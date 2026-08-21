@@ -303,6 +303,41 @@ describe("PluginsView", () => {
     expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the Built in section on screen while a background refresh is in flight", async () => {
+    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
+
+    renderList();
+    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
+
+    const refresh = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
+    bridgeMock.listOfferedPlugins.mockReturnValueOnce(refresh.promise);
+
+    act(() => {
+      // setStatus emits several "changed" events per action — each one
+      // triggers a refresh, and none of them may hide the section while
+      // its own fetch is still in flight.
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("some-other-plugin"),
+      });
+    });
+
+    // The refresh is pending, but the previously-ready offer — row and Add
+    // control both — stays rendered, not replaced by a loading state.
+    const row = screen.getByTestId("plugin-offer-row");
+    expect(row).toBeTruthy();
+    expect(within(row).getByTestId("plugin-offer-add")).toBeTruthy();
+
+    await act(async () => {
+      refresh.resolve({ ok: true, offers: [offers[1]] });
+      await refresh.promise;
+    });
+
+    expect(await screen.findByText("Claude Code")).toBeTruthy();
+    expect(screen.queryByText("Codex")).toBeNull();
+  });
+
   it("shows an Adding state and a named error when Add fails", async () => {
     const addResult = deferred<{
       ok: false;

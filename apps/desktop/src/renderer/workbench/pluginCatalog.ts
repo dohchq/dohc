@@ -385,7 +385,18 @@ export function usePluginCatalog(
     const requestToken = ++offersRequestToken.current;
     const epoch = workspaceEpoch.current;
     const forWorkspaceId = workspaceId;
-    setOffersLoad({ status: "loading" });
+    // A background refresh (a "changed"/"removed" status event, or a manual
+    // reload while data already exists) keeps the current ready list on
+    // screen instead of flashing to loading: setStatus emits several
+    // "changed" events per action, and flipping the whole Built in section
+    // to loading on each would hide its rows and Add controls repeatedly.
+    // Only the very first load, with nothing to show yet for this
+    // workspace, presents as loading.
+    setOffersLoad((current) =>
+      current.status === "ready" && current.workspaceId === forWorkspaceId
+        ? current
+        : { status: "loading" },
+    );
     try {
       const result = await bridge().listOfferedPlugins({ workspaceId });
       if (
