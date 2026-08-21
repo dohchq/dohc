@@ -817,6 +817,7 @@ export async function captureSharedViewLocalDivergence(
   let repairedPaths = 0;
   const unjournalablePaths: UnjournalablePath[] = [];
   const visitedPendingPaths = new Set<string>();
+  const unreadableDirsList = [...unreadableDirs];
 
   const diskMatchesSnapshot = (
     disk: DiskTextState,
@@ -898,11 +899,7 @@ export async function captureSharedViewLocalDivergence(
                   contentKind:
                     currentSnapshot.contentKind === "binary" ? "binary" : "text",
                   sha256: currentSnapshot.sha256 ?? null,
-                  // The point-read comparison cannot supply the metadata row's
-                  // latestMomentId, so the spread keeps the pre-loop id. If a
-                  // queued save advanced this path before the callback, its disk
-                  // and head match above; while this ordered path lock is held,
-                  // no save can advance it between this check and moment fetch.
+                  latestMomentId: currentSnapshot.latestMomentId,
                 };
           if (diskMatchesSnapshot(disk, currentEntry)) {
             return {
@@ -991,7 +988,7 @@ export async function captureSharedViewLocalDivergence(
       continue;
     }
 
-    const belowUnreadableDirectory = [...unreadableDirs].some(
+    const belowUnreadableDirectory = unreadableDirsList.some(
       (directory) =>
         directory === "" ||
         entry.path === directory ||

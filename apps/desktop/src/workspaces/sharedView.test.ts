@@ -1096,6 +1096,77 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("uses the current moment preimage when a pending path advances after listing", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/advanced-pending.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment one");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      const initial = await store.readTextFile({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+        path,
+      });
+      if (initial === null) throw new Error("Expected the initial snapshot.");
+      await writePendingMaterializationPaths(rootDir, [path]);
+
+      let currentMomentId: string | undefined;
+      const fetchedMomentIds: string[] = [];
+      const captureStore: typeof store = {
+        ...store,
+        async listTextFileMetadata(input) {
+          const tracked = await store.listTextFileMetadata!(input);
+          expect(tracked.find((entry) => entry.path === path)).toMatchObject({
+            latestMomentId: initial.latestMomentId,
+          });
+          const advanced = await store.writeTextFile({
+            workspaceId: WORKSPACE,
+            versionId: main.id,
+            path,
+            text: "moment two",
+            metadata: { origin: "sync" },
+          });
+          currentMomentId = advanced.moment.id;
+          return tracked;
+        },
+        async getMoment(input) {
+          fetchedMomentIds.push(input.momentId);
+          return await store.getMoment(input);
+        },
+      };
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, captureStore),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(currentMomentId).toBeDefined();
+      expect(fetchedMomentIds).toEqual([currentMomentId]);
+      const moments = (
+        await store.listMoments({ workspaceId: WORKSPACE, limit: 100 })
+      ).moments.filter((moment) => moment.path === path);
+      expect(moments).toHaveLength(2);
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toMatchObject({ text: "moment two" });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
+    } finally {
+      await store.close();
+    }
+  });
+
   it("reports a repair-only standalone refresh as updated", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
