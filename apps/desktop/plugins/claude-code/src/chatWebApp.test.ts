@@ -782,20 +782,41 @@ describe("Claude Code chat web app", () => {
     });
   });
 
-  it("a deactivate racing the server's own listen never leaves either promise pending forever", async () => {
-    // Best-effort race reproduction: listen(0, "127.0.0.1", ...) genuinely
-    // crosses into async OS-level work, so firing deactivate immediately
-    // after startWebApp without awaiting it has a real chance of landing
-    // in the window between `server = nextServer` and the listen callback.
-    // Whether or not this run lands exactly there, neither promise may
-    // hang: before the fix, landing in that window left listen()'s own
-    // promise (and everything awaiting startServer() through it) pending
-    // forever, and this test would time out instead of completing.
+  it("a deactivate racing the server's own listen settles instead of hanging, and the next start is clean", async () => {
+    // The beforeListen test hook forces the exact race deterministically,
+    // rather than hoping a real timing window gets hit: deactivate the app
+    // before its server is ever told to listen, so listen()'s "close" guard
+    // is the only thing that can settle this startWebApp call.
     const fake = fakeDriver();
-    const app = createChatWebApp(fake.driver, "C:\\workspace", PLUGIN_UI_ROOT);
+    const ref: { app?: ChatWebApp } = {};
+    let triggered = false;
+    const app = createChatWebApp(fake.driver, "C:\\workspace", PLUGIN_UI_ROOT, {
+      beforeListen: async () => {
+        if (triggered) return;
+        triggered = true;
+        await ref.app?.deactivate();
+      },
+    });
+    ref.app = app;
     runningApps.push(app);
-    const startPromise = app.startWebApp("chat", null);
-    const deactivatePromise = app.deactivate();
-    await Promise.allSettled([startPromise, deactivatePromise]);
+
+    const started = await app.startWebApp("chat", null).then(
+      (result) => ({ ok: true as const, url: result.url }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
+    if (started.ok) {
+      // A raced start that still resolves must hand back a URL that
+      // actually answers -- not a stale one for a server already closed
+      // underneath it.
+      const response = await fetch(new URL("/", started.url)).catch(() => null);
+      expect(response?.status).toBe(200);
+    }
+
+    // Either way, a fresh start afterward must produce a real, working
+    // server: the race must not leave the app permanently wedged.
+    const restarted = await app.startWebApp("chat", null);
+    const page = await fetch(new URL("/", restarted.url));
+    expect(page.status).toBe(200);
   }, 10_000);
 });

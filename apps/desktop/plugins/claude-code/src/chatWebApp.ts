@@ -153,7 +153,19 @@ function staticAsset(pathname: string): { file: string; contentType: string } | 
   return null;
 }
 
-async function listen(server: Server): Promise<string> {
+/** Test-only extension point: nothing in main.ts's production wiring passes
+ * this. It exists so a test can force a deterministic race against startup
+ * instead of hoping to land in a narrow, real timing window. */
+export interface ChatWebAppTestHooks {
+  /** Runs just before the server's own listen() call, and is awaited before
+   * that call happens. */
+  beforeListen?: (server: Server) => Promise<void> | void;
+}
+
+async function listen(
+  server: Server,
+  beforeListen?: (server: Server) => Promise<void> | void,
+): Promise<string> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     // A close before the server ever started listening (deactivate or
@@ -163,7 +175,9 @@ async function listen(server: Server): Promise<string> {
     server.once("close", () =>
       reject(new Error("The chat server closed before it started listening.")),
     );
-    server.listen(0, "127.0.0.1", resolve);
+    Promise.resolve(beforeListen?.(server)).then(() => {
+      server.listen(0, "127.0.0.1", resolve);
+    }, reject);
   });
   const address = server.address();
   if (!address || typeof address === "string") {
@@ -176,6 +190,7 @@ export function createChatWebApp(
   driver: PluginAgentDriver,
   workspaceRoot: string,
   uiRoot: string,
+  testHooks?: ChatWebAppTestHooks,
 ): ChatWebApp {
   let server: Server | null = null;
   let serverUrl: string | null = null;
@@ -488,7 +503,7 @@ export function createChatWebApp(
     nextServer.unref();
     server = nextServer;
     try {
-      serverUrl = await listen(nextServer);
+      serverUrl = await listen(nextServer, testHooks?.beforeListen);
       return serverUrl;
     } catch (error) {
       server = null;

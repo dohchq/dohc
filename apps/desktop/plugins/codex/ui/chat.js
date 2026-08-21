@@ -324,14 +324,17 @@ events.addEventListener("error", () => {
   statePill.dataset.state = "starting";
 });
 
-function markMessageFailed(clientId, card, message) {
+function markMessageFailed(clientId, card, message, reenable = true) {
   pendingMessages.delete(clientId);
   card.dataset.failed = "true";
   const note = document.createElement("p");
   note.className = "send-failed";
   note.textContent = message;
   card.append(note);
-  sendButton.disabled = false;
+  // A 409 means a turn really is still active server-side: re-enabling here
+  // would just let the user fire another message that also 409s. Leave it
+  // disabled and let the eventual settled session-state event restore it.
+  if (reenable) sendButton.disabled = false;
 }
 
 composer.addEventListener("submit", async (event) => {
@@ -357,6 +360,7 @@ composer.addEventListener("submit", async (event) => {
         response.status === 409
           ? "Wait for the current response to finish."
           : "This message was not sent. Send it again.",
+        response.status !== 409,
       );
     }
     // A successful 202 leaves Send disabled: the session-state:running
