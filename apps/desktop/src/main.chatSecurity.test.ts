@@ -1127,5 +1127,8 @@ describe("main-process chat authorization", () => {
     expect(submit).toContain("? scope.workspace.shareView.grantedSelector");
     expect(submit).toContain("scope.workspace.shareView.ended === true");
     expect(submit).not.toContain("ended: false");
+    expect(submit).toContain(
+      "capturedLocalChanges: captured.capturedPaths + captured.repairedPaths,",
+    );
   });
 });

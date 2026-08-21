@@ -3031,12 +3031,14 @@ export const SubmitShareChangesPayload = z.object({
 });
 export type SubmitShareChangesPayload = z.infer<typeof SubmitShareChangesPayload>;
 
-// What a submit did, in the three facts the recipient's surface states. The
-// new proposal's id is NOT among them: the surface re-reads its own sent
-// changes right after, and an id that arrived by two routes would be two
-// answers to one question.
+// What a submit did. The new proposal's id is NOT among these facts: the
+// surface re-reads its own sent changes right after, and an id that arrived by
+// two routes would be two answers to one question.
 export const SubmitShareChangesResult = z.object({
   submitted: z.number().int().nonnegative(),
+  // Local changes the submit's capture pass journaled or repaired. Repairs can
+  // change the projection, so the renderer uses this count to repaint files.
+  capturedLocalChanges: z.number().int().nonnegative(),
   // Files this submit did NOT offer because they are not part of this share.
   // The count does not distinguish a file that LEFT the shared paths from one
   // that was never in them — both are the same fact to the person who pressed

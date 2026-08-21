@@ -5886,7 +5886,10 @@ function registerIpcHandlers(
       // a second set of changes and a second proposal.
       submitId: randomUUID(),
     });
-    return SubmitShareChangesResult.parse(result);
+    return SubmitShareChangesResult.parse({
+      ...result,
+      capturedLocalChanges: captured.capturedPaths + captured.repairedPaths,
+    });
   });
 
   ipcMain.handle(CHANNELS.listMyShareChanges, async (event, payload) => {

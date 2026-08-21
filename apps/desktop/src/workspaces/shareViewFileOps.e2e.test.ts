@@ -418,9 +418,11 @@ describe("share-view file operations through the real store", () => {
           view.store,
         );
       });
+      for (let turn = 0; turn < 20 && !captureEnteredGap; turn += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       const captureStartedBeforeProjection = captureEnteredGap;
 
-      if (captureStartedBeforeProjection) await capturing;
       releaseRename();
       await moving;
       const captured = await capturing;

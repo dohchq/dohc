@@ -4627,6 +4627,7 @@ export function DesktopWorkspaceShell(props: {
       if (token !== shareRefreshToken.current) return;
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
+        setShareViewEnded(true);
       } else {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
@@ -4636,7 +4637,6 @@ export function DesktopWorkspaceShell(props: {
         setVersionEpoch((epoch) => epoch + 1);
       }
       if (outcome.status === "ended") {
-        setShareViewEnded(true);
         return;
       }
     } catch (error) {
@@ -4646,10 +4646,10 @@ export function DesktopWorkspaceShell(props: {
       // recorded page by page before each cursor commit, so a refresh that
       // died on a later page still left durable evidence behind — reading it
       // only on the success path would keep that invisible until a lucky
-      // refresh or a remount. It runs after the listing because a stale file
-      // list is what the user is looking at, and this read must not delay it.
-      await reloadShareSkipped().catch(() => undefined);
+      // refresh or a remount. Start this after the listing, but do not let a
+      // slow registry read keep the Refresh control disabled.
       if (token === shareRefreshToken.current) setShareRefreshing(false);
+      void reloadShareSkipped().catch(() => undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
@@ -4719,6 +4719,10 @@ export function DesktopWorkspaceShell(props: {
     try {
       const result = await bridge().submitShareChanges({ workspaceId });
       if (token !== myShareChangeToken.current) return;
+      if (result.capturedLocalChanges > 0) {
+        await refreshFiles();
+        setVersionEpoch((epoch) => epoch + 1);
+      }
       setShareChangesEmpty(result.submitted === 0);
       setShareChangesSkipped(
         result.skippedOutsideShare > 0 || result.morePending

@@ -2169,10 +2169,28 @@ describe("share changes IPC contract (#646 PR3a)", () => {
 
   // Zero is the honest answer for "nothing was pending", not an error.
   it("carries an empty submit", () => {
-    const empty = { submitted: 0, skippedOutsideShare: 0, morePending: false };
-    expect(SubmitShareChangesResult.parse(empty).submitted).toBe(0);
+    const empty = {
+      submitted: 0,
+      capturedLocalChanges: 0,
+      skippedOutsideShare: 0,
+      morePending: false,
+    };
+    expect(SubmitShareChangesResult.parse(empty)).toMatchObject({
+      submitted: 0,
+      capturedLocalChanges: 0,
+    });
     expect(() =>
       SubmitShareChangesResult.parse({ ...empty, submitted: -1 }),
+    ).toThrow();
+    expect(() =>
+      SubmitShareChangesResult.parse({ ...empty, capturedLocalChanges: -1 }),
+    ).toThrow();
+    expect(() =>
+      SubmitShareChangesResult.parse({
+        submitted: 0,
+        skippedOutsideShare: 0,
+        morePending: false,
+      }),
     ).toThrow();
   });
 

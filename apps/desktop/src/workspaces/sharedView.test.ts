@@ -39,9 +39,10 @@ import {
 import { routeWorkspaceFileCreate } from "./workspaceFileOps";
 import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
-import type {
-  PullShareViewResult,
-  ShareViewRefusal,
+import {
+  ShareUnavailableError,
+  type PullShareViewResult,
+  type ShareViewRefusal,
 } from "@dohc/workspace-contracts/relay";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createTestScratch } from "./testTemp";
@@ -555,6 +556,96 @@ describe("shared view refresh", () => {
       expect(captured.capturedPaths).toBe(1);
     } finally {
       releaseCapture();
+      await Promise.allSettled(pendingOperations);
+      await store.close();
+    }
+  });
+
+  it("keeps capture queued behind an editor save's projection gap", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/save-gap.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    let signalSaveStored!: () => void;
+    let releaseSave!: () => void;
+    const saveStored = new Promise<void>((resolve) => {
+      signalSaveStored = resolve;
+    });
+    const saveHeld = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    const saveStore: typeof store = {
+      ...store,
+      async writeTextFile(input) {
+        const result = await store.writeTextFile(input);
+        signalSaveStored();
+        await saveHeld;
+        return result;
+      },
+    };
+    let captureDeleteStarted = false;
+    const captureStore: typeof store = {
+      ...store,
+      async deleteTextFile(input) {
+        captureDeleteStarted = true;
+        return await store.deleteTextFile(input);
+      },
+    };
+    const pendingOperations: Promise<unknown>[] = [];
+
+    try {
+      const saving = routeWorkspaceTextWrite({
+        workspaceId: WORKSPACE,
+        rootPath: rootDir,
+        relativePath: path,
+        text: "saved in app",
+        expectedContentHash: sha256("granter body"),
+        shareView: { access: "edit", ended: false },
+        shareViewStore: () => saveStore,
+      });
+      pendingOperations.push(saving);
+      await saveStored;
+      // Hold the save's per-path lock after its store write, with the
+      // projection absent in the same window materialization creates.
+      await rm(join(rootDir, path));
+
+      const capturing = captureSharedViewLocalDivergence(
+        rootDir,
+        WORKSPACE,
+        captureStore,
+      );
+      pendingOperations.push(capturing);
+      for (let turn = 0; turn < 200 && !captureDeleteStarted; turn += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(
+        captureDeleteStarted,
+        "MUTATION: an unlocked scanned delete can erase the editor save before its projection lands",
+      ).toBe(false);
+
+      releaseSave();
+      await expect(saving).resolves.toMatchObject({ status: "written" });
+      await expect(capturing).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toMatchObject({ text: "saved in app" });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("saved in app");
+    } finally {
+      releaseSave();
       await Promise.allSettled(pendingOperations);
       await store.close();
     }
@@ -1969,6 +2060,53 @@ describe("shared view refresh", () => {
     }
   });
 
+  itNonRoot(
+    "keeps an unreadable pending delete marker for the next pass",
+    async () => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "docs/unreadable-delete.md";
+      const absolutePath = join(rootDir, path);
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(path, "delete me");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+
+      const store = harness.openStore(target);
+      let denied = false;
+      try {
+        const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+        await store.deleteTextFile({
+          workspaceId: WORKSPACE,
+          versionId: main.id,
+          path,
+          metadata: { origin: "sync" },
+        });
+        await writePendingMaterializationPaths(rootDir, [path]);
+        await denyFileContentRead(absolutePath);
+        denied = true;
+
+        await expect(
+          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+        ).resolves.toEqual({
+          capturedPaths: 0,
+          repairedPaths: 0,
+          unjournalablePaths: [{ path, reason: "unreadable" }],
+        });
+        await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+          new Set([path]),
+        );
+      } finally {
+        if (denied) await restoreRead(absolutePath, 0o600);
+        await store.close();
+      }
+    },
+  );
+
   it("pages past 500 newer moments to finish a pending delete", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -2319,6 +2457,15 @@ describe("shared view refresh", () => {
     await expect(lstat(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("clears an absent pull marker without creating metadata", async () => {
+    const rootDir = await tempRoot();
+    const metadataDir = join(rootDir, ".dohc");
+
+    await expect(clearPullInFlightMarker(rootDir)).resolves.toBeUndefined();
+
+    await expect(lstat(metadataDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("refuses to write sidecars through a symlinked metadata directory", async () => {
     const rootDir = await tempRoot();
     const outsideDir = await tempRoot();
@@ -2338,7 +2485,7 @@ describe("shared view refresh", () => {
     expect((await lstat(metadataDir)).isSymbolicLink()).toBe(true);
   });
 
-  it("refuses to clear a pull marker through a substituted metadata directory", async () => {
+  it("leaves a substituted pull-marker directory untouched", async () => {
     const rootDir = await tempRoot();
     const outsideDir = await tempRoot();
     const metadataDir = join(rootDir, ".dohc");
@@ -2373,13 +2520,39 @@ describe("shared view refresh", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
 
-    const result = await clearPullInFlightMarker(rootDir).then(
-      () => "resolved" as const,
-      () => "rejected" as const,
-    );
+    await expect(clearPullInFlightMarker(rootDir)).resolves.toBeUndefined();
 
-    expect.soft(result).toBe("rejected");
     expect(await readdir(outsideDir)).toEqual(outsideBefore);
+  });
+
+  it("reports an ended share when pull-marker cleanup finds a metadata symlink", async () => {
+    const rootDir = await tempRoot();
+    const outsideDir = await tempRoot();
+    const metadataDir = join(rootDir, ".dohc");
+
+    const outcome = refreshSharedViewOnceWithPull({
+      rootDir,
+      workspaceId: WORKSPACE,
+      relay: new FakeShareRelay().connection(),
+      shareId: SHARE_ID,
+      pinnedSelector: PINNED_SELECTOR,
+      recordRefusals: async () => undefined,
+      store: stubStore(async () => ({ text: "unused" })),
+      trackPendingMaterialization: true,
+      pull: async () => {
+        await rm(metadataDir, { force: true, recursive: true });
+        await symlink(
+          outsideDir,
+          metadataDir,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        throw new ShareUnavailableError();
+      },
+    });
+
+    await expect(outcome).resolves.toMatchObject({ status: "ended" });
+    expect(await readdir(outsideDir)).toEqual([]);
+    expect((await lstat(metadataDir)).isSymbolicLink()).toBe(true);
   });
 
   it("refuses to clear pending paths through a substituted metadata directory", async () => {
@@ -2405,12 +2578,13 @@ describe("shared view refresh", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
 
-    const result = await clearPendingMaterializationPaths(rootDir, [path]).then(
-      () => "resolved" as const,
-      () => "rejected" as const,
+    const error = await clearPendingMaterializationPaths(rootDir, [path]).then(
+      () => null,
+      (rejection: unknown) => rejection,
     );
 
-    expect.soft(result).toBe("rejected");
+    expect.soft(error).toBeInstanceOf(Error);
+    expect.soft((error as Error).message).toContain("not a real directory");
     expect(await readdir(outsideDir)).toEqual(outsideBefore);
   });
 

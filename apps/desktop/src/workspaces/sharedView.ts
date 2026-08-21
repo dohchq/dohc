@@ -31,7 +31,6 @@ import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import {
   withExclusiveWorkspaceOperation,
   withOrderedWorkspaceTargetPath,
-  withOrderedWorkspaceTextPath,
 } from "./workspaceAssets";
 import { readDiskContent, type DiskTextState } from "./workspaceEngineCapture";
 import {
@@ -289,6 +288,21 @@ async function resolvedShareViewTarget(
   return resolvedAbsolute;
 }
 
+// EVERY store mutation inside captureSharedViewLocalDivergence must run through
+// this helper. There is no other correct way to mutate the store from here —
+// a branch added later that calls store.deleteTextFile / writeDiskContentToStore
+// / materializeSharedViewPaths directly, outside this helper, reintroduces the
+// exact race this function exists to close (see the round-14 fix for the
+// scanned-deletion branch, which used to skip locking entirely).
+async function withCaptureMutationLock<T>(
+  rootDir: string,
+  path: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const resolvedTarget = await resolvedShareViewTarget(rootDir, path);
+  return withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, operation);
+}
+
 export async function materializeSharedViewPaths(
   rootDir: string,
   workspaceId: string,
@@ -506,7 +520,16 @@ async function writePullInFlightMarker(rootDir: string): Promise<void> {
 }
 
 export async function clearPullInFlightMarker(rootDir: string): Promise<void> {
-  const metadataDir = await ensureRealMetadataDirectory(rootDir);
+  const metadataDir = join(rootDir, ".dohc");
+  let stat;
+  try {
+    stat = await lstat(metadataDir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return;
+    throw error;
+  }
+  if (!stat.isDirectory()) return;
   await rm(pullInFlightPath(rootDir), { force: true });
   await syncMetadataDirectory(metadataDir);
 }
@@ -784,6 +807,26 @@ async function latestMomentForPath(
   }
 }
 
+// The only rule this function's markers ever follow: unjournalable content is
+// never resolved, so its marker must survive to protect it on the next pass.
+// Everything else (captured, repaired, unchanged) is resolved, so its marker
+// clears — but only if it was actually recorded, not merely swept in by a
+// verify-everything pass that found nothing to clear in the first place.
+async function clearCapturePendingMarker(
+  rootDir: string,
+  path: string,
+  resultKind: "captured" | "repaired" | "unchanged" | "unjournalable",
+  pendingState: {
+    canClearRecord: boolean;
+    recordedPaths: ReadonlySet<string>;
+  },
+): Promise<void> {
+  if (resultKind === "unjournalable") return;
+  if (!pendingState.canClearRecord) return;
+  if (!pendingState.recordedPaths.has(path)) return;
+  await clearPendingMaterializationPaths(rootDir, [path]);
+}
+
 // Capture out-of-app modifications and deletes for paths the standalone share
 // view already tracks. A hand-placed file belongs to the recipient and stays
 // outside the journal. Comparing disk with the engine head avoids echoing
@@ -856,9 +899,9 @@ export async function captureSharedViewLocalDivergence(
     if (pendingPaths.has(entry.path)) {
       visitedPendingPaths.add(entry.path);
       const resolvedTarget = await resolvedShareViewTarget(rootDir, entry.path);
-      const result = await withOrderedWorkspaceTargetPath(
+      const result = await withCaptureMutationLock(
         rootDir,
-        resolvedTarget,
+        entry.path,
         async (): Promise<
           | { kind: "captured" }
           | { kind: "repaired" }
@@ -973,15 +1016,12 @@ export async function captureSharedViewLocalDivergence(
           return { kind: "captured" };
         },
       );
-      // The marker is the only record that a materialization was in flight.
-      // An unjournalable path is not yet resolved, so the marker stays.
-      if (
-        result.kind !== "unjournalable" &&
-        pendingState.canClearRecord &&
-        pendingState.recordedPaths.has(entry.path)
-      ) {
-        await clearPendingMaterializationPaths(rootDir, [entry.path]);
-      }
+      await clearCapturePendingMarker(
+        rootDir,
+        entry.path,
+        result.kind,
+        pendingState,
+      );
       if (result.kind === "captured") capturedPaths += 1;
       if (result.kind === "repaired") repairedPaths += 1;
       if (result.kind === "unjournalable") {
@@ -1027,28 +1067,43 @@ export async function captureSharedViewLocalDivergence(
     }
 
     if (onDisk === "absent") {
-      let confirmedAbsent;
-      try {
-        confirmedAbsent = await pathConfirmedAbsentOnDisk(realRoot, entry.path);
-      } catch {
-        unjournalablePaths.push({ path: entry.path, reason: "unreadable" });
-        continue;
+      const deleted = await withCaptureMutationLock(
+        rootDir,
+        entry.path,
+        async (): Promise<
+          boolean | { kind: "unjournalable"; path: UnjournalablePath }
+        > => {
+          try {
+            if (!(await pathConfirmedAbsentOnDisk(realRoot, entry.path))) {
+              return false;
+            }
+          } catch {
+            return {
+              kind: "unjournalable",
+              path: { path: entry.path, reason: "unreadable" },
+            };
+          }
+          await store.deleteTextFile({
+            workspaceId,
+            versionId: main.id,
+            path: entry.path,
+            metadata: { origin: "local-file" },
+          });
+          return true;
+        },
+      );
+      if (typeof deleted === "object") {
+        unjournalablePaths.push(deleted.path);
+      } else if (deleted) {
+        capturedPaths += 1;
       }
-      if (!confirmedAbsent) continue;
-      await store.deleteTextFile({
-        workspaceId,
-        versionId: main.id,
-        path: entry.path,
-        metadata: { origin: "local-file" },
-      });
-      capturedPaths += 1;
       continue;
     }
 
-    const result = await withOrderedWorkspaceTextPath(
+    const result = await withCaptureMutationLock(
       rootDir,
       entry.path,
-      async (_readCurrent) => {
+      async () => {
         const disk = await readDiskContent(resolve(realRoot, entry.path));
         if (disk.kind === "absent") {
           try {
@@ -1108,10 +1163,9 @@ export async function captureSharedViewLocalDivergence(
       },
     );
     if (typeof result === "object" && "status" in result) {
-      const resolvedTarget = await resolvedShareViewTarget(rootDir, entry.path);
-      const deleted = await withOrderedWorkspaceTargetPath(
+      const deleted = await withCaptureMutationLock(
         rootDir,
-        resolvedTarget,
+        entry.path,
         async (): Promise<
           boolean | { kind: "unjournalable"; path: UnjournalablePath }
         > => {
@@ -1150,9 +1204,9 @@ export async function captureSharedViewLocalDivergence(
   for (const path of pendingPaths) {
     if (visitedPendingPaths.has(path)) continue;
     const resolvedTarget = await resolvedShareViewTarget(rootDir, path);
-    const result = await withOrderedWorkspaceTargetPath(
+    const result = await withCaptureMutationLock(
       rootDir,
-      resolvedTarget,
+      path,
       async (): Promise<
         | { kind: "repaired" }
         | { kind: "unchanged" }
@@ -1200,9 +1254,7 @@ export async function captureSharedViewLocalDivergence(
         return { kind: "unchanged" };
       },
     );
-    if (pendingState.canClearRecord) {
-      await clearPendingMaterializationPaths(rootDir, [path]);
-    }
+    await clearCapturePendingMarker(rootDir, path, result.kind, pendingState);
     if (result.kind === "repaired") repairedPaths += 1;
     if (result.kind === "unjournalable") {
       unjournalablePaths.push(result.path);
