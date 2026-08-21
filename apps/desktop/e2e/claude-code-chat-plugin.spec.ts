@@ -51,6 +51,24 @@ async function readGuestText(desktop: Desktop): Promise<string> {
   return (await evalInChatGuest<string>(desktop, "(document.body ? document.body.innerText : '')")) ?? "";
 }
 
+/** Reloads the chat guest's own WebContentsView (not the desktop's page). */
+async function reloadChatGuest(desktop: Desktop): Promise<void> {
+  const reloaded = await desktop.app.evaluate(
+    async ({ webContents }, title) => {
+      for (const contents of webContents.getAllWebContents()) {
+        if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
+        const pageTitle = (await contents.executeJavaScript("document.title")) as string;
+        if (pageTitle !== title) continue;
+        contents.reload();
+        return true;
+      }
+      return false;
+    },
+    CHAT_TITLE,
+  );
+  if (!reloaded) throw new Error("The Claude Code chat guest did not open.");
+}
+
 test.setTimeout(300_000);
 
 test("the Claude Code plugin serves its chat and answers a tool permission", async () => {
@@ -141,6 +159,27 @@ test("the Claude Code plugin serves its chat and answers a tool permission", asy
     await expect
       .poll(async () => readGuestText(desktop!), { timeout: 60_000 })
       .toContain('"behavior":"allow"');
+
+    // Round-7 fix 1's proof: a reload re-requests the guest's own URL,
+    // which chat.js already stripped its token fragment from on first
+    // load -- without sessionStorage recovery this bricks instead of
+    // reattaching. Click the reloaded page's own Stop button to prove its
+    // own JS recovered a real, working token, not just that the page
+    // loaded: the click fires an authenticated fetch straight from the
+    // reloaded script.
+    await reloadChatGuest(desktop);
+
+    await expect
+      .poll(async () => (await evalInChatGuest<string>(desktop!, "(document.title)")) ?? "", {
+        timeout: 60_000,
+      })
+      .toBe(CHAT_TITLE);
+
+    await runInChatGuest(desktop, "document.querySelector('#stop').click(); true;");
+
+    await expect
+      .poll(async () => readGuestText(desktop!), { timeout: 60_000 })
+      .toContain("Stopped");
 
     // Fix 1's proof against the real server, not the fake driver: a direct,
     // unauthenticated cross-origin-shaped POST (what a hostile local page

@@ -22,8 +22,16 @@ class FakeEventSource extends EventTarget {
 /** Boots just enough of the page for ../ui/chat.js's own top-level guard to
  * pass, then imports it. A cache-busting query string forces a fresh module
  * instance per test, so one test's DOM and EventSource never leak into
- * another's. */
-async function loadChatModule(): Promise<{
+ * another's.
+ *
+ * Every call starts from a clean sessionStorage and a fresh fragment token,
+ * simulating a genuine first load -- unless `reload` is set, which leaves
+ * both alone: sessionStorage keeps whatever a prior call in the SAME test
+ * already stored, and the fragment stays whatever chat.js's own
+ * history.replaceState last left it as (empty, after a real first load).
+ * That is exactly what a real page reload looks like: the same origin's
+ * sessionStorage survives, the URL's fragment does not. */
+async function loadChatModule(options: { reload?: boolean } = {}): Promise<{
   module: typeof import("../ui/chat.js");
   eventSource: FakeEventSource;
 }> {
@@ -40,9 +48,12 @@ async function loadChatModule(): Promise<{
     </form>
   `;
   lastEventSource = null;
-  // The page's own credential, exactly as startWebApp hands it to the
-  // guest: in the URL fragment, not a meta tag.
-  location.hash = "token=test-token";
+  if (!options.reload) {
+    sessionStorage.clear();
+    // The page's own credential, exactly as startWebApp hands it to the
+    // guest: in the URL fragment, not a meta tag.
+    location.hash = "token=test-token";
+  }
   const mod = await import(/* @vite-ignore */ `../ui/chat.js?t=${Date.now()}-${Math.random()}`);
   if (!lastEventSource) throw new Error("chat.js did not construct an EventSource.");
   return { module: mod, eventSource: lastEventSource };
@@ -150,6 +161,17 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     // constructed the EventSource above (its very first act) -- what
     // remains is what the page's own history.replaceState left behind.
     expect(location.hash).toBe("");
+  });
+
+  it("recovers its token from sessionStorage on a reload, after the fragment was already stripped", async () => {
+    await loadChatModule();
+    expect(location.hash).toBe("");
+
+    // A real reload re-requests the already-stripped URL: no fragment left
+    // to read at all. Without sessionStorage recovery this throws instead
+    // of reattaching -- the exact regression this fix exists to prevent.
+    const { eventSource } = await loadChatModule({ reload: true });
+    expect(eventSource.url).toContain("test-token");
   });
 
   it("renders a replayed event's own publish time, not the reconnect moment", async () => {

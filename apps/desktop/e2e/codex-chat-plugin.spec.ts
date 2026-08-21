@@ -126,6 +126,45 @@ test("the Codex plugin serves its chat and sends a message to Codex", async () =
       .poll(async () => (await readGuest())?.text ?? "", { timeout: 60_000 })
       .toContain(echoedPrompt);
 
+    // Round-7 fix 1's proof: a reload re-requests the guest's own URL,
+    // which chat.js already stripped its token fragment from on first
+    // load -- without sessionStorage recovery this bricks instead of
+    // reattaching. Click the reloaded page's own Stop button (rather than
+    // sending another message -- the "no-turn" fake driver never completes
+    // a turn, so a second message would 409 regardless of the token) to
+    // prove its own JS recovered a real, working token, not just that the
+    // page loaded: the click fires an authenticated fetch straight from
+    // the reloaded script.
+    await desktop.app.evaluate(async ({ webContents }) => {
+      for (const contents of webContents.getAllWebContents()) {
+        if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
+        const title = (await contents.executeJavaScript("document.title")) as string;
+        if (title !== "Codex Chat") continue;
+        contents.reload();
+        return;
+      }
+      throw new Error("The Codex chat guest did not open.");
+    });
+
+    await expect
+      .poll(async () => (await readGuest())?.title ?? "", { timeout: 60_000 })
+      .toBe("Codex Chat");
+
+    await desktop.app.evaluate(async ({ webContents }) => {
+      for (const contents of webContents.getAllWebContents()) {
+        if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
+        const title = (await contents.executeJavaScript("document.title")) as string;
+        if (title !== "Codex Chat") continue;
+        await contents.executeJavaScript("document.querySelector('#stop').click();");
+        return;
+      }
+      throw new Error("The Codex chat guest did not open.");
+    });
+
+    await expect
+      .poll(async () => (await readGuest())?.text ?? "", { timeout: 60_000 })
+      .toContain("Stopped");
+
     // Fix 1's proof against the real server, not the fake driver: a direct,
     // unauthenticated cross-origin-shaped POST (what a hostile local page
     // sends -- Node's fetch has no CORS of its own to stop it either) must

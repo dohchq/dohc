@@ -234,9 +234,24 @@ export function createChatWebApp(
   // Each entry's own publish time -- a replay renders it, not the moment
   // the reconnecting client happened to receive it, so history stays in
   // its real chronological order instead of collapsing to "now".
-  const eventLog: Array<{ event: ChatStreamEvent; at: number }> = [];
+  //
+  // provisional marks a /message reservation still awaiting the driver's
+  // accept/reject (see message() below): filtered out of every replay so a
+  // reconnect that lands in that exact window can never render an
+  // unconfirmed send as if it were accepted, with no live fetch left on
+  // that connection to ever mark it failed if the driver goes on to reject
+  // it. Live clients still see it normally, once it's actually confirmed.
+  const eventLog: Array<{ event: ChatStreamEvent; at: number; provisional?: boolean }> = [];
   const clients = new Set<ServerResponse>();
   const pendingPermissions = new Set<string>();
+  // A request permission() has claimed (removed from pendingPermissions, so
+  // a second concurrent POST can't also answer it) but hasn't finished
+  // answering yet. Tracked separately so settlePendingPermissions can still
+  // resolve it if the session ends while it's in flight -- otherwise no
+  // permission-resolved event ever lands for it, and a reconnect's replay
+  // recreates its request-card as if it were still pending, with no live
+  // session left behind it.
+  const claimedPermissions = new Set<string>();
 
   function frame(event: ChatStreamEvent, at: number): string {
     return "data: " + JSON.stringify({ ...event, at }) + "\n\n";
@@ -294,10 +309,11 @@ export function createChatWebApp(
    * it (every answer 404s), and a reconnect's replay would recreate the
    * same unusable card from the buffered permission-request event. */
   function settlePendingPermissions(): void {
-    for (const requestId of [...pendingPermissions]) {
+    for (const requestId of new Set([...pendingPermissions, ...claimedPermissions])) {
       publish({ kind: "permission-resolved", requestId, decision: "cancel" });
     }
     pendingPermissions.clear();
+    claimedPermissions.clear();
   }
 
   async function startSession(): Promise<PluginAgentSession> {
@@ -404,9 +420,10 @@ export function createChatWebApp(
     // own message that caused them. Filled in on accept, dropped on
     // rejection -- never broadcast live here, only once accepted below,
     // same as before.
-    const reserved: { event: ChatStreamEvent; at: number } = {
+    const reserved: { event: ChatStreamEvent; at: number; provisional?: boolean } = {
       event: { kind: "user-message", text: body.text, clientId },
       at: Date.now(),
+      provisional: true,
     };
     eventLog.push(reserved);
     trimLog();
@@ -430,6 +447,7 @@ export function createChatWebApp(
     // for one that in fact was.
     turnActive = true;
     reserved.at = Date.now();
+    reserved.provisional = false;
     // The reservation can have aged out of the buffer's cap while prompt()
     // was still pending (a very active turn ahead of it) -- put it back at
     // the end rather than lose the confirmation entirely.
@@ -496,10 +514,18 @@ export function createChatWebApp(
     if (!live || !pendingPermissions.has(requestId)) {
       throw requestError(404, "This permission request is no longer pending.");
     }
+    // Captured before the claim: tells the catch block below whether the
+    // SAME session attempt is still live once this settles, or whether a
+    // stop/restart raced in and already resolved this request itself.
+    const generation = sessionGeneration;
     // Claimed synchronously, before the first await: two concurrent POSTs
     // for the same requestId must not both pass the check above and both
     // answer the driver. The loser has to see it already gone and 404.
+    // Tracked in claimedPermissions (not just removed), so a session that
+    // ends while this is still in flight can still settle it through
+    // settlePendingPermissions.
     pendingPermissions.delete(requestId);
+    claimedPermissions.add(requestId);
     try {
       const body = await jsonBody(request);
       const decision = isRecord(body) ? body.decision : undefined;
@@ -508,10 +534,16 @@ export function createChatWebApp(
       }
       await live.answerPermission(requestId, decision);
     } catch (error) {
-      // The claim above didn't actually answer the driver -- put it back so
-      // the still-showing, still-clickable card can be retried.
-      pendingPermissions.add(requestId);
+      // Only restore it as pending if the SAME session generation is still
+      // live. If the session ended while this was in flight,
+      // settlePendingPermissions already resolved it (or is about to) --
+      // resurrecting it here would recreate exactly the zombie card, stuck
+      // showing "pending" forever with every retry 404ing, that this claim
+      // exists to prevent.
+      if (sessionGeneration === generation) pendingPermissions.add(requestId);
       throw error;
+    } finally {
+      claimedPermissions.delete(requestId);
     }
     writeEmpty(response, 204);
   }
@@ -526,7 +558,10 @@ export function createChatWebApp(
     });
     response.flushHeaders();
     response.write(snapshotFrame());
-    for (const entry of eventLog) response.write(frame(entry.event, entry.at));
+    for (const entry of eventLog) {
+      if (entry.provisional) continue;
+      response.write(frame(entry.event, entry.at));
+    }
     clients.add(response);
     request.once("close", () => clients.delete(response));
   }

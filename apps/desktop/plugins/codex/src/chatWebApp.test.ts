@@ -39,6 +39,16 @@ function deferred<T = void>(): {
   return { promise, resolve };
 }
 
+/** Races a promise against a bounded wait, for proving a negative -- "this
+ * never arrives" -- that a plain await can't express without hanging
+ * forever. */
+async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
+  return Promise.race([
+    promise,
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms)),
+  ]);
+}
+
 interface FakeSession extends PluginAgentSession {
   promptCalls: string[];
   stopCalls: number;
@@ -51,6 +61,9 @@ interface FakeSession extends PluginAgentSession {
   disposeError: Error | null;
   /** Same idea, for prompt() -- a driver that rejects a submitted turn. */
   promptError: Error | null;
+  /** Same idea, for answerPermission() -- a driver call that fails because
+   * the session it belonged to is already gone underneath it. */
+  answerPermissionError: Error | null;
 }
 
 interface FakeDriverOptions {
@@ -133,6 +146,7 @@ function fakeDriver(
         stopError: null,
         disposeError: null,
         promptError: options.promptError ?? null,
+        answerPermissionError: null,
         get stopCalls() {
           return stopCalls;
         },
@@ -151,6 +165,11 @@ function fakeDriver(
         async answerPermission(requestId, decision) {
           options.onAnswerPermissionEntered?.();
           if (options.answerPermissionGate) await options.answerPermissionGate();
+          if (session.answerPermissionError) {
+            const error = session.answerPermissionError;
+            session.answerPermissionError = null;
+            throw error;
+          }
           permissionCalls.push({ requestId, decision });
         },
         async stop() {
@@ -459,6 +478,39 @@ describe("Codex chat web app", () => {
     await reattached.close();
   });
 
+  it("replays nothing for a reservation the driver hasn't accepted yet, but carries it in order once it has", async () => {
+    // A reconnect landing in the exact window between the reservation and
+    // the driver's accept would have no live fetch on THAT connection to
+    // ever mark the send failed -- it must see nothing at all for it, not
+    // an unconfirmed message rendered as if it were sent.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    await entered.promise;
+
+    const reattached = await eventStream(url, token);
+    expect((await reattached.nextRaw()).snapshot).toBe(true);
+    const raced = await raceTimeout(reattached.nextRaw(), 200);
+    expect(raced).toBe("timeout");
+    await reattached.close();
+
+    gate.resolve();
+    expect((await sendPromise).status).toBe(202);
+
+    // Once accepted, a fresh connection carries it in order, same as
+    // round-6's own ordering guarantee.
+    const after = await eventStream(url, token);
+    await after.next(); // snapshot
+    expect(await after.next()).toEqual({ kind: "user-message", text: "Hello", clientId: "c1" });
+    await after.close();
+  });
+
   it("stops the live session and starts a fresh session for the next message", async () => {
     const fake = fakeDriver();
     const { url, token } = await start(fake);
@@ -638,6 +690,97 @@ describe("Codex chat web app", () => {
       { requestId: "request/1", decision: "allow_once" },
     ]);
     await stream.close();
+  });
+
+  it("settles a permission claimed just before Stop, instead of resurrecting it as an unkillable zombie", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onAnswerPermissionEntered: () => entered.resolve(),
+      answerPermissionGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    fake.startInputs[0]?.onEvent({
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "command",
+      title: "Run tests",
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    });
+    await stream.next(); // the permission-request itself
+
+    const answerPromise = post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "allow_once" },
+      token,
+    );
+    await entered.promise; // claimed, gated deep inside the driver call
+
+    // The underlying session is gone by the time the gate releases -- the
+    // exact interleaving the bug depended on: the claim already removed
+    // the id from pendingPermissions before Stop got a chance to see it.
+    const fakeSession = fake.sessions[0];
+    if (!fakeSession) throw new Error("No session started.");
+    fakeSession.answerPermissionError = new Error("The session ended while answering.");
+
+    const stopResponse = await post(url, "stop", undefined, token);
+    expect(stopResponse.status).toBe(204);
+
+    gate.resolve();
+    const answerResponse = await answerPromise;
+    expect(answerResponse.status).toBe(500);
+
+    // The cancellation published by Stop's own settlePendingPermissions
+    // (before the driver call even started rejecting) reaches the stream
+    // first, then the session's own closed transition.
+    expect(await stream.next()).toEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+    expect(await stream.next()).toEqual({
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+    });
+
+    // A retry 404s because there's no live session -- never because the
+    // claim wrongly resurrected the id as pending for a session generation
+    // that no longer exists.
+    const retry = await post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "reject_once" },
+      token,
+    );
+    expect(retry.status).toBe(404);
+
+    // A second /stop still runs settlePendingPermissions unconditionally --
+    // if the catch above had ignored the generation check and re-added the
+    // id anyway, this would publish a second, bogus cancellation for a
+    // request that was already fully settled.
+    const secondStop = await post(url, "stop", undefined, token);
+    expect(secondStop.status).toBe(204);
+    const racedSecondCancel = await raceTimeout(stream.next(), 200);
+    expect(racedSecondCancel).toBe("timeout");
+
+    // A reconnect's replay carries the cancellation, not a bare unanswered
+    // request that would recreate a clickable, dead-end card.
+    const reattached = await eventStream(url, token);
+    const replayed: unknown[] = [];
+    for (let index = 0; index < 5; index += 1) replayed.push(await reattached.next());
+    expect(replayed).toContainEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+    await stream.close();
+    await reattached.close();
   });
 
   it("serves its own static chat page, stylesheet, and script -- the page itself is token-free", async () => {

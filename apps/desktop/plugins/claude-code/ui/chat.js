@@ -24,13 +24,17 @@ if (
 // itself navigated: startWebApp returns the URL with the token in its
 // fragment, which reaches this script through location.hash but never
 // travels in an HTTP request (a fragment is client-side only), so no other
-// local caller that merely fetches "/" ever sees it. Read once, then
-// stripped from the visible URL so it doesn't linger in history.
+// local caller that merely fetches "/" ever sees it. sessionStorage is
+// scoped to this guest's own partition -- acceptable custody -- and is what
+// survives a reload after the fragment is stripped: a reload re-requests
+// the already-stripped URL, which carries no token at all on its own.
+const TOKEN_STORAGE_KEY = "dohc-chat-token";
 const tokenMatch = /(?:^|&)token=([^&]+)/.exec(location.hash.slice(1));
-if (!tokenMatch) {
+const TOKEN = sessionStorage.getItem(TOKEN_STORAGE_KEY) || (tokenMatch ? decodeURIComponent(tokenMatch[1]) : null);
+if (!TOKEN) {
   throw new Error("The chat page did not receive a session token.");
 }
-const TOKEN = decodeURIComponent(tokenMatch[1]);
+sessionStorage.setItem(TOKEN_STORAGE_KEY, TOKEN);
 history.replaceState(null, "", location.pathname + location.search);
 
 const textItems = new Map();
