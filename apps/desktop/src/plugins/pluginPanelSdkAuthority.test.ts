@@ -64,26 +64,28 @@ describe("plugin panel SDK authority", () => {
     );
   });
 
-  it("revokes stale generations and inactive panels", () => {
+  it("revokes stale generations", () => {
     const generations = createPluginPanelSdkAuthorityRegistry();
     const staleGeneration = generations.register(owned);
     expect(() => authorize(generations, { generation: 3 })).toThrow(/stale/i);
     expect(staleGeneration.signal.aborted).toBe(true);
-
-    const panels = createPluginPanelSdkAuthorityRegistry();
-    const inactivePanel = panels.register(owned);
-    expect(() => authorize(panels, { panelRunning: false })).toThrow(/stale/i);
-    expect(inactivePanel.signal.aborted).toBe(true);
+    expect(() => authorize(generations)).toThrow(/active panel/i);
   });
 
-  it("revokes a tracked panel when its plugin has no live spawn", () => {
+  it("keeps a panel grant through a transiently stopped runtime", () => {
     const registry = createPluginPanelSdkAuthorityRegistry();
     const grant = registry.register(owned);
 
+    expect(authorize(registry)).toMatchObject({ spawnId: "spawn-live" });
+    expect(() => authorize(registry, { panelRunning: false })).toThrow(
+      "Plugin panel SDK authority is stale.",
+    );
+    expect(grant.signal.aborted).toBe(false);
     expect(() =>
       authorize(registry, { panelRunning: true, liveSpawnId: undefined }),
-    ).toThrow(/stale/i);
-    expect(grant.signal.aborted).toBe(true);
+    ).toThrow("Plugin panel SDK authority is stale.");
+    expect(grant.signal.aborted).toBe(false);
+    expect(authorize(registry)).toMatchObject({ spawnId: "spawn-live" });
   });
 
   it("revokes a panel, a renderer, and all remaining grants with abort", () => {

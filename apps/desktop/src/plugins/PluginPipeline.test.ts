@@ -49,6 +49,7 @@ import {
   startPluginForPanel,
 } from "./pluginPanelRegistration";
 import { invokeRegisteredPluginCommand } from "./pluginCommandInvocation";
+import type { PluginSettingDeclaration } from "./pluginManifestSchema";
 import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
@@ -2678,19 +2679,24 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   describe("established plugin rebuild recovery", () => {
     async function setupEstablishedPlugin(options: {
       commands?: { id: string; title: string }[];
+      settings?: PluginSettingDeclaration[];
     } = {}) {
       const fixture = await createPluginWorkspace();
       const manifestPath = join(fixture.pluginRoot, "dohc-plugin.json");
-      const manifestText = (commands: { id: string; title: string }[]) =>
+      const manifestText = (
+        commands: { id: string; title: string }[],
+        settings: PluginSettingDeclaration[] = options.settings ?? [],
+      ) =>
         `${JSON.stringify({
           version: 1,
           name: "example-plugin",
           displayName: "Example plugin",
           entry: "src/index.ts",
           commands,
+          settings,
         }, null, 2)}\n`;
-      if (options.commands) {
-        await writeFile(manifestPath, manifestText(options.commands));
+      if (options.commands || options.settings) {
+        await writeFile(manifestPath, manifestText(options.commands ?? []));
       }
       let mismatchNextSnapshot = false;
       let failNextDiscard = false;
@@ -2698,6 +2704,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let failRecordWrite = false;
       let failBuild = false;
       let nextStopGate: { entered: Deferred; release: Deferred } | null = null;
+      let nextBuildGate: { entered: Deferred; release: Deferred } | null = null;
       let buildCalls = 0;
       let registeredCommands = (options.commands ?? [])
         .map((command) => command.id);
@@ -2758,6 +2765,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
           build: async (input) => {
             buildCalls += 1;
+            const gate = nextBuildGate;
+            if (gate) {
+              nextBuildGate = null;
+              gate.entered.resolve();
+              await gate.release.promise;
+            }
             if (failBuild) {
               failBuild = false;
               throw new Error("simulated build failure before the approval record write");
@@ -2805,6 +2818,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         gateNextStop: () => {
           const gate = { entered: deferred(), release: deferred() };
           nextStopGate = gate;
+          return gate;
+        },
+        gateNextBuild: () => {
+          const gate = { entered: deferred(), release: deferred() };
+          nextBuildGate = gate;
           return gate;
         },
         setRegisteredCommands: (commands: string[]) => {
@@ -3045,6 +3063,126 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         expect(
           setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
         ).toEqual(newCommands);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps recovered commands authoritative throughout a pre-stop retry", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        setup.failNextRecordWrite();
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+
+        const buildGate = setup.gateNextBuild();
+        setup.failNextBuild();
+        const retry = setup.pipeline.approve("example-plugin");
+        await buildGate.entered.promise;
+
+        try {
+          expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+          expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+          expect(
+            setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+          ).toEqual(oldCommands);
+        } finally {
+          buildGate.release.resolve();
+        }
+        expect((await retry).ok).toBe(false);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the running build's settings and validation after a pre-stop failure", async () => {
+      const oldSettings: PluginSettingDeclaration[] = [{
+        key: "greeting",
+        type: "string",
+        label: "Greeting",
+        description: "What the plugin says.",
+        default: "Hello",
+      }];
+      const newSettings: PluginSettingDeclaration[] = [{
+        key: "repeat",
+        type: "number",
+        label: "Repeat",
+        description: "How many times the plugin repeats itself.",
+        default: 1,
+      }];
+      const setup = await setupEstablishedPlugin({ settings: oldSettings });
+      try {
+        setup.failNextRecordWrite();
+        await writeFile(
+          setup.manifestPath,
+          setup.manifestText([], newSettings),
+        );
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.settings).toEqual(oldSettings);
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { greeting: "Hi" }),
+        ).resolves.toEqual({ greeting: "Hi" });
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { repeat: 2 }),
+        ).rejects.toThrow('does not declare a setting named "repeat"');
+
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after replacing its settings declaration.",
+        );
+        expect(setup.pipeline.list()[0]?.settings).toEqual(newSettings);
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { repeat: 2 }),
+        ).resolves.toEqual({ repeat: 2 });
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { greeting: "Hi" }),
+        ).rejects.toThrow('does not declare a setting named "greeting"');
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("notifies when rebuild stops an old runtime to hold changed source", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "changed before retry";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        let callbackCalled = false;
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            callbackCalled = true;
+          },
+        });
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: { status: "disabled-pending-approval" },
+        });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+        expect(callbackCalled).toBe(true);
       } finally {
         await setup.pipeline.dispose();
       }

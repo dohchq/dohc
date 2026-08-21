@@ -596,6 +596,8 @@ interface WatchingPlugin {
    */
   delivered: Emitted[];
   received: () => Promise<Array<{ event: string; data: PluginFileWatchEvent }>>;
+  started: () => Promise<{ ok: boolean; message: string | null }>;
+  stop: () => Promise<{ stopped: boolean }>;
 }
 
 /**
@@ -611,6 +613,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
 
   const events = new PluginWorkspaceEvents();
   const delivered: Emitted[] = [];
+  const writes = new Map<string, string>();
   const workspace = {
     workspaceId: "ws-plugin-watch",
     rootPath: root,
@@ -667,7 +670,10 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
             ),
           unsubscribeFileWatch: (watchParams) =>
             events.unsubscribe({ owner: processOwner(pluginId, spawnId) }, watchParams),
-          writeAuthoredText: async (path) => ({ path }),
+          writeAuthoredText: async (path, text) => {
+            writes.set(path, text);
+            return { path };
+          },
         },
         method,
         params,
@@ -707,18 +713,33 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
     workspaceRoot: root,
     events,
     delivered,
-    received: async () =>
-      (await host.invokeCommand("hello-plugin", "watch.received")) as Array<{
+    received: async () => {
+      await host.invokeCommand("hello-plugin", "watch.received");
+      return JSON.parse(writes.get("watch-received-report.json") ?? "[]") as Array<{
         event: string;
         data: PluginFileWatchEvent;
-      }>,
+      }>;
+    },
+    started: async () => {
+      await host.invokeCommand("hello-plugin", "watch.started");
+      return JSON.parse(writes.get("watch-started-report.json") ?? "null") as {
+        ok: boolean;
+        message: string | null;
+      };
+    },
+    stop: async () => {
+      await host.invokeCommand("hello-plugin", "watch.stop");
+      return JSON.parse(writes.get("watch-stop-report.json") ?? "null") as {
+        stopped: boolean;
+      };
+    },
   };
 }
 
 describe("a plugin watching workspace files over the real host protocol", () => {
   it("delivers a real settled write under the prefix, and never one outside it", async () => {
     const plugin = await startWatchingPlugin("notes");
-    expect(await plugin.host.invokeCommand("hello-plugin", "watch.started")).toEqual({
+    expect(await plugin.started()).toEqual({
       ok: true,
       message: null,
     });
@@ -754,7 +775,7 @@ describe("a plugin watching workspace files over the real host protocol", () => 
       20_000,
     );
 
-    expect(await plugin.host.invokeCommand("hello-plugin", "watch.stop")).toEqual({
+    expect(await plugin.stop()).toEqual({
       stopped: true,
     });
     await writeFile(join(plugin.workspaceRoot, "notes", "second.md"), "two\n");
@@ -826,10 +847,7 @@ describe("a plugin watching workspace files over the real host protocol", () => 
   it("refuses a prefix that escapes the workspace, over the real protocol", async () => {
     const plugin = await startWatchingPlugin("../outside");
 
-    const started = (await plugin.host.invokeCommand(
-      "hello-plugin",
-      "watch.started",
-    )) as { ok: boolean; message: string };
+    const started = await plugin.started();
     expect(started.ok).toBe(false);
     expect(started.message).toContain("traversal");
   }, 60_000);

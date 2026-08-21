@@ -722,7 +722,7 @@ export class PluginPipeline {
           pluginId,
           (record) => ({ ...record, disabled: true }),
         );
-        await this.options.pluginHost.stop(pluginId);
+        await this.stopOldRuntime(pluginId);
         return this.success(this.setStatus(candidate, {
           status: "disabled",
           disabledReason: "user",
@@ -967,6 +967,7 @@ export class PluginPipeline {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
     if (runtimeStatus === "disabled") {
+      this.recoveredManifests.delete(pluginId);
       this.setStatus(candidate, {
         status: "disabled",
         disabledReason: "crash-loop",
@@ -1098,7 +1099,7 @@ export class PluginPipeline {
           pluginId,
           (existing) => ({ ...existing, disabled: true }),
         );
-        await this.options.pluginHost.stop(pluginId);
+        await this.stopOldRuntime(pluginId);
 
         // Re-verify immediately before the actual delete: pluginHost.stop()
         // can take real wall-clock time (a grace period, then signal
@@ -1576,7 +1577,7 @@ export class PluginPipeline {
 
   private async removeOldIdentity(candidate: InstalledPluginRecord): Promise<void> {
     try {
-      await this.options.pluginHost.stop(candidate.id);
+      await this.stopOldRuntime(candidate.id);
       await this.operations.mutateRecord(
         this.options.stateDir,
         this.workspaceRoot,
@@ -1599,6 +1600,15 @@ export class PluginPipeline {
       this.failure(candidate.id, detail);
       throw new PipelineFailure(detail);
     }
+  }
+
+  private async stopOldRuntime(
+    pluginId: string,
+    onStopped?: () => void,
+  ): Promise<void> {
+    await this.options.pluginHost.stop(pluginId);
+    this.recoveredManifests.delete(pluginId);
+    onStopped?.();
   }
 
   /**
@@ -1635,7 +1645,6 @@ export class PluginPipeline {
   ): Promise<PluginPipelineActionResult> {
     const { candidate } = input;
     const oldRuntime = this.options.pluginHost.getStatus(candidate.id) ?? null;
-    this.recoveredManifests.delete(candidate.id);
     if (!candidate.manifest) {
       return this.failure(
         candidate.id,
@@ -1680,6 +1689,8 @@ export class PluginPipeline {
           validCandidate,
           snapshot.sourceHash,
           priorDisabledReason,
+          "changed-after-install",
+          input.onOldRuntimeStopped,
         );
       }
       // snapshotOrThrow's own digest is reused for the install baseline
@@ -1775,9 +1786,8 @@ export class PluginPipeline {
       // before the new process starts — unapproved bytes running under the
       // approvedBundleHash just recorded for them (#779 round 12 A3).
       if (oldRuntime) {
-        await this.options.pluginHost.stop(candidate.id);
+        await this.stopOldRuntime(candidate.id, input.onOldRuntimeStopped);
         oldRuntimeStopped = true;
-        input.onOldRuntimeStopped?.();
       }
 
       // Both publishes happen only now, with the record that approves these
@@ -1935,6 +1945,7 @@ export class PluginPipeline {
     priorDisabledReason?: PluginPipelinePluginStatus["disabledReason"],
     cause: "changed-after-install" | "changed-during-install" =
       "changed-after-install",
+    onOldRuntimeStopped?: () => void,
   ): Promise<PluginPipelineActionResult> {
     const error = cause === "changed-during-install"
       ? pipelineError(
@@ -1956,7 +1967,7 @@ export class PluginPipeline {
         candidate.id,
         (record) => ({ ...record, disabled: true }),
       );
-      await this.options.pluginHost.stop(candidate.id);
+      await this.stopOldRuntime(candidate.id, onOldRuntimeStopped);
       const record = await this.localRecord(candidate.id);
       return this.success(this.setStatus(candidate, {
         status: "disabled-pending-approval",
@@ -2236,7 +2247,7 @@ export class PluginPipeline {
       error: null,
     });
     try {
-      await this.options.pluginHost.stop(pluginId);
+      await this.stopOldRuntime(pluginId);
       await this.removePluginData(pluginId);
       await this.operations.mutateRecord(
         this.options.stateDir,
@@ -2449,6 +2460,8 @@ export class PluginPipeline {
     patch: Partial<PluginPipelinePluginStatus>,
   ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
+    const authoritativeManifest =
+      this.recoveredManifests.get(candidate.id) ?? candidate.manifest;
     const next: PluginPipelinePluginStatus = {
       ...current,
       ...patch,
@@ -2470,17 +2483,17 @@ export class PluginPipeline {
       // which has no manifest to read. The status keeps the name and icon it
       // already carried rather than losing them mid-action.
       ...(candidate.manifest ? manifestMetadata(candidate) : {}),
-      settings: candidate.manifest
-        ? manifestSettings(candidate.manifest)
+      settings: authoritativeManifest
+        ? manifestSettings(authoritativeManifest)
         : current.settings,
       webApps: patch.webApps ?? manifestWebApps(
-        this.recoveredManifests.get(candidate.id) ?? candidate.manifest,
+        authoritativeManifest,
       ),
       panels: patch.panels ?? manifestPanels(
-        this.recoveredManifests.get(candidate.id) ?? candidate.manifest,
+        authoritativeManifest,
       ),
       commands: patch.commands ?? manifestCommands(
-        this.recoveredManifests.get(candidate.id) ?? candidate.manifest,
+        authoritativeManifest,
       ),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),

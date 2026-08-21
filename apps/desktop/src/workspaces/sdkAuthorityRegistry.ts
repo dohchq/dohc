@@ -68,13 +68,11 @@ export function createSdkAuthorityRegistry<
           `${copy.label} request does not belong to an active ${copy.subject} in this renderer.`,
         );
       }
-      if (
-        grant.input.generation !== input.generation ||
-        !subjectRunning(input)
-      ) {
+      if (grant.input.generation !== input.generation) {
         revoke(key, grant);
         throw new Error(copy.stale);
       }
+      if (!subjectRunning(input)) throw new Error(copy.stale);
       return { ...grant.input, signal: grant.controller.signal };
     },
 

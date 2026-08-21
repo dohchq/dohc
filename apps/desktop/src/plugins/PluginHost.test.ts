@@ -107,10 +107,11 @@ const HELLO_PLUGIN_FIXTURE_COMMANDS: Record<string, readonly string[]> = {
   hello: ["hello.write"],
   "use-workspace": ["database.roundTrip", "ui.tryOpen"],
   "async-throw-after-activate": ["noop"],
+  "non-json-command-result": ["transport.sideEffect"],
   "grandchild-heartbeat": [],
   "report-context": ["report.context"],
   "report-settings": ["report.settings"],
-  "instanced-web-app": ["webapp.running"],
+  "instanced-web-app": [],
   "web-app": [],
   "web-app-pairing": [],
   "web-app-hang": [],
@@ -289,6 +290,30 @@ function defaultRouter(): Promise<unknown> {
   return Promise.resolve({});
 }
 
+function workspaceFileRouter(
+  workspaceRoot: string,
+): PluginHostOptions["routeSdkRequest"] {
+  return (pluginId, method, params, spawnId, signal) =>
+    invokePluginSdkHost(
+      {
+        pluginId,
+        workspaceRoot,
+        spawnId,
+        requestPath: "plugin-process",
+        isWritable: () => true,
+        writeAvailable: async () => true,
+        signal,
+        invokeChildProcess: async () => ({}),
+        writeAuthoredText: async (path, text) => {
+          await writeFile(join(workspaceRoot, path), text);
+          return { path };
+        },
+      },
+      method,
+      params,
+    );
+}
+
 function mutateDisabledState(
   localStateDir: string,
   root: string,
@@ -381,11 +406,11 @@ describe("PluginHost", () => {
     ]);
   });
 
-  it("round-trips databases.read and a plugin-attributed databases.edit over the real protocol", async () => {
+  it("does not send command return values across the child-process transport", async () => {
     const root = await workspaceRoot();
-    await seedFixtureDatabase(root);
+    const writes: Array<{ path: string; text: string }> = [];
     const harness = createProcessHarness({
-      modes: { "hello-plugin": "use-workspace" },
+      modes: { "hello-plugin": "non-json-command-result" },
     });
     const host = trackHost({
       stateDir: await stateDir(),
@@ -402,11 +427,47 @@ describe("PluginHost", () => {
             writeAvailable: async () => true,
             signal,
             invokeChildProcess: async () => ({}),
-            writeAuthoredText: async (path) => ({ path }),
+            writeAuthoredText: async (path, text) => {
+              writes.push({ path, text });
+              return { path };
+            },
           },
           method,
           params,
         ),
+    });
+
+    await host.start(
+      helloPluginRoot,
+      await fixtureManifest(
+        HELLO_PLUGIN_FIXTURE_COMMANDS["non-json-command-result"],
+      ),
+    );
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    await expect(
+      host.invokeCommand("hello-plugin", "transport.sideEffect"),
+    ).resolves.toBeNull();
+    expect(writes).toEqual([{
+      path: "transport-command-output.txt",
+      text: "command ran\n",
+    }]);
+  });
+
+  it("round-trips databases.read and a plugin-attributed databases.edit over the real protocol", async () => {
+    const root = await workspaceRoot();
+    await seedFixtureDatabase(root);
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "use-workspace" },
+    });
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: workspaceFileRouter(root),
     });
 
     await host.start(
@@ -418,8 +479,12 @@ describe("PluginHost", () => {
       "Plugin did not become ready.",
     );
 
-    // The snapshot really crossed the protocol.
-    expect(await host.invokeCommand("hello-plugin", "database.roundTrip")).toEqual({
+    await host.invokeCommand("hello-plugin", "database.roundTrip");
+    // The snapshot really crossed the protocol before the handler completed.
+    expect(JSON.parse(await readFile(
+      join(root, "database-roundtrip-report.json"),
+      "utf8",
+    ))).toEqual({
       tables: ["sentinel"],
     });
 
@@ -450,22 +515,7 @@ describe("PluginHost", () => {
       stateDir: await stateDir(),
       workspaceRoot: root,
       spawnTransport: harness.spawnTransport,
-      routeSdkRequest: (pluginId, method, params, spawnId, signal) =>
-        invokePluginSdkHost(
-          {
-            pluginId,
-            workspaceRoot: root,
-            spawnId,
-            requestPath: "plugin-process",
-            isWritable: () => true,
-            writeAvailable: async () => true,
-            signal,
-            invokeChildProcess: async () => ({}),
-            writeAuthoredText: async (path) => ({ path }),
-          },
-          method,
-          params,
-        ),
+      routeSdkRequest: workspaceFileRouter(root),
     });
 
     await host.start(
@@ -477,7 +527,11 @@ describe("PluginHost", () => {
       "Plugin did not become ready.",
     );
 
-    const result = (await host.invokeCommand("hello-plugin", "ui.tryOpen")) as {
+    await host.invokeCommand("hello-plugin", "ui.tryOpen");
+    const result = JSON.parse(await readFile(
+      join(root, "ui-open-report.json"),
+      "utf8",
+    )) as {
       opened: boolean;
       message: string | null;
     };
@@ -1790,7 +1844,7 @@ describe("PluginHost", () => {
     await engine.stop();
   });
 
-  it("rejects a tracked panel grant after its underlying host stops", async () => {
+  it("keeps a tracked panel grant while its underlying host restarts", async () => {
     const root = await workspaceRoot();
     const host = trackHost({
       stateDir: await stateDir(),
@@ -1834,7 +1888,26 @@ describe("PluginHost", () => {
         liveSpawnId,
       }),
     ).toThrow(/stale/i);
-    expect(grant.signal.aborted).toBe(true);
+    expect(grant.signal.aborted).toBe(false);
+
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready after restart.",
+    );
+    const restartedSpawnId = host.getSpawnId("hello-plugin");
+    expect(restartedSpawnId).toBeDefined();
+    expect(registry.authorize({
+      senderId: 1,
+      generation: 1,
+      activeWorkspaceId: "workspace-a",
+      workspaceId: "workspace-a",
+      pluginId: "hello-plugin",
+      panelId: "main",
+      panelRunning: Boolean(restartedSpawnId),
+      liveSpawnId: restartedSpawnId,
+    })).toMatchObject({ spawnId: restartedSpawnId });
+    expect(grant.signal.aborted).toBe(false);
   });
 
   it("sequences different panels against one plugin host", async () => {
@@ -2544,7 +2617,7 @@ describe("PluginHost web apps", () => {
       stateDir: localStateDir,
       workspaceRoot: root,
       spawnTransport: harness.spawnTransport,
-      routeSdkRequest: defaultRouter,
+      routeSdkRequest: workspaceFileRouter(root),
     });
     await host.start(
       helloPluginRoot,
@@ -2555,10 +2628,11 @@ describe("PluginHost web apps", () => {
       "Plugin did not become ready.",
     );
 
-    const reported = await host.invokeCommand(
-      "hello-plugin",
-      "report.context",
-    ) as { stateRoot: string; workspaceRoot: string };
+    await host.invokeCommand("hello-plugin", "report.context");
+    const reported = JSON.parse(await readFile(
+      join(root, "plugin-context-report.json"),
+      "utf8",
+    )) as { stateRoot: string; workspaceRoot: string };
     expect(reported.workspaceRoot).toBe(root);
     expect(reported.stateRoot).toBe(
       pluginStateRoot(pluginDataDir(localStateDir, root), "hello-plugin"),
@@ -2575,7 +2649,7 @@ describe("PluginHost web apps", () => {
       stateDir: localStateDir,
       workspaceRoot: root,
       spawnTransport: harness.spawnTransport,
-      routeSdkRequest: defaultRouter,
+      routeSdkRequest: workspaceFileRouter(root),
       readPluginSettings: async () => ({ greeting: "Hei", shout: false }),
     });
     await host.start(
@@ -2595,10 +2669,11 @@ describe("PluginHost web apps", () => {
     };
 
     // The plugin never asked for these: they arrived with its activation.
-    const started = await host.invokeCommand(
-      "hello-plugin",
-      "report.settings",
-    ) as Report;
+    await host.invokeCommand("hello-plugin", "report.settings");
+    const started = JSON.parse(await readFile(
+      join(root, "plugin-settings-report.json"),
+      "utf8",
+    )) as Report;
     expect(started.atActivation).toEqual({ greeting: "Hei", shout: false });
     expect(started.current).toEqual({ greeting: "Hei", shout: false });
     expect(started.heard).toBeNull();
@@ -2609,10 +2684,11 @@ describe("PluginHost web apps", () => {
       shout: true,
     });
 
-    const changed = await host.invokeCommand(
-      "hello-plugin",
-      "report.settings",
-    ) as Report;
+    await host.invokeCommand("hello-plugin", "report.settings");
+    const changed = JSON.parse(await readFile(
+      join(root, "plugin-settings-report.json"),
+      "utf8",
+    )) as Report;
     // Both halves of the SDK surface: the listener fired, and the snapshot
     // getter now answers with the new values rather than the old ones.
     expect(changed.heard).toEqual({ greeting: "Hello", shout: true });
@@ -2711,10 +2787,6 @@ describe("PluginHost instanced web apps", () => {
     const second = await host.startWebApp("hello-plugin", "preview", "sites/b");
 
     await host.stopWebApp("hello-plugin", "preview", "sites/a");
-    expect(await host.invokeCommand("hello-plugin", "webapp.running")).toEqual([
-      "sites/b",
-    ]);
-
     // The survivor is still the same live server, not a restarted one.
     const stillSecond = await host.startWebApp(
       "hello-plugin",
