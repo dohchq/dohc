@@ -1829,30 +1829,51 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   let config: RawDohcSiteConfig | null = null;
   if (configPath) {
     const parsed = await readJsonDetailed<RawDohcSiteConfig>(join(ctx.root, configPath));
-    if (parsed.ok) {
-      config = parsed.value;
-    } else {
+    if (!parsed.ok) {
       diagnostics.push({
         severity: "error",
         code: "invalid_dohc_json",
         path: configPath,
         message: parsed.reason,
       });
+    } else if (!isRecord(parsed.value)) {
+      // Valid JSON, but not an object (e.g. `[]`) — matches workspace-core's
+      // parseDohcSiteConfig shape check (packages/workspace-core/src/sites.ts),
+      // same code and message, so both detectors agree on this input (#853
+      // round-11 finding 14). A bare JSON.parse cast would otherwise accept
+      // this as a well-formed config with no diagnostic at all.
+      diagnostics.push({
+        severity: "error",
+        code: "invalid-config",
+        path: configPath,
+        message: "dohc.json must contain a JSON object.",
+      });
+    } else {
+      config = parsed.value;
     }
   }
 
   let pkg: PackageJson | null = null;
   if (files.has("package.json")) {
     const parsed = await readJsonDetailed<PackageJson>(join(absolute, "package.json"));
-    if (parsed.ok) {
-      pkg = parsed.value;
-    } else {
+    if (!parsed.ok) {
       diagnostics.push({
         severity: "error",
         code: "invalid_package_json",
         path: relativeJoin(root, "package.json"),
         message: parsed.reason,
       });
+    } else if (!isRecord(parsed.value)) {
+      // Mirrors workspace-core's parsePackageJson shape check — same code and
+      // message as the shared parser's non-object case (#853 round-11 finding 14).
+      diagnostics.push({
+        severity: "error",
+        code: "invalid-package-json",
+        path: relativeJoin(root, "package.json"),
+        message: "package.json must contain a JSON object.",
+      });
+    } else {
+      pkg = parsed.value;
     }
   }
 

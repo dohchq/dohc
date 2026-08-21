@@ -129,6 +129,15 @@ function pathRelativeToArtifact(artifactRoot: string, path: string): string | nu
     : null;
 }
 
+// RFC 3986's scheme grammar — the one name every "is this value an absolute
+// URL, not a local path" check in this file shares. A narrower allowlist
+// (data|https?|javascript|mailto|tel|...) always misses some real scheme
+// (blob:, file:, a custom app:, ...) that a browser still parses as
+// absolute; on a platform where `:` is a legal filename character, a value
+// like `file:private.txt` would otherwise fall through to filesystem
+// resolution and can approve an unrelated same-named file.
+const URI_SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+
 function localReferenceCandidates(
   rawReference: string,
   fromPath: string,
@@ -141,7 +150,7 @@ function localReferenceCandidates(
     !raw ||
     raw.startsWith("#") ||
     raw.startsWith("//") ||
-    /^(?:data|https?|javascript|mailto|tel):/i.test(raw)
+    URI_SCHEME_PATTERN.test(raw)
   ) return [];
   let decoded: string;
   try {
@@ -193,9 +202,13 @@ function isHtml5Element(node: Html5Node): node is Html5Node & { tagName: string;
 }
 
 // A <template>'s markup children live in `.content` (an inert document
-// fragment per the HTML spec) — its own `.childNodes` is always empty.
+// fragment per the HTML spec), not its own (always-empty) `.childNodes` —
+// but that fragment is not part of the document tree. A browser fetches
+// nothing inside inert template content until it's cloned and inserted, and
+// a `<base>` inside one never affects the containing document's base URL —
+// exclude it entirely, from base selection AND from reference scanning.
 function html5ChildNodes(node: Html5Node): Html5Node[] {
-  return node.content ? node.content.childNodes : (node.childNodes ?? []);
+  return node.content ? [] : (node.childNodes ?? []);
 }
 
 function html5TextContent(node: Html5Node): string {
@@ -243,7 +256,10 @@ const URL_ATTRIBUTE_ELEMENTS: Readonly<Record<string, ReadonlySet<string>>> = {
     "input",
   ]),
   srcset: new Set(["img", "source"]),
-  href: new Set(["a", "link", "area"]),
+  // "image" and "use" also cover the SVG-namespace elements — parse5
+  // exposes an xlink:href attribute with name "href" and a separate
+  // prefix field, so it already reaches this same allowlist entry.
+  href: new Set(["a", "link", "area", "image", "use"]),
   poster: new Set(["video"]),
   data: new Set(["object"]),
 };
@@ -251,9 +267,10 @@ const URL_ATTRIBUTE_ELEMENTS: Readonly<Record<string, ReadonlySet<string>>> = {
 // A <link href> counts only when its `rel` names a token the browser
 // actually fetches for — an alternate/canonical/author/search/etc. link
 // never triggers a request the way a stylesheet or icon does. `rel` is a
-// space-separated token list; preload/modulepreload only fetch when paired
-// with `as` (it names WHAT is being preloaded, and without it the browser
-// treats the link as inert).
+// space-separated token list. `preload` only fetches when paired with `as`
+// (it names WHAT is being preloaded, and without it the browser treats the
+// link as inert); `modulepreload` needs no `as` — a missing `as` there
+// defaults to the "script" destination and the fetch still happens.
 const LINK_REL_RESOURCE_TOKENS = new Set([
   "stylesheet",
   "icon",
@@ -263,14 +280,15 @@ const LINK_REL_RESOURCE_TOKENS = new Set([
   "mask-icon",
   "manifest",
   "prefetch",
+  "modulepreload",
 ]);
-const LINK_REL_PRELOAD_TOKENS = new Set(["preload", "modulepreload"]);
+const LINK_REL_TOKENS_REQUIRING_AS = new Set(["preload"]);
 
 function isResourceConsumingLinkRel(relValue: string | undefined, hasAsAttribute: boolean): boolean {
   if (!relValue) return false;
   for (const token of relValue.toLowerCase().split(/\s+/).filter(Boolean)) {
     if (LINK_REL_RESOURCE_TOKENS.has(token)) return true;
-    if (LINK_REL_PRELOAD_TOKENS.has(token) && hasAsAttribute) return true;
+    if (LINK_REL_TOKENS_REQUIRING_AS.has(token) && hasAsAttribute) return true;
   }
   return false;
 }
@@ -307,7 +325,7 @@ function htmlBaseDirectoryFromDocument(
   if (!href || href.startsWith("#")) return { kind: "none" };
   if (
     href.startsWith("//") ||
-    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(href)
+    URI_SCHEME_PATTERN.test(href)
   ) return { kind: "external" };
   let decoded: string;
   try {
@@ -419,17 +437,29 @@ export interface BrowserTextReference {
   // IT references (once loaded) resolves against ITS directory, not the
   // document that launched it.
   entersOwnContext?: boolean;
+  // True for a <link rel="manifest"> target: the browser treats it as a web
+  // app manifest regardless of its file extension (a "manifest.json" is as
+  // real a manifest as a ".webmanifest" file) — carried onto the queue so
+  // the scan's extension gate yields to this instead of skipping the file.
+  isManifest?: boolean;
 }
 
 // CSS still isn't parsed with a real parser (out of this round's scope) —
 // url()/@import stay pattern-matched, but only over text a browser's CSS
 // parser would actually read: a real <style> element's content, a style=""
-// attribute value, or an entire external .css file.
+// attribute value, or an entire external .css file. A CSS comment produces
+// no tokens at all (unlike an HTML comment, which parse5 already keeps out
+// of the tree as a separate node) — blank comments before matching so
+// `/* url("private.txt") */` can't mint a reference the parser never sees.
+const CSS_COMMENT_PATTERN = /\/\*[\s\S]*?(?:\*\/|$)/g;
 const CSS_URL_PATTERN =
   /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi;
 const CSS_IMPORT_PATTERN = /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi;
 
-function cssReferences(cssText: string): BrowserTextReference[] {
+function cssReferences(rawCssText: string): BrowserTextReference[] {
+  const cssText = rawCssText.replace(CSS_COMMENT_PATTERN, (comment) =>
+    comment.replace(/[^\r\n]/g, " "),
+  );
   const references: BrowserTextReference[] = [];
   for (const match of cssText.matchAll(CSS_URL_PATTERN)) {
     const value = (match[1] ?? match[2] ?? match[3])?.trim();
@@ -484,9 +514,26 @@ function walkAst(node: unknown, visit: (node: AstNode) => void): void {
 }
 
 function stringLiteralValue(node: unknown): string | undefined {
-  if (!isAstNode(node) || node.type !== "Literal") return undefined;
-  const value = node.value;
-  return typeof value === "string" ? value : undefined;
+  if (!isAstNode(node)) return undefined;
+  if (node.type === "Literal") {
+    const value = node.value;
+    return typeof value === "string" ? value : undefined;
+  }
+  // A substitution-free template literal (`` `data.json` ``) is a constant
+  // string to the browser, same as "data.json" — Acorn represents even a
+  // plain backtick string as TemplateLiteral, never Literal.
+  if (node.type === "TemplateLiteral") {
+    const expressions = astChildren(node, "expressions");
+    const quasis = astChildren(node, "quasis");
+    if (expressions.length > 0 || quasis.length !== 1) return undefined;
+    const quasi = quasis[0];
+    if (!isAstNode(quasi)) return undefined;
+    const templateValue = quasi.value;
+    if (!templateValue || typeof templateValue !== "object") return undefined;
+    const cooked = (templateValue as Record<string, unknown>).cooked;
+    return typeof cooked === "string" ? cooked : undefined;
+  }
+  return undefined;
 }
 
 /** `import.meta.url` — acorn represents `import.meta` as a MetaProperty. */
@@ -511,21 +558,90 @@ function endsWithProperty(node: unknown, name: string): boolean {
   return false;
 }
 
-// Finding 3's stance: a property assignment (`X.src = lit`) or
+// Finding 2/3's stance: a property assignment (`X.src = lit`) or
 // `X.setAttribute("src", lit)` only counts as a real browser-consumed
-// reference when X is PROVABLY a DOM element — the result of
-// document.createElement/querySelector/getElementById/body/head, or a
-// variable assigned from one. An unprovable receiver (`el.src = lit` where
-// `el` came from nowhere traceable, or any other object entirely) is
-// excluded. For a share manifest, under-inclusion breaks a share visibly (a
-// missing asset 404s in the open tab); over-inclusion discloses a file
-// silently. Unprovable consumption stays out.
-const DOM_PRODUCING_CALL_NAMES = new Set(["createElement", "querySelector", "getElementById"]);
-const DOM_PRODUCING_MEMBER_NAMES = new Set(["body", "head"]);
-const URL_RECEIVER_PROPERTIES = new Set(["src", "href", "poster"]);
+// reference when X is PROVABLY a DOM element of a tag the HTML spec
+// actually fires that property/attribute from — the result of
+// document.createElement("TAG")/body/head with a known tag, or a variable
+// assigned from one. DOM provenance alone does NOT prove resource semantics
+// (`document.createElement("div").src` is an inert expando, no request
+// happens); querySelector/getElementById produce a real element but an
+// UNKNOWN tag, so they can never satisfy the (tag, property) check either —
+// unprovable stays out, the same rule (tag, property) already enumerates
+// for markup via URL_ATTRIBUTE_ELEMENTS, reused here rather than duplicated.
+// For a share manifest, under-inclusion breaks a share visibly (a missing
+// asset 404s in the open tab); over-inclusion discloses a file silently.
+type DomProducingTag = string | "unknown";
 
-function isDocumentReceiver(node: unknown): boolean {
-  if (!isAstNode(node)) return false;
+// Finding 3: the browser globals this scanner trusts by identifier name —
+// document, fetch, Worker, SharedWorker, URL, importScripts — must be the
+// REAL globals, not a same-named local. Over-conservative by design: if the
+// program declares ANY binding for the name anywhere (a function, a var/
+// let/const, a parameter, a class, or an import specifier), the whole file
+// treats that name as shadowed and excludes every use of it, rather than
+// attempting real lexical scope resolution for a heuristic scanner.
+const TRUSTED_GLOBAL_NAMES = new Set(["document", "fetch", "Worker", "SharedWorker", "URL", "importScripts"]);
+
+function collectShadowedGlobalNames(program: AstNode): Set<string> {
+  const shadowed = new Set<string>();
+  const noteBindingTarget = (node: unknown): void => {
+    if (!isAstNode(node)) return;
+    if (node.type === "Identifier") {
+      const name = astString(node, "name");
+      if (name && TRUSTED_GLOBAL_NAMES.has(name)) shadowed.add(name);
+      return;
+    }
+    if (node.type === "AssignmentPattern") {
+      noteBindingTarget(astChild(node, "left"));
+      return;
+    }
+    if (node.type === "RestElement") {
+      noteBindingTarget(astChild(node, "argument"));
+      return;
+    }
+    if (node.type === "ArrayPattern") {
+      for (const element of astChildren(node, "elements")) noteBindingTarget(element);
+      return;
+    }
+    if (node.type === "ObjectPattern") {
+      for (const property of astChildren(node, "properties")) {
+        if (!isAstNode(property)) continue;
+        noteBindingTarget(property.type === "RestElement" ? property : astChild(property, "value"));
+      }
+    }
+  };
+  walkAst(program, (node) => {
+    switch (node.type) {
+      case "FunctionDeclaration":
+      case "FunctionExpression":
+      case "ArrowFunctionExpression":
+        noteBindingTarget(astChild(node, "id"));
+        for (const param of astChildren(node, "params")) noteBindingTarget(param);
+        break;
+      case "ClassDeclaration":
+      case "ClassExpression":
+        noteBindingTarget(astChild(node, "id"));
+        break;
+      case "VariableDeclarator":
+        noteBindingTarget(astChild(node, "id"));
+        break;
+      case "CatchClause":
+        noteBindingTarget(astChild(node, "param"));
+        break;
+      case "ImportDefaultSpecifier":
+      case "ImportNamespaceSpecifier":
+      case "ImportSpecifier":
+        noteBindingTarget(astChild(node, "local"));
+        break;
+      default:
+        break;
+    }
+  });
+  return shadowed;
+}
+
+function isDocumentReceiver(node: unknown, shadowedGlobals: ReadonlySet<string>): boolean {
+  if (shadowedGlobals.has("document") || !isAstNode(node)) return false;
   if (node.type === "Identifier") return astString(node, "name") === "document";
   if (node.type === "MemberExpression") {
     const property = astChild(node, "property");
@@ -534,42 +650,62 @@ function isDocumentReceiver(node: unknown): boolean {
   return false;
 }
 
-function isDomProducingExpression(node: unknown, provenNames: ReadonlySet<string>): boolean {
-  if (!isAstNode(node)) return false;
+/** The literal tag a DOM-producing expression is known to produce
+ * ("div", "img", ...), "unknown" when it's provably a DOM element but its
+ * concrete tag can't be determined (querySelector, getElementById, or
+ * createElement with a non-literal argument), or undefined when the
+ * expression isn't provably DOM-producing at all. */
+function domProducingTag(
+  node: unknown,
+  provenTags: ReadonlyMap<string, DomProducingTag>,
+  shadowedGlobals: ReadonlySet<string>,
+): DomProducingTag | undefined {
+  if (!isAstNode(node)) return undefined;
   if (node.type === "CallExpression") {
     const callee = astChild(node, "callee");
-    if (!isAstNode(callee) || callee.type !== "MemberExpression") return false;
+    if (!isAstNode(callee) || callee.type !== "MemberExpression") return undefined;
     const object = astChild(callee, "object");
     const property = astChild(callee, "property");
-    return (
-      isDocumentReceiver(object) &&
-      isAstNode(property) &&
-      property.type === "Identifier" &&
-      DOM_PRODUCING_CALL_NAMES.has(astString(property, "name") ?? "")
-    );
+    if (
+      !isDocumentReceiver(object, shadowedGlobals) ||
+      !isAstNode(property) ||
+      property.type !== "Identifier"
+    ) return undefined;
+    const methodName = astString(property, "name");
+    if (methodName === "createElement") {
+      const tag = stringLiteralValue(astChildren(node, "arguments")[0]);
+      return tag ? tag.toLowerCase() : "unknown";
+    }
+    if (methodName === "querySelector" || methodName === "getElementById") return "unknown";
+    return undefined;
   }
   if (node.type === "MemberExpression") {
     const object = astChild(node, "object");
     const property = astChild(node, "property");
-    return (
-      isDocumentReceiver(object) &&
-      isAstNode(property) &&
-      property.type === "Identifier" &&
-      DOM_PRODUCING_MEMBER_NAMES.has(astString(property, "name") ?? "")
-    );
+    if (
+      !isDocumentReceiver(object, shadowedGlobals) ||
+      !isAstNode(property) ||
+      property.type !== "Identifier"
+    ) return undefined;
+    const name = astString(property, "name");
+    return name === "body" || name === "head" ? name : undefined;
   }
   if (node.type === "Identifier") {
-    return provenNames.has(astString(node, "name") ?? "");
+    return provenTags.get(astString(node, "name") ?? "");
   }
-  return false;
+  return undefined;
 }
 
 /** Every identifier PROVABLY bound to a DOM-producing expression somewhere
- * in the file — a small fixed-point pass (not real lexical scoping) so a
- * chain like `const a = document.createElement("img"); const b = a;` still
- * resolves, without building a full scope resolver for a heuristic scanner. */
-function collectDomProducingNames(program: AstNode): Set<string> {
-  const names = new Set<string>();
+ * in the file, and the tag it's known to produce — a small fixed-point pass
+ * (not real lexical scoping) so a chain like
+ * `const a = document.createElement("img"); const b = a;` still resolves,
+ * without building a full scope resolver for a heuristic scanner. */
+function collectDomProducingTags(
+  program: AstNode,
+  shadowedGlobals: ReadonlySet<string>,
+): Map<string, DomProducingTag> {
+  const tags = new Map<string, DomProducingTag>();
   for (let pass = 0; pass < 3; pass += 1) {
     let changed = false;
     walkAst(program, (node) => {
@@ -586,15 +722,30 @@ function collectDomProducingNames(program: AstNode): Set<string> {
       }
       if (!isAstNode(target) || target.type !== "Identifier") return;
       const name = astString(target, "name");
-      if (!name || names.has(name)) return;
-      if (isDomProducingExpression(source, names)) {
-        names.add(name);
+      if (!name || tags.has(name)) return;
+      const tag = domProducingTag(source, tags, shadowedGlobals);
+      if (tag !== undefined) {
+        tags.set(name, tag);
         changed = true;
       }
     });
     if (!changed) break;
   }
-  return names;
+  return tags;
+}
+
+/** Whether `object.property = lit` or `object.setAttribute("property", lit)`
+ * is a proven, resource-consuming (tag, property) pair — reuses
+ * URL_ATTRIBUTE_ELEMENTS, the SAME allowlist markup attributes already go
+ * through, so a DOM element's real tag is held to the identical rule. */
+function isProvenUrlReceiver(
+  object: unknown,
+  propertyName: string,
+  provenTags: ReadonlyMap<string, DomProducingTag>,
+  shadowedGlobals: ReadonlySet<string>,
+): boolean {
+  const tag = domProducingTag(object, provenTags, shadowedGlobals);
+  return tag !== undefined && tag !== "unknown" && (URL_ATTRIBUTE_ELEMENTS[propertyName]?.has(tag) ?? false);
 }
 
 // A worker script (reached via Worker/SharedWorker/serviceWorker.register)
@@ -619,14 +770,93 @@ function parseJavaScript(code: string): AstNode | null {
   }
 }
 
-function jsReferencesFromCode(code: string, context: JsScanContext): BrowserTextReference[] {
+// Finding 9: an inline <script type="importmap"> remaps bare module
+// specifiers before the browser resolves them — an unmapped bare specifier
+// is not a relative filesystem path at all (module resolution throws on
+// one), so it must not fall through to naive local-path joining the way a
+// literal relative/absolute specifier does.
+interface ImportMapResolution {
+  imports: ReadonlyMap<string, string>;
+}
+
+function isBareModuleSpecifier(specifier: string): boolean {
+  return (
+    !specifier.startsWith("/") &&
+    !specifier.startsWith("./") &&
+    !specifier.startsWith("../") &&
+    !URI_SCHEME_PATTERN.test(specifier)
+  );
+}
+
+/** Resolves a module specifier the way HTML's module-resolution algorithm
+ * does: a path-like or absolute specifier passes through unchanged (import
+ * maps don't rewrite those); a bare specifier resolves through the active
+ * import map — an exact "imports" key first, then the longest matching
+ * "prefix/" key — and an unmapped bare specifier resolves to nothing. */
+function resolveModuleSpecifier(
+  specifier: string,
+  importMap: ImportMapResolution | undefined,
+): string | undefined {
+  if (!isBareModuleSpecifier(specifier)) return specifier;
+  if (!importMap) return undefined;
+  const exact = importMap.imports.get(specifier);
+  if (exact !== undefined) return exact;
+  let bestPrefixKey: string | undefined;
+  for (const key of importMap.imports.keys()) {
+    if (!key.endsWith("/") || !specifier.startsWith(key)) continue;
+    if (!bestPrefixKey || key.length > bestPrefixKey.length) bestPrefixKey = key;
+  }
+  if (bestPrefixKey === undefined) return undefined;
+  return importMap.imports.get(bestPrefixKey)! + specifier.slice(bestPrefixKey.length);
+}
+
+function parseImportMap(text: string): ImportMapResolution | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const importsField = (parsed as Record<string, unknown>).imports;
+  const imports = new Map<string, string>();
+  if (importsField && typeof importsField === "object" && !Array.isArray(importsField)) {
+    for (const [key, value] of Object.entries(importsField as Record<string, unknown>)) {
+      if (typeof value === "string") imports.set(key, value);
+    }
+  }
+  return { imports };
+}
+
+function jsReferencesFromCode(
+  code: string,
+  context: JsScanContext,
+  importMap?: ImportMapResolution,
+): BrowserTextReference[] {
   const program = parseJavaScript(code);
   if (!program) return [];
-  const provenDomNames = collectDomProducingNames(program);
+  const shadowedGlobals = collectShadowedGlobalNames(program);
+  const provenDomTags = collectDomProducingTags(program, shadowedGlobals);
   const references: BrowserTextReference[] = [];
   const addReference = (value: string | undefined, documentRelative: boolean, entersOwnContext = false) => {
     const trimmed = value?.trim();
     if (trimmed) references.push({ value: trimmed, documentRelative, entersOwnContext });
+  };
+  // import/export/dynamic-import specifiers are MODULE specifiers, subject
+  // to import-map resolution — an unmapped bare specifier ("lib") is not a
+  // local path at all and must not fall through to naive relative joining.
+  const addModuleSpecifier = (value: string | undefined) => {
+    const trimmed = value?.trim();
+    if (trimmed) addReference(resolveModuleSpecifier(trimmed, importMap), false);
+  };
+  const addUrlAttributeReference = (object: unknown, propertyName: string, value: string | undefined) => {
+    if (!isProvenUrlReceiver(object, propertyName, provenDomTags, shadowedGlobals)) return;
+    if (propertyName === "srcset") {
+      const trimmed = value?.trim();
+      if (trimmed) for (const srcsetValue of referencesFromSrcset(trimmed)) addReference(srcsetValue, true);
+      return;
+    }
+    addReference(value, true);
   };
 
   walkAst(program, (node) => {
@@ -634,11 +864,11 @@ function jsReferencesFromCode(code: string, context: JsScanContext): BrowserText
       case "ImportDeclaration":
       case "ExportNamedDeclaration":
       case "ExportAllDeclaration": {
-        addReference(stringLiteralValue(astChild(node, "source")), false);
+        addModuleSpecifier(stringLiteralValue(astChild(node, "source")));
         break;
       }
       case "ImportExpression": {
-        addReference(stringLiteralValue(astChild(node, "source")), false);
+        addModuleSpecifier(stringLiteralValue(astChild(node, "source")));
         break;
       }
       case "NewExpression": {
@@ -646,6 +876,7 @@ function jsReferencesFromCode(code: string, context: JsScanContext): BrowserText
         const args = astChildren(node, "arguments");
         if (!isAstNode(callee) || callee.type !== "Identifier") break;
         const calleeName = astString(callee, "name");
+        if (!calleeName || shadowedGlobals.has(calleeName)) break;
         if (calleeName === "URL" && args.length >= 2) {
           const first = stringLiteralValue(args[0]);
           if (first && isImportMetaUrl(args[1])) addReference(first, false);
@@ -660,6 +891,7 @@ function jsReferencesFromCode(code: string, context: JsScanContext): BrowserText
         if (!isAstNode(callee)) break;
         if (callee.type === "Identifier") {
           const calleeName = astString(callee, "name");
+          if (!calleeName || shadowedGlobals.has(calleeName)) break;
           if (calleeName === "fetch") {
             addReference(stringLiteralValue(args[0]), true);
           } else if (calleeName === "importScripts" && context === "worker") {
@@ -671,16 +903,12 @@ function jsReferencesFromCode(code: string, context: JsScanContext): BrowserText
           const propertyName =
             isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
           if (propertyName === "register" && endsWithProperty(object, "serviceWorker")) {
-            addReference(stringLiteralValue(args[0]), true);
+            // A registered service worker runs in its own global scope with
+            // its own script URL, same as Worker/SharedWorker.
+            addReference(stringLiteralValue(args[0]), true, true);
           } else if (propertyName === "setAttribute" && args.length >= 2) {
             const attributeName = stringLiteralValue(args[0]);
-            if (
-              attributeName &&
-              URL_RECEIVER_PROPERTIES.has(attributeName) &&
-              isDomProducingExpression(object, provenDomNames)
-            ) {
-              addReference(stringLiteralValue(args[1]), true);
-            }
+            if (attributeName) addUrlAttributeReference(object, attributeName, stringLiteralValue(args[1]));
           }
         }
         break;
@@ -693,12 +921,8 @@ function jsReferencesFromCode(code: string, context: JsScanContext): BrowserText
         const object = astChild(left, "object");
         const propertyName =
           isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
-        if (
-          propertyName &&
-          URL_RECEIVER_PROPERTIES.has(propertyName) &&
-          isDomProducingExpression(object, provenDomNames)
-        ) {
-          addReference(stringLiteralValue(astChild(node, "right")), true);
+        if (propertyName) {
+          addUrlAttributeReference(object, propertyName, stringLiteralValue(astChild(node, "right")));
         }
         break;
       }
@@ -711,10 +935,38 @@ function jsReferencesFromCode(code: string, context: JsScanContext): BrowserText
 
 // ---- HTML: parse once with parse5 and walk the real tree.
 
-function htmlReferencesFromDocument(document: Html5Node, context: JsScanContext): BrowserTextReference[] {
+interface HtmlDocumentReferences {
+  references: BrowserTextReference[];
+  // The document's own active import map, if it declared one — undefined
+  // for a plain document (never inherited: each HTML document is a fresh
+  // realm, and only the module scripts IT loads share this map).
+  importMap: ImportMapResolution | undefined;
+}
+
+/** Wraps one inline on* handler's value as a function body before parsing —
+ * a browser compiles a handler as a FUNCTION BODY (where a bare `return` is
+ * valid), not a module or program, and joining every handler with every
+ * script body into one string means one handler using `return` would make
+ * the WHOLE combined parse fail. Parsing each handler on its own also
+ * isolates a malformed handler's failure from every other reference. */
+function jsReferencesFromEventHandler(
+  code: string,
+  context: JsScanContext,
+  importMap: ImportMapResolution | undefined,
+): BrowserTextReference[] {
+  return jsReferencesFromCode(`function __dohc_handler__(event) {\n${code}\n}`, context, importMap);
+}
+
+function htmlReferencesFromDocument(
+  document: Html5Node,
+  context: JsScanContext,
+): HtmlDocumentReferences {
   const attributeReferences: BrowserTextReference[] = [];
   const cssTexts: string[] = [];
   const jsTexts: string[] = [];
+  const handlerTexts: string[] = [];
+  const importMapTexts: string[] = [];
+  const nestedReferences: BrowserTextReference[] = [];
 
   const visit = (node: Html5Node): void => {
     if (isHtml5Element(node)) {
@@ -728,8 +980,21 @@ function htmlReferencesFromDocument(document: Html5Node, context: JsScanContext)
       if (styleAttribute) cssTexts.push(styleAttribute);
       for (const attribute of node.attrs) {
         // Inline on* handlers hold real JS the browser executes, same as a
-        // <script> body — parse5 already decoded any entity in the value.
-        if (/^on[a-z]+$/i.test(attribute.name)) jsTexts.push(attribute.value);
+        // <script> body — parse5 already decoded any entity in the value —
+        // but they compile with function-body grammar, so they're parsed
+        // separately (jsReferencesFromEventHandler), not joined into jsTexts.
+        if (/^on[a-z]+$/i.test(attribute.name)) handlerTexts.push(attribute.value);
+      }
+      // A browser parses `srcdoc` as a nested HTML document; nothing else
+      // in this file walks into its markup, so it never contributes
+      // references on its own.
+      const srcdoc = tagName === "iframe" ? attrs.get("srcdoc") : undefined;
+      if (srcdoc !== undefined) {
+        // Its references resolve against the EMBEDDING document's base —
+        // that happens naturally here because they're merged as ordinary
+        // documentRelative references into this same document's output,
+        // never given a base of their own.
+        nestedReferences.push(...htmlReferencesFromDocument(parseHtml(srcdoc), context).references);
       }
       for (const attribute of node.attrs) {
         const attributeName = attribute.name;
@@ -740,8 +1005,13 @@ function htmlReferencesFromDocument(document: Html5Node, context: JsScanContext)
           tagName === "link" &&
           !isResourceConsumingLinkRel(attrs.get("rel"), attrs.has("as"))
         ) continue;
+        // A manifest linked as plain "manifest.json" is still a web app
+        // manifest to the browser — the extension gate in the scan queue
+        // must yield to this, not require a ".webmanifest" spelling.
+        const isManifest =
+          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("manifest");
         if (attributeName !== "srcset") {
-          attributeReferences.push({ value: attribute.value, documentRelative: true });
+          attributeReferences.push({ value: attribute.value, documentRelative: true, isManifest });
           continue;
         }
         for (const srcsetValue of referencesFromSrcset(attribute.value)) {
@@ -749,7 +1019,11 @@ function htmlReferencesFromDocument(document: Html5Node, context: JsScanContext)
         }
       }
       if (tagName === "script") {
-        if (isExecutableScriptElement(attrs)) jsTexts.push(html5TextContent(node));
+        if (attrs.get("type")?.toLowerCase() === "importmap") {
+          importMapTexts.push(html5TextContent(node));
+        } else if (isExecutableScriptElement(attrs)) {
+          jsTexts.push(html5TextContent(node));
+        }
         return;
       }
       if (tagName === "style") {
@@ -761,11 +1035,18 @@ function htmlReferencesFromDocument(document: Html5Node, context: JsScanContext)
   };
   visit(document);
 
-  return [
+  // Only the FIRST import map counts per the HTML standard; a document
+  // never inherits one from anywhere else.
+  const importMap = importMapTexts[0] !== undefined ? parseImportMap(importMapTexts[0]) : undefined;
+
+  const references = [
     ...attributeReferences,
+    ...nestedReferences,
     ...cssReferences(cssTexts.join("\n")),
-    ...jsReferencesFromCode(jsTexts.join("\n"), context),
+    ...jsReferencesFromCode(jsTexts.join("\n"), context, importMap),
+    ...handlerTexts.flatMap((handler) => jsReferencesFromEventHandler(handler, context, importMap)),
   ];
+  return { references, importMap };
 }
 
 /** Every reference in a non-HTML file — HTML is scanned from its already-
@@ -775,15 +1056,20 @@ function referencesFromNonHtmlFile(
   text: string,
   sourcePath: string,
   context: JsScanContext,
+  isManifest: boolean,
+  importMap: ImportMapResolution | undefined,
 ): BrowserTextReference[] {
-  if (/\.webmanifest$/i.test(sourcePath)) {
+  // A file reached through a <link rel="manifest"> is a web app manifest to
+  // the browser regardless of its own extension — a plain "manifest.json"
+  // is as real a manifest as a ".webmanifest" file.
+  if (isManifest || /\.webmanifest$/i.test(sourcePath)) {
     // A web app manifest's URLs (icons, start_url, ...) resolve relative to
     // the MANIFEST file itself, not the document that links it — the same
     // rule CSS's url()/@import already follow. Not document-relative.
     return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: false }));
   }
   if (/\.css$/i.test(sourcePath)) return cssReferences(text);
-  if (/\.(?:js|mjs)$/i.test(sourcePath)) return jsReferencesFromCode(text, context);
+  if (/\.(?:js|mjs)$/i.test(sourcePath)) return jsReferencesFromCode(text, context, importMap);
   return [];
 }
 
@@ -853,15 +1139,36 @@ async function shareManifestForSite(
   // that document's own <base href> (not a blanket artifact root). context
   // carries whether the file being scanned runs as an ordinary document
   // script or as a worker's own global scope (importScripts only exists,
-  // and only counts, in the latter).
-  const queue: Array<{ path: string; documentBase: HtmlBaseResolution; context: JsScanContext }> = [
-    { path: entryPath, documentBase: { kind: "none" }, context: "document" },
+  // and only counts, in the latter). isManifest carries that a target was
+  // reached through <link rel="manifest">, so the extension gate below (and
+  // the file's own content dispatch) treats it as a web app manifest
+  // regardless of its own file extension. importMap carries the referring
+  // document's active import map (undefined for none) to whatever
+  // non-HTML module script it references — an HTML document never
+  // inherits one; it only ever declares its own.
+  const queue: Array<{
+    path: string;
+    documentBase: HtmlBaseResolution;
+    context: JsScanContext;
+    isManifest: boolean;
+    importMap: ImportMapResolution | undefined;
+  }> = [
+    { path: entryPath, documentBase: { kind: "none" }, context: "document", isManifest: false, importMap: undefined },
   ];
   let scannedBytes = 0;
   while (queue.length > 0) {
-    const { path: current, documentBase: inheritedDocumentBase, context } = queue.shift()!;
-    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}`;
-    if (scanned.has(scanKey) || !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current)) continue;
+    const {
+      path: current,
+      documentBase: inheritedDocumentBase,
+      context,
+      isManifest,
+      importMap: inheritedImportMap,
+    } = queue.shift()!;
+    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${isManifest}`;
+    if (
+      scanned.has(scanKey) ||
+      (!isManifest && !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current))
+    ) continue;
     scanned.add(scanKey);
     try {
       const info = await stat(join(rootPath, current));
@@ -896,9 +1203,11 @@ async function shareManifestForSite(
           ? { kind: "local", directory: posix.dirname(current) }
           : base
         : inheritedDocumentBase;
-      const references = htmlDocument
-        ? htmlReferencesFromDocument(htmlDocument, context)
-        : referencesFromNonHtmlFile(text, current, context);
+      const htmlResult = htmlDocument ? htmlReferencesFromDocument(htmlDocument, context) : null;
+      const references = htmlResult
+        ? htmlResult.references
+        : referencesFromNonHtmlFile(text, current, context, isManifest, inheritedImportMap);
+      const documentImportMap = htmlResult ? htmlResult.importMap : inheritedImportMap;
       for (const reference of references) {
         const referenceBase = reference.documentRelative ? documentBase : base;
         for (const target of localReferenceCandidates(
@@ -917,7 +1226,13 @@ async function shareManifestForSite(
             ? { kind: "local", directory: posix.dirname(target) }
             : documentBase;
           const propagatedContext: JsScanContext = reference.entersOwnContext ? "worker" : context;
-          queue.push({ path: target, documentBase: propagatedDocumentBase, context: propagatedContext });
+          queue.push({
+            path: target,
+            documentBase: propagatedDocumentBase,
+            context: propagatedContext,
+            isManifest: reference.isManifest ?? false,
+            importMap: documentImportMap,
+          });
         }
       }
     } catch {

@@ -1558,6 +1558,64 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites rejects a dohc.json that parses to a non-object, mirroring workspace-core's code", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "not-an-object"), { recursive: true });
+      await writeFile(join(ctx.root, "not-an-object/dohc.json"), "[]");
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      // A genuinely valid dohc.json ({"type":"site"}) reads kind "configured"
+      // and confidence "high" here (see the "finds configured, package, and
+      // static sites" test above); an array parses without throwing, so
+      // without the shape check this folder would misclassify the same way.
+      // kind stays "configured" (dohc.json is present, matching
+      // workspace-core's own siteKind rule) but confidence must not.
+      expect(result.sites[0]).toMatchObject({
+        root: "not-an-object",
+        kind: "configured",
+        confidence: "low",
+        diagnostics: [
+          expect.objectContaining({
+            code: "invalid-config",
+            severity: "error",
+            message: "dohc.json must contain a JSON object.",
+          }),
+        ],
+      });
+    });
+  });
+
+  it("detect_sites rejects a package.json that parses to a non-object, mirroring workspace-core's code", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "pkg-not-an-object"), { recursive: true });
+      // An index.html gives the folder an independent site signal so a
+      // rejected package.json still surfaces as a site with a diagnostic,
+      // instead of vanishing from detect_sites entirely (package.json alone
+      // carries no site signal of its own once it fails the shape check).
+      await writeFile(join(ctx.root, "pkg-not-an-object/index.html"), "<h1>Static</h1>");
+      await writeFile(join(ctx.root, "pkg-not-an-object/package.json"), "[]");
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      // A silently-accepted array pkg would look like an empty, valid
+      // package.json (no scripts, no dependencies, no diagnostic at all) and
+      // would never explain why no package signal was picked up.
+      expect(result.sites[0]).toMatchObject({
+        root: "pkg-not-an-object",
+        kind: "static",
+        scripts: {},
+        diagnostics: [
+          expect.objectContaining({
+            code: "invalid-package-json",
+            severity: "error",
+            message: "package.json must contain a JSON object.",
+          }),
+        ],
+      });
+    });
+  });
+
   it("detect_sites ignores non-site dohc.json unless website signals conflict", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "workflow"), { recursive: true });

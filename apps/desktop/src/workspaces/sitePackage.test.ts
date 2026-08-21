@@ -811,7 +811,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("worker-import/helper.js");
   });
 
-  it("only trusts a proven consumption shape (property assignment, setAttribute) for a provably DOM-producing receiver", async () => {
+  it("only trusts a proven consumption shape (property assignment, setAttribute) for a provably DOM-producing receiver of a matching tag", async () => {
     await mkdir(join(root, "prop-assign"), { recursive: true });
     await writeFile(
       join(root, "prop-assign", "index.html"),
@@ -820,12 +820,20 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "prop-assign", "app.js"),
       [
-        // Provable: assigned straight from document.createElement.
+        // Provable, matching (tag, property): img.src.
         'const img = document.createElement("img");',
         'img.src = "img.png";',
-        // Provable: assigned from document.querySelector.
-        'const link = document.querySelector("a");',
+        // Provable, matching (tag, property): a.href via setAttribute.
+        'const link = document.createElement("a");',
         'link.setAttribute("href", "linked.html");',
+        // Provable receiver, WRONG property for the tag — div.src is an
+        // inert expando, not a request (finding 2).
+        'const div = document.createElement("div");',
+        'div.src = "wrong-tag.png";',
+        // Provably a DOM element, but querySelector's tag is UNKNOWN — an
+        // unknowable tag can never satisfy the (tag, property) check.
+        'const queried = document.querySelector("a");',
+        'queried.setAttribute("href", "queried.html");',
         // Not provable: no traceable DOM-producing origin at all.
         'const el = getElementFromSomewhere();',
         'el.src = "unproven.png";',
@@ -835,6 +843,8 @@ describe("listSitePackages", () => {
     );
     await writeFile(join(root, "prop-assign", "img.png"), "image");
     await writeFile(join(root, "prop-assign", "linked.html"), "<h1>Linked</h1>");
+    await writeFile(join(root, "prop-assign", "wrong-tag.png"), "image");
+    await writeFile(join(root, "prop-assign", "queried.html"), "<h1>Queried</h1>");
     await writeFile(join(root, "prop-assign", "unproven.png"), "image");
     await writeFile(join(root, "prop-assign", "private.html"), "<h1>Private</h1>");
 
@@ -844,6 +854,8 @@ describe("listSitePackages", () => {
 
     expect(manifestOf(site)?.assets).toContain("prop-assign/img.png");
     expect(manifestOf(site)?.assets).toContain("prop-assign/linked.html");
+    expect(manifestOf(site)?.assets).not.toContain("prop-assign/wrong-tag.png");
+    expect(manifestOf(site)?.assets).not.toContain("prop-assign/queried.html");
     expect(manifestOf(site)?.assets).not.toContain("prop-assign/unproven.png");
     expect(manifestOf(site)?.assets).not.toContain("prop-assign/private.html");
   });
@@ -955,6 +967,222 @@ describe("listSitePackages", () => {
     );
 
     expect(manifestOf(site)?.assets).not.toContain("not-a-worker/helper.js");
+  });
+
+  it("ignores a reference inside a CSS comment", async () => {
+    await mkdir(join(root, "css-comment"), { recursive: true });
+    await writeFile(
+      join(root, "css-comment", "index.html"),
+      '<link rel="stylesheet" href="style.css">',
+    );
+    await writeFile(
+      join(root, "css-comment", "style.css"),
+      '/* url("private.txt") */ body { color: red; }',
+    );
+    await writeFile(join(root, "css-comment", "private.txt"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "css-comment",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("css-comment/style.css");
+    expect(manifestOf(site)?.assets).not.toContain("css-comment/private.txt");
+  });
+
+  it("does not trust a locally shadowed fetch identifier", async () => {
+    await mkdir(join(root, "shadowed-fetch"), { recursive: true });
+    await writeFile(
+      join(root, "shadowed-fetch", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "shadowed-fetch", "app.js"),
+      'function fetch(path) { console.log(path); }\nfetch("private.txt");',
+    );
+    await writeFile(join(root, "shadowed-fetch", "private.txt"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "shadowed-fetch",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("shadowed-fetch/private.txt");
+  });
+
+  it("switches a registered service worker's own references to its own directory, not the launching document's", async () => {
+    await mkdir(join(root, "sw-context", "workers"), { recursive: true });
+    await writeFile(
+      join(root, "sw-context", "index.html"),
+      '<script>navigator.serviceWorker.register("workers/sw.js");</script>',
+    );
+    await writeFile(
+      join(root, "sw-context", "workers", "sw.js"),
+      'importScripts("helper.js");\nfetch("payload.json");',
+    );
+    await writeFile(join(root, "sw-context", "workers", "helper.js"), "self.ready = true;");
+    await writeFile(join(root, "sw-context", "workers", "payload.json"), "{}");
+    await writeFile(join(root, "sw-context", "helper.js"), "wrong file");
+    await writeFile(join(root, "sw-context", "payload.json"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "sw-context",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("sw-context/workers/helper.js");
+    expect(manifestOf(site)?.assets).toContain("sw-context/workers/payload.json");
+    expect(manifestOf(site)?.assets).not.toContain("sw-context/helper.js");
+    expect(manifestOf(site)?.assets).not.toContain("sw-context/payload.json");
+  });
+
+  it("parses an inline event handler with function-body grammar, isolated from other handlers and scripts", async () => {
+    await mkdir(join(root, "handler-body"), { recursive: true });
+    await writeFile(
+      join(root, "handler-body", "index.html"),
+      [
+        "<button onclick=\"fetch('data.json'); return false;\"></button>",
+        '<script>fetch("script-data.json");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "handler-body", "data.json"), "{}");
+    await writeFile(join(root, "handler-body", "script-data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "handler-body",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("handler-body/data.json");
+    expect(manifestOf(site)?.assets).toContain("handler-body/script-data.json");
+  });
+
+  it("includes a modulepreload link's target without requiring an as attribute", async () => {
+    await mkdir(join(root, "modulepreload"), { recursive: true });
+    await writeFile(
+      join(root, "modulepreload", "index.html"),
+      '<link rel="modulepreload" href="app.mjs">',
+    );
+    await writeFile(join(root, "modulepreload", "app.mjs"), "export {};");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "modulepreload",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("modulepreload/app.mjs");
+  });
+
+  it("treats a substitution-free template literal as a static string reference", async () => {
+    await mkdir(join(root, "template-literal"), { recursive: true });
+    await writeFile(
+      join(root, "template-literal", "index.html"),
+      "<script>fetch(`data.json`); import(`./module.js`);</script>",
+    );
+    await writeFile(join(root, "template-literal", "data.json"), "{}");
+    await writeFile(join(root, "template-literal", "module.js"), "export {};");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "template-literal",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("template-literal/data.json");
+    expect(manifestOf(site)?.assets).toContain("template-literal/module.js");
+  });
+
+  it("scans a JSON file linked as a web manifest regardless of its own file extension", async () => {
+    await mkdir(join(root, "json-manifest"), { recursive: true });
+    await writeFile(
+      join(root, "json-manifest", "index.html"),
+      '<link rel="manifest" href="manifest.json">',
+    );
+    await writeFile(
+      join(root, "json-manifest", "manifest.json"),
+      JSON.stringify({ icons: [{ src: "icon.png" }] }),
+    );
+    await writeFile(join(root, "json-manifest", "icon.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "json-manifest",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("json-manifest/manifest.json");
+    expect(manifestOf(site)?.assets).toContain("json-manifest/icon.png");
+  });
+
+  it("resolves a bare module specifier through an active import map, and excludes an unmapped one", async () => {
+    await mkdir(join(root, "import-map"), { recursive: true });
+    await writeFile(
+      join(root, "import-map", "index.html"),
+      [
+        '<script type="importmap">{"imports": {"lib": "./public.js"}}</script>',
+        '<script type="module">import "lib"; import "unmapped";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map", "public.js"), "export {};");
+    await writeFile(join(root, "import-map", "lib"), "private file literally named lib");
+    await writeFile(join(root, "import-map", "unmapped"), "private file literally named unmapped");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map/public.js");
+    expect(manifestOf(site)?.assets).not.toContain("import-map/lib");
+    expect(manifestOf(site)?.assets).not.toContain("import-map/unmapped");
+  });
+
+  it("parses an iframe's srcdoc as a nested document, resolved against the embedding document's base", async () => {
+    await mkdir(join(root, "srcdoc"), { recursive: true });
+    await writeFile(
+      join(root, "srcdoc", "index.html"),
+      "<iframe srcdoc=\"<img src='frame.png'>\"></iframe>",
+    );
+    await writeFile(join(root, "srcdoc", "frame.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "srcdoc",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("srcdoc/frame.png");
+  });
+
+  it("includes inline SVG image/use href and xlink:href references", async () => {
+    await mkdir(join(root, "svg-href"), { recursive: true });
+    await writeFile(
+      join(root, "svg-href", "index.html"),
+      [
+        '<svg><image href="diagram.png"></image>',
+        '<use xlink:href="icons.svg#mark"></use></svg>',
+      ].join(""),
+    );
+    await writeFile(join(root, "svg-href", "diagram.png"), "image");
+    await writeFile(join(root, "svg-href", "icons.svg"), "<svg></svg>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "svg-href",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("svg-href/diagram.png");
+    expect(manifestOf(site)?.assets).toContain("svg-href/icons.svg");
+  });
+
+  it("excludes template content from both base selection and reference scanning", async () => {
+    await mkdir(join(root, "template-inert"), { recursive: true });
+    await mkdir(join(root, "template-inert", "private"), { recursive: true });
+    await writeFile(
+      join(root, "template-inert", "index.html"),
+      [
+        '<template><base href="/private/"><img src="template-image.png"></template>',
+        '<script src="app.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "template-inert", "app.js"), "window.ready = true;");
+    await writeFile(join(root, "template-inert", "template-image.png"), "image");
+    await writeFile(join(root, "template-inert", "private", "app.js"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "template-inert",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("template-inert/app.js");
+    expect(manifestOf(site)?.assets).not.toContain("template-inert/private/app.js");
+    expect(manifestOf(site)?.assets).not.toContain("template-inert/template-image.png");
   });
 
   it("bounds a metadata file read and records a diagnostic instead of reading it unbounded", async () => {
