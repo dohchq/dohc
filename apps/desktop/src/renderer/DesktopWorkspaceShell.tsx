@@ -2023,12 +2023,16 @@ export function DesktopWorkspaceShell(props: {
         : [],
     [pluginCatalogLoad],
   );
+  // A shared view can never write the workspace (assertWritableWorkspace
+  // refuses on the share's presence alone), so every plugin command
+  // invoked from one is a dead click regardless of which plugin or command
+  // it names — the palette offers none of them here (round-8 finding 2).
   const pluginCommandItems = useMemo(
     () =>
-      pluginCatalogLoad.status === "ready"
+      pluginCatalogLoad.status === "ready" && !props.workspace.shareView
         ? pluginCommandEntries(pluginCatalogLoad.plugins)
         : [],
-    [pluginCatalogLoad],
+    [pluginCatalogLoad, props.workspace.shareView],
   );
   const selectedPluginView = parsePluginViewId(wb.activeView);
   const selectedPluginViewState =

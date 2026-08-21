@@ -70,6 +70,7 @@ function plugin(
     commands: [],
     panels: [],
     webApps: [],
+    hasFailedReplacement: false,
     diagnostics: [],
     warnings: [],
     error: null,
@@ -636,6 +637,31 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.rebuildPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "failed-plugin",
+    });
+  });
+
+  it("keeps offering a build retry after a crash-loop respawn hides status \"failed\" (round-8 finding 3)", async () => {
+    const respawned = plugin("respawned-plugin", {
+      status: "ready",
+      runtimeStatus: "ready",
+      hasFailedReplacement: true,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [respawned] });
+    bridgeMock.rebuildPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("respawned-plugin"),
+    });
+
+    renderPage("respawned-plugin");
+
+    const rebuildButton = await screen.findByTestId("plugin-rebuild");
+    expect(rebuildButton.textContent).toBe("Retry build");
+
+    await userEvent.click(rebuildButton);
+
+    expect(bridgeMock.rebuildPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "respawned-plugin",
     });
   });
 

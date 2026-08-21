@@ -639,6 +639,7 @@ describe("plugin panel registration", () => {
           commands: [],
           panels: [],
           webApps: [],
+          hasFailedReplacement: false,
           sourceHash: null,
           approvedHash: null,
           installedBaselineHash: null,

@@ -75,6 +75,7 @@ describe("ActivityBar plugin views", () => {
       commands: [],
       panels: [],
       webApps: [],
+      hasFailedReplacement: false,
       diagnostics: [],
       warnings: [],
       error: null,

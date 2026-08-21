@@ -292,6 +292,7 @@ describe("discoverInstalledPlugins", () => {
         panels: [],
         commands: [],
         webApps: [],
+        hasFailedReplacement: false,
         diagnostics: record.diagnostics,
         warnings: [],
         error: null,

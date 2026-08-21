@@ -134,6 +134,16 @@ export interface PluginPipelinePluginStatus extends PluginMetadata {
    * controls without a second manifest read. Values live per workspace and
    * travel separately. */
   settings: PluginSettingDeclaration[];
+  /**
+   * True from the moment a build fails while an old runtime keeps serving,
+   * until a replacement build succeeds — independent of runtimeStatus, so a
+   * crash-loop respawn between the failure and the fix can never make the
+   * still-owed replacement disappear from status. Mirrors whether
+   * recoveredManifests holds this plugin's recovery cache (round-8 finding
+   * 3): that map is the one existing fact honest enough to carry this,
+   * already cleared the moment a replacement publishes or the plugin stops.
+   */
+  hasFailedReplacement: boolean;
   diagnostics: string[];
   warnings: string[];
   error: PluginPipelineError | null;
@@ -641,6 +651,7 @@ export class PluginPipeline {
           webApps: manifestWebApps(candidate.manifest),
           panels: manifestPanels(candidate.manifest),
           commands: manifestCommands(candidate.manifest),
+          hasFailedReplacement: this.recoveredManifests.has(candidate.id),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
@@ -867,7 +878,14 @@ export class PluginPipeline {
     return this.enqueueAction(pluginId, async () => {
       const candidate = this.requireValidCandidate(pluginId);
       const state = this.statuses.get(pluginId);
-      if (state?.status !== "failed") {
+      // A crash-loop respawn between the failure and this call flips
+      // runtimeStatus — and with it status, via noteRuntimeStatus — back to
+      // whatever the still-running old build reports, even though the
+      // replacement it never built is still owed. recoveredManifests is
+      // the fact that survives that respawn (round-8 finding 3): a build
+      // with no old runtime to preserve never populates it, so status
+      // "failed" alone still covers that case.
+      if (state?.status !== "failed" && !this.recoveredManifests.has(pluginId)) {
         return this.failure(
           pluginId,
           pipelineError(
@@ -1906,27 +1924,7 @@ export class PluginPipeline {
         });
       } else {
         if (oldRuntime !== null && !oldRuntimeStopped) {
-          try {
-            const manifestPath = join(
-              this.liveRoot(candidate.id),
-              "dohc-plugin.generated.json",
-            );
-            const [manifestStats, manifestBody] = await Promise.all([
-              this.operations.inspectPath(manifestPath),
-              this.operations.readFile(manifestPath, "utf8"),
-            ]);
-            if (manifestStats.isFile()) {
-              const parsed = DohcPluginManifestSchema.safeParse(
-                JSON.parse(manifestBody),
-              );
-              if (parsed.success) {
-                this.recoveredManifests.set(candidate.id, parsed.data);
-              }
-            }
-          } catch {
-            // The existing candidate-manifest fallback below remains the
-            // best available answer when the live manifest cannot be read.
-          }
+          await this.captureRecoveredManifest(candidate.id);
         }
         this.setStatus(candidate, {
           status: "failed",
@@ -2039,6 +2037,16 @@ export class PluginPipeline {
       const detail = error instanceof PipelineFailure
         ? error.detail
         : pipelineError("snapshot", "snapshot-failed", errorMessage(error));
+      const runtimeStatus = this.options.pluginHost.getStatus(candidate.id) ?? null;
+      // This verify pass never touched the live root, so whatever it was
+      // running is still running — the same "old runtime still serving a
+      // failed candidate" case runFullBuild's own catch recovers from, and
+      // it needs the same recovery cache write, or the not-yet-trusted
+      // candidate this pass just rejected becomes authoritative everywhere
+      // setStatus derives from it (round-8 finding 1).
+      if (runtimeStatus !== null) {
+        await this.captureRecoveredManifest(candidate.id);
+      }
       // snapshotOrThrow set "snapshotting" on its way in. That is a busy
       // status: it disables every Settings action for this plugin, and
       // nothing else restores it, so a failed source check left the plugin
@@ -2046,10 +2054,42 @@ export class PluginPipeline {
       // Land where runFullBuild's own failure path lands instead.
       this.setStatus(candidate, {
         status: "failed",
-        runtimeStatus: this.options.pluginHost.getStatus(candidate.id) ?? null,
+        runtimeStatus,
         error: detail,
       });
       return { kind: "failed", result: this.failure(candidate.id, detail) };
+    }
+  }
+
+  /**
+   * Populates the recovery cache from the live root's own generated
+   * manifest, so setStatus keeps deriving commands/panels/webApps/settings
+   * from the build actually running rather than a candidate manifest a
+   * failure just meant not to trust. Shared by every failure path that can
+   * land with an old runtime still serving — one entry point missing this
+   * call is how round-8 finding 1 escaped runFullBuild's own version of it.
+   */
+  private async captureRecoveredManifest(pluginId: string): Promise<void> {
+    try {
+      const manifestPath = join(
+        this.liveRoot(pluginId),
+        "dohc-plugin.generated.json",
+      );
+      const [manifestStats, manifestBody] = await Promise.all([
+        this.operations.inspectPath(manifestPath),
+        this.operations.readFile(manifestPath, "utf8"),
+      ]);
+      if (manifestStats.isFile()) {
+        const parsed = DohcPluginManifestSchema.safeParse(
+          JSON.parse(manifestBody),
+        );
+        if (parsed.success) {
+          this.recoveredManifests.set(pluginId, parsed.data);
+        }
+      }
+    } catch {
+      // The existing candidate-manifest fallback remains the best available
+      // answer when the live manifest cannot be read.
     }
   }
 
@@ -2461,6 +2501,7 @@ export class PluginPipeline {
       webApps: manifestWebApps(candidate.manifest),
       panels: manifestPanels(candidate.manifest),
       commands: manifestCommands(candidate.manifest),
+      hasFailedReplacement: this.recoveredManifests.has(candidate.id),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
@@ -2507,6 +2548,7 @@ export class PluginPipeline {
       commands: patch.commands ?? manifestCommands(
         authoritativeManifest,
       ),
+      hasFailedReplacement: this.recoveredManifests.has(candidate.id),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),

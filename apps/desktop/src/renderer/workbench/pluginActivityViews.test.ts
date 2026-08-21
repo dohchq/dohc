@@ -36,6 +36,7 @@ function plugin(
     commands: [],
     panels: [],
     webApps: [],
+    hasFailedReplacement: false,
     diagnostics: [],
     warnings: [],
     error: null,

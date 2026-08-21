@@ -215,6 +215,24 @@ describe("plugin panel main-process wiring", () => {
     expect(invoke).toContain(
       "() => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId)",
     );
+    // A `finally` that itself throws replaces whatever the `try` returned
+    // or threw — so this cleanup must be contained, or a host-stop
+    // rejection would reach the renderer in place of a command result the
+    // invocation already earned (round-8 finding 4). The isolation and
+    // always-run guarantees of that shape are behavioral, not
+    // grep-provable; pinned by finding-4's own containment test below,
+    // this only pins that the containment is actually wired here.
+    const finallyAt = invoke.indexOf("} finally {");
+    const stopCallAt = invoke.indexOf(
+      "() => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId)",
+      finallyAt,
+    );
+    const catchAt = invoke.indexOf("} catch (error) {", stopCallAt);
+    const warnAt = invoke.indexOf("console.warn(", catchAt);
+    expect(finallyAt).toBeGreaterThan(-1);
+    expect(stopCallAt).toBeGreaterThan(finallyAt);
+    expect(catchAt).toBeGreaterThan(stopCallAt);
+    expect(warnAt).toBeGreaterThan(catchAt);
   });
 
   it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {

@@ -197,8 +197,16 @@ export function canApprove(plugin: PluginStatusRecord): boolean {
   );
 }
 
+// hasFailedReplacement carries the fact through a crash-loop respawn that
+// flips status back to "ready"/"crashed" between the failure and the fix —
+// status === "failed" alone only covers the still-common case where nothing
+// respawned (round-8 finding 3).
 export function canRebuild(plugin: PluginStatusRecord): boolean {
-  return plugin.valid && plugin.status === "failed" && plugin.approvedHash !== null;
+  return (
+    plugin.valid &&
+    plugin.approvedHash !== null &&
+    (plugin.status === "failed" || plugin.hasFailedReplacement)
+  );
 }
 
 /** The web apps this page may offer a button for: the ones that open a single

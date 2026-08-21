@@ -1191,6 +1191,32 @@ describe("plugin activity-bar views", () => {
     );
   });
 
+  // assertWritableWorkspace refuses on the share's presence alone, so every
+  // invocation from a shared view was a dead click before this filter — the
+  // palette must not offer what it can never do (round-8 finding 2).
+  it("offers no plugin commands from a shared view", async () => {
+    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
+      commands: [{ id: "hello.write", title: "Write hello note" }],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    // The palette itself renders and lists something, so an empty list
+    // here is the filter working, not the palette failing to open.
+    await within(palette).findByText("New editor group right");
+    expect(within(palette).queryByText("Hello Plugin: Write hello note"))
+      .toBeNull();
+  });
+
   it("lists contributed views after the workspace opens", async () => {
     const workspaceOpen = deferred<SyncStatusResult>();
     const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)));
@@ -1334,6 +1360,7 @@ describe("plugin details tabs", () => {
           commands: [],
           panels: [],
           webApps: [],
+          hasFailedReplacement: false,
           diagnostics: [],
           warnings: [],
           error: null,

@@ -2373,6 +2373,10 @@ export const PluginStatusRecord = z.object({
   /** What the plugin declares the user may set. Values travel separately —
    * they are per-workspace state, not part of the plugin's identity. */
   settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
+  /** True while a build has failed and its replacement is still owed, even
+   * through a runtime health change (crash, respawn) that would otherwise
+   * hide it — see PluginPipelinePluginStatus.hasFailedReplacement. */
+  hasFailedReplacement: z.boolean(),
   /** The plugin's declared panels. `placement` says where each one shows:
    * "editor" opens a tab, "view" gets a button in the activity bar. The
    * entry path never crosses — the renderer asks for a panel by id. */

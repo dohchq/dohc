@@ -3068,6 +3068,37 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("keeps the running build's commands after a verify-pass failure (round-8 finding 1)", async () => {
+      // The twin of "keeps the running build's commands after a pre-stop
+      // failure" above, reached through reconcileApprovedCandidate's
+      // verifyApprovedSource pass instead of runFullBuild's own — the two
+      // failure paths write the recovery cache from two different call
+      // sites, and only one of them did until this fix.
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+
+        await setup.failEstablishedBuild();
+
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("keeps recovered commands authoritative throughout a pre-stop retry", async () => {
       const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
       const newCommands = [{ id: "new.cmd", title: "New Command" }];
@@ -3292,6 +3323,37 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         expect(setup.statuses.slice(statusesBefore)).not.toContain("installing");
         expect(setup.statuses.slice(statusesBefore)).not.toContain("scanning");
         expect(setup.statuses.slice(statusesBefore)).not.toContain("building");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps offering a build retry through a crash-loop respawn, until the replacement publishes (round-8 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // A crash-loop respawn between the failure and the fix — the
+        // host's own health reporting, not a rebuild — flips
+        // runtimeStatus, and with it status via noteRuntimeStatus, back to
+        // "ready" even though the replacement this failure owes was never
+        // built.
+        setup.pipeline.noteRuntimeStatus("example-plugin", "crashed");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "starting");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt.ok).toBe(true);
+        await waitFor(
+          () =>
+            setup.pipeline.list()[0]?.status === "ready" &&
+            setup.pipeline.list()[0]?.hasFailedReplacement === false,
+          "Plugin did not clear its failed-replacement fact after the retried build.",
+        );
       } finally {
         await setup.pipeline.dispose();
       }

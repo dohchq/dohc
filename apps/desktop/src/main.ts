@@ -6838,10 +6838,21 @@ function registerIpcHandlers(
       );
     } finally {
       releaseHostForCommand(claimKey);
-      await withPluginHostLifecycleLock(
-        claimKey,
-        () => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId),
-      );
+      // Best-effort: a `finally` that itself throws replaces whatever the
+      // `try` returned or threw, so a host-stop rejection here must never
+      // reach the renderer in place of a command result the invocation
+      // already earned (round-8 finding 4).
+      try {
+        await withPluginHostLifecycleLock(
+          claimKey,
+          () => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId),
+        );
+      } catch (error) {
+        console.warn(
+          `[desktop] failed to stop an unclaimed plugin host for "${input.pluginId}"`,
+          error,
+        );
+      }
     }
   });
 
