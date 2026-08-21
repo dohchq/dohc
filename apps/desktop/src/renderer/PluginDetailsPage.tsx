@@ -945,10 +945,13 @@ function PluginUninstallDialog(props: {
   // states which one is true instead of calling a never-installed copy
   // "uninstalled".
   const installed = isInstalled(confirmation.plugin);
-  // Only a built-in driver's own directory can come back through Add — a
-  // hand-authored or agent-created plugin has no such path, and claiming
-  // one would be false: dohc's own delete here is permanent (PluginPipeline
-  // .uninstall removes the source directly, no trash).
+  // A directoryName matching a built-in only means Add can offer this slot
+  // again — it says nothing about what's actually IN the folder right now.
+  // A user or an agent can put anything at plugins/codex; Add always
+  // restores dohc's own packaged source, never whatever this specific copy
+  // held. Anything else has no such path at all, and dohc's own delete here
+  // is permanent either way (PluginPipeline.uninstall removes the source
+  // directly, no trash) — the copy below says exactly that, never more.
   const isBuiltinOffer = (
     BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES as readonly string[]
   ).includes(confirmation.plugin.directoryName);
@@ -979,7 +982,7 @@ function PluginUninstallDialog(props: {
             {installed
               ? "This removes the plugin source and build files from this workspace."
               : isBuiltinOffer
-                ? `This removes plugins/${confirmation.plugin.directoryName} from this workspace. Add ${pluginTitle(confirmation.plugin)} again to bring it back.`
+                ? `This deletes plugins/${confirmation.plugin.directoryName}'s files from this workspace. Add restores dohc's packaged ${pluginTitle(confirmation.plugin)} plugin, not this copy.`
                 : `This permanently deletes plugins/${confirmation.plugin.directoryName} from this workspace. dohc has no way to bring it back.`}
           </p>
           {warning ? (

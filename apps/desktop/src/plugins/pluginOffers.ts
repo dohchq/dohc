@@ -260,16 +260,20 @@ async function targetIdentity(target: string): Promise<OfferedPluginIdentity> {
  * appear between this copy landing and the caller's rediscovery rescan, a
  * race this module cannot close, only let the caller detect and unwind.
  *
- * Deleting on a caller's say-so is itself a TOCTOU risk: by the time the
- * caller decides to roll back, `plugins/` or the target itself could have
- * been swapped for a symlink/junction pointing outside the workspace, and a
- * blind recursive delete would follow it. This re-runs the same
- * containment discipline addOfferedPlugin used to create the directory, and
- * additionally refuses unless the target's device+inode still matches what
- * `identity` (returned by the addOfferedPlugin call this is undoing)
- * recorded the instant the copy landed — the one check that catches the
- * target being deleted and something else recreated under the same name,
- * which a path or realpath comparison alone cannot.
+ * A check on `target` followed by a SEPARATE delete stays racy no matter
+ * how tight the gap: Node has no fd-bound recursive delete, so `plugins/`
+ * (or the target itself) could still be swapped for a symlink/junction
+ * between the check and the delete syscall actually running. This closes
+ * that instead of narrowing it, by binding the delete to a RENAME: moving
+ * `target` into `.dohc`'s own contained staging area is one atomic syscall
+ * that only ever touches the directory ENTRY currently there — not a
+ * symlink's target, and not wherever a parent swap redirects to once the
+ * syscall has already completed. Only after that move does this verify the
+ * STAGED item's device+inode against `identity` (captured the instant
+ * addOfferedPlugin's own rename landed); a mismatch renames it straight
+ * back to where it was and refuses, never deleting it. Only a confirmed
+ * match is ever deleted, and always from the staging path this module
+ * already verified — never from the original, still-swappable one.
  */
 export async function removeAddedOfferedPlugin(params: {
   workspaceRoot: string;
@@ -300,25 +304,48 @@ export async function removeAddedOfferedPlugin(params: {
     );
   }
 
+  const dohcRoot = await ensureContainedDirectory(
+    join(workspaceRoot, ".dohc"),
+    realWorkspaceRoot,
+    "Workspace metadata directory",
+  );
+  const stagingRoot = await ensureContainedDirectory(
+    join(dohcRoot, "plugin-offer-staging"),
+    dohcRoot,
+    "Plugin staging directory",
+  );
+
   const target = join(pluginsPath, directoryName);
-  let targetStats;
+  const staged = join(stagingRoot, `remove-${directoryName}-${randomUUID()}`);
   try {
-    targetStats = await lstat(target);
+    // Identity, not wrapped: lets ENOENT (target already gone) be told
+    // apart from a real failure below, before either is turned into an
+    // OfferedPluginAddError.
+    await renameWithWindowsRetry(target, staged, (error) => error);
   } catch (error) {
     if (isMissing(error)) return; // Already gone.
+    throw toOfferedPluginAddError(error);
+  }
+
+  let stagedStats;
+  try {
+    stagedStats = await lstat(staged);
+  } catch (error) {
     throw new OfferedPluginAddError(
-      `plugins/${directoryName} could not be inspected: ${errorMessage(error)}`,
+      `plugins/${directoryName} could not be inspected after staging: ${errorMessage(error)}`,
     );
   }
-  if (targetStats.isSymbolicLink()) {
-    throw new OfferedPluginAddError(
-      `plugins/${directoryName} is a symlink or junction; refusing to remove it.`,
-    );
-  }
-  if (targetStats.dev !== identity.dev || targetStats.ino !== identity.ino) {
+  if (
+    stagedStats.isSymbolicLink() ||
+    stagedStats.dev !== identity.dev ||
+    stagedStats.ino !== identity.ino
+  ) {
+    // Not what this request created — put it back exactly where it was
+    // and refuse, rather than delete something this call never verified.
+    await renameWithWindowsRetry(staged, target, toOfferedPluginAddError);
     throw new OfferedPluginAddError(
       `plugins/${directoryName} no longer matches what this request created; refusing to remove it.`,
     );
   }
-  await removeStaging(target);
+  await removeStaging(staged);
 }

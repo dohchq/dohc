@@ -384,6 +384,49 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(readFile(join(target, "keep.txt"), "utf8")).resolves.toBe("keep");
   });
 
+  // The mechanism this pins: a check on `target` followed by a SEPARATE
+  // delete call stays racy no matter how tight the gap, because Node has
+  // no fd-bound recursive delete — plugins/codex itself could be swapped
+  // for a junction in between. Binding the delete to a rename closes that:
+  // the rename is one atomic syscall that grabs whatever entry is actually
+  // there, verifies it in its own contained staging area, and only ever
+  // deletes from there — never from the original, still-swappable path.
+  it("refuses and restores when the target itself becomes a junction, not only when plugins/ does", async () => {
+    const fixture = await createFixture();
+    const added = await addOfferedPlugin({
+      builtinPluginsRoot: fixture.builtinPluginsRoot,
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+    });
+
+    const outside = await mkdtemp(join(tmpdir(), "dohc-plugin-offers-outside-"));
+    roots.push(outside);
+    await writeFile(join(outside, "marker.txt"), "keep");
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    await rm(target, { recursive: true, force: true });
+    await symlink(
+      outside,
+      target,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(
+      removeAddedOfferedPlugin({
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        identity: added.identity,
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    // Nothing inside the redirected location was deleted, and the junction
+    // itself — the swapped-in content — is back where it was found rather
+    // than left stranded inside this module's own staging area.
+    await expect(readFile(join(outside, "marker.txt"), "utf8")).resolves.toBe("keep");
+    const restored = await lstat(target);
+    expect(restored.isSymbolicLink()).toBe(true);
+  });
+
   it("removes exactly what it was told to, when the identity still matches", async () => {
     const fixture = await createFixture();
     const added = await addOfferedPlugin({

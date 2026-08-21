@@ -400,11 +400,12 @@ describe("PluginDetailsPage", () => {
 
     const dialog = await screen.findByTestId("plugin-uninstall-dialog");
     expect(within(dialog).getByText("Remove codex?")).toBeTruthy();
-    // The true recovery path, stated: this plugin's own files, not
-    // something running, and Add is how it comes back.
+    // The true consequence, stated: this copy's own files are deleted, and
+    // Add restores dohc's packaged plugin — never a promise that Add
+    // restores whatever this specific copy held.
     expect(
       within(dialog).getByText(
-        "This removes plugins/codex from this workspace. Add codex again to bring it back.",
+        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged codex plugin, not this copy.",
       ),
     ).toBeTruthy();
     expect(within(dialog).getByTestId("plugin-uninstall-confirm").textContent).toBe(
@@ -454,7 +455,7 @@ describe("PluginDetailsPage", () => {
       ),
     ).toBeTruthy();
     // Never claims a recovery path that does not exist for this plugin.
-    expect(within(dialog).queryByText(/Add .* again to bring it back/)).toBeNull();
+    expect(within(dialog).queryByText(/restores dohc's packaged/)).toBeNull();
   });
 
   it("closes the Remove confirmation instead of deleting under a stale claim once the plugin gets installed", async () => {
