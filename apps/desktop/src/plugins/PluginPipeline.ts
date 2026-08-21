@@ -738,70 +738,68 @@ export class PluginPipeline {
   }
 
   install(pluginId: string): Promise<PluginPipelineActionResult> {
-    return this.enqueueAction(pluginId, async () => {
-      const candidate = this.requireValidCandidate(pluginId);
-      return this.runFullBuild({
-        candidate,
-        startRuntime: true,
-        disabledReasonAfterBuild: null,
-        resetCrashAccounting: true,
-        freshInstall: true,
-      });
-    });
+    return this.withCommandClaimsBarrier(pluginId, () =>
+      this.enqueueAction(pluginId, async () => {
+        const candidate = this.requireValidCandidate(pluginId);
+        return this.runFullBuild({
+          candidate,
+          startRuntime: true,
+          disabledReasonAfterBuild: null,
+          resetCrashAccounting: true,
+          freshInstall: true,
+        });
+      }));
   }
 
   disable(pluginId: string): Promise<PluginPipelineActionResult> {
-    // Raised before this action is enqueued, so a command cannot claim
-    // this plugin while the action is still queued behind other work.
-    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
-    return this.enqueueAction(pluginId, async () => {
-      const candidate = this.requireValidCandidate(pluginId);
-      try {
-        await this.operations.mutateRecord(
-          this.options.stateDir,
-          this.workspaceRoot,
-          pluginId,
-          (record) => ({ ...record, disabled: true }),
-        );
-        await this.stopOldRuntime(pluginId);
-        return this.success(this.setStatus(candidate, {
-          status: "disabled",
-          disabledReason: "user",
-          runtimeStatus: null,
-          error: null,
-        }));
-      } catch (error) {
-        return this.failure(
-          pluginId,
-          pipelineError("state", "disable-failed", errorMessage(error)),
-        );
-      } finally {
-        lowerBarrier?.();
-      }
-    });
+    return this.withCommandClaimsBarrier(pluginId, () =>
+      this.enqueueAction(pluginId, async () => {
+        try {
+          const candidate = this.requireValidCandidate(pluginId);
+          await this.operations.mutateRecord(
+            this.options.stateDir,
+            this.workspaceRoot,
+            pluginId,
+            (record) => ({ ...record, disabled: true }),
+          );
+          await this.stopOldRuntime(pluginId);
+          return this.success(this.setStatus(candidate, {
+            status: "disabled",
+            disabledReason: "user",
+            runtimeStatus: null,
+            error: null,
+          }));
+        } catch (error) {
+          return this.failure(
+            pluginId,
+            pipelineError("state", "disable-failed", errorMessage(error)),
+          );
+        }
+      }));
   }
 
   enable(pluginId: string): Promise<PluginPipelineActionResult> {
-    return this.enqueueAction(pluginId, async () => {
-      const candidate = this.requireValidCandidate(pluginId);
-      const state = await this.localRecord(pluginId);
-      if (!state?.approvedHash) {
-        return this.failure(
-          pluginId,
-          pipelineError(
-            "state",
-            "install-required",
-            `Plugin "${pluginId}" must be installed before it can be enabled.`,
-          ),
-        );
-      }
-      return this.startFromApprovedSource(candidate, state, state.approvedHash, {
-        clearDisabled: true,
-        resetCrashAccounting:
-          this.statuses.get(pluginId)?.disabledReason === "crash-loop",
-        runtimeErrorCode: "enable-failed",
-      });
-    });
+    return this.withCommandClaimsBarrier(pluginId, () =>
+      this.enqueueAction(pluginId, async () => {
+        const candidate = this.requireValidCandidate(pluginId);
+        const state = await this.localRecord(pluginId);
+        if (!state?.approvedHash) {
+          return this.failure(
+            pluginId,
+            pipelineError(
+              "state",
+              "install-required",
+              `Plugin "${pluginId}" must be installed before it can be enabled.`,
+            ),
+          );
+        }
+        return this.startFromApprovedSource(candidate, state, state.approvedHash, {
+          clearDisabled: true,
+          resetCrashAccounting:
+            this.statuses.get(pluginId)?.disabledReason === "crash-loop",
+          runtimeErrorCode: "enable-failed",
+        });
+      }));
   }
 
   /**
@@ -891,35 +889,26 @@ export class PluginPipeline {
   }
 
   approve(pluginId: string): Promise<PluginPipelineActionResult> {
-    // Raised before this action is enqueued, so a command cannot claim
-    // this plugin while the action is still queued behind other work.
-    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
-    return this.enqueueAction(pluginId, async () => {
-      try {
+    return this.withCommandClaimsBarrier(pluginId, () =>
+      this.enqueueAction(pluginId, async () => {
         const candidate = this.requireValidCandidate(pluginId);
         // The disabled bit is the user's own choice, orthogonal to
         // approval: approving new content trusts that content, but must
         // never silently re-enable a plugin the user explicitly turned
         // off before the out-of-band change arrived (#779 round 3
         // finding 5).
-        return await this.buildFromCurrentSource(pluginId, candidate, {
+        return this.buildFromCurrentSource(pluginId, candidate, {
           rememberAsApprovedAttempt: true,
         });
-      } finally {
-        lowerBarrier?.();
-      }
-    });
+      }));
   }
 
   rebuild(
     pluginId: string,
     options?: { onOldRuntimeStopped?: () => void },
   ): Promise<PluginPipelineActionResult> {
-    // Raised before this action is enqueued, so a command cannot claim
-    // this plugin while the action is still queued behind other work.
-    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
-    return this.enqueueAction(pluginId, async () => {
-      try {
+    return this.withCommandClaimsBarrier(pluginId, () =>
+      this.enqueueAction(pluginId, async () => {
         const candidate = this.requireValidCandidate(pluginId);
         const state = this.statuses.get(pluginId);
         // A crash-loop respawn between the failure and this call flips
@@ -950,7 +939,7 @@ export class PluginPipeline {
             ),
           );
         }
-        return await this.buildFromCurrentSource(
+        return this.buildFromCurrentSource(
           pluginId,
           candidate,
           {
@@ -959,10 +948,7 @@ export class PluginPipeline {
             onOldRuntimeStopped: options?.onOldRuntimeStopped,
           },
         );
-      } finally {
-        lowerBarrier?.();
-      }
-    });
+      }));
   }
 
   /**
@@ -1105,11 +1091,8 @@ export class PluginPipeline {
     pluginId: string,
     confirmationToken: string,
   ): Promise<PluginPipelineActionResult> {
-    // Raised before this action is enqueued, so a command cannot claim
-    // this plugin while the action is still queued behind other work.
-    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
-    return this.enqueueAction(pluginId, async () => {
-     try {
+    return this.withCommandClaimsBarrier(pluginId, () =>
+      this.enqueueAction(pluginId, async () => {
       const confirmation = this.uninstallConfirmations.get(pluginId);
       this.uninstallConfirmations.delete(pluginId);
       if (!confirmation || confirmation.token !== confirmationToken) {
@@ -1270,10 +1253,7 @@ export class PluginPipeline {
         });
         return this.failure(pluginId, detail);
       }
-     } finally {
-       lowerBarrier?.();
-     }
-    });
+      }));
   }
 
   async dispose(): Promise<void> {
@@ -1491,8 +1471,15 @@ export class PluginPipeline {
     // replacement read the departing identity's own not-yet-cleaned-up
     // record and host status under that same id).
     for (const oldCandidate of departing) {
-      await this.enqueueActionValue(oldCandidate.id, () =>
-        this.removeOldIdentity(oldCandidate));
+      // The same exposure as any other action on this per-plugin queue
+      // (see withCommandClaimsBarrier): removeOldIdentity calls
+      // stopOldRuntime directly, so a command racing in while this
+      // cleanup still sits queued must refuse instead of claiming an
+      // identity this watcher batch is about to remove out from under it
+      // (round-16 finding 2).
+      await this.withCommandClaimsBarrier(oldCandidate.id, () =>
+        this.enqueueActionValue(oldCandidate.id, () =>
+          this.removeOldIdentity(oldCandidate)));
     }
     // The old identity's approval never carries to the replacement
     // (CERT779 A4): a manifest-name change or root swap is a new identity,
@@ -2701,6 +2688,38 @@ export class PluginPipeline {
       },
     });
     this.drain(pluginId, queue);
+  }
+
+  /**
+   * Raises this plugin's command claims barrier before `run` — typically an
+   * enqueueAction/enqueueActionValue call — is even enqueued, and lowers it
+   * once whatever that call started fully settles. A command racing in
+   * while the action still sits queued must see the barrier already up and
+   * refuse, rather than claim a plugin whose queue it could then be stuck
+   * behind: install, enable, disable, approve, rebuild, and uninstall all
+   * share this, uniformly, because runFullBuild, holdForApproval, and
+   * stopOldRuntime itself all wait on those same claims, and any of the six
+   * can reach one of those three under the right — even rare, even
+   * crash-loop-only — conditions. Applied here rather than argued
+   * case by case, so a future branch added to any of them inherits the
+   * same protection instead of needing its own audit.
+   *
+   * ensureStarted is the one enqueued caller that does not use this. A
+   * command already checks this exact barrier, against this exact key,
+   * before it ever calls ensureStarted (main.ts refuses at invocation, the
+   * moment the barrier is up, before it claims); raising it again from
+   * inside ensureStarted would not protect that command — it would only
+   * refuse a second, unrelated command racing an ordinary cold start, which
+   * today is legitimate and unclaimed by anything this barrier means to
+   * guard.
+   */
+  private withCommandClaimsBarrier<T>(
+    pluginId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
+    if (!lowerBarrier) return run();
+    return run().finally(lowerBarrier);
   }
 
   private enqueueAction(

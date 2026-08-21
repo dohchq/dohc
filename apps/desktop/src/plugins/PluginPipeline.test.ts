@@ -3656,6 +3656,110 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("marks the drain barrier synchronously the instant Install is called, before its own job has any chance to run (round-16 finding 4)", async () => {
+      const fixture = await createPluginWorkspace();
+      const commandClaims = new PluginCommandHostClaims();
+      let pipeline: PluginPipeline;
+      const host = new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        pnpmRunnerEntry,
+        raiseCommandClaimsBarrier: (pluginId) =>
+          commandClaims.raiseDrainBarrier(pluginId),
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        },
+      });
+
+      try {
+        await pipeline.start();
+        const key = "example-plugin";
+        expect(commandClaims.isDraining(key)).toBe(false);
+
+        // No `await` between the call and this assertion — the same gap
+        // that finding 1 (round 15) closed for disable, uninstall,
+        // approve, and rebuild left install and enable exposed until this
+        // round's uniform rule (round-16 finding 4).
+        const installing = pipeline.install("example-plugin");
+        expect(commandClaims.isDraining(key)).toBe(true);
+
+        const installed = await installing;
+        expect(installed.ok).toBe(true);
+        expect(commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier synchronously the instant Enable is called, before its own job has any chance to run (round-16 finding 4)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        const disabled = await setup.pipeline.disable("example-plugin");
+        expect(disabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        const enabling = setup.pipeline.enable("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        const enabled = await enabling;
+        expect(enabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("refuses a racing command instead of stalling forever when Enable's own verify-and-hold branch reaches stopOldRuntime (round-16 finding 4, enable's crash-loop-shaped path)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        const disabled = await setup.pipeline.disable("example-plugin");
+        expect(disabled.ok).toBe(true);
+
+        // Source drifts from the approved hash while disabled — the same
+        // shape a crash-loop repair leaves behind — so enable()'s own
+        // verify step finds "changed" and calls holdForApproval instead of
+        // starting, reaching stopOldRuntime's own wait even though nothing
+        // is currently running (PluginPipeline.ts's holdForApproval always
+        // calls stopOldRuntime, unconditionally).
+        await writeFile(setup.entryPath, [
+          'export const marker = "drifted";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        // A claim already outstanding on this key, as if a command were
+        // mid-flight — without this round's barrier, a second racing
+        // command could still claim while enable sits queued, then both
+        // would wait on each other: enable's stopOldRuntime for this
+        // claim to drain, and nothing left to release it.
+        setup.commandClaims.claim(key);
+
+        const enabling = setup.pipeline.enable("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        setup.commandClaims.release(key);
+        const enabled = await enabling;
+        expect(enabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("holds the drain barrier through the publish window after the old runtime stops, until the whole retry settles (round-13 finding 2)", async () => {
       const setup = await setupEstablishedPlugin();
       try {
@@ -3753,6 +3857,27 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("clears disable's own outer hold even when the candidate lookup itself throws, before its job ever reaches a try (round-16 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "missing-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // No plugin named this was ever installed, so requireValidCandidate
+        // throws PipelineFailure the instant the job runs — before any try
+        // this job body's own barrier-lowering could depend on.
+        const disabled = await setup.pipeline.disable("missing-plugin");
+
+        expect(disabled.ok).toBe(false);
+        // The barrier must still be down: left up here would refuse every
+        // later command against this key until the workspace closes, not
+        // just the one call that already failed.
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("waits for an in-flight command claim to drain before workspace disposal stops every host (round-12 finding 2)", async () => {
       const setup = await setupEstablishedPlugin();
       const key = "example-plugin";
@@ -3802,6 +3927,58 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // later session's own host, opened under this same lifecycle
       // key, to whatever this one never consumed.
       expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
+    }, 60_000);
+
+    it("marks the drain barrier for a watcher-driven identity removal while it still sits queued behind another job, not only once it reaches its own stopOldRuntime (round-16 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      let buildGate: ReturnType<typeof setup.gateNextBuild> | undefined;
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // Occupy the plugin's own per-plugin job queue with a door-write
+        // reconcile — an internal, background refresh (enqueueSourceRefresh)
+        // that raises no barrier of its own — held mid-build.
+        buildGate = setup.gateNextBuild();
+        const driftedText = [
+          'export const marker = "door-written drift";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n");
+        await writeFile(setup.entryPath, driftedText);
+        setup.pipeline.handleDoorWrittenSourceChange("example-plugin", {
+          absolutePath: setup.entryPath,
+          text: driftedText,
+        });
+        await buildGate.entered.promise;
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // The plugin's whole root vanishes — a real departure — while that
+        // reconcile is still gated mid-build. removeOldIdentity's own job
+        // cannot have started yet: it is still queued behind the reconcile
+        // job on the same per-plugin queue, so isDraining becoming true
+        // here can only be this round's own pre-enqueue raise — not
+        // stopOldRuntime's separate, pre-existing inner hold, which nothing
+        // has reached yet.
+        await rm(setup.fixture.pluginRoot, { recursive: true, force: true });
+        const watching = setup.pipeline.handleWatcherEvents([
+          { path: "plugins/example-plugin", operation: "delete" },
+        ]);
+        await waitFor(
+          () => setup.commandClaims.isDraining(key),
+          "removeOldIdentity never marked the drain barrier while still queued.",
+        );
+
+        buildGate.release.resolve();
+        await watching;
+
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(setup.pipeline.list().some((p) => p.id === "example-plugin"))
+          .toBe(false);
+      } finally {
+        buildGate?.release.resolve();
+        await setup.pipeline.dispose();
+      }
     }, 60_000);
   });
 

@@ -37,14 +37,14 @@ export function raceWithTimeout<T>(
   });
 }
 
-// Bounds how long a stopping action (disable, uninstall, approve,
-// rebuild, or workspace disposal) waits on a plugin's own command claims
-// before it stops the host anyway. Generous — the barrier already
-// refuses new claims once it's raised, so a healthy wait is bounded by
-// whatever was already in flight when it began; a claim still
-// outstanding this long means its command's own handler never settled.
-// Stopping the host terminates that hung handler, the honest outcome for
-// one that never will.
+// A budget, not a work-rejection limit — new commands are already refused
+// once the barrier is up, so AGENTS.md's "measure limits that reject work"
+// rule does not cover this constant. Measured evidence all the same: the
+// hello fixture's command round-trips in 0.1-0.5 ms over a real subprocess
+// host (20 runs); PluginHost's own PLUGIN_ACTIVATION_TIMEOUT_MS already
+// treats 30 s as this same host's line between "still working" and "never
+// will" — reused here so a legitimately slower handler keeps that same
+// headroom before its host is stopped out from under it.
 export const COMMAND_CLAIMS_DRAIN_DEADLINE_MS = 30_000;
 
 /**
