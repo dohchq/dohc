@@ -364,6 +364,29 @@ describe("discoverSites", () => {
       expect.objectContaining({ code: "unexpected_dohc_type" }),
     ]);
   });
+
+  it("does not treat a non-site config's own build.output claim as an independent signal", () => {
+    const configuredOnly = discoverSites([
+      {
+        path: "workflow/dohc.json",
+        body: JSON.stringify({ type: "workflow", build: { output: "dist" } }),
+      },
+    ]);
+    expect(configuredOnly).toHaveLength(0);
+
+    const withRealOutput = discoverSites([
+      {
+        path: "workflow/dohc.json",
+        body: JSON.stringify({ type: "workflow", build: { output: "dist" } }),
+      },
+      "workflow/dist/index.html",
+    ]);
+    expect(withRealOutput).toHaveLength(1);
+    expect(withRealOutput[0]).toMatchObject({ root: "workflow" });
+    expect(withRealOutput[0]?.diagnostics).toEqual([
+      expect.objectContaining({ code: "unexpected_dohc_type" }),
+    ]);
+  });
 });
 
 describe("parseDohcSiteConfig", () => {

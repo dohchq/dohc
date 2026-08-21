@@ -533,6 +533,85 @@ describe("listSitePackages", () => {
     ).toContain("no-base/app.js");
   });
 
+  it("resolves an external script's fetch-like reference against its referring document's base href, not the artifact root", async () => {
+    await mkdir(join(root, "doc-base", "docs"), { recursive: true });
+    await writeFile(
+      join(root, "doc-base", "index.html"),
+      '<base href="/docs/"><script src="app.js"></script>',
+    );
+    await writeFile(join(root, "doc-base", "docs", "app.js"), 'fetch("data.json");');
+    await writeFile(join(root, "doc-base", "docs", "data.json"), "{}");
+    await writeFile(join(root, "doc-base", "data.json"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "doc-base",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("doc-base/docs/data.json");
+    expect(manifestOf(site)?.assets).not.toContain("doc-base/data.json");
+  });
+
+  it("resolves a linked web manifest's own references against the manifest file, not the document", async () => {
+    await mkdir(join(root, "manifest-base", "manifests"), { recursive: true });
+    await writeFile(
+      join(root, "manifest-base", "index.html"),
+      '<link rel="manifest" href="manifests/site.webmanifest">',
+    );
+    await writeFile(
+      join(root, "manifest-base", "manifests", "site.webmanifest"),
+      JSON.stringify({ icons: [{ src: "icon.png" }] }),
+    );
+    await writeFile(join(root, "manifest-base", "manifests", "icon.png"), "image");
+    await writeFile(join(root, "manifest-base", "icon.png"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "manifest-base",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("manifest-base/manifests/icon.png");
+    expect(manifestOf(site)?.assets).not.toContain("manifest-base/icon.png");
+  });
+
+  it("only mints a reference from real script/style syntax, not JS/CSS-shaped prose in a text node", async () => {
+    await mkdir(join(root, "prose"), { recursive: true });
+    await writeFile(
+      join(root, "prose", "index.html"),
+      [
+        "<pre>import \"./private.js\";</pre>",
+        "<p>Try url(private.css) in your stylesheet.</p>",
+        '<script type="module" src="app.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "prose", "app.js"), 'import "./real.js";');
+    await writeFile(join(root, "prose", "real.js"), "export {};");
+    await writeFile(join(root, "prose", "private.js"), "window.secret = true;");
+    await writeFile(join(root, "prose", "private.css"), "body{color:red}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "prose",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("prose/real.js");
+    expect(manifestOf(site)?.assets).not.toContain("prose/private.js");
+    expect(manifestOf(site)?.assets).not.toContain("prose/private.css");
+  });
+
+  it("still finds a real src after an opening tag with a quoted `>` in an earlier attribute, and still blanks its body", async () => {
+    await mkdir(join(root, "quoted-tag"), { recursive: true });
+    await writeFile(
+      join(root, "quoted-tag", "index.html"),
+      '<script data-label=">" src="app.js">document.write("<img src=fake.png>");</script>',
+    );
+    await writeFile(join(root, "quoted-tag", "app.js"), "window.ready = true;");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "quoted-tag",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("quoted-tag/app.js");
+    expect(manifestOf(site)?.assets).not.toContain("quoted-tag/fake.png");
+  });
+
   it("emits exact approved static browser files instead of a recursive site root", async () => {
     await mkdir(join(root, "report", "assets"), { recursive: true });
     await mkdir(join(root, "report", "data"), { recursive: true });

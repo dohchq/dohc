@@ -691,7 +691,12 @@ function hasIndependentWebsiteSignal(candidate: Candidate): boolean {
     candidate.hasIndexHtml ||
     candidate.hasWebPackageSignal ||
     candidate.hasFrameworkConfig ||
-    candidate.hasBuildOutputSignal
+    // Not hasBuildOutputSignal: that flag also turns on from the dohc.json's
+    // OWN configured build.output path, whether or not anything was ever
+    // built there. An explicitly non-site config's own claim can't be the
+    // independent signal that overrides its own type declaration — only a
+    // build output actually found on disk (candidate.buildOutputs) counts.
+    candidate.buildOutputs.size > 0
   );
 }
 

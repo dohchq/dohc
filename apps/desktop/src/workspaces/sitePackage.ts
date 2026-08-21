@@ -170,37 +170,96 @@ function blankHtmlComments(text: string): string {
   );
 }
 
+/**
+ * The index of the `>` that really ends an opening tag starting at
+ * `searchStart` (the position right after the tag name), tracking quote
+ * state so a `>` inside a quoted attribute value (`<script data-label=">">`)
+ * doesn't end the tag early. Returns null when the tag never closes. The
+ * one boundary rule every opening-tag consumer in this file shares.
+ */
+function findOpeningTagEnd(text: string, searchStart: number): number | null {
+  let quote: "\"" | "'" | null = null;
+  for (let position = searchStart; position < text.length; position += 1) {
+    const character = text[position]!;
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "\"" || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === ">") return position;
+  }
+  return null;
+}
+
+interface HtmlRawTextExtraction {
+  // The text with every <script>/<style> element's own content (not its
+  // tags) replaced by whitespace, for scanning markup attributes — a
+  // browser never parses raw-text element content as nested elements.
+  blanked: string;
+  // The real (unblanked) content of every <script> element, for scanning
+  // real inline module/import syntax — this is code, not markup.
+  scriptContents: string[];
+  // The real (unblanked) content of every <style> element, for scanning
+  // real inline CSS syntax.
+  styleContents: string[];
+}
+
+function extractHtmlRawText(text: string): HtmlRawTextExtraction {
+  const tagStart = /<(script|style)\b/gi;
+  let blanked = "";
+  let cursor = 0;
+  const scriptContents: string[] = [];
+  const styleContents: string[] = [];
+  for (const match of text.matchAll(tagStart)) {
+    const elementStart = match.index ?? 0;
+    if (elementStart < cursor) continue;
+    const tagName = match[1]!.toLowerCase();
+    const openEnd = findOpeningTagEnd(text, elementStart + match[0].length);
+    if (openEnd === null) continue;
+    const afterOpen = openEnd + 1;
+    const closeMatch = new RegExp(`</${tagName}\\s*>`, "i").exec(text.slice(afterOpen));
+    const contentEnd = closeMatch ? afterOpen + closeMatch.index : text.length;
+    const closeTagEnd = closeMatch
+      ? afterOpen + closeMatch.index + closeMatch[0].length
+      : text.length;
+    const content = text.slice(afterOpen, contentEnd);
+    (tagName === "script" ? scriptContents : styleContents).push(content);
+    blanked += text.slice(cursor, afterOpen);
+    blanked += blankPreservingLines(content);
+    blanked += text.slice(contentEnd, closeTagEnd);
+    cursor = closeTagEnd;
+  }
+  blanked += text.slice(cursor);
+  return { blanked, scriptContents, styleContents };
+}
+
 function blankHtmlRawTextContents(text: string): string {
-  return text.replace(
-    /(<(script|style)\b[^>]*>)([\s\S]*?)(<\/\2\s*>|$)/gi,
-    (_match, open: string, _tag: string, content: string, close: string) =>
-      `${open}${blankPreservingLines(content)}${close}`,
-  );
+  return extractHtmlRawText(text).blanked;
 }
 
 function openingHtmlTags(text: string): string[] {
   const tags: string[] = [];
   const start = /<[A-Za-z][A-Za-z0-9-]*\b/g;
   for (const match of text.matchAll(start)) {
-    let quote: "\"" | "'" | null = null;
-    let position = (match.index ?? 0) + match[0].length;
-    for (; position < text.length; position += 1) {
-      const character = text[position]!;
-      if (quote) {
-        if (character === quote) quote = null;
-        continue;
-      }
-      if (character === "\"" || character === "'") {
-        quote = character;
-        continue;
-      }
-      if (character === ">") {
-        tags.push(text.slice(match.index, position + 1));
-        break;
-      }
-    }
+    const tagStart = match.index ?? 0;
+    const end = findOpeningTagEnd(text, tagStart + match[0].length);
+    if (end !== null) tags.push(text.slice(tagStart, end + 1));
   }
   return tags;
+}
+
+function styleAttributeValues(tags: readonly string[]): string[] {
+  const values: string[] = [];
+  const attribute = /\bstyle\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/i;
+  for (const tag of tags) {
+    const match = attribute.exec(tag);
+    const value = match?.[1] ?? match?.[2];
+    if (value) values.push(value);
+  }
+  return values;
 }
 
 function htmlBaseDirectory(
@@ -328,16 +387,33 @@ export interface BrowserTextReference {
   documentRelative: boolean;
 }
 
+const CSS_URL_PATTERN =
+  /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi;
+const CSS_IMPORT_PATTERN = /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi;
+const JS_STATIC_IMPORT_PATTERN =
+  /\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_DYNAMIC_IMPORT_PATTERN = /\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_NEW_URL_PATTERN =
+  /\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g;
+const JS_FETCH_LIKE_PATTERN =
+  /\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_SERVICE_WORKER_PATTERN =
+  /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_ASSIGNMENT_SHAPED_PATTERN =
+  /\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+
 function referencesFromBrowserText(text: string, sourcePath: string): BrowserTextReference[] {
   if (/\.webmanifest$/i.test(sourcePath)) {
-    return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: true }));
+    // A web app manifest's URLs (icons, start_url, ...) resolve relative to
+    // the MANIFEST file itself, not the document that links it — the same
+    // rule CSS's url()/@import already follow. Not document-relative.
+    return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: false }));
   }
   const references: BrowserTextReference[] = [];
   const isHtml = /\.html?$/i.test(sourcePath);
   const scanText = isHtml ? blankHtmlComments(text) : text;
-  const attributeText = isHtml
-    ? blankHtmlRawTextContents(scanText).replace(/<base\b[^>]*>/gi, "")
-    : scanText;
+  const rawText = isHtml ? extractHtmlRawText(scanText) : null;
+  const attributeText = rawText ? rawText.blanked.replace(/<base\b[^>]*>/gi, "") : scanText;
   const htmlTags = isHtml ? openingHtmlTags(attributeText) : [];
   const addMatches = (input: string, pattern: RegExp, documentRelative: boolean) => {
     for (const match of input.matchAll(pattern)) {
@@ -363,18 +439,40 @@ function referencesFromBrowserText(text: string, sourcePath: string): BrowserTex
     }
   }
 
-  if (/\.(?:html?|css)$/i.test(sourcePath)) {
-    addMatches(scanText, /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi, false);
-    addMatches(scanText, /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi, false);
+  if (isHtml) {
+    // CSS syntax only means something inside a real <style> element or a
+    // style="" attribute — the same way a browser's CSS parser never reads
+    // the rest of the document. An external .css file below is entirely CSS
+    // by definition, so it keeps scanning its whole text.
+    const cssText = [
+      ...(rawText?.styleContents ?? []),
+      ...styleAttributeValues(htmlTags),
+    ].join("\n");
+    addMatches(cssText, CSS_URL_PATTERN, false);
+    addMatches(cssText, CSS_IMPORT_PATTERN, false);
+  } else if (/\.css$/i.test(sourcePath)) {
+    addMatches(scanText, CSS_URL_PATTERN, false);
+    addMatches(scanText, CSS_IMPORT_PATTERN, false);
   }
 
-  if (/\.(?:html?|js|mjs)$/i.test(sourcePath)) {
-    addMatches(scanText, /\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g, false);
-    addMatches(scanText, /\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, false);
-    addMatches(scanText, /\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g, false);
-    addMatches(scanText, /\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, true);
-    addMatches(scanText, /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, true);
-    addMatches(isHtml ? htmlTags.join("\n") : scanText, /\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, true);
+  if (isHtml) {
+    // Likewise, JS syntax only means something inside a real <script>
+    // element — plain document text that happens to look like an import
+    // statement is not code a browser ever executes.
+    const jsText = (rawText?.scriptContents ?? []).join("\n");
+    addMatches(jsText, JS_STATIC_IMPORT_PATTERN, false);
+    addMatches(jsText, JS_DYNAMIC_IMPORT_PATTERN, false);
+    addMatches(jsText, JS_NEW_URL_PATTERN, false);
+    addMatches(jsText, JS_FETCH_LIKE_PATTERN, true);
+    addMatches(jsText, JS_SERVICE_WORKER_PATTERN, true);
+    addMatches(htmlTags.join("\n"), JS_ASSIGNMENT_SHAPED_PATTERN, true);
+  } else if (/\.(?:js|mjs)$/i.test(sourcePath)) {
+    addMatches(scanText, JS_STATIC_IMPORT_PATTERN, false);
+    addMatches(scanText, JS_DYNAMIC_IMPORT_PATTERN, false);
+    addMatches(scanText, JS_NEW_URL_PATTERN, false);
+    addMatches(scanText, JS_FETCH_LIKE_PATTERN, true);
+    addMatches(scanText, JS_SERVICE_WORKER_PATTERN, true);
+    addMatches(scanText, JS_ASSIGNMENT_SHAPED_PATTERN, true);
   }
   return references;
 }
@@ -417,10 +515,17 @@ async function shareManifestForSite(
 
   const approved = new Set([entryPath]);
   const scanned = new Set<string>();
-  const queue = [entryPath];
+  // Every file is scanned with its own referring document's base — an
+  // external .js/.mjs file has no <base> of its own, but a reference the
+  // browser resolves against the DOCUMENT's base (fetch, Worker, an
+  // assignment-shaped src/href) must still use the document that linked it,
+  // including that document's own <base href> (not a blanket artifact root).
+  const queue: Array<{ path: string; documentBase: HtmlBaseResolution }> = [
+    { path: entryPath, documentBase: { kind: "none" } },
+  ];
   let scannedBytes = 0;
   while (queue.length > 0) {
-    const current = queue.shift()!;
+    const { path: current, documentBase: inheritedDocumentBase } = queue.shift()!;
     if (scanned.has(current) || !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current)) continue;
     scanned.add(current);
     try {
@@ -442,14 +547,17 @@ async function shareManifestForSite(
       const base = isHtmlFile
         ? htmlBaseDirectory(text, current, artifactRoot)
         : { kind: "none" as const };
-      // A separate .js/.mjs file has no <base> of its own, but a reference
-      // the browser resolves against the DOCUMENT's base (fetch, Worker,
-      // an assignment-shaped src/href) still needs the document's own
-      // directory, not the script's — reuse the same local-base mechanism
-      // an HTML file's own <base> tag already uses.
+      // A non-HTML file has no <base> of its own to declare, so it keeps the
+      // document base of whichever HTML page referred to it. "none" means
+      // "resolve against the referring file's own directory", which is only
+      // correct while that referring file IS the document being scanned —
+      // normalize it to this document's own directory before it can outlive
+      // that scan and get applied to a different (script) file's fromPath.
       const documentBase: HtmlBaseResolution = isHtmlFile
-        ? base
-        : { kind: "local", directory: artifactRoot };
+        ? base.kind === "none"
+          ? { kind: "local", directory: posix.dirname(current) }
+          : base
+        : inheritedDocumentBase;
       for (const reference of referencesFromBrowserText(text, current)) {
         const referenceBase = reference.documentRelative ? documentBase : base;
         for (const target of localReferenceCandidates(
@@ -460,7 +568,7 @@ async function shareManifestForSite(
           referenceBase,
         )) {
           approved.add(target);
-          queue.push(target);
+          queue.push({ path: target, documentBase });
         }
       }
     } catch {
