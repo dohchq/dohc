@@ -16,6 +16,7 @@ import {
 import {
   captureSharedViewLocalDivergence,
   materializeSharedViewPaths,
+  readPendingMaterializationPaths,
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
@@ -235,6 +236,7 @@ describe("share-view file operations through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         ),
       ).resolves.toEqual({
         capturedPaths: 1,
@@ -310,6 +312,49 @@ describe("share-view file operations through the real store", () => {
       await expect(
         readFile(join(view.rootPath, "docs", "added.md"), "utf8"),
       ).resolves.toBe("recipient\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "repairs a create interrupted after the store write instead of journaling a delete",
+    async () => {
+      const view = await harness("dohc-share-interrupted-create-", "edit");
+      const path = "docs/added.md";
+      const failingStore: CaptureVersionedTextStore = {
+        ...view.store,
+        async writeTextFile(input) {
+          await view.store.writeTextFile(input);
+          throw new Error("simulated crash after store write");
+        },
+      };
+
+      await expect(
+        routeWorkspaceFileCreate({
+          ...scope(view),
+          relativePath: path,
+          initialText: "recipient\n",
+          shareViewStore: () => failingStore,
+        }),
+      ).rejects.toThrow("simulated crash after store write");
+
+      const pathsBeforeRecovery = await storePaths(view);
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+          true,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(await storePaths(view)).toEqual(pathsBeforeRecovery);
+      await expect(readFile(join(view.rootPath, path), "utf8")).resolves.toBe(
+        "recipient\n",
+      );
     },
     60_000,
   );
@@ -416,6 +461,7 @@ describe("share-view file operations through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         );
       });
       for (let turn = 0; turn < 20 && !captureEnteredGap; turn += 1) {
@@ -871,6 +917,9 @@ describe("share-view file operations through the real store", () => {
       await expect(
         readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
       ).resolves.toBe("one\n");
+      await expect(readPendingMaterializationPaths(view.rootPath)).resolves.toEqual(
+        new Set(),
+      );
     },
     60_000,
   );
@@ -907,6 +956,9 @@ describe("share-view file operations through the real store", () => {
         "docs/plans/two.md",
         "docs/roadmap/one.md",
       ]);
+      const pending = await readPendingMaterializationPaths(view.rootPath);
+      expect(pending).toContain("docs/plans/one.md");
+      expect(pending).toContain("docs/roadmap/one.md");
     },
     60_000,
   );
@@ -1167,6 +1219,7 @@ describe("share-view file operations through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,

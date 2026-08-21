@@ -6088,6 +6088,7 @@ function registerIpcHandlers(
             recordRefusals: input.recordRefusals,
           }),
       });
+      if (!outcome.ok) throw new Error(outcome.errorMessage);
       if (outcome.status === "ended") {
         throw new ShareUnavailableError();
       }
@@ -6139,6 +6140,7 @@ function registerIpcHandlers(
     if (!shareView) throw new Error("This workspace is not a shared view.");
     if (shareView.ended) {
       return RefreshSharedViewResult.parse({
+        ok: true,
         status: "ended",
         changedPaths: 0,
         excludedPaths: [],
@@ -6157,6 +6159,7 @@ function registerIpcHandlers(
       !relayUrlsMatch(cachedCredentials.relayUrl, shareView.relayUrl)
     ) {
       return RefreshSharedViewResult.parse({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: [],
@@ -6220,6 +6223,10 @@ function registerIpcHandlers(
         );
       }
       throw error;
+    }
+    if (!outcome.ok) {
+      notifyRenderer();
+      return RefreshSharedViewResult.parse(outcome);
     }
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
