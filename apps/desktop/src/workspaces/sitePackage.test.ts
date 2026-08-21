@@ -227,6 +227,31 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("manual/docs/app.js");
   });
 
+  it("does not resolve relative references against an external document base", async () => {
+    await mkdir(join(root, "external-base"), { recursive: true });
+    await writeFile(
+      join(root, "external-base", "index.html"),
+      '<base href="https://cdn.example/"><script src="app.js"></script>',
+    );
+    await writeFile(join(root, "external-base", "app.js"), "window.localSecret = true;");
+    await mkdir(join(root, "no-base"), { recursive: true });
+    await writeFile(
+      join(root, "no-base", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(join(root, "no-base", "app.js"), "window.local = true;");
+
+    const sites = await listSitePackages(root);
+
+    expect(
+      manifestOf(sites.find((candidate) => candidate.root === "external-base"))
+        ?.assets,
+    ).not.toContain("external-base/app.js");
+    expect(
+      manifestOf(sites.find((candidate) => candidate.root === "no-base"))?.assets,
+    ).toContain("no-base/app.js");
+  });
+
   it("emits exact approved static browser files instead of a recursive site root", async () => {
     await mkdir(join(root, "report", "assets"), { recursive: true });
     await mkdir(join(root, "report", "data"), { recursive: true });

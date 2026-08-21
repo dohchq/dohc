@@ -1,4 +1,8 @@
-import type { SiteProcessHandle, StaticSitePreview } from "./siteRunner";
+import type {
+  SiteLogEntry,
+  SiteProcessHandle,
+  StaticSitePreview,
+} from "./siteRunner";
 
 export type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 
@@ -68,6 +72,12 @@ export function createSitePreviewLifecycle(input: {
 
     isRunning(workspaceId: string, siteRoot: string): boolean {
       return activePreviews.has(previewKey(workspaceId, siteRoot));
+    },
+
+    logs(workspaceId: string, siteRoot: string): SiteLogEntry[] {
+      const handle =
+        activePreviews.get(previewKey(workspaceId, siteRoot))?.handle;
+      return handle && "logs" in handle ? handle.logs() : [];
     },
 
     previewsForWorkspace(

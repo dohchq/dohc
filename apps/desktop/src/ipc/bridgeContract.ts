@@ -2312,6 +2312,21 @@ export const StartSitePreviewResult = z.object({
 });
 export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
 
+export const GetSitePreviewLogsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+});
+export type GetSitePreviewLogsPayload = z.infer<
+  typeof GetSitePreviewLogsPayload
+>;
+
+export const GetSitePreviewLogsResult = z.object({
+  logs: z.array(SiteLogEntry).max(500),
+});
+export type GetSitePreviewLogsResult = z.infer<
+  typeof GetSitePreviewLogsResult
+>;
+
 export const StopSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,
   siteRoot: SITE_ROOT_STRING,
@@ -4391,6 +4406,9 @@ export interface DohcDesktopBridge {
   listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
   startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
+  getSitePreviewLogs(
+    payload: GetSitePreviewLogsPayload,
+  ): Promise<GetSitePreviewLogsResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
   openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
   onPluginPanelOpened(

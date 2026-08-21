@@ -56,7 +56,11 @@ function availableModes(
   }
   if (site.entryPath) modes.push("static");
   if (site.scripts.dev || site.scripts.start) modes.push("dev");
-  if (site.scripts.build || site.buildOutputs.length > 0) modes.push("build");
+  if (
+    site.scripts.build ||
+    site.buildOutputs.length > 0 ||
+    presentBuildOutput(site)
+  ) modes.push("build");
   return modes;
 }
 
@@ -159,12 +163,17 @@ export function SitePreviewPage(props: {
 }) {
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [preview, setPreview] = useState<StartSitePreviewResult | null>(null);
+  const [previewLogs, setPreviewLogs] = useState<StartSitePreviewResult["logs"]>(
+    [],
+  );
+  const [logsOpen, setLogsOpen] = useState(false);
   const [runningMode, setRunningMode] = useState<SitePreviewMode | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [stoppedByUser, setStoppedByUser] = useState(false);
   const autoStartKeyRef = useRef<string | null>(null);
   const loadRequestRef = useRef(0);
   const previewStartRequestRef = useRef(0);
+  const logsRequestRef = useRef(0);
   const shareRequestRef = useRef(0);
   const siteContextRef = useRef("");
   const siteContext = `${props.workspaceId}\0${props.siteRoot}`;
@@ -175,7 +184,10 @@ export function SitePreviewPage(props: {
     shareRequestRef.current += 1;
     setLoad({ status: "loading" });
     setPreview(null);
+    setPreviewLogs([]);
+    setLogsOpen(false);
     previewStartRequestRef.current += 1;
+    logsRequestRef.current += 1;
     setRunningMode(null);
     setStoppedByUser(false);
     autoStartKeyRef.current = null;
@@ -213,6 +225,7 @@ export function SitePreviewPage(props: {
     return () => {
       loadRequestRef.current += 1;
       shareRequestRef.current += 1;
+      logsRequestRef.current += 1;
     };
   }, [reloadSite]);
 
@@ -233,6 +246,9 @@ export function SitePreviewPage(props: {
 
   const start = useCallback(async (mode: SitePreviewMode) => {
     const request = ++previewStartRequestRef.current;
+    logsRequestRef.current += 1;
+    setLogsOpen(false);
+    setPreviewLogs([]);
     setRunningMode(mode);
     setActionError(null);
     setStoppedByUser(false);
@@ -244,6 +260,7 @@ export function SitePreviewPage(props: {
       });
       if (request !== previewStartRequestRef.current) return;
       setPreview(result);
+      setPreviewLogs(result.logs);
       rememberMode(props.workspaceId, props.siteRoot, mode);
       return result;
     } catch (error) {
@@ -267,6 +284,12 @@ export function SitePreviewPage(props: {
       requestContext === siteContextRef.current;
     try {
       let latest = site;
+      const fresh = await bridge().getSitePackage({
+        workspaceId: props.workspaceId,
+        path: props.siteRoot,
+      });
+      if (!isCurrent()) return;
+      if (fresh) latest = fresh;
       let target = shareTargetForSite(latest);
       if (
         !target &&
@@ -280,12 +303,12 @@ export function SitePreviewPage(props: {
         }
         const built = await start("build");
         if (!built || !isCurrent()) return;
-        const refreshed = await bridge().getSitePackage({
+        const refreshedAfterBuild = await bridge().getSitePackage({
           workspaceId: props.workspaceId,
           path: props.siteRoot,
         });
         if (!isCurrent()) return;
-        if (refreshed) latest = refreshed;
+        if (refreshedAfterBuild) latest = refreshedAfterBuild;
         target = shareTargetForSite(latest);
       }
       if (!target) {
@@ -305,6 +328,39 @@ export function SitePreviewPage(props: {
       }
     }
   }, [props.onShareSite, props.siteRoot, props.workspaceId, siteContext, start]);
+
+  const refreshPreviewLogs = useCallback(async () => {
+    if (!preview || preview.mode !== "dev") return;
+    const request = ++logsRequestRef.current;
+    const requestContext = siteContext;
+    const previewRequest = previewStartRequestRef.current;
+    try {
+      const result = await bridge().getSitePreviewLogs({
+        workspaceId: props.workspaceId,
+        siteRoot: props.siteRoot,
+      });
+      if (
+        request !== logsRequestRef.current ||
+        requestContext !== siteContextRef.current ||
+        previewRequest !== previewStartRequestRef.current
+      ) return;
+      setPreviewLogs(result.logs);
+    } catch {
+      // Starting, stopping, and workspace changes can invalidate a poll.
+    }
+  }, [preview, props.siteRoot, props.workspaceId, siteContext]);
+
+  useEffect(() => {
+    if (!logsOpen || preview?.mode !== "dev") return;
+    void refreshPreviewLogs();
+    const interval = setInterval(() => {
+      void refreshPreviewLogs();
+    }, 1000);
+    return () => {
+      clearInterval(interval);
+      logsRequestRef.current += 1;
+    };
+  }, [logsOpen, preview?.mode, refreshPreviewLogs]);
 
   useEffect(() => {
     if (
@@ -339,6 +395,8 @@ export function SitePreviewPage(props: {
 
   async function stop() {
     const request = ++previewStartRequestRef.current;
+    logsRequestRef.current += 1;
+    setLogsOpen(false);
     setActionError(null);
     try {
       await bridge().stopSitePreview({
@@ -347,6 +405,7 @@ export function SitePreviewPage(props: {
       });
       if (request !== previewStartRequestRef.current) return;
       setPreview(null);
+      setPreviewLogs([]);
       setStoppedByUser(true);
     } catch (error) {
       if (request !== previewStartRequestRef.current) return;
@@ -525,11 +584,15 @@ export function SitePreviewPage(props: {
                 referrerPolicy="no-referrer"
                 className="min-h-0 flex-1 border-0 bg-bg"
               />
-              {preview.logs.length > 0 ? (
-                <details className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]">
+              {preview.mode === "dev" || previewLogs.length > 0 ? (
+                <details
+                  open={logsOpen}
+                  onToggle={(event) => setLogsOpen(event.currentTarget.open)}
+                  className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]"
+                >
                   <summary className="cursor-pointer text-muted">Logs</summary>
                   <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
-                    {preview.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+                    {previewLogs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
                   </pre>
                 </details>
               ) : null}

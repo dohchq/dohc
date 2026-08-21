@@ -58,6 +58,8 @@ const DEV_URL_RE =
 // eslint-disable-next-line no-control-regex
 const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
 const HOST_BIND_FLAGS = new Set(["--host", "--hostname", "-H"]);
+const MAX_SHELL_NESTING_DEPTH = 3;
+const DEV_URL_CARRY_CHARS = 2 * 1024;
 
 async function resolveContainedDir(rootPath: string, relativePath: string): Promise<string> {
   if (relativePath.includes("\0") || relativePath.includes("\\")) {
@@ -191,7 +193,7 @@ function explicitHostBinds(args: string[]): string[] {
   return hosts;
 }
 
-export function assertLoopbackOnlyDevServerCommand(command: string, args: string[]): void {
+function assertDirectHostBinds(command: string, args: string[]): void {
   for (const host of explicitHostBinds(args)) {
     if (host !== "" && isLoopbackHostname(host)) continue;
     const displayHost = host === "" ? "all interfaces" : host;
@@ -202,6 +204,61 @@ export function assertLoopbackOnlyDevServerCommand(command: string, args: string
       ].join(" ")}`,
     );
   }
+}
+
+function nestedShellCommand(command: string, args: string[]): string | null {
+  const name = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+  let flagIndex = -1;
+  if (name === "sh" || name === "bash" || name === "zsh" || name === "dash") {
+    flagIndex = args.indexOf("-c");
+  } else if (name === "cmd" || name === "cmd.exe") {
+    flagIndex = args.findIndex((arg) => arg.toLowerCase() === "/c");
+  } else if (
+    name === "powershell" ||
+    name === "powershell.exe" ||
+    name === "pwsh"
+  ) {
+    flagIndex = args.findIndex((arg) => arg.toLowerCase() === "-command");
+  }
+  return flagIndex >= 0 ? args[flagIndex + 1] ?? null : null;
+}
+
+function assertLoopbackOnlyDevServerCommandAtDepth(
+  command: string,
+  args: string[],
+  shellDepth: number,
+): void {
+  assertDirectHostBinds(command, args);
+  const nested = nestedShellCommand(command, args);
+  if (nested === null) return;
+  if (shellDepth >= MAX_SHELL_NESTING_DEPTH) {
+    throw new Error(
+      "Site dev server command could not statically validate the nested shell command " +
+      "for the loopback-only constraint because it exceeds " +
+      String(MAX_SHELL_NESTING_DEPTH) +
+      " shell levels.",
+    );
+  }
+  let parsed: ReturnType<typeof splitCommandLine>;
+  try {
+    parsed = splitCommandLine(nested);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      "Site dev server command could not statically validate the nested shell command " +
+      "for the loopback-only constraint: " +
+      reason,
+    );
+  }
+  assertLoopbackOnlyDevServerCommandAtDepth(
+    parsed.command,
+    parsed.args,
+    shellDepth + 1,
+  );
+}
+
+export function assertLoopbackOnlyDevServerCommand(command: string, args: string[]): void {
+  assertLoopbackOnlyDevServerCommandAtDepth(command, args, 0);
 }
 
 export function packageManagerDevCommand(
@@ -248,6 +305,8 @@ export async function startSiteDevServer(input: {
 
   let resolved = false;
   let stopped = false;
+  let stdoutCarry = "";
+  let stderrCarry = "";
 
   return await new Promise<SiteProcessHandle>((resolve, reject) => {
     function clearTimers() {
@@ -286,8 +345,13 @@ export async function startSiteDevServer(input: {
     if (input.signal?.aborted) abortStart();
     else input.signal?.addEventListener("abort", abortStart, { once: true });
 
-    function maybeResolve(chunk: string) {
-      const url = detectDevUrl(chunk);
+    function maybeResolve(chunk: string, stream: "stdout" | "stderr") {
+      const combined =
+        (stream === "stdout" ? stdoutCarry : stderrCarry) + chunk;
+      const carry = combined.slice(-DEV_URL_CARRY_CHARS);
+      if (stream === "stdout") stdoutCarry = carry;
+      else stderrCarry = carry;
+      const url = detectDevUrl(combined);
       if (!url || resolved) return;
       resolved = true;
       clearTimers();
@@ -313,12 +377,12 @@ export async function startSiteDevServer(input: {
     child.stdout.on("data", (chunk) => {
       const text = String(chunk);
       pushLog(logs, "stdout", text);
-      maybeResolve(text);
+      maybeResolve(text, "stdout");
     });
     child.stderr.on("data", (chunk) => {
       const text = String(chunk);
       pushLog(logs, "stderr", text);
-      maybeResolve(text);
+      maybeResolve(text, "stderr");
     });
     child.once("error", (error) => {
       clearTimers();

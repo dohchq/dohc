@@ -22,17 +22,18 @@ import {
   assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
 } from "./sitePreviewLifecycle";
-import type { SiteProcessHandle } from "./siteRunner";
+import type { SiteLogEntry, SiteProcessHandle } from "./siteRunner";
 
 function fakeProcessHandle(url: string) {
   let exited = false;
+  const logs: SiteLogEntry[] = [];
   const exitListeners = new Set<() => void>();
   const handle: SiteProcessHandle = {
     url,
     command: "test-server",
     args: [],
     cwd: "/workspace/site",
-    logs: () => [],
+    logs: () => [...logs],
     onExit(listener) {
       if (exited) queueMicrotask(listener);
       else exitListeners.add(listener);
@@ -41,6 +42,9 @@ function fakeProcessHandle(url: string) {
   };
   return {
     handle,
+    appendLog(log: SiteLogEntry) {
+      logs.push(log);
+    },
     exit() {
       if (exited) return;
       exited = true;
@@ -69,6 +73,31 @@ describe("site preview lifecycle", () => {
     expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:4173/frame")).toBe(
       false,
     );
+  });
+
+  it("reads process logs added after the initial preview response", () => {
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const server = fakeProcessHandle("http://127.0.0.1:4173/");
+    previews.remember("workspace-1", "site", server.handle);
+    const initialResponseLogs = server.handle.logs();
+
+    server.appendLog({
+      stream: "stderr",
+      text: "compiler warning after readiness",
+      at: 2,
+    });
+
+    expect(initialResponseLogs).toEqual([]);
+    expect(previews.logs("workspace-1", "site")).toEqual([
+      {
+        stream: "stderr",
+        text: "compiler warning after readiness",
+        at: 2,
+      },
+    ]);
+    server.exit();
   });
 
   it("removes the handle and origin even when stop fails", async () => {

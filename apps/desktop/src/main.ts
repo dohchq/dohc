@@ -117,6 +117,8 @@ import {
   InvokePluginPanelSdkResult,
   ListSitesPayload,
   ListSitesResult,
+  GetSitePreviewLogsPayload,
+  GetSitePreviewLogsResult,
   SitePackagePayload,
   SitePackageResult,
   StartSitePreviewPayload,
@@ -1238,10 +1240,11 @@ function commandForSiteScript(
   if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
   if (site.packagePath) {
     if (script === "dev" || script === "start") {
-      // This checks each visible host flag in the package script text. It
-      // cannot trace shell functions, environment-driven binds, or config-file
-      // binds, so the spawned command still relies on each tool's loopback
-      // default when the visible script contains no host flag.
+      // This checks visible host flags in the package script and recursively
+      // inspects visible shell command strings through three wrapper levels.
+      // It cannot trace shell functions, environment-driven binds, config-file
+      // binds, or commands past that depth, so tools with no visible host flag
+      // still rely on their loopback default.
       return packageManagerDevCommand(site.packageManager ?? "npm", script, configured);
     }
     return packageManagerCommand(site.packageManager ?? "npm", script);
@@ -6941,6 +6944,22 @@ function registerIpcHandlers(
     } finally {
       pendingStart.finish();
     }
+  });
+
+  ipcMain.handle(CHANNELS.getSitePreviewLogs, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetSitePreviewLogsPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    if (
+      activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId
+    ) {
+      throw new Error(
+        "The Site preview logs request does not target the active workspace. Open the workspace and try again.",
+      );
+    }
+    return GetSitePreviewLogsResult.parse({
+      logs: sitePreviews.logs(workspace.workspaceId, input.siteRoot),
+    });
   });
 
   ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {

@@ -15,7 +15,11 @@ type SitesLoadState =
   | { status: "ready"; sites: SitePackageInfo[] }
   | { status: "error"; message: string };
 
-function useSites(workspaceId: string, refreshKey = 0): SitesLoadState {
+function useSites(
+  workspaceId: string,
+  filesRevision: string,
+  refreshKey = 0,
+): SitesLoadState {
   const [state, setState] = useState<SitesLoadState>({ status: "loading" });
 
   useEffect(() => {
@@ -37,9 +41,22 @@ function useSites(workspaceId: string, refreshKey = 0): SitesLoadState {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, refreshKey]);
+  }, [workspaceId, filesRevision, refreshKey]);
 
   return state;
+}
+
+function workspaceFilesRevision(files: WorkspaceFileEntry[]): string {
+  let hash = 0x811c9dc5;
+  for (const file of files) {
+    const value =
+      file.path + "\0" + file.kind + "\0" + (file.icon ?? "") + "\0";
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+  }
+  return String(files.length) + ":" + (hash >>> 0).toString(36);
 }
 
 function siteDiagnosticLabel(site: SitePackageInfo): string | null {
@@ -58,7 +75,11 @@ export function SitesView(props: {
   refreshKey?: number;
   onOpenPath: (path: string) => void;
 }) {
-  const state = useSites(props.workspaceId, props.refreshKey);
+  const state = useSites(
+    props.workspaceId,
+    workspaceFilesRevision(props.files),
+    props.refreshKey,
+  );
   const sites = state.status === "ready" ? state.sites : [];
 
   return (

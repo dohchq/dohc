@@ -3,6 +3,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  GetSitePreviewLogsResult,
   SitePackageInfo,
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
@@ -54,6 +55,9 @@ const bridgeMock = {
     url: "http://127.0.0.1:49152/",
     logs: [],
   })),
+  getSitePreviewLogs: vi.fn(
+    async (): Promise<GetSitePreviewLogsResult> => ({ logs: [] }),
+  ),
   stopSitePreview: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
 };
@@ -152,6 +156,49 @@ describe("SitePreviewPage", () => {
       siteRoot: "report",
       mode: "build",
     });
+  });
+
+  it("offers a present configured output as build mode without a build script", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "configured",
+      entryPath: null,
+      configuredBuildOutput: "public",
+      sourceFiles: ["report/public/index.html"],
+      shareManifest: readyShare("report/public/index.html"),
+    });
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "build",
+      url: "http://127.0.0.1:49152/",
+      logs: [],
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    expect(screen.getByTestId("site-preview-build")).toBeTruthy();
+    expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      mode: "build",
+    });
+  });
+
+  it("offers no mode when a site has no entry, script, or present output", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      entryPath: null,
+      shareManifest: noRunnableArtifact,
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText(
+      "This site has no previewable entry, dev script, or build output yet.",
+    );
+    expect(screen.queryByTestId("site-preview-options")).toBeNull();
+    expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
   });
 
   it("keeps a stored preview mode over the workspace default", async () => {
@@ -295,8 +342,131 @@ describe("SitePreviewPage", () => {
     });
   });
 
+  it("refreshes the site manifest before preparing a share", async () => {
+    const freshSite: SitePackageInfo = {
+      ...site,
+      sourceFiles: ["report/index.html", "report/fresh.js"],
+      shareManifest: readyShare("report/index.html", ["report/fresh.js"]),
+    };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(site)
+      .mockResolvedValueOnce(freshSite);
+    const onShareSite = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={onShareSite}
+      />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(onShareSite).toHaveBeenCalledWith({
+      paths: ["report/index.html", "report/fresh.js"],
+      label: "Report",
+    });
+  });
+
+  it("shows dev logs written after the preview becomes ready", async () => {
+    const devSite: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+    };
+    bridgeMock.getSitePackage.mockResolvedValueOnce(devSite);
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "dev",
+      url: "http://127.0.0.1:49152/",
+      logs: [{ stream: "stdout", text: "ready", at: 1 }],
+    });
+    bridgeMock.getSitePreviewLogs.mockResolvedValueOnce({
+      logs: [
+        { stream: "stdout", text: "ready", at: 1 },
+        { stream: "stderr", text: "compiler warning after readiness", at: 2 },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByText("Logs"));
+
+    expect(
+      await screen.findByText(/compiler warning after readiness/),
+    ).toBeTruthy();
+  });
+
+  it("does not apply a stale dev-log response after the site context changes", async () => {
+    const pendingLogs = deferred<{
+      logs: Array<{ stream: "stdout"; text: string; at: number }>;
+    }>();
+    const devSite: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+    };
+    const replacementSite: SitePackageInfo = {
+      ...devSite,
+      root: "replacement",
+      title: "Replacement",
+      entryPath: "replacement/index.html",
+      packagePath: "replacement/package.json",
+      sourceFiles: ["replacement/index.html", "replacement/package.json"],
+      shareManifest: readyShare("replacement/index.html"),
+    };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(devSite)
+      .mockResolvedValueOnce(replacementSite);
+    bridgeMock.startSitePreview
+      .mockResolvedValueOnce({
+        siteRoot: "report",
+        mode: "dev",
+        url: "http://127.0.0.1:49152/",
+        logs: [{ stream: "stdout", text: "report ready", at: 1 }],
+      })
+      .mockResolvedValueOnce({
+        siteRoot: "replacement",
+        mode: "dev",
+        url: "http://127.0.0.1:49153/",
+        logs: [{ stream: "stdout", text: "replacement ready", at: 2 }],
+      });
+    bridgeMock.getSitePreviewLogs.mockReturnValueOnce(pendingLogs.promise);
+    const user = userEvent.setup();
+    const view = render(
+      <SitePreviewPage workspaceId="ws-sites" siteRoot="report" />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByText("Logs"));
+    await vi.waitFor(() =>
+      expect(bridgeMock.getSitePreviewLogs).toHaveBeenCalledTimes(1),
+    );
+
+    view.rerender(
+      <SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />,
+    );
+    await screen.findByText("Replacement");
+    await screen.findByText(/replacement ready/);
+
+    await act(async () => {
+      pendingLogs.resolve({
+        logs: [{ stream: "stdout", text: "stale report output", at: 3 }],
+      });
+      await pendingLogs.promise;
+    });
+
+    expect(screen.queryByText(/stale report output/)).toBeNull();
+    expect(screen.getByText(/replacement ready/)).toBeTruthy();
+  });
+
   it("names the byte budget and observed scan size when sharing is refused", async () => {
-    bridgeMock.getSitePackage.mockResolvedValueOnce({
+    const refusedSite: SitePackageInfo = {
       ...site,
       shareManifest: {
         ok: false,
@@ -304,7 +474,10 @@ describe("SitePreviewPage", () => {
         limitBytes: 4 * 1024 * 1024,
         observedBytes: 5 * 1024 * 1024,
       },
-    });
+    };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(refusedSite)
+      .mockResolvedValueOnce(refusedSite);
     const user = userEvent.setup();
     render(
       <SitePreviewPage
@@ -325,7 +498,7 @@ describe("SitePreviewPage", () => {
   });
 
   it("names the file limit and observed count when sharing is refused", async () => {
-    bridgeMock.getSitePackage.mockResolvedValueOnce({
+    const refusedSite: SitePackageInfo = {
       ...site,
       shareManifest: {
         ok: false,
@@ -333,7 +506,10 @@ describe("SitePreviewPage", () => {
         limitFiles: 100,
         observedFiles: 101,
       },
-    });
+    };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(refusedSite)
+      .mockResolvedValueOnce(refusedSite);
     const user = userEvent.setup();
     render(
       <SitePreviewPage
@@ -371,10 +547,13 @@ describe("SitePreviewPage", () => {
       "This site does not have a runnable static artifact to share.",
     ],
   ])("renders the share refusal reason %#", async (shareManifest, message) => {
-    bridgeMock.getSitePackage.mockResolvedValueOnce({
+    const refusedSite: SitePackageInfo = {
       ...site,
       shareManifest,
-    });
+    };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(refusedSite)
+      .mockResolvedValueOnce(refusedSite);
     const user = userEvent.setup();
     render(
       <SitePreviewPage
@@ -390,7 +569,7 @@ describe("SitePreviewPage", () => {
     expect(await screen.findByText(message)).toBeTruthy();
   });
 
-  it("does not open a stale share dialog when build refresh finishes after site replacement", async () => {
+  it("does not open a stale share dialog when manifest refresh finishes after site replacement", async () => {
     const pendingRefresh = deferred<SitePackageInfo | null>();
     const buildableSite: SitePackageInfo = {
       ...site,
@@ -418,12 +597,6 @@ describe("SitePreviewPage", () => {
         siteRoot: "report",
         mode: "dev",
         url: "http://127.0.0.1:49152/",
-        logs: [],
-      })
-      .mockResolvedValueOnce({
-        siteRoot: "report",
-        mode: "build",
-        url: "http://127.0.0.1:49154/",
         logs: [],
       })
       .mockResolvedValueOnce({
@@ -498,9 +671,9 @@ describe("SitePreviewPage", () => {
         logs: [],
       })
       .mockResolvedValueOnce({
-        siteRoot: "report",
-        mode: "build",
-        url: "http://127.0.0.1:49154/",
+        siteRoot: "replacement",
+        mode: "static",
+        url: "http://127.0.0.1:49153/",
         logs: [],
       });
     const user = userEvent.setup();

@@ -120,7 +120,7 @@ function localReferenceCandidates(
   fromPath: string,
   artifactRoot: string,
   available: ReadonlySet<string>,
-  baseDirectory: string | null = null,
+  base: HtmlBaseResolution = { kind: "none" },
 ): string[] {
   const raw = rawReference.trim().split(/[?#]/, 1)[0]?.trim() ?? "";
   if (
@@ -136,10 +136,14 @@ function localReferenceCandidates(
     return [];
   }
   const artifactBase = artifactRoot === "." ? "" : artifactRoot;
+  if (!decoded.startsWith("/") && base.kind === "external") return [];
   const candidate = posix.normalize(
     decoded.startsWith("/")
       ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
-      : posix.join(baseDirectory ?? posix.dirname(fromPath), decoded),
+      : posix.join(
+          base.kind === "local" ? base.directory : posix.dirname(fromPath),
+          decoded,
+        ),
   );
   if (
     !pathRelativeToArtifact(artifactRoot, candidate) ||
@@ -155,33 +159,35 @@ function localReferenceCandidates(
   return [...new Set(variants)].filter((path) => available.has(path));
 }
 
+type HtmlBaseResolution =
+  | { kind: "local"; directory: string }
+  | { kind: "external" }
+  | { kind: "none" };
+
 function htmlBaseDirectory(
   text: string,
   fromPath: string,
   artifactRoot: string,
-): string | null {
+): HtmlBaseResolution {
   const baseTag = /<base\b[^>]*>/i.exec(text)?.[0];
-  if (!baseTag) return null;
+  if (!baseTag) return { kind: "none" };
   const hrefMatch =
     /\bhref\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>]{1,2048}))/i.exec(
       baseTag,
     );
   const href = (hrefMatch?.[1] ?? hrefMatch?.[2] ?? hrefMatch?.[3])?.trim();
+  if (!href || href.startsWith("#")) return { kind: "none" };
   if (
-    !href ||
-    href.startsWith("#") ||
     href.startsWith("//") ||
-    /^(?:data|https?|javascript|mailto|tel):/i.test(href)
-  ) {
-    return null;
-  }
+    /^[A-Za-z][A-Za-z0-9+.-]*:/.test(href)
+  ) return { kind: "external" };
   let decoded: string;
   try {
     decoded = decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "");
   } catch {
-    return null;
+    return { kind: "external" };
   }
-  if (!decoded) return null;
+  if (!decoded) return { kind: "none" };
   const artifactBase = artifactRoot === "." ? "" : artifactRoot;
   const resolved = posix.normalize(
     decoded.startsWith("/")
@@ -192,8 +198,8 @@ function htmlBaseDirectory(
   return (directory === artifactRoot ||
     pathRelativeToArtifact(artifactRoot, directory) !== null) &&
     !hasIgnoredSegment(directory)
-    ? directory
-    : null;
+    ? { kind: "local", directory }
+    : { kind: "external" };
 }
 
 function referencesFromWebManifest(text: string): string[] {
@@ -334,16 +340,16 @@ async function shareManifestForSite(
         };
       }
       const text = await readFile(join(rootPath, current), "utf8");
-      const baseDirectory = /\.html?$/i.test(current)
+      const base = /\.html?$/i.test(current)
         ? htmlBaseDirectory(text, current, artifactRoot)
-        : null;
+        : { kind: "none" as const };
       for (const reference of referencesFromBrowserText(text, current)) {
         for (const target of localReferenceCandidates(
           reference,
           current,
           artifactRoot,
           available,
-          baseDirectory,
+          base,
         )) {
           approved.add(target);
           queue.push(target);

@@ -110,6 +110,30 @@ describe("package manager helpers", () => {
     });
   });
 
+  it("validates host flags inside visible shell-wrapped package scripts", () => {
+    expect(() =>
+      packageManagerDevCommand(
+        "pnpm",
+        "dev",
+        "sh -c 'vite --host 0.0.0.0'",
+      ),
+    ).toThrow(/loopback/);
+    expect(() =>
+      packageManagerDevCommand(
+        "pnpm",
+        "dev",
+        "sh -c 'vite --host 127.0.0.1'",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      packageManagerDevCommand(
+        "pnpm",
+        "dev",
+        "BASH -c 'vite --hostname 192.168.1.1'",
+      ),
+    ).toThrow(/loopback/);
+  });
+
   it("extracts local dev server urls from common tool output", () => {
     expect(detectDevUrl("  Local:   http://localhost:5173/")).toBe("http://localhost:5173/");
     expect(detectDevUrl("ready on http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
@@ -257,6 +281,29 @@ describe("startSiteDevServer", () => {
     try {
       expect(handle.url).toBe("http://127.0.0.1:43210");
       expect(handle.logs().some((entry) => entry.text.includes("Local:"))).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("detects a local URL split across stdout chunks", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    const handle = await startSiteDevServer({
+      workspaceRoot: root,
+      siteRoot: "site",
+      command: process.execPath,
+      args: [
+        "-e",
+        [
+          "process.stdout.write('Local: http://local');",
+          "setTimeout(() => process.stdout.write('host:5173/\\n'), 100);",
+          "setInterval(() => {}, 1000);",
+        ].join("\n"),
+      ],
+      readyTimeoutMs: 750,
+    });
+    try {
+      expect(handle.url).toBe("http://localhost:5173/");
     } finally {
       await handle.stop();
     }

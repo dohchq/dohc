@@ -659,6 +659,7 @@ export const CHANNELS = {
   listSites: "desktop:list-sites",
   getSitePackage: "desktop:get-site-package",
   startSitePreview: "desktop:start-site-preview",
+  getSitePreviewLogs: "desktop:get-site-preview-logs",
   stopSitePreview: "desktop:stop-site-preview",
   openPluginPanel: "desktop:open-plugin-panel",
   startPluginPanel: "desktop:start-plugin-panel",

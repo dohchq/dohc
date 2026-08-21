@@ -59,6 +59,53 @@ describe("SitesView", () => {
     expect(onOpenPath).toHaveBeenCalledWith(siteTabPath("client-portal"));
   });
 
+  it("reloads detected sites when workspace file content changes", async () => {
+    const view = render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[{ path: "notes.md", kind: "file" }]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await screen.findByText("Client Portal");
+    expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[
+          { path: "notes.md", kind: "file" },
+          { path: "report/index.html", kind: "file" },
+        ]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not reload detected sites for a content-identical files array", async () => {
+    const view = render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[{ path: "notes.md", kind: "file" }]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await screen.findByText("Client Portal");
+
+    view.rerender(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[{ path: "notes.md", kind: "file" }]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await Promise.resolve();
+
+    expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
+  });
+
   it("does not fabricate sites from files while IPC is loading", () => {
     bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
     render(

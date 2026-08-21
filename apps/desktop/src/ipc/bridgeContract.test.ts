@@ -68,6 +68,8 @@ import {
   WorkspaceGraphResult,
   WorkspaceVersionConflict,
   ListSitesResult,
+  GetSitePreviewLogsPayload,
+  GetSitePreviewLogsResult,
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
@@ -1184,6 +1186,17 @@ describe("site IPC contract", () => {
         siteRoot: ".",
       }),
     ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    expect(
+      GetSitePreviewLogsPayload.parse({
+        workspaceId: "ws-sites",
+        siteRoot: ".",
+      }),
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    expect(
+      GetSitePreviewLogsResult.parse({
+        logs: [{ stream: "stderr", text: "late output", at: 2 }],
+      }).logs,
+    ).toEqual([{ stream: "stderr", text: "late output", at: 2 }]);
     for (const workspaceId of ["", "WS-SITES", "ws_sites"]) {
       expect(
         StartSitePreviewPayload.safeParse({
