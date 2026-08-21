@@ -125,12 +125,14 @@ async function signalProcessTreePosix(
   try {
     const table = parseProcessTable(await readProcessTable());
     const entriesByPid = new Map(table.map((entry) => [entry.pid, entry]));
-    const verifiedRoots = (options.alsoSignal ?? []).filter((pid) => {
+    const identityMatches = (pid: number): boolean => {
       const captured = capturedIdentities.get(pid);
       return captured === undefined ||
         entriesByPid.get(pid)?.startedAt === captured.startedAt;
-    });
-    const roots = [rootPid, ...verifiedRoots];
+    };
+    const roots = [rootPid, ...(options.alsoSignal ?? [])].filter(
+      identityMatches,
+    );
     pids = [...new Set(roots.flatMap((pid) => processTreePids(table, pid)))];
     identities = pids.flatMap((pid) => {
       const entry = entriesByPid.get(pid);

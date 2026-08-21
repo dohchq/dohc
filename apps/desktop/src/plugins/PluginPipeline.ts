@@ -497,6 +497,16 @@ export function overlayDoorWrittenSourceDeltas(
     target ??= relPath;
     files.set(target, delta.sha256);
     byLowerCase?.set(lower, target);
+    if (byLowerCaseDirectory) {
+      const targetSegments = target.split("/");
+      for (let depth = 1; depth < targetSegments.length; depth += 1) {
+        const directory = targetSegments.slice(0, depth).join("/");
+        const key = directory.toLowerCase();
+        if (!byLowerCaseDirectory.has(key)) {
+          byLowerCaseDirectory.set(key, directory);
+        }
+      }
+    }
   }
   return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
 }

@@ -219,6 +219,52 @@ describe("killProcessTreePosix", () => {
 });
 
 describe("stopProcessTreePosix", () => {
+  it("skips a root pid reused by a different process", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let readCount = 0;
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      undefined,
+      {
+        readProcessTable: async () => {
+          readCount += 1;
+          return readCount === 1
+            ? psRow(100, 1, "Fri Aug 21 09:59:00 2026")
+            : psRow(100, 1, "Fri Aug 21 10:00:05 2026");
+        },
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 100, signal: "SIGTERM" },
+    ]);
+  });
+
+  it("still signals the root pid with the same process identity", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const startedAt = "Fri Aug 21 10:00:05 2026";
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      undefined,
+      {
+        readProcessTable: async () => psRow(100, 1, startedAt),
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 100, signal: "SIGTERM" },
+      { pid: 100, signal: "SIGKILL" },
+    ]);
+  });
+
   it("skips a captured pid reused by a different process", async () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     let readCount = 0;

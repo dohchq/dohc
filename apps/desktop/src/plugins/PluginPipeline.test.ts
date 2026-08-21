@@ -413,6 +413,40 @@ describe("overlayDoorWrittenSourceDeltas", () => {
     ]);
   });
 
+  it("uses the first Windows delta's casing for a new directory", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "baseline" }],
+      new Map([
+        ["src/NewDir/a.ts", { sha256: "aaa", seq: 1 }],
+        ["SRC/newdir/b.ts", { sha256: "bbb", seq: 2 }],
+      ]),
+      "win32",
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "baseline" },
+      { relPath: "src/NewDir/a.ts", sha256: "aaa" },
+      { relPath: "src/NewDir/b.ts", sha256: "bbb" },
+    ]);
+  });
+
+  it("keeps new case-distinct POSIX delta directories separate", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "baseline" }],
+      new Map([
+        ["src/NewDir/a.ts", { sha256: "aaa", seq: 1 }],
+        ["SRC/newdir/b.ts", { sha256: "bbb", seq: 2 }],
+      ]),
+      "linux",
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "baseline" },
+      { relPath: "src/NewDir/a.ts", sha256: "aaa" },
+      { relPath: "SRC/newdir/b.ts", sha256: "bbb" },
+    ]);
+  });
+
   it("keeps a new file under a case-distinct POSIX directory separate", () => {
     const files = overlayDoorWrittenSourceDeltas(
       [{ relPath: "src/index.ts", sha256: "aaa" }],
