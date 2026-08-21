@@ -371,6 +371,27 @@ export function SettingsDialog(props: {
     [markSaved, markSaving, props.workspaceId, workspaceResult],
   );
 
+  // Zoom goes through main's one serialized mutation instead of a full-file
+  // save: main persists the level before re-tinting the windows, and its
+  // answer is the settings now on disk, so the row paints the level actually
+  // in effect.
+  const stepZoomSetting = useCallback(async (step: "in" | "out" | "reset") => {
+    const requestId = userSaveRequestRef.current + 1;
+    userSaveRequestRef.current = requestId;
+    markSaving();
+    setError(null);
+    try {
+      const saved = await bridge().stepWindowZoom({ step });
+      if (userSaveRequestRef.current !== requestId) return;
+      setUserResult(saved);
+      markSaved();
+    } catch (cause) {
+      if (userSaveRequestRef.current !== requestId) return;
+      setSaveState("error");
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [markSaved, markSaving]);
+
   const resetUserSettings = useCallback(async () => {
     const requestId = userSaveRequestRef.current + 1;
     userSaveRequestRef.current = requestId;
@@ -598,15 +619,7 @@ export function SettingsDialog(props: {
                 userSettings.appearance.zoomLevel,
                 DEFAULT_USER_SETTINGS.appearance.zoomLevel,
               )}
-              onReset={() =>
-                void saveUserSettings({
-                  ...userSettings,
-                  appearance: {
-                    ...userSettings.appearance,
-                    zoomLevel: DEFAULT_USER_SETTINGS.appearance.zoomLevel,
-                  },
-                })
-              }
+              onReset={() => void stepZoomSetting("reset")}
               testId="settings-row-zoom"
             >
               <div className="flex items-center gap-1.5">
@@ -614,15 +627,7 @@ export function SettingsDialog(props: {
                   type="button"
                   aria-label="Zoom out"
                   disabled={userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL}
-                  onClick={() =>
-                    void saveUserSettings({
-                      ...userSettings,
-                      appearance: {
-                        ...userSettings.appearance,
-                        zoomLevel: userSettings.appearance.zoomLevel - 1,
-                      },
-                    })
-                  }
+                  onClick={() => void stepZoomSetting("out")}
                   className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
                 >
                   <Minus size={14} strokeWidth={1.9} />
@@ -634,15 +639,7 @@ export function SettingsDialog(props: {
                   type="button"
                   aria-label="Zoom in"
                   disabled={userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL}
-                  onClick={() =>
-                    void saveUserSettings({
-                      ...userSettings,
-                      appearance: {
-                        ...userSettings.appearance,
-                        zoomLevel: userSettings.appearance.zoomLevel + 1,
-                      },
-                    })
-                  }
+                  onClick={() => void stepZoomSetting("in")}
                   className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
                 >
                   <Plus size={14} strokeWidth={1.9} />

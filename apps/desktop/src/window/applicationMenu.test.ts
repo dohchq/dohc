@@ -8,6 +8,7 @@ function build(
   canInstallUpdate = false,
 ) {
   const sendCommand = vi.fn();
+  const stepZoom = vi.fn();
   const openRecentWorkspace = vi.fn();
   const showAbout = vi.fn();
   const recentWorkspaces = [
@@ -24,10 +25,11 @@ function build(
     recentWorkspaces,
     canInstallUpdate,
     sendCommand,
+    stepZoom,
     openRecentWorkspace,
     showAbout,
   });
-  return { template, sendCommand, openRecentWorkspace, recentWorkspaces, showAbout };
+  return { template, sendCommand, stepZoom, openRecentWorkspace, recentWorkspaces, showAbout };
 }
 
 function items(template: MenuItemConstructorOptions[], label: string) {
@@ -100,6 +102,7 @@ describe("application menu template", () => {
       platform: "linux",
       recentWorkspaces: [],
       sendCommand,
+      stepZoom: vi.fn(),
       showAbout,
     });
     const openRecent = items(template, "File").find((i) => i.label === "Open Recent");
@@ -170,23 +173,30 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "command-palette");
   });
 
-  it("zoom is renderer-owned and Zoom In shows the unshifted Ctrl+= chord", () => {
+  it("zoom answers the unshifted, shifted, and numpad chords through main's mutation", () => {
     // Electron's zoomIn role only answers CommandOrControl+Plus, which needs
     // Shift on most layouts — plain Ctrl+= (the key labeled "+") did nothing
-    // while Ctrl+- zoomed out, leaving no keyboard way back.
-    const { template, sendCommand } = build();
+    // while Ctrl+- zoomed out, leaving no keyboard way back. Zoom is also
+    // main-owned (not a renderer command), so it keeps working on windows
+    // that never mount the workspace shell.
+    const { template, stepZoom } = build();
     const viewItems = items(template, "View");
-    for (const [label, accelerator, commandId] of [
-      ["Reset Zoom", "CommandOrControl+0", "zoom-reset"],
-      ["Zoom In", "CommandOrControl+=", "zoom-in"],
-      ["Zoom Out", "CommandOrControl+-", "zoom-out"],
+    for (const [accelerator, step, hidden] of [
+      ["CommandOrControl+0", "reset", false],
+      ["CommandOrControl+=", "in", false],
+      ["CommandOrControl+Plus", "in", true],
+      ["CommandOrControl+numadd", "in", true],
+      ["CommandOrControl+-", "out", false],
+      ["CommandOrControl+numsub", "out", true],
     ] as const) {
-      const item = viewItems.find((entry) => entry.label === label);
-      expect(item?.accelerator, label).toBe(accelerator);
-      expect(item?.registerAccelerator, label).toBe(false);
-      const fakeWindow = { id: 9 };
-      (item?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
-      expect(sendCommand).toHaveBeenCalledWith(fakeWindow, commandId);
+      const item = viewItems.find((entry) => entry.accelerator === accelerator);
+      expect(item, accelerator).toBeTruthy();
+      // Native registration is the point: no registerAccelerator:false.
+      expect(item?.registerAccelerator, accelerator).toBeUndefined();
+      expect(item?.visible === false, accelerator).toBe(hidden);
+      stepZoom.mockClear();
+      (item?.click as () => void)();
+      expect(stepZoom, accelerator).toHaveBeenCalledWith(step);
     }
     expect(viewItems.some((entry) => entry.role === "zoomIn")).toBe(false);
   });

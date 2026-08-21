@@ -73,8 +73,7 @@ import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
-  MAX_ZOOM_LEVEL,
-  MIN_ZOOM_LEVEL,
+  ZOOM_STEPS,
 } from "../settings/userSettings";
 import type {
   DesktopUserSettings as DesktopUserSettingsType,
@@ -3688,13 +3687,15 @@ export const SetTitlebarThemePayload = z.object({
 });
 export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 
-// The renderer mirrors the persisted appearance zoom level to main, which
-// applies it as the sender window's Chromium zoom. Same one-way, best-effort
-// shape as setTitlebarTheme; the settings schema owns the level bounds.
-export const SetWindowZoomPayload = z.object({
-  zoomLevel: z.number().int().min(MIN_ZOOM_LEVEL).max(MAX_ZOOM_LEVEL),
+// One zoom mutation, owned by main: it persists appearance.zoomLevel before
+// applying it to the windows, and answers with the settings now on disk so
+// the caller can paint the level in effect. The menu accelerators call the
+// same mutation directly in main; this channel is for the palette and the
+// Settings stepper.
+export const StepWindowZoomPayload = z.object({
+  step: z.enum(ZOOM_STEPS),
 }).strict();
-export type SetWindowZoomPayload = z.infer<typeof SetWindowZoomPayload>;
+export type StepWindowZoomPayload = z.infer<typeof StepWindowZoomPayload>;
 
 // Application-menu commands. One closed set (channels.ts owns the tuple; the
 // sandboxed preload validates against it as a plain value): the menu sends
@@ -4484,7 +4485,9 @@ export interface DohcDesktopBridge {
   ): Promise<WorkspaceSettingsResult>;
   writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
-  setWindowZoom(payload: SetWindowZoomPayload): Promise<void>;
+  stepWindowZoom(
+    payload: StepWindowZoomPayload,
+  ): Promise<DesktopUserSettingsResult>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
     payload: ListWorkspaceFilesPayload,

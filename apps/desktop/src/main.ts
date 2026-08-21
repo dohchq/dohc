@@ -258,7 +258,7 @@ import {
   PickImageFilesResult,
   WRITE_ASSET_MAX_BYTES,
   SetTitlebarThemePayload,
-  SetWindowZoomPayload,
+  StepWindowZoomPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SetWorkspaceUiStatePayload,
@@ -338,6 +338,7 @@ import {
   shouldUseDarkSystemIcon,
 } from "./systemThemeIcon";
 import { buildMenuTemplate } from "./window/applicationMenu";
+import { createZoomMutation } from "./window/windowZoom";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
   allowLoopbackFrameOrigin,
@@ -1257,6 +1258,18 @@ const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
 function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
   workspaceWindows.track(window);
   window.on("closed", () => workspaceWindows.forget(window));
+  // The persisted zoom level is a window property main owns: apply it once
+  // the first load finishes, so every window opens at the level Settings
+  // shows. Best-effort — a fresh install has only the default.
+  window.webContents.once("did-finish-load", () => {
+    void readCachedUserSettingsFile(stateDir())
+      .then(({ settings }) => {
+        if (!window.isDestroyed()) {
+          window.webContents.setZoomLevel(settings.appearance.zoomLevel);
+        }
+      })
+      .catch(() => undefined);
+  });
   return window;
 }
 function liveWorkspaceWindow(): BrowserWindow | undefined {
@@ -1296,6 +1309,21 @@ function quoteWindowsArg(value: string): string {
   return quoted;
 }
 
+// One serialized zoom mutation for every caller (menu accelerators, the
+// palette, the Settings stepper): persist appearance.zoomLevel first, then
+// re-tint every window. A failed write changes no window.
+function applyZoomLevelToWindows(zoomLevel: number): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.setZoomLevel(zoomLevel);
+  }
+}
+
+const stepWindowZoom = createZoomMutation({
+  read: () => readCachedUserSettingsFile(stateDir()),
+  write: (settings) => writeUserSettingsFile(stateDir(), settings),
+  apply: applyZoomLevelToWindows,
+});
+
 function refreshApplicationMenu(): void {
   if (!app.isReady()) return;
   const canInstallUpdate = currentUpdateState().canInstall === true;
@@ -1309,6 +1337,11 @@ function refreshApplicationMenu(): void {
         canInstallUpdate,
         sendCommand: (window, command) => {
           targetWindow(window)?.webContents.send(CHANNELS.menuCommand, command);
+        },
+        stepZoom: (step) => {
+          void stepWindowZoom(step).catch((error) => {
+            console.error("[desktop] window zoom:", error);
+          });
         },
         openRecentWorkspace: (window, workspace) => {
           sendWorkspaceActivated(window, workspace);
@@ -9820,6 +9853,9 @@ function registerIpcHandlers(
     const input = SetUserSettingsPayload.parse(payload);
     await writeUserSettingsFile(stateDir(), input.settings);
     cachedPreferredName = input.settings.profile.preferredName;
+    // The windows must match whatever zoom level was just persisted, however
+    // it got into the saved object.
+    applyZoomLevelToWindows(input.settings.appearance.zoomLevel);
     await refreshDispatchTray();
     if (input.settings.runner.enabled && input.settings.runner.command.trim()) {
       for (const workspace of openDispatchWorkspaces()) {
@@ -9838,6 +9874,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
     cachedPreferredName = undefined;
+    applyZoomLevelToWindows(DEFAULT_USER_SETTINGS.appearance.zoomLevel);
     await refreshDispatchTray();
     return DesktopUserSettingsResult.parse({
       settings: DEFAULT_USER_SETTINGS,
@@ -9896,12 +9933,13 @@ function registerIpcHandlers(
     }
   });
 
-  // The renderer owns the zoom setting (appearance.zoomLevel) and mirrors it
-  // here; Chromium zoom is a webContents property only main can set.
-  ipcMain.handle(CHANNELS.setWindowZoom, (event, payload) => {
+  // The palette and the Settings stepper share the menu accelerators' zoom
+  // mutation; the answer is the settings now on disk, so the caller paints
+  // the level actually in effect.
+  ipcMain.handle(CHANNELS.stepWindowZoom, async (event, payload) => {
     assertTrustedSender(event);
-    const input = SetWindowZoomPayload.parse(payload);
-    event.sender.setZoomLevel(input.zoomLevel);
+    const input = StepWindowZoomPayload.parse(payload);
+    return DesktopUserSettingsResult.parse(await stepWindowZoom(input.step));
   });
 
   // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer

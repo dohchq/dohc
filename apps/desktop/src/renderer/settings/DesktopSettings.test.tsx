@@ -143,7 +143,16 @@ const bridge = {
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
   writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
   setTitlebarTheme: vi.fn(async () => undefined),
-  setWindowZoom: vi.fn(async () => undefined),
+  stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
+    settings: {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: {
+        ...DEFAULT_USER_SETTINGS.appearance,
+        zoomLevel: payload.step === "in" ? 1 : payload.step === "out" ? -1 : 0,
+      },
+    },
+    source: "stored" as const,
+  })),
 };
 
 const writeText = vi.fn(async () => {});
@@ -257,14 +266,11 @@ describe("DesktopSettings", () => {
     expect(row.textContent).toContain("100%");
 
     await user.click(within(row).getByRole("button", { name: "Zoom in" }));
-    expect(bridge.setUserSettings).toHaveBeenCalledWith({
-      settings: expect.objectContaining({
-        appearance: expect.objectContaining({ zoomLevel: 1 }),
-      }),
-    });
-    // The optimistic paint applies the zoom and shows the new value at once.
-    expect(bridge.setWindowZoom).toHaveBeenCalledWith({ zoomLevel: 1 });
-    expect(row.textContent).toContain("120%");
+    // The stepper goes through main's one zoom mutation — never a full-file
+    // save — and paints the level main answered with.
+    expect(bridge.stepWindowZoom).toHaveBeenCalledWith({ step: "in" });
+    expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    await waitFor(() => expect(row.textContent).toContain("120%"));
   });
 
   it("saves a preferred name and previews agent attribution", async () => {

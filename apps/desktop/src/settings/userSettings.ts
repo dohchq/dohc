@@ -38,6 +38,9 @@ export function zoomPercent(level: number): number {
   return Math.round(100 * Math.pow(1.2, level));
 }
 
+export const ZOOM_STEPS = ["in", "out", "reset"] as const;
+export type ZoomStep = (typeof ZOOM_STEPS)[number];
+
 export const RunnerSettings = z.object({
   command: z.string().max(4096),
   enabled: z.boolean(),
