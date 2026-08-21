@@ -401,15 +401,101 @@ describe("stopProcessTreePosix", () => {
     ]);
   });
 
+  it("waits for a captured descendant after the root settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      let descendantAliveChecks = 0;
+      const options = {
+        readProcessTable: async () =>
+          [psRow(100, 1), psRow(200, 100)].join("\n"),
+        sendSignal: (pid: number, signal: NodeJS.Signals) =>
+          signalled.push({ pid, signal }),
+        isAlive: (pid: number) => {
+          if (pid === 100) return false;
+          descendantAliveChecks += 1;
+          return descendantAliveChecks < 3;
+        },
+      };
+
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        200,
+        undefined,
+        options,
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(signalled).toEqual([
+        { pid: 200, signal: "SIGTERM" },
+        { pid: 100, signal: "SIGTERM" },
+      ]);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(descendantAliveChecks).toBe(2);
+      expect(signalled).toEqual([
+        { pid: 200, signal: "SIGTERM" },
+        { pid: 100, signal: "SIGTERM" },
+      ]);
+      await vi.advanceTimersByTimeAsync(50);
+      await pending;
+
+      expect(descendantAliveChecks).toBe(4);
+      expect(signalled).toEqual([
+        { pid: 200, signal: "SIGTERM" },
+        { pid: 100, signal: "SIGTERM" },
+        { pid: 200, signal: "SIGKILL" },
+        { pid: 100, signal: "SIGKILL" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts the force round promptly when every captured target has exited", async () => {
+    vi.useFakeTimers();
+    try {
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        200,
+        undefined,
+        {
+          readProcessTable: async () =>
+            [psRow(100, 1), psRow(200, 100)].join("\n"),
+          sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+          isAlive: () => false,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      await pending;
+
+      expect(signalled).toEqual([
+        { pid: 200, signal: "SIGTERM" },
+        { pid: 100, signal: "SIGTERM" },
+        { pid: 200, signal: "SIGKILL" },
+        { pid: 100, signal: "SIGKILL" },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("waits for force-round targets to exit before resolving", async () => {
     vi.useFakeTimers();
     try {
       let aliveChecks = 0;
       let resolved = false;
+      let forceRoundStarted = false;
       const options = {
         readProcessTable: async () => psRow(100, 1),
-        sendSignal: () => undefined,
+        sendSignal: (_pid: number, signal: NodeJS.Signals) => {
+          if (signal === "SIGKILL") forceRoundStarted = true;
+        },
         isAlive: () => {
+          if (!forceRoundStarted) return false;
           aliveChecks += 1;
           return aliveChecks < 3;
         },

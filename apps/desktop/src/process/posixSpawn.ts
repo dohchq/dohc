@@ -210,12 +210,13 @@ async function waitForProcessExit(
 }
 
 /**
- * SIGTERM the whole POSIX process tree rooted at `pid`, wait up to
- * `settleMs` for `settled` to resolve (or the grace period to elapse,
- * whichever comes first), then SIGKILL the tree again. The force round reuses
- * a captured pid only when its start time still matches, so it reaches a
- * reparented descendant without signalling a process that reused the pid.
- * After SIGKILL, waits up to `settleMs` for the force-round targets to exit.
+ * SIGTERM the whole POSIX process tree rooted at `pid`, then wait concurrently
+ * for `settled` to resolve and every captured pid to exit. Each wait uses the
+ * same `settleMs` grace period before the tree receives SIGKILL. The force
+ * round reuses a captured pid only when its start time still matches, so it
+ * reaches a reparented descendant without signalling a process that reused
+ * the pid. After SIGKILL, waits up to `settleMs` for the force-round targets
+ * to exit.
  */
 export async function stopProcessTreePosix(
   pid: number,
@@ -234,7 +235,10 @@ export async function stopProcessTreePosix(
     onTreeKillFailure?.();
   }
   const settledPromise = typeof settled === "function" ? settled() : settled;
-  await Promise.race([settledPromise, unrefDelay(settleMs)]);
+  await Promise.all([
+    Promise.race([settledPromise, unrefDelay(settleMs)]),
+    waitForProcessExit(captured, settleMs, options.isAlive ?? isProcessAlive),
+  ]);
   try {
     const result = await signalProcessTreePosix(pid, "SIGKILL", {
       ...options,
