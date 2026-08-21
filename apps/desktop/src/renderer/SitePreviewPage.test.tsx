@@ -912,6 +912,35 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByText("Stale share refresh failed")).toBeNull();
   });
 
+  it("does not repaint the new site with a stale site-load response after switching sites mid-load", async () => {
+    const pendingLoad = deferred<SitePackageInfo | null>();
+    const replacementSite: SitePackageInfo = {
+      ...site,
+      root: "replacement",
+      title: "Replacement",
+      entryPath: "replacement/index.html",
+      sourceFiles: ["replacement/index.html"],
+      shareManifest: readyShare("replacement/index.html"),
+    };
+    bridgeMock.getSitePackage
+      .mockReturnValueOnce(pendingLoad.promise)
+      .mockResolvedValueOnce(replacementSite);
+
+    const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await vi.waitFor(() => expect(bridgeMock.getSitePackage).toHaveBeenCalledTimes(1));
+
+    view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
+    await screen.findByText("Replacement");
+
+    await act(async () => {
+      pendingLoad.resolve(site);
+      await pendingLoad.promise;
+    });
+
+    expect(screen.queryByText("Report")).toBeNull();
+    expect(screen.getByText("Replacement")).toBeTruthy();
+  });
+
   it("does not repaint the new site with a stale preview-start response after switching sites mid-start", async () => {
     const pendingStart = deferred<StartSitePreviewResult>();
     const replacementSite: SitePackageInfo = {

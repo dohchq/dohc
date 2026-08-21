@@ -8,24 +8,51 @@ import {
 
 export type SitePreviewScript = "dev" | "start" | "build";
 
+const KNOWN_PACKAGE_MANAGER_COMMANDS: ReadonlySet<string> = new Set([
+  "npm",
+  "pnpm",
+  "yarn",
+  "bun",
+]);
+
+// npm's own documented boolean options for `run`/`run-script`, deliberately
+// excluding any option that takes a value (e.g. --script-shell) — a
+// value-taking option could redirect execution somewhere dohc never
+// validates, so it's left unrecognized rather than allowlisted.
+const NPM_RUN_BOOLEAN_OPTIONS: ReadonlySet<string> = new Set([
+  "--if-present",
+  "--ignore-scripts",
+  "--silent",
+  "-s",
+  "--foreground-scripts",
+]);
+
+// `npm run [options] <script> [options] [-- <forwardedArgs...>]` — options
+// can land either between `run` and the script name or after it.
+function npmRunScriptResult(
+  args: string[],
+): { script: string; forwardedArgs: string[] } | null {
+  let i = 0;
+  while (i < args.length && NPM_RUN_BOOLEAN_OPTIONS.has(args[i])) i++;
+  const script = args[i];
+  if (!script) return null;
+  i++;
+  while (i < args.length && NPM_RUN_BOOLEAN_OPTIONS.has(args[i])) i++;
+  if (i === args.length) return { script, forwardedArgs: [] };
+  if (args[i] === "--") return { script, forwardedArgs: args.slice(i + 1) };
+  return null;
+}
+
 function packageManagerScriptRun(
   parsed: ReturnType<typeof splitCommandLine>,
 ): { manager: "npm" | "pnpm" | "yarn" | "bun"; script: string; forwardedArgs: string[] } | null {
-  const [first, second, ...rest] = parsed.args;
   if (parsed.command === "npm") {
-    if ((first === "run" || first === "run-script") && second) {
-      // npm's own documented form for passing args through to the script:
-      // `npm run <script> -- <forwardedArgs...>`. Anything after `run
-      // <script>` that ISN'T this exact `--` separator is an unrecognized
-      // shape, not a wrapper.
-      if (rest.length === 0) return { manager: "npm", script: second, forwardedArgs: [] };
-      if (rest[0] === "--") {
-        return { manager: "npm", script: second, forwardedArgs: rest.slice(1) };
-      }
-      return null;
-    }
-    return null;
+    const [first, ...rest] = parsed.args;
+    if (first !== "run" && first !== "run-script") return null;
+    const run = npmRunScriptResult(rest);
+    return run ? { manager: "npm", script: run.script, forwardedArgs: run.forwardedArgs } : null;
   }
+  const [first, second, ...rest] = parsed.args;
   if (rest.length > 0) return null;
   if (
     parsed.command === "pnpm" ||
@@ -85,7 +112,19 @@ export function commandForSiteScript(
   const configuredCommand = site.configuredScripts[script];
   if (configuredCommand) {
     const parsed = splitCommandLine(configuredCommand);
-    return validatedPackageManagerRun(site, parsed) ?? parsed;
+    const validated = validatedPackageManagerRun(site, parsed);
+    if (validated) return validated;
+    // A known package manager MUST resolve to a validated script run — the
+    // uninspected literal-command fallback below is only for commands that
+    // aren't a package manager at all (e.g. a bare `vite --host ...`).
+    // Falling through here would let an unrecognized wrapper shape (like
+    // `npm run dev --if-present` before this fix) execute unvalidated.
+    if (KNOWN_PACKAGE_MANAGER_COMMANDS.has(parsed.command)) {
+      throw new Error(
+        `This site's configured ${script} command invokes ${parsed.command} in a shape dohc does not recognize as a script-run wrapper: ${configuredCommand}`,
+      );
+    }
+    return parsed;
   }
   const configured = site.scripts[script];
   if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);

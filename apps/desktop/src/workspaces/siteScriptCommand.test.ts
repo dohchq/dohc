@@ -76,17 +76,51 @@ describe("commandForSiteScript", () => {
     expect(() => commandForSiteScript(site, "dev")).toThrow(/loopback/);
   });
 
-  it("does not treat npm args after run <script> as a recognized wrapper unless they start with --", () => {
+  it("refuses an npm run command it cannot recognize as a script-run wrapper, rather than falling through unvalidated", () => {
     const site = packageSite({
       configuredScripts: { dev: "npm run dev --port 3000" },
     });
 
-    // Falls through to the uninspected literal command rather than being
-    // misread as npm's `-- <forwardedArgs>` form.
+    // `--port 3000` is neither a documented npm run option nor npm's `--
+    // <forwardedArgs>` form — a known package manager in an unrecognized
+    // shape is refused, never executed uninspected.
+    expect(() => commandForSiteScript(site, "dev")).toThrow(
+      /does not recognize as a script-run wrapper/,
+    );
+  });
+
+  it("recognizes npm run's documented boolean options between run and the script name, and after it", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run --if-present dev --silent" },
+    });
+
     expect(commandForSiteScript(site, "dev")).toEqual({
       command: "npm",
-      args: ["run", "dev", "--port", "3000"],
+      args: ["run", "dev"],
     });
+  });
+
+  it("still falls through to the uninspected literal command when it isn't a package manager at all", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "vite --host 127.0.0.1" },
+    });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({
+      command: "vite",
+      args: ["--host", "127.0.0.1"],
+    });
+  });
+
+  it("refuses npm run dev --if-present with a hostile predev, rather than executing it unvalidated", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run dev --if-present" },
+      scripts: {
+        dev: "vite --host 127.0.0.1",
+        predev: "vite --host 0.0.0.0",
+      },
+    });
+
+    expect(() => commandForSiteScript(site, "dev")).toThrow(/loopback/);
   });
 
   it.each(["bun run dev", "bun dev"])(

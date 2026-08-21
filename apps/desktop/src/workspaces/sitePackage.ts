@@ -258,6 +258,20 @@ function isImageInputElement(attrs: ReadonlyMap<string, string>): boolean {
   return attrs.get("type")?.toLowerCase() === "image";
 }
 
+// <meta http-equiv="refresh" content="0;url=target.html"> navigates the
+// browser to `target.html` after the given delay — a literal navigation
+// dependency the URL_ATTRIBUTE_ELEMENTS mechanism doesn't cover, since the
+// URL lives inside a mini-syntax packed into `content`, not its own
+// attribute. A bare delay with no "url=" part (content="5") just re-loads
+// the current document and names no separate target.
+const META_REFRESH_URL_PATTERN = /^\s*[\d.]*\s*[;,]\s*url\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S.*))$/i;
+
+function metaRefreshTarget(content: string): string | undefined {
+  const match = META_REFRESH_URL_PATTERN.exec(content);
+  const raw = (match?.[1] ?? match?.[2] ?? match?.[3])?.trim();
+  return raw || undefined;
+}
+
 // Which elements a URL-bearing attribute actually fires a request from, per
 // the HTML spec — the same list every attribute-reference consumer below
 // shares, so a `<div data="...">` (data means nothing there) can't mint one.
@@ -871,6 +885,13 @@ function parseJavaScript(code: string, scriptKind: ScriptKind): AstNode | null {
 // literal relative/absolute specifier does.
 interface ImportMapResolution {
   imports: ReadonlyMap<string, string>;
+  // A relative/root-relative import-map KEY ("./lib.js") is itself a
+  // URL-like specifier, not a bare one — the spec normalizes it against the
+  // map's own (declaring document) base the same way it normalizes the
+  // address it maps to, then matches an importer's specifier by its OWN
+  // normalized form. Keyed by the same artifact-root-absolute ("/"-prefixed)
+  // convention resolveImportMapAddresses already uses for values.
+  urlLikeImports: ReadonlyMap<string, string>;
 }
 
 function isBareModuleSpecifier(specifier: string): boolean {
@@ -890,8 +911,21 @@ function isBareModuleSpecifier(specifier: string): boolean {
 function resolveModuleSpecifier(
   specifier: string,
   importMap: ImportMapResolution | undefined,
+  fromPath: string,
+  ownBase: HtmlBaseResolution,
+  artifactRoot: string,
 ): string | undefined {
-  if (!isBareModuleSpecifier(specifier)) return specifier;
+  if (!isBareModuleSpecifier(specifier)) {
+    // A URL-like specifier still passes through the import map: the spec
+    // normalizes it against the IMPORTING script's own base and matches
+    // that normalized form against the map's (already-normalized) keys.
+    // Unmatched, it resolves to itself — same as before this lookup existed.
+    if (!importMap) return specifier;
+    const normalized = resolveArtifactRelativePath(specifier, fromPath, artifactRoot, ownBase);
+    const normalizedRelative = normalized ? pathRelativeToArtifact(artifactRoot, normalized) : null;
+    if (normalizedRelative === null) return specifier;
+    return importMap.urlLikeImports.get(`/${normalizedRelative}`) ?? specifier;
+  }
   if (!importMap) return undefined;
   const exact = importMap.imports.get(specifier);
   if (exact !== undefined) return exact;
@@ -919,7 +953,9 @@ function parseImportMap(text: string): ImportMapResolution | undefined {
       if (typeof value === "string") imports.set(key, value);
     }
   }
-  return { imports };
+  // Raw, pre-normalization form — resolveImportMapAddresses splits bare vs.
+  // URL-like keys and populates urlLikeImports before this is used anywhere.
+  return { imports, urlLikeImports: new Map() };
 }
 
 // Finding 8's stance: `new URL(lit, import.meta.url)` alone only
@@ -980,6 +1016,9 @@ function jsReferencesFromCode(
   code: string,
   scriptKind: ScriptKind,
   context: JsScanContext,
+  fromPath: string,
+  ownBase: HtmlBaseResolution,
+  artifactRoot: string,
   importMap?: ImportMapResolution,
 ): BrowserTextReference[] {
   const program = parseJavaScript(code, scriptKind);
@@ -1003,7 +1042,14 @@ function jsReferencesFromCode(
   // They can only ever appear in module grammar, so the target is a module.
   const addModuleSpecifier = (value: string | undefined) => {
     const trimmed = value?.trim();
-    if (trimmed) addReference(resolveModuleSpecifier(trimmed, importMap), false, false, "module");
+    if (trimmed) {
+      addReference(
+        resolveModuleSpecifier(trimmed, importMap, fromPath, ownBase, artifactRoot),
+        false,
+        false,
+        "module",
+      );
+    }
   };
   // A literal string argument, OR a consumed new URL(lit, import.meta.url)
   // result — the latter resolves against the SCRIPT's own location
@@ -1123,9 +1169,20 @@ interface HtmlDocumentReferences {
 function jsReferencesFromEventHandler(
   code: string,
   context: JsScanContext,
+  fromPath: string,
+  ownBase: HtmlBaseResolution,
+  artifactRoot: string,
   importMap: ImportMapResolution | undefined,
 ): BrowserTextReference[] {
-  return jsReferencesFromCode(`function __dohc_handler__(event) {\n${code}\n}`, "classic", context, importMap);
+  return jsReferencesFromCode(
+    `function __dohc_handler__(event) {\n${code}\n}`,
+    "classic",
+    context,
+    fromPath,
+    ownBase,
+    artifactRoot,
+    importMap,
+  );
 }
 
 /** Resolves each import-map address against the DECLARING document's own
@@ -1141,6 +1198,7 @@ function resolveImportMapAddresses(
   artifactRoot: string,
 ): ImportMapResolution {
   const resolved = new Map<string, string>();
+  const resolvedUrlLike = new Map<string, string>();
   for (const [key, rawAddress] of importMap.imports) {
     const candidate = resolveArtifactRelativePath(rawAddress, documentPath, artifactRoot, documentBase);
     // candidate is already artifact-relative (it includes artifactRoot's own
@@ -1149,9 +1207,20 @@ function resolveImportMapAddresses(
     // prefix on the next pass — strip it first or a nested artifactRoot
     // gets joined onto itself.
     const artifactRelative = candidate ? pathRelativeToArtifact(artifactRoot, candidate) : null;
-    if (artifactRelative !== null) resolved.set(key, `/${artifactRelative}`);
+    if (artifactRelative === null) continue;
+    const resolvedValue = `/${artifactRelative}`;
+    if (isBareModuleSpecifier(key)) {
+      resolved.set(key, resolvedValue);
+      continue;
+    }
+    // A relative/root-relative key normalizes the same way its address
+    // does, against THIS document's own base — an importer's specifier is
+    // matched against this normalized form, not the raw key text.
+    const normalizedKey = resolveArtifactRelativePath(key, documentPath, artifactRoot, documentBase);
+    const normalizedKeyRelative = normalizedKey ? pathRelativeToArtifact(artifactRoot, normalizedKey) : null;
+    if (normalizedKeyRelative !== null) resolvedUrlLike.set(`/${normalizedKeyRelative}`, resolvedValue);
   }
-  return { imports: resolved };
+  return { imports: resolved, urlLikeImports: resolvedUrlLike };
 }
 
 function htmlReferencesFromDocument(
@@ -1222,11 +1291,18 @@ function htmlReferencesFromDocument(
           }
         }
       }
+      if (tagName === "meta" && attrs.get("http-equiv")?.toLowerCase() === "refresh") {
+        const refreshTarget = metaRefreshTarget(attrs.get("content") ?? "");
+        if (refreshTarget) attributeReferences.push({ value: refreshTarget, documentRelative: true });
+      }
       const scriptKind: ScriptKind = attrs.get("type")?.toLowerCase() === "module" ? "module" : "classic";
       for (const attribute of node.attrs) {
         const attributeName = attribute.name;
         if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
         if (attributeName === "src" && tagName === "input" && !isImageInputElement(attrs)) continue;
+        // With `srcdoc` present, the browser never fetches an iframe's own
+        // `src` at all — srcdoc wins outright, it isn't a fallback.
+        if (attributeName === "src" && tagName === "iframe" && srcdoc !== undefined) continue;
         // A data-block script (a non-JS type, e.g. type="application/json")
         // is never fetched — src only fires a request for a classic or
         // module script.
@@ -1241,12 +1317,18 @@ function htmlReferencesFromDocument(
         // must yield to this, not require a ".webmanifest" spelling.
         const isManifest =
           attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("manifest");
+        // A modulepreload target is always fetched AND parsed as a module —
+        // it has no <script> element of its own to carry that kind, so the
+        // reference has to name it directly.
+        const isModulePreload =
+          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("modulepreload");
         if (attributeName !== "srcset") {
           attributeReferences.push({
             value: attribute.value,
             documentRelative: true,
             isManifest,
             ...(attributeName === "src" && tagName === "script" ? { scriptKind } : {}),
+            ...(isModulePreload ? { scriptKind: "module" as const } : {}),
           });
           continue;
         }
@@ -1283,9 +1365,11 @@ function htmlReferencesFromDocument(
     ...attributeReferences,
     ...nestedReferences,
     ...cssReferences(cssTexts.join("\n")),
-    ...jsReferencesFromCode(classicJsTexts.join("\n"), "classic", context, importMap),
-    ...jsReferencesFromCode(moduleJsTexts.join("\n"), "module", context, importMap),
-    ...handlerTexts.flatMap((handler) => jsReferencesFromEventHandler(handler, context, importMap)),
+    ...jsReferencesFromCode(classicJsTexts.join("\n"), "classic", context, documentPath, documentBase, artifactRoot, importMap),
+    ...jsReferencesFromCode(moduleJsTexts.join("\n"), "module", context, documentPath, documentBase, artifactRoot, importMap),
+    ...handlerTexts.flatMap((handler) =>
+      jsReferencesFromEventHandler(handler, context, documentPath, documentBase, artifactRoot, importMap),
+    ),
   ];
   return { references, importMap };
 }
@@ -1298,6 +1382,9 @@ function referencesFromNonHtmlFile(
   sourcePath: string,
   scriptKind: ScriptKind,
   context: JsScanContext,
+  ownBase: HtmlBaseResolution,
+  artifactRoot: string,
+  executesAsCode: boolean,
   isManifest: boolean,
   importMap: ImportMapResolution | undefined,
 ): BrowserTextReference[] {
@@ -1311,7 +1398,14 @@ function referencesFromNonHtmlFile(
     return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: false }));
   }
   if (/\.css$/i.test(sourcePath)) return cssReferences(text);
-  if (/\.(?:js|mjs)$/i.test(sourcePath)) return jsReferencesFromCode(text, scriptKind, context, importMap);
+  if (/\.(?:js|mjs)$/i.test(sourcePath)) {
+    // Bytes the browser only ever FETCHES (fetch(), an asset-style URL
+    // attribute) are never executed, so their text is never parsed as code
+    // — the file still shares as an asset (the caller already added it to
+    // `approved`), it just contributes no further references of its own.
+    if (!executesAsCode) return [];
+    return jsReferencesFromCode(text, scriptKind, context, sourcePath, ownBase, artifactRoot, importMap);
+  }
   return [];
 }
 
@@ -1397,6 +1491,16 @@ async function shareManifestForSite(
     documentBase: HtmlBaseResolution;
     context: JsScanContext;
     scriptKind: ScriptKind;
+    // Whether the browser EXECUTES this target as code (a <script src>, a
+    // module specifier, a Worker/service-worker script, importScripts) as
+    // opposed to only fetching its bytes (fetch(), or an asset-style URL
+    // attribute that happens to point at a ".js" path). A fetched-only
+    // target still shares as an asset — its content is just never parsed
+    // for further references, the same way a browser never runs it. Part of
+    // the dedupe key below for the same reason scriptKind is: the same file
+    // reached both ways (once via fetch, once via <script src>) needs both
+    // scans, not one "using up" the path for the other.
+    executesAsCode: boolean;
     isManifest: boolean;
     importMap: ImportMapResolution | undefined;
   }> = [
@@ -1405,6 +1509,7 @@ async function shareManifestForSite(
       documentBase: { kind: "none" },
       context: "document",
       scriptKind: "classic",
+      executesAsCode: true,
       isManifest: false,
       importMap: undefined,
     },
@@ -1416,10 +1521,11 @@ async function shareManifestForSite(
       documentBase: inheritedDocumentBase,
       context,
       scriptKind,
+      executesAsCode,
       isManifest,
       importMap: inheritedImportMap,
     } = queue.shift()!;
-    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${isManifest}`;
+    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${isManifest}`;
     if (
       scanned.has(scanKey) ||
       (!isManifest && !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current))
@@ -1463,7 +1569,17 @@ async function shareManifestForSite(
         : null;
       const references = htmlResult
         ? htmlResult.references
-        : referencesFromNonHtmlFile(text, current, scriptKind, context, isManifest, inheritedImportMap);
+        : referencesFromNonHtmlFile(
+            text,
+            current,
+            scriptKind,
+            context,
+            base,
+            artifactRoot,
+            executesAsCode,
+            isManifest,
+            inheritedImportMap,
+          );
       const documentImportMap = htmlResult ? htmlResult.importMap : inheritedImportMap;
       for (const reference of references) {
         const referenceBase = reference.documentRelative ? documentBase : base;
@@ -1488,6 +1604,7 @@ async function shareManifestForSite(
             documentBase: propagatedDocumentBase,
             context: propagatedContext,
             scriptKind: reference.scriptKind ?? "classic",
+            executesAsCode: reference.scriptKind !== undefined || reference.entersOwnContext === true,
             isManifest: reference.isManifest ?? false,
             importMap: documentImportMap,
           });

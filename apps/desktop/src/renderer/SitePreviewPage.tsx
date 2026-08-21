@@ -197,6 +197,9 @@ export function SitePreviewPage(props: {
 
   const reloadSite = useCallback(async () => {
     const request = ++loadRequestRef.current;
+    const requestContext = siteContext;
+    const isCurrent = () =>
+      request === loadRequestRef.current && requestContext === siteContextRef.current;
     shareRequestRef.current += 1;
     setLoad({ status: "loading" });
     setPreview(null);
@@ -218,7 +221,7 @@ export function SitePreviewPage(props: {
           .getWorkspaceSettings({ workspaceId: props.workspaceId })
           .catch((): WorkspaceSettingsResult | null => null),
       ]);
-      if (request !== loadRequestRef.current) return;
+      if (!isCurrent()) return;
       setLoad(site
         ? {
             status: "ready",
@@ -229,13 +232,13 @@ export function SitePreviewPage(props: {
         : { status: "missing" });
       setActionError(null);
     } catch (error) {
-      if (request !== loadRequestRef.current) return;
+      if (!isCurrent()) return;
       setLoad({
         status: "error",
         message: error instanceof Error ? error.message : "Could not load this site.",
       });
     }
-  }, [props.workspaceId, props.siteRoot]);
+  }, [props.workspaceId, props.siteRoot, siteContext]);
 
   useEffect(() => {
     void reloadSite();

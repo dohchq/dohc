@@ -1068,6 +1068,142 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("modulepreload/app.mjs");
   });
 
+  it("parses a modulepreload target as a module, not classic script grammar", async () => {
+    await mkdir(join(root, "modulepreload-kind"), { recursive: true });
+    await writeFile(
+      join(root, "modulepreload-kind", "index.html"),
+      '<link rel="modulepreload" href="dep.js">',
+    );
+    // `export` is only legal in module grammar — parsing this as classic
+    // grammar would fail entirely and miss the fetch() reference below it.
+    await writeFile(
+      join(root, "modulepreload-kind", "dep.js"),
+      'export {};\nfetch("./dep-target.txt");',
+    );
+    await writeFile(join(root, "modulepreload-kind", "dep-target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "modulepreload-kind",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("modulepreload-kind/dep.js");
+    expect(manifestOf(site)?.assets).toContain("modulepreload-kind/dep-target.txt");
+  });
+
+  it("does not parse a fetch()-only .js target as code — it shares as an asset but names no further references", async () => {
+    await mkdir(join(root, "fetched-bytes"), { recursive: true });
+    await writeFile(
+      join(root, "fetched-bytes", "index.html"),
+      '<script>fetch("payload.js");</script>',
+    );
+    // Real bytes a browser only ever fetches with this file — never runs as
+    // a script — so the fetch("private.txt") text inside it is just data,
+    // not a reference a real browser would ever follow.
+    await writeFile(
+      join(root, "fetched-bytes", "payload.js"),
+      'fetch("private.txt");',
+    );
+    await writeFile(join(root, "fetched-bytes", "private.txt"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "fetched-bytes",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("fetched-bytes/payload.js");
+    expect(manifestOf(site)?.assets).not.toContain("fetched-bytes/private.txt");
+  });
+
+  it("still parses the same .js file as code when a LATER reference to it (same path/context/kind) is executable", async () => {
+    // Both references to shared.js come from worker.js's own scan, sharing
+    // the exact same documentBase/context/scriptKind — only executesAsCode
+    // differs — and fetch() is discovered (and queued) BEFORE importScripts,
+    // matching source order. Without executesAsCode in the dedupe key, the
+    // first (non-executable) scan would "use up" shared.js's path and the
+    // second (executable, importScripts) reference would be silently
+    // skipped, missing real-target.txt entirely.
+    await mkdir(join(root, "dual-executability"), { recursive: true });
+    await writeFile(
+      join(root, "dual-executability", "index.html"),
+      '<script>new Worker("worker.js");</script>',
+    );
+    await writeFile(
+      join(root, "dual-executability", "worker.js"),
+      'fetch("shared.js");\nimportScripts("shared.js");',
+    );
+    await writeFile(
+      join(root, "dual-executability", "shared.js"),
+      'fetch("real-target.txt");',
+    );
+    await writeFile(join(root, "dual-executability", "real-target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "dual-executability",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("dual-executability/worker.js");
+    expect(manifestOf(site)?.assets).toContain("dual-executability/shared.js");
+    expect(manifestOf(site)?.assets).toContain("dual-executability/real-target.txt");
+  });
+
+  it("follows a meta-refresh navigation target as a document-relative dependency", async () => {
+    await mkdir(join(root, "meta-refresh"), { recursive: true });
+    await writeFile(
+      join(root, "meta-refresh", "index.html"),
+      '<meta http-equiv="refresh" content="0;url=next.html">',
+    );
+    await writeFile(join(root, "meta-refresh", "next.html"), "<h1>Next</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "meta-refresh",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("meta-refresh/next.html");
+  });
+
+  it("does not mint a meta-refresh reference from a bare delay with no url= part", async () => {
+    await mkdir(join(root, "meta-refresh-bare"), { recursive: true });
+    await writeFile(
+      join(root, "meta-refresh-bare", "index.html"),
+      '<meta http-equiv="refresh" content="5">',
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "meta-refresh-bare",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual([]);
+  });
+
+  it("iframe src yields to srcdoc when both are present", async () => {
+    await mkdir(join(root, "srcdoc-wins"), { recursive: true });
+    await writeFile(
+      join(root, "srcdoc-wins", "index.html"),
+      '<iframe srcdoc="<h1>Inline</h1>" src="private.html"></iframe>',
+    );
+    await writeFile(join(root, "srcdoc-wins", "private.html"), "<h1>Private</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "srcdoc-wins",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("srcdoc-wins/private.html");
+  });
+
+  it("still fetches an iframe's src when srcdoc is absent", async () => {
+    await mkdir(join(root, "src-alone"), { recursive: true });
+    await writeFile(
+      join(root, "src-alone", "index.html"),
+      '<iframe src="framed.html"></iframe>',
+    );
+    await writeFile(join(root, "src-alone", "framed.html"), "<h1>Framed</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "src-alone",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("src-alone/framed.html");
+  });
+
   it("treats a substitution-free template literal as a static string reference", async () => {
     await mkdir(join(root, "template-literal"), { recursive: true });
     await writeFile(
@@ -1125,6 +1261,26 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("import-map/public.js");
     expect(manifestOf(site)?.assets).not.toContain("import-map/lib");
     expect(manifestOf(site)?.assets).not.toContain("import-map/unmapped");
+  });
+
+  it("resolves a relative import-map key by matching the importer's normalized specifier, not just bare ones", async () => {
+    await mkdir(join(root, "import-map-key"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-key", "index.html"),
+      [
+        '<script type="importmap">{"imports": {"./lib.js": "./public.js"}}</script>',
+        '<script type="module">import "./lib.js";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-key", "public.js"), "export {};");
+    await writeFile(join(root, "import-map-key", "lib.js"), "private file literally named lib.js");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-key",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-key/public.js");
+    expect(manifestOf(site)?.assets).not.toContain("import-map-key/lib.js");
   });
 
   it("parses an iframe's srcdoc as a nested document, resolved against the embedding document's base", async () => {

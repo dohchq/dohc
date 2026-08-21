@@ -151,6 +151,28 @@ describe("startStaticDirectoryPreview", () => {
     }
   });
 
+  it("serves a .htm entry as text/html, not application/octet-stream", async () => {
+    const panelRoot = join(root, "htm-panel");
+    await mkdir(panelRoot, { recursive: true });
+    await writeFile(join(panelRoot, "index.htm"), "<h1>Htm</h1>");
+
+    const preview = await startStaticDirectoryPreview(panelRoot, {
+      containmentRoot: root,
+      entry: "index.htm",
+      entryLabel: "panel entry",
+    });
+    try {
+      const asset = await fetch(new URL("/index.htm", preview.url));
+      expect(asset.status).toBe(200);
+      // MUTATION (mime): a missing .htm table entry falls through to
+      // application/octet-stream and the browser downloads the page instead
+      // of rendering it.
+      expect(asset.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    } finally {
+      await preview.stop();
+    }
+  });
+
   it("refuses an alias that leaves the served root but stays in containment", async () => {
     // The served root is a SUBDIRECTORY of the containment root, so the
     // containment check alone still admits the plugin's sibling files. This
