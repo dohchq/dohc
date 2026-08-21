@@ -2,7 +2,7 @@ import { symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import {
   createPluginAuthoredTextWriter,
@@ -397,6 +397,117 @@ describe("createPluginAuthoredTextWriter", () => {
       expect(doorWrites).toEqual([]);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stops after an abort during the final case-recovery read", async () => {
+    const controller = new AbortController();
+    let enterRead: () => void = () => undefined;
+    let releaseRead: (entries: string[]) => void = () => undefined;
+    const readEntered = new Promise<void>((resolve) => {
+      enterRead = resolve;
+    });
+    const readResult = new Promise<string[]>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readdirMock = vi.fn(async () => {
+      enterRead();
+      return readResult;
+    });
+    const handleDoorWrittenSourceChange = vi.fn();
+    vi.resetModules();
+    vi.doMock("node:fs/promises", () => ({ readdir: readdirMock }));
+
+    try {
+      const { createPluginAuthoredTextWriter: createWriterWithMockedReaddir } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithMockedReaddir(writerInput({
+        signal: controller.signal,
+        platform: "darwin",
+        capture: recordingCapture().capture,
+        pipeline: {
+          pluginIdForPath: () => "owned-plugin",
+          handleDoorWrittenSourceChange,
+        },
+      }));
+
+      const pending = write("note.txt", "text\n", {
+        overwrite: true,
+        author,
+      });
+      await readEntered;
+      controller.abort();
+      releaseRead(["note.txt"]);
+
+      await expect(pending).rejects.toThrow(
+        "Plugin panel is no longer active.",
+      );
+      expect(handleDoorWrittenSourceChange).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("reports overlapping writes in their landing order after case recovery", async () => {
+    let releaseFirstRead: (entries: string[]) => void = () => undefined;
+    const firstReadResult = new Promise<string[]>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    let readCount = 0;
+    const readdirMock = vi.fn(async () => {
+      readCount += 1;
+      return readCount === 1 ? firstReadResult : ["note.txt"];
+    });
+    let writeCount = 0;
+    let landSecondWrite: () => void = () => undefined;
+    const secondWriteLanded = new Promise<void>((resolve) => {
+      landSecondWrite = resolve;
+    });
+    const reportedTexts: string[] = [];
+    vi.resetModules();
+    vi.doMock("node:fs/promises", () => ({ readdir: readdirMock }));
+
+    try {
+      const { createPluginAuthoredTextWriter: createWriterWithMockedReaddir } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithMockedReaddir(writerInput({
+        platform: "darwin",
+        capture: {
+          writeAuthoredTextFile: async () => {
+            writeCount += 1;
+            if (writeCount === 2) landSecondWrite();
+          },
+        },
+        pipeline: {
+          pluginIdForPath: () => "owned-plugin",
+          handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
+            reportedTexts.push(doorWrite.text);
+          },
+        },
+      }));
+
+      const first = write("note.txt", "first\n", {
+        overwrite: true,
+        author,
+      });
+      await vi.waitFor(() => expect(readdirMock).toHaveBeenCalledOnce());
+      const second = write("note.txt", "second\n", {
+        overwrite: true,
+        author,
+      });
+      await secondWriteLanded;
+      await Promise.resolve();
+      await Promise.resolve();
+      releaseFirstRead(["note.txt"]);
+      await Promise.all([first, second]);
+
+      expect(readdirMock).toHaveBeenCalledTimes(2);
+      expect(reportedTexts).toEqual(["first\n", "second\n"]);
+      expect(reportedTexts.at(-1)).toBe("second\n");
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
     }
   });
 

@@ -9,8 +9,9 @@
 // from the process table instead and signal each pid.
 import { execFile } from "node:child_process";
 
-// Keep the 2_000 ms timeout within one default grace budget. On WSL/Ubuntu,
-// 20-run idle (~89 processes) and loaded (~145, four CPU loops) samples of
+// The nominal read cap equals the default total shutdown budget. A stopped
+// tree clamps each read to the time left in that budget. On WSL/Ubuntu, 20-run
+// idle (~89 processes) and loaded (~145, four CPU loops) samples of
 // `ps -A -o pid=,ppid=,lstart=` took 5-10 ms.
 const PROCESS_TABLE_READ_TIMEOUT_MS = 2_000;
 
@@ -61,6 +62,12 @@ export function processTreePids(
   table: readonly Pick<ProcessTableEntry, "pid" | "ppid">[],
   rootPid: number,
 ): number[] {
+  return collectTreePids(buildChildrenByParent(table), rootPid);
+}
+
+function buildChildrenByParent(
+  table: readonly Pick<ProcessTableEntry, "pid" | "ppid">[],
+): Map<number, number[]> {
   const childrenByParent = new Map<number, number[]>();
   for (const entry of table) {
     if (entry.pid === entry.ppid) continue;
@@ -68,6 +75,13 @@ export function processTreePids(
     if (siblings) siblings.push(entry.pid);
     else childrenByParent.set(entry.ppid, [entry.pid]);
   }
+  return childrenByParent;
+}
+
+function collectTreePids(
+  childrenByParent: ReadonlyMap<number, number[]>,
+  rootPid: number,
+): number[] {
   const ordered: number[] = [rootPid];
   const seen = new Set<number>([rootPid]);
   for (let index = 0; index < ordered.length; index += 1) {
@@ -93,6 +107,8 @@ export interface KillProcessTreePosixOptions {
   alsoSignal?: readonly number[];
   /** When present, a fresh process-table row must match before reuse. */
   alsoSignalIdentities?: readonly ProcessIdentity[];
+  /** Bounds this round's process-table read. */
+  readTimeoutMs?: number;
 }
 
 export interface StopProcessTreePosixOptions extends Pick<
@@ -102,14 +118,14 @@ export interface StopProcessTreePosixOptions extends Pick<
   isAlive?: (pid: number) => boolean;
 }
 
-function readProcessTableWithPs(): Promise<string> {
+function readProcessTableWithPs(readTimeoutMs: number): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile(
       "ps",
       ["-A", "-o", "pid=,ppid=,lstart="],
       {
         maxBuffer: PROCESS_TABLE_MAX_BUFFER_BYTES,
-        timeout: PROCESS_TABLE_READ_TIMEOUT_MS,
+        timeout: readTimeoutMs,
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -121,7 +137,13 @@ function readProcessTableWithPs(): Promise<string> {
 
 function readProcessTableWithTimeout(
   readProcessTable: () => Promise<string>,
+  readTimeoutMs: number,
 ): Promise<string> {
+  if (readTimeoutMs <= 0) {
+    return Promise.reject(
+      new Error(`Process table read exceeded ${readTimeoutMs} ms.`),
+    );
+  }
   return new Promise((resolveOutput, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -129,10 +151,10 @@ function readProcessTableWithTimeout(
       settled = true;
       reject(
         new Error(
-          `Process table read exceeded ${PROCESS_TABLE_READ_TIMEOUT_MS} ms.`,
+          `Process table read exceeded ${readTimeoutMs} ms.`,
         ),
       );
-    }, PROCESS_TABLE_READ_TIMEOUT_MS);
+    }, readTimeoutMs);
     timer.unref?.();
     Promise.resolve().then(readProcessTable).then(
       (output) => {
@@ -162,7 +184,9 @@ async function signalProcessTreePosix(
   signal: NodeJS.Signals,
   options: KillProcessTreePosixOptions,
 ): Promise<ProcessTreeSignalResult> {
-  const readProcessTable = options.readProcessTable ?? readProcessTableWithPs;
+  const readTimeoutMs = options.readTimeoutMs ?? PROCESS_TABLE_READ_TIMEOUT_MS;
+  const readProcessTable = options.readProcessTable ??
+    (() => readProcessTableWithPs(readTimeoutMs));
   const sendSignal = options.sendSignal ??
     ((pid, pidSignal) => process.kill(pid, pidSignal));
   const isForceRound = options.alsoSignalIdentities !== undefined;
@@ -179,9 +203,10 @@ async function signalProcessTreePosix(
   let tableReadFailed = false;
   try {
     const table = parseProcessTable(
-      await readProcessTableWithTimeout(readProcessTable),
+      await readProcessTableWithTimeout(readProcessTable, readTimeoutMs),
     );
     const entriesByPid = new Map(table.map((entry) => [entry.pid, entry]));
+    const childrenByParent = buildChildrenByParent(table);
     const identityMatches = (pid: number): boolean => {
       const captured = capturedIdentities.get(pid);
       if (captured === undefined) {
@@ -195,7 +220,9 @@ async function signalProcessTreePosix(
     const roots = [rootPid, ...(options.alsoSignal ?? [])].filter(
       identityMatches,
     );
-    pids = [...new Set(roots.flatMap((pid) => processTreePids(table, pid)))];
+    pids = [...new Set(
+      roots.flatMap((pid) => collectTreePids(childrenByParent, pid)),
+    )];
     identities = pids.flatMap((pid) => {
       const entry = entriesByPid.get(pid);
       return entry ? [{ pid, startedAt: entry.startedAt }] : [];
@@ -264,12 +291,12 @@ async function waitForProcessExit(
 
 /**
  * SIGTERM the whole POSIX process tree rooted at `pid`, then wait concurrently
- * for `settled` to resolve and every captured pid to exit. Each wait uses the
- * same `settleMs` grace period before the tree receives SIGKILL. The force
- * round reuses a captured pid only when its start time still matches, so it
+ * for `settled` to resolve and every captured pid to exit. Both process-table
+ * reads, the grace wait, and the final confirmation share one `settleMs`
+ * budget. The force round reuses a captured pid only when its start time
+ * still matches, so it
  * reaches a reparented descendant without signalling a process that reused
- * the pid. After SIGKILL, waits up to `settleMs` for the force-round targets
- * to exit.
+ * the pid.
  */
 export async function stopProcessTreePosix(
   pid: number,
@@ -279,11 +306,19 @@ export async function stopProcessTreePosix(
   options: StopProcessTreePosixOptions = {},
 ): Promise<void> {
   const isAlive = options.isAlive ?? isProcessAlive;
+  const deadline = Date.now() + settleMs;
+  const remaining = (): number => Math.max(0, deadline - Date.now());
   let captured: readonly number[] = [];
   let capturedIdentities: readonly ProcessIdentity[] = [];
   let unverifiable = false;
   try {
-    const result = await signalProcessTreePosix(pid, "SIGTERM", options);
+    const result = await signalProcessTreePosix(pid, "SIGTERM", {
+      ...options,
+      readTimeoutMs: Math.min(
+        PROCESS_TABLE_READ_TIMEOUT_MS,
+        remaining(),
+      ),
+    });
     captured = result.pids;
     capturedIdentities = result.identities;
     unverifiable = result.tableReadFailed;
@@ -293,8 +328,8 @@ export async function stopProcessTreePosix(
 
   const settledPromise = typeof settled === "function" ? settled() : settled;
   await Promise.all([
-    Promise.race([settledPromise, unrefDelay(settleMs)]),
-    waitForProcessExit(captured, settleMs, isAlive),
+    Promise.race([settledPromise, unrefDelay(remaining())]),
+    waitForProcessExit(captured, remaining(), isAlive),
   ]);
 
   let forceResultPids: readonly number[] = [];
@@ -303,10 +338,14 @@ export async function stopProcessTreePosix(
       ...options,
       alsoSignal: captured,
       alsoSignalIdentities: capturedIdentities,
+      readTimeoutMs: Math.min(
+        PROCESS_TABLE_READ_TIMEOUT_MS,
+        remaining(),
+      ),
     });
     forceResultPids = result.pids;
     unverifiable ||= result.tableReadFailed;
-    await waitForProcessExit(forceResultPids, settleMs, isAlive);
+    await waitForProcessExit(forceResultPids, remaining(), isAlive);
   } catch {
     unverifiable = true;
   }

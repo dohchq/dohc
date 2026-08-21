@@ -146,6 +146,53 @@ describe("killProcessTreePosix", () => {
     ]);
   });
 
+  it("builds one child index for a multi-root signal round", async () => {
+    const originalIterator = Array.prototype[Symbol.iterator];
+    let processTableIterations = 0;
+    Object.defineProperty(Array.prototype, Symbol.iterator, {
+      configurable: true,
+      writable: true,
+      value: function (this: unknown[]) {
+        const first = this[0];
+        if (
+          typeof first === "object" &&
+          first !== null &&
+          "pid" in first &&
+          "ppid" in first &&
+          "startedAt" in first
+        ) {
+          processTableIterations += 1;
+        }
+        return originalIterator.call(this);
+      },
+    });
+    const signalled: number[] = [];
+
+    try {
+      await killProcessTreePosix(100, "SIGTERM", {
+        readProcessTable: async () => [
+          psRow(100, 1),
+          psRow(110, 100),
+          psRow(200, 1),
+          psRow(210, 200),
+          psRow(300, 1),
+          psRow(310, 300),
+        ].join("\n"),
+        alsoSignal: [200, 300],
+        sendSignal: (pid) => signalled.push(pid),
+      });
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, {
+        configurable: true,
+        writable: true,
+        value: originalIterator,
+      });
+    }
+
+    expect(processTableIterations).toBe(1);
+    expect(signalled).toEqual([110, 100, 210, 200, 310, 300]);
+  });
+
   it("signals the root alone when the process table cannot be read", async () => {
     const signalled: number[] = [];
 
@@ -326,7 +373,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      0,
+      100,
       onTreeKillFailure,
       {
         readProcessTable: async () => {
@@ -344,13 +391,11 @@ describe("stopProcessTreePosix", () => {
     expect(onTreeKillFailure).not.toHaveBeenCalled();
   });
 
-  it("does not fall back when both reads succeed and SIGKILL stops the root", async () => {
+  it("does not fall back when both reads succeed and the force round runs promptly", async () => {
     vi.useFakeTimers();
     try {
       const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
       const onTreeKillFailure = vi.fn();
-      let killed = false;
-
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
@@ -360,9 +405,8 @@ describe("stopProcessTreePosix", () => {
           readProcessTable: async () => psRow(100, 1),
           sendSignal: (pid, signal) => {
             signalled.push({ pid, signal });
-            if (signal === "SIGKILL") killed = true;
           },
-          isAlive: () => !killed,
+          isAlive: () => false,
         },
       );
 
@@ -477,20 +521,69 @@ describe("stopProcessTreePosix", () => {
         },
       );
 
-      await vi.advanceTimersByTimeAsync(1_999);
+      await vi.advanceTimersByTimeAsync(99);
       expect(onTreeKillFailure).not.toHaveBeenCalled();
       expect(signalled).toEqual([]);
       await vi.advanceTimersByTimeAsync(1);
-      expect(onTreeKillFailure).not.toHaveBeenCalled();
+      await pending;
+      expect(onTreeKillFailure).toHaveBeenCalledOnce();
       expect(signalled).toEqual([
         { pid: 100, signal: "SIGTERM" },
       ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shares one shutdown budget across reads, grace, force, and fallback", async () => {
+    vi.useFakeTimers();
+    try {
+      const settleMs = 100;
+      const toleranceMs = 1;
+      const startedAt = Date.now();
+      let readCount = 0;
+      let resolvedAt: number | undefined;
+      let fallbackAt: number | undefined;
+      const onTreeKillFailure = vi.fn(() => {
+        fallbackAt = Date.now();
+      });
+
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        settleMs,
+        onTreeKillFailure,
+        {
+          readProcessTable: () => {
+            readCount += 1;
+            if (readCount === 1) {
+              return new Promise<string>((resolve) => {
+                setTimeout(() => resolve(psRow(100, 1)), 95);
+              });
+            }
+            return new Promise(() => {});
+          },
+          sendSignal: () => undefined,
+          isAlive: () => true,
+        },
+      ).then(() => {
+        resolvedAt = Date.now();
+      });
+
       await vi.advanceTimersByTimeAsync(99);
       expect(onTreeKillFailure).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      await pending;
+      await vi.advanceTimersByTimeAsync(0);
 
-      expect(onTreeKillFailure).toHaveBeenCalledOnce();
+      // The force round has no budget left, so its read wrapper fails before
+      // it calls the underlying reader.
+      expect(readCount).toBe(1);
+      expect(fallbackAt).toBeDefined();
+      expect((fallbackAt as number) - startedAt)
+        .toBeLessThanOrEqual(settleMs + toleranceMs);
+      expect((resolvedAt as number) - startedAt)
+        .toBeLessThanOrEqual(settleMs + toleranceMs);
+      await pending;
     } finally {
       vi.useRealTimers();
     }
@@ -559,7 +652,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      0,
+      100,
       undefined,
       {
         readProcessTable: async () => {
@@ -569,6 +662,7 @@ describe("stopProcessTreePosix", () => {
             : [psRow(100, 1, startedAt), psRow(999, 1)].join("\n");
         },
         sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+        isAlive: () => false,
       },
     );
 
@@ -586,7 +680,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      0,
+      100,
       onTreeKillFailure,
       {
         readProcessTable: async () => {
@@ -596,6 +690,7 @@ describe("stopProcessTreePosix", () => {
             : psRow(100, 1, "Fri Aug 21 10:00:05 2026");
         },
         sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+        isAlive: () => false,
       },
     );
 
@@ -612,11 +707,12 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      0,
+      100,
       undefined,
       {
         readProcessTable: async () => psRow(100, 1, startedAt),
         sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+        isAlive: () => false,
       },
     );
 
@@ -633,7 +729,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      0,
+      100,
       undefined,
       {
         readProcessTable: async () => {
@@ -649,6 +745,7 @@ describe("stopProcessTreePosix", () => {
               ].join("\n");
         },
         sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+        isAlive: () => false,
       },
     );
 
@@ -667,7 +764,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      0,
+      100,
       undefined,
       {
         readProcessTable: async () => {
@@ -677,6 +774,7 @@ describe("stopProcessTreePosix", () => {
             : [psRow(100, 1), psRow(200, 1, startedAt)].join("\n");
         },
         sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+        isAlive: () => false,
       },
     );
 
