@@ -3529,6 +3529,74 @@ describe("shared view refresh", () => {
     },
   );
 
+  itNonRoot(
+    "reports a pending path below an unreadable directory and recovers when access returns",
+    async () => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "locked/pending.md";
+      const parent = join(rootDir, "locked");
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(path, "tracked body");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+      await writePendingMaterializationPaths(rootDir, [path]);
+
+      const store = harness.openStore(target);
+      try {
+        await denyRead(parent, "dir");
+        try {
+          const failed = await refreshStandaloneShareViewOnceWithPull({
+            rootDir,
+            workspaceId: WORKSPACE,
+            relay: harness.relay,
+            shareId: SHARE_ID,
+            store,
+            pull: harness.pullFor(target),
+            pinnedSelector: PINNED_SELECTOR,
+            recordRefusals: async () => undefined,
+            ended: false,
+          });
+          expect(failed).toMatchObject({
+            ok: false,
+            changedPaths: 0,
+            errorMessage: expect.any(String),
+          });
+          if (failed.ok) throw new Error("expected the unreadable refresh to fail");
+          expect(failed.errorMessage.length).toBeGreaterThan(0);
+          await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+            new Set([path]),
+          );
+        } finally {
+          await restoreRead(parent, 0o755);
+        }
+
+        await expect(
+          refreshStandaloneShareViewOnceWithPull({
+            rootDir,
+            workspaceId: WORKSPACE,
+            relay: harness.relay,
+            shareId: SHARE_ID,
+            store,
+            pull: harness.pullFor(target),
+            pinnedSelector: PINNED_SELECTOR,
+            recordRefusals: async () => undefined,
+            ended: false,
+          }),
+        ).resolves.toMatchObject({ ok: true, status: "updated", changedPaths: 1 });
+        await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+          new Set(),
+        );
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
   it("reports and preserves a symlink that replaced a tracked file", async () => {
     const rootDir = await tempRoot();
     const outsideRoot = await tempRoot();

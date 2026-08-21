@@ -1481,7 +1481,23 @@ export async function refreshStandaloneShareViewOnce(
   input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
 ): Promise<StandaloneShareViewRefreshOutcome> {
   return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
-    const captured = await captureStandaloneShareViewDivergence(input);
+    let captured: CaptureSharedViewLocalDivergenceOutcome;
+    try {
+      captured = await captureStandaloneShareViewDivergence(input);
+    } catch (error) {
+      // The pending branch fails closed on an unreadable path rather than
+      // guessing (#867) — the marker is the recovery record, and it survives
+      // uncleared here (the mutation lock's callback never returns
+      // normally), so the next readable refresh repairs or reports the path
+      // normally. Report the failure through the same discriminated union
+      // every other failure in this function already uses, instead of
+      // rejecting raw.
+      return {
+        ok: false,
+        changedPaths: 0,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
+    }
     const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
     try {
       const main = await input.store.ensureMainVersion({
