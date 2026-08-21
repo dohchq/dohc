@@ -675,6 +675,7 @@ import {
 } from "./plugins/pluginWebAppInstances";
 import {
   PluginWebAppViewRegistry,
+  stopPluginWebAppGuests,
   webAppInstanceKey,
   type PluginWebAppViewRecord,
 } from "./plugins/pluginWebAppViews";
@@ -2785,18 +2786,26 @@ function notifyPluginWebAppFailed(
 
 function stopPluginWebAppsForPlugin(workspaceId: string, pluginId: string): void {
   const records = pluginWebAppViews.removeForPlugin(workspaceId, pluginId);
-  for (const record of records) {
-    const sender = webContents.fromId(record.senderId);
-    if (sender) {
-      notifyPluginWebAppFailed(sender, {
-        workspaceId: record.workspaceId,
-        pluginId: record.pluginId,
-        webAppId: record.webAppId,
-        instanceKey: record.instanceKey,
-      });
-    }
-  }
-  destroyPluginWebAppViews(records);
+  stopPluginWebAppGuests(
+    records,
+    (record) => {
+      const sender = webContents.fromId(record.senderId);
+      if (sender) {
+        notifyPluginWebAppFailed(sender, {
+          workspaceId: record.workspaceId,
+          pluginId: record.pluginId,
+          webAppId: record.webAppId,
+          instanceKey: record.instanceKey,
+        });
+      }
+    },
+    destroyPluginWebAppViews,
+    (_record, error) =>
+      console.warn(
+        `[desktop] failed to notify a plugin web app's owner for "${pluginId}"`,
+        error,
+      ),
+  );
 }
 
 const withPluginHostLifecycleLock = <T>(

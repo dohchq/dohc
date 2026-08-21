@@ -242,22 +242,25 @@ describe("plugin web app main-process wiring", () => {
   it("notifies each owner when plugin teardown destroys its guest view", () => {
     const stop = functionSource("function stopPluginWebAppsForPlugin(");
     const removeAt = stop.indexOf("pluginWebAppViews.removeForPlugin(");
-    const loopAt = stop.indexOf("for (const record of records)", removeAt);
+    const guestsAt = stop.indexOf("stopPluginWebAppGuests(", removeAt);
     const resolveSenderAt = stop.indexOf(
       "webContents.fromId(record.senderId)",
-      loopAt,
+      guestsAt,
     );
     const notifyAt = stop.indexOf("notifyPluginWebAppFailed(sender,", resolveSenderAt);
-    const destroyAt = stop.indexOf("destroyPluginWebAppViews(records);", notifyAt);
+    const destroyAt = stop.indexOf("destroyPluginWebAppViews,", notifyAt);
 
     expect(removeAt).toBeGreaterThan(-1);
-    expect(loopAt).toBeGreaterThan(removeAt);
-    expect(resolveSenderAt).toBeGreaterThan(loopAt);
+    expect(guestsAt).toBeGreaterThan(removeAt);
+    expect(resolveSenderAt).toBeGreaterThan(guestsAt);
     expect(notifyAt).toBeGreaterThan(resolveSenderAt);
     expect(destroyAt).toBeGreaterThan(notifyAt);
     expect(squeeze(stop)).toContain(
       "notifyPluginWebAppFailed(sender,{workspaceId:record.workspaceId,pluginId:record.pluginId,webAppId:record.webAppId,instanceKey:record.instanceKey,})",
     );
+    // The isolation and always-destroy guarantees themselves are pinned
+    // behaviorally in pluginWebAppViews.test.ts, against the shared
+    // stopPluginWebAppGuests() this handler delegates to.
   });
 
   it("clears the guest partition's storage after a successful uninstall", () => {
