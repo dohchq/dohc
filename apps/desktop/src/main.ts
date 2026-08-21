@@ -1054,10 +1054,6 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       activeCommandClaims.drain(
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
-    lowerCommandClaimsBarrier: (pluginId) =>
-      activeCommandClaims.lowerDrainBarrier(
-        pluginLifecycleKey(workspace.workspaceId, pluginId),
-      ),
   });
   return pipeline;
 }
@@ -3004,6 +3000,10 @@ async function stopPluginHostIfUnclaimed(
     // sibling panel does.
     !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
     !activeCommandClaims.has(key) &&
+    // A rebuild owns this plugin's stop while its barrier is up — this
+    // stays clear of the on-demand markers below so a later, unclaimed
+    // release still finds them once the barrier falls.
+    !activeCommandClaims.isDraining(key) &&
     // Only stop the host if an on-demand open is the reason it's running at
     // all — an enabled, workspace-started plugin has no panel or tab to
     // answer to (#779 round 4 finding 3). A panel/web-app cold start and a

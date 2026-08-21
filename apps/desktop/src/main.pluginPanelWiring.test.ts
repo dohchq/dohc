@@ -411,19 +411,32 @@ describe("plugin panel main-process wiring", () => {
     expect(orAt).toBeGreaterThan(activeClaimAt);
   });
 
-  it("refuses a new command claim while a plugin is draining, and wires all three barrier hooks to the same claims object (round-10 finding 2, round-11, round-12, round-13)", () => {
-    // raiseDrainBarrier()/drain()/isDraining()/lowerDrainBarrier()'s own
-    // semantics — the synchronous, refcounted raise, the
-    // resolve-only-once-existing-claims-release behavior, the multiple
-    // independent holds nesting without one's lower undoing another's,
-    // and every waiter on one key resolving together — are pinned in
-    // pluginCommandHostClaims.test.ts. rebuild() raising its own hold
-    // before it is even enqueued and lowering it only once the whole
-    // action settles, stopOldRuntime raising and lowering its own
-    // narrower nested hold around just the stop, and dispose() draining
-    // every plugin before stopAll(), are all pinned behaviorally in
-    // PluginPipeline.test.ts. This only pins that main.ts wires all
-    // three hooks to the same claims object.
+  it("defers to a plugin's own drain barrier instead of stopping its host out of band (round-14 finding 1)", () => {
+    const unclaimed = stopPluginHostIfUnclaimedSource();
+    const activeClaimAt = unclaimed.indexOf("!activeCommandClaims.has(key)");
+    const isDrainingAt = unclaimed.indexOf(
+      "!activeCommandClaims.isDraining(key)",
+      activeClaimAt,
+    );
+    const consumeAt = unclaimed.indexOf(
+      "(panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))",
+      isDrainingAt,
+    );
+    // MUTATION (out-of-band stop): without this check, a command that
+    // finishes mid-rebuild consumes the on-demand marker and stops the
+    // host directly here — outside the pipeline's own rebuild — while
+    // the rebuild still believes that runtime is retained.
+    expect(activeClaimAt).toBeGreaterThan(-1);
+    expect(isDrainingAt).toBeGreaterThan(activeClaimAt);
+    expect(consumeAt).toBeGreaterThan(isDrainingAt);
+  });
+
+  it("refuses a new command claim while a plugin is draining, and wires both barrier hooks to the same claims object", () => {
+    // raiseDrainBarrier()/drain()/isDraining()'s own semantics are pinned
+    // in pluginCommandHostClaims.test.ts. rebuild(), stopOldRuntime, and
+    // dispose()'s own use of the returned lower handles are pinned
+    // behaviorally in PluginPipeline.test.ts. This only pins that main.ts
+    // wires both hooks to the same claims object.
     const invoke = handler("invokePluginCommand");
     const claimKeyAt = invoke.indexOf(
       "const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);",
@@ -436,8 +449,7 @@ describe("plugin panel main-process wiring", () => {
     const claimAt = invoke.indexOf("claimHostForCommand(claimKey);", refusalAt);
     // MUTATION (unbounded wait): dropping this refusal lets a new command
     // join a plugin whose rebuild or workspace close is already draining
-    // it — the exact "chasing future arrivals instead of the claims it
-    // began with" case drain() is built to never do on its own.
+    // it, so drain()'s own wait would never end.
     expect(claimKeyAt).toBeGreaterThan(-1);
     expect(isDrainingAt).toBeGreaterThan(claimKeyAt);
     expect(refusalAt).toBeGreaterThan(isDrainingAt);
@@ -463,30 +475,15 @@ describe("plugin panel main-process wiring", () => {
       "activeCommandClaims.drain(",
       drainedAt,
     );
-    const lowerHookAt = createPipeline.indexOf(
-      "lowerCommandClaimsBarrier: (pluginId) =>",
-      drainCallAt,
-    );
-    // round-11: the barrier the refusal above reads must outlive the
-    // wait — lowering it as soon as drain() resolves would drop it
-    // before stopOldRuntime's own pluginHost.stop() actually finishes,
-    // reopening the exact race this whole mechanism exists to close.
-    const lowerCallAt = createPipeline.indexOf(
-      "activeCommandClaims.lowerDrainBarrier(",
-      lowerHookAt,
-    );
-    // MUTATION (no raise/no wait/no lower): missing any one of these
-    // three wire-ups makes the corresponding PluginPipeline hook a no-op
-    // (each is optional exactly so a caller without one keeps working) —
-    // silently reopening whichever of round-12's and round-13's findings
-    // that hook exists to close.
+    // MUTATION (no raise/no wait): missing either wire-up makes the
+    // corresponding PluginPipeline hook a no-op (each is optional exactly
+    // so a caller without one keeps working) — silently letting a command
+    // claim a plugin its own rebuild believes it has exclusive control of.
     expect(optionsAt).toBeGreaterThan(-1);
     expect(raiseAt).toBeGreaterThan(optionsAt);
     expect(raiseCallAt).toBeGreaterThan(raiseAt);
     expect(drainedAt).toBeGreaterThan(raiseCallAt);
     expect(drainCallAt).toBeGreaterThan(drainedAt);
-    expect(lowerHookAt).toBeGreaterThan(drainCallAt);
-    expect(lowerCallAt).toBeGreaterThan(lowerHookAt);
   });
 
   it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {

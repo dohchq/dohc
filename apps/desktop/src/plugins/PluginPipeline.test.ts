@@ -2774,9 +2774,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         onStatusChange: (event) => {
           if (event.kind === "changed") statuses.push(event.plugin.status);
         },
-        raiseCommandClaimsBarrier: (pluginId) => {
-          commandClaims.raiseDrainBarrier(pluginId);
-        },
+        raiseCommandClaimsBarrier: (pluginId) => commandClaims.raiseDrainBarrier(pluginId),
         awaitCommandClaimsDrained: async (pluginId) => {
           const gate = nextCommandDrainGate;
           const drained = commandClaims.drain(pluginId);
@@ -2785,10 +2783,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             gate.entered.resolve();
             await gate.release.promise;
           }
-          await drained;
-        },
-        lowerCommandClaimsBarrier: (pluginId) => {
-          commandClaims.lowerDrainBarrier(pluginId);
+          return drained;
         },
         operations: {
           install: (input) =>
