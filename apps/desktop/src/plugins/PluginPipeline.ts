@@ -456,26 +456,37 @@ function candidateKey(candidate: InstalledPluginRecord): string {
   return `${candidate.id}\0${resolve(candidate.rootPath)}`;
 }
 
+export interface DoorWrittenDelta {
+  sha256: string;
+  seq: number;
+  provisional?: boolean;
+  /**
+   * The write's original, caller-spelled absolute path. Set only when
+   * landing attributed this delta through sourceRelPath's case-insensitive
+   * fold, not an exact root match — an exact landing already proved
+   * ownership, so it has nothing left to re-confirm. retryProvisionalDeltaRecovery
+   * walks this path from the workspace root to confirm or disprove that
+   * guess; a rekeyed or landing-exact delta carries no origin because it
+   * needs none.
+   */
+  provisionalOrigin?: string;
+}
+
 export function overlayDoorWrittenSourceDeltas(
   baselineFiles: readonly PluginSourceFileDigest[],
-  deltas: Iterable<
-    readonly [
-      string,
-      { sha256: string; seq: number; provisional?: boolean },
-    ]
-  >,
+  deltas: Iterable<readonly [string, DoorWrittenDelta]>,
   platform: NodeJS.Platform = process.platform,
 ): PluginSourceFileDigest[] {
   const files = new Map(
     baselineFiles.map((file) => [file.relPath, file.sha256]),
   );
   const byLowerCase = platform === "win32" || platform === "darwin"
-    ? new Map([...files.keys()].map((relPath) => [relPath.toLowerCase(), relPath]))
+    ? new Map([...files.keys()].map((relPath) => [foldForCompare(relPath), relPath]))
     : undefined;
   for (
     const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
   ) {
-    const lower = relPath.toLowerCase();
+    const lower = foldForCompare(relPath);
     const target = delta.provisional && byLowerCase
       ? byLowerCase.get(lower) ?? relPath
       : relPath;
@@ -504,7 +515,7 @@ export class PluginPipeline {
    */
   private readonly doorWrittenDeltas = new Map<
     string,
-    Map<string, { sha256: string; seq: number; provisional?: boolean }>
+    Map<string, DoorWrittenDelta>
   >();
   /** Orders door writes against each build's snapshot; see runFullBuild. */
   private doorWriteSeq = 0;
@@ -914,20 +925,19 @@ export class PluginPipeline {
   ): void {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
-    const relPath = this.sourceRelPath(candidate, write.absolutePath);
+    const exactRelPath = this.sourceRelPathExact(candidate, write.absolutePath);
+    const relPath = exactRelPath ?? this.sourceRelPath(candidate, write.absolutePath);
     if (relPath === null) return;
     // node_modules and .dohc are excluded from every source digest, so a
     // write under them cannot change the hash this predicate compares.
     if (this.isExcludedRelPath(relPath)) return;
     const deltas = this.doorWrittenDeltas.get(pluginId) ??
-      new Map<
-        string,
-        { sha256: string; seq: number; provisional?: boolean }
-      >();
+      new Map<string, DoorWrittenDelta>();
     deltas.set(relPath, {
       sha256: createHash("sha256").update(write.text, "utf8").digest("hex"),
       seq: ++this.doorWriteSeq,
       provisional: true,
+      provisionalOrigin: exactRelPath === null ? write.absolutePath : undefined,
     });
     this.doorWrittenDeltas.set(pluginId, deltas);
     this.enqueueSourceRefresh(pluginId, () =>
@@ -1657,7 +1667,8 @@ export class PluginPipeline {
    * deltas, so any other byte on disk — an interloper file, a
    * watcher-class edit, an out-of-band delete — makes the live tree miss
    * this hash and hold for approval. The SDK write surface has no delete,
-   * so a delta only ever adds or replaces one file.
+   * so a delta only ever adds or replaces one file. The retry also confirms
+   * ownership for a delta attributed through the landing-time path fold.
    */
   private async retryProvisionalDeltaRecovery(pluginId: string): Promise<void> {
     if (this.platform !== "win32" && this.platform !== "darwin") return;
@@ -1668,15 +1679,30 @@ export class PluginPipeline {
     const root = resolve(candidate.rootPath);
     for (const [relPath, delta] of [...deltas]) {
       if (!delta.provisional) continue;
+      const origin = delta.provisionalOrigin;
       const { segments, fullyRecovered } = await recoverOnDiskSegments(
-        root,
-        relPath,
+        origin !== undefined ? this.workspaceRoot : root,
+        origin !== undefined
+          ? relative(this.workspaceRoot, origin).replaceAll("\\", "/")
+          : relPath,
         undefined,
       );
       const current = deltas.get(relPath);
       if (!current || current.seq !== delta.seq) continue;
       if (!fullyRecovered) continue;
-      const recoveredRelPath = segments.join("/");
+      const recoveredRelPath = origin !== undefined
+        ? this.sourceRelPathExact(candidate, join(this.workspaceRoot, ...segments))
+        : segments.join("/");
+      if (recoveredRelPath === null) {
+        // Recovery resolved the write's true on-disk path, and it is not
+        // under this plugin's real root: the landing-time fold guessed
+        // ownership from spelling alone, and a case-sensitive volume just
+        // proved that guess wrong. Drop it — the same confirmation
+        // rekeyDoorWrittenSourceChange applies to a delta the writer's own
+        // recovery rekeys.
+        deltas.delete(relPath);
+        continue;
+      }
       if (this.isExcludedRelPath(recoveredRelPath)) {
         deltas.delete(relPath);
         continue;

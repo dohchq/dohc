@@ -32,6 +32,7 @@ import {
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import {
+  type DoorWrittenDelta,
   overlayDoorWrittenSourceDeltas,
   PluginPipeline,
   type PluginPipelineStatusEvent,
@@ -65,7 +66,7 @@ interface Deferred {
 
 type DoorWrittenDeltas = Map<
   string,
-  Map<string, { sha256: string; seq: number; provisional?: boolean }>
+  Map<string, DoorWrittenDelta>
 >;
 
 function doorWrittenDeltasOf(pipeline: PluginPipeline): DoorWrittenDeltas {
@@ -441,6 +442,22 @@ describe("overlayDoorWrittenSourceDeltas", () => {
     );
 
     expect(files).toEqual([{ relPath: "SRC/new.ts", sha256: "latest" }]);
+  });
+
+  it("folds a provisional NFC path onto an NFD baseline spelling", () => {
+    const nfdRelPath = "src/caf\u0065\u0301.ts";
+    const nfcRelPath = "src/caf\u00e9.ts";
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: nfdRelPath, sha256: "baseline" }],
+      new Map([[nfcRelPath, {
+        sha256: "delta",
+        seq: 1,
+        provisional: true,
+      }]]),
+      "darwin",
+    );
+
+    expect(files).toEqual([{ relPath: nfdRelPath, sha256: "delta" }]);
   });
 });
 
@@ -890,6 +907,128 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       vi.resetModules();
     }
   }, 120_000);
+
+  it("confirms fold-attributed ownership before settling a provisional delta", async () => {
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    let pluginEntries: string[] = [];
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      switch (actualPath.posix.resolve(String(args[0]))) {
+        case "/workspace":
+          return ["plugins"];
+        case "/workspace/plugins":
+          return pluginEntries;
+        case "/workspace/plugins/owned":
+        case "/workspace/plugins/OWNED":
+          return ["src"];
+        case "/workspace/plugins/owned/src":
+        case "/workspace/plugins/OWNED/src":
+          return ["index.ts"];
+        default:
+          throw new Error("Unexpected readdir path: " + String(args[0]));
+      }
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+
+      for (const scenario of [
+        { entries: ["owned", "OWNED"], confirmed: false },
+        { entries: ["owned"], confirmed: true },
+      ]) {
+        pluginEntries = scenario.entries;
+        let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+        const host = new PluginHostWithPosixPaths({
+          stateDir: "/state",
+          workspaceRoot: "/workspace",
+          spawnTransport: fakeSpawnTransport(),
+          routeSdkRequest: async () => ({}),
+          onStatusChange: (pluginId, status) => {
+            pipeline.noteRuntimeStatus(pluginId, status);
+          },
+        });
+        pipeline = new PluginPipelineWithPosixPaths({
+          workspaceRoot: "/workspace",
+          stateDir: "/state",
+          pluginHost: host,
+          platform: "darwin",
+          pnpmRunnerEntry: "/runner",
+        });
+        const pipelineState = pipeline as unknown as {
+          discovery: InstalledPluginRecord[];
+          doorWrittenDeltas: DoorWrittenDeltas;
+          enqueueSourceRefresh(
+            pluginId: string,
+            run: () => Promise<void>,
+          ): void;
+          retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+        };
+        pipelineState.discovery = [{
+          id: "owned",
+          directoryName: "owned",
+          rootPath: "/workspace/plugins/owned",
+          manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+          iconPath: null,
+          diagnostics: [],
+          valid: true,
+        }];
+        pipelineState.enqueueSourceRefresh = () => undefined;
+
+        const callerPath = "/workspace/plugins/OWNED/src/index.ts";
+        const text = scenario.confirmed ? "confirmed\n" : "distinct root\n";
+        const sha256 = createHash("sha256")
+          .update(text, "utf8")
+          .digest("hex");
+        pipeline.handleDoorWrittenSourceChange("owned", {
+          absolutePath: callerPath,
+          text,
+        });
+        expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256,
+            seq: 1,
+            provisional: true,
+            provisionalOrigin: callerPath,
+          },
+        ]]));
+
+        await pipelineState.retryProvisionalDeltaRecovery("owned");
+
+        expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(
+          scenario.confirmed
+            ? new Map([["src/index.ts", { sha256, seq: 1 }]])
+            : new Map(),
+        );
+      }
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
 
   it("does not let stale provisional recovery replace a newer same-path write", async () => {
     const fixture = await createPluginWorkspace();
