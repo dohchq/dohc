@@ -4439,10 +4439,16 @@ export function DesktopWorkspaceShell(props: {
             })
             .then((outcome) => {
               if (outcome.status !== "ok") {
-                reportShellError(
-                  "Could not run the plugin command.",
-                  new Error(outcome.message),
-                );
+                // reportShellError shows error.message and drops the
+                // fallback whenever the error carries one — a terse
+                // backend cause ("timeout") would otherwise displace the
+                // command's own name entirely. Composing the full
+                // sentence here, not relying on the fallback, keeps both
+                // regardless of which one reportShellError picks
+                // (round-10 finding 4).
+                const message =
+                  `Could not run plugin command "${entry.title}". ${outcome.message}`;
+                reportShellError(message, new Error(message));
               }
             })
             .catch((error) => {

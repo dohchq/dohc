@@ -1191,6 +1191,35 @@ describe("plugin activity-bar views", () => {
     );
   });
 
+  // reportShellError shows error.message and drops the fallback whenever
+  // the error carries one — a terse backend cause alone would name
+  // neither the command nor that a command failed (round-10 finding 4).
+  it("names the command and the cause when a plugin command fails with a terse outcome", async () => {
+    const invokePluginCommand = vi.fn(async () => ({
+      status: "command-failed" as const,
+      message: "timeout",
+    }));
+    const bridge = Object.assign(
+      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
+        commands: [{ id: "hello.write", title: "Write hello note" }],
+      }),
+      { invokePluginCommand },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Hello Plugin: Write hello note",
+      ),
+    );
+
+    const banner = await screen.findByTestId("workspace-shell-error");
+    expect(banner.textContent).toContain("Write hello note");
+    expect(banner.textContent).toContain("timeout");
+  });
+
   // assertWritableWorkspace refuses on the share's presence alone, so every
   // invocation from a shared view was a dead click before this filter — the
   // palette must not offer what it can never do (round-8 finding 2).

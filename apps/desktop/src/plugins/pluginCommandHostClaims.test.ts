@@ -83,4 +83,72 @@ describe("PluginCommandHostClaims", () => {
       expect(claims.consumeStartedHost(key)).toBe(true);
     });
   });
+
+  // round-10 finding 2: a rebuild's old-runtime stop must wait for
+  // claims that already exist, and refuse ones that arrive after —
+  // otherwise it could dispose the transport under a command still
+  // running its side effects, or never finish if new commands keep
+  // arriving.
+  describe("isDraining / drain", () => {
+    it("resolves immediately for a key nothing has claimed", async () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      expect(claims.isDraining(key)).toBe(false);
+      await claims.drain(key);
+      expect(claims.isDraining(key)).toBe(false);
+    });
+
+    it("marks a key draining the instant drain() is called, and resolves once its one claim releases", async () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+      claims.claim(key);
+
+      const drained = claims.drain(key);
+      // Synchronous: a caller checking right after calling drain() must
+      // see it, with no await between the two — the exact ordering
+      // isDraining()'s own guard in stopPluginHostIfUnclaimed relies on.
+      expect(claims.isDraining(key)).toBe(true);
+
+      let settled = false;
+      void drained.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      claims.release(key);
+      await drained;
+
+      expect(settled).toBe(true);
+      expect(claims.isDraining(key)).toBe(false);
+    });
+
+    it("waits for every claim that existed when it began, not ones that arrive after", async () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+      claims.claim(key);
+      claims.claim(key);
+
+      const drained = claims.drain(key);
+      let settled = false;
+      void drained.then(() => {
+        settled = true;
+      });
+
+      claims.release(key);
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      // A claim arriving mid-drain would extend the wait if drain() re-armed
+      // on it — it must not: this key is already draining, so a real caller
+      // refuses this claim before it ever reaches claim().
+      expect(claims.isDraining(key)).toBe(true);
+
+      claims.release(key);
+      await drained;
+
+      expect(settled).toBe(true);
+    });
+  });
 });

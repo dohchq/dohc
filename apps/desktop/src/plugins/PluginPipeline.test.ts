@@ -2705,6 +2705,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let failBuild = false;
       let nextStopGate: { entered: Deferred; release: Deferred } | null = null;
       let nextBuildGate: { entered: Deferred; release: Deferred } | null = null;
+      let nextCommandDrainGate: { entered: Deferred; release: Deferred } | null =
+        null;
       let buildCalls = 0;
       let registeredCommands = (options.commands ?? [])
         .map((command) => command.id);
@@ -2736,6 +2738,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         pnpmRunnerEntry,
         onStatusChange: (event) => {
           if (event.kind === "changed") statuses.push(event.plugin.status);
+        },
+        awaitCommandClaimsDrained: async () => {
+          const gate = nextCommandDrainGate;
+          if (!gate) return;
+          nextCommandDrainGate = null;
+          gate.entered.resolve();
+          await gate.release.promise;
         },
         operations: {
           install: (input) =>
@@ -2823,6 +2832,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         gateNextBuild: () => {
           const gate = { entered: deferred(), release: deferred() };
           nextBuildGate = gate;
+          return gate;
+        },
+        gateNextCommandDrain: () => {
+          const gate = { entered: deferred(), release: deferred() };
+          nextCommandDrainGate = gate;
           return gate;
         },
         setRegisteredCommands: (commands: string[]) => {
@@ -3384,6 +3398,37 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             setup.pipeline.list()[0]?.status === "ready" &&
             setup.pipeline.list()[0]?.hasFailedReplacement === false,
           "Plugin did not recover from a crash-loop disable through Retry build.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("waits for an in-flight command claim to drain before stopping the old runtime (round-10 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const drainGate = setup.gateNextCommandDrain();
+        await writeFile(setup.entryPath, [
+          'export const marker = "replacement";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        const approving = setup.pipeline.approve("example-plugin");
+
+        await drainGate.entered.promise;
+        // The drain is pending: the old runtime has not been stopped, so
+        // a command claim against it right now would still reach a live
+        // host — this is the fact the drain exists to preserve.
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        drainGate.release.resolve();
+        const approved = await approving;
+
+        expect(approved.ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after the drain released.",
         );
       } finally {
         await setup.pipeline.dispose();

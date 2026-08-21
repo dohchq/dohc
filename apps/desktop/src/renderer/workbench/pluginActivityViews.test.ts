@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PluginStatusRecord } from "../../ipc/bridgeContract";
 import {
   pluginActivityViews,
+  pluginCommandEntries,
   pluginCommandPaletteId,
   resolvePluginView,
 } from "./pluginActivityViews";
@@ -104,6 +105,86 @@ describe("pluginActivityViews", () => {
       "a-plugin/one",
       "a-plugin/two",
     ]);
+  });
+});
+
+describe("pluginCommandEntries", () => {
+  const writeCommand = { id: "write", title: "Write note" };
+
+  it("lists a ready plugin's declared commands", () => {
+    expect(
+      pluginCommandEntries([
+        plugin("hello-plugin", {
+          displayName: "Hello Plugin",
+          commands: [writeCommand],
+        }),
+      ]),
+    ).toEqual([
+      {
+        pluginId: "hello-plugin",
+        commandId: "write",
+        title: "Write note",
+        pluginTitle: "Hello Plugin",
+      },
+    ]);
+  });
+
+  // canServeSurfaces only excludes a status that starts with "disabled" —
+  // a user-disabled plugin mid-approve or mid-rebuild cycles through
+  // "installing"/"scanning"/"building"/"failed" while still durably
+  // disabled, and every one of those statuses would otherwise pass. Every
+  // invocation against it fails with "plugin-disabled" regardless
+  // (round-10 finding 3).
+  it.each([
+    "installing",
+    "scanning",
+    "building",
+    "failed",
+  ] as const)(
+    "excludes a user-disabled plugin's commands even mid-%s",
+    (status) => {
+      expect(
+        pluginCommandEntries([
+          plugin("hello-plugin", {
+            status,
+            disabledReason: "user",
+            commands: [writeCommand],
+          }),
+        ]),
+      ).toEqual([]);
+    },
+  );
+
+  // A crash-loop disable is not the user's own choice — the plugin was
+  // running until its host gave up, and canEnable/canRebuild both still
+  // offer a real action for it. Only the user-disabled reason is a dead
+  // click regardless of status.
+  it("keeps a crash-loop-disabled plugin's commands out only while status itself says disabled", () => {
+    expect(
+      pluginCommandEntries([
+        plugin("hello-plugin", {
+          status: "building",
+          disabledReason: "crash-loop",
+          commands: [writeCommand],
+        }),
+      ]),
+    ).toEqual([
+      expect.objectContaining({ pluginId: "hello-plugin", commandId: "write" }),
+    ]);
+  });
+
+  it.each([
+    ["disabled", { status: "disabled" as const }],
+    ["waiting for approval", { status: "disabled-pending-approval" as const }],
+    ["being uninstalled", { status: "uninstalling" as const }],
+    ["never approved", { approvedHash: null }],
+    ["invalid", { valid: false }],
+  ])("keeps a %s plugin's commands out of the palette", (_case, overrides) => {
+    expect(
+      pluginCommandEntries([
+        plugin("hello-plugin", { commands: [writeCommand], ...overrides }),
+      ]),
+    ).toEqual([]);
   });
 });
 

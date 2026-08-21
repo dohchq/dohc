@@ -1046,6 +1046,10 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       notifyPluginStatusChanged(workspace.workspaceId, event),
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
+    awaitCommandClaimsDrained: (pluginId) =>
+      activeCommandClaims.drain(
+        pluginLifecycleKey(workspace.workspaceId, pluginId),
+      ),
   });
   return pipeline;
 }
@@ -6816,6 +6820,16 @@ function registerIpcHandlers(
       });
     }
     const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);
+    // A rebuild's old-runtime stop is already draining this key's claims —
+    // joining now would extend a wait meant to be bounded by the claims
+    // that existed when it began, so this refuses instead (round-10
+    // finding 2).
+    if (activeCommandClaims.isDraining(claimKey)) {
+      return InvokePluginCommandResult.parse({
+        status: "plugin-rebuilding",
+        message: `Plugin "${input.pluginId}" is rebuilding. Try the command again once it finishes.`,
+      });
+    }
     claimHostForCommand(claimKey);
     try {
       return InvokePluginCommandResult.parse(

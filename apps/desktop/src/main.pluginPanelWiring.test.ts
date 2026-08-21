@@ -411,6 +411,53 @@ describe("plugin panel main-process wiring", () => {
     expect(orAt).toBeGreaterThan(activeClaimAt);
   });
 
+  it("refuses a new command claim while a rebuild is draining it, and wires the pipeline's drain wait (round-10 finding 2)", () => {
+    // drain()/isDraining()'s own semantics — the synchronous marking, the
+    // resolve-only-once-existing-claims-release behavior — are pinned in
+    // pluginCommandHostClaims.test.ts. stopOldRuntime genuinely awaiting
+    // the injected drain before pluginHost.stop() is pinned behaviorally
+    // in PluginPipeline.test.ts. This only pins that main.ts wires the
+    // refusal and the drain callback to the same claims object.
+    const invoke = handler("invokePluginCommand");
+    const claimKeyAt = invoke.indexOf(
+      "const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);",
+    );
+    const isDrainingAt = invoke.indexOf(
+      "activeCommandClaims.isDraining(claimKey)",
+      claimKeyAt,
+    );
+    const refusalAt = invoke.indexOf('"plugin-rebuilding"', isDrainingAt);
+    const claimAt = invoke.indexOf("claimHostForCommand(claimKey);", refusalAt);
+    // MUTATION (unbounded wait): dropping this refusal lets a new command
+    // join a plugin whose rebuild is already draining it — the exact
+    // "chasing future arrivals instead of the claims it began with" case
+    // drain() is built to never do on its own.
+    expect(claimKeyAt).toBeGreaterThan(-1);
+    expect(isDrainingAt).toBeGreaterThan(claimKeyAt);
+    expect(refusalAt).toBeGreaterThan(isDrainingAt);
+    expect(claimAt).toBeGreaterThan(refusalAt);
+
+    const createPipeline = functionSource(
+      "function createPluginPipeline(",
+    );
+    const optionsAt = createPipeline.indexOf("pipeline = new PluginPipeline({");
+    const drainedAt = createPipeline.indexOf(
+      "awaitCommandClaimsDrained: (pluginId) =>",
+      optionsAt,
+    );
+    const drainCallAt = createPipeline.indexOf(
+      "activeCommandClaims.drain(",
+      drainedAt,
+    );
+    // MUTATION (no wait): without this wire-up, stopOldRuntime's own
+    // awaitCommandClaimsDrained call is a no-op (it's optional exactly so
+    // every caller without one keeps working), and every claim this
+    // handler makes stops meaning anything to a rebuild's stop.
+    expect(optionsAt).toBeGreaterThan(-1);
+    expect(drainedAt).toBeGreaterThan(optionsAt);
+    expect(drainCallAt).toBeGreaterThan(drainedAt);
+  });
+
   it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {
     const disableAt = mainSource.indexOf(
       "pluginAction(CHANNELS.disablePlugin,",

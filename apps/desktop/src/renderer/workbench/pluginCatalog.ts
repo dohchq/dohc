@@ -175,10 +175,19 @@ export function canRetryInstall(plugin: PluginStatusRecord): boolean {
   );
 }
 
+// While hasFailedReplacement, Enable's own verify pass compares the live
+// source against the durable approvedHash — the OLD bytes, since the
+// failed replacement's edit never earned a new one — finds them changed,
+// and holds for approval instead of restarting. That hold's stop clears
+// recoveredManifests, destroying the exact fact Retry build needs and
+// leaving neither action honest. Retry build already knows how to accept
+// this same source (lastApprovedAttemptHash); Enable does not
+// (round-10 finding 1).
 export function canEnable(plugin: PluginStatusRecord): boolean {
   return (
     plugin.status === "disabled" &&
-    (plugin.disabledReason === "user" || plugin.disabledReason === "crash-loop")
+    (plugin.disabledReason === "user" || plugin.disabledReason === "crash-loop") &&
+    !plugin.hasFailedReplacement
   );
 }
 

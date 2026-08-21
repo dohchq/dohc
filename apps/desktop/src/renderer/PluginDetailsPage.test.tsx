@@ -665,6 +665,59 @@ describe("PluginDetailsPage", () => {
     });
   });
 
+  it("offers Retry build, not Enable, for a crash-loop-disabled plugin with a failed replacement owed (round-10 finding 1)", async () => {
+    const disabled = plugin("disabled-plugin", {
+      status: "disabled",
+      disabledReason: "crash-loop",
+      runtimeStatus: null,
+      hasFailedReplacement: true,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [disabled] });
+    bridgeMock.rebuildPlugin.mockResolvedValue({
+      ok: true,
+      // The replacement succeeds: hasFailedReplacement clears and normal
+      // actions return.
+      plugin: plugin("disabled-plugin"),
+    });
+
+    renderPage("disabled-plugin");
+
+    // Awaited first: queryByTestId on an unsettled render is null
+    // regardless of canEnable, so asserting absence before the load
+    // resolves would prove nothing.
+    const rebuildButton = await screen.findByTestId("plugin-rebuild");
+    expect(rebuildButton.textContent).toBe("Retry build");
+    // Enable's own verify pass would hold this exact source for approval
+    // and, doing so, clear the recovery marker Retry needs — Retry build
+    // is the one honest action while a replacement is still owed.
+    expect(screen.queryByTestId("plugin-enable")).toBeNull();
+
+    await userEvent.click(rebuildButton);
+
+    expect(bridgeMock.rebuildPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "disabled-plugin",
+    });
+  });
+
+  it("offers Enable again once a crash-loop-disabled plugin has no failed replacement owed", async () => {
+    // The same disabled + crash-loop reason as above, but the replacement
+    // already succeeded (hasFailedReplacement cleared) — Enable's absence
+    // above was never permanent, only tied to the fact still being owed.
+    const recovered = plugin("recovered-plugin", {
+      status: "disabled",
+      disabledReason: "crash-loop",
+      runtimeStatus: null,
+      hasFailedReplacement: false,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [recovered] });
+
+    renderPage("recovered-plugin");
+
+    expect(await screen.findByTestId("plugin-enable")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-rebuild")).toBeNull();
+  });
+
   it("offers only uninstall for an installed plugin whose manifest broke (#779 round 8 D2)", async () => {
     const broken = plugin("broken-plugin", {
       valid: false,

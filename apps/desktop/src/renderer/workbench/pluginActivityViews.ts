@@ -57,7 +57,16 @@ export function pluginCommandEntries(
 ): PluginCommandEntry[] {
   const entries: PluginCommandEntry[] = [];
   for (const plugin of plugins) {
-    if (!canServeSurfaces(plugin)) continue;
+    // canServeSurfaces only excludes a status that currently starts with
+    // "disabled" — a plugin the user disabled but that is mid-approve or
+    // mid-rebuild (still durably disabled) cycles through
+    // "installing"/"scanning"/"building"/"failed" without ever losing
+    // disabledReason "user", and every one of those statuses passes.
+    // Every command invocation against a durably disabled plugin fails
+    // with "plugin-disabled" regardless of that transient status, so the
+    // palette must never offer one while that reason still holds
+    // (round-10 finding 3).
+    if (!canServeSurfaces(plugin) || plugin.disabledReason === "user") continue;
     for (const command of plugin.commands) {
       entries.push({
         pluginId: plugin.id,

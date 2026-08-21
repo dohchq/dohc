@@ -7,6 +7,12 @@ export class PluginCommandHostClaims {
   // start put this host into running" check had nothing to find (round-9
   // finding 1).
   private readonly startedHosts = new Set<string>();
+  // Keys a rebuild's old-runtime stop is waiting to drain — set the
+  // instant drain() is called (synchronously, before its promise
+  // executor returns), so a caller that checks isDraining() before
+  // claim() can never lose the race: JS runs both on one thread with no
+  // await between the check and the claim (round-10 finding 2).
+  private readonly draining = new Map<string, () => void>();
 
   claim(key: string): void {
     this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
@@ -17,6 +23,7 @@ export class PluginCommandHostClaims {
     if (count === undefined) return;
     if (count <= 1) {
       this.counts.delete(key);
+      this.draining.get(key)?.();
       return;
     }
     this.counts.set(key, count - 1);
@@ -48,5 +55,37 @@ export class PluginCommandHostClaims {
    */
   consumeStartedHost(key: string): boolean {
     return this.startedHosts.delete(key);
+  }
+
+  /**
+   * True while an old-runtime stop is waiting on this key's claims to
+   * drain. A caller about to claim a new command must check this first
+   * and refuse instead of joining — otherwise the wait a rebuild is doing
+   * before it disposes the transport would never end, chasing new
+   * arrivals instead of the claims that existed when it began
+   * (round-10 finding 2).
+   */
+  isDraining(key: string): boolean {
+    return this.draining.has(key);
+  }
+
+  /**
+   * Marks a key draining and resolves once every claim already
+   * outstanding for it has released — or immediately, if there are none.
+   * Call exactly once per key, before disposing a host claims might still
+   * be mid-command against: severing the transport under a claim already
+   * running would dispose it after only some of that command's side
+   * effects ran. The caller is expected to have every new claim on this
+   * key check isDraining() and refuse before this settles, or a claim
+   * could still land after the drain begins and this would wait on it too.
+   */
+  drain(key: string): Promise<void> {
+    if (!this.counts.has(key)) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.draining.set(key, () => {
+        this.draining.delete(key);
+        resolve();
+      });
+    });
   }
 }

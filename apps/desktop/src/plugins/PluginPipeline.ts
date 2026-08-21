@@ -214,6 +214,16 @@ export interface PluginPipelineOptions {
    * wasn't running to record it). Defaults to true so existing callers and
    * tests that don't care about this keep their current behavior. */
   isEngineCaptureAvailable?: () => boolean;
+  /**
+   * Lets an old-runtime stop wait for the caller's own in-flight command
+   * claims on that plugin to drain before it disposes the transport —
+   * severing it under a claim still running would dispose it after only
+   * some of that command's side effects ran (round-10 finding 2). Optional:
+   * a caller with no command-claim concept of its own (every existing test,
+   * and any path that never claims a host for a command) omits it and the
+   * stop proceeds immediately, exactly as before.
+   */
+  awaitCommandClaimsDrained?: (pluginId: string) => Promise<void>;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -1631,6 +1641,13 @@ export class PluginPipeline {
     onStopped?: () => void,
     markStopped?: () => void,
   ): Promise<void> {
+    // Waits for a command already running against this plugin to finish
+    // before the transport under it goes away — a stop that ran ahead of
+    // it could dispose the transport after only some of that command's
+    // side effects ran. A command arriving after this wait begins is the
+    // caller's own concern to refuse (round-10 finding 2): this only
+    // drains what was already claimed.
+    await this.options.awaitCommandClaimsDrained?.(pluginId);
     await this.options.pluginHost.stop(pluginId);
     this.recoveredManifests.delete(pluginId);
     // The stop already happened — mark it before running its consequences,
