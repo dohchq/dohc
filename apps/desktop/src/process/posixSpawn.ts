@@ -9,6 +9,9 @@
 // from the process table instead and signal each pid.
 import { execFile } from "node:child_process";
 
+// Keep the 2_000 ms timeout within one default grace budget. On WSL/Ubuntu,
+// 20-run idle (~89 processes) and loaded (~145, four CPU loops) samples of
+// `ps -A -o pid=,ppid=,lstart=` took 5-10 ms.
 const PROCESS_TABLE_READ_TIMEOUT_MS = 2_000;
 
 function unrefDelay(ms: number): Promise<void> {
@@ -159,13 +162,12 @@ async function signalProcessTreePosix(
   const capturedIdentities = new Map(
     options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
   );
-  const unverifiedRoots = isForceRound
+  // capturedIdentities is empty on the non-force path, so the filter was a no-op.
+  const initialPids = isForceRound
     ? []
-    : [rootPid, ...(options.alsoSignal ?? [])].filter(
-        (pid) => !capturedIdentities.has(pid),
-      );
+    : [...new Set([rootPid, ...(options.alsoSignal ?? [])])];
 
-  let pids = [...new Set(unverifiedRoots)];
+  let pids = initialPids;
   let identities: ProcessIdentity[] = [];
   let tableReadFailed = false;
   try {
