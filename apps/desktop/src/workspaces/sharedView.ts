@@ -934,134 +934,143 @@ export async function captureSharedViewLocalDivergence(
 
     if (pendingPaths.has(entry.path)) {
       visitedPendingPaths.add(entry.path);
-      const result = await withCaptureMutationLock(
-        rootDir,
-        entry.path,
-        async (resolvedTarget): Promise<
-          | { kind: "captured" }
-          | { kind: "repaired" }
-          | { kind: "unjournalable"; path: UnjournalablePath }
-          | { kind: "unchanged" }
-        > => {
-          let targetStat: Stats | null;
-          try {
-            targetStat = await lstat(resolvedTarget);
-          } catch (error) {
-            const code = (error as NodeJS.ErrnoException).code;
-            if (code !== "ENOENT" && code !== "ENOTDIR") {
-              throw new CapturePartialFailureError(
-                capturedPaths,
-                repairedPaths,
-                entry.path,
-                { cause: error },
-              );
+      let result:
+        | { kind: "captured" }
+        | { kind: "repaired" }
+        | { kind: "unjournalable"; path: UnjournalablePath }
+        | { kind: "unchanged" };
+      try {
+        result = await withCaptureMutationLock(
+          rootDir,
+          entry.path,
+          async (resolvedTarget): Promise<
+            | { kind: "captured" }
+            | { kind: "repaired" }
+            | { kind: "unjournalable"; path: UnjournalablePath }
+            | { kind: "unchanged" }
+          > => {
+            let targetStat: Stats | null;
+            try {
+              targetStat = await lstat(resolvedTarget);
+            } catch (error) {
+              const code = (error as NodeJS.ErrnoException).code;
+              if (code !== "ENOENT" && code !== "ENOTDIR") {
+                throw error;
+              }
+              targetStat = null;
             }
-            targetStat = null;
-          }
-          // `lstat` never follows the final component, so a symlink entry
-          // already answers `isFile()` false — `isSymbolicLink()` decided
-          // nothing this didn't.
-          if (targetStat !== null && !targetStat.isFile()) {
-            return {
-              kind: "unjournalable",
-              path: { path: entry.path, reason: "non-file-replacement" },
-            };
-          }
+            // `lstat` never follows the final component, so a symlink entry
+            // already answers `isFile()` false — `isSymbolicLink()` decided
+            // nothing this didn't.
+            if (targetStat !== null && !targetStat.isFile()) {
+              return {
+                kind: "unjournalable",
+                path: { path: entry.path, reason: "non-file-replacement" },
+              };
+            }
 
-          const disk = await readDiskContent(resolvedTarget);
-          const currentSnapshot = await store.readTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-          });
-          const currentEntry: {
-            contentKind: "text" | "binary";
-            sha256: string | null;
-            latestMomentId: string;
-          } =
-            currentSnapshot === null
-              ? entry
-              : {
-                  ...entry,
-                  contentKind:
-                    currentSnapshot.contentKind === "binary" ? "binary" : "text",
-                  sha256: currentSnapshot.sha256 ?? null,
-                  latestMomentId: currentSnapshot.latestMomentId,
-                };
-          if (diskMatchesSnapshot(disk, currentEntry)) {
-            return {
-              kind: pendingState.recordedPaths.has(entry.path)
-                ? "repaired"
-                : "unchanged",
-            };
-          }
-
-          const latestMoment = await store.getMoment({
-            workspaceId,
-            momentId: currentEntry.latestMomentId,
-          });
-          const before = latestMoment?.payload.before;
-          const matchesPreimage =
-            latestMoment !== null &&
-            (before === null
-              ? disk.kind === "absent"
-              : before !== undefined && diskMatchesSnapshot(disk, before));
-          if (matchesPreimage) {
-            await materializeSharedViewPaths(
-              rootDir,
+            const disk = await readDiskContent(resolvedTarget);
+            const currentSnapshot = await store.readTextFile({
               workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind: currentEntry.contentKind,
-                },
-              ],
-              store,
-            );
-            return { kind: "repaired" };
-          }
+              versionId: main.id,
+              path: entry.path,
+            });
+            const currentEntry: {
+              contentKind: "text" | "binary";
+              sha256: string | null;
+              latestMomentId: string;
+            } =
+              currentSnapshot === null
+                ? entry
+                : {
+                    ...entry,
+                    contentKind:
+                      currentSnapshot.contentKind === "binary" ? "binary" : "text",
+                    sha256: currentSnapshot.sha256 ?? null,
+                    latestMomentId: currentSnapshot.latestMomentId,
+                  };
+            if (diskMatchesSnapshot(disk, currentEntry)) {
+              return {
+                kind: pendingState.recordedPaths.has(entry.path)
+                  ? "repaired"
+                  : "unchanged",
+              };
+            }
 
-          if (disk.kind === "absent") {
-            // A pending write removes the target before it writes. An absent
-            // path here is an interrupted materialization, not a delete.
-            await materializeSharedViewPaths(
-              rootDir,
+            const latestMoment = await store.getMoment({
               workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind: currentEntry.contentKind,
-                },
-              ],
+              momentId: currentEntry.latestMomentId,
+            });
+            const before = latestMoment?.payload.before;
+            const matchesPreimage =
+              latestMoment !== null &&
+              (before === null
+                ? disk.kind === "absent"
+                : before !== undefined && diskMatchesSnapshot(disk, before));
+            if (matchesPreimage) {
+              await materializeSharedViewPaths(
+                rootDir,
+                workspaceId,
+                [
+                  {
+                    path: entry.path,
+                    operation: "write",
+                    contentKind: currentEntry.contentKind,
+                  },
+                ],
+                store,
+              );
+              return { kind: "repaired" };
+            }
+
+            if (disk.kind === "absent") {
+              // A pending write removes the target before it writes. An absent
+              // path here is an interrupted materialization, not a delete.
+              await materializeSharedViewPaths(
+                rootDir,
+                workspaceId,
+                [
+                  {
+                    path: entry.path,
+                    operation: "write",
+                    contentKind: currentEntry.contentKind,
+                  },
+                ],
+                store,
+              );
+              return { kind: "repaired" };
+            }
+            if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
+              return {
+                kind: "unjournalable",
+                path: unjournalableFromDisk(entry.path, disk),
+              };
+            }
+            if (disk.kind !== "text" && disk.kind !== "binary") {
+              return { kind: "unchanged" };
+            }
+            if (!allowLocalJournaling) {
+              await rematerializeHead(entry.path, currentEntry.contentKind);
+              return { kind: "repaired" };
+            }
+            await writeDiskContentToStore({
               store,
-            );
-            return { kind: "repaired" };
-          }
-          if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
-            return {
-              kind: "unjournalable",
-              path: unjournalableFromDisk(entry.path, disk),
-            };
-          }
-          if (disk.kind !== "text" && disk.kind !== "binary") {
-            return { kind: "unchanged" };
-          }
-          if (!allowLocalJournaling) {
-            await rematerializeHead(entry.path, currentEntry.contentKind);
-            return { kind: "repaired" };
-          }
-          await writeDiskContentToStore({
-            store,
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-            content: disk,
-          });
-          return { kind: "captured" };
-        },
-      );
+              workspaceId,
+              versionId: main.id,
+              path: entry.path,
+              content: disk,
+            });
+            return { kind: "captured" };
+          },
+        );
+      } catch (error) {
+        throw new CapturePartialFailureError(
+          capturedPaths,
+          repairedPaths,
+          entry.path,
+          { cause: error },
+        );
+      }
       await clearCapturePendingMarker(
         rootDir,
         entry.path,

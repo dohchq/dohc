@@ -3540,14 +3540,59 @@ describe("shared view refresh", () => {
   );
 
   itNonRoot(
+    "preserves an earlier repair count when pending path resolution finds an unreadable directory",
+    async () => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const repairedPath = "docs/a-repaired-first.md";
+      const deniedPath = "docs/z-locked/pending.md";
+      const parent = join(rootDir, "docs", "z-locked");
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(repairedPath, "already correct body");
+      relay.addWrite(deniedPath, "tracked body");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+      await writePendingMaterializationPaths(rootDir, [repairedPath, deniedPath]);
+
+      const store = harness.openStore(target);
+      try {
+        await denyRead(parent, "dir");
+        try {
+          await expect(
+            refreshStandaloneShareViewOnceWithPull({
+              rootDir,
+              workspaceId: WORKSPACE,
+              relay: harness.relay,
+              shareId: SHARE_ID,
+              store,
+              pull: harness.pullFor(target),
+              pinnedSelector: PINNED_SELECTOR,
+              recordRefusals: async () => undefined,
+              ended: false,
+            }),
+          ).resolves.toMatchObject({ ok: false, changedPaths: 1 });
+        } finally {
+          await restoreRead(parent, 0o755);
+        }
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  itNonRoot(
     "reports a pending path below an unreadable directory and recovers when access returns",
     async () => {
       const rootDir = await tempRoot();
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
-      const repairedPath = "docs/repaired-first.md";
-      const deniedPath = "locked/pending.md";
-      const parent = join(rootDir, "locked");
+      const repairedPath = "docs/a-repaired-first.md";
+      const deniedPath = "docs/z-locked/pending.md";
+      const parent = join(rootDir, "docs", "z-locked");
       const target = { workspaceId: WORKSPACE, rootPath: rootDir };
       relay.addWrite(repairedPath, "already correct body");
       relay.addWrite(deniedPath, "tracked body");
