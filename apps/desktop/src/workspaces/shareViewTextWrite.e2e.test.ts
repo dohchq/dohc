@@ -238,6 +238,7 @@ describe("share-view text writes through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,

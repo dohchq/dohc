@@ -125,13 +125,17 @@ describe("shared view refresh IPC contract", () => {
         refusedOps: 0,
         refusedDetail: null,
       }),
-    ).toMatchObject({
+    ).toEqual({
       ok: true,
+      status: "unchanged",
+      changedPaths: 0,
       excludedPaths: ["docs/pull-excluded.md"],
       unjournalablePaths: [
         { path: "docs/oversized.md", reason: "oversized-text" },
         { path: "docs/local.md", reason: "local-collision" },
       ],
+      refusedOps: 0,
+      refusedDetail: null,
     });
   });
 

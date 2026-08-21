@@ -134,6 +134,22 @@ async function materializeWithPendingRecord(
   await clearPendingMaterializationPaths(rootPath, paths);
 }
 
+async function markMutateMaterializeAndClear(
+  rootPath: string,
+  workspaceId: string,
+  paths: readonly string[],
+  changed: readonly ShareViewChangedPath[],
+  store: CaptureVersionedTextStore,
+  mutate: () => Promise<void>,
+): Promise<void> {
+  if (paths.length > 0) await writePendingMaterializationPaths(rootPath, paths);
+  await mutate();
+  if (changed.length > 0) {
+    await materializeSharedViewPaths(rootPath, workspaceId, changed, store);
+  }
+  if (paths.length > 0) await clearPendingMaterializationPaths(rootPath, paths);
+}
+
 export async function routeWorkspaceFileCreate(
   input: ShareViewFileOpScope & { relativePath: string; initialText: string },
 ): Promise<string> {
@@ -265,19 +281,22 @@ async function shareViewCreate(
       );
       return path;
     }
-    await writePendingMaterializationPaths(input.rootPath, [path]);
-    await store.writeTextFile({
-      workspaceId: input.workspaceId,
-      versionId: main.id,
-      path,
-      text: input.initialText,
-      metadata: { origin: "local-file" },
-    });
-    await materializeWithPendingRecord(
+    const changed = [{ path, operation: "write" as const, contentKind: "text" as const }];
+    await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      [{ path, operation: "write", contentKind: "text" }],
+      [path],
+      changed,
       store,
+      async () => {
+        await store.writeTextFile({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+          path,
+          text: input.initialText,
+          metadata: { origin: "local-file" },
+        });
+      },
     );
     return path;
   });
@@ -340,26 +359,6 @@ async function shareViewMove(
       }
     }
 
-    const pendingPaths = moves.flatMap((move) => [move.from, move.to]);
-    if (!held.has(from) && !renamesInPlace) pendingPaths.push(from);
-    await writePendingMaterializationPaths(input.rootPath, pendingPaths);
-    const applied: { from: string; to: string }[] = [];
-    try {
-      for (const move of moves) {
-        await store.renameTextFile({
-          workspaceId: input.workspaceId,
-          versionId: main.id,
-          fromPath: move.from,
-          toPath: move.to,
-          metadata: { origin: "local-file" },
-        });
-        applied.push(move);
-      }
-    } catch (error) {
-      await putBackMoves(store, input.workspaceId, main.id, applied);
-      throw error;
-    }
-
     const changed: ShareViewChangedPath[] = [];
     for (const move of moves) {
       changed.push({ path: move.from, operation: "delete", contentKind: "text" });
@@ -379,11 +378,31 @@ async function shareViewMove(
     if (!held.has(from) && !renamesInPlace) {
       changed.push({ path: from, operation: "delete", contentKind: "text" });
     }
-    await materializeWithPendingRecord(
+    const paths = changed.map((change) => change.path);
+    await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
+      paths,
       changed,
       store,
+      async () => {
+        const applied: { from: string; to: string }[] = [];
+        try {
+          for (const move of moves) {
+            await store.renameTextFile({
+              workspaceId: input.workspaceId,
+              versionId: main.id,
+              fromPath: move.from,
+              toPath: move.to,
+              metadata: { origin: "local-file" },
+            });
+            applied.push(move);
+          }
+        } catch (error) {
+          await putBackMoves(store, input.workspaceId, main.id, applied);
+          throw error;
+        }
+      },
     );
     return to;
   });
@@ -465,39 +484,44 @@ async function shareViewDelete(
     }
     await refuseUntrackedUnder(input.rootPath, target, held);
 
-    await writePendingMaterializationPaths(input.rootPath, targets);
-    const applied: string[] = [];
-    try {
-      for (const path of targets) {
-        await store.deleteTextFile({
-          workspaceId: input.workspaceId,
-          versionId: main.id,
-          path,
-          metadata: { origin: "local-file" },
-        });
-        applied.push(path);
-      }
-    } catch (error) {
-      // A delete cannot be put back, so the other rule applies: what happened is
-      // visible. The projection follows the store for the files that actually
-      // went, so nothing is left describing content the store no longer has.
-      await materializeWithPendingRecord(
-        input.rootPath,
-        input.workspaceId,
-        applied.map((path) => ({
-          path,
-          operation: "delete" as const,
-          contentKind: "text" as const,
-        })),
-        store,
-      );
-      throw error;
-    }
-    await materializeWithPendingRecord(
+    const changed = [
+      { path: target, operation: "delete" as const, contentKind: "text" as const },
+    ];
+    await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      [{ path: target, operation: "delete", contentKind: "text" }],
+      targets,
+      changed,
       store,
+      async () => {
+        const applied: string[] = [];
+        try {
+          for (const path of targets) {
+            await store.deleteTextFile({
+              workspaceId: input.workspaceId,
+              versionId: main.id,
+              path,
+              metadata: { origin: "local-file" },
+            });
+            applied.push(path);
+          }
+        } catch (error) {
+          // A delete cannot be put back, so the other rule applies: what happened is
+          // visible. The projection follows the store for the files that actually
+          // went, so nothing is left describing content the store no longer has.
+          await materializeWithPendingRecord(
+            input.rootPath,
+            input.workspaceId,
+            applied.map((path) => ({
+              path,
+              operation: "delete" as const,
+              contentKind: "text" as const,
+            })),
+            store,
+          );
+          throw error;
+        }
+      },
     );
     return { trashed: false };
   });
@@ -601,11 +625,15 @@ async function shareViewImport(
     } finally {
       // What landed is materialized even when a later source fails, so the
       // projection never lags the store.
-      await materializeWithPendingRecord(
+      await materializeSharedViewPaths(
         input.rootPath,
         input.workspaceId,
         changed,
         store,
+      );
+      await clearPendingMaterializationPaths(
+        input.rootPath,
+        changed.map((change) => change.path),
       );
     }
     return { imported, skipped };

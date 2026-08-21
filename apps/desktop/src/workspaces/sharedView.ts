@@ -838,7 +838,7 @@ export async function captureSharedViewLocalDivergence(
   rootDir: string,
   workspaceId: string,
   store: CaptureVersionedTextStore,
-  allowLocalJournaling = true,
+  allowLocalJournaling: boolean,
   testHooks?: { beforeCaptureWrite?: (path: string) => Promise<void> },
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const realRoot = await realpath(rootDir).catch(() => null);
@@ -880,6 +880,18 @@ export async function captureSharedViewLocalDivergence(
       disk.sha256 === snapshot.sha256
     );
   };
+
+  async function rematerializeHead(
+    path: string,
+    contentKind: "text" | "binary",
+  ): Promise<void> {
+    await materializeSharedViewPaths(
+      rootDir,
+      workspaceId,
+      [{ path, operation: "write", contentKind }],
+      store,
+    );
+  }
 
   const unjournalableFromDisk = (
     path: string,
@@ -1010,18 +1022,7 @@ export async function captureSharedViewLocalDivergence(
             return { kind: "unchanged" };
           }
           if (!allowLocalJournaling) {
-            await materializeSharedViewPaths(
-              rootDir,
-              workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind: currentEntry.contentKind,
-                },
-              ],
-              store,
-            );
+            await rematerializeHead(entry.path, currentEntry.contentKind);
             return { kind: "repaired" };
           }
           await writeDiskContentToStore({
@@ -1105,18 +1106,9 @@ export async function captureSharedViewLocalDivergence(
             };
           }
           if (!allowLocalJournaling) {
-            await materializeSharedViewPaths(
-              rootDir,
-              workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind:
-                    entry.contentKind === "binary" ? "binary" : "text",
-                },
-              ],
-              store,
+            await rematerializeHead(
+              entry.path,
+              entry.contentKind === "binary" ? "binary" : "text",
             );
             return "repaired";
           }
@@ -1156,18 +1148,9 @@ export async function captureSharedViewLocalDivergence(
             };
           }
           if (!allowLocalJournaling) {
-            await materializeSharedViewPaths(
-              rootDir,
-              workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind:
-                    entry.contentKind === "binary" ? "binary" : "text",
-                },
-              ],
-              store,
+            await rematerializeHead(
+              entry.path,
+              entry.contentKind === "binary" ? "binary" : "text",
             );
             return "repaired" as const;
           }
@@ -1207,18 +1190,9 @@ export async function captureSharedViewLocalDivergence(
         if (!changed) return "unchanged" as const;
 
         if (!allowLocalJournaling) {
-          await materializeSharedViewPaths(
-            rootDir,
-            workspaceId,
-            [
-              {
-                path: entry.path,
-                operation: "write",
-                contentKind:
-                  current.contentKind === "binary" ? "binary" : "text",
-              },
-            ],
-            store,
+          await rematerializeHead(
+            entry.path,
+            current.contentKind === "binary" ? "binary" : "text",
           );
           return "repaired" as const;
         }
@@ -1233,60 +1207,6 @@ export async function captureSharedViewLocalDivergence(
         return "captured" as const;
       },
     );
-    if (typeof result === "object" && "status" in result) {
-      const deleted = await withCaptureMutationLock(
-        rootDir,
-        entry.path,
-        async (resolvedTarget): Promise<
-          | "captured"
-          | "repaired"
-          | "unchanged"
-          | { kind: "unjournalable"; path: UnjournalablePath }
-        > => {
-          try {
-            if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
-              return "unchanged";
-            }
-          } catch {
-            return {
-              kind: "unjournalable",
-              path: { path: entry.path, reason: "unreadable" },
-            };
-          }
-          if (!allowLocalJournaling) {
-            await materializeSharedViewPaths(
-              rootDir,
-              workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind:
-                    entry.contentKind === "binary" ? "binary" : "text",
-                },
-              ],
-              store,
-            );
-            return "repaired";
-          }
-          await store.deleteTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-            metadata: { origin: "local-file" },
-          });
-          return "captured";
-        },
-      );
-      if (typeof deleted === "object") {
-        unjournalablePaths.push(deleted.path);
-      } else if (deleted === "captured") {
-        capturedPaths += 1;
-      } else if (deleted === "repaired") {
-        repairedPaths += 1;
-      }
-      continue;
-    }
     if (result === "captured") capturedPaths += 1;
     if (result === "repaired") repairedPaths += 1;
     if (typeof result === "object" && result.kind === "unjournalable") {

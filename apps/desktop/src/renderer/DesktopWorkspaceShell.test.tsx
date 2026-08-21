@@ -3802,13 +3802,71 @@ describe("ui-state merge-on-load", () => {
 
     await userEvent.click(screen.getByTestId("shared-view-refresh"));
 
+    let listCallsWhenReported = 0;
+    let readCallsWhenReported = 0;
+    await waitFor(() => {
+      const error = screen.getByTestId("workspace-shell-error");
+      expect(error.textContent).toContain("Couldn't refresh the shared view.");
+      expect(error.textContent).toContain("relay failed");
+      listCallsWhenReported = bridge.listWorkspaceFiles.mock.calls.length;
+      readCallsWhenReported = bridge.readWorkspaceText.mock.calls.length;
+    });
+    expect(listCallsWhenReported).toBeGreaterThan(listCallsBeforeFailure);
+    expect(readCallsWhenReported).toBeGreaterThan(readCallsBeforeFailure);
+  });
+
+  it("does not repaint a failed share pull when no paths changed", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    const outcomes = [
+      {
+        ok: true as const,
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        ok: false as const,
+        changedPaths: 0,
+        errorMessage: "relay failed",
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome as RefreshSharedViewResult;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    const listCallsBeforeFailure = bridge.listWorkspaceFiles.mock.calls.length;
+    const readCallsBeforeFailure = bridge.readWorkspaceText.mock.calls.length;
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+
     const error = await screen.findByTestId("workspace-shell-error");
-    expect(error.textContent).toContain("Couldn't refresh the shared view.");
     expect(error.textContent).toContain("relay failed");
-    expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
+    expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(
       listCallsBeforeFailure,
     );
-    expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(
+    expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(
       readCallsBeforeFailure,
     );
   });

@@ -235,6 +235,7 @@ describe("share-view file operations through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         ),
       ).resolves.toEqual({
         capturedPaths: 1,
@@ -342,6 +343,7 @@ describe("share-view file operations through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
@@ -458,6 +460,7 @@ describe("share-view file operations through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         );
       });
       for (let turn = 0; turn < 20 && !captureEnteredGap; turn += 1) {
@@ -475,7 +478,7 @@ describe("share-view file operations through the real store", () => {
       ).toBe(false);
       expect(captured).toEqual({
         capturedPaths: 0,
-        repairedPaths: 2,
+        repairedPaths: 0,
         unjournalablePaths: [],
       });
       expect(await storePaths(view)).toEqual([toPath]);
@@ -1209,6 +1212,7 @@ describe("share-view file operations through the real store", () => {
           view.rootPath,
           view.workspaceId,
           view.store,
+          true,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,

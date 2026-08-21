@@ -4625,10 +4625,13 @@ export function DesktopWorkspaceShell(props: {
     if (!shareView || shareViewEnded || shareViewDamaged) return;
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
+    const repaintAfterChange = async () => {
+      await refreshFiles();
+      setVersionEpoch((epoch) => epoch + 1);
+    };
     const bestEffortRepaint = async () => {
       try {
-        await refreshFiles();
-        setVersionEpoch((epoch) => epoch + 1);
+        await repaintAfterChange();
       } catch (repaintError) {
         console.error(
           "[desktop] repaint after shared-view refresh failed:",
@@ -4641,6 +4644,7 @@ export function DesktopWorkspaceShell(props: {
       if (token !== shareRefreshToken.current) return;
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
+        if (token !== shareRefreshToken.current) return;
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
@@ -4654,7 +4658,7 @@ export function DesktopWorkspaceShell(props: {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
       if (outcome.changedPaths > 0) {
-        await bestEffortRepaint();
+        await repaintAfterChange();
       }
       if (outcome.status === "ended") {
         return;
