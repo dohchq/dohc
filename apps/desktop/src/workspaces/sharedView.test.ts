@@ -2099,6 +2099,16 @@ describe("shared view refresh", () => {
         "the recipient's new file\n",
       );
       await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+        new Set([created]),
+      );
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
         new Set(),
       );
     } finally {

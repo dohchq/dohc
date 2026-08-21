@@ -265,6 +265,7 @@ async function shareViewCreate(
       );
       return path;
     }
+    await writePendingMaterializationPaths(input.rootPath, [path]);
     await store.writeTextFile({
       workspaceId: input.workspaceId,
       versionId: main.id,
@@ -339,6 +340,9 @@ async function shareViewMove(
       }
     }
 
+    const pendingPaths = moves.flatMap((move) => [move.from, move.to]);
+    if (!held.has(from) && !renamesInPlace) pendingPaths.push(from);
+    await writePendingMaterializationPaths(input.rootPath, pendingPaths);
     const applied: { from: string; to: string }[] = [];
     try {
       for (const move of moves) {
@@ -461,6 +465,7 @@ async function shareViewDelete(
     }
     await refuseUntrackedUnder(input.rootPath, target, held);
 
+    await writePendingMaterializationPaths(input.rootPath, targets);
     const applied: string[] = [];
     try {
       for (const path of targets) {
@@ -582,6 +587,7 @@ async function shareViewImport(
         }
         claimed.add(name.toLowerCase());
         const path = relDir === "" ? name : `${relDir}/${name}`;
+        await writePendingMaterializationPaths(input.rootPath, [path]);
         await writeDiskContentToStore({
           store,
           workspaceId: input.workspaceId,

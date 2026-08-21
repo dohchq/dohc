@@ -315,6 +315,48 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
+    "repairs a create interrupted after the store write instead of journaling a delete",
+    async () => {
+      const view = await harness("dohc-share-interrupted-create-", "edit");
+      const path = "docs/added.md";
+      const failingStore: CaptureVersionedTextStore = {
+        ...view.store,
+        async writeTextFile(input) {
+          await view.store.writeTextFile(input);
+          throw new Error("simulated crash after store write");
+        },
+      };
+
+      await expect(
+        routeWorkspaceFileCreate({
+          ...scope(view),
+          relativePath: path,
+          initialText: "recipient\n",
+          shareViewStore: () => failingStore,
+        }),
+      ).rejects.toThrow("simulated crash after store write");
+
+      const pathsBeforeRecovery = await storePaths(view);
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(await storePaths(view)).toEqual(pathsBeforeRecovery);
+      await expect(readFile(join(view.rootPath, path), "utf8")).resolves.toBe(
+        "recipient\n",
+      );
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "leaves a file the recipient put in the folder by hand alone",
     async () => {
       const view = await harness("dohc-share-create-local-", "edit");
@@ -433,7 +475,7 @@ describe("share-view file operations through the real store", () => {
       ).toBe(false);
       expect(captured).toEqual({
         capturedPaths: 0,
-        repairedPaths: 0,
+        repairedPaths: 2,
         unjournalablePaths: [],
       });
       expect(await storePaths(view)).toEqual([toPath]);
