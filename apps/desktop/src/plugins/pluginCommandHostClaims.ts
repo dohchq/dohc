@@ -83,4 +83,22 @@ export class PluginCommandHostClaims {
       this.drainWaiters.set(key, waiters);
     });
   }
+
+  /**
+   * Clears every piece of state this key holds — claims, the started-host
+   * marker, and any drain hold. Call once the host behind this key is
+   * gone for good: a marker surviving into a later session that reuses
+   * the same key would misattribute that session's own host to whatever
+   * this one never consumed.
+   */
+  reset(key: string): void {
+    this.counts.delete(key);
+    this.startedHosts.delete(key);
+    this.drainHolds.delete(key);
+    const waiters = this.drainWaiters.get(key);
+    if (waiters) {
+      this.drainWaiters.delete(key);
+      for (const resolve of waiters) resolve();
+    }
+  }
 }

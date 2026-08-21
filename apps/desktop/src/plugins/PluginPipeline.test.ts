@@ -2785,6 +2785,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           }
           return drained;
         },
+        resetCommandClaims: (pluginId) => commandClaims.reset(pluginId),
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3564,12 +3565,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         await setup.failEstablishedBuild();
         expect(setup.commandClaims.isDraining(key)).toBe(false);
 
-        // Occupy the plugin's own per-plugin job queue with an
-        // UNRELATED action — approve(), which raises no outer hold of
-        // its own and has not reached its own eventual stopOldRuntime
-        // either — held mid-build. Isolates this test to a retry's OWN
-        // raise timing: if approve() itself raised something, isDraining
-        // would already read true regardless of what retry does.
+        // Occupy the plugin's own per-plugin job queue with another
+        // action — approve(), which now raises its own outer hold before
+        // it is enqueued too (round-15 finding 1) — held mid-build.
         buildGate = setup.gateNextBuild();
         await writeFile(setup.entryPath, [
           'export const marker = "queue occupant";',
@@ -3578,14 +3576,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         ].join("\n"));
         const approving = setup.pipeline.approve("example-plugin");
         await buildGate.entered.promise;
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
 
         // Called while the queue is still occupied by approve()'s own
         // job — this call's own job has not started, let alone reached
-        // a build or snapshot step of its own. The mark still has to be
-        // up, or a command racing in right now would refuse nothing and
-        // could enqueue its own start behind this call — deadlocking
-        // whichever job eventually reaches its own stop.
+        // a build or snapshot step of its own. Both holds compose: the
+        // mark stays up regardless, so a command racing in right now
+        // still refuses instead of enqueuing its own start behind
+        // either call — deadlocking whichever job eventually reaches
+        // its own stop.
         const rebuilding = setup.pipeline.rebuild("example-plugin");
         expect(setup.commandClaims.isDraining(key)).toBe(true);
 
@@ -3606,6 +3605,53 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         // does not hang the whole suite behind a gate nothing else will
         // ever release.
         buildGate?.release.resolve();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier synchronously the instant Disable is called, before its own job has any chance to run (round-15 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // No `await` between the call and this assertion: if the raise
+        // lived inside the enqueued job instead of before enqueueAction,
+        // the job has not had a single microtask to run yet, and this
+        // would still read false — exactly the gap that let a command
+        // race in and queue its own start behind Disable on the same
+        // queue, deadlocking Disable's later wait for that exact claim.
+        const disabling = setup.pipeline.disable("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        const disabled = await disabling;
+        expect(disabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier synchronously the instant Uninstall is called, before its own job has any chance to run (round-15 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        const preflight = await setup.pipeline.uninstallPreflight("example-plugin");
+        if (!preflight.ok) throw new Error(preflight.error.message);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // No `await` between the call and this assertion — see the
+        // Disable test above for why that gap matters.
+        const uninstalling = setup.pipeline.uninstall(
+          "example-plugin",
+          preflight.confirmationToken,
+        );
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        const uninstalled = await uninstalling;
+        expect(uninstalled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
@@ -3686,12 +3732,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
-    it("clears the drain barrier via stopOldRuntime's own finally when nothing else wraps it (round-12 finding 3, isolated)", async () => {
-      // disable() calls stopOldRuntime directly, with no early
-      // raiseCommandClaimsBarrier call and no outer finally of its own —
-      // unlike rebuild()'s own wider barrier, stopOldRuntime's own
-      // finally is the only thing standing between a rejecting stop and
-      // a barrier that never comes down.
+    it("clears both disable's own outer hold and stopOldRuntime's own inner hold even when the stop itself rejects (round-12 finding 3, nested)", async () => {
+      // disable()'s own outer hold (round-15 finding 1) and
+      // stopOldRuntime's own inner hold nest on the same key — isDraining
+      // only returns false once both lower. A stop rejection must not
+      // strand either one: disable's own finally lowers its hold
+      // regardless of the outcome, and stopOldRuntime's own finally does
+      // the same for its own, narrower hold.
       const setup = await setupEstablishedPlugin();
       try {
         const key = "example-plugin";
@@ -3738,6 +3785,23 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
 
       expect(setup.commandClaims.isDraining(key)).toBe(false);
+    }, 60_000);
+
+    it("clears a stale started-host marker at dispose, so a later session reusing the same key is never misattributed to it (round-15 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      // A command that finished under dispose's own barrier skips
+      // consumeStartedHost (round-14's !isDraining guard defers it
+      // indefinitely, not just past this dispose) — simulate that
+      // stale marker directly, the state it would have left behind.
+      setup.commandClaims.markStartedHost(key);
+
+      await setup.pipeline.dispose();
+
+      // This workspace is gone for good. Nothing may still attribute a
+      // later session's own host, opened under this same lifecycle
+      // key, to whatever this one never consumed.
+      expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
     }, 60_000);
   });
 

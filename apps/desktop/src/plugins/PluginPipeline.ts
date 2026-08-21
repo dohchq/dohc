@@ -232,6 +232,15 @@ export interface PluginPipelineOptions {
    * and proceeds immediately.
    */
   awaitCommandClaimsDrained?: (pluginId: string) => Promise<() => void>;
+  /**
+   * Clears all command-claim state for this plugin — every claim, its
+   * on-demand start marker, and any drain hold. Call once this pipeline
+   * is fully disposed: a marker left behind would misattribute a later
+   * session's host, opened under the same workspace/plugin key, to
+   * whatever this one left unconsumed. Optional: a caller with no
+   * command-claim concept of its own omits it.
+   */
+  resetCommandClaims?: (pluginId: string) => void;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -742,6 +751,9 @@ export class PluginPipeline {
   }
 
   disable(pluginId: string): Promise<PluginPipelineActionResult> {
+    // Raised before this action is enqueued, so a command cannot claim
+    // this plugin while the action is still queued behind other work.
+    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
     return this.enqueueAction(pluginId, async () => {
       const candidate = this.requireValidCandidate(pluginId);
       try {
@@ -763,6 +775,8 @@ export class PluginPipeline {
           pluginId,
           pipelineError("state", "disable-failed", errorMessage(error)),
         );
+      } finally {
+        lowerBarrier?.();
       }
     });
   }
@@ -877,15 +891,23 @@ export class PluginPipeline {
   }
 
   approve(pluginId: string): Promise<PluginPipelineActionResult> {
+    // Raised before this action is enqueued, so a command cannot claim
+    // this plugin while the action is still queued behind other work.
+    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
     return this.enqueueAction(pluginId, async () => {
-      const candidate = this.requireValidCandidate(pluginId);
-      // The disabled bit is the user's own choice, orthogonal to approval:
-      // approving new content trusts that content, but must never silently
-      // re-enable a plugin the user explicitly turned off before the
-      // out-of-band change arrived (#779 round 3 finding 5).
-      return this.buildFromCurrentSource(pluginId, candidate, {
-        rememberAsApprovedAttempt: true,
-      });
+      try {
+        const candidate = this.requireValidCandidate(pluginId);
+        // The disabled bit is the user's own choice, orthogonal to
+        // approval: approving new content trusts that content, but must
+        // never silently re-enable a plugin the user explicitly turned
+        // off before the out-of-band change arrived (#779 round 3
+        // finding 5).
+        return await this.buildFromCurrentSource(pluginId, candidate, {
+          rememberAsApprovedAttempt: true,
+        });
+      } finally {
+        lowerBarrier?.();
+      }
     });
   }
 
@@ -1083,7 +1105,11 @@ export class PluginPipeline {
     pluginId: string,
     confirmationToken: string,
   ): Promise<PluginPipelineActionResult> {
+    // Raised before this action is enqueued, so a command cannot claim
+    // this plugin while the action is still queued behind other work.
+    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
     return this.enqueueAction(pluginId, async () => {
+     try {
       const confirmation = this.uninstallConfirmations.get(pluginId);
       this.uninstallConfirmations.delete(pluginId);
       if (!confirmation || confirmation.token !== confirmationToken) {
@@ -1244,6 +1270,9 @@ export class PluginPipeline {
         });
         return this.failure(pluginId, detail);
       }
+     } finally {
+       lowerBarrier?.();
+     }
     });
   }
 
@@ -1262,17 +1291,19 @@ export class PluginPipeline {
     // transports, so a command still mid-flight is never cut off partway
     // through.
     const pluginIds = [...this.statuses.keys()];
-    const lowerBarriers: Array<() => void> = [];
     try {
       await Promise.all(
-        pluginIds.map(async (pluginId) => {
-          const lower = await this.options.awaitCommandClaimsDrained?.(pluginId);
-          if (lower) lowerBarriers.push(lower);
-        }),
+        pluginIds.map((pluginId) => this.options.awaitCommandClaimsDrained?.(pluginId)),
       );
       await this.options.pluginHost.stopAll();
     } finally {
-      for (const lower of lowerBarriers) lower();
+      // Resets rather than just lowers: this pipeline is gone for good,
+      // so any marker left under these keys would misattribute a later
+      // session's own host, opened under the same workspace/plugin key,
+      // to whatever this one never consumed.
+      for (const pluginId of pluginIds) {
+        this.options.resetCommandClaims?.(pluginId);
+      }
     }
     this.uninstallConfirmations.clear();
   }

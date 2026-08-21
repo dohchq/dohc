@@ -223,4 +223,83 @@ describe("PluginCommandHostClaims", () => {
       expect(secondSettled).toBe(true);
     });
   });
+
+  describe("reset", () => {
+    it("clears an outstanding claim, so has() reports false and a later release is a no-op", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+      claims.claim(key);
+      expect(claims.has(key)).toBe(true);
+
+      claims.reset(key);
+
+      expect(claims.has(key)).toBe(false);
+      // A release that arrives after reset must not throw or resurrect
+      // a claim reset already discarded.
+      expect(() => claims.release(key)).not.toThrow();
+      expect(claims.has(key)).toBe(false);
+    });
+
+    it("clears the started-host marker, so a later consume reports false", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+      claims.markStartedHost(key);
+
+      claims.reset(key);
+
+      expect(claims.consumeStartedHost(key)).toBe(false);
+    });
+
+    it("clears an outstanding drain hold, so isDraining reports false", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+      claims.raiseDrainBarrier(key);
+      expect(claims.isDraining(key)).toBe(true);
+
+      claims.reset(key);
+
+      expect(claims.isDraining(key)).toBe(false);
+    });
+
+    it("resolves a pending drain waiter instead of leaving it hanging", async () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+      claims.claim(key);
+
+      const drained = claims.drain(key);
+      let settled = false;
+      void drained.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      claims.reset(key);
+      await drained;
+
+      expect(settled).toBe(true);
+    });
+
+    it("only touches the key it is given, leaving another key's state intact", () => {
+      const claims = new PluginCommandHostClaims();
+      const resetKey = "workspace-1\0example-plugin";
+      const otherKey = "workspace-2\0example-plugin";
+      claims.claim(resetKey);
+      claims.claim(otherKey);
+      claims.markStartedHost(resetKey);
+      claims.markStartedHost(otherKey);
+      claims.raiseDrainBarrier(resetKey);
+      claims.raiseDrainBarrier(otherKey);
+
+      claims.reset(resetKey);
+
+      expect(claims.has(resetKey)).toBe(false);
+      expect(claims.consumeStartedHost(resetKey)).toBe(false);
+      expect(claims.isDraining(resetKey)).toBe(false);
+
+      expect(claims.has(otherKey)).toBe(true);
+      expect(claims.consumeStartedHost(otherKey)).toBe(true);
+      expect(claims.isDraining(otherKey)).toBe(true);
+    });
+  });
 });

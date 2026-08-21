@@ -617,6 +617,7 @@ import {
 import { PluginHost } from "./plugins/PluginHost";
 import { invokeRegisteredPluginCommand } from "./plugins/pluginCommandInvocation";
 import { PluginCommandHostClaims } from "./plugins/pluginCommandHostClaims";
+import { awaitCommandClaimsDrainedWithDeadline } from "./plugins/pluginShared";
 import {
   PluginPipeline,
   type PluginPipelineStatusEvent,
@@ -1051,7 +1052,14 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
     awaitCommandClaimsDrained: (pluginId) =>
-      activeCommandClaims.drain(
+      awaitCommandClaimsDrainedWithDeadline(
+        pluginId,
+        activeCommandClaims.drain(
+          pluginLifecycleKey(workspace.workspaceId, pluginId),
+        ),
+      ),
+    resetCommandClaims: (pluginId) =>
+      activeCommandClaims.reset(
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
   });

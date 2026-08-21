@@ -37,6 +37,41 @@ export function raceWithTimeout<T>(
   });
 }
 
+// Bounds how long a stopping action (disable, uninstall, approve,
+// rebuild, or workspace disposal) waits on a plugin's own command claims
+// before it stops the host anyway. Generous — the barrier already
+// refuses new claims once it's raised, so a healthy wait is bounded by
+// whatever was already in flight when it began; a claim still
+// outstanding this long means its command's own handler never settled.
+// Stopping the host terminates that hung handler, the honest outcome for
+// one that never will.
+export const COMMAND_CLAIMS_DRAIN_DEADLINE_MS = 30_000;
+
+/**
+ * Wraps a command-claims drain with COMMAND_CLAIMS_DRAIN_DEADLINE_MS: if
+ * `drained` is still outstanding past the deadline, logs which plugin
+ * overran and resolves with a no-op lower so the caller proceeds to stop
+ * the host — the real lower is never discarded, so the barrier still
+ * clears once the hung command's handler eventually settles.
+ */
+export function awaitCommandClaimsDrainedWithDeadline(
+  pluginId: string,
+  drained: Promise<() => void>,
+  warn: (message: string) => void = (message) => console.warn(message),
+): Promise<() => void> {
+  return raceWithTimeout(
+    drained,
+    COMMAND_CLAIMS_DRAIN_DEADLINE_MS,
+    `Plugin "${pluginId}" still has command claims outstanding after ${COMMAND_CLAIMS_DRAIN_DEADLINE_MS} ms`,
+  ).catch((error: unknown) => {
+    warn(`[desktop] ${errorMessage(error)}. Stopping its host anyway.`);
+    // The claim will still lower once its command eventually settles —
+    // never discard the real lower, or the barrier leaks.
+    void drained.then((lower) => lower());
+    return () => {};
+  });
+}
+
 export function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const pathFromParent = relative(parent, child);

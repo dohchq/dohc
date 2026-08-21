@@ -471,9 +471,21 @@ describe("plugin panel main-process wiring", () => {
       "awaitCommandClaimsDrained: (pluginId) =>",
       raiseCallAt,
     );
+    const deadlineWrapAt = createPipeline.indexOf(
+      "awaitCommandClaimsDrainedWithDeadline(",
+      drainedAt,
+    );
     const drainCallAt = createPipeline.indexOf(
       "activeCommandClaims.drain(",
-      drainedAt,
+      deadlineWrapAt,
+    );
+    const resetAt = createPipeline.indexOf(
+      "resetCommandClaims: (pluginId) =>",
+      drainCallAt,
+    );
+    const resetCallAt = createPipeline.indexOf(
+      "activeCommandClaims.reset(",
+      resetAt,
     );
     // MUTATION (no raise/no wait): missing either wire-up makes the
     // corresponding PluginPipeline hook a no-op (each is optional exactly
@@ -483,7 +495,17 @@ describe("plugin panel main-process wiring", () => {
     expect(raiseAt).toBeGreaterThan(optionsAt);
     expect(raiseCallAt).toBeGreaterThan(raiseAt);
     expect(drainedAt).toBeGreaterThan(raiseCallAt);
-    expect(drainCallAt).toBeGreaterThan(drainedAt);
+    // MUTATION (unbounded teardown): a raw drain() with no deadline wrap
+    // lets a hung command's handler block disable/uninstall/rebuild and
+    // workspace disposal forever (round-15 finding 3).
+    expect(deadlineWrapAt).toBeGreaterThan(drainedAt);
+    expect(drainCallAt).toBeGreaterThan(deadlineWrapAt);
+    // MUTATION (stale marker survives disposal): a missing reset wire-up
+    // leaves a disposed workspace's started-host marker in place, so the
+    // next command against a later session reusing the same lifecycle
+    // key stops the wrong host (round-15 finding 2).
+    expect(resetAt).toBeGreaterThan(drainCallAt);
+    expect(resetCallAt).toBeGreaterThan(resetAt);
   });
 
   it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {
