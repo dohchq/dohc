@@ -1,11 +1,6 @@
 import { randomUUID } from "node:crypto";
-import {
-  copyFile,
-  lstat,
-  mkdir,
-  readdir,
-} from "node:fs/promises";
-import { join, relative } from "node:path";
+import { cp, lstat, mkdir } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
 import { readPluginManifestFile } from "./pluginManifest";
 import {
@@ -78,63 +73,18 @@ function isBuiltinDriverPlugin(
   );
 }
 
+// The renderer composes the full sentence ("dohc could not add <name>. ...");
+// every error here states only the cause, never repeats that prefix.
 function existingTargetError(directoryName: string): OfferedPluginAddError {
   return new OfferedPluginAddError(
     `plugins/${directoryName} already exists in this workspace.`,
   );
 }
 
-function copyFailure(
-  directoryName: string,
-  error: unknown,
-): OfferedPluginAddError {
-  if (error instanceof OfferedPluginAddError) return error;
-  return new OfferedPluginAddError(
-    `dohc could not add plugins/${directoryName}. ${errorMessage(error)}`,
-  );
-}
-
-async function copySourceTree(
-  sourceRoot: string,
-  destinationRoot: string,
-  pluginRoot: string = sourceRoot,
-): Promise<void> {
-  const sourceStats = await lstat(sourceRoot);
-  const sourcePath = relative(pluginRoot, sourceRoot).replaceAll("\\", "/") || ".";
-  if (sourceStats.isSymbolicLink()) {
-    throw new OfferedPluginAddError(
-      `dohc could not add this plugin because its built-in source contains a link at ${sourcePath}.`,
-    );
-  }
-  if (!sourceStats.isDirectory()) {
-    throw new OfferedPluginAddError(
-      "dohc could not add this plugin because its built-in source is not a directory.",
-    );
-  }
-
-  await mkdir(destinationRoot, { recursive: true });
-  for (const entry of await readdir(sourceRoot, { withFileTypes: true })) {
-    if (EXCLUDED_SOURCE_NAMES.has(entry.name) || entry.name === "dist") continue;
-    const source = join(sourceRoot, entry.name);
-    const destination = join(destinationRoot, entry.name);
-    const stats = await lstat(source);
-    const entryPath = relative(pluginRoot, source).replaceAll("\\", "/");
-    if (stats.isSymbolicLink()) {
-      throw new OfferedPluginAddError(
-        `dohc could not add this plugin because its built-in source contains a link at ${entryPath}.`,
-      );
-    }
-    if (stats.isDirectory()) {
-      await copySourceTree(source, destination, pluginRoot);
-      continue;
-    }
-    if (!stats.isFile()) {
-      throw new OfferedPluginAddError(
-        `dohc could not add this plugin because its built-in source contains an unsupported entry at ${entryPath}.`,
-      );
-    }
-    await copyFile(source, destination);
-  }
+function toOfferedPluginAddError(error: unknown): OfferedPluginAddError {
+  return error instanceof OfferedPluginAddError
+    ? error
+    : new OfferedPluginAddError(errorMessage(error));
 }
 
 export async function addOfferedPlugin(params: {
@@ -145,32 +95,41 @@ export async function addOfferedPlugin(params: {
   const { builtinPluginsRoot, workspaceRoot, directoryName } = params;
   if (!isBuiltinDriverPlugin(directoryName)) {
     throw new OfferedPluginAddError(
-      `dohc cannot add ${directoryName} because it is not a built-in driver plugin.`,
+      `"${directoryName}" is not a built-in driver plugin.`,
     );
   }
 
-  const pluginsRoot = join(workspaceRoot, "plugins");
-  const target = join(pluginsRoot, directoryName);
-  try {
-    if (await pathExists(target)) throw existingTargetError(directoryName);
-  } catch (error) {
-    throw copyFailure(directoryName, error);
-  }
+  const target = join(workspaceRoot, "plugins", directoryName);
+  if (await pathExists(target)) throw existingTargetError(directoryName);
 
-  const staging = join(pluginsRoot, `.offer-staging-${randomUUID()}`);
+  // Staged under .dohc, never under plugins/: a mid-copy watcher batch would
+  // otherwise list the staging directory itself as a phantom plugin
+  // (discoverInstalledPlugins has no dot-prefix skip), and a crash between
+  // the copy and the rename would strand it there for good. .dohc is on the
+  // same volume as plugins/ (both live under workspaceRoot), so the rename
+  // below stays atomic, and .dohc is already excluded from workspace
+  // listing, capture, and plugin discovery.
+  const stagingRoot = join(workspaceRoot, ".dohc", "plugin-offer-staging");
+  const staging = join(stagingRoot, `${directoryName}-${randomUUID()}`);
   try {
-    await mkdir(pluginsRoot, { recursive: true });
-    await copySourceTree(join(builtinPluginsRoot, directoryName), staging);
+    await mkdir(join(workspaceRoot, "plugins"), { recursive: true });
+    await mkdir(stagingRoot, { recursive: true });
+    // The install pipeline's own source snapshot already rejects a symlink
+    // or other non-regular entry with a proper diagnostic once this copy is
+    // installed — duplicating that check here would only produce a second,
+    // worse-worded rejection. fs.cp does not dereference by default, so a
+    // hypothetical symlink in the built-in source lands inert (pointing
+    // nowhere useful in the copy) rather than pulling in bytes from outside
+    // the source tree.
+    await cp(join(builtinPluginsRoot, directoryName), staging, {
+      recursive: true,
+      filter: (source) => !EXCLUDED_SOURCE_NAMES.has(basename(source)),
+    });
     if (await pathExists(target)) throw existingTargetError(directoryName);
-    await renameWithWindowsRetry(staging, target, (error) =>
-      copyFailure(directoryName, error));
+    await renameWithWindowsRetry(staging, target, toOfferedPluginAddError);
     return { rootPath: target };
   } catch (error) {
-    try {
-      await removeStaging(staging);
-    } catch (cleanupError) {
-      throw copyFailure(directoryName, cleanupError);
-    }
-    throw copyFailure(directoryName, error);
+    await removeStaging(staging).catch(() => undefined);
+    throw toOfferedPluginAddError(error);
   }
 }

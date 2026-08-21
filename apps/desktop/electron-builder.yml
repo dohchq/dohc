@@ -61,13 +61,11 @@ extraResources:
     filter:
       - "**/*"
       - "!node_modules/**"
-      - "!dist/**"
   - from: plugins/claude-code
     to: builtin-plugins/claude-code
     filter:
       - "**/*"
       - "!node_modules/**"
-      - "!dist/**"
   # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
   # outside app.asar so the main process can execute it directly.
   - from: resources/workspace-engine

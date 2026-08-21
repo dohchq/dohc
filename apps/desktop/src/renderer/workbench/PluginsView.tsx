@@ -1,5 +1,5 @@
 import { AlertTriangle, Blocks, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type {
   OfferedPluginRecord,
   PluginStatusRecord,
@@ -15,7 +15,6 @@ import {
   pluginTitle,
   statusText,
   statusTone,
-  useOfferedPlugins,
   usePluginCatalog,
 } from "./pluginCatalog";
 
@@ -45,7 +44,6 @@ export function PluginsView(props: {
   onOpenDetails: (pluginId: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
-  const offersHook = useOfferedPlugins(props.workspaceId);
   const [filter, setFilter] = useState("");
 
   const plugins = catalog.load.status === "ready" ? catalog.load.plugins : [];
@@ -56,8 +54,8 @@ export function PluginsView(props: {
   const installedPlugins = matched.filter(isInstalled);
   const candidatePlugins = matched.filter((plugin) => !isInstalled(plugin));
   const offers = useMemo(
-    () => offersHook.offers.filter((offer) => matchesFilter(offer, filter)),
-    [offersHook.offers, filter],
+    () => catalog.offers.filter((offer) => matchesFilter(offer, filter)),
+    [catalog.offers, filter],
   );
 
   function renderRow(plugin: PluginStatusRecord) {
@@ -170,8 +168,8 @@ export function PluginsView(props: {
   }
 
   function renderOfferRow(offer: OfferedPluginRecord) {
-    const busy = offersHook.busyDirectoryName === offer.directoryName;
-    const error = offersHook.errors[offer.directoryName];
+    const busyAction = catalog.busy[offer.directoryName];
+    const error = catalog.errors[offer.directoryName];
     return (
       <li key={offer.directoryName} className="list-none">
         <div
@@ -202,11 +200,11 @@ export function PluginsView(props: {
           <button
             type="button"
             data-testid="plugin-offer-add"
-            disabled={offersHook.busyDirectoryName !== null}
-            onClick={() => offersHook.add(offer)}
+            disabled={busyAction !== undefined}
+            onClick={() => catalog.addOffer(offer)}
             className={installButton}
           >
-            {busy ? "Adding" : "Add"}
+            {actionLabel("add", busyAction === "add")}
           </button>
         </div>
         {error ? (
@@ -221,6 +219,24 @@ export function PluginsView(props: {
       </li>
     );
   }
+
+  const sections: { testId: string; label: string; rows: ReactNode[] }[] = [
+    {
+      testId: "plugins-section-installed",
+      label: "Installed",
+      rows: installedPlugins.map(renderRow),
+    },
+    {
+      testId: "plugins-section-available",
+      label: "Available in this workspace",
+      rows: candidatePlugins.map(renderRow),
+    },
+    {
+      testId: "plugins-section-offered",
+      label: "Built in",
+      rows: offers.map(renderOfferRow),
+    },
+  ].filter((section) => section.rows.length > 0);
 
   return (
     <div data-testid="plugins-view" className="flex min-h-0 flex-1 flex-col">
@@ -258,7 +274,7 @@ export function PluginsView(props: {
             Retry
           </button>
         </div>
-      ) : plugins.length === 0 && offersHook.offers.length === 0 ? (
+      ) : plugins.length === 0 && catalog.offers.length === 0 ? (
         <div data-testid="plugins-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
             icon={<Blocks size={22} aria-hidden className="text-line" />}
@@ -276,42 +292,16 @@ export function PluginsView(props: {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-1 py-2">
-          {installedPlugins.length > 0 ? (
-            <section data-testid="plugins-section-installed">
-              <SectionLabel className="block px-2 pb-1">Installed</SectionLabel>
-              <ul className="m-0 flex list-none flex-col p-0">
-                {installedPlugins.map(renderRow)}
-              </ul>
-            </section>
-          ) : null}
-          {candidatePlugins.length > 0 ? (
+          {sections.map((section, index) => (
             <section
-              data-testid="plugins-section-available"
-              className={installedPlugins.length > 0 ? "mt-4" : undefined}
+              key={section.testId}
+              data-testid={section.testId}
+              className={index > 0 ? "mt-4" : undefined}
             >
-              <SectionLabel className="block px-2 pb-1">
-                Available in this workspace
-              </SectionLabel>
-              <ul className="m-0 flex list-none flex-col p-0">
-                {candidatePlugins.map(renderRow)}
-              </ul>
+              <SectionLabel className="block px-2 pb-1">{section.label}</SectionLabel>
+              <ul className="m-0 flex list-none flex-col p-0">{section.rows}</ul>
             </section>
-          ) : null}
-          {offers.length > 0 ? (
-            <section
-              data-testid="plugins-section-offered"
-              className={
-                installedPlugins.length > 0 || candidatePlugins.length > 0
-                  ? "mt-4"
-                  : undefined
-              }
-            >
-              <SectionLabel className="block px-2 pb-1">Offered</SectionLabel>
-              <ul className="m-0 flex list-none flex-col p-0">
-                {offers.map(renderOfferRow)}
-              </ul>
-            </section>
-          ) : null}
+          ))}
         </div>
       )}
     </div>

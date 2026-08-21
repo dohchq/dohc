@@ -858,29 +858,33 @@ const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>(
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
+// app.getAppPath() is unreliable here: when Electron is launched with a
+// direct script path (as the e2e harness does, and as a plain built binary
+// is), it resolves to the launched script's own directory (dist/main) rather
+// than the package root, with no upward package.json search — it silently
+// pointed pnpm resolution at dist/main/resources and broke every plugin
+// install (#777's e2e caught this). import.meta.dirname is the currently
+// executing module's own directory (dist/main at runtime, exactly like
+// createPluginPipeline's sibling plugin-host.js resolution below), so two
+// levels up reaches apps/desktop deterministically regardless of how
+// Electron was launched. Both dev-mode resolvers below walk from here, so
+// this one call site is the only place that encodes that layout.
+function desktopPackageRootInDev(): string {
+  return join(import.meta.dirname, "..", "..");
+}
+
 function pluginResourcesBasePath(): string {
-  // app.getAppPath() is unreliable here: when Electron is launched with a
-  // direct script path (as the e2e harness does, and as a plain built binary
-  // is), it resolves to the launched script's own directory (dist/main)
-  // rather than the package root, with no upward package.json search — it
-  // silently pointed pnpm resolution at dist/main/resources and broke every
-  // plugin install (#777's e2e caught this). import.meta.dirname is the
-  // currently executing module's own directory (dist/main at runtime,
-  // exactly like createPluginPipeline's sibling plugin-host.js resolution
-  // below), so two levels up reaches apps/desktop deterministically
-  // regardless of how Electron was launched.
   return app.isPackaged
     ? process.resourcesPath
-    : join(import.meta.dirname, "..", "..", "resources");
+    : join(desktopPackageRootInDev(), "resources");
 }
 
 function builtinPluginsRoot(): string {
-  // Packaged plugin sources live in extraResources as a plain directory.
-  // In dev, import.meta.dirname is dist/main, so two levels up reaches the
-  // desktop package and its checked-in plugins directory.
+  // Packaged plugin sources live in extraResources as a plain directory,
+  // staged from the repo's checked-in apps/desktop/plugins (electron-builder.yml).
   return app.isPackaged
     ? join(process.resourcesPath, "builtin-plugins")
-    : join(import.meta.dirname, "..", "..", "plugins");
+    : join(desktopPackageRootInDev(), "plugins");
 }
 
 function notifyPluginStatusChanged(
@@ -7176,14 +7180,15 @@ function registerIpcHandlers(
   async function activePluginPipelineFor(
     event: IpcMainInvokeEvent,
     workspaceId: string,
-  ): Promise<PluginPipeline> {
+  ) {
     const workspace = requireWorkspace(workspaceId);
     if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
       throw new Error(
         "The plugin request does not target the active workspace. Open the workspace and try again.",
       );
     }
-    return ensurePluginPipeline(workspace);
+    const pipeline = await ensurePluginPipeline(workspace);
+    return { pipeline, workspace };
   }
 
   function pluginIpcError(error: unknown) {
@@ -7198,7 +7203,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListPluginsPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return ListPluginsResult.parse({ ok: true, plugins: pipeline.list() });
     } catch (error) {
       return ListPluginsResult.parse({ ok: false, error: pluginIpcError(error) });
@@ -7209,8 +7214,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListOfferedPluginsPayload.parse(payload);
     try {
-      await activePluginPipelineFor(event, input.workspaceId);
-      const workspace = requireWorkspace(input.workspaceId);
+      const { workspace } = await activePluginPipelineFor(event, input.workspaceId);
       const offers = await listOfferedPlugins(
         builtinPluginsRoot(),
         workspace.rootPath,
@@ -7228,8 +7232,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = AddOfferedPluginPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
-      const workspace = requireWorkspace(input.workspaceId);
+      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
       await addOfferedPlugin({
         builtinPluginsRoot: builtinPluginsRoot(),
         workspaceRoot: workspace.rootPath,
@@ -7282,7 +7285,7 @@ function registerIpcHandlers(
       assertTrustedSender(event);
       const input = PluginActionPayload.parse(payload);
       try {
-        const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+        const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
         const result = PluginActionResult.parse(
           await run(pipeline, input.pluginId, input.workspaceId),
         );
@@ -7320,7 +7323,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = PluginActionPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginUninstallPreflightResult.parse(
         await pipeline.uninstallPreflight(input.pluginId),
       );
@@ -7336,7 +7339,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = PluginActionPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSizesResult.parse({
         ok: true,
         sizes: await pipeline.sizes(input.pluginId),
@@ -7353,7 +7356,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = PluginActionPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
         values: await pipeline.getPluginSettings(input.pluginId),
@@ -7370,7 +7373,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = SetPluginSettingsPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
         values: await pipeline.setPluginSettings(input.pluginId, input.values),
@@ -7387,7 +7390,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = UninstallPluginPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
       // Uninstall stops the plugin's process on its way to deleting the
       // source, so no panel authority over it survives the attempt whether
       // or not the delete succeeds (#779 round 12 A4).
@@ -7407,7 +7410,7 @@ function registerIpcHandlers(
         // The guest partition holds the web app's session cookies — plugin
         // state as much as its data directory. A reinstall starts unpaired.
         await clearPluginWebAppPartition({
-          workspaceRoot: requireWorkspace(input.workspaceId).rootPath,
+          workspaceRoot: workspace.rootPath,
           pluginId: input.pluginId,
           hardenedPartitions: hardenedGuestPartitions,
           fromPartition: (partition) => session.fromPartition(partition),

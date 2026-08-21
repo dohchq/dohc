@@ -2392,9 +2392,8 @@ export const ListPluginsPayload = z.object({
 }).strict();
 export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
 
-export const ListOfferedPluginsPayload = z.object({
-  workspaceId: WORKSPACE_ID,
-}).strict();
+// Same shape as ListPluginsPayload — aliased rather than duplicated.
+export const ListOfferedPluginsPayload = ListPluginsPayload;
 export type ListOfferedPluginsPayload = z.infer<typeof ListOfferedPluginsPayload>;
 
 export const AddOfferedPluginPayload = z.object({

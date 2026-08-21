@@ -24,7 +24,14 @@ export type PluginAction =
   | "enable"
   | "approve"
   | "preflight"
-  | "uninstall";
+  | "uninstall"
+  | "add";
+
+// install/disable/enable/approve go through runAction's shared dispatch and
+// error composition; add has its own bridge call and its own error copy
+// (named by the offer's title, not a pluginId), and preflight/uninstall
+// already run their own dedicated flows below.
+type RunnablePluginAction = Exclude<PluginAction, "preflight" | "uninstall" | "add">;
 
 export type PluginLoadState =
   | { status: "loading" }
@@ -111,6 +118,7 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
       approve: "Approve",
       preflight: "Uninstall",
       uninstall: "Uninstall plugin",
+      add: "Add",
     };
     return labels[action];
   }
@@ -121,12 +129,13 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
     approve: "Approving",
     preflight: "Checking",
     uninstall: "Uninstalling",
+    add: "Adding",
   };
   return labels[action];
 }
 
 function actionError(
-  action: Exclude<PluginAction, "preflight" | "uninstall">,
+  action: RunnablePluginAction,
   pluginId: string,
   error: PluginPipelineError,
 ): string {
@@ -257,103 +266,12 @@ export function matchesFilter(plugin: PluginFilterRecord, filter: string): boole
   const needle = filter.trim().toLowerCase();
   if (needle.length === 0) return true;
   return [
-    plugin.id ?? plugin.directoryName,
+    plugin.id ?? null,
     plugin.directoryName,
     plugin.displayName,
     plugin.description,
     plugin.publisher,
   ].some((field) => field !== null && field.toLowerCase().includes(needle));
-}
-
-export interface OfferedPlugins {
-  offers: OfferedPluginRecord[];
-  add: (offer: OfferedPluginRecord) => void;
-  busyDirectoryName: string | null;
-  errors: Record<string, string | undefined>;
-}
-
-export function useOfferedPlugins(
-  workspaceId: string,
-  enabled: boolean = true,
-): OfferedPlugins {
-  const [offers, setOffers] = useState<OfferedPluginRecord[]>([]);
-  const [busyDirectoryName, setBusyDirectoryName] = useState<string | null>(null);
-  const [errors, setErrors] = useState<Record<string, string | undefined>>({});
-  const listRequestToken = useRef(0);
-  const workspaceEpoch = useRef(0);
-
-  async function loadOffers() {
-    const requestToken = ++listRequestToken.current;
-    const epoch = workspaceEpoch.current;
-    try {
-      const result = await bridge().listOfferedPlugins({ workspaceId });
-      if (
-        requestToken !== listRequestToken.current ||
-        epoch !== workspaceEpoch.current
-      ) {
-        return;
-      }
-      setOffers(result.ok ? result.offers : []);
-    } catch {
-      if (
-        requestToken === listRequestToken.current &&
-        epoch === workspaceEpoch.current
-      ) {
-        setOffers([]);
-      }
-    }
-  }
-
-  useEffect(() => {
-    if (!enabled) return;
-    setOffers([]);
-    setBusyDirectoryName(null);
-    setErrors({});
-    void loadOffers();
-    return () => {
-      listRequestToken.current += 1;
-      workspaceEpoch.current += 1;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, enabled]);
-
-  async function add(offer: OfferedPluginRecord) {
-    const epoch = workspaceEpoch.current;
-    const directoryName = offer.directoryName;
-    const title = offer.displayName ?? directoryName;
-    setBusyDirectoryName(directoryName);
-    setErrors((current) => ({ ...current, [directoryName]: undefined }));
-    try {
-      const result = await bridge().addOfferedPlugin({ workspaceId, directoryName });
-      if (epoch !== workspaceEpoch.current) return;
-      if (result.ok) {
-        setOffers((current) =>
-          current.filter((entry) => entry.directoryName !== directoryName),
-        );
-      } else {
-        setErrors((current) => ({
-          ...current,
-          [directoryName]: `dohc could not add ${title}. ${result.error.message}`,
-        }));
-      }
-    } catch (error) {
-      if (epoch !== workspaceEpoch.current) return;
-      const reason = error instanceof Error ? error.message : "Try again.";
-      setErrors((current) => ({
-        ...current,
-        [directoryName]: `dohc could not add ${title}. ${reason}`,
-      }));
-    } finally {
-      if (epoch === workspaceEpoch.current) setBusyDirectoryName(null);
-    }
-  }
-
-  return {
-    offers,
-    add: (offer) => void add(offer),
-    busyDirectoryName,
-    errors,
-  };
 }
 
 export interface PluginCatalog {
@@ -362,11 +280,14 @@ export interface PluginCatalog {
   openingWebApp: string | null;
   errors: Record<string, string | undefined>;
   confirmation: PluginUninstallConfirmation | null;
+  /** Built-in driver plugins this workspace doesn't have yet. */
+  offers: OfferedPluginRecord[];
   reload: () => void;
   runAction: (
     plugin: PluginStatusRecord,
-    action: Exclude<PluginAction, "preflight" | "uninstall">,
+    action: RunnablePluginAction,
   ) => void;
+  addOffer: (offer: OfferedPluginRecord) => void;
   openWebApp: (plugin: PluginStatusRecord, webAppId: string) => void;
   prepareUninstall: (plugin: PluginStatusRecord) => void;
   confirmUninstall: () => void;
@@ -392,9 +313,14 @@ export function usePluginCatalog(
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
   const [confirmation, setConfirmation] =
     useState<PluginUninstallConfirmation | null>(null);
+  const [offers, setOffers] = useState<OfferedPluginRecord[]>([]);
   // The request token orders list responses. The workspace epoch invalidates
-  // list and action responses after unmount or a workspace switch.
+  // list and action responses after unmount or a workspace switch. Offers
+  // are a separate bridge call from the plugin list, so they order their own
+  // responses against their own token, but share the one epoch — a single
+  // workspace lifecycle governs both.
   const listRequestToken = useRef(0);
+  const offersRequestToken = useRef(0);
   const workspaceEpoch = useRef(0);
   // Status events can arrive while the initial list is in flight. Keep the
   // newest event for each plugin and merge it over that list before painting.
@@ -443,6 +369,28 @@ export function usePluginCatalog(
     }
   }
 
+  async function loadOffers() {
+    const requestToken = ++offersRequestToken.current;
+    const epoch = workspaceEpoch.current;
+    try {
+      const result = await bridge().listOfferedPlugins({ workspaceId });
+      if (
+        requestToken !== offersRequestToken.current ||
+        epoch !== workspaceEpoch.current
+      ) {
+        return;
+      }
+      setOffers(result.ok ? result.offers : []);
+    } catch {
+      if (
+        requestToken === offersRequestToken.current &&
+        epoch === workspaceEpoch.current
+      ) {
+        setOffers([]);
+      }
+    }
+  }
+
   useEffect(() => {
     if (!enabled) return;
     const epoch = workspaceEpoch.current;
@@ -453,9 +401,11 @@ export function usePluginCatalog(
     // cleanup on the epoch guard, so this workspace clears it. Without this
     // every Open control here stays disabled for the rest of the session.
     setOpeningWebApp(null);
+    setOffers([]);
     pendingStatusEvents.current.clear();
     statusRevision.current = 0;
     void loadPlugins();
+    void loadOffers();
     const unsubscribe = bridge().onPluginStatusChanged((event) => {
       if (epoch !== workspaceEpoch.current || event.workspaceId !== workspaceId) {
         return;
@@ -478,6 +428,7 @@ export function usePluginCatalog(
     return () => {
       unsubscribe();
       listRequestToken.current += 1;
+      offersRequestToken.current += 1;
       workspaceEpoch.current += 1;
       pendingStatusEvents.current.clear();
     };
@@ -510,7 +461,7 @@ export function usePluginCatalog(
 
   async function runAction(
     plugin: PluginStatusRecord,
-    action: Exclude<PluginAction, "preflight" | "uninstall">,
+    action: RunnablePluginAction,
   ) {
     const epoch = workspaceEpoch.current;
     const revisionAtStart = statusRevision.current;
@@ -660,14 +611,60 @@ export function usePluginCatalog(
     }
   }
 
+  // A build/enable/etc action never sees "add" — RunnablePluginAction
+  // excludes it — but addOffer runs its own bridge call and error copy: the
+  // offer names itself by title, not by a pluginId a plugin action shares.
+  async function addOffer(offer: OfferedPluginRecord) {
+    const epoch = workspaceEpoch.current;
+    const revisionAtStart = statusRevision.current;
+    const directoryName = offer.directoryName;
+    const title = offer.displayName ?? directoryName;
+    setBusy((current) => ({ ...current, [directoryName]: "add" }));
+    setErrors((current) => ({ ...current, [directoryName]: undefined }));
+    try {
+      const result = await bridge().addOfferedPlugin({ workspaceId, directoryName });
+      if (epoch !== workspaceEpoch.current) return;
+      if (result.ok) {
+        setOffers((current) =>
+          current.filter((entry) => entry.directoryName !== directoryName),
+        );
+        // Upserted in the same tick the offer disappears, so the plugin
+        // never spends a render in neither the offered nor the installed
+        // section.
+        replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
+      } else {
+        setErrors((current) => ({
+          ...current,
+          [directoryName]: `dohc could not add ${title}. ${result.error.message}`,
+        }));
+      }
+    } catch (error) {
+      if (epoch !== workspaceEpoch.current) return;
+      const reason = error instanceof Error ? error.message : "Try again.";
+      setErrors((current) => ({
+        ...current,
+        [directoryName]: `dohc could not add ${title}. ${reason}`,
+      }));
+    } finally {
+      if (epoch === workspaceEpoch.current) {
+        setBusy((current) => ({ ...current, [directoryName]: undefined }));
+      }
+    }
+  }
+
   return {
     load,
     busy,
     openingWebApp,
     errors,
     confirmation,
-    reload: () => void loadPlugins(),
+    offers,
+    reload: () => {
+      void loadPlugins();
+      void loadOffers();
+    },
     runAction: (plugin, action) => void runAction(plugin, action),
+    addOffer: (offer) => void addOffer(offer),
     openWebApp: (plugin, webAppId) => void openWebApp(plugin, webAppId),
     prepareUninstall: (plugin) => void prepareUninstall(plugin),
     confirmUninstall: () => void confirmUninstall(),

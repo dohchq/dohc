@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
+import { discoverInstalledPlugins } from "./pluginDiscovery";
 import {
   OfferedPluginAddError,
   addOfferedPlugin,
@@ -105,12 +107,10 @@ describe("addOfferedPlugin", () => {
     await Promise.all([
       mkdir(join(sourceRoot, "node_modules", "dependency"), { recursive: true }),
       mkdir(join(sourceRoot, ".dohc"), { recursive: true }),
-      mkdir(join(sourceRoot, "dist"), { recursive: true }),
     ]);
     await Promise.all([
       writeFile(join(sourceRoot, "node_modules", "dependency", "marker"), "no"),
       writeFile(join(sourceRoot, ".dohc", "marker"), "no"),
-      writeFile(join(sourceRoot, "dist", "marker"), "no"),
     ]);
 
     const result = await addOfferedPlugin({
@@ -124,11 +124,43 @@ describe("addOfferedPlugin", () => {
       .resolves.toBe("export default {};\n");
     await expect(readFile(join(result.rootPath, "dohc-plugin.json"), "utf8"))
       .resolves.toContain('"name": "codex"');
-    for (const excluded of ["node_modules", ".dohc", "dist"]) {
+    for (const excluded of ["node_modules", ".dohc"]) {
       await expect(lstat(join(result.rootPath, excluded))).rejects.toMatchObject({
         code: "ENOENT",
       });
     }
+  });
+
+  it("stages under .dohc, never inside plugins/, invisible to discovery", async () => {
+    const fixture = await createFixture();
+    // A real, already-installed plugin, so discovery is genuinely scanning
+    // plugins/ in this test rather than short-circuiting on an absent
+    // directory.
+    const otherPluginRoot = join(fixture.workspaceRoot, "plugins", "claude-code");
+    await mkdir(join(otherPluginRoot, "src"), { recursive: true });
+    await writeFile(
+      join(otherPluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "claude-code", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(otherPluginRoot, "src", "main.ts"), "export default {};\n");
+
+    // Simulates a file sitting in the staging path mid-copy: since the
+    // staging root lives under workspaceRoot/.dohc rather than
+    // workspaceRoot/plugins, discovery — which only ever reads
+    // workspaceRoot/plugins/* — structurally cannot see it, at any point in
+    // time, not just the moment this snapshot happens to sample.
+    const stagingDir = join(
+      fixture.workspaceRoot,
+      ".dohc",
+      "plugin-offer-staging",
+      `codex-${randomUUID()}`,
+    );
+    await mkdir(stagingDir, { recursive: true });
+    await writeFile(join(stagingDir, "dohc-plugin.json"), "{}");
+
+    const discovered = await discoverInstalledPlugins(fixture.workspaceRoot, new Map());
+
+    expect(discovered.map((plugin) => plugin.directoryName)).toEqual(["claude-code"]);
   });
 
   it("refuses an existing target without changing its contents", async () => {
