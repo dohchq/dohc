@@ -57,6 +57,38 @@ describe("commandForSiteScript", () => {
     expect(() => commandForSiteScript(site, "dev")).toThrow(/loopback/);
   });
 
+  it("preserves forwarded args after npm's documented -- separator", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run dev -- --port 3000" },
+    });
+
+    expect(commandForSiteScript(site, "dev")).toEqual({
+      command: "npm",
+      args: ["run", "dev", "--port", "3000"],
+    });
+  });
+
+  it("validates a forwarded arg that binds outside loopback, not just the configured script", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run dev -- --host 0.0.0.0" },
+    });
+
+    expect(() => commandForSiteScript(site, "dev")).toThrow(/loopback/);
+  });
+
+  it("does not treat npm args after run <script> as a recognized wrapper unless they start with --", () => {
+    const site = packageSite({
+      configuredScripts: { dev: "npm run dev --port 3000" },
+    });
+
+    // Falls through to the uninspected literal command rather than being
+    // misread as npm's `-- <forwardedArgs>` form.
+    expect(commandForSiteScript(site, "dev")).toEqual({
+      command: "npm",
+      args: ["run", "dev", "--port", "3000"],
+    });
+  });
+
   it.each(["bun run dev", "bun dev"])(
     "validates lifecycle hooks behind the configured %s wrapper",
     (configuredCommand) => {

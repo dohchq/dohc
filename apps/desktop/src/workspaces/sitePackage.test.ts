@@ -53,7 +53,7 @@ describe("shareMountRootForSite", () => {
     );
     await writeFile(
       join(root, "shared-with-me", "alex", "portal", "dist", "index.html"),
-      '<script src="/assets/main.js"></script>',
+      '<script type="module" src="/assets/main.js"></script>',
     );
     await writeFile(
       join(root, "shared-with-me", "alex", "portal", "dist", "assets", "main.js"),
@@ -1142,6 +1142,198 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("srcdoc/frame.png");
   });
 
+  it("honors a nested srcdoc document's own relative <base>, resolved against the embedding document's own <base>", async () => {
+    await mkdir(join(root, "srcdoc-base", "elsewhere", "nested"), { recursive: true });
+    await mkdir(join(root, "srcdoc-base", "nested"), { recursive: true });
+    await writeFile(
+      join(root, "srcdoc-base", "index.html"),
+      [
+        '<base href="/elsewhere/">',
+        "<iframe srcdoc=\"<base href='nested/'><img src='inner.png'>\"></iframe>",
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "srcdoc-base", "elsewhere", "nested", "inner.png"),
+      "image",
+    );
+    // Decoy at the path a nested relative <base> would resolve to if it
+    // ignored the embedding document's own <base href="/elsewhere/"> and
+    // fell back to the embedding document's plain directory instead.
+    await writeFile(join(root, "srcdoc-base", "nested", "inner.png"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "srcdoc-base",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("srcdoc-base/elsewhere/nested/inner.png");
+    expect(manifestOf(site)?.assets).not.toContain("srcdoc-base/nested/inner.png");
+  });
+
+  it("does not mint a CSS reference from url()/@import text embedded inside an ordinary CSS string value", async () => {
+    await mkdir(join(root, "css-string"), { recursive: true });
+    await writeFile(
+      join(root, "css-string", "index.html"),
+      '<link rel="stylesheet" href="style.css">',
+    );
+    await writeFile(
+      join(root, "css-string", "style.css"),
+      [
+        '.a { content: "url(private-url.txt)"; }',
+        ".b { content: '@import \"private-import.css\"'; }",
+        ".c { background: url(real.png); }",
+      ].join("\n"),
+    );
+    await writeFile(join(root, "css-string", "private-url.txt"), "private");
+    await writeFile(join(root, "css-string", "private-import.css"), "private");
+    await writeFile(join(root, "css-string", "real.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "css-string",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("css-string/real.png");
+    expect(manifestOf(site)?.assets).not.toContain("css-string/private-url.txt");
+    expect(manifestOf(site)?.assets).not.toContain("css-string/private-import.css");
+  });
+
+  it("does not trust document.createElement through a receiver that only happens to be named document", async () => {
+    await mkdir(join(root, "fake-document"), { recursive: true });
+    await writeFile(
+      join(root, "fake-document", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "fake-document", "app.js"),
+      [
+        'const fake = { document: { createElement: () => ({}) } };',
+        'const img = fake.document.createElement("img");',
+        'img.src = "private.png";',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "fake-document", "private.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "fake-document",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("fake-document/private.png");
+  });
+
+  it("does not trust serviceWorker.register through a receiver that only happens to be named serviceWorker", async () => {
+    await mkdir(join(root, "fake-sw"), { recursive: true });
+    await writeFile(
+      join(root, "fake-sw", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "fake-sw", "app.js"),
+      [
+        'const app = { serviceWorker: { register: (url) => url } };',
+        'app.serviceWorker.register("private-sw.js");',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "fake-sw", "private-sw.js"), "self.ready = true;");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "fake-sw",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("fake-sw/private-sw.js");
+  });
+
+  it("never fetches a data-block script's own src (a non-executable type never fires a request)", async () => {
+    await mkdir(join(root, "data-block"), { recursive: true });
+    await writeFile(
+      join(root, "data-block", "index.html"),
+      '<script type="application/json" src="data.json"></script>',
+    );
+    await writeFile(join(root, "data-block", "data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "data-block",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("data-block/data.json");
+  });
+
+  it("parses a classic script with its own grammar rather than falling back to module grammar", async () => {
+    await mkdir(join(root, "classic-only"), { recursive: true });
+    await writeFile(
+      join(root, "classic-only", "index.html"),
+      '<script src="classic.js"></script>',
+    );
+    // `import` is only legal in module grammar — a real browser throws a
+    // syntax error for this classic script and runs nothing in it,
+    // including the otherwise-valid fetch call below.
+    await writeFile(
+      join(root, "classic-only", "classic.js"),
+      'import "module-only.js";\nfetch("fetch-target.txt");',
+    );
+    await writeFile(join(root, "classic-only", "module-only.js"), "export {};");
+    await writeFile(join(root, "classic-only", "fetch-target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "classic-only",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("classic-only/module-only.js");
+    expect(manifestOf(site)?.assets).not.toContain("classic-only/fetch-target.txt");
+  });
+
+  it("scans the same external file separately per script context instead of deduping across classic and module", async () => {
+    await mkdir(join(root, "dual-context"), { recursive: true });
+    await writeFile(
+      join(root, "dual-context", "index.html"),
+      [
+        '<script src="shared.js"></script>',
+        '<script type="module" src="shared.js"></script>',
+      ].join(""),
+    );
+    // Invalid as a classic script (export is module-only syntax), so the
+    // classic reference to shared.js contributes nothing; a scan keyed only
+    // by path would let that failed classic parse "use up" shared.js and
+    // silently skip the later module reference that DOES parse.
+    await writeFile(
+      join(root, "dual-context", "shared.js"),
+      'export {};\nfetch("target.txt");',
+    );
+    await writeFile(join(root, "dual-context", "target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "dual-context",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("dual-context/target.txt");
+  });
+
+  it("only counts a new URL(...) constructed from import.meta.url when the result is consumed", async () => {
+    await mkdir(join(root, "url-consumption"), { recursive: true });
+    await writeFile(
+      join(root, "url-consumption", "index.html"),
+      '<script type="module" src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "url-consumption", "app.js"),
+      [
+        'new URL("unconsumed.txt", import.meta.url);',
+        'new Worker(new URL("inline-worker.js", import.meta.url));',
+        'const target = new URL("one-hop.json", import.meta.url);',
+        'fetch(target);',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "url-consumption", "unconsumed.txt"), "data");
+    await writeFile(join(root, "url-consumption", "inline-worker.js"), "self.ready = true;");
+    await writeFile(join(root, "url-consumption", "one-hop.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "url-consumption",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("url-consumption/unconsumed.txt");
+    expect(manifestOf(site)?.assets).toContain("url-consumption/inline-worker.js");
+    expect(manifestOf(site)?.assets).toContain("url-consumption/one-hop.json");
+  });
+
   it("includes inline SVG image/use href and xlink:href references", async () => {
     await mkdir(join(root, "svg-href"), { recursive: true });
     await writeFile(
@@ -1500,6 +1692,35 @@ describe("listSitePackages", () => {
       },
       configuredScripts: { dev: "npm run dev" },
     });
+  });
+
+  it("drops an over-length package script (name or body) with a diagnostic instead of hiding the whole site", async () => {
+    await mkdir(root, { recursive: true });
+    const longName = "x".repeat(201);
+    const longBody = `echo ${"y".repeat(10_000)}`;
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          dev: "vite",
+          [longName]: "echo short",
+          "long-body": longBody,
+        },
+      }),
+    );
+    await writeFile(join(root, "index.html"), "<h1>Scripts</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === ".",
+    );
+
+    expect(site?.scripts).toEqual({ dev: "vite" });
+    expect(site?.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "script-too-large" }),
+    );
+    expect(
+      site?.diagnostics.filter((d) => d.code === "script-too-large"),
+    ).toHaveLength(2);
   });
 
   it("drops configured preview commands that explicitly bind outside loopback", async () => {

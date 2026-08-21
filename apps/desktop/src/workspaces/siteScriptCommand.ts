@@ -1,5 +1,6 @@
 import type { SitePackageInfo } from "./sitePackage";
 import {
+  assertLoopbackOnlyDevServerCommand,
   packageManagerCommand,
   packageManagerValidatedScriptCommand,
   splitCommandLine,
@@ -9,25 +10,33 @@ export type SitePreviewScript = "dev" | "start" | "build";
 
 function packageManagerScriptRun(
   parsed: ReturnType<typeof splitCommandLine>,
-): { manager: "npm" | "pnpm" | "yarn" | "bun"; script: string } | null {
+): { manager: "npm" | "pnpm" | "yarn" | "bun"; script: string; forwardedArgs: string[] } | null {
   const [first, second, ...rest] = parsed.args;
-  if (rest.length > 0) return null;
   if (parsed.command === "npm") {
     if ((first === "run" || first === "run-script") && second) {
-      return { manager: "npm", script: second };
+      // npm's own documented form for passing args through to the script:
+      // `npm run <script> -- <forwardedArgs...>`. Anything after `run
+      // <script>` that ISN'T this exact `--` separator is an unrecognized
+      // shape, not a wrapper.
+      if (rest.length === 0) return { manager: "npm", script: second, forwardedArgs: [] };
+      if (rest[0] === "--") {
+        return { manager: "npm", script: second, forwardedArgs: rest.slice(1) };
+      }
+      return null;
     }
     return null;
   }
+  if (rest.length > 0) return null;
   if (
     parsed.command === "pnpm" ||
     parsed.command === "yarn" ||
     parsed.command === "bun"
   ) {
     if (first === "run" && second) {
-      return { manager: parsed.command, script: second };
+      return { manager: parsed.command, script: second, forwardedArgs: [] };
     }
     if (first && !second) {
-      return { manager: parsed.command, script: first };
+      return { manager: parsed.command, script: first, forwardedArgs: [] };
     }
   }
   return null;
@@ -50,7 +59,7 @@ function validatedPackageManagerRun(
       `Site has no ${run.script} script to run via ${run.manager}: ${site.root}`,
     );
   }
-  return packageManagerValidatedScriptCommand(
+  const validated = packageManagerValidatedScriptCommand(
     run.manager,
     run.script,
     scriptBody,
@@ -59,6 +68,14 @@ function validatedPackageManagerRun(
       post: site.scripts[`post${run.script}`],
     },
   );
+  if (run.forwardedArgs.length === 0) return validated;
+  // The forwarded args land on the command dohc actually spawns, so the
+  // loopback-only constraint has to see the FINAL argv — a forwarded
+  // `--host 0.0.0.0` is exactly as real a bind-everywhere risk as one
+  // written directly into the configured script.
+  const withForwardedArgs = { command: validated.command, args: [...validated.args, ...run.forwardedArgs] };
+  assertLoopbackOnlyDevServerCommand(withForwardedArgs.command, withForwardedArgs.args);
+  return withForwardedArgs;
 }
 
 export function commandForSiteScript(

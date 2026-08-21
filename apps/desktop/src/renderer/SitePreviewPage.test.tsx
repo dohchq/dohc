@@ -912,6 +912,51 @@ describe("SitePreviewPage", () => {
     expect(screen.queryByText("Stale share refresh failed")).toBeNull();
   });
 
+  it("does not repaint the new site with a stale preview-start response after switching sites mid-start", async () => {
+    const pendingStart = deferred<StartSitePreviewResult>();
+    const replacementSite: SitePackageInfo = {
+      ...site,
+      root: "replacement",
+      title: "Replacement",
+      entryPath: "replacement/index.html",
+      sourceFiles: ["replacement/index.html"],
+      shareManifest: readyShare("replacement/index.html"),
+    };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(site)
+      .mockResolvedValueOnce(replacementSite);
+    bridgeMock.startSitePreview
+      .mockReturnValueOnce(pendingStart.promise)
+      .mockResolvedValueOnce({
+        siteRoot: "replacement",
+        mode: "static",
+        url: "http://127.0.0.1:49999/",
+        logs: [],
+        exited: false,
+      });
+
+    const view = render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+    await vi.waitFor(() => expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(1));
+
+    view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
+    const frame = await screen.findByTestId("site-preview-frame");
+    expect(new URL(frame.getAttribute("src") ?? "").origin).toBe("http://127.0.0.1:49999");
+
+    await act(async () => {
+      pendingStart.resolve({
+        siteRoot: "report",
+        mode: "static",
+        url: "http://127.0.0.1:49152/",
+        logs: [],
+        exited: false,
+      });
+      await pendingStart.promise;
+    });
+
+    const frameAfter = screen.getByTestId("site-preview-frame");
+    expect(new URL(frameAfter.getAttribute("src") ?? "").origin).toBe("http://127.0.0.1:49999");
+  });
+
   it("shares only a package's built browser artifact", () => {
     expect(
       shareTargetForSite({

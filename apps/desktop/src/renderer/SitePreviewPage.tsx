@@ -263,6 +263,10 @@ export function SitePreviewPage(props: {
 
   const start = useCallback(async (mode: SitePreviewMode) => {
     const request = ++previewStartRequestRef.current;
+    const requestContext = siteContext;
+    const isCurrent = () =>
+      request === previewStartRequestRef.current &&
+      requestContext === siteContextRef.current;
     logsRequestRef.current += 1;
     setLogsOpen(false);
     setPreviewLogs([]);
@@ -276,7 +280,7 @@ export function SitePreviewPage(props: {
         siteRoot: props.siteRoot,
         mode,
       });
-      if (request !== previewStartRequestRef.current) return;
+      if (!isCurrent()) return;
       setPreviewLogs(result.logs);
       rememberMode(props.workspaceId, props.siteRoot, mode);
       if (result.exited) {
@@ -288,7 +292,7 @@ export function SitePreviewPage(props: {
       setPreview(result);
       return result;
     } catch (error) {
-      if (request !== previewStartRequestRef.current) return;
+      if (!isCurrent()) return;
       setPreview(null);
       setActionError(
         error instanceof Error
@@ -297,9 +301,9 @@ export function SitePreviewPage(props: {
       );
       return null;
     } finally {
-      if (request === previewStartRequestRef.current) setRunningMode(null);
+      if (isCurrent()) setRunningMode(null);
     }
-  }, [props.siteRoot, props.workspaceId]);
+  }, [props.siteRoot, props.workspaceId, siteContext]);
 
   const prepareShare = useCallback(async (site: SitePackageInfo) => {
     const request = ++shareRequestRef.current;
