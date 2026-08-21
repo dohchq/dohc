@@ -4627,14 +4627,17 @@ export function DesktopWorkspaceShell(props: {
       if (token !== shareRefreshToken.current) return;
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
-        setShareViewEnded(true);
-        return;
+      } else {
+        setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
-      setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       if (outcome.changedPaths > 0) {
         await refreshFiles();
         // Re-read open editors: the shared view's files changed on disk.
         setVersionEpoch((epoch) => epoch + 1);
+      }
+      if (outcome.status === "ended") {
+        setShareViewEnded(true);
+        return;
       }
     } catch (error) {
       reportShellError("Couldn't refresh the shared view.", error);

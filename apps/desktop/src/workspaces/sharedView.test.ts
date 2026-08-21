@@ -22,6 +22,7 @@ import {
   captureSharedViewLocalDivergence,
   captureStandaloneShareViewDivergence,
   clearPendingMaterializationPaths,
+  clearPullInFlightMarker,
   readPendingMaterializationPaths,
   SharePinInvalidError,
   materializeSharedViewPaths,
@@ -2154,7 +2155,7 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("does not count captured local changes after the share has ended", async () => {
+  it("counts local changes captured before the pull discovers the share ended", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -2179,7 +2180,7 @@ describe("shared view refresh", () => {
           recordRefusals: async () => undefined,
           ended: false,
         }),
-      ).resolves.toMatchObject({ status: "ended", changedPaths: 0 });
+      ).resolves.toMatchObject({ status: "ended", changedPaths: 1 });
       await expect(
         lstat(join(rootDir, ".dohc", "pull-in-flight.marker")),
       ).rejects.toMatchObject({ code: "ENOENT" });
@@ -2335,6 +2336,82 @@ describe("shared view refresh", () => {
 
     expect(await readdir(outsideDir)).toEqual(outsideBefore);
     expect((await lstat(metadataDir)).isSymbolicLink()).toBe(true);
+  });
+
+  it("refuses to clear a pull marker through a substituted metadata directory", async () => {
+    const rootDir = await tempRoot();
+    const outsideDir = await tempRoot();
+    const metadataDir = join(rootDir, ".dohc");
+    const markerName = "pull-in-flight.marker";
+    const markerPath = join(metadataDir, markerName);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const published = new Error("leave the published marker in place");
+
+    await expect(
+      refreshSharedViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: new FakeShareRelay().connection(),
+        shareId: SHARE_ID,
+        pinnedSelector: PINNED_SELECTOR,
+        recordRefusals: async () => undefined,
+        store: stubStore(async () => ({ text: "unused" })),
+        trackPendingMaterialization: true,
+        pull: async () => {
+          throw published;
+        },
+      }),
+    ).rejects.toBe(published);
+    await expect(lstat(markerPath)).resolves.toBeTruthy();
+
+    await rm(metadataDir, { force: true, recursive: true });
+    await writeFile(join(outsideDir, markerName), "external marker", "utf8");
+    const outsideBefore = await readdir(outsideDir);
+    await symlink(
+      outsideDir,
+      metadataDir,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const result = await clearPullInFlightMarker(rootDir).then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+
+    expect.soft(result).toBe("rejected");
+    expect(await readdir(outsideDir)).toEqual(outsideBefore);
+  });
+
+  it("refuses to clear pending paths through a substituted metadata directory", async () => {
+    const rootDir = await tempRoot();
+    const outsideDir = await tempRoot();
+    const metadataDir = join(rootDir, ".dohc");
+    const pendingName = "pending-materialization.json";
+    const path = "docs/pending.md";
+
+    await writePendingMaterializationPaths(rootDir, [path]);
+    await expect(lstat(join(metadataDir, pendingName))).resolves.toBeTruthy();
+
+    await rm(metadataDir, { force: true, recursive: true });
+    await writeFile(
+      join(outsideDir, pendingName),
+      JSON.stringify({ counts: { [path]: 1 } }),
+      "utf8",
+    );
+    const outsideBefore = await readdir(outsideDir);
+    await symlink(
+      outsideDir,
+      metadataDir,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    const result = await clearPendingMaterializationPaths(rootDir, [path]).then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+
+    expect.soft(result).toBe("rejected");
+    expect(await readdir(outsideDir)).toEqual(outsideBefore);
   });
 
   it("still journals a genuine edit while recovering an interrupted pull", async () => {

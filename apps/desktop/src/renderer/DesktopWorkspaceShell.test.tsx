@@ -3684,6 +3684,70 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
   });
 
+  it("repaints changed files before an ended share becomes read-only", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    const outcomes = [
+      {
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        status: "ended" as const,
+        changedPaths: 1,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    const listCallsBeforeEnd = bridge.listWorkspaceFiles.mock.calls.length;
+    const readCallsBeforeEnd = bridge.readWorkspaceText.mock.calls.length;
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
+    });
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
+        listCallsBeforeEnd,
+      ),
+    );
+    await waitFor(() =>
+      expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(
+        readCallsBeforeEnd,
+      ),
+    );
+  });
+
   it("clears the unjournalable notice once an ordinary refresh recovers", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const outcomes = [

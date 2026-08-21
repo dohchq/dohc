@@ -505,9 +505,10 @@ async function writePullInFlightMarker(rootDir: string): Promise<void> {
   }
 }
 
-async function clearPullInFlightMarker(rootDir: string): Promise<void> {
+export async function clearPullInFlightMarker(rootDir: string): Promise<void> {
+  const metadataDir = await ensureRealMetadataDirectory(rootDir);
   await rm(pullInFlightPath(rootDir), { force: true });
-  await syncMetadataDirectory(join(rootDir, ".dohc"));
+  await syncMetadataDirectory(metadataDir);
 }
 
 async function pullMayBeInFlight(rootDir: string): Promise<boolean> {
@@ -689,6 +690,7 @@ export async function clearPendingMaterializationPaths(
   await withExclusiveWorkspaceOperation(
     pendingMaterializationPath(rootDir),
     async () => {
+      await ensureRealMetadataDirectory(rootDir);
       const counts = await readPendingFileUnlocked(rootDir);
       for (const path of new Set(paths)) {
         const count = counts[path];
@@ -1503,10 +1505,7 @@ export async function refreshStandaloneShareViewOnce(
         outcome.status === "unchanged" && totalLocalChanges > 0
           ? "updated"
           : outcome.status,
-      changedPaths:
-        outcome.status === "ended"
-          ? 0
-          : outcome.changedPaths + totalLocalChanges,
+      changedPaths: outcome.changedPaths + totalLocalChanges,
     };
   });
 }
