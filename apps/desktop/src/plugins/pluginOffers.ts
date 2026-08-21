@@ -175,7 +175,7 @@ export async function addOfferedPlugin(params: {
   workspaceRoot: string;
   directoryName: string;
   existingPluginIds: ReadonlySet<string>;
-}): Promise<{ rootPath: string }> {
+}): Promise<{ rootPath: string; identity: OfferedPluginIdentity }> {
   const { builtinPluginsRoot, workspaceRoot, directoryName, existingPluginIds } = params;
   if (!isBuiltinDriverPlugin(directoryName)) {
     throw new OfferedPluginAddError(
@@ -229,25 +229,96 @@ export async function addOfferedPlugin(params: {
     });
     if (await pathExists(target)) throw existingTargetError(directoryName);
     await renameWithWindowsRetry(staging, target, toOfferedPluginAddError);
-    return { rootPath: target };
+    // Captured the instant the rename lands, while target is still known to
+    // be exactly what this call just created — removeAddedOfferedPlugin's
+    // own re-check compares against this rather than trusting that the path
+    // still means the same thing by the time a caller decides to roll back.
+    const identity = await targetIdentity(target);
+    return { rootPath: target, identity };
   } catch (error) {
     await removeStaging(staging).catch(() => undefined);
     throw toOfferedPluginAddError(error);
   }
 }
 
+/** Device + inode: the filesystem's own answer to "is this the same
+ * directory entry", independent of what the path currently resolves to. */
+export interface OfferedPluginIdentity {
+  dev: number;
+  ino: number;
+}
+
+async function targetIdentity(target: string): Promise<OfferedPluginIdentity> {
+  const stats = await lstat(target);
+  return { dev: stats.dev, ino: stats.ino };
+}
+
 /**
  * Deletes what a successful addOfferedPlugin just placed at
- * `plugins/<directoryName>`. Reserved for the caller's own post-copy
- * validity check: a directory claiming the same manifest id can appear
- * between this copy landing and the caller's rediscovery rescan — a race
- * this module cannot close, only let the caller detect and unwind. Reuses
- * removeStaging's Windows-lock-retry removal rather than a second copy of
- * the same rm() call.
+ * `plugins/<directoryName>` — reserved for the caller's own post-copy
+ * validity check, since a directory claiming the same manifest id can
+ * appear between this copy landing and the caller's rediscovery rescan, a
+ * race this module cannot close, only let the caller detect and unwind.
+ *
+ * Deleting on a caller's say-so is itself a TOCTOU risk: by the time the
+ * caller decides to roll back, `plugins/` or the target itself could have
+ * been swapped for a symlink/junction pointing outside the workspace, and a
+ * blind recursive delete would follow it. This re-runs the same
+ * containment discipline addOfferedPlugin used to create the directory, and
+ * additionally refuses unless the target's device+inode still matches what
+ * `identity` (returned by the addOfferedPlugin call this is undoing)
+ * recorded the instant the copy landed — the one check that catches the
+ * target being deleted and something else recreated under the same name,
+ * which a path or realpath comparison alone cannot.
  */
 export async function removeAddedOfferedPlugin(params: {
   workspaceRoot: string;
   directoryName: string;
+  identity: OfferedPluginIdentity;
 }): Promise<void> {
-  await removeStaging(join(params.workspaceRoot, "plugins", params.directoryName));
+  const { workspaceRoot, directoryName, identity } = params;
+  const realWorkspaceRoot = await realpath(workspaceRoot);
+  const pluginsPath = join(workspaceRoot, "plugins");
+  let pluginsStats;
+  try {
+    pluginsStats = await lstat(pluginsPath);
+  } catch (error) {
+    if (isMissing(error)) return; // Nothing to roll back.
+    throw new OfferedPluginAddError(
+      `Plugins directory at ${pluginsPath} could not be inspected: ${errorMessage(error)}`,
+    );
+  }
+  if (pluginsStats.isSymbolicLink()) {
+    throw new OfferedPluginAddError(
+      `Plugins directory at ${pluginsPath} is a symlink or junction; refusing to remove plugins/${directoryName} through it.`,
+    );
+  }
+  const realPluginsPath = await realpath(pluginsPath);
+  if (!isInside(realWorkspaceRoot, realPluginsPath)) {
+    throw new OfferedPluginAddError(
+      `Plugins directory at ${pluginsPath} resolves outside this workspace; refusing to remove plugins/${directoryName} through it.`,
+    );
+  }
+
+  const target = join(pluginsPath, directoryName);
+  let targetStats;
+  try {
+    targetStats = await lstat(target);
+  } catch (error) {
+    if (isMissing(error)) return; // Already gone.
+    throw new OfferedPluginAddError(
+      `plugins/${directoryName} could not be inspected: ${errorMessage(error)}`,
+    );
+  }
+  if (targetStats.isSymbolicLink()) {
+    throw new OfferedPluginAddError(
+      `plugins/${directoryName} is a symlink or junction; refusing to remove it.`,
+    );
+  }
+  if (targetStats.dev !== identity.dev || targetStats.ino !== identity.ino) {
+    throw new OfferedPluginAddError(
+      `plugins/${directoryName} no longer matches what this request created; refusing to remove it.`,
+    );
+  }
+  await removeStaging(target);
 }

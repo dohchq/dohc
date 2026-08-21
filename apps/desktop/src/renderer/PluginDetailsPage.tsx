@@ -1,6 +1,7 @@
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
+import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   isHttpsUrl,
@@ -944,6 +945,13 @@ function PluginUninstallDialog(props: {
   // states which one is true instead of calling a never-installed copy
   // "uninstalled".
   const installed = isInstalled(confirmation.plugin);
+  // Only a built-in driver's own directory can come back through Add — a
+  // hand-authored or agent-created plugin has no such path, and claiming
+  // one would be false: dohc's own delete here is permanent (PluginPipeline
+  // .uninstall removes the source directly, no trash).
+  const isBuiltinOffer = (
+    BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES as readonly string[]
+  ).includes(confirmation.plugin.directoryName);
 
   return (
     <Overlay
@@ -970,7 +978,9 @@ function PluginUninstallDialog(props: {
           <p className="m-0 mt-2 text-xs text-muted">
             {installed
               ? "This removes the plugin source and build files from this workspace."
-              : `This removes plugins/${confirmation.plugin.directoryName} from this workspace. Add ${pluginTitle(confirmation.plugin)} again to bring it back.`}
+              : isBuiltinOffer
+                ? `This removes plugins/${confirmation.plugin.directoryName} from this workspace. Add ${pluginTitle(confirmation.plugin)} again to bring it back.`
+                : `This permanently deletes plugins/${confirmation.plugin.directoryName} from this workspace. dohc has no way to bring it back.`}
           </p>
           {warning ? (
             <div

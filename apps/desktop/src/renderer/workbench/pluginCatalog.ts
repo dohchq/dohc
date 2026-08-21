@@ -521,6 +521,24 @@ export function usePluginCatalog(
         // rather than guessing which offer (if any) is affected.
         void loadOffers();
       }
+      if (event.kind === "changed") {
+        // A pending Remove confirmation was opened for a plugin that had
+        // never been installed — its wording and its consequences both
+        // assume that. An install from ANY window (a second client, a
+        // click on this same plugin's row elsewhere) can land while the
+        // dialog is still open, and confirming it would then delete a now-
+        // running installation under a claim that stopped being true.
+        // Dropping the confirmation both closes the dialog and discards its
+        // token — the one thing that must not survive this transition.
+        setConfirmation((current) =>
+          current &&
+          current.plugin.id === event.plugin.id &&
+          !isInstalled(current.plugin) &&
+          isInstalled(event.plugin)
+            ? null
+            : current,
+        );
+      }
     });
     return () => {
       unsubscribe();

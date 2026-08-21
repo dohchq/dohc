@@ -7267,7 +7267,7 @@ function registerIpcHandlers(
       // a plugin can be discovered under a different directory between an
       // offer showing and this request landing.
       const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
-      await addOfferedPlugin({
+      const added = await addOfferedPlugin({
         builtinPluginsRoot: builtinPluginsRoot(),
         workspaceRoot: workspace.rootPath,
         directoryName: input.directoryName,
@@ -7281,26 +7281,39 @@ function registerIpcHandlers(
       const plugin = pipeline.list().find(
         (entry) => entry.directoryName === input.directoryName,
       );
-      if (!plugin) {
-        throw new Error(
-          `plugins/${input.directoryName} did not appear after it was added.`,
-        );
-      }
-      if (!plugin.valid) {
-        // The pre-copy rescan closed the window where an already-existing
-        // conflict went unnoticed, but a directory claiming the same
-        // manifest id can still appear WHILE this request is copying —
-        // discovery's own duplicate-id handling has now degraded one side
-        // of that collision, and it must not read as a successful add
-        // either way. Remove what this request wrote and let the rescan
-        // hand the id back to whichever side was already there.
+      // A directory claiming the same manifest id can appear WHILE this
+      // request is copying — discovery's own duplicate-id handling then
+      // degrades ONE side of that collision, and it must not read as a
+      // successful add on EITHER side: !plugin.valid catches this add
+      // having lost, and the diagnostic scan catches it having WON (its own
+      // record stays valid, but some other directory's now carries
+      // discovery's "duplicate plugin id" note naming this one).
+      const conflictingDiagnostic = `duplicate plugin id "${input.directoryName}"`;
+      const displaced = pipeline.list().find(
+        (entry) =>
+          entry.directoryName !== input.directoryName &&
+          entry.diagnostics.some((diagnostic) =>
+            diagnostic.includes(conflictingDiagnostic),
+          ),
+      );
+      if (!plugin || !plugin.valid || displaced) {
+        // handleWatcherEvents logs and swallows a rescan failure rather than
+        // throwing, so a transient fs error that left `plugin` missing must
+        // not silently strand the copy while this handler still reports a
+        // refusal — a retry would then find "already exists" for a plugin
+        // the user was just told never appeared. Same cleanup either way:
+        // remove what this request wrote and let the rescan hand the id
+        // back to whichever side (if any) was already there first.
         await removeAddedOfferedPlugin({
           workspaceRoot: workspace.rootPath,
           directoryName: input.directoryName,
+          identity: added.identity,
         });
         await pipeline.handleWatcherEvents([rediscoveryEvent]);
         throw new Error(
-          `Another plugin already claims the id "${input.directoryName}" in this workspace.`,
+          plugin
+            ? `Another plugin already claims the id "${input.directoryName}" in this workspace.`
+            : `plugins/${input.directoryName} did not appear after it was added.`,
         );
       }
       return AddOfferedPluginResult.parse({ ok: true, plugin });

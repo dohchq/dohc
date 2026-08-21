@@ -18,6 +18,7 @@ import {
   OfferedPluginAddError,
   addOfferedPlugin,
   listOfferedPlugins,
+  removeAddedOfferedPlugin,
 } from "./pluginOffers";
 
 const roots: string[] = [];
@@ -315,5 +316,91 @@ describe("addOfferedPlugin", () => {
 
     // Nothing landed outside the workspace through the link.
     await expect(readdir(outside)).resolves.toEqual([]);
+  });
+});
+
+describe("removeAddedOfferedPlugin", () => {
+  // The rollback path is itself a TOCTOU risk: by the time a caller decides
+  // to undo a copy, plugins/ could have been swapped for a junction between
+  // the copy landing and this call. A blind recursive delete would follow
+  // it; this must refuse instead.
+  it("refuses to remove through a junction that replaced plugins/ after the copy", async () => {
+    const fixture = await createFixture();
+    const added = await addOfferedPlugin({
+      builtinPluginsRoot: fixture.builtinPluginsRoot,
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+    });
+
+    const outside = await mkdtemp(join(tmpdir(), "dohc-plugin-offers-outside-"));
+    roots.push(outside);
+    await writeFile(join(outside, "marker.txt"), "keep");
+    await rm(join(fixture.workspaceRoot, "plugins"), { recursive: true, force: true });
+    await symlink(
+      outside,
+      join(fixture.workspaceRoot, "plugins"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(
+      removeAddedOfferedPlugin({
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        identity: added.identity,
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    // Nothing inside the redirected location was touched.
+    await expect(readFile(join(outside, "marker.txt"), "utf8")).resolves.toBe("keep");
+  });
+
+  // A path comparison alone cannot tell "the same directory" from "deleted
+  // and recreated under the same name" — only the filesystem's own device
+  // and inode can. The identity addOfferedPlugin captured at copy time must
+  // not match a directory that only shares the copy's name.
+  it("refuses to remove a directory that only shares the copy's name, not its identity", async () => {
+    const fixture = await createFixture();
+    const added = await addOfferedPlugin({
+      builtinPluginsRoot: fixture.builtinPluginsRoot,
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+    });
+
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    await rm(target, { recursive: true, force: true });
+    await mkdir(target, { recursive: true });
+    await writeFile(join(target, "keep.txt"), "keep");
+
+    await expect(
+      removeAddedOfferedPlugin({
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        identity: added.identity,
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    await expect(readFile(join(target, "keep.txt"), "utf8")).resolves.toBe("keep");
+  });
+
+  it("removes exactly what it was told to, when the identity still matches", async () => {
+    const fixture = await createFixture();
+    const added = await addOfferedPlugin({
+      builtinPluginsRoot: fixture.builtinPluginsRoot,
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+    });
+
+    await removeAddedOfferedPlugin({
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      identity: added.identity,
+    });
+
+    await expect(
+      lstat(join(fixture.workspaceRoot, "plugins", "codex")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

@@ -430,6 +430,64 @@ describe("PluginDetailsPage", () => {
     );
   });
 
+  it("names the real consequence for a never-installed plugin that isn't a built-in offer", async () => {
+    // Same never-approved shape Add produces, but a directoryName no offer
+    // mechanism recognizes — a hand-authored or agent-created plugin sitting
+    // undiscovered, never Added.
+    const handAuthored = plugin("notes-widget", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [handAuthored] });
+
+    renderPage("notes-widget");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(within(dialog).getByText("Remove notes-widget?")).toBeTruthy();
+    expect(
+      within(dialog).getByText(
+        "This permanently deletes plugins/notes-widget from this workspace. dohc has no way to bring it back.",
+      ),
+    ).toBeTruthy();
+    // Never claims a recovery path that does not exist for this plugin.
+    expect(within(dialog).queryByText(/Add .* again to bring it back/)).toBeNull();
+  });
+
+  it("closes the Remove confirmation instead of deleting under a stale claim once the plugin gets installed", async () => {
+    const added = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [added] });
+
+    renderPage("codex");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+    expect(await screen.findByTestId("plugin-uninstall-dialog")).toBeTruthy();
+
+    // Something else — another window, an install triggered elsewhere on
+    // this same plugin — installs it while the confirmation is still open.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex"), // default status "ready", approved
+      });
+    });
+
+    // The stale confirmation, and the token it carried, do not survive the
+    // transition — there is nothing left to confirm under a claim that
+    // stopped being true.
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+    expect(bridgeMock.uninstallPlugin).not.toHaveBeenCalled();
+  });
+
   // MUTATION (offer Open for a per-instance app too): this page has no
   // instance to name, so the open would be refused — and a user would be
   // handed a button that never works. The plugin's own panel opens these.

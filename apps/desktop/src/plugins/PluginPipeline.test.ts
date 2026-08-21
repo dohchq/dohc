@@ -564,7 +564,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
       expect(existingPluginIds.size).toBe(0);
 
-      await addOfferedPlugin({
+      const added = await addOfferedPlugin({
         builtinPluginsRoot,
         workspaceRoot,
         directoryName: "codex",
@@ -590,7 +590,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // The handler's cleanup on that conflict: remove what this request
       // wrote and rescan so the surviving side recovers.
-      await removeAddedOfferedPlugin({ workspaceRoot, directoryName: "codex" });
+      await removeAddedOfferedPlugin({
+        workspaceRoot,
+        directoryName: "codex",
+        identity: added.identity,
+      });
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
 
       await expect(
@@ -598,6 +602,200 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       ).rejects.toMatchObject({ code: "ENOENT" });
       const survivor = pipeline.list().find((entry) => entry.directoryName === "aaa-codex");
       expect(survivor).toMatchObject({ id: "codex", valid: true });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Conflict detection has to be side-agnostic: !plugin.valid alone only
+  // catches THIS request's copy losing the tie-break. When the copy sorts
+  // first and WINS instead, its own record stays valid and reads as a
+  // clean add — but the plugin it collided with is now the one carrying
+  // discovery's "duplicate plugin id" diagnostic. Either side degrading
+  // must roll the add back the same way.
+  it("detects a conflict and rolls back even when its own copy wins the tie-break", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-conflict-win-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
+    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
+    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    await writeFile(
+      join(builtinCodexRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.list()).toEqual([]);
+
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
+
+      const added = await addOfferedPlugin({
+        builtinPluginsRoot,
+        workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds,
+      });
+
+      // Injected between the copy and the post-copy rescan — sorts AFTER
+      // "codex" lexically this time, so discovery's tie-break hands the id
+      // to the copy this request just made instead.
+      const concurrentRoot = join(workspaceRoot, "plugins", "z-codex");
+      await mkdir(join(concurrentRoot, "src"), { recursive: true });
+      await writeFile(
+        join(concurrentRoot, "dohc-plugin.json"),
+        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      );
+      await writeFile(join(concurrentRoot, "src", "main.ts"), "export default {};\n");
+
+      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/codex" }]);
+      const copied = pipeline.list().find((entry) => entry.directoryName === "codex");
+      // This request's own copy won — its record alone would read as a
+      // clean, successful add.
+      expect(copied?.valid).toBe(true);
+
+      // The fixed handler's side-agnostic scan: some OTHER directory now
+      // carries the duplicate-id diagnostic naming "codex".
+      const conflictingDiagnostic = 'duplicate plugin id "codex"';
+      const displaced = pipeline.list().find(
+        (entry) =>
+          entry.directoryName !== "codex" &&
+          entry.diagnostics.some((diagnostic) => diagnostic.includes(conflictingDiagnostic)),
+      );
+      expect(displaced?.directoryName).toBe("z-codex");
+
+      // The handler's cleanup fires on that signal alone, even though
+      // copied.valid was true.
+      await removeAddedOfferedPlugin({
+        workspaceRoot,
+        directoryName: "codex",
+        identity: added.identity,
+      });
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+
+      await expect(
+        lstat(join(workspaceRoot, "plugins", "codex")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      // The departed identity's cleanup and the surviving replacement's own
+      // reconciliation are both queued work, not synchronous with the
+      // rescan settling — the same asynchronous reseed every other real-
+      // lifecycle test in this file waits out.
+      await waitFor(
+        () => pipeline.list().some((entry) => entry.directoryName === "z-codex"),
+        "z-codex did not recover the id after the conflicting copy was removed.",
+      );
+      const survivor = pipeline.list().find((entry) => entry.directoryName === "z-codex");
+      expect(survivor).toMatchObject({ id: "codex", valid: true });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // handleWatcherEvents logs and swallows a rescan failure rather than
+  // throwing (a transient fs error, say), so the copy this request just
+  // made can be on disk with nothing in pipeline.list() to show for it.
+  // The fixed handler's cleanup must remove it before reporting the
+  // refusal — otherwise a retry finds "already exists" for a plugin the
+  // user was just told never appeared.
+  it("removes its copy instead of stranding it when the post-copy rescan finds nothing", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-no-rescan-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
+    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
+    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    await writeFile(
+      join(builtinCodexRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
+
+      const added = await addOfferedPlugin({
+        builtinPluginsRoot,
+        workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds,
+      });
+
+      // Simulates the rescan finding nothing: skip it entirely, so
+      // discovery never picks up the new directory the copy just wrote.
+      const plugin = pipeline.list().find((entry) => entry.directoryName === "codex");
+      expect(plugin).toBeUndefined();
+
+      // The fixed handler's cleanup for exactly this case.
+      await removeAddedOfferedPlugin({
+        workspaceRoot,
+        directoryName: "codex",
+        identity: added.identity,
+      });
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+
+      await expect(
+        lstat(join(workspaceRoot, "plugins", "codex")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      // The offer's own existence check would pass again — a retry is
+      // genuinely possible, not stuck behind a stranded copy.
+      expect(pipeline.list()).toEqual([]);
     } finally {
       await pipeline.dispose();
     }
