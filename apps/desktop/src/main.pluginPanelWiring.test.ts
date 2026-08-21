@@ -352,9 +352,7 @@ describe("plugin panel main-process wiring", () => {
     );
     const unclaimed = stopPluginHostIfUnclaimedSource();
     const hasAnotherAt = unclaimed.indexOf("hasAnotherPanel");
-    const deleteAt = unclaimed.indexOf(
-      "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
-    );
+    const deleteAt = unclaimed.indexOf("panelStartedHosts.delete(key)");
     const stopHostAt = unclaimed.indexOf(
       "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
     );
@@ -371,9 +369,46 @@ describe("plugin panel main-process wiring", () => {
     expect(pluginActionEnd).toBeGreaterThan(-1);
     const pluginAction = mainSource.slice(pluginActionStart, pluginActionEnd);
     expect(pluginAction).toContain("if (result.ok) {");
-    expect(pluginAction).toContain(
-      "panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));",
+    expect(pluginAction).toContain("panelStartedHosts.delete(key);");
+    expect(pluginAction).toContain("activeCommandClaims.consumeStartedHost(key);");
+  });
+
+  it("stops a surface-less host a command cold-started once its own claim is the last to release (round-9 finding 1)", () => {
+    // The refcount and the on-demand marker's actual claim/release/mark/
+    // consume behavior are pinned in pluginCommandHostClaims.test.ts, and
+    // the callback that reports a cold start under claim: false is pinned
+    // behaviorally in pluginPanelRegistration.test.ts. This only pins that
+    // main.ts wires those two pieces together correctly.
+    const invoke = handler("invokePluginCommand");
+    const ensureStartedAt = invoke.indexOf("ensureStarted: async () => {");
+    const startAt = invoke.indexOf(
+      "ensurePluginStarted(workspace, plugin, {",
+      ensureStartedAt,
     );
+    const claimFalseAt = invoke.indexOf("claim: false,", startAt);
+    const onColdStartAt = invoke.indexOf("onColdStartWithoutClaim: () =>", claimFalseAt);
+    const markAt = invoke.indexOf(
+      "activeCommandClaims.markStartedHost(claimKey)",
+      onColdStartAt,
+    );
+    expect(ensureStartedAt).toBeGreaterThan(-1);
+    expect(startAt).toBeGreaterThan(ensureStartedAt);
+    expect(claimFalseAt).toBeGreaterThan(startAt);
+    expect(onColdStartAt).toBeGreaterThan(claimFalseAt);
+    expect(markAt).toBeGreaterThan(onColdStartAt);
+
+    const unclaimed = stopPluginHostIfUnclaimedSource();
+    const activeClaimAt = unclaimed.indexOf("!activeCommandClaims.has(key)");
+    const orAt = unclaimed.indexOf(
+      "(panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))",
+      activeClaimAt,
+    );
+    // MUTATION (leak): dropping the "|| activeCommandClaims.consumeStartedHost(key)"
+    // half leaves panelStartedHosts.delete(key) as the sole trigger, which a
+    // command's cold start (claim: false) never populates — the exact way a
+    // surface-less command-started host used to never stop.
+    expect(activeClaimAt).toBeGreaterThan(-1);
+    expect(orAt).toBeGreaterThan(activeClaimAt);
   });
 
   it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {

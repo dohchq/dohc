@@ -985,7 +985,13 @@ export class PluginPipeline {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
     if (runtimeStatus === "disabled") {
-      this.recoveredManifests.delete(pluginId);
+      // recoveredManifests staying set is what keeps hasFailedReplacement
+      // true through this transition: a build that failed and was never
+      // replaced is still owed one whether or not the old runtime that
+      // outlived it just gave up crash-looping. Clearing it here hid Retry
+      // build and routed Enable through an approval hold instead (round-9
+      // finding 2) — the one path a build failure can leave with no running
+      // host left to preserve the fact for later.
       this.setStatus(candidate, {
         status: "disabled",
         disabledReason: "crash-loop",

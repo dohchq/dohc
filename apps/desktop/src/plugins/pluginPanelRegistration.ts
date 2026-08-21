@@ -106,6 +106,14 @@ export async function startPluginForPanel(input: {
   workspaceId: string;
   pluginId: string;
   claim?: boolean;
+  /**
+   * Called once, only when this exact call performed the zero-to-running
+   * transition under claim: false — the on-demand-command counterpart to
+   * panelStartedHosts gaining an entry, for a caller that opted out of
+   * panel ownership but still needs to know it alone is why the host is
+   * running (round-9 finding 1).
+   */
+  onColdStartWithoutClaim?: () => void;
   /** The running host's activation, or undefined when no host is running. */
   hostActivation: () => Promise<void> | undefined;
   ensureStarted: () => Promise<PluginPanelHostStartResult>;
@@ -114,10 +122,14 @@ export async function startPluginForPanel(input: {
   if (running) return running;
   const result = await input.ensureStarted();
   if (!result.ok) throw new Error(result.error.message);
-  if (result.startedHost && input.claim !== false) {
-    input.panelStartedHosts.add(
-      pluginLifecycleKey(input.workspaceId, input.pluginId),
-    );
+  if (result.startedHost) {
+    if (input.claim !== false) {
+      input.panelStartedHosts.add(
+        pluginLifecycleKey(input.workspaceId, input.pluginId),
+      );
+    } else {
+      input.onColdStartWithoutClaim?.();
+    }
   }
   await input.hostActivation();
 }

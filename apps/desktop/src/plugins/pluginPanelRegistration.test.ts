@@ -404,15 +404,19 @@ describe("plugin panel registration", () => {
     ]);
   });
 
-  it("does not claim a host started for a plugin command", async () => {
+  it("does not claim a host started for a plugin command, and reports the cold start instead (round-9 finding 1)", async () => {
     const panelStartedHosts = new Set<string>();
     let running = false;
+    let coldStarts = 0;
 
     await startPluginForPanel({
       panelStartedHosts,
       workspaceId: "workspace-1",
       pluginId: "hello-plugin",
       claim: false,
+      onColdStartWithoutClaim: () => {
+        coldStarts += 1;
+      },
       hostActivation: () => (running ? Promise.resolve() : undefined),
       ensureStarted: async () => {
         running = true;
@@ -422,6 +426,52 @@ describe("plugin panel registration", () => {
 
     expect(running).toBe(true);
     expect(panelStartedHosts.size).toBe(0);
+    // Without a panelStartedHosts entry, this is the only record that the
+    // host is running only because this command cold-started it — without
+    // it, nothing would ever stop it once the command settles.
+    expect(coldStarts).toBe(1);
+  });
+
+  it("does not report a cold start for a command that only rode an already-running host", async () => {
+    const panelStartedHosts = new Set<string>();
+    let coldStarts = 0;
+
+    await startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      claim: false,
+      onColdStartWithoutClaim: () => {
+        coldStarts += 1;
+      },
+      hostActivation: () => Promise.resolve(),
+      ensureStarted: async () => {
+        throw new Error("ensureStarted must not run when a host is already active.");
+      },
+    });
+
+    expect(coldStarts).toBe(0);
+  });
+
+  it("does not report a cold start for a normal panel claim (claim left at its default)", async () => {
+    const panelStartedHosts = new Set<string>();
+    let coldStarts = 0;
+
+    await startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      onColdStartWithoutClaim: () => {
+        coldStarts += 1;
+      },
+      hostActivation: () => undefined,
+      ensureStarted: async () => ({ ok: true, startedHost: true }),
+    });
+
+    expect([...panelStartedHosts]).toEqual([
+      pluginLifecycleKey("workspace-1", "hello-plugin"),
+    ]);
+    expect(coldStarts).toBe(0);
   });
 
   it("reports a refused start instead of claiming the host", async () => {

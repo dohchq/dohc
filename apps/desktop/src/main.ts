@@ -2928,7 +2928,7 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
 async function ensurePluginStarted(
   workspace: CreatedWorkspace,
   plugin: RegisteredPlugin,
-  options: { claim?: boolean } = {},
+  options: { claim?: boolean; onColdStartWithoutClaim?: () => void } = {},
 ): Promise<PluginHost> {
   const pipeline = await ensurePluginPipeline(workspace);
   await startPluginForPanel({
@@ -2936,6 +2936,7 @@ async function ensurePluginStarted(
     workspaceId: workspace.workspaceId,
     pluginId: plugin.manifest.name,
     claim: options.claim,
+    onColdStartWithoutClaim: options.onColdStartWithoutClaim,
     hostActivation: () => pipeline.host.activationOf(plugin.manifest.name),
     ensureStarted: () => pipeline.ensureStarted(plugin.manifest.name),
   });
@@ -2972,6 +2973,7 @@ async function stopPluginHostIfUnclaimed(
   workspaceId: string,
   pluginId: string,
 ): Promise<void> {
+  const key = pluginLifecycleKey(workspaceId, pluginId);
   const hasAnotherPanel = [...runningPluginPanels.values()].some(
     (candidate) =>
       candidate.workspaceId === workspaceId && candidate.pluginId === pluginId,
@@ -2982,11 +2984,16 @@ async function stopPluginHostIfUnclaimed(
     // with the host's spawn, so it holds the host open exactly like a
     // sibling panel does.
     !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
-    !activeCommandClaims.has(pluginLifecycleKey(workspaceId, pluginId)) &&
+    !activeCommandClaims.has(key) &&
     // Only stop the host if an on-demand open is the reason it's running at
     // all — an enabled, workspace-started plugin has no panel or tab to
-    // answer to (#779 round 4 finding 3).
-    panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
+    // answer to (#779 round 4 finding 3). A panel/web-app cold start and a
+    // command cold start are two disjoint claims on that same "on-demand"
+    // fact — commands never touch panelStartedHosts (claim: false), so a
+    // surface-less command's own on-demand marker is the only one that can
+    // ever consume here, and only once nothing else still needs the host
+    // (round-9 finding 1).
+    (panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))
   ) {
     // Stops the shared host directly rather than through the pipeline's
     // disable()/enable() actions — this is "nothing needs the process right
@@ -6824,7 +6831,11 @@ function registerIpcHandlers(
             assertWritableWorkspace(workspace);
             return withPluginHostLifecycleLock(
               claimKey,
-              () => ensurePluginStarted(workspace, plugin, { claim: false }),
+              () => ensurePluginStarted(workspace, plugin, {
+                claim: false,
+                onColdStartWithoutClaim: () =>
+                  activeCommandClaims.markStartedHost(claimKey),
+              }),
             );
           },
           ensureCurrent: () => {
@@ -7306,8 +7317,12 @@ function registerIpcHandlers(
           // install/enable/approve/rebuild/disable/uninstall each decide this
           // plugin's running state on the workspace's own authority — an
           // earlier panel's cold start no longer owns whether closing it
-          // stops the host (#779 round 4 finding 3).
-          panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));
+          // stops the host (#779 round 4 finding 3). A command's own
+          // on-demand marker is the same kind of stale claim once the
+          // workspace has spoken (round-9 finding 1).
+          const key = pluginLifecycleKey(input.workspaceId, input.pluginId);
+          panelStartedHosts.delete(key);
+          activeCommandClaims.consumeStartedHost(key);
         }
         return result;
       } catch (error) {

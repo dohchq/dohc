@@ -180,11 +180,14 @@ describe("plugin web app main-process wiring", () => {
     expect(unclaimed).toContain(
       "!pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&",
     );
+    expect(unclaimed).toContain("!activeCommandClaims.has(key) &&");
+    // A command's cold start (claim: false) never touches panelStartedHosts,
+    // so a surface-less command-started host relies on this fallback the
+    // same way a panel's own claim relies on panelStartedHosts.delete()
+    // (round-9 finding 1) — pinned behaviorally in
+    // pluginCommandHostClaims.test.ts and pluginPanelRegistration.test.ts.
     expect(unclaimed).toContain(
-      "!activeCommandClaims.has(pluginLifecycleKey(workspaceId, pluginId)) &&",
-    );
-    expect(unclaimed).toContain(
-      "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
+      "(panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))",
     );
   });
 

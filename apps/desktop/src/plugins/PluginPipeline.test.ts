@@ -3358,6 +3358,37 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         await setup.pipeline.dispose();
       }
     }, 60_000);
+
+    it("keeps offering a build retry once the old runtime crash-loops all the way to disabled (round-9 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // The host's own crash-loop detector gives up and disables the
+        // plugin outright — a terminal transition, unlike the respawn round
+        // 8 covered, with no running host left at all afterward.
+        setup.pipeline.noteRuntimeStatus("example-plugin", "disabled");
+
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "disabled",
+          disabledReason: "crash-loop",
+        });
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt.ok).toBe(true);
+        await waitFor(
+          () =>
+            setup.pipeline.list()[0]?.status === "ready" &&
+            setup.pipeline.list()[0]?.hasFailedReplacement === false,
+          "Plugin did not recover from a crash-loop disable through Retry build.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
   });
 
   it("opens a surface only once the host finished activating (#798)", async () => {
