@@ -318,7 +318,7 @@ describe("DesktopSettings", () => {
       pushUserSettings = listener;
       return () => undefined;
     });
-    const load = deferred<DesktopUserSettingsResult>();
+    const load = deferred<Awaited<ReturnType<typeof bridge.getUserSettings>>>();
     bridge.getUserSettings.mockImplementationOnce(() => load.promise);
     render(
       <DesktopSettings
