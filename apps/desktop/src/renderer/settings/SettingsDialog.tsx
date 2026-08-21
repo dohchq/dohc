@@ -127,6 +127,10 @@ export function SettingsDialog(props: {
   // token guard DesktopWorkspaceShell uses for engine history.
   const workspaceTokenRef = useRef(0);
   const updateSubscriptionFiredRef = useRef(false);
+  // Same shape as updateSubscriptionFiredRef: a zoom broadcast arriving while
+  // the initial Promise.all load is in flight is NEWER than the user-settings
+  // snapshot that load retained, and must not be painted over.
+  const settingsEventFiredRef = useRef(false);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? DEFAULT_SETTINGS_SECTION,
   );
@@ -215,7 +219,9 @@ export function SettingsDialog(props: {
     () =>
       bridge().onUserSettingsChanged((result) => {
         const parsed = DesktopUserSettingsResult.safeParse(result);
-        if (parsed.success) setUserResult(parsed.data);
+        if (!parsed.success) return;
+        settingsEventFiredRef.current = true;
+        setUserResult(parsed.data);
       }),
     [],
   );
@@ -255,6 +261,7 @@ export function SettingsDialog(props: {
     // result, saveWorkspaceSettings refuses ("still loading") instead.
     const token = workspaceTokenRef.current + 1;
     workspaceTokenRef.current = token;
+    settingsEventFiredRef.current = false;
     setWorkspaceResult(null);
     void Promise.all([
       bridge().getUserSettings(),
@@ -262,7 +269,7 @@ export function SettingsDialog(props: {
     ])
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
-        setUserResult(nextUser);
+        if (!settingsEventFiredRef.current) setUserResult(nextUser);
         applyAppearanceSettings(nextUser.settings.appearance);
         if (workspaceTokenRef.current !== token) return;
         setWorkspaceResult(nextWorkspace);

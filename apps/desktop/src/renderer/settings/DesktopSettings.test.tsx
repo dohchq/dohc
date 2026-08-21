@@ -310,6 +310,46 @@ describe("DesktopSettings", () => {
     await waitFor(() => expect(row.textContent).toContain("144%"));
   });
 
+  it("a zoom broadcast during the initial load is not painted over by it", async () => {
+    // The initial Promise.all retains a user-settings snapshot; a zoom pushed
+    // while it is in flight is NEWER and must survive the load resolving.
+    let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
+    bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
+      pushUserSettings = listener;
+      return () => undefined;
+    });
+    const load = deferred<DesktopUserSettingsResult>();
+    bridge.getUserSettings.mockImplementationOnce(() => load.promise);
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      if (!pushUserSettings) {
+        throw new Error("User settings subscription was not registered.");
+      }
+    });
+    pushUserSettings?.({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 },
+      },
+      source: "stored",
+    });
+    load.resolve({ settings: DEFAULT_USER_SETTINGS, source: "default" });
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    await waitFor(() => expect(row.textContent).toContain("144%"));
+    // Give the resolved load a chance to (wrongly) repaint before asserting.
+    await new Promise((settle) => setTimeout(settle, 0));
+    expect(row.textContent).toContain("144%");
+  });
+
   it("saves a preferred name and previews agent attribution", async () => {
     const user = userEvent.setup();
     render(
