@@ -165,7 +165,13 @@ function fakeDriver(
 }
 
 interface EventStream {
+  /** The event with `at` (publish time) and `snapshot` (the initial
+   * connection-state frame's own marker) stripped, for every existing
+   * assertion that only cares about the event's own semantic content. */
   next(): Promise<PluginAgentEvent | { kind: "user-message"; text: string; clientId: string }>;
+  /** The exact wire object, `at`/`snapshot` included -- for the tests that
+   * specifically pin those two fields. */
+  nextRaw(): Promise<Record<string, unknown>>;
   close(): Promise<void>;
 }
 
@@ -181,26 +187,32 @@ async function eventStream(url: string, token: string): Promise<EventStream> {
   const decoder = new TextDecoder();
   let buffered = "";
 
+  async function nextRaw(): Promise<Record<string, unknown>> {
+    for (;;) {
+      const boundary = buffered.indexOf("\n\n");
+      if (boundary >= 0) {
+        const frame = buffered.slice(0, boundary);
+        buffered = buffered.slice(boundary + 2);
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data) return JSON.parse(data);
+        continue;
+      }
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error("The event stream ended before the next event.");
+      buffered += decoder.decode(chunk.value, { stream: true });
+    }
+  }
+
   return {
     async next() {
-      for (;;) {
-        const boundary = buffered.indexOf("\n\n");
-        if (boundary >= 0) {
-          const frame = buffered.slice(0, boundary);
-          buffered = buffered.slice(boundary + 2);
-          const data = frame
-            .split("\n")
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trimStart())
-            .join("\n");
-          if (data) return JSON.parse(data);
-          continue;
-        }
-        const chunk = await reader.read();
-        if (chunk.done) throw new Error("The event stream ended before the next event.");
-        buffered += decoder.decode(chunk.value, { stream: true });
-      }
+      const { at: _at, snapshot: _snapshot, ...rest } = await nextRaw();
+      return rest as PluginAgentEvent | { kind: "user-message"; text: string; clientId: string };
     },
+    nextRaw,
     async close() {
       controller.abort();
       await reader.cancel().catch(() => undefined);
@@ -327,6 +339,53 @@ describe("Codex chat web app", () => {
     const restarted = await app.startWebApp("chat", null);
     expect(restarted.url).toBe(url);
     expect(fake.startInputs).toHaveLength(1);
+    await reattached.close();
+  });
+
+  it("stamps every event with its real publish time, so a reconnect replays chronology instead of \"now\"", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const before = Date.now();
+    await post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    const after = Date.now();
+
+    const reattached = await eventStream(url, token);
+    await reattached.nextRaw(); // the initial snapshot
+    const replayed = await reattached.nextRaw();
+    expect(replayed.kind).toBe("user-message");
+    expect(typeof replayed.at).toBe("number");
+    expect(replayed.at as number).toBeGreaterThanOrEqual(before);
+    expect(replayed.at as number).toBeLessThanOrEqual(after);
+    await reattached.close();
+  });
+
+  it("marks the initial connection snapshot, so a reasoned terminal state renders exactly one card, not two", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "First", clientId: "c1" }, token);
+    await post(url, "stop", undefined, token);
+
+    const reattached = await eventStream(url, token);
+    const snapshot = await reattached.nextRaw();
+    expect(snapshot).toMatchObject({
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+      snapshot: true,
+    });
+
+    // The buffered replay carries the same transition again -- the client
+    // must be able to tell these apart, or it renders the "Stopped" card
+    // twice: once for the snapshot, once for the replayed event.
+    const userMessageReplay = await reattached.nextRaw();
+    expect(userMessageReplay.kind).toBe("user-message");
+    const closedReplay = await reattached.nextRaw();
+    expect(closedReplay).toMatchObject({
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+    });
+    expect(closedReplay.snapshot).toBeUndefined();
     await reattached.close();
   });
 

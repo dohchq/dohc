@@ -221,12 +221,25 @@ export function createChatWebApp(
   // the first one is still shutting down.
   let teardown: Promise<void> | null = null;
   let state: SessionStateEvent = { kind: "session-state", state: "closed" };
-  const eventLog: ChatStreamEvent[] = [];
+  // Each entry's own publish time -- a replay renders it, not the moment
+  // the reconnecting client happened to receive it, so history stays in
+  // its real chronological order instead of collapsing to "now".
+  const eventLog: Array<{ event: ChatStreamEvent; at: number }> = [];
   const clients = new Set<ServerResponse>();
   const pendingPermissions = new Set<string>();
 
-  function frame(event: ChatStreamEvent): string {
-    return "data: " + JSON.stringify(event) + "\n\n";
+  function frame(event: ChatStreamEvent, at: number): string {
+    return "data: " + JSON.stringify({ ...event, at }) + "\n\n";
+  }
+
+  /** The current-state snapshot every new connection gets first, marked so
+   * the client applies it to the pill only. The buffered replay right
+   * behind it (or a live event still to come) is what actually narrates
+   * the transcript -- without this flag a reasoned terminal state (say,
+   * "closed" with reason "Stopped") renders its card twice: once from this
+   * snapshot, once from the same transition's own entry in the replay. */
+  function snapshotFrame(): string {
+    return "data: " + JSON.stringify({ ...state, snapshot: true }) + "\n\n";
   }
 
   function publish(event: ChatStreamEvent): void {
@@ -241,11 +254,12 @@ export function createChatWebApp(
     }
     if (event.kind === "permission-request") pendingPermissions.add(event.requestId);
     if (event.kind === "permission-resolved") pendingPermissions.delete(event.requestId);
-    eventLog.push(event);
+    const at = Date.now();
+    eventLog.push({ event, at });
     if (eventLog.length > MAX_BUFFERED_EVENTS) {
       eventLog.splice(0, eventLog.length - MAX_BUFFERED_EVENTS);
     }
-    const encoded = frame(event);
+    const encoded = frame(event, at);
     for (const client of clients) client.write(encoded);
   }
 
@@ -456,8 +470,8 @@ export function createChatWebApp(
       "x-content-type-options": "nosniff",
     });
     response.flushHeaders();
-    response.write(frame(state));
-    for (const event of eventLog) response.write(frame(event));
+    response.write(snapshotFrame());
+    for (const entry of eventLog) response.write(frame(entry.event, entry.at));
     clients.add(response);
     request.once("close", () => clients.delete(response));
   }

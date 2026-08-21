@@ -37,8 +37,15 @@ const permissions = new Map();
 // existing card instead of rendering a duplicate.
 const pendingMessages = new Map();
 
-function timestamp() {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+// `at` is the server's own publish time (every event carries it); replaying
+// history must render when it really happened, not the reconnect moment.
+// Falls back to now for the client's own optimistic cards, which have no
+// server timestamp yet.
+function formatTimestamp(at) {
+  return new Date(at ?? Date.now()).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function hideEmptyState() {
@@ -58,7 +65,7 @@ function announce(text) {
   statusRegion.textContent = text;
 }
 
-function messageCard(author, text, className) {
+function messageCard(author, text, className, at) {
   hideEmptyState();
   const card = document.createElement("article");
   card.className = "message " + className;
@@ -68,7 +75,7 @@ function messageCard(author, text, className) {
   name.textContent = author;
   const time = document.createElement("span");
   time.className = "timestamp";
-  time.textContent = timestamp();
+  time.textContent = formatTimestamp(at);
   const body = document.createElement("p");
   body.className = "message-body";
   body.textContent = text;
@@ -79,7 +86,7 @@ function messageCard(author, text, className) {
   return { card, body };
 }
 
-function setSessionState(state, reason) {
+function setSessionState(state, reason, options = {}) {
   const labels = {
     starting: "Starting",
     ready: "Ready",
@@ -95,6 +102,11 @@ function setSessionState(state, reason) {
   // session ends -- not on the message's own 202, which lands well before
   // the driver's turn actually finishes.
   sendButton.disabled = state === "running";
+  // The initial connection snapshot applies to the pill only: the log
+  // replay right behind it (or a live event still to come) is what
+  // actually narrates the transcript. Announcing or rendering a card here
+  // too would duplicate whatever that replay is about to show.
+  if (options.silent) return;
   announce(label);
   if (state === "closed" && reason) {
     recoveryCard(reason);
@@ -153,6 +165,7 @@ function renderText(event) {
       event.stream === "reasoning" ? "Reasoning" : "Claude Code",
       "",
       event.stream === "reasoning" ? "agent reasoning" : "agent",
+      event.at,
     ));
     textItems.set(key, body);
   }
@@ -213,12 +226,29 @@ function renderUserMessage(event) {
   if (pending) {
     pendingMessages.delete(event.clientId);
     pending.dataset.pending = "false";
+    // A reconnect's own reset can have detached this card while its
+    // /message fetch was still in flight (resetTranscript keeps the map
+    // entry for exactly this reason). Put it back where it belongs now
+    // that the server confirms it was really accepted.
+    if (!pending.isConnected) {
+      hideEmptyState();
+      transcript.append(pending);
+      scrollToLatest();
+    }
     return;
   }
   // No local optimistic card: this arrived on reconnect, or from a message
   // sent before this page attached.
-  messageCard("You", event.text, "user");
+  messageCard("You", event.text, "user", event.at);
 }
+
+const PERMISSION_DECISION_LABELS = {
+  allow_once: "Allowed",
+  allow_always: "Allowed for session",
+  reject_once: "Rejected",
+  reject_always: "Rejected for session",
+  cancel: "Cancelled",
+};
 
 function resolvePermission(requestId, label) {
   const card = permissions.get(requestId);
@@ -319,6 +349,13 @@ function renderPermission(event) {
 }
 
 function renderEvent(event) {
+  if (event.snapshot) {
+    // The current-state snapshot every new connection gets first, marked
+    // by the server. Applies to the pill only -- see the silent branch in
+    // setSessionState for why.
+    setSessionState(event.state, event.reason, { silent: true });
+    return;
+  }
   switch (event.kind) {
     case "session-state":
       setSessionState(event.state, event.reason);
@@ -336,7 +373,7 @@ function renderEvent(event) {
       renderPermission(event);
       break;
     case "permission-resolved":
-      resolvePermission(event.requestId, "Resolved");
+      resolvePermission(event.requestId, PERMISSION_DECISION_LABELS[event.decision] || "Resolved");
       break;
     case "token-usage":
       statePill.title = event.max
@@ -348,14 +385,14 @@ function renderEvent(event) {
       if (event.status === "failed" && event.errorMessage) failedTurnCard(event.errorMessage);
       break;
     case "auth":
-      if (event.detail) messageCard("Claude Code", event.detail, "agent");
+      if (event.detail) messageCard("Claude Code", event.detail, "agent", event.at);
       break;
     case "error":
       if (event.fatal) {
         setSessionState("error");
         recoveryCard(event.message);
       } else {
-        messageCard("Claude Code", event.message, "agent");
+        messageCard("Claude Code", event.message, "agent", event.at);
         announce(event.message);
       }
       break;
@@ -370,7 +407,13 @@ function resetTranscript() {
   textItems.clear();
   activityItems.clear();
   permissions.clear();
-  pendingMessages.clear();
+  // pendingMessages is deliberately NOT cleared here: a /message fetch can
+  // still be in flight when a reconnect fires this reset. Clearing the map
+  // would strand it -- the eventual confirm (via the replayed user-message
+  // event, in renderUserMessage) or failure handler (markMessageFailed)
+  // would find nothing to update, and the user's message and its outcome
+  // would silently disappear. Both paths re-attach the card if this reset
+  // just detached it.
 }
 
 const events = new EventSource("/events?token=" + encodeURIComponent(TOKEN));
@@ -390,6 +433,13 @@ function markMessageFailed(clientId, card, message, reenable = true) {
   note.className = "send-failed";
   note.textContent = message;
   card.append(note);
+  // Same reattachment as the confirm path in renderUserMessage: a reset
+  // can have detached this card while the fetch that just failed was
+  // still in flight.
+  if (!card.isConnected) {
+    hideEmptyState();
+    transcript.append(card);
+  }
   // A 409 means a turn really is still active server-side: re-enabling here
   // would just let the user fire another message that also 409s. Leave it
   // disabled and let the eventual settled session-state event restore it.
