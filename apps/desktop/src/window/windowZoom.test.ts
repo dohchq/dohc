@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
-import { createZoomMutation, nextZoomLevel } from "./windowZoom";
+import {
+  createUserSettingsWriteQueue,
+  createZoomMutation,
+  nextZoomLevel,
+} from "./windowZoom";
 
 function storeAt(zoomLevel: number) {
   let stored = {
@@ -19,6 +23,7 @@ function storeAt(zoomLevel: number) {
     stored = settings;
   });
   const step = createZoomMutation({
+    enqueue: createUserSettingsWriteQueue(),
     read,
     write,
     apply: (level) => applied.push(level),
@@ -49,6 +54,7 @@ describe("the zoom mutation", () => {
   it("persists before it applies, and a failed write applies nothing", async () => {
     const applied: number[] = [];
     const step = createZoomMutation({
+      enqueue: createUserSettingsWriteQueue(),
       read: async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "stored" as const,
@@ -80,6 +86,62 @@ describe("the zoom mutation", () => {
     store.releaseWrites();
     expect((await result).settings.appearance.zoomLevel).toBe(5);
     expect(store.write).not.toHaveBeenCalled();
+  });
+
+  it("refuses to replace recovered settings", async () => {
+    const write = vi.fn(async () => undefined);
+    const apply = vi.fn();
+    const step = createZoomMutation({
+      enqueue: createUserSettingsWriteQueue(),
+      read: async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "recovered" as const,
+        warning: "The settings file could not be read.",
+      }),
+      write,
+      apply,
+    });
+
+    await expect(step("in")).rejects.toThrow(
+      "Zoom is unavailable while the settings file is unreadable. Open Settings to repair or reset it.",
+    );
+    expect(write).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("runs a full save enqueued between two zoom steps strictly between them", async () => {
+    const enqueue = createUserSettingsWriteQueue();
+    const order: string[] = [];
+    let stored = DEFAULT_USER_SETTINGS;
+    const step = createZoomMutation({
+      enqueue,
+      read: async () => {
+        order.push(`read:${stored.appearance.zoomLevel}`);
+        return { settings: stored, source: "stored" as const };
+      },
+      write: async (settings) => {
+        order.push(`write:${settings.appearance.zoomLevel}`);
+        stored = settings;
+      },
+      apply: (zoomLevel) => order.push(`apply:${zoomLevel}`),
+    });
+
+    const first = step("in");
+    const fullSave = enqueue(async () => {
+      order.push("full-save");
+    });
+    const second = step("in");
+
+    await Promise.all([first, fullSave, second]);
+    expect(order).toEqual([
+      "read:0",
+      "write:1",
+      "apply:1",
+      "full-save",
+      "read:1",
+      "write:2",
+      "apply:2",
+    ]);
   });
 });
 

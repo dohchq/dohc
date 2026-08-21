@@ -338,7 +338,10 @@ import {
   shouldUseDarkSystemIcon,
 } from "./systemThemeIcon";
 import { buildMenuTemplate } from "./window/applicationMenu";
-import { createZoomMutation } from "./window/windowZoom";
+import {
+  createUserSettingsWriteQueue,
+  createZoomMutation,
+} from "./window/windowZoom";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
   allowLoopbackFrameOrigin,
@@ -1309,20 +1312,31 @@ function quoteWindowsArg(value: string): string {
   return quoted;
 }
 
-// One serialized zoom mutation for every caller (menu accelerators, the
-// palette, the Settings stepper): persist appearance.zoomLevel first, then
-// re-tint every window. A failed write changes no window.
+// One user-settings write queue for every caller. Full saves and zoom steps
+// cannot interleave their file mutations.
 function applyZoomLevelToWindows(zoomLevel: number): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.setZoomLevel(zoomLevel);
   }
 }
 
-const stepWindowZoom = createZoomMutation({
+const enqueueUserSettingsWrite = createUserSettingsWriteQueue();
+const mutateWindowZoom = createZoomMutation({
+  enqueue: enqueueUserSettingsWrite,
   read: () => readCachedUserSettingsFile(stateDir()),
   write: (settings) => writeUserSettingsFile(stateDir(), settings),
   apply: applyZoomLevelToWindows,
 });
+
+async function stepWindowZoom(
+  step: Parameters<typeof mutateWindowZoom>[0],
+): Promise<DesktopUserSettingsResult> {
+  const result = DesktopUserSettingsResult.parse(await mutateWindowZoom(step));
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send(CHANNELS.userSettingsChanged, result);
+  }
+  return result;
+}
 
 function refreshApplicationMenu(): void {
   if (!app.isReady()) return;
@@ -9851,11 +9865,17 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.setUserSettings, async (event, payload) => {
     assertTrustedSender(event);
     const input = SetUserSettingsPayload.parse(payload);
-    await writeUserSettingsFile(stateDir(), input.settings);
-    cachedPreferredName = input.settings.profile.preferredName;
-    // The windows must match whatever zoom level was just persisted, however
-    // it got into the saved object.
-    applyZoomLevelToWindows(input.settings.appearance.zoomLevel);
+    const result = await enqueueUserSettingsWrite(async () => {
+      await writeUserSettingsFile(stateDir(), input.settings);
+      cachedPreferredName = input.settings.profile.preferredName;
+      // The windows must match whatever zoom level was just persisted, however
+      // it got into the saved object.
+      applyZoomLevelToWindows(input.settings.appearance.zoomLevel);
+      return DesktopUserSettingsResult.parse({
+        settings: input.settings,
+        source: "stored",
+      });
+    });
     await refreshDispatchTray();
     if (input.settings.runner.enabled && input.settings.runner.command.trim()) {
       for (const workspace of openDispatchWorkspaces()) {
@@ -9864,22 +9884,22 @@ function registerIpcHandlers(
         });
       }
     }
-    return DesktopUserSettingsResult.parse({
-      settings: input.settings,
-      source: "stored",
-    });
+    return result;
   });
 
   ipcMain.handle(CHANNELS.resetUserSettings, async (event) => {
     assertTrustedSender(event);
-    await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
-    cachedPreferredName = undefined;
-    applyZoomLevelToWindows(DEFAULT_USER_SETTINGS.appearance.zoomLevel);
-    await refreshDispatchTray();
-    return DesktopUserSettingsResult.parse({
-      settings: DEFAULT_USER_SETTINGS,
-      source: "stored",
+    const result = await enqueueUserSettingsWrite(async () => {
+      await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
+      cachedPreferredName = undefined;
+      applyZoomLevelToWindows(DEFAULT_USER_SETTINGS.appearance.zoomLevel);
+      return DesktopUserSettingsResult.parse({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "stored",
+      });
     });
+    await refreshDispatchTray();
+    return result;
   });
 
   ipcMain.handle(CHANNELS.getWorkspaceSettings, async (event, payload) => {

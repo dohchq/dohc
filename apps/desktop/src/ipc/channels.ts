@@ -773,6 +773,7 @@ export const CHANNELS = {
   writeClipboardText: "desktop:write-clipboard-text",
   setTitlebarTheme: "desktop:set-titlebar-theme",
   stepWindowZoom: "desktop:step-window-zoom",
+  userSettingsChanged: "desktop:user-settings-changed",
   getWorkspaceUiState: "desktop:get-workspace-ui-state",
   setWorkspaceUiState: "desktop:set-workspace-ui-state",
   searchWorkspace: "desktop:search-workspace",

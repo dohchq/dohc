@@ -2,7 +2,10 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import {
+  DEFAULT_USER_SETTINGS,
+  type DesktopUserSettingsResult,
+} from "../../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
@@ -143,6 +146,9 @@ const bridge = {
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
   writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
   setTitlebarTheme: vi.fn(async () => undefined),
+  onUserSettingsChanged: vi.fn(
+    (_listener: (result: DesktopUserSettingsResult) => void) => () => undefined,
+  ),
   stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
     settings: {
       ...DEFAULT_USER_SETTINGS,
@@ -271,6 +277,37 @@ describe("DesktopSettings", () => {
     expect(bridge.stepWindowZoom).toHaveBeenCalledWith({ step: "in" });
     expect(bridge.setUserSettings).not.toHaveBeenCalled();
     await waitFor(() => expect(row.textContent).toContain("120%"));
+  });
+
+  it("repaints the window zoom when main reports changed user settings", async () => {
+    let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
+    bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
+      pushUserSettings = listener;
+      return () => undefined;
+    });
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    expect(row.textContent).toContain("100%");
+    if (!pushUserSettings) {
+      throw new Error("User settings subscription was not registered.");
+    }
+    pushUserSettings({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 },
+      },
+      source: "stored",
+    });
+
+    await waitFor(() => expect(row.textContent).toContain("144%"));
   });
 
   it("saves a preferred name and previews agent attribution", async () => {

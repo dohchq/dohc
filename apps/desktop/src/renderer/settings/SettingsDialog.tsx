@@ -18,10 +18,10 @@ import {
 import type { UpdateStateEvent } from "../../ipc/bridgeContract";
 import {
   DEFAULT_USER_SETTINGS,
+  DesktopUserSettingsResult,
   MAX_ZOOM_LEVEL,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
-  type DesktopUserSettingsResult,
   zoomPercent,
 } from "../../settings/userSettings";
 import {
@@ -210,6 +210,15 @@ export function SettingsDialog(props: {
   }, [props.onClose]);
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
+
+  useEffect(
+    () =>
+      bridge().onUserSettingsChanged((result) => {
+        const parsed = DesktopUserSettingsResult.safeParse(result);
+        if (parsed.success) setUserResult(parsed.data);
+      }),
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;

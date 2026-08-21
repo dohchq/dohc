@@ -4485,6 +4485,9 @@ export interface DohcDesktopBridge {
   ): Promise<WorkspaceSettingsResult>;
   writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
+  onUserSettingsChanged(
+    listener: (result: DesktopUserSettingsResult) => void,
+  ): () => void;
   stepWindowZoom(
     payload: StepWindowZoomPayload,
   ): Promise<DesktopUserSettingsResult>;
