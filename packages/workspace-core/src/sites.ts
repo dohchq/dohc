@@ -619,7 +619,13 @@ function includesWebScriptToken(haystack: string, token: string): boolean {
   return false;
 }
 
-function hasWebScript(pkg: PackageJson | undefined): boolean {
+// Exported so MCP's own site detector can apply the SAME "does this
+// package.json look like a web project" rule desktop's discoverSites
+// already does — testing only whether ANY script exists (rather than
+// whether one actually names a web dependency or tool) is a materially
+// looser test that disagrees with desktop's Sites view on the same input
+// (round-16 finding 9).
+export function hasWebScript(pkg: PackageJson | undefined): boolean {
   const scripts = packageScripts(pkg);
   return Object.entries(scripts).some(([name, value]) => {
     const haystack = `${name} ${value}`.toLowerCase();
@@ -874,7 +880,30 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
     }
   }
 
+  // A configured site's OWN declared build.output can itself sit several
+  // directories deep and contain a conventional output-directory name —
+  // "public/dist" for a site at "portal", say. Without checking that
+  // FIRST, the generic "first conventional directory name in the path"
+  // scan below finds "dist" and promotes "portal/public" (an ordinary
+  // subdirectory, not a site of its own) into a spurious second candidate,
+  // instead of crediting the match to "portal" (its declared output) the
+  // way it would if build.output were a single, non-nested segment.
+  const configuredOutputArtifacts = new Map<string, { root: string; output: string }>();
+  for (const [root, candidate] of candidates) {
+    const output = candidate.dohcConfig?.build?.output;
+    if (!output) continue;
+    configuredOutputArtifacts.set(`${root === "" ? output : `${root}/${output}`}/index.html`, { root, output });
+  }
+
   for (const path of normalizedPaths) {
+    const configuredOwner = configuredOutputArtifacts.get(path);
+    if (configuredOwner) {
+      const candidate = getCandidate(candidates, configuredOwner.root);
+      candidate.buildOutputs.add(configuredOwner.output);
+      candidate.hasBuildOutputSignal = true;
+      candidate.entry ??= `${configuredOwner.output}/index.html`;
+      continue;
+    }
     const segments = path.split("/");
     const index = segments.findIndex((segment) => BUILD_OUTPUT_DIRS.includes(segment));
     if (index === -1 || index === segments.length - 1) continue;

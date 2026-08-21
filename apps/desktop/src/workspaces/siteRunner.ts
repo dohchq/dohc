@@ -256,9 +256,9 @@ function explicitHostBinds(args: string[]): string[] {
 // assignment at all (the real command).
 const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 
-function explicitHostEnvironmentAssignments(command: string, args: string[]): string[] {
+function explicitHostEnvironmentAssignments(tokens: string[]): string[] {
   const hosts: string[] = [];
-  for (const token of [command, ...args]) {
+  for (const token of tokens) {
     const match = ENV_ASSIGNMENT_PATTERN.exec(token);
     if (!match) break;
     const [, name, value] = match;
@@ -268,9 +268,15 @@ function explicitHostEnvironmentAssignments(command: string, args: string[]): st
 }
 
 function assertDirectHostBinds(command: string, args: string[]): void {
+  const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   const hosts = [
     ...explicitHostBinds(args),
-    ...explicitHostEnvironmentAssignments(command, args),
+    ...explicitHostEnvironmentAssignments([command, ...args]),
+    // GNU env's documented form is `env [OPTION]... [NAME=VALUE]...
+    // [COMMAND [ARG]...]` — env itself sets each assignment before running
+    // the wrapped command, so the SAME assignments matter here too, just
+    // one token later since "env" itself isn't one.
+    ...(commandName === "env" ? explicitHostEnvironmentAssignments(args) : []),
   ];
   for (const host of hosts) {
     if (host !== "" && isLoopbackHostname(host)) continue;

@@ -280,6 +280,18 @@ function isImageInputElement(attrs: ReadonlyMap<string, string>): boolean {
   return attrs.get("type")?.toLowerCase() === "image";
 }
 
+/** `formaction` only overrides the enclosing form's submission target for a
+ * SUBMIT control — a `<button>` with no `type` (its default is "submit")
+ * or an explicit `type="submit"`, or an `<input type="submit"|"image">`.
+ * Any other type (a plain `<button type="button">`, `<input type="text">`,
+ * ...) never navigates, so the attribute is inert there. */
+function isSubmitControlElement(tagName: string, attrs: ReadonlyMap<string, string>): boolean {
+  const type = attrs.get("type")?.toLowerCase();
+  if (tagName === "button") return !type || type === "submit";
+  if (tagName === "input") return type === "submit" || type === "image";
+  return false;
+}
+
 // <meta http-equiv="refresh" content="0;url=target.html"> navigates the
 // browser to `target.html` after the given delay — a literal navigation
 // dependency the URL_ATTRIBUTE_ELEMENTS mechanism doesn't cover, since the
@@ -349,8 +361,8 @@ const LINK_REL_TOKENS_REQUIRING_AS = new Set(["preload"]);
 // destination state at all: the browser aborts preload processing and
 // makes no request, so the mere PRESENCE of the attribute isn't enough.
 const PRELOAD_AS_DESTINATIONS = new Set([
-  "audio", "audioworklet", "document", "embed", "fencedframe", "font",
-  "frame", "iframe", "image", "manifest", "object", "paintworklet",
+  "audio", "audioworklet", "document", "embed", "fencedframe", "fetch",
+  "font", "frame", "iframe", "image", "manifest", "object", "paintworklet",
   "report", "script", "sharedworker", "style", "track", "video",
   "webidentity", "worker", "xslt",
 ]);
@@ -569,12 +581,35 @@ function blankCssStrings(cssText: string): string {
   });
 }
 
+// image-set(<candidate> <descriptor>?, ...) — each candidate can be a
+// quoted STRING url (not just url(...)), and the browser fetches whichever
+// one it selects for the device. Extracted from the comment-stripped text
+// BEFORE blankCssStrings runs: a candidate string isn't preceded by url(
+// or @import, so blanking would otherwise erase it as an ordinary,
+// resource-free CSS string.
+const CSS_IMAGE_SET_PATTERN = /(?:-webkit-)?image-set\(([^)]*)\)/gi;
+const CSS_IMAGE_SET_CANDIDATE_PATTERN = /"([^"]{1,2048})"|'([^']{1,2048})'/g;
+
+function imageSetStringCandidates(cssText: string): string[] {
+  const values: string[] = [];
+  for (const match of cssText.matchAll(CSS_IMAGE_SET_PATTERN)) {
+    for (const candidate of (match[1] ?? "").matchAll(CSS_IMAGE_SET_CANDIDATE_PATTERN)) {
+      const value = (candidate[1] ?? candidate[2])?.trim();
+      if (value) values.push(value);
+    }
+  }
+  return values;
+}
+
 function cssReferences(rawCssText: string): BrowserTextReference[] {
   const withoutComments = rawCssText.replace(CSS_COMMENT_PATTERN, (comment) =>
     comment.replace(/[^\r\n]/g, " "),
   );
-  const cssText = blankCssStrings(withoutComments);
   const references: BrowserTextReference[] = [];
+  for (const value of imageSetStringCandidates(withoutComments)) {
+    references.push({ value, documentRelative: false });
+  }
+  const cssText = blankCssStrings(withoutComments);
   for (const match of cssText.matchAll(CSS_URL_PATTERN)) {
     const value = (match[1] ?? match[2] ?? match[3])?.trim();
     if (value) references.push({ value, documentRelative: false });
@@ -1017,6 +1052,15 @@ interface ImportMapResolution {
   // normalized form. Keyed by the same artifact-root-absolute ("/"-prefixed)
   // convention resolveImportMapAddresses already uses for values.
   urlLikeImports: ReadonlyMap<string, string>;
+  // `scopes` remaps specifiers only for modules whose OWN resolved path
+  // falls under a given prefix — keyed by that prefix, normalized the same
+  // "/"-prefixed way as a urlLikeImports key. The spec picks the LONGEST
+  // matching scope for the importing script's own path first, and only
+  // falls back to the top-level maps above when no scope matches (or the
+  // matching one doesn't map the specifier either) — this heuristic
+  // scanner tries exactly the ONE longest-matching scope, not every
+  // matching scope in descending specificity, before falling back.
+  scopes: ReadonlyMap<string, { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> }>;
 }
 
 function isBareModuleSpecifier(specifier: string): boolean {
@@ -1051,6 +1095,29 @@ function resolveAgainstImportMapEntries(
   return entries.get(bestPrefixKey)! + specifier.slice(bestPrefixKey.length);
 }
 
+/** The LONGEST scope whose prefix is an ancestor of the IMPORTING script's
+ * own resolved path — the same longest-prefix-wins rule as everything
+ * else here, applied to the importer's location instead of the specifier. */
+function matchingScope(
+  importMap: ImportMapResolution,
+  fromPath: string,
+  artifactRoot: string,
+): { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> } | undefined {
+  const importerRelative = pathRelativeToArtifact(artifactRoot, fromPath);
+  if (importerRelative === null) return undefined;
+  const importerKey = `/${importerRelative}`;
+  let bestScopeKey: string | undefined;
+  let bestScope: { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> } | undefined;
+  for (const [scopeKey, scope] of importMap.scopes) {
+    if (!importerKey.startsWith(scopeKey)) continue;
+    if (!bestScopeKey || scopeKey.length > bestScopeKey.length) {
+      bestScopeKey = scopeKey;
+      bestScope = scope;
+    }
+  }
+  return bestScope;
+}
+
 function resolveModuleSpecifier(
   specifier: string,
   importMap: ImportMapResolution | undefined,
@@ -1058,20 +1125,38 @@ function resolveModuleSpecifier(
   ownBase: HtmlBaseResolution,
   artifactRoot: string,
 ): string | undefined {
+  if (!importMap) return isBareModuleSpecifier(specifier) ? undefined : specifier;
+  const scope = matchingScope(importMap, fromPath, artifactRoot);
   if (!isBareModuleSpecifier(specifier)) {
     // A URL-like specifier still passes through the import map: the spec
     // normalizes it against the IMPORTING script's own base and matches
     // that normalized form against the map's (already-normalized) keys —
     // an exact key OR the longest "prefix/" key it starts with. Unmatched,
     // it resolves to itself — same as before this lookup existed.
-    if (!importMap) return specifier;
     const normalized = resolveArtifactRelativePath(specifier, fromPath, artifactRoot, ownBase);
     const normalizedRelative = normalized ? pathRelativeToArtifact(artifactRoot, normalized) : null;
     if (normalizedRelative === null) return specifier;
-    return resolveAgainstImportMapEntries(`/${normalizedRelative}`, importMap.urlLikeImports) ?? specifier;
+    const normalizedKey = `/${normalizedRelative}`;
+    return (
+      (scope && resolveAgainstImportMapEntries(normalizedKey, scope.urlLikeImports)) ??
+      resolveAgainstImportMapEntries(normalizedKey, importMap.urlLikeImports) ??
+      specifier
+    );
   }
-  if (!importMap) return undefined;
-  return resolveAgainstImportMapEntries(specifier, importMap.imports);
+  return (
+    (scope && resolveAgainstImportMapEntries(specifier, scope.imports)) ??
+    resolveAgainstImportMapEntries(specifier, importMap.imports)
+  );
+}
+
+function rawSpecifierMap(value: unknown): Map<string, string> {
+  const map = new Map<string, string>();
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, specifierValue] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof specifierValue === "string") map.set(key, specifierValue);
+    }
+  }
+  return map;
 }
 
 function parseImportMap(text: string): ImportMapResolution | undefined {
@@ -1082,16 +1167,18 @@ function parseImportMap(text: string): ImportMapResolution | undefined {
     return undefined;
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const importsField = (parsed as Record<string, unknown>).imports;
-  const imports = new Map<string, string>();
-  if (importsField && typeof importsField === "object" && !Array.isArray(importsField)) {
-    for (const [key, value] of Object.entries(importsField as Record<string, unknown>)) {
-      if (typeof value === "string") imports.set(key, value);
+  const imports = rawSpecifierMap((parsed as Record<string, unknown>).imports);
+  const scopesField = (parsed as Record<string, unknown>).scopes;
+  // Raw, pre-normalization form — each scope's own key AND its specifier
+  // map both go through the same resolution resolveImportMapAddresses
+  // already applies to the top-level maps, before this is used anywhere.
+  const scopes = new Map<string, { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> }>();
+  if (scopesField && typeof scopesField === "object" && !Array.isArray(scopesField)) {
+    for (const [scopeKey, scopeValue] of Object.entries(scopesField as Record<string, unknown>)) {
+      scopes.set(scopeKey, { imports: rawSpecifierMap(scopeValue), urlLikeImports: new Map() });
     }
   }
-  // Raw, pre-normalization form — resolveImportMapAddresses splits bare vs.
-  // URL-like keys and populates urlLikeImports before this is used anywhere.
-  return { imports, urlLikeImports: new Map() };
+  return { imports, urlLikeImports: new Map(), scopes };
 }
 
 // Finding 8's stance: `new URL(lit, import.meta.url)` alone only
@@ -1120,16 +1207,91 @@ function newUrlLiteral(node: unknown, shadowedGlobals: ReadonlySet<string>): str
  * import.meta.url); fetch(u);` still counts once `u` reaches a consumer. */
 function collectUrlLiteralNames(program: AstNode, shadowedGlobals: ReadonlySet<string>): Map<string, string> {
   const names = new Map<string, string>();
+  // Same unprovable-stays-out conservative kill as collectDomProducingTags
+  // (round-15 finding 4): a function parameter's value is never provable
+  // statically, and a name later assigned something ELSE (or a DIFFERENT
+  // URL literal) anywhere in the file can no longer be trusted anywhere
+  // either — this flat, name-keyed map has no real scope resolver to tell
+  // an unrelated same-named binding apart from the one that's really a URL
+  // literal.
+  const invalidated = new Set<string>(collectFunctionParameterNames(program));
   walkAst(program, (node) => {
-    if (node.type !== "VariableDeclarator") return;
-    const target = astChild(node, "id");
+    let target: unknown;
+    let source: unknown;
+    if (node.type === "VariableDeclarator") {
+      target = astChild(node, "id");
+      source = astChild(node, "init");
+    } else if (node.type === "AssignmentExpression" && node.operator === "=") {
+      target = astChild(node, "left");
+      source = astChild(node, "right");
+    } else {
+      return;
+    }
     if (!isAstNode(target) || target.type !== "Identifier") return;
     const name = astString(target, "name");
-    if (!name || names.has(name)) return;
-    const literal = newUrlLiteral(astChild(node, "init"), shadowedGlobals);
-    if (literal !== undefined) names.set(name, literal);
+    if (!name || invalidated.has(name)) return;
+    const literal = newUrlLiteral(source, shadowedGlobals);
+    if (literal === undefined) {
+      // No real initializer (a bare `let target;`) proves nothing either
+      // way — only an ACTUAL non-URL-literal value invalidates.
+      if (source === null || source === undefined) return;
+      names.delete(name);
+      invalidated.add(name);
+      return;
+    }
+    const existing = names.get(name);
+    if (existing !== undefined && existing !== literal) {
+      names.delete(name);
+      invalidated.add(name);
+      return;
+    }
+    names.set(name, literal);
   });
   return names;
+}
+
+function isNewXhrExpression(node: unknown, shadowedGlobals: ReadonlySet<string>): boolean {
+  if (!isAstNode(node) || node.type !== "NewExpression") return false;
+  const callee = astChild(node, "callee");
+  return (
+    isAstNode(callee) &&
+    callee.type === "Identifier" &&
+    astString(callee, "name") === "XMLHttpRequest" &&
+    !shadowedGlobals.has("XMLHttpRequest")
+  );
+}
+
+/** Every identifier PROVABLY bound to `new XMLHttpRequest()` — same
+ * conservative-kill shape as collectDomProducingTags/collectUrlLiteralNames:
+ * a function parameter's value is never provable, and a name later bound
+ * to something else anywhere in the file is untrustworthy everywhere. */
+function collectXhrInstanceNames(program: AstNode, shadowedGlobals: ReadonlySet<string>): Set<string> {
+  const proven = new Set<string>();
+  const invalidated = new Set<string>(collectFunctionParameterNames(program));
+  walkAst(program, (node) => {
+    let target: unknown;
+    let source: unknown;
+    if (node.type === "VariableDeclarator") {
+      target = astChild(node, "id");
+      source = astChild(node, "init");
+    } else if (node.type === "AssignmentExpression" && node.operator === "=") {
+      target = astChild(node, "left");
+      source = astChild(node, "right");
+    } else {
+      return;
+    }
+    if (!isAstNode(target) || target.type !== "Identifier") return;
+    const name = astString(target, "name");
+    if (!name || invalidated.has(name)) return;
+    if (!isNewXhrExpression(source, shadowedGlobals)) {
+      if (source === null || source === undefined) return;
+      proven.delete(name);
+      invalidated.add(name);
+      return;
+    }
+    proven.add(name);
+  });
+  return proven;
 }
 
 /** The `new URL(lit, import.meta.url)` literal a CONSUMED expression
@@ -1183,6 +1345,7 @@ function jsReferencesFromCode(
   const shadowedGlobals = collectShadowedGlobalNames(program);
   const provenDomTags = collectDomProducingTags(program, shadowedGlobals);
   const urlLiteralNames = collectUrlLiteralNames(program, shadowedGlobals);
+  const provenXhrNames = collectXhrInstanceNames(program, shadowedGlobals);
   const references: BrowserTextReference[] = [];
   const addReference = (
     value: string | undefined,
@@ -1275,9 +1438,11 @@ function jsReferencesFromCode(
             isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
           if (propertyName === "register" && isServiceWorkerReceiver(object, shadowedGlobals)) {
             // A registered service worker runs in its own global scope with
-            // its own script URL, same as Worker/SharedWorker.
+            // its own script URL, same as Worker/SharedWorker — including
+            // the SAME { type: "module" } registration option deciding its
+            // grammar.
             const { value, scriptRelative } = consumedValue(args[0]);
-            addReference(value, !scriptRelative, true);
+            addReference(value, !scriptRelative, true, workerScriptKind(args[1]));
           } else if (
             propertyName === "fetch" &&
             (isGlobalReceiver(object, "window", shadowedGlobals) ||
@@ -1291,6 +1456,17 @@ function jsReferencesFromCode(
           } else if (propertyName === "setAttribute" && args.length >= 2) {
             const attributeName = stringLiteralValue(args[0]);
             if (attributeName) addUrlAttributeReference(object, attributeName, args[1]);
+          } else if (
+            propertyName === "open" &&
+            args.length >= 2 &&
+            isAstNode(object) &&
+            object.type === "Identifier" &&
+            provenXhrNames.has(astString(object, "name") ?? "")
+          ) {
+            // XMLHttpRequest.open(method, url, ...) resolves url against the
+            // document, the same as fetch().
+            const { value, scriptRelative } = consumedValue(args[1]);
+            addReference(value, !scriptRelative);
           }
         }
         break;
@@ -1358,15 +1534,15 @@ function jsReferencesFromEventHandler(
  * way, regardless of the importing script's own location. Matches the HTML
  * import-map processing model: addresses are normalized against the import
  * map's own base URL when the map is parsed, not the importer's. */
-function resolveImportMapAddresses(
-  importMap: ImportMapResolution,
+function resolveSpecifierMap(
+  rawMap: ReadonlyMap<string, string>,
   documentPath: string,
   documentBase: HtmlBaseResolution,
   artifactRoot: string,
-): ImportMapResolution {
+): { imports: Map<string, string>; urlLikeImports: Map<string, string> } {
   const resolved = new Map<string, string>();
   const resolvedUrlLike = new Map<string, string>();
-  for (const [key, rawAddress] of importMap.imports) {
+  for (const [key, rawAddress] of rawMap) {
     const candidate = resolveArtifactRelativePath(rawAddress, documentPath, artifactRoot, documentBase);
     // candidate is already artifact-relative (it includes artifactRoot's own
     // prefix, e.g. "dist/assets/main.js"). The "/"-prefix convention below
@@ -1390,6 +1566,30 @@ function resolveImportMapAddresses(
   return { imports: resolved, urlLikeImports: resolvedUrlLike };
 }
 
+function resolveImportMapAddresses(
+  importMap: ImportMapResolution,
+  documentPath: string,
+  documentBase: HtmlBaseResolution,
+  artifactRoot: string,
+): ImportMapResolution {
+  const { imports, urlLikeImports } = resolveSpecifierMap(importMap.imports, documentPath, documentBase, artifactRoot);
+  const scopes = new Map<string, { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> }>();
+  for (const [scopeKey, scopeMap] of importMap.scopes) {
+    // A scope's own key is itself a URL-like prefix — normalized against
+    // the declaring document's base the exact same way a urlLikeImports
+    // key is, so it can be compared against an importer's OWN normalized
+    // path later.
+    const normalizedScopeKey = resolveArtifactRelativePath(scopeKey, documentPath, artifactRoot, documentBase);
+    const normalizedScopeRelative = normalizedScopeKey ? pathRelativeToArtifact(artifactRoot, normalizedScopeKey) : null;
+    if (normalizedScopeRelative === null) continue;
+    scopes.set(
+      `/${normalizedScopeRelative}`,
+      resolveSpecifierMap(scopeMap.imports, documentPath, documentBase, artifactRoot),
+    );
+  }
+  return { imports, urlLikeImports, scopes };
+}
+
 function htmlReferencesFromDocument(
   document: Html5Node,
   context: JsScanContext,
@@ -1405,7 +1605,7 @@ function htmlReferencesFromDocument(
   const importMapTexts: string[] = [];
   const nestedReferences: BrowserTextReference[] = [];
 
-  const visit = (node: Html5Node): void => {
+  const visit = (node: Html5Node, parentTagName?: string): void => {
     if (isHtml5Element(node)) {
       const tagName = node.tagName;
       const attrs = new Map(node.attrs.map((attribute) => [attribute.name, attribute.value]));
@@ -1467,6 +1667,16 @@ function htmlReferencesFromDocument(
         const attributeName = attribute.name;
         if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
         if (attributeName === "src" && tagName === "input" && !isImageInputElement(attrs)) continue;
+        if (attributeName === "formaction" && !isSubmitControlElement(tagName, attrs)) continue;
+        // <source src> only fires a request inside <audio>/<video> — a
+        // <picture><source> uses srcset instead (src there is inert), and a
+        // detached/otherwise-parented <source> performs no request at all.
+        if (
+          attributeName === "src" &&
+          tagName === "source" &&
+          parentTagName !== "audio" &&
+          parentTagName !== "video"
+        ) continue;
         // With `srcdoc` present, the browser never fetches an iframe's own
         // `src` at all — srcdoc wins outright, it isn't a fallback.
         if (attributeName === "src" && tagName === "iframe" && srcdoc !== undefined) continue;
@@ -1516,7 +1726,8 @@ function htmlReferencesFromDocument(
         return;
       }
     }
-    for (const child of html5ChildNodes(node)) visit(child);
+    const childParentTagName = isHtml5Element(node) ? node.tagName : parentTagName;
+    for (const child of html5ChildNodes(node)) visit(child, childParentTagName);
   };
   visit(document);
 

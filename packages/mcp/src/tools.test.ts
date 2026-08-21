@@ -1707,6 +1707,57 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites does not treat a directory literally named index.html as a build artifact", async () => {
+    await withWorkspace(async (ctx) => {
+      // A directory, not a file, named index.html inside dist/ — stat()
+      // alone is truthy for both; only isFile() tells them apart.
+      await mkdir(join(ctx.root, "workflow-dir-index/dist/index.html"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "workflow-dir-index/dohc.json"),
+        JSON.stringify({ type: "workflow" }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      expect(result.sites.map((site) => site.root)).not.toContain("workflow-dir-index");
+    });
+  });
+
+  it("detect_sites requires a real web dependency or web-tool script token, not just any script", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "non-web-package"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "non-web-package/package.json"),
+        JSON.stringify({ name: "non-web-package", scripts: { build: "tsc" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      expect(result.sites.map((site) => site.root)).not.toContain("non-web-package");
+    });
+  });
+
+  it("detect_sites keeps a malformed dohc.json type visible with a diagnostic instead of silently dropping it", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "malformed-type"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "malformed-type/dohc.json"),
+        JSON.stringify({ type: 42 }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "malformed-type");
+      expect(site).toBeDefined();
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "invalid-type" }),
+      );
+    });
+  });
+
   it("detect_sites honors a configured preview.entry over the bare index.html fallback", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "docs/public"), { recursive: true });

@@ -224,6 +224,30 @@ describe("discoverSites", () => {
     ).toBe("dist");
   });
 
+  it("associates a nested configured build.output with its own site instead of a spurious ancestor", () => {
+    const sites = discoverSites([
+      {
+        path: "portal/dohc.json",
+        body: JSON.stringify({
+          type: "site",
+          build: { command: "vite build", output: "public/dist" },
+        }),
+      },
+      "portal/public/dist/index.html",
+    ]);
+
+    // Without the fix, the generic "first conventional directory name in
+    // the path" scan finds "dist" and promotes "portal/public" — an
+    // ordinary subdirectory, not a site of its own — into a SECOND,
+    // spurious candidate.
+    expect(sites.map((site) => site.root)).toEqual(["portal"]);
+    expect(sites[0]).toMatchObject({
+      configuredBuildOutput: "public/dist",
+      buildOutputs: ["public/dist"],
+      entry: "public/dist/index.html",
+    });
+  });
+
   it("surfaces invalid dohc.json diagnostics without hiding the site", () => {
     const [site] = discoverSites([
       "broken/index.html",

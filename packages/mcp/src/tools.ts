@@ -16,6 +16,7 @@ import {
   frameworkConfigName,
   hasIgnoredSegment,
   hasWebDependency,
+  hasWebScript,
   isDohcMetadataPath,
   mediaTypeForPath,
   notARealFolderRefusal,
@@ -1910,9 +1911,14 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
 
   const frameworkConfig = frameworkConfigName(files);
   const hasIndex = files.has("index.html");
+  // Whether ANY script exists is a materially looser test than whether
+  // one actually names a web dependency or a recognizable web-tool token —
+  // the shared hasWebScript predicate is the same one desktop's own
+  // discoverSites already applies, so both sites views agree on the same
+  // package.json.
   const hasPackageSignal =
     files.has("package.json") &&
-    (Object.keys(scripts).length > 0 || Boolean(frameworkConfig) || hasWebDependency(pkg));
+    (hasWebScript(pkg ?? undefined) || Boolean(frameworkConfig) || hasWebDependency(pkg));
   // A directory ACTUALLY found on disk vs. the configured build.output PATH
   // (a claim, whether or not anything was ever built there) are different
   // signals — workspace-core's hasIndependentWebsiteSignal only accepts the
@@ -1929,7 +1935,12 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   for (const name of SITE_BUILD_OUTPUT_NAMES) {
     if (!directories.has(name)) continue;
     const candidate = join(absolute, name, "index.html");
-    if (!(await stat(candidate).catch(() => null))) continue;
+    // stat() alone is truthy for a directory too — workspace-core's own
+    // detector only ever sees real FILES (it works from a file listing, not
+    // raw stat), so a directory literally named "index.html" must not pass
+    // here either, or the two detectors disagree on the identical input.
+    const info = await stat(candidate).catch(() => null);
+    if (!info?.isFile()) continue;
     detectedBuildOutputs.push(name);
     if (builtEntry === undefined) builtEntry = relativeJoin(relativeJoin(root, name), "index.html");
   }
@@ -1954,7 +1965,22 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     (output): output is string => typeof output === "string" && output.length > 0,
   );
   const uniqueBuildOutputs = [...new Set(buildOutputs)];
-  const explicitNonSite = config?.type !== undefined && config.type !== "site";
+  // A malformed type ({ "type": 42 }, or an empty string) is invalid
+  // CONFIG, not a legitimate declaration of some other dohc feature —
+  // workspace-core's own parser leaves declaredType unset for exactly this
+  // case (an "invalid-type" diagnostic, the candidate stays visible)
+  // rather than treating it as an explicit non-site type that can suppress
+  // the whole candidate.
+  const validType = typeof config?.type === "string" && config.type.trim() !== "" ? config.type : undefined;
+  if (config?.type !== undefined && validType === undefined) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-type",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: 'dohc.json type should be "site".',
+    });
+  }
+  const explicitNonSite = validType !== undefined && validType !== "site";
 
   if (
     explicitNonSite &&

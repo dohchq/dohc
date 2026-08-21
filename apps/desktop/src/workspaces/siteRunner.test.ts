@@ -449,6 +449,25 @@ describe("package manager helpers", () => {
       ]),
     ).toThrow(/loopback/);
   });
+
+  it("rejects a HOST/HOSTNAME assignment passed through the env wrapper", () => {
+    // GNU env's documented form: env [NAME=VALUE]... [COMMAND [ARG]...] —
+    // env itself is not an assignment, so the direct-assignment scan alone
+    // (which reads command+args as one leading run) never reaches "HOST="
+    // here without recognizing "env" as a wrapper first.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["HOST=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["HOSTNAME=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["HOST=127.0.0.1", "vite"]),
+    ).not.toThrow();
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["NODE_ENV=production", "vite"]),
+    ).not.toThrow();
+  });
 });
 
 describe("startSiteDevServer", () => {

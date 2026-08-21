@@ -1649,6 +1649,175 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("form-action/override.html");
   });
 
+  it("does not follow formaction on a control the browser never treats as a submit control", async () => {
+    await mkdir(join(root, "formaction-not-submit"), { recursive: true });
+    await writeFile(
+      join(root, "formaction-not-submit", "index.html"),
+      [
+        '<input type="text" formaction="private-text.html">',
+        '<button type="button" formaction="private-button.html">Go</button>',
+        '<input type="submit" formaction="real-submit.html">',
+      ].join(""),
+    );
+    await writeFile(join(root, "formaction-not-submit", "private-text.html"), "<h1>Private</h1>");
+    await writeFile(join(root, "formaction-not-submit", "private-button.html"), "<h1>Private</h1>");
+    await writeFile(join(root, "formaction-not-submit", "real-submit.html"), "<h1>Real</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "formaction-not-submit",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("formaction-not-submit/private-text.html");
+    expect(manifestOf(site)?.assets).not.toContain("formaction-not-submit/private-button.html");
+    expect(manifestOf(site)?.assets).toContain("formaction-not-submit/real-submit.html");
+  });
+
+  it("accepts fetch as a valid preload as destination", async () => {
+    await mkdir(join(root, "preload-fetch"), { recursive: true });
+    await writeFile(
+      join(root, "preload-fetch", "index.html"),
+      '<link rel="preload" as="fetch" href="data.json">',
+    );
+    await writeFile(join(root, "preload-fetch", "data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "preload-fetch",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("preload-fetch/data.json");
+  });
+
+  it("resolves a bare specifier through a scoped import-map entry", async () => {
+    await mkdir(join(root, "import-map-scope", "feature"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-scope", "index.html"),
+      [
+        '<script type="importmap">{"scopes": {"./feature/": {"lib": "./from-scope.js"}}}</script>',
+        '<script type="module" src="feature/mod.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-scope", "feature", "mod.js"), 'import "lib";');
+    // A scoped address resolves against the DECLARING document (the
+    // import map's own base), not against the scope key's own directory —
+    // "./from-scope.js" is next to index.html, not inside feature/.
+    await writeFile(join(root, "import-map-scope", "from-scope.js"), "export {};");
+    // A file literally named "lib" would only be approved if the bare
+    // specifier fell through unmapped instead of resolving via the scope.
+    await writeFile(join(root, "import-map-scope", "lib"), "private file literally named lib");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-scope",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-scope/from-scope.js");
+    expect(manifestOf(site)?.assets).not.toContain("import-map-scope/lib");
+  });
+
+  it("carries module grammar into a service worker registered with { type: \"module\" }", async () => {
+    await mkdir(join(root, "sw-module-type"), { recursive: true });
+    await writeFile(
+      join(root, "sw-module-type", "index.html"),
+      '<script>navigator.serviceWorker.register("sw.js", { type: "module" });</script>',
+    );
+    await writeFile(
+      join(root, "sw-module-type", "sw.js"),
+      'export {};\nfetch("target.txt");',
+    );
+    await writeFile(join(root, "sw-module-type", "target.txt"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "sw-module-type",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("sw-module-type/target.txt");
+  });
+
+  it("only fetches source[src] under an audio/video parent, matching picture/audio/video semantics", async () => {
+    await mkdir(join(root, "source-parent"), { recursive: true });
+    await writeFile(
+      join(root, "source-parent", "index.html"),
+      [
+        '<picture><source src="private-in-picture.png" srcset="real-srcset.png"><img src="fallback.png"></picture>',
+        '<video><source src="real-video.mp4"></video>',
+        '<source src="detached.mp4">',
+      ].join(""),
+    );
+    await writeFile(join(root, "source-parent", "private-in-picture.png"), "image");
+    await writeFile(join(root, "source-parent", "real-srcset.png"), "image");
+    await writeFile(join(root, "source-parent", "fallback.png"), "image");
+    await writeFile(join(root, "source-parent", "real-video.mp4"), "video");
+    await writeFile(join(root, "source-parent", "detached.mp4"), "video");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "source-parent",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("source-parent/private-in-picture.png");
+    expect(manifestOf(site)?.assets).toContain("source-parent/real-srcset.png");
+    expect(manifestOf(site)?.assets).toContain("source-parent/fallback.png");
+    expect(manifestOf(site)?.assets).toContain("source-parent/real-video.mp4");
+    expect(manifestOf(site)?.assets).not.toContain("source-parent/detached.mp4");
+  });
+
+  it("preserves image-set() string candidates instead of blanking them as ordinary CSS strings", async () => {
+    await mkdir(join(root, "image-set-css"), { recursive: true });
+    await writeFile(
+      join(root, "image-set-css", "index.html"),
+      '<style>body { background-image: image-set("one.png" 1x, "two.png" 2x); }</style>',
+    );
+    await writeFile(join(root, "image-set-css", "one.png"), "image");
+    await writeFile(join(root, "image-set-css", "two.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "image-set-css",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("image-set-css/one.png");
+    expect(manifestOf(site)?.assets).toContain("image-set-css/two.png");
+  });
+
+  it("does not let an unrelated scope's non-URL-literal binding of the same name grant URL-literal provenance", async () => {
+    await mkdir(join(root, "url-literal-scope"), { recursive: true });
+    await writeFile(
+      join(root, "url-literal-scope", "index.html"),
+      '<script type="module" src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "url-literal-scope", "app.js"),
+      [
+        'const target = new URL("private.json", import.meta.url);',
+        "function load(target) {",
+        "  fetch(target);",
+        "}",
+        'load("public.json");',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "url-literal-scope", "private.json"), "{}");
+    await writeFile(join(root, "url-literal-scope", "public.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "url-literal-scope",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("url-literal-scope/private.json");
+    expect(manifestOf(site)?.assets).not.toContain("url-literal-scope/public.json");
+  });
+
+  it("follows a literal XMLHttpRequest.open() target as a document-relative dependency", async () => {
+    await mkdir(join(root, "xhr-open"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-open", "index.html"),
+      '<script>const request = new XMLHttpRequest(); request.open("GET", "data.json"); request.send();</script>',
+    );
+    await writeFile(join(root, "xhr-open", "data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-open",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("xhr-open/data.json");
+  });
+
   it("parses an iframe's srcdoc as a nested document, resolved against the embedding document's base", async () => {
     await mkdir(join(root, "srcdoc"), { recursive: true });
     await writeFile(
