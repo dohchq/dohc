@@ -35,6 +35,31 @@ function unrefDelay(ms: number): Promise<void> {
   });
 }
 
+function neverRejects(promise: Promise<unknown>): Promise<void> {
+  return new Promise((resolve) => {
+    promise.then(
+      () => resolve(),
+      () => {
+        // A rejection did not confirm settlement. The grace timeout remains
+        // responsible for advancing teardown to the force round.
+      },
+    );
+  });
+}
+
+function resolveSettled(
+  settled: Promise<unknown> | (() => Promise<unknown>),
+): Promise<void> {
+  try {
+    const result = typeof settled === "function" ? settled() : settled;
+    return neverRejects(Promise.resolve(result));
+  } catch {
+    return new Promise<void>(() => {
+      // A synchronous throw also did not confirm settlement. Grace bounds it.
+    });
+  }
+}
+
 export interface ProcessTableEntry {
   pid: number;
   ppid: number;
@@ -320,20 +345,17 @@ export async function stopProcessTreePosix(
   const isAlive = options.isAlive ?? isProcessAlive;
   const deadline = Date.now() + settleMs;
   const remaining = (): number => Math.max(0, deadline - Date.now());
-  const graceBudget = (): number =>
-    Math.max(
-      0,
-      remaining() - FORCE_READ_RESERVE_MS - FINAL_WAIT_RESERVE_MS,
-    );
+  const phaseBudget = (ownCapMs: number, reserveForLaterMs: number): number =>
+    Math.min(ownCapMs, Math.max(0, remaining() - reserveForLaterMs));
   let captured: readonly number[] = [];
   let capturedIdentities: readonly ProcessIdentity[] = [];
   let unverifiable = false;
   try {
     const result = await signalProcessTreePosix(pid, "SIGTERM", {
       ...options,
-      readTimeoutMs: Math.min(
+      readTimeoutMs: phaseBudget(
         PROCESS_TABLE_READ_TIMEOUT_MS,
-        remaining(),
+        FORCE_READ_RESERVE_MS + FINAL_WAIT_RESERVE_MS,
       ),
     });
     captured = result.pids;
@@ -343,10 +365,13 @@ export async function stopProcessTreePosix(
     unverifiable = true;
   }
 
-  const settledPromise = typeof settled === "function" ? settled() : settled;
+  const graceMs = phaseBudget(
+    Number.POSITIVE_INFINITY,
+    FORCE_READ_RESERVE_MS + FINAL_WAIT_RESERVE_MS,
+  );
   await Promise.all([
-    Promise.race([settledPromise, unrefDelay(graceBudget())]),
-    waitForProcessExit(captured, graceBudget(), isAlive),
+    Promise.race([resolveSettled(settled), unrefDelay(graceMs)]),
+    waitForProcessExit(captured, graceMs, isAlive),
   ]);
 
   let forceResultPids: readonly number[] = [];
@@ -355,14 +380,18 @@ export async function stopProcessTreePosix(
       ...options,
       alsoSignal: captured,
       alsoSignalIdentities: capturedIdentities,
-      readTimeoutMs: Math.min(
+      readTimeoutMs: phaseBudget(
         PROCESS_TABLE_READ_TIMEOUT_MS,
-        remaining(),
+        FINAL_WAIT_RESERVE_MS,
       ),
     });
     forceResultPids = result.pids;
     unverifiable ||= result.tableReadFailed;
-    await waitForProcessExit(forceResultPids, remaining(), isAlive);
+    await waitForProcessExit(
+      forceResultPids,
+      phaseBudget(Number.POSITIVE_INFINITY, 0),
+      isAlive,
+    );
   } catch {
     unverifiable = true;
   }

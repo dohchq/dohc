@@ -9,6 +9,7 @@ import {
   type PluginAuthoredWriteCapture,
   type PluginDoorWritePipeline,
 } from "./pluginAuthoredWrite";
+import { overlayDoorWrittenSourceDeltas } from "./PluginPipeline";
 
 const author: MomentAuthor = {
   kind: "agent",
@@ -518,10 +519,9 @@ describe("createPluginAuthoredTextWriter", () => {
       readCount += 1;
       return readCount === 1 ? firstReadResult : ["note.txt"];
     });
-    let writeCount = 0;
-    let landSecondWrite: () => void = () => undefined;
-    const secondWriteLanded = new Promise<void>((resolve) => {
-      landSecondWrite = resolve;
+    let landSecondDoorWrite: () => void = () => undefined;
+    const secondDoorWriteLanded = new Promise<void>((resolve) => {
+      landSecondDoorWrite = resolve;
     });
     const reportedTexts: string[] = [];
     vi.resetModules();
@@ -533,15 +533,13 @@ describe("createPluginAuthoredTextWriter", () => {
       const input = writerInput({
         platform: "darwin",
         capture: {
-          writeAuthoredTextFile: async () => {
-            writeCount += 1;
-            if (writeCount === 2) landSecondWrite();
-          },
+          writeAuthoredTextFile: async () => undefined,
         },
         pipeline: {
           pluginIdForPath: () => "owned-plugin",
           handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
             reportedTexts.push(doorWrite.text);
+            if (reportedTexts.length === 2) landSecondDoorWrite();
           },
           rekeyDoorWrittenSourceChange: () => undefined,
         },
@@ -558,15 +556,81 @@ describe("createPluginAuthoredTextWriter", () => {
         overwrite: true,
         author,
       });
-      await secondWriteLanded;
-      await Promise.resolve();
-      await Promise.resolve();
+      await secondDoorWriteLanded;
       releaseFirstRead(["note.txt"]);
       await Promise.all([first, second]);
 
       expect(readdirMock).toHaveBeenCalledTimes(2);
       expect(reportedTexts).toEqual(["first\n", "second\n"]);
       expect(reportedTexts.at(-1)).toBe("second\n");
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("keeps a landed path provisional when casing recovery cannot read a directory", async () => {
+    const workspaceRoot = join(tmpdir(), "dohc-authored-unreadable");
+    const originalRelPath = "SRC/file.ts";
+    const recoveredRelPath = "src/file.ts";
+    const deltas = new Map<
+      string,
+      { sha256: string; seq: number; provisional?: boolean }
+    >();
+    let readCount = 0;
+    const readdirMock = vi.fn(async () => {
+      readCount += 1;
+      if (readCount === 1) return ["plugins"];
+      if (readCount === 2) return ["owned"];
+      if (readCount === 3) return ["src"];
+      throw new Error("simulated transient readdir failure");
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", () => ({ readdir: readdirMock }));
+
+    try {
+      const { createPluginAuthoredTextWriter: createWriterWithUnreadablePath } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithUnreadablePath(writerInput({
+        platform: "darwin",
+        workspaceRoot,
+        capture: { writeAuthoredTextFile: async () => undefined },
+        pipeline: {
+          pluginIdForPath: () => "owned-plugin",
+          handleDoorWrittenSourceChange: () => {
+            deltas.set(originalRelPath, {
+              sha256: "written",
+              seq: 1,
+              provisional: true,
+            });
+          },
+          rekeyDoorWrittenSourceChange: () => {
+            const delta = deltas.get(originalRelPath);
+            if (!delta) return;
+            deltas.delete(originalRelPath);
+            deltas.set(recoveredRelPath, {
+              sha256: delta.sha256,
+              seq: delta.seq,
+            });
+          },
+        },
+      }));
+
+      await write(
+        join("PLUGINS", "owned", "SRC", "file.ts"),
+        "text\n",
+        { overwrite: true, author },
+      );
+
+      expect(deltas).toEqual(new Map([[
+        originalRelPath,
+        { sha256: "written", seq: 1, provisional: true },
+      ]]));
+      expect(overlayDoorWrittenSourceDeltas(
+        [{ relPath: "src/File.ts", sha256: "baseline" }],
+        deltas,
+        "darwin",
+      )).toEqual([{ relPath: "src/File.ts", sha256: "written" }]);
     } finally {
       vi.doUnmock("node:fs/promises");
       vi.resetModules();

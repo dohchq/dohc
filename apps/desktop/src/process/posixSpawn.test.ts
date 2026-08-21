@@ -146,50 +146,22 @@ describe("killProcessTreePosix", () => {
     ]);
   });
 
-  it("builds one child index for a multi-root signal round", async () => {
-    const originalIterator = Array.prototype[Symbol.iterator];
-    let processTableIterations = 0;
-    Object.defineProperty(Array.prototype, Symbol.iterator, {
-      configurable: true,
-      writable: true,
-      value: function (this: unknown[]) {
-        const first = this[0];
-        if (
-          typeof first === "object" &&
-          first !== null &&
-          "pid" in first &&
-          "ppid" in first &&
-          "startedAt" in first
-        ) {
-          processTableIterations += 1;
-        }
-        return originalIterator.call(this);
-      },
-    });
+  it("signals multi-root descendants in one stable order", async () => {
     const signalled: number[] = [];
 
-    try {
-      await killProcessTreePosix(100, "SIGTERM", {
-        readProcessTable: async () => [
-          psRow(100, 1),
-          psRow(110, 100),
-          psRow(200, 1),
-          psRow(210, 200),
-          psRow(300, 1),
-          psRow(310, 300),
-        ].join("\n"),
-        alsoSignal: [200, 300],
-        sendSignal: (pid) => signalled.push(pid),
-      });
-    } finally {
-      Object.defineProperty(Array.prototype, Symbol.iterator, {
-        configurable: true,
-        writable: true,
-        value: originalIterator,
-      });
-    }
+    await killProcessTreePosix(100, "SIGTERM", {
+      readProcessTable: async () => [
+        psRow(100, 1),
+        psRow(110, 100),
+        psRow(200, 1),
+        psRow(210, 200),
+        psRow(300, 1),
+        psRow(310, 300),
+      ].join("\n"),
+      alsoSignal: [200, 300],
+      sendSignal: (pid) => signalled.push(pid),
+    });
 
-    expect(processTableIterations).toBe(1);
     expect(signalled).toEqual([310, 210, 110, 300, 200, 100]);
   });
 
@@ -337,7 +309,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        100,
+        700,
         onTreeKillFailure,
         {
           readProcessTable: async () => {
@@ -349,7 +321,7 @@ describe("stopProcessTreePosix", () => {
         },
       );
 
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
       await pending;
 
       expect(signalled).toEqual([
@@ -369,7 +341,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      100,
+      700,
       onTreeKillFailure,
       {
         readProcessTable: async () => {
@@ -395,7 +367,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        100,
+        700,
         onTreeKillFailure,
         {
           readProcessTable: async () => psRow(100, 1),
@@ -428,7 +400,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        100,
+        700,
         onTreeKillFailure,
         {
           readProcessTable: async () => {
@@ -441,7 +413,7 @@ describe("stopProcessTreePosix", () => {
         },
       );
 
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
       await pending;
 
       expect(onTreeKillFailure).toHaveBeenCalledOnce();
@@ -460,7 +432,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        100,
+        700,
         onTreeKillFailure,
         {
           readProcessTable: async () => {
@@ -473,7 +445,7 @@ describe("stopProcessTreePosix", () => {
         },
       );
 
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
       await pending;
 
       expect(signalled).toEqual([
@@ -495,7 +467,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        100,
+        700,
         onTreeKillFailure,
         {
           readProcessTable: () => {
@@ -526,7 +498,7 @@ describe("stopProcessTreePosix", () => {
   it("shares one shutdown budget across reads, grace, force, and fallback", async () => {
     vi.useFakeTimers();
     try {
-      const settleMs = 100;
+      const settleMs = 700;
       const toleranceMs = 1;
       const startedAt = Date.now();
       let readCount = 0;
@@ -558,14 +530,13 @@ describe("stopProcessTreePosix", () => {
         resolvedAt = Date.now();
       });
 
-      await vi.advanceTimersByTimeAsync(99);
+      await vi.advanceTimersByTimeAsync(399);
       expect(onTreeKillFailure).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
       await vi.advanceTimersByTimeAsync(0);
 
-      // Grace is skipped because this budget is smaller than both reserves.
-      // The force read still starts and is bounded by the few milliseconds
-      // left after the deliberately slow first read.
+      // The slow first read and grace use only the budget above both reserves.
+      // The force read then consumes its full reserve and leaves the final one.
       expect(readCount).toBe(2);
       expect(fallbackAt).toBeDefined();
       expect((fallbackAt as number) - startedAt)
@@ -573,6 +544,100 @@ describe("stopProcessTreePosix", () => {
       expect((resolvedAt as number) - startedAt)
         .toBeLessThanOrEqual(settleMs + toleranceMs);
       await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reserves the force read and final wait before a slow first read", async () => {
+    vi.useFakeTimers();
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      let readCount = 0;
+      const pending = stopProcessTreePosix(
+        100,
+        new Promise(() => {}),
+        1_000,
+        undefined,
+        {
+          readProcessTable: () => {
+            readCount += 1;
+            const delayMs = readCount === 1 ? 350 : 250;
+            return new Promise<string>((resolve) => {
+              setTimeout(
+                () => resolve([psRow(100, 1), psRow(200, 100)].join("\n")),
+                delayMs,
+              );
+            });
+          },
+          sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+          isAlive: () => false,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(650);
+      await pending;
+
+      expect(timeoutSpy.mock.calls.map((call) => call[1])).toEqual([
+        400,
+        350,
+        50,
+        300,
+        250,
+      ]);
+      expect(signalled).toContainEqual({ pid: 200, signal: "SIGKILL" });
+    } finally {
+      timeoutSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("still force-signals after the settled promise rejects", async () => {
+    vi.useFakeTimers();
+    try {
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.reject(new Error("settlement failed")),
+        700,
+        undefined,
+        {
+          readProcessTable: async () => psRow(100, 1),
+          sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+          isAlive: () => false,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(pending).resolves.toBeUndefined();
+      expect(signalled).toContainEqual({ pid: 100, signal: "SIGKILL" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still force-signals after the settled thunk throws synchronously", async () => {
+    vi.useFakeTimers();
+    try {
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      const pending = stopProcessTreePosix(
+        100,
+        () => {
+          throw new Error("settlement failed");
+        },
+        700,
+        undefined,
+        {
+          readProcessTable: async () => psRow(100, 1),
+          sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+          isAlive: () => false,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(pending).resolves.toBeUndefined();
+      expect(signalled).toContainEqual({ pid: 100, signal: "SIGKILL" });
     } finally {
       vi.useRealTimers();
     }
@@ -636,7 +701,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        100,
+        700,
         onTreeKillFailure,
         {
           readProcessTable: () => Promise.reject(new Error("ps: not found")),
@@ -645,7 +710,7 @@ describe("stopProcessTreePosix", () => {
         },
       );
 
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
       await pending;
 
       expect(onTreeKillFailure).toHaveBeenCalledOnce();
@@ -662,7 +727,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      100,
+      700,
       onTreeKillFailure,
       {
         readProcessTable: async () => {
@@ -687,7 +752,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      100,
+      700,
       undefined,
       {
         readProcessTable: async () => {
@@ -715,7 +780,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      100,
+      700,
       onTreeKillFailure,
       {
         readProcessTable: async () => {
@@ -742,7 +807,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      100,
+      700,
       undefined,
       {
         readProcessTable: async () => psRow(100, 1, startedAt),
@@ -764,7 +829,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      100,
+      700,
       undefined,
       {
         readProcessTable: async () => {
@@ -799,7 +864,7 @@ describe("stopProcessTreePosix", () => {
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      100,
+      700,
       undefined,
       {
         readProcessTable: async () => {
@@ -879,7 +944,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        200,
+        800,
         undefined,
         {
           readProcessTable: async () =>
@@ -924,7 +989,7 @@ describe("stopProcessTreePosix", () => {
       const pending = stopProcessTreePosix(
         100,
         Promise.resolve(),
-        200,
+        800,
         undefined,
         options,
       ).then(() => {

@@ -6,11 +6,12 @@ async function recoverOnDiskCasing(
   root: string,
   relativePath: string,
   signal: AbortSignal | undefined,
-): Promise<string> {
+): Promise<{ path: string; fullyRecovered: boolean }> {
   const segments = relativePath.split(/[\\/]+/).filter(Boolean);
   const recovered: string[] = [];
   let currentDir = root;
   let folding = true;
+  let fullyRecovered = true;
 
   for (const segment of segments) {
     if (signal?.aborted) {
@@ -24,22 +25,25 @@ async function recoverOnDiskCasing(
       } catch {
         readable = false;
       }
-      const normalizedSegment = segment.normalize("NFC");
-      const match = readable
-        ? entries.find(
+      if (!readable) {
+        fullyRecovered = false;
+        folding = false;
+      } else {
+        const normalizedSegment = segment.normalize("NFC");
+        const match = entries.find(
             (entry) => entry.normalize("NFC") === normalizedSegment,
           ) ??
           entries.find(
             (entry) => entry.normalize("NFC").toLowerCase() ===
               normalizedSegment.toLowerCase(),
-          )
-        : undefined;
-      if (match !== undefined) {
-        recovered.push(match);
-        currentDir = join(currentDir, match);
-        continue;
+          );
+        if (match !== undefined) {
+          recovered.push(match);
+          currentDir = join(currentDir, match);
+          continue;
+        }
+        folding = false;
       }
-      folding = false;
     }
     recovered.push(segment);
   }
@@ -48,7 +52,7 @@ async function recoverOnDiskCasing(
     throw new Error("Plugin panel is no longer active.");
   }
 
-  return join(root, ...recovered);
+  return { path: join(root, ...recovered), fullyRecovered };
 }
 
 /** The one slice of a workspace engine capture an authored plugin write uses. */
@@ -131,17 +135,20 @@ export function createPluginAuthoredTextWriter(
     }
 
     let recoveredPath = absolutePath;
+    let recoveryComplete = true;
     if (platform === "win32" || platform === "darwin") {
-      recoveredPath = await recoverOnDiskCasing(
+      const result = await recoverOnDiskCasing(
         workspaceRoot,
         path,
         input.signal,
       );
+      recoveredPath = result.path;
+      recoveryComplete = result.fullyRecovered;
     }
     if (input.signal?.aborted) {
       throw new Error("Plugin panel is no longer active.");
     }
-    if (ownerId && pipeline) {
+    if (ownerId && pipeline && recoveryComplete) {
       pipeline.rekeyDoorWrittenSourceChange(
         ownerId,
         { absolutePath },

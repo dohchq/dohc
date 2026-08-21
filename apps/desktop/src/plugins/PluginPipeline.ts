@@ -471,10 +471,12 @@ export function overlayDoorWrittenSourceDeltas(
   for (
     const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
   ) {
+    const lower = relPath.toLowerCase();
     const target = delta.provisional && byLowerCase
-      ? byLowerCase.get(relPath.toLowerCase()) ?? relPath
+      ? byLowerCase.get(lower) ?? relPath
       : relPath;
     files.set(target, delta.sha256);
+    byLowerCase?.set(lower, target);
   }
   return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
 }
@@ -902,9 +904,7 @@ export class PluginPipeline {
     if (relPath === null) return;
     // node_modules and .dohc are excluded from every source digest, so a
     // write under them cannot change the hash this predicate compares.
-    if (relPath.split("/").some((segment) => EXCLUDED_SOURCE_NAMES.has(segment))) {
-      return;
-    }
+    if (this.isExcludedRelPath(relPath)) return;
     const deltas = this.doorWrittenDeltas.get(pluginId) ??
       new Map<
         string,
@@ -939,6 +939,13 @@ export class PluginPipeline {
     const delta = deltas?.get(fromRelPath);
     if (!deltas || !delta) return;
 
+    if (this.isExcludedRelPath(toRelPath)) {
+      deltas.delete(fromRelPath);
+      this.enqueueSourceRefresh(pluginId, () =>
+        this.reconcileApprovedCandidate(pluginId, true));
+      return;
+    }
+
     const destination = deltas.get(toRelPath);
     const pathChanged = fromRelPath !== toRelPath;
     if (pathChanged) deltas.delete(fromRelPath);
@@ -949,6 +956,14 @@ export class PluginPipeline {
       this.enqueueSourceRefresh(pluginId, () =>
         this.reconcileApprovedCandidate(pluginId, true));
     }
+  }
+
+  private isExcludedRelPath(relPath: string): boolean {
+    const caseInsensitive = this.platform === "win32" ||
+      this.platform === "darwin";
+    return relPath.split("/").some((segment) =>
+      EXCLUDED_SOURCE_NAMES.has(caseInsensitive ? segment.toLowerCase() : segment)
+    );
   }
 
   /**

@@ -63,6 +63,16 @@ interface Deferred {
   resolve(): void;
 }
 
+type DoorWrittenDeltas = Map<
+  string,
+  Map<string, { sha256: string; seq: number; provisional?: boolean }>
+>;
+
+function doorWrittenDeltasOf(pipeline: PluginPipeline): DoorWrittenDeltas {
+  return (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+    .doorWrittenDeltas;
+}
+
 const roots: string[] = [];
 let resourcesParent: string;
 let resourcesBasePath: string;
@@ -419,9 +429,97 @@ describe("overlayDoorWrittenSourceDeltas", () => {
       { relPath: "SRC/final.ts", sha256: "ccc" },
     ]);
   });
+
+  it("folds provisional case variants for a new file in sequence order", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [],
+      new Map([
+        ["SRC/new.ts", { sha256: "first", seq: 1, provisional: true }],
+        ["src/new.ts", { sha256: "latest", seq: 2, provisional: true }],
+      ]),
+      "darwin",
+    );
+
+    expect(files).toEqual([{ relPath: "SRC/new.ts", sha256: "latest" }]);
+  });
 });
 
 describe("PluginPipeline real filesystem lifecycle", () => {
+  it("ignores case-drifted excluded paths at door-write landing", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: join(fixture.pluginRoot, "NODE_MODULES", "x.ts"),
+        text: "excluded\n",
+      });
+
+      expect(doorWrittenDeltasOf(pipeline).get("example-plugin")).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("deletes a landed delta when rekeying reveals an excluded path", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const callerPath = join(fixture.pluginRoot, "src", "alias", "x.ts");
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: callerPath,
+        text: "excluded\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "example-plugin",
+        { absolutePath: callerPath },
+        { absolutePath: join(fixture.pluginRoot, "node_modules", "x.ts") },
+      );
+
+      expect(doorWrittenDeltasOf(pipeline).get("example-plugin"))
+        .toEqual(new Map());
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
   for (const scenario of [
     { name: "an empty directory", excludedOnly: false },
     { name: "a directory with only excluded content", excludedOnly: true },
