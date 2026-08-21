@@ -1,11 +1,13 @@
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import {
   createPluginAuthoredTextWriter,
   type PluginAuthoredWriteCapture,
+  type PluginDoorWritePipeline,
 } from "./pluginAuthoredWrite";
 
 const author: MomentAuthor = {
@@ -67,18 +69,14 @@ function recordingCapture(behavior?: {
 
 function writerInput(overrides: {
   signal?: AbortSignal;
+  platform?: NodeJS.Platform;
   workspaceRoot?: string;
   capture: PluginAuthoredWriteCapture;
-  pipeline?: {
-    pluginIdForPath(absolutePath: string): string | null;
-    handleDoorWrittenSourceChange(
-      pluginId: string,
-      write: { absolutePath: string; text: string },
-    ): void;
-  };
+  pipeline?: PluginDoorWritePipeline;
 }) {
   return {
     signal: overrides.signal,
+    platform: overrides.platform,
     requireWritableCapture: async () => ({
       workspaceRoot: overrides.workspaceRoot ?? join("C:", "ws"),
       capture: overrides.capture,
@@ -225,14 +223,37 @@ describe("createPluginAuthoredTextWriter", () => {
     expect(doorWrites).toEqual([]);
   });
 
-  it.skipIf(process.platform === "win32")(
-    "preserves the caller-spelled path on POSIX",
-    async () => {
-      const { capture } = recordingCapture();
-      const reportedPaths: string[] = [];
-      const workspaceRoot = join("/tmp", "workspace");
+  it("canonicalizes the reported path when darwin is injected", async () => {
+    const { capture } = recordingCapture();
+    const reportedPaths: string[] = [];
+    const workspaceRoot = join(tmpdir(), "workspace");
+    const callerSpelledPath = join(
+      workspaceRoot,
+      "plugins",
+      "owned",
+      "SRC",
+      "NewDir",
+      "a.ts",
+    );
+    const canonicalPath = join(
+      workspaceRoot,
+      "plugins",
+      "owned",
+      "src",
+      "newdir",
+      "a.ts",
+    );
+    const realpath = vi
+      .spyOn(realpathSync, "native")
+      .mockReturnValue(canonicalPath);
+    const hostPlatform = vi
+      .spyOn(process, "platform", "get")
+      .mockReturnValue("linux");
+
+    try {
       const write = createPluginAuthoredTextWriter(writerInput({
         capture,
+        platform: "darwin",
         workspaceRoot,
         pipeline: {
           pluginIdForPath: () => "owned-plugin",
@@ -247,9 +268,46 @@ describe("createPluginAuthoredTextWriter", () => {
         author,
       });
 
+      expect(realpath).toHaveBeenCalledOnce();
+      expect(realpath).toHaveBeenCalledWith(callerSpelledPath);
+      expect(reportedPaths).toEqual([canonicalPath]);
+    } finally {
+      hostPlatform.mockRestore();
+      realpath.mockRestore();
+    }
+  });
+
+  it("preserves the caller-spelled path when linux is injected", async () => {
+    const { capture } = recordingCapture();
+    const reportedPaths: string[] = [];
+    const workspaceRoot = join("/tmp", "workspace");
+    const realpath = vi
+      .spyOn(realpathSync, "native")
+      .mockReturnValue(join(workspaceRoot, "canonical", "a.ts"));
+    const write = createPluginAuthoredTextWriter(writerInput({
+      capture,
+      platform: "linux",
+      workspaceRoot,
+      pipeline: {
+        pluginIdForPath: () => "owned-plugin",
+        handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
+          reportedPaths.push(doorWrite.absolutePath);
+        },
+      },
+    }));
+
+    try {
+      await write(join("plugins", "owned", "SRC", "NewDir", "a.ts"), "text\n", {
+        overwrite: true,
+        author,
+      });
+
+      expect(realpath).not.toHaveBeenCalled();
       expect(reportedPaths).toEqual([
         join(workspaceRoot, "plugins", "owned", "SRC", "NewDir", "a.ts"),
       ]);
-    },
-  );
+    } finally {
+      realpath.mockRestore();
+    }
+  });
 });

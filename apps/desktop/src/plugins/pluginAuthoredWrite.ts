@@ -22,6 +22,7 @@ export interface PluginDoorWritePipeline {
 }
 
 export interface PluginAuthoredTextWriterInput {
+  platform?: NodeJS.Platform;
   /**
    * Aborts when the calling panel authority goes stale or the plugin's spawn
    * ends. The write must not start after it fires, and the capture receives
@@ -59,6 +60,7 @@ export function createPluginAuthoredTextWriter(
   options: { overwrite: boolean; author: MomentAuthor },
 ) => Promise<{ path: string }> {
   return async (path, text, { overwrite, author }) => {
+    const platform = input.platform ?? process.platform;
     const { workspaceRoot, capture } = await input.requireWritableCapture();
     if (input.signal?.aborted) {
       throw new Error("Plugin panel is no longer active.");
@@ -72,7 +74,7 @@ export function createPluginAuthoredTextWriter(
     const ownerId = pipeline?.pluginIdForPath(absolutePath);
     if (ownerId && pipeline) {
       let reportedPath = absolutePath;
-      if (process.platform === "win32") {
+      if (platform === "win32" || platform === "darwin") {
         try {
           reportedPath = realpathSync.native(absolutePath);
         } catch {
