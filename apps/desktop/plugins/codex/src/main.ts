@@ -1,18 +1,39 @@
 import type { PluginActivateContext, PluginHandler } from "@dohc/sdk/node";
+import { join } from "node:path";
+import { createChatWebApp, type ChatWebApp } from "./chatWebApp.ts";
 import { codexCommandSpec, createCodexDriver } from "./codexDriver.ts";
 
-// Thin wiring only. Activation registers the driver and returns: dohc decides
-// when to probe Codex and when to start it, so nothing here starts a process.
+let chatWebApp: ChatWebApp | null = null;
+
+function requireChatWebApp(): ChatWebApp {
+  if (!chatWebApp) throw new Error("The Codex plugin is not active.");
+  return chatWebApp;
+}
 
 const handler: PluginHandler = {
   activate(ctx: PluginActivateContext): void {
-    ctx.drivers.register(
-      "codex",
-      createCodexDriver(
-        (input, options) => ctx.childProcesses.spawnCommand(input, options),
-        codexCommandSpec(process.env),
-      ),
+    const driver = createCodexDriver(
+      (input, options) => ctx.childProcesses.spawnCommand(input, options),
+      codexCommandSpec(process.env),
     );
+    ctx.drivers.register("codex", driver);
+    // Static plugin assets live in the built root's snapshot subdirectory, not beside the bundle.
+    chatWebApp = createChatWebApp(
+      driver,
+      ctx.workspaceRoot,
+      join(ctx.pluginRoot, "snapshot", "ui"),
+    );
+  },
+  startWebApp(webAppId, instanceKey) {
+    return requireChatWebApp().startWebApp(webAppId, instanceKey);
+  },
+  stopWebApp(webAppId, instanceKey) {
+    return requireChatWebApp().stopWebApp(webAppId, instanceKey);
+  },
+  async deactivate() {
+    const app = chatWebApp;
+    chatWebApp = null;
+    await app?.deactivate();
   },
 };
 

@@ -100,6 +100,28 @@ works. This plugin drives the `claude` CLI directly and takes an id of its own,
 so the two stand side by side. Whether the adapter path stays in core is a
 separate decision.
 
+## Its own chat
+
+The plugin also serves a singleton web app (`chat`): a dedicated Claude Code
+chat UI on the plugin's own loopback HTTP server, separate from dohc's
+built-in workspace chat. It reuses the same `createClaudeDriver` instance the
+`claude-code` driver above registers — dohc's own chat and this one are still
+two independent sessions at runtime. The stdio permission seam described
+above is unchanged: a `can_use_tool` control request surfaces in the chat
+page the same way it reaches dohc's own chat.
+
+**MCP is credential-free and local-only here.** dohc's built-in chat spawns
+`dohc-mcp` with `--home` pointed at the desktop's own state directory, SDK
+package metadata, and — when cached — cloud credentials
+(`mcpRuntimeConfigFor` in `apps/desktop/src/main.ts`). All of that is
+main-process-only state a plugin has no SDK seam to reach, and a plugin must
+not be handed it to fetch it: that would route host credentials into
+full-trust plugin code. Without `--home`, `dohc-mcp` resolves its home to the
+OS default instead, so registry-backed MCP tools this chat's session reaches
+read that default registry rather than the desktop's, and cloud-aware tools
+have no runtime environment. Shared views are unaffected either way: they are
+already refused before a plugin web app starts (`assertWritableWorkspace`).
+
 ## Proofs
 
 - `src/*.test.ts` — the protocol mapping and the line framing, in isolation.
