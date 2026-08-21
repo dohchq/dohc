@@ -38,6 +38,39 @@ const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
 const RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
 
+// The granter's only open proposal, listed then opened — the shape the
+// granter's own review takes. The listing is a summary (#808); its count is
+// the whole answer it owes a timer, enforced at
+// services/sync-relay/src/shareProposals.test.ts:1700-1723. Opening reads
+// that one proposal's file rows.
+async function openOnlyProposal(
+  baseUrl: string,
+  workspaceId: string,
+): Promise<{
+  summary: { proposalId: string; proposedByEmail: string | null; ops: number };
+  proposal: Record<string, unknown>;
+}> {
+  const listed = await relayJson(baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/proposals`);
+  expect(listed.status).toBe(200);
+  const proposals = (
+    JSON.parse(listed.body) as {
+      proposals: Array<{ proposalId: string; proposedByEmail: string | null; ops: number }>;
+    }
+  ).proposals;
+  expect(proposals.length, "one open proposal").toBe(1);
+  const summary = proposals[0]!;
+
+  const opened = await relayJson(
+    baseUrl,
+    GRANTER_TOKEN,
+    `/sync/${workspaceId}/proposals/${summary.proposalId}`,
+  );
+  expect(opened.status, opened.body).toBe(200);
+  const proposal = (JSON.parse(opened.body) as { proposal: Record<string, unknown> }).proposal;
+
+  return { summary, proposal };
+}
+
 test("grant side: share a file by email from the explorer, copy the code, and end it from Settings", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
@@ -881,26 +914,18 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
       )
       .toBe(1);
 
-    // The granter's side, read over HTTP as the granter: one change, on the
-    // shared file, not drifted.
-    const listed = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/proposals`);
-    expect(listed.status).toBe(200);
-    const proposals = (
-      JSON.parse(listed.body) as {
-        proposals: Array<{
-          proposalId: string;
-          proposedByEmail: string;
-          ops: Array<{ basedOnPath: string; afterPath: string; drifted: boolean }>;
-        }>;
-      }
-    ).proposals;
-    expect(proposals.length).toBe(1);
+    // The granter's side, read over HTTP as the granter.
+    const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
     // WHO sent them, resolved by the relay from the server-derived user id on
     // the proposal row — never rebuilt by the client from its share list.
-    expect(proposals[0]!.proposedByEmail).toBe("e2e-recipient@dohc.test");
-    expect(proposals[0]!.ops.length).toBe(1);
-    expect(proposals[0]!.ops[0]!.afterPath).toBe("docs/shared.md");
-    expect(proposals[0]!.ops[0]!.drifted).toBe(false);
+    expect(summary.proposedByEmail).toBe("e2e-recipient@dohc.test");
+    expect(summary.ops).toBe(1);
+    const proposalId = summary.proposalId;
+    // One change, on the shared file, not drifted.
+    const ops = proposal.ops as Array<{ afterPath: string; drifted: boolean }>;
+    expect(ops.length).toBe(1);
+    expect(ops[0]!.afterPath).toBe("docs/shared.md");
+    expect(ops[0]!.drifted).toBe(false);
 
     // Nothing is in the granter's log until the granter says so.
     const beforeAccept = await relayJson(
@@ -916,7 +941,7 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     const accepted = await relayJson(
       relay.baseUrl,
       GRANTER_TOKEN,
-      `/sync/${workspaceId}/proposals/${proposals[0]!.proposalId}/accept`,
+      `/sync/${workspaceId}/proposals/${proposalId}/accept`,
       { method: "POST" },
     );
     expect(accepted.status, accepted.body).toBe(200);
@@ -1128,22 +1153,10 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
 
     // ONE proposal holding FOUR net changes — one per object, which is what
     // the submit consolidates to.
-    const listed = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/proposals`);
-    expect(listed.status).toBe(200);
-    const proposals = (
-      JSON.parse(listed.body) as {
-        proposals: Array<{
-          proposalId: string;
-          ops: Array<{
-            basedOnPath: string | null;
-            afterPath: string | null;
-            currentPath: string | null;
-          }>;
-        }>;
-      }
-    ).proposals;
-    expect(proposals.length).toBe(1);
-    const ops = [...proposals[0]!.ops].sort((left, right) =>
+    const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
+    expect(summary.ops).toBe(4);
+    const proposalId = summary.proposalId;
+    const ops = (proposal.ops as Array<{ afterPath: string | null }>).sort((left, right) =>
       String(left.afterPath).localeCompare(String(right.afterPath)),
     );
     expect(ops.length).toBe(4);
@@ -1158,7 +1171,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     const accepted = await relayJson(
       relay.baseUrl,
       GRANTER_TOKEN,
-      `/sync/${workspaceId}/proposals/${proposals[0]!.proposalId}/accept`,
+      `/sync/${workspaceId}/proposals/${proposalId}/accept`,
       { method: "POST" },
     );
     expect(accepted.status, accepted.body).toBe(200);
