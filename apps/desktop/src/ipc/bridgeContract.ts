@@ -4242,6 +4242,7 @@ export interface DohcDesktopBridge {
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
+  rebuildPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   pluginUninstallPreflight(
     payload: PluginActionPayload,
   ): Promise<PluginUninstallPreflightResult>;

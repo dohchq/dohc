@@ -22,6 +22,7 @@ export type PluginAction =
   | "disable"
   | "enable"
   | "approve"
+  | "rebuild"
   | "preflight"
   | "uninstall";
 
@@ -108,6 +109,7 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
       disable: "Disable",
       enable: "Enable",
       approve: "Approve",
+      rebuild: "Retry build",
       preflight: "Uninstall",
       uninstall: "Uninstall plugin",
     };
@@ -118,6 +120,7 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
     disable: "Disabling",
     enable: "Enabling",
     approve: "Approving",
+    rebuild: "Retrying build",
     preflight: "Checking",
     uninstall: "Uninstalling",
   };
@@ -134,6 +137,7 @@ function actionError(
     disable: "disable",
     enable: "enable",
     approve: "approve",
+    rebuild: "rebuild",
   };
   return `dohc could not ${verbs[action]} ${pluginId}. ${error.message}`;
 }
@@ -191,6 +195,10 @@ export function canApprove(plugin: PluginStatusRecord): boolean {
     plugin.sourceHash !== null &&
     plugin.sourceHash !== plugin.approvedHash
   );
+}
+
+export function canRebuild(plugin: PluginStatusRecord): boolean {
+  return plugin.valid && plugin.status === "failed" && plugin.approvedHash !== null;
 }
 
 /** The web apps this page may offer a button for: the ones that open a single
@@ -428,7 +436,9 @@ export function usePluginCatalog(
             ? await bridge().disablePlugin(payload)
             : action === "enable"
               ? await bridge().enablePlugin(payload)
-              : await bridge().approvePlugin(payload);
+              : action === "approve"
+                ? await bridge().approvePlugin(payload)
+                : await bridge().rebuildPlugin(payload);
       if (epoch !== workspaceEpoch.current) return;
       if (result.ok) {
         replacePluginUnlessSuperseded(result.plugin, revisionAtStart);

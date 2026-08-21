@@ -2667,6 +2667,162 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  describe("established plugin rebuild recovery", () => {
+    async function setupEstablishedPlugin() {
+      const fixture = await createPluginWorkspace();
+      let mismatchNextSnapshot = false;
+      let failNextDiscard = false;
+      let failPublish = false;
+      let buildCalls = 0;
+      const statuses: string[] = [];
+      let pipeline: PluginPipeline;
+      const host = new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        pnpmRunnerEntry,
+        onStatusChange: (event) => {
+          if (event.kind === "changed") statuses.push(event.plugin.status);
+        },
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+          snapshot: async (input) => {
+            const result = await snapshotPluginSource(input);
+            if (!result.ok || !mismatchNextSnapshot) return result;
+            mismatchNextSnapshot = false;
+            return {
+              ...result,
+              sourceHash: "0".repeat(64),
+              discard: async () => {
+                if (failNextDiscard) {
+                  failNextDiscard = false;
+                  throw new Error("simulated: staged tree is busy");
+                }
+                await result.discard();
+              },
+            };
+          },
+          build: async (input) => {
+            buildCalls += 1;
+            const result = await buildPluginBundle(input);
+            if (!result.ok || !failPublish) return result;
+            return {
+              ...result,
+              publish: () => Promise.reject(new Error("simulated publish failure")),
+            };
+          },
+        },
+      });
+
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      return {
+        pipeline,
+        statuses,
+        buildCalls: () => buildCalls,
+        failNextBuildPublish: () => {
+          failPublish = true;
+        },
+        failEstablishedBuild: async () => {
+          mismatchNextSnapshot = true;
+          failNextDiscard = true;
+          pipeline.handleDoorWrittenSourceChange("example-plugin", {
+            absolutePath: fixture.entryPath,
+            text: await readFile(fixture.entryPath, "utf8"),
+          });
+          await waitFor(
+            () => pipeline.list()[0]?.status === "failed",
+            "The established plugin rebuild did not fail.",
+          );
+        },
+      };
+    }
+
+    it("retries a failed build for an established plugin", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+
+        const rebuilt = await setup.pipeline.rebuildPlugin("example-plugin");
+
+        expect(rebuilt.ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after retrying its build.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the approved build recoverable when its rebuild fails again", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        const approvedHash = setup.pipeline.list()[0]?.approvedHash;
+        setup.failNextBuildPublish();
+
+        const rebuilt = await setup.pipeline.rebuildPlugin("example-plugin");
+
+        expect(rebuilt.ok).toBe(false);
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "failed",
+          approvedHash,
+        });
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("rejects rebuild when the plugin has no failed approved build", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const buildsBefore = setup.buildCalls();
+        const statusesBefore = setup.statuses.length;
+
+        const rebuilt = await setup.pipeline.rebuildPlugin("example-plugin");
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+        expect(rebuilt).toMatchObject({
+          ok: false,
+          error: {
+            stage: "state",
+            code: "no-failed-build",
+            message: 'Plugin "example-plugin" has no failed build to retry.',
+          },
+        });
+        expect(setup.buildCalls()).toBe(buildsBefore);
+        expect(setup.statuses.slice(statusesBefore)).not.toContain("installing");
+        expect(setup.statuses.slice(statusesBefore)).not.toContain("scanning");
+        expect(setup.statuses.slice(statusesBefore)).not.toContain("building");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+  });
+
   it("opens a surface only once the host finished activating (#798)", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;

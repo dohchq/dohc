@@ -829,6 +829,31 @@ export class PluginPipeline {
     });
   }
 
+  rebuildPlugin(pluginId: string): Promise<PluginPipelineActionResult> {
+    return this.enqueueAction(pluginId, async () => {
+      const candidate = this.requireValidCandidate(pluginId);
+      const state = this.statuses.get(pluginId);
+      if (state?.status !== "failed" || state.approvedHash === null) {
+        return this.failure(
+          pluginId,
+          pipelineError(
+            "state",
+            "no-failed-build",
+            `Plugin "${pluginId}" has no failed build to retry.`,
+          ),
+        );
+      }
+      const staysDisabled = state.disabledReason === "user";
+      return this.runFullBuild({
+        candidate,
+        startRuntime: !staysDisabled,
+        disabledReasonAfterBuild: staysDisabled ? "user" : null,
+        resetCrashAccounting: true,
+        freshInstall: false,
+      });
+    });
+  }
+
   /**
    * Records one door-attributed write — per-operation authored bytes that
    * arrived through main.ts's writeAuthoredText — and queues a source

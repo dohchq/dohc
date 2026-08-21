@@ -7232,7 +7232,7 @@ function registerIpcHandlers(
           await run(pipeline, input.pluginId, input.workspaceId),
         );
         if (result.ok) {
-          // install/enable/approve/disable/uninstall each decide this
+          // install/enable/approve/rebuild/disable/uninstall each decide this
           // plugin's running state on the workspace's own authority — an
           // earlier panel's cold start no longer owns whether closing it
           // stops the host (#779 round 4 finding 3).
@@ -7260,6 +7260,8 @@ function registerIpcHandlers(
     pipeline.enable(pluginId));
   pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
     pipeline.approve(pluginId));
+  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId) =>
+    pipeline.rebuildPlugin(pluginId));
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);

@@ -238,6 +238,8 @@ const bridge: DohcDesktopBridge = {
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.enablePlugin, payload)),
   approvePlugin: async (payload) =>
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.approvePlugin, payload)),
+  rebuildPlugin: async (payload) =>
+    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.rebuildPlugin, payload)),
   pluginUninstallPreflight: async (payload) =>
     PluginUninstallPreflightResult.parse(
       await ipcRenderer.invoke(CHANNELS.pluginUninstallPreflight, payload),

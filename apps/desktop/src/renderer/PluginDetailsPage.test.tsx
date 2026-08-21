@@ -18,6 +18,7 @@ const bridgeMock = {
   disablePlugin: vi.fn(),
   enablePlugin: vi.fn(),
   approvePlugin: vi.fn(),
+  rebuildPlugin: vi.fn(),
   pluginUninstallPreflight: vi.fn(),
   pluginSizes: vi.fn(),
   openExternalUrl: vi.fn(),
@@ -608,6 +609,33 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.installPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "stuck-plugin",
+    });
+  });
+
+  it("offers a build retry for an established plugin whose rebuild failed", async () => {
+    const failed = plugin("failed-plugin", {
+      status: "failed",
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [failed] });
+    bridgeMock.rebuildPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("failed-plugin"),
+    });
+
+    renderPage("failed-plugin");
+
+    expect(screen.queryByTestId("plugin-install")).toBeNull();
+    expect(screen.queryByTestId("plugin-enable")).toBeNull();
+    expect(screen.queryByTestId("plugin-approve")).toBeNull();
+    expect(await screen.findByTestId("plugin-disable")).toBeTruthy();
+    const rebuildButton = await screen.findByTestId("plugin-rebuild");
+    expect(rebuildButton.textContent).toBe("Retry build");
+
+    await userEvent.click(rebuildButton);
+
+    expect(bridgeMock.rebuildPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "failed-plugin",
     });
   });
 
