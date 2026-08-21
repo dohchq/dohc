@@ -519,6 +519,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     ),
     refreshSharedView: vi.fn(
       async (): Promise<RefreshSharedViewResult> => ({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: [],
@@ -3582,6 +3583,7 @@ describe("ui-state merge-on-load", () => {
     bridge.listWorkspaceFiles = listing("a.md", "b.md");
     await act(async () => {
       pull.resolve({
+        ok: true,
         status: "updated",
         changedPaths: 1,
         excludedPaths: [],
@@ -3602,6 +3604,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: ["docs/pull-skipped.md"],
@@ -3621,6 +3624,7 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: true as const,
         status: "ended" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3692,6 +3696,7 @@ describe("ui-state merge-on-load", () => {
     );
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3700,6 +3705,7 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: true as const,
         status: "ended" as const,
         changedPaths: 1,
         excludedPaths: [],
@@ -3750,12 +3756,13 @@ describe("ui-state merge-on-load", () => {
     ).toBeNull();
   });
 
-  it("keeps an ended share read-only when its changed-file listing fails", async () => {
+  it("repaints local repairs before reporting a failed share pull", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
     );
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3764,6 +3771,64 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: false as const,
+        changedPaths: 1,
+        errorMessage: "relay failed",
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome as RefreshSharedViewResult;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    const listCallsBeforeFailure = bridge.listWorkspaceFiles.mock.calls.length;
+    const readCallsBeforeFailure = bridge.readWorkspaceText.mock.calls.length;
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("Couldn't refresh the shared view.");
+    expect(error.textContent).toContain("relay failed");
+    expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(
+      listCallsBeforeFailure,
+    );
+    expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(
+      readCallsBeforeFailure,
+    );
+  });
+
+  it("keeps an ended share read-only when its changed-file listing fails", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    const outcomes = [
+      {
+        ok: true as const,
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        ok: true as const,
         status: "ended" as const,
         changedPaths: 1,
         excludedPaths: [],
@@ -3846,6 +3911,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3856,6 +3922,7 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3930,6 +3997,7 @@ describe("ui-state merge-on-load", () => {
 
     await act(async () => {
       second.resolve({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: ["docs/new-pull.md"],
@@ -3947,6 +4015,7 @@ describe("ui-state merge-on-load", () => {
 
     await act(async () => {
       first.resolve({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: ["docs/stale-pull.md"],
@@ -4029,6 +4098,7 @@ describe("ui-state merge-on-load", () => {
       // What the recorder does mid-pull: the registry now holds the skip.
       recorded = true;
       return {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -4095,6 +4165,7 @@ describe("ui-state merge-on-load", () => {
     );
     // A refresh that finds nothing new. The warning must survive it.
     bridge.refreshSharedView = vi.fn(async () => ({
+      ok: true as const,
       status: "unchanged" as const,
       changedPaths: 0,
       excludedPaths: [],
@@ -11339,6 +11410,7 @@ describe("shared view versions surface", () => {
   it("never asks a shared view for versions, and raises no banner across a share refresh", async () => {
     const bridge = makeShareBridge();
     bridge.refreshSharedView = vi.fn(async () => ({
+      ok: true as const,
       status: "updated" as const,
       changedPaths: 1,
       excludedPaths: [],

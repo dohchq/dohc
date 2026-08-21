@@ -60,6 +60,10 @@ export interface RefreshSharedViewOutcome {
   refusedDetail: string | null;
 }
 
+export type StandaloneShareViewRefreshOutcome =
+  | ({ ok: true } & RefreshSharedViewOutcome)
+  | { ok: false; changedPaths: number; errorMessage: string };
+
 export interface UnjournalablePath {
   path: string;
   reason:
@@ -834,6 +838,7 @@ export async function captureSharedViewLocalDivergence(
   rootDir: string,
   workspaceId: string,
   store: CaptureVersionedTextStore,
+  allowLocalJournaling = true,
   testHooks?: { beforeCaptureWrite?: (path: string) => Promise<void> },
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const realRoot = await realpath(rootDir).catch(() => null);
@@ -1004,6 +1009,21 @@ export async function captureSharedViewLocalDivergence(
           if (disk.kind !== "text" && disk.kind !== "binary") {
             return { kind: "unchanged" };
           }
+          if (!allowLocalJournaling) {
+            await materializeSharedViewPaths(
+              rootDir,
+              workspaceId,
+              [
+                {
+                  path: entry.path,
+                  operation: "write",
+                  contentKind: currentEntry.contentKind,
+                },
+              ],
+              store,
+            );
+            return { kind: "repaired" };
+          }
           await writeDiskContentToStore({
             store,
             workspaceId,
@@ -1069,11 +1089,14 @@ export async function captureSharedViewLocalDivergence(
         rootDir,
         entry.path,
         async (resolvedTarget): Promise<
-          boolean | { kind: "unjournalable"; path: UnjournalablePath }
+          | "captured"
+          | "repaired"
+          | "unchanged"
+          | { kind: "unjournalable"; path: UnjournalablePath }
         > => {
           try {
             if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
-              return false;
+              return "unchanged";
             }
           } catch {
             return {
@@ -1081,19 +1104,37 @@ export async function captureSharedViewLocalDivergence(
               path: { path: entry.path, reason: "unreadable" },
             };
           }
+          if (!allowLocalJournaling) {
+            await materializeSharedViewPaths(
+              rootDir,
+              workspaceId,
+              [
+                {
+                  path: entry.path,
+                  operation: "write",
+                  contentKind:
+                    entry.contentKind === "binary" ? "binary" : "text",
+                },
+              ],
+              store,
+            );
+            return "repaired";
+          }
           await store.deleteTextFile({
             workspaceId,
             versionId: main.id,
             path: entry.path,
             metadata: { origin: "local-file" },
           });
-          return true;
+          return "captured";
         },
       );
       if (typeof deleted === "object") {
         unjournalablePaths.push(deleted.path);
-      } else if (deleted) {
+      } else if (deleted === "captured") {
         capturedPaths += 1;
+      } else if (deleted === "repaired") {
+        repairedPaths += 1;
       }
       continue;
     }
@@ -1113,6 +1154,22 @@ export async function captureSharedViewLocalDivergence(
               kind: "unjournalable" as const,
               path: { path: entry.path, reason: "unreadable" as const },
             };
+          }
+          if (!allowLocalJournaling) {
+            await materializeSharedViewPaths(
+              rootDir,
+              workspaceId,
+              [
+                {
+                  path: entry.path,
+                  operation: "write",
+                  contentKind:
+                    entry.contentKind === "binary" ? "binary" : "text",
+                },
+              ],
+              store,
+            );
+            return "repaired" as const;
           }
           await store.deleteTextFile({
             workspaceId,
@@ -1149,6 +1206,22 @@ export async function captureSharedViewLocalDivergence(
           current.sha256 !== disk.sha256;
         if (!changed) return "unchanged" as const;
 
+        if (!allowLocalJournaling) {
+          await materializeSharedViewPaths(
+            rootDir,
+            workspaceId,
+            [
+              {
+                path: entry.path,
+                operation: "write",
+                contentKind:
+                  current.contentKind === "binary" ? "binary" : "text",
+              },
+            ],
+            store,
+          );
+          return "repaired" as const;
+        }
         await testHooks?.beforeCaptureWrite?.(entry.path);
         await writeDiskContentToStore({
           store,
@@ -1165,11 +1238,14 @@ export async function captureSharedViewLocalDivergence(
         rootDir,
         entry.path,
         async (resolvedTarget): Promise<
-          boolean | { kind: "unjournalable"; path: UnjournalablePath }
+          | "captured"
+          | "repaired"
+          | "unchanged"
+          | { kind: "unjournalable"; path: UnjournalablePath }
         > => {
           try {
             if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
-              return false;
+              return "unchanged";
             }
           } catch {
             return {
@@ -1177,23 +1253,42 @@ export async function captureSharedViewLocalDivergence(
               path: { path: entry.path, reason: "unreadable" },
             };
           }
+          if (!allowLocalJournaling) {
+            await materializeSharedViewPaths(
+              rootDir,
+              workspaceId,
+              [
+                {
+                  path: entry.path,
+                  operation: "write",
+                  contentKind:
+                    entry.contentKind === "binary" ? "binary" : "text",
+                },
+              ],
+              store,
+            );
+            return "repaired";
+          }
           await store.deleteTextFile({
             workspaceId,
             versionId: main.id,
             path: entry.path,
             metadata: { origin: "local-file" },
           });
-          return true;
+          return "captured";
         },
       );
       if (typeof deleted === "object") {
         unjournalablePaths.push(deleted.path);
-      } else if (deleted) {
+      } else if (deleted === "captured") {
         capturedPaths += 1;
+      } else if (deleted === "repaired") {
+        repairedPaths += 1;
       }
       continue;
     }
     if (result === "captured") capturedPaths += 1;
+    if (result === "repaired") repairedPaths += 1;
     if (typeof result === "object" && result.kind === "unjournalable") {
       unjournalablePaths.push(result.path);
     }
@@ -1271,18 +1366,15 @@ export async function captureStandaloneShareViewDivergence(input: {
 }): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
-  if (
-    !shareViewTakesLocalWrites({
-      access: grantedSelector.access,
-      ended: input.ended,
-    })
-  ) {
-    return { capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] };
-  }
+  const allowLocalJournaling = shareViewTakesLocalWrites({
+    access: grantedSelector.access,
+    ended: input.ended,
+  });
   return captureSharedViewLocalDivergence(
     input.rootDir,
     input.workspaceId,
     input.store,
+    allowLocalJournaling,
   );
 }
 
@@ -1521,9 +1613,10 @@ export async function refreshSharedViewOnce(input: {
 
 export async function refreshStandaloneShareViewOnce(
   input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
-): Promise<RefreshSharedViewOutcome> {
+): Promise<StandaloneShareViewRefreshOutcome> {
   return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
     const captured = await captureStandaloneShareViewDivergence(input);
+    const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
     const main = await input.store.ensureMainVersion({
       workspaceId: input.workspaceId,
     });
@@ -1538,17 +1631,26 @@ export async function refreshStandaloneShareViewOnce(
         })
       ).map((entry) => entry.path),
     );
-    const outcome = await refreshSharedViewOnce({
-      ...input,
-      excludeFromMaterialization: new Set(
-        captured.unjournalablePaths.map((path) => path.path),
-      ),
-      unjournalablePaths: captured.unjournalablePaths,
-      trackPendingMaterialization: true,
-      preTrackedPaths,
-    });
-    const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
+    let outcome: RefreshSharedViewOutcome;
+    try {
+      outcome = await refreshSharedViewOnce({
+        ...input,
+        excludeFromMaterialization: new Set(
+          captured.unjournalablePaths.map((path) => path.path),
+        ),
+        unjournalablePaths: captured.unjournalablePaths,
+        trackPendingMaterialization: true,
+        preTrackedPaths,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        changedPaths: totalLocalChanges,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
+    }
     return {
+      ok: true,
       ...outcome,
       status:
         outcome.status === "unchanged" && totalLocalChanges > 0

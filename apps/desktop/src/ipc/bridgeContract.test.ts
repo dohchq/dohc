@@ -112,7 +112,9 @@ import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimi
 
 describe("shared view refresh IPC contract", () => {
   it("preserves pull exclusions and unjournalable paths independently", () => {
-    const parsed = RefreshSharedViewResult.parse({
+    expect(
+      RefreshSharedViewResult.parse({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: ["docs/pull-excluded.md"],
@@ -122,12 +124,29 @@ describe("shared view refresh IPC contract", () => {
         ],
         refusedOps: 0,
         refusedDetail: null,
-      });
-    expect(parsed.excludedPaths).toEqual(["docs/pull-excluded.md"]);
-    expect(parsed.unjournalablePaths).toEqual([
-      { path: "docs/oversized.md", reason: "oversized-text" },
-      { path: "docs/local.md", reason: "local-collision" },
-    ]);
+      }),
+    ).toMatchObject({
+      ok: true,
+      excludedPaths: ["docs/pull-excluded.md"],
+      unjournalablePaths: [
+        { path: "docs/oversized.md", reason: "oversized-text" },
+        { path: "docs/local.md", reason: "local-collision" },
+      ],
+    });
+  });
+
+  it("carries changed paths when the pull fails after local repair", () => {
+    expect(
+      RefreshSharedViewResult.parse({
+        ok: false,
+        changedPaths: 2,
+        errorMessage: "relay failed",
+      }),
+    ).toEqual({
+      ok: false,
+      changedPaths: 2,
+      errorMessage: "relay failed",
+    });
   });
 });
 

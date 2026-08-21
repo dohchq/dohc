@@ -3348,7 +3348,8 @@ export const DismissShareSkipsPayload = z.object({
 });
 export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
 
-export const RefreshSharedViewResult = z.object({
+const RefreshSharedViewSuccessResult = z.object({
+  ok: z.literal(true),
   // "ended" means the granter revoked the share: the local view stays
   // readable but stops refreshing, and the UI says so honestly.
   status: z.enum(["updated", "unchanged", "ended"]),
@@ -3374,6 +3375,19 @@ export const RefreshSharedViewResult = z.object({
   // the log. Null when nothing was refused.
   refusedDetail: z.string().nullable(),
 });
+
+const RefreshSharedViewFailureResult = z.object({
+  ok: z.literal(false),
+  // Capture runs before the pull. A failed pull can still leave repaired
+  // projection files that the renderer must repaint.
+  changedPaths: z.number().int().nonnegative(),
+  errorMessage: z.string(),
+});
+
+export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
+  RefreshSharedViewSuccessResult,
+  RefreshSharedViewFailureResult,
+]);
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
 
 // ---- Share mounts ----

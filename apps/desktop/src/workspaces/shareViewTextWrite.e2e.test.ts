@@ -13,7 +13,10 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { materializeSharedViewPaths } from "./sharedView";
+import {
+  captureSharedViewLocalDivergence,
+  materializeSharedViewPaths,
+} from "./sharedView";
 import { readWorkspaceText } from "./workspaceAssets";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
@@ -199,6 +202,62 @@ describe("share-view text writes through the real store", () => {
       await expect(readFile(join(view.rootPath, "docs", "note.md"), "utf8")).resolves.toBe(
         "recipient\n",
       );
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "repairs a save interrupted after the store write instead of capturing stale disk bytes",
+    async () => {
+      const view = await harness("dohc-share-interrupted-write-", "edit");
+      const path = "docs/note.md";
+      const seeded = await seedSharedFile(view, path, "granter\n");
+      const failingStore: CaptureVersionedTextStore = {
+        ...view.store,
+        async writeTextFile(input) {
+          await view.store.writeTextFile(input);
+          throw new Error("simulated crash after store write");
+        },
+      };
+
+      await expect(
+        routeWorkspaceTextWrite({
+          workspaceId: view.workspaceId,
+          rootPath: view.rootPath,
+          relativePath: path,
+          text: "recipient\n",
+          expectedContentHash: seeded.contentHash,
+          shareView: { access: "edit", ended: false },
+          shareViewStore: () => failingStore,
+        }),
+      ).rejects.toThrow("simulated crash after store write");
+
+      const momentsBeforeRecovery = await momentIdsFor(view, path);
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(await momentIdsFor(view, path)).toEqual(momentsBeforeRecovery);
+      await expect(
+        readFile(join(view.rootPath, path), "utf8"),
+      ).resolves.toBe("recipient\n");
+      const main = await view.store.ensureMainVersion({
+        workspaceId: view.workspaceId,
+      });
+      await expect(
+        view.store.readTextFile({
+          workspaceId: view.workspaceId,
+          versionId: main.id,
+          path,
+        }),
+      ).resolves.toMatchObject({ text: "recipient\n" });
     },
     60_000,
   );

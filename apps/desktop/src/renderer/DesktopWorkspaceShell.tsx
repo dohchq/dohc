@@ -1348,7 +1348,10 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
-type UnjournalableSharePath = RefreshSharedViewResult["unjournalablePaths"][number];
+type UnjournalableSharePath = Extract<
+  RefreshSharedViewResult,
+  { ok: true }
+>["unjournalablePaths"][number];
 
 function namedUnjournalablePaths(paths: readonly UnjournalableSharePath[]): string {
   const named = paths.slice(0, 3).map((entry) => entry.path).join(", ");
@@ -4622,9 +4625,28 @@ export function DesktopWorkspaceShell(props: {
     if (!shareView || shareViewEnded || shareViewDamaged) return;
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
+    const bestEffortRepaint = async () => {
+      try {
+        await refreshFiles();
+        setVersionEpoch((epoch) => epoch + 1);
+      } catch (repaintError) {
+        console.error(
+          "[desktop] repaint after shared-view refresh failed:",
+          repaintError,
+        );
+      }
+    };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
       if (token !== shareRefreshToken.current) return;
+      if (!outcome.ok) {
+        if (outcome.changedPaths > 0) await bestEffortRepaint();
+        reportShellError(
+          "Couldn't refresh the shared view.",
+          new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
+        );
+        return;
+      }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
         setShareViewEnded(true);
@@ -4632,9 +4654,7 @@ export function DesktopWorkspaceShell(props: {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
       if (outcome.changedPaths > 0) {
-        await refreshFiles();
-        // Re-read open editors: the shared view's files changed on disk.
-        setVersionEpoch((epoch) => epoch + 1);
+        await bestEffortRepaint();
       }
       if (outcome.status === "ended") {
         return;
