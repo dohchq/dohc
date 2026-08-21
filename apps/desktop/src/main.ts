@@ -7248,10 +7248,15 @@ function registerIpcHandlers(
       // into the workspace and that write boundary must be legible on its
       // own, not inferred from a pipeline-lifecycle helper three calls away.
       assertWritableWorkspace(workspace);
+      // Sampled fresh, not reused from any earlier listOfferedPlugins call —
+      // a plugin can be discovered under a different directory between an
+      // offer showing and this request landing.
+      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
       await addOfferedPlugin({
         builtinPluginsRoot: builtinPluginsRoot(),
         workspaceRoot: workspace.rootPath,
         directoryName: input.directoryName,
+        existingPluginIds,
       });
       const rediscoveryEvent: WatcherEvent = {
         operation: "create",

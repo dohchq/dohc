@@ -131,6 +131,32 @@ describe("PluginsView", () => {
     },
   ];
 
+  it("does not flash the empty state while offers are still loading", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
+    const offersResult = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
+    bridgeMock.listOfferedPlugins.mockReturnValue(offersResult.promise);
+
+    renderList();
+
+    // listPlugins' fast resolve settles catalog.load to ready/empty while
+    // listOfferedPlugins is still deliberately unresolved: without the
+    // fix, "No plugins yet" would paint here and then get replaced the
+    // instant offers arrive.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("plugins-empty")).toBeNull();
+
+    await act(async () => {
+      offersResult.resolve({ ok: true, offers: [offers[0]] });
+      await offersResult.promise;
+    });
+
+    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
+    expect(screen.queryByTestId("plugins-empty")).toBeNull();
+  });
+
   it("shows both offered driver plugins when the workspace has no plugins", async () => {
     bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers });
 
@@ -251,6 +277,29 @@ describe("PluginsView", () => {
 
     expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
     expect(screen.getByText("Codex")).toBeTruthy();
+    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops an offer once a changed status event introduces its id under another directory", async () => {
+    bridgeMock.listOfferedPlugins
+      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
+      .mockResolvedValueOnce({ ok: true, offers: [] });
+
+    renderList();
+    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
+
+    act(() => {
+      // Something other than this hook's own Add discovered "codex" under a
+      // renamed directory — an agent's own copy, a second client. The
+      // catalog does not know why, only that the identity now exists.
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex", { directoryName: "my-codex" }),
+      });
+    });
+
+    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
     expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
   });
 

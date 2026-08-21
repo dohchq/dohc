@@ -57,7 +57,18 @@ export async function listOfferedPlugins(
 
     const sourceRoot = join(builtinPluginsRoot, directoryName);
     const manifest = await readPluginManifestFile(sourceRoot);
-    if (!manifest.ok) continue;
+    if (!manifest.ok) {
+      // A built-in ships with dohc itself — dev repo path or packaged
+      // extraResources — so its manifest is never optional the way a
+      // hand-authored plugin's is. Silently omitting it here would read as
+      // "nothing to offer" instead of "the packaged install is broken";
+      // propagating it as a real failure surfaces the retryable offers-error
+      // state instead of a falsely reassuring empty list.
+      throw new Error(
+        `The built-in ${directoryName} plugin's manifest could not be read: ` +
+          manifest.diagnostics.join(" "),
+      );
+    }
     offers.push({
       directoryName,
       displayName: manifest.manifest.displayName ?? null,
@@ -150,15 +161,30 @@ async function ensureContainedDirectory(
   return realDirectory;
 }
 
+/**
+ * @param existingPluginIds The workspace's current plugin ids, sampled
+ * fresh right before this copy — not merely at the time the offer list was
+ * loaded. A plugin can be discovered under a different directory between
+ * an offer showing and this call landing (a rename, an agent's own copy, a
+ * second add racing this one); identity is the manifest id, so this must be
+ * the same check listOfferedPlugins already applies, re-run at write time
+ * rather than trusted from a stale read.
+ */
 export async function addOfferedPlugin(params: {
   builtinPluginsRoot: string;
   workspaceRoot: string;
   directoryName: string;
+  existingPluginIds: ReadonlySet<string>;
 }): Promise<{ rootPath: string }> {
-  const { builtinPluginsRoot, workspaceRoot, directoryName } = params;
+  const { builtinPluginsRoot, workspaceRoot, directoryName, existingPluginIds } = params;
   if (!isBuiltinDriverPlugin(directoryName)) {
     throw new OfferedPluginAddError(
       `"${directoryName}" is not a built-in driver plugin.`,
+    );
+  }
+  if (existingPluginIds.has(directoryName)) {
+    throw new OfferedPluginAddError(
+      `A plugin named "${directoryName}" already exists in this workspace.`,
     );
   }
 

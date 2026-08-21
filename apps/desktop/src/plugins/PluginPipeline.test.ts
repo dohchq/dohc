@@ -378,6 +378,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       builtinPluginsRoot,
       workspaceRoot,
       directoryName: "codex",
+      existingPluginIds: new Set(),
     });
 
     let pipeline: PluginPipeline;

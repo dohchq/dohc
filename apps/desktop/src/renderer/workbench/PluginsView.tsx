@@ -276,6 +276,13 @@ export function PluginsView(props: {
             Retry
           </button>
         </div>
+      ) : plugins.length === 0 && offersLoad.status === "loading" ? (
+        // A workspace with no plugins of its own still waits on the offers
+        // fetch: painting "No plugins yet" here would flash and then get
+        // replaced the instant the built-in rows arrive.
+        <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
+          Loading plugins…
+        </div>
       ) : plugins.length === 0 && offersReady.length === 0 && offersLoad.status !== "error" ? (
         <div data-testid="plugins-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState

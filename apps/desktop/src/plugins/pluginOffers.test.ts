@@ -146,6 +146,26 @@ describe("listOfferedPlugins", () => {
       expect.objectContaining({ directoryName: "claude-code" }),
     ]);
   });
+
+  // A built-in ships with dohc itself — its manifest is never optional the
+  // way a hand-authored plugin's is. Silently omitting a broken one read as
+  // "nothing to offer," indistinguishable from a workspace that already has
+  // both drivers; a broken packaged install must fail loudly instead.
+  it("propagates a broken built-in manifest as a real failure, not a silent omission", async () => {
+    const fixture = await createFixture();
+    await writeFile(
+      join(fixture.builtinPluginsRoot, "codex", "dohc-plugin.json"),
+      "not valid json",
+    );
+
+    await expect(
+      listOfferedPlugins(
+        fixture.builtinPluginsRoot,
+        fixture.workspaceRoot,
+        NO_EXISTING_PLUGIN_IDS,
+      ),
+    ).rejects.toThrow(/codex/);
+  });
 });
 
 describe("addOfferedPlugin", () => {
@@ -165,6 +185,7 @@ describe("addOfferedPlugin", () => {
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
       directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
     expect(result.rootPath).toBe(join(fixture.workspaceRoot, "plugins", "codex"));
@@ -222,6 +243,7 @@ describe("addOfferedPlugin", () => {
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       }),
     ).rejects.toSatisfy(
       (error: unknown) =>
@@ -232,6 +254,29 @@ describe("addOfferedPlugin", () => {
     await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  // Identity is the manifest id, not the directory: a plugin can be
+  // discovered under a DIFFERENT directory between an offer showing and
+  // this call landing (a rename, a second copy racing this one). The
+  // caller re-samples existingPluginIds right before this call rather than
+  // reusing whatever the offer list saw, so this must refuse the same way
+  // listOfferedPlugins would already have suppressed the offer.
+  it("refuses to add when the manifest id is already claimed under another directory", async () => {
+    const fixture = await createFixture();
+
+    await expect(
+      addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds: new Set(["codex"]),
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    await expect(lstat(join(fixture.workspaceRoot, "plugins", "codex"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("refuses directory names outside the built-in driver set", async () => {
     const fixture = await createFixture();
 
@@ -240,6 +285,7 @@ describe("addOfferedPlugin", () => {
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "sites",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
   });
@@ -263,6 +309,7 @@ describe("addOfferedPlugin", () => {
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
 

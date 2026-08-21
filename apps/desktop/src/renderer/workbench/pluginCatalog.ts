@@ -452,11 +452,14 @@ export function usePluginCatalog(
           plugins: applyStatusEvents(current.plugins, [pending]),
         };
       });
-      if (event.kind === "removed") {
-        // The uninstalled plugin's built-in directory may be gone now, so
-        // whatever it was may be offerable again. Offers have no per-event
-        // incremental merge the way plugins do, so a removal re-fetches
-        // rather than guessing which offer (if any) should come back.
+      if (event.kind === "removed" || event.kind === "changed") {
+        // A plugin's identity can move either direction: an uninstall frees
+        // a directory (removed) an offer might now fit again, and a fresh
+        // discovery can claim an id a built-in offer was suppressing under
+        // a DIFFERENT directory (changed) — a rename or a second copy this
+        // hook never directly caused. Offers have no per-event incremental
+        // merge the way plugins do, so any identity change re-fetches
+        // rather than guessing which offer (if any) is affected.
         void loadOffers();
       }
     });
