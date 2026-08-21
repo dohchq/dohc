@@ -445,7 +445,7 @@ describe("overlayDoorWrittenSourceDeltas", () => {
 });
 
 describe("PluginPipeline real filesystem lifecycle", () => {
-  it("ignores case-drifted excluded paths at door-write landing", async () => {
+  it("attributes a mixed-case directory that the source snapshot includes", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;
     const host = new PluginHost({
@@ -469,11 +469,19 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     try {
       await pipeline.start();
       pipeline.handleDoorWrittenSourceChange("example-plugin", {
-        absolutePath: join(fixture.pluginRoot, "NODE_MODULES", "x.ts"),
-        text: "excluded\n",
+        absolutePath: join(fixture.pluginRoot, "Node_Modules", "x.ts"),
+        text: "included\n",
       });
 
-      expect(doorWrittenDeltasOf(pipeline).get("example-plugin")).toBeUndefined();
+      expect(doorWrittenDeltasOf(pipeline).get("example-plugin"))
+        .toEqual(new Map([[
+          "Node_Modules/x.ts",
+          {
+            sha256: createHash("sha256").update("included\n", "utf8").digest("hex"),
+            seq: 1,
+            provisional: true,
+          },
+        ]]));
     } finally {
       await pipeline.dispose();
     }
@@ -502,7 +510,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     try {
       await pipeline.start();
-      const callerPath = join(fixture.pluginRoot, "src", "alias", "x.ts");
+      const callerPath = join(fixture.pluginRoot, "NODE_MODULES", "x.ts");
       pipeline.handleDoorWrittenSourceChange("example-plugin", {
         absolutePath: callerPath,
         text: "excluded\n",
@@ -597,6 +605,112 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       60_000,
     );
   }
+
+  it("retries a provisional new-directory delta before hashing it", async () => {
+    const fixture = await createPluginWorkspace();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const canonicalDirectory = join(fixture.pluginRoot, "src", "NewDir");
+    const canonicalPath = join(canonicalDirectory, "a.ts");
+    const failedDirectory = resolve(join(fixture.pluginRoot, "src"));
+    let transientFailures = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      if (
+        resolve(String(args[0])) === failedDirectory &&
+        transientFailures === 0
+      ) {
+        transientFailures += 1;
+        throw new Error("simulated transient readdir failure");
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const originalHash = pipeline.list()[0]?.approvedHash;
+      await mkdir(canonicalDirectory, { recursive: true });
+
+      const { createPluginAuthoredTextWriter: createWriterWithTransientRead } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithTransientRead({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath, text) => {
+              await writeFile(canonicalPath, text);
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      await write(
+        join("plugins", "example-plugin", "SRC", "newdir", "a.ts"),
+        "export const recovered = true;\n",
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+
+      await waitFor(
+        () => {
+          const plugin = pipeline.list()[0];
+          return plugin?.status === "ready" &&
+            plugin.approvedHash !== originalHash;
+        },
+        "The retried door write did not reach ready.",
+        60_000,
+      );
+      expect(transientFailures).toBe(1);
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+    } finally {
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
 
   it("attributes an authored write before delayed case recovery lets a watcher reconcile it", async () => {
     const fixture = await createPluginWorkspace();

@@ -131,6 +131,66 @@ describe("createPluginAuthoredTextWriter", () => {
     expect(writes).toEqual([]);
   });
 
+  it("does not start case recovery for an unowned write", async () => {
+    let reportWalkStarted: () => void = () => undefined;
+    const walkStarted = new Promise<void>((resolve) => {
+      reportWalkStarted = resolve;
+    });
+    const readdirMock = vi.fn(() => {
+      reportWalkStarted();
+      return new Promise<string[]>(() => undefined);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", () => ({ readdir: readdirMock }));
+
+    try {
+      const { createPluginAuthoredTextWriter: createWriterWithHangingReaddir } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithHangingReaddir(writerInput({
+        platform: "darwin",
+        capture: recordingCapture().capture,
+        pipeline: {
+          pluginIdForPath: () => null,
+          handleDoorWrittenSourceChange: vi.fn(),
+          rekeyDoorWrittenSourceChange: vi.fn(),
+        },
+      }));
+
+      await expect(Promise.race([
+        write("notes/today.md", "landed\n", { overwrite: true, author }),
+        walkStarted.then(() => {
+          throw new Error("Unowned write started case recovery.");
+        }),
+      ])).resolves.toEqual({ path: "notes/today.md" });
+      expect(readdirMock).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("returns a landed unowned write when its signal aborts after capture", async () => {
+    const controller = new AbortController();
+    const write = createPluginAuthoredTextWriter(writerInput({
+      signal: controller.signal,
+      platform: "darwin",
+      capture: {
+        writeAuthoredTextFile: async () => {
+          controller.abort();
+        },
+      },
+      pipeline: {
+        pluginIdForPath: () => null,
+        handleDoorWrittenSourceChange: vi.fn(),
+        rekeyDoorWrittenSourceChange: vi.fn(),
+      },
+    }));
+
+    await expect(
+      write("notes/today.md", "landed\n", { overwrite: true, author }),
+    ).resolves.toEqual({ path: "notes/today.md" });
+  });
+
   it("writes under the workspace root and reports an owned path as door-written with its path and bytes (#779 A5, round 14 A1)", async () => {
     const { capture, writes } = recordingCapture({ landWrite: true });
     const doorWrites: {

@@ -1,58 +1,18 @@
-import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
+import { recoverOnDiskSegments } from "./pluginCaseRecovery";
 
 async function recoverOnDiskCasing(
   root: string,
   relativePath: string,
   signal: AbortSignal | undefined,
 ): Promise<{ path: string; fullyRecovered: boolean }> {
-  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
-  const recovered: string[] = [];
-  let currentDir = root;
-  let folding = true;
-  let fullyRecovered = true;
-
-  for (const segment of segments) {
-    if (signal?.aborted) {
-      throw new Error("Plugin panel is no longer active.");
-    }
-    if (folding) {
-      let entries: string[] = [];
-      let readable = true;
-      try {
-        entries = await readdir(currentDir);
-      } catch {
-        readable = false;
-      }
-      if (!readable) {
-        fullyRecovered = false;
-        folding = false;
-      } else {
-        const normalizedSegment = segment.normalize("NFC");
-        const match = entries.find(
-            (entry) => entry.normalize("NFC") === normalizedSegment,
-          ) ??
-          entries.find(
-            (entry) => entry.normalize("NFC").toLowerCase() ===
-              normalizedSegment.toLowerCase(),
-          );
-        if (match !== undefined) {
-          recovered.push(match);
-          currentDir = join(currentDir, match);
-          continue;
-        }
-        folding = false;
-      }
-    }
-    recovered.push(segment);
-  }
-
-  if (signal?.aborted) {
-    throw new Error("Plugin panel is no longer active.");
-  }
-
-  return { path: join(root, ...recovered), fullyRecovered };
+  const { segments, fullyRecovered } = await recoverOnDiskSegments(
+    root,
+    relativePath,
+    signal,
+  );
+  return { path: join(root, ...segments), fullyRecovered };
 }
 
 /** The one slice of a workspace engine capture an authored plugin write uses. */
@@ -136,7 +96,7 @@ export function createPluginAuthoredTextWriter(
 
     let recoveredPath = absolutePath;
     let recoveryComplete = true;
-    if (platform === "win32" || platform === "darwin") {
+    if (ownerId && (platform === "win32" || platform === "darwin")) {
       const result = await recoverOnDiskCasing(
         workspaceRoot,
         path,
@@ -144,9 +104,9 @@ export function createPluginAuthoredTextWriter(
       );
       recoveredPath = result.path;
       recoveryComplete = result.fullyRecovered;
-    }
-    if (input.signal?.aborted) {
-      throw new Error("Plugin panel is no longer active.");
+      if (input.signal?.aborted) {
+        throw new Error("Plugin panel is no longer active.");
+      }
     }
     if (ownerId && pipeline && recoveryComplete) {
       pipeline.rekeyDoorWrittenSourceChange(

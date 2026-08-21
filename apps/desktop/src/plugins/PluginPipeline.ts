@@ -12,6 +12,7 @@ import {
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import { buildPluginBundle } from "./pluginBuildRunner";
+import { recoverOnDiskSegments } from "./pluginCaseRecovery";
 import { installPluginDependencies } from "./pluginInstallRunner";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
 import {
@@ -35,7 +36,7 @@ import {
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
   canonicalPluginSourceHash,
-  EXCLUDED_SOURCE_NAMES,
+  isExcludedSourceName,
   isPluginRootArtifact,
   pluginIdToSafePath,
   pluginStateRoot,
@@ -959,11 +960,7 @@ export class PluginPipeline {
   }
 
   private isExcludedRelPath(relPath: string): boolean {
-    const caseInsensitive = this.platform === "win32" ||
-      this.platform === "darwin";
-    return relPath.split("/").some((segment) =>
-      EXCLUDED_SOURCE_NAMES.has(caseInsensitive ? segment.toLowerCase() : segment)
-    );
+    return relPath.split("/").some((segment) => isExcludedSourceName(segment));
   }
 
   /**
@@ -1636,12 +1633,45 @@ export class PluginPipeline {
    * this hash and hold for approval. The SDK write surface has no delete,
    * so a delta only ever adds or replaces one file.
    */
+  private async retryProvisionalDeltaRecovery(pluginId: string): Promise<void> {
+    if (this.platform !== "win32" && this.platform !== "darwin") return;
+    const deltas = this.doorWrittenDeltas.get(pluginId);
+    if (!deltas) return;
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) return;
+    const root = resolve(candidate.rootPath);
+    for (const [relPath, delta] of [...deltas]) {
+      if (!delta.provisional) continue;
+      const { segments, fullyRecovered } = await recoverOnDiskSegments(
+        root,
+        relPath,
+        undefined,
+      );
+      if (!fullyRecovered) continue;
+      const recoveredRelPath = segments.join("/");
+      if (this.isExcludedRelPath(recoveredRelPath)) {
+        deltas.delete(relPath);
+        continue;
+      }
+      if (recoveredRelPath === relPath) {
+        deltas.set(relPath, { sha256: delta.sha256, seq: delta.seq });
+        continue;
+      }
+      deltas.delete(relPath);
+      const destination = deltas.get(recoveredRelPath);
+      if (!destination || destination.seq <= delta.seq) {
+        deltas.set(recoveredRelPath, { sha256: delta.sha256, seq: delta.seq });
+      }
+    }
+  }
+
   private async doorApprovedHash(
     pluginId: string,
     approvedHash: string,
   ): Promise<string | null> {
     const baseline = await readPluginBaselineManifest(this.dohcDir, pluginId);
     if (!baseline || baseline.sourceHash !== approvedHash) return null;
+    await this.retryProvisionalDeltaRecovery(pluginId);
     return canonicalPluginSourceHash(
       overlayDoorWrittenSourceDeltas(
         baseline.files,
