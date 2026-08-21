@@ -12,6 +12,8 @@ import {
 import {
   clearPendingMaterializationPaths,
   materializeSharedViewPaths,
+  type UnjournalablePath,
+  unjournalablePathMessages,
   withShareViewRefreshLifecycleLock,
   writeDiskContentToStore,
   writePendingMaterializationPaths,
@@ -338,6 +340,7 @@ async function shareViewMove(
     if (sources.length === 0) {
       throw new Error(notInThisShareView(from, "Rename"));
     }
+    await refuseNonFileReplacement(input.rootPath, sources);
     await refuseUntrackedUnder(input.rootPath, from, held);
     // The DESTINATION is screened too. A folder move merges into whatever is
     // already there, and the ordinary `movePath` refuses that outright; the files
@@ -483,6 +486,7 @@ async function shareViewDelete(
     if (targets.length === 0) {
       throw new Error(notInThisShareView(target, "Delete"));
     }
+    await refuseNonFileReplacement(input.rootPath, targets);
     await refuseUntrackedUnder(input.rootPath, target, held);
 
     const changed = [
@@ -675,6 +679,41 @@ async function refuseUntrackedUnder(
   );
   if (untracked.length > 0) {
     throw new Error(untrackedUnderRefusal(target, untracked));
+  }
+}
+
+/**
+ * Refuse when a path the store treats as a FILE now names a directory or a
+ * symlink on disk.
+ *
+ * Something outside dohc replaced it after the projection last matched the
+ * store. `materializeSharedViewPaths` removes whatever sits at a target path
+ * recursively, so a rename or delete that mutated the store over one of
+ * these paths would delete a directory — and everything in it — that the
+ * store never described. The refresh side already refuses this under the
+ * same reason (#850); this asks the same question, of the same disk entry,
+ * before either operation is allowed to touch the store at all.
+ */
+async function refuseNonFileReplacement(
+  rootPath: string,
+  paths: readonly string[],
+): Promise<void> {
+  const replaced: UnjournalablePath[] = [];
+  for (const path of paths) {
+    let entry;
+    try {
+      entry = await lstat(join(rootPath, path));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      throw error;
+    }
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      replaced.push({ path, reason: "non-file-replacement" });
+    }
+  }
+  if (replaced.length > 0) {
+    throw new Error(unjournalablePathMessages(replaced).join(" "));
   }
 }
 

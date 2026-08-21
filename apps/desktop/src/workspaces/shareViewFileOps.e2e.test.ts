@@ -814,6 +814,81 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
+    "refuses to delete a tracked file something outside dohc replaced with a directory",
+    async () => {
+      const view = await harness("dohc-share-delete-dir-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await mkdir(join(view.rootPath, "docs", "notes.md"));
+      await writeFile(
+        join(view.rootPath, "docs", "notes.md", "inside.txt"),
+        "recipient file\n",
+        "utf8",
+      );
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/notes.md",
+          trashItem: async () => {
+            throw new Error("a refused delete must not reach the trash");
+          },
+        }),
+        "MUTATION: deleting over a directory that replaced a tracked file recursively removes the directory and everything in it",
+      ).rejects.toThrow(
+        "docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
+        "MUTATION: the recipient-owned directory must survive a refused delete",
+      ).toBe(true);
+      await expect(
+        readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
+      ).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to rename a tracked file something outside dohc replaced with a directory",
+    async () => {
+      const view = await harness("dohc-share-rename-dir-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await mkdir(join(view.rootPath, "docs", "notes.md"));
+      await writeFile(
+        join(view.rootPath, "docs", "notes.md", "inside.txt"),
+        "recipient file\n",
+        "utf8",
+      );
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/notes.md",
+          toPath: "docs/renamed.md",
+        }),
+        "MUTATION: renaming over a directory that replaced a tracked file recursively removes the directory and everything in it",
+      ).rejects.toThrow(
+        "docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
+        "MUTATION: the recipient-owned directory must survive a refused rename",
+      ).toBe(true);
+      await expect(
+        readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
+      ).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+      expect(await exists(join(view.rootPath, "docs", "renamed.md"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "names the first three files it will not move, and counts the rest",
     async () => {
       const view = await harness("dohc-share-untracked-many-", "edit");
