@@ -86,10 +86,12 @@ export interface KillProcessTreePosixOptions {
   alsoSignalIdentities?: readonly ProcessIdentity[];
 }
 
-type StopProcessTreePosixOptions = Pick<
+export interface StopProcessTreePosixOptions extends Pick<
   KillProcessTreePosixOptions,
   "readProcessTable" | "sendSignal"
->;
+> {
+  isAlive?: (pid: number) => boolean;
+}
 
 function readProcessTableWithPs(): Promise<string> {
   return new Promise((resolveOutput, reject) => {
@@ -116,11 +118,11 @@ async function signalProcessTreePosix(
   const capturedIdentities = new Map(
     options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
   );
-  const unverifiedRoots = (options.alsoSignal ?? []).filter(
+  const unverifiedRoots = [rootPid, ...(options.alsoSignal ?? [])].filter(
     (pid) => !capturedIdentities.has(pid),
   );
 
-  let pids = [...new Set([rootPid, ...unverifiedRoots])];
+  let pids = [...new Set(unverifiedRoots)];
   let identities: ProcessIdentity[] = [];
   try {
     const table = parseProcessTable(await readProcessTable());
@@ -173,13 +175,39 @@ export async function killProcessTreePosix(
   return (await signalProcessTreePosix(rootPid, signal, options)).pids;
 }
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForProcessExit(
+  pids: readonly number[],
+  budgetMs: number,
+  isAlive: (pid: number) => boolean,
+): Promise<void> {
+  if (budgetMs <= 0) return;
+  const deadline = Date.now() + budgetMs;
+  let remaining = [...new Set(pids)];
+  while (remaining.length > 0) {
+    remaining = remaining.filter(isAlive);
+    if (remaining.length === 0) return;
+    const waitMs = Math.min(50, deadline - Date.now());
+    if (waitMs <= 0) return;
+    await unrefDelay(waitMs);
+  }
+}
+
 /**
  * SIGTERM the whole POSIX process tree rooted at `pid`, wait up to
  * `settleMs` for `settled` to resolve (or the grace period to elapse,
  * whichever comes first), then SIGKILL the tree again. The force round reuses
  * a captured pid only when its start time still matches, so it reaches a
  * reparented descendant without signalling a process that reused the pid.
- * Returns after sending SIGKILL. Callers still need to bound process exit.
+ * After SIGKILL, waits up to `settleMs` for the force-round targets to exit.
  */
 export async function stopProcessTreePosix(
   pid: number,
@@ -200,11 +228,16 @@ export async function stopProcessTreePosix(
   const settledPromise = typeof settled === "function" ? settled() : settled;
   await Promise.race([settledPromise, unrefDelay(settleMs)]);
   try {
-    await signalProcessTreePosix(pid, "SIGKILL", {
+    const result = await signalProcessTreePosix(pid, "SIGKILL", {
       ...options,
       alsoSignal: captured,
       alsoSignalIdentities: capturedIdentities,
     });
+    await waitForProcessExit(
+      result.pids,
+      settleMs,
+      options.isAlive ?? isProcessAlive,
+    );
   } catch {
     onTreeKillFailure?.();
   }

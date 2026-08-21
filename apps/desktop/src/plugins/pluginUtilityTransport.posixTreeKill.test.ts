@@ -14,14 +14,21 @@ describe("createPluginUtilityTransport", () => {
     async () => {
       const scratch = await createTestScratch("plugin-utility-tree-");
       const grandchildPidPath = join(scratch, "grandchild.pid");
+      const grandchildReadyPath = join(scratch, "grandchild.ready");
       const parentScript = `
         const { spawn } = require("node:child_process");
         const { writeFileSync } = require("node:fs");
-        const [grandchildPidPath] = process.argv.slice(1);
-        const grandchildScript = \`setInterval(() => {}, 1_000);\`;
+        const [grandchildPidPath, grandchildReadyPath] = process.argv.slice(1);
+        const grandchildScript = \`
+          const { writeFileSync } = require("node:fs");
+          const [readyPath] = process.argv.slice(1);
+          process.on("SIGTERM", () => {});
+          writeFileSync(readyPath, "ready");
+          setInterval(() => {}, 1_000);
+        \`;
         const grandchild = spawn(
           process.execPath,
-          ["-e", grandchildScript],
+          ["-e", grandchildScript, "--", grandchildReadyPath],
           { detached: true, stdio: "ignore" },
         );
         writeFileSync(grandchildPidPath, String(grandchild.pid));
@@ -30,7 +37,7 @@ describe("createPluginUtilityTransport", () => {
       `;
       const parent = spawn(
         process.execPath,
-        ["-e", parentScript, "--", grandchildPidPath],
+        ["-e", parentScript, "--", grandchildPidPath, grandchildReadyPath],
         { stdio: "ignore" },
       );
       const transport = createPluginUtilityTransport(
@@ -47,17 +54,16 @@ describe("createPluginUtilityTransport", () => {
       try {
         await vi.waitFor(async () => {
           expect(await readFile(grandchildPidPath, "utf8")).not.toBe("");
+          expect(await readFile(grandchildReadyPath, "utf8")).toBe("ready");
         });
         grandchildPid = Number(await readFile(grandchildPidPath, "utf8"));
         expect(() => process.kill(grandchildPid as number, 0)).not.toThrow();
 
         await transport.dispose();
 
-        await vi.waitFor(() => {
-          expect(() => process.kill(grandchildPid as number, 0)).toThrow(
-            expect.objectContaining({ code: "ESRCH" }),
-          );
-        });
+        expect(() => process.kill(grandchildPid as number, 0)).toThrow(
+          expect.objectContaining({ code: "ESRCH" }),
+        );
       } finally {
         if (grandchildPid !== undefined) {
           try {

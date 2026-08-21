@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import {
@@ -29,6 +31,7 @@ interface RecordedWrite {
  */
 function recordingCapture(behavior?: {
   blockUntil?: Promise<void>;
+  landWrite?: boolean;
   onEnter?: () => void;
 }): {
   capture: PluginAuthoredWriteCapture;
@@ -51,6 +54,10 @@ function recordingCapture(behavior?: {
               resolve();
             });
           });
+        }
+        if (behavior?.landWrite) {
+          await mkdir(dirname(absolutePath), { recursive: true });
+          await writeFile(absolutePath, text);
         }
         writes.push({ absolutePath, text, options });
       },
@@ -126,12 +133,12 @@ describe("createPluginAuthoredTextWriter", () => {
   });
 
   it("writes under the workspace root and reports an owned path as door-written with its path and bytes (#779 A5, round 14 A1)", async () => {
-    const { capture, writes } = recordingCapture();
+    const { capture, writes } = recordingCapture({ landWrite: true });
     const doorWrites: {
       pluginId: string;
       write: { absolutePath: string; text: string };
     }[] = [];
-    const workspaceRoot = join("C:", "ws");
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-write-"));
     const write = createPluginAuthoredTextWriter(writerInput({
       capture,
       workspaceRoot,
@@ -150,30 +157,51 @@ describe("createPluginAuthoredTextWriter", () => {
       },
     }));
 
-    const owned = await write(
-      join("plugins", "owned", "src", "index.ts"),
-      "export {};\n",
-      { overwrite: true, author },
-    );
-    expect(owned).toEqual({ path: join("plugins", "owned", "src", "index.ts") });
-    expect(doorWrites).toEqual([{
-      pluginId: "owned-plugin",
-      write: {
-        absolutePath: join(workspaceRoot, "plugins", "owned", "src", "index.ts"),
-        text: "export {};\n",
-      },
-    }]);
-    expect(writes[0]).toMatchObject({
-      absolutePath: join(workspaceRoot, "plugins", "owned", "src", "index.ts"),
-      options: { createOnly: false },
-    });
+    try {
+      const owned = await write(
+        join("plugins", "owned", "src", "index.ts"),
+        "export {};\n",
+        { overwrite: true, author },
+      );
+      expect(owned).toEqual({
+        path: join("plugins", "owned", "src", "index.ts"),
+      });
+      expect(doorWrites).toEqual([{
+        pluginId: "owned-plugin",
+        write: {
+          absolutePath: join(
+            workspaceRoot,
+            "plugins",
+            "owned",
+            "src",
+            "index.ts",
+          ),
+          text: "export {};\n",
+        },
+      }]);
+      expect(writes[0]).toMatchObject({
+        absolutePath: join(
+          workspaceRoot,
+          "plugins",
+          "owned",
+          "src",
+          "index.ts",
+        ),
+        options: { createOnly: false },
+      });
 
-    await write("note.txt", "not plugin source\n", { overwrite: false, author });
-    expect(doorWrites).toHaveLength(1);
-    expect(writes[1]).toMatchObject({
-      absolutePath: join(workspaceRoot, "note.txt"),
-      options: { createOnly: true },
-    });
+      await write("note.txt", "not plugin source\n", {
+        overwrite: false,
+        author,
+      });
+      expect(doorWrites).toHaveLength(1);
+      expect(writes[1]).toMatchObject({
+        absolutePath: join(workspaceRoot, "note.txt"),
+        options: { createOnly: true },
+      });
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it("does not report a door write when the capture refused the write", async () => {
@@ -196,4 +224,32 @@ describe("createPluginAuthoredTextWriter", () => {
       .rejects.toThrow("File already exists");
     expect(doorWrites).toEqual([]);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "preserves the caller-spelled path on POSIX",
+    async () => {
+      const { capture } = recordingCapture();
+      const reportedPaths: string[] = [];
+      const workspaceRoot = join("/tmp", "workspace");
+      const write = createPluginAuthoredTextWriter(writerInput({
+        capture,
+        workspaceRoot,
+        pipeline: {
+          pluginIdForPath: () => "owned-plugin",
+          handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
+            reportedPaths.push(doorWrite.absolutePath);
+          },
+        },
+      }));
+
+      await write(join("plugins", "owned", "SRC", "NewDir", "a.ts"), "text\n", {
+        overwrite: true,
+        author,
+      });
+
+      expect(reportedPaths).toEqual([
+        join(workspaceRoot, "plugins", "owned", "SRC", "NewDir", "a.ts"),
+      ]);
+    },
+  );
 });

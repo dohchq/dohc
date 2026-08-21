@@ -26,6 +26,7 @@ import {
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { createPluginAuthoredTextWriter } from "./pluginAuthoredWrite";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
@@ -328,6 +329,35 @@ async function doorWrite(
   pipeline.handleDoorWrittenSourceChange(pluginId, { absolutePath, text });
 }
 
+async function authoredDoorWrite(
+  pipeline: PluginPipeline,
+  workspaceRoot: string,
+  path: string,
+  text: string,
+): Promise<void> {
+  const write = createPluginAuthoredTextWriter({
+    signal: undefined,
+    requireWritableCapture: async () => ({
+      workspaceRoot,
+      capture: {
+        writeAuthoredTextFile: async (absolutePath, writtenText) => {
+          await writeFile(absolutePath, writtenText);
+        },
+      },
+    }),
+    pipeline: () => pipeline,
+  });
+  await write(path, text, {
+    overwrite: true,
+    author: {
+      kind: "agent",
+      agentId: "plugin:example-plugin",
+      onBehalfOf: "local",
+      agentRunId: "spawn-1",
+    },
+  });
+}
+
 function fakeSpawnTransport(): PluginHostOptions["spawnTransport"] {
   return vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
     request: async <T = unknown>(method: string): Promise<T> => (
@@ -359,171 +389,99 @@ afterAll(async () => {
 });
 
 describe("overlayDoorWrittenSourceDeltas", () => {
-  it("overlays a case-drifted Windows path onto the baseline entry", () => {
+  it("replaces and adds files by exact relative path", () => {
     const files = overlayDoorWrittenSourceDeltas(
       [{ relPath: "src/index.ts", sha256: "aaa" }],
-      new Map([["SRC/index.ts", { sha256: "bbb", seq: 1 }]]),
-      "win32",
-    );
-
-    expect(files).toEqual([{ relPath: "src/index.ts", sha256: "bbb" }]);
-  });
-
-  it("applies case-colliding Windows deltas in write order", () => {
-    const deltas = new Map<string, { sha256: string; seq: number }>();
-    deltas.set("SRC/index.ts", { sha256: "first", seq: 1 });
-    deltas.set("src/index.ts", { sha256: "second", seq: 2 });
-    deltas.set("SRC/index.ts", { sha256: "third", seq: 3 });
-
-    const files = overlayDoorWrittenSourceDeltas(
-      [{ relPath: "src/index.ts", sha256: "baseline" }],
-      deltas,
-      "win32",
-    );
-
-    expect(files).toEqual([{ relPath: "src/index.ts", sha256: "third" }]);
-  });
-
-  it("keeps case-distinct POSIX paths separate", () => {
-    const files = overlayDoorWrittenSourceDeltas(
-      [
-        { relPath: "Src/index.ts", sha256: "aaa" },
-        { relPath: "src/index.ts", sha256: "bbb" },
-      ],
-      new Map([["Src/index.ts", { sha256: "ccc", seq: 1 }]]),
-      "linux",
+      new Map([
+        ["src/index.ts", { sha256: "bbb", seq: 1 }],
+        ["src/new.ts", { sha256: "ccc", seq: 2 }],
+      ]),
     );
 
     expect(files).toEqual([
-      { relPath: "Src/index.ts", sha256: "ccc" },
       { relPath: "src/index.ts", sha256: "bbb" },
-    ]);
-  });
-
-  it("uses an existing Windows directory's casing for a new file", () => {
-    const files = overlayDoorWrittenSourceDeltas(
-      [{ relPath: "src/index.ts", sha256: "aaa" }],
-      new Map([["SRC/new.ts", { sha256: "bbb", seq: 1 }]]),
-      "win32",
-    );
-
-    expect(files).toEqual([
-      { relPath: "src/index.ts", sha256: "aaa" },
-      { relPath: "src/new.ts", sha256: "bbb" },
-    ]);
-  });
-
-  it("uses the first Windows delta's casing for a new directory", () => {
-    const files = overlayDoorWrittenSourceDeltas(
-      [{ relPath: "src/index.ts", sha256: "baseline" }],
-      new Map([
-        ["src/NewDir/a.ts", { sha256: "aaa", seq: 1 }],
-        ["SRC/newdir/b.ts", { sha256: "bbb", seq: 2 }],
-      ]),
-      "win32",
-    );
-
-    expect(files).toEqual([
-      { relPath: "src/index.ts", sha256: "baseline" },
-      { relPath: "src/NewDir/a.ts", sha256: "aaa" },
-      { relPath: "src/NewDir/b.ts", sha256: "bbb" },
-    ]);
-  });
-
-  it("keeps new case-distinct POSIX delta directories separate", () => {
-    const files = overlayDoorWrittenSourceDeltas(
-      [{ relPath: "src/index.ts", sha256: "baseline" }],
-      new Map([
-        ["src/NewDir/a.ts", { sha256: "aaa", seq: 1 }],
-        ["SRC/newdir/b.ts", { sha256: "bbb", seq: 2 }],
-      ]),
-      "linux",
-    );
-
-    expect(files).toEqual([
-      { relPath: "src/index.ts", sha256: "baseline" },
-      { relPath: "src/NewDir/a.ts", sha256: "aaa" },
-      { relPath: "SRC/newdir/b.ts", sha256: "bbb" },
-    ]);
-  });
-
-  it("keeps a new file under a case-distinct POSIX directory separate", () => {
-    const files = overlayDoorWrittenSourceDeltas(
-      [{ relPath: "src/index.ts", sha256: "aaa" }],
-      new Map([["SRC/new.ts", { sha256: "bbb", seq: 1 }]]),
-      "linux",
-    );
-
-    expect(files).toEqual([
-      { relPath: "src/index.ts", sha256: "aaa" },
-      { relPath: "SRC/new.ts", sha256: "bbb" },
+      { relPath: "src/new.ts", sha256: "ccc" },
     ]);
   });
 });
 
 describe("PluginPipeline real filesystem lifecycle", () => {
-  it("auto-approves a case-drifted Windows door write", async () => {
-    const fixture = await createPluginWorkspace();
-    let pipeline: PluginPipeline;
-    const host = new PluginHost({
-      stateDir: fixture.stateDir,
-      workspaceRoot: fixture.workspaceRoot,
-      spawnTransport: fakeSpawnTransport(),
-      routeSdkRequest: async () => ({}),
-      onStatusChange: (pluginId, status) => {
-        pipeline.noteRuntimeStatus(pluginId, status);
-      },
-    });
-    pipeline = new PluginPipeline({
-      workspaceRoot: fixture.workspaceRoot,
-      stateDir: fixture.stateDir,
-      pluginHost: host,
-      resourcesBasePath,
-      pnpmRunnerEntry,
-      platform: "win32",
-      operations: {
-        install: (input) =>
-          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-      },
-    });
+  for (const scenario of [
+    { name: "an empty directory", excludedOnly: false },
+    { name: "a directory with only excluded content", excludedOnly: true },
+  ]) {
+    it.skipIf(process.platform !== "win32")(
+      `auto-approves a case-drifted Windows door write under ${scenario.name}`,
+      async () => {
+        const fixture = await createPluginWorkspace();
+        const existingDirectory = join(fixture.pluginRoot, "src", "NewDir");
+        await mkdir(existingDirectory, { recursive: true });
+        if (scenario.excludedOnly) {
+          const excludedPath = join(existingDirectory, "node_modules", "x.js");
+          await mkdir(dirname(excludedPath), { recursive: true });
+          await writeFile(excludedPath, "excluded\n");
+        }
+        let pipeline: PluginPipeline;
+        const host = new PluginHost({
+          stateDir: fixture.stateDir,
+          workspaceRoot: fixture.workspaceRoot,
+          spawnTransport: fakeSpawnTransport(),
+          routeSdkRequest: async () => ({}),
+          onStatusChange: (pluginId, status) => {
+            pipeline.noteRuntimeStatus(pluginId, status);
+          },
+        });
+        pipeline = new PluginPipeline({
+          workspaceRoot: fixture.workspaceRoot,
+          stateDir: fixture.stateDir,
+          pluginHost: host,
+          resourcesBasePath,
+          pnpmRunnerEntry,
+          operations: {
+            install: (input) =>
+              installPluginDependencies({
+                ...input,
+                forkProcess: nodeForkProcess,
+              }),
+          },
+        });
 
-    try {
-      await pipeline.start();
-      const installed = await pipeline.install("example-plugin");
-      if (!installed.ok) throw new Error(installed.error.message);
-      await waitFor(
-        () => pipeline.list()[0]?.status === "ready",
-        "Plugin did not reach ready after install.",
-      );
-      const originalHash = pipeline.list()[0]?.approvedHash;
-      const text = [
-        'export const marker = "case-drifted-door-write";',
-        "export default { activate() {} };",
-        "",
-      ].join("\n");
-      await writeFile(fixture.entryPath, text);
-      pipeline.handleDoorWrittenSourceChange("example-plugin", {
-        absolutePath: join(fixture.pluginRoot, "SRC", "INDEX.TS"),
-        text,
-      });
+        try {
+          await pipeline.start();
+          const installed = await pipeline.install("example-plugin");
+          if (!installed.ok) throw new Error(installed.error.message);
+          await waitFor(
+            () => pipeline.list()[0]?.status === "ready",
+            "Plugin did not reach ready after install.",
+          );
+          const originalHash = pipeline.list()[0]?.approvedHash;
+          await authoredDoorWrite(
+            pipeline,
+            fixture.workspaceRoot,
+            join("plugins", "example-plugin", "SRC", "newdir", "a.ts"),
+            "export const added = true;\n",
+          );
 
-      await waitFor(
-        () => {
-          const plugin = pipeline.list()[0];
-          return plugin?.status === "ready" &&
-            plugin.approvedHash !== originalHash;
-        },
-        () => `Case-drifted door write did not return to ready; status is ` +
-          `"${pipeline.list()[0]?.status}".`,
-      );
-      expect(pipeline.list()[0]).toMatchObject({
-        status: "ready",
-        disabledReason: null,
-      });
-    } finally {
-      await pipeline.dispose();
-    }
-  }, 60_000);
+          await waitFor(
+            () => {
+              const plugin = pipeline.list()[0];
+              return plugin?.status === "disabled-pending-approval" ||
+                plugin?.approvedHash !== originalHash;
+            },
+            "Door write did not finish reconciliation.",
+          );
+          expect(pipeline.list()[0]).toMatchObject({
+            status: "ready",
+            disabledReason: null,
+          });
+          expect(pipeline.list()[0]?.approvedHash).not.toBe(originalHash);
+        } finally {
+          await pipeline.dispose();
+        }
+      },
+      60_000,
+    );
+  }
 
   it("installs, hot reloads with one coalesced follow-up, disables, enables, approves, and uninstalls", async () => {
     const fixture = await createPluginWorkspace();

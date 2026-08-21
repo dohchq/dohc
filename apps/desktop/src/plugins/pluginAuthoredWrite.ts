@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 
@@ -67,10 +68,14 @@ export function createPluginAuthoredTextWriter(
       createOnly: !overwrite,
       signal: input.signal,
     });
-    const ownerId = input.pipeline()?.pluginIdForPath(absolutePath);
-    if (ownerId) {
-      input.pipeline()?.handleDoorWrittenSourceChange(ownerId, {
-        absolutePath,
+    const pipeline = input.pipeline();
+    const ownerId = pipeline?.pluginIdForPath(absolutePath);
+    if (ownerId && pipeline) {
+      const reportedPath = process.platform === "win32"
+        ? realpathSync.native(absolutePath)
+        : absolutePath;
+      pipeline.handleDoorWrittenSourceChange(ownerId, {
+        absolutePath: reportedPath,
         text,
       });
     }

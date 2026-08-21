@@ -219,6 +219,30 @@ describe("killProcessTreePosix", () => {
 });
 
 describe("stopProcessTreePosix", () => {
+  it("skips a captured root when the force-round process table cannot be read", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let readCount = 0;
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      undefined,
+      {
+        readProcessTable: async () => {
+          readCount += 1;
+          if (readCount === 1) return psRow(100, 1);
+          throw new Error("ps: transient failure");
+        },
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 100, signal: "SIGTERM" },
+    ]);
+  });
+
   it("skips a root pid reused by a different process", async () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     let readCount = 0;
@@ -325,6 +349,44 @@ describe("stopProcessTreePosix", () => {
       { pid: 100, signal: "SIGKILL" },
       { pid: 200, signal: "SIGKILL" },
     ]);
+  });
+
+  it("waits for force-round targets to exit before resolving", async () => {
+    vi.useFakeTimers();
+    try {
+      let aliveChecks = 0;
+      let resolved = false;
+      const options = {
+        readProcessTable: async () => psRow(100, 1),
+        sendSignal: () => undefined,
+        isAlive: () => {
+          aliveChecks += 1;
+          return aliveChecks < 3;
+        },
+      };
+
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        200,
+        undefined,
+        options,
+      ).then(() => {
+        resolved = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resolved).toBe(false);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(resolved).toBe(false);
+      await vi.advanceTimersByTimeAsync(50);
+      await pending;
+
+      expect(aliveChecks).toBe(3);
+      expect(resolved).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

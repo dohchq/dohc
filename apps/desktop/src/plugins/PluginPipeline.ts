@@ -190,8 +190,6 @@ export interface PluginPipelineOptions {
   /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
   pnpmRunnerEntry: string;
   onStatusChange?: (event: PluginPipelineStatusEvent) => void;
-  /** Overrides path case rules in platform-specific tests. */
-  platform?: NodeJS.Platform;
   /** Whether this workspace's engine capture is running right now — used
    * only to keep uninstall preflight's recovery promises honest (a file
    * under the capture size cap is not actually recoverable if capture
@@ -456,57 +454,14 @@ function candidateKey(candidate: InstalledPluginRecord): string {
 export function overlayDoorWrittenSourceDeltas(
   baselineFiles: readonly PluginSourceFileDigest[],
   deltas: Iterable<readonly [string, { sha256: string; seq: number }]>,
-  platform: NodeJS.Platform = process.platform,
 ): PluginSourceFileDigest[] {
   const files = new Map(
     baselineFiles.map((file) => [file.relPath, file.sha256]),
   );
-  const byLowerCase = platform === "win32"
-    ? new Map([...files.keys()].map((relPath) => [relPath.toLowerCase(), relPath]))
-    : undefined;
-  const byLowerCaseDirectory = platform === "win32"
-    ? (() => {
-        const directories = new Map<string, string>();
-        for (const relPath of files.keys()) {
-          const segments = relPath.split("/");
-          for (let depth = 1; depth < segments.length; depth += 1) {
-            const directory = segments.slice(0, depth).join("/");
-            directories.set(directory.toLowerCase(), directory);
-          }
-        }
-        return directories;
-      })()
-    : undefined;
   for (
     const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
   ) {
-    const lower = relPath.toLowerCase();
-    let target = byLowerCase?.get(lower);
-    if (target === undefined && byLowerCaseDirectory) {
-      const segments = relPath.split("/");
-      for (let depth = segments.length - 1; depth > 0; depth -= 1) {
-        const directory = segments.slice(0, depth).join("/");
-        const canonicalDirectory = byLowerCaseDirectory.get(
-          directory.toLowerCase(),
-        );
-        if (canonicalDirectory === undefined) continue;
-        target = [canonicalDirectory, ...segments.slice(depth)].join("/");
-        break;
-      }
-    }
-    target ??= relPath;
-    files.set(target, delta.sha256);
-    byLowerCase?.set(lower, target);
-    if (byLowerCaseDirectory) {
-      const targetSegments = target.split("/");
-      for (let depth = 1; depth < targetSegments.length; depth += 1) {
-        const directory = targetSegments.slice(0, depth).join("/");
-        const key = directory.toLowerCase();
-        if (!byLowerCaseDirectory.has(key)) {
-          byLowerCaseDirectory.set(key, directory);
-        }
-      }
-    }
+    files.set(relPath, delta.sha256);
   }
   return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
 }
@@ -523,8 +478,10 @@ export class PluginPipeline {
    * relPath (POSIX, root-relative) to the sha256 of the written bytes and
    * the write's order in doorWriteSeq. See handleDoorWrittenSourceChange
    * and doorApprovedHash — this overlay, applied to the persisted baseline
-   * manifest, is the only tree the door path may auto-approve. Overlay paths
-   * match case-insensitively on win32 and exactly on every other platform.
+   * manifest, is the only tree the door path may auto-approve. Overlay
+   * paths match exactly: on win32, the write layer already reports the
+   * resolved on-disk spelling (see pluginAuthoredWrite.ts), so a delta key
+   * agrees with the live snapshot's key by construction.
    */
   private readonly doorWrittenDeltas = new Map<
     string,
@@ -1579,9 +1536,7 @@ export class PluginPipeline {
    * deltas, so any other byte on disk — an interloper file, a
    * watcher-class edit, an out-of-band delete — makes the live tree miss
    * this hash and hold for approval. The SDK write surface has no delete,
-   * so a delta only ever adds or replaces one file. On win32, a delta whose
-   * path casing drifted still replaces the matching baseline file and keeps
-   * the baseline's original casing. Other platforms match paths exactly.
+   * so a delta only ever adds or replaces one file.
    */
   private async doorApprovedHash(
     pluginId: string,
@@ -1593,7 +1548,6 @@ export class PluginPipeline {
       overlayDoorWrittenSourceDeltas(
         baseline.files,
         this.doorWrittenDeltas.get(pluginId) ?? [],
-        this.options.platform,
       ),
     );
   }
