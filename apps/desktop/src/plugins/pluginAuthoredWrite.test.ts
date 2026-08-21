@@ -9,7 +9,10 @@ import {
   type PluginAuthoredWriteCapture,
   type PluginDoorWritePipeline,
 } from "./pluginAuthoredWrite";
-import { overlayDoorWrittenSourceDeltas } from "./PluginPipeline";
+import {
+  type DoorWrittenDelta,
+  overlayDoorWrittenSourceDeltas,
+} from "./PluginPipeline";
 
 const author: MomentAuthor = {
   kind: "agent",
@@ -683,10 +686,7 @@ describe("createPluginAuthoredTextWriter", () => {
     const workspaceRoot = join(tmpdir(), "dohc-authored-unreadable");
     const originalRelPath = "SRC/file.ts";
     const recoveredRelPath = "src/file.ts";
-    const deltas = new Map<
-      string,
-      { sha256: string; seq: number; provisional?: boolean }
-    >();
+    const deltas = new Map<string, DoorWrittenDelta>();
     let readCount = 0;
     const readdirMock = vi.fn(async () => {
       readCount += 1;

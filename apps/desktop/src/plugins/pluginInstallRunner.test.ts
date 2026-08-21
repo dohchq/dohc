@@ -141,6 +141,27 @@ async function flushMicrotasks(times = 5): Promise<void> {
   for (let index = 0; index < times; index += 1) await Promise.resolve();
 }
 
+/**
+ * Waits, one microtask at a time, until `condition` holds — the honest form
+ * of "flush enough microtasks": it stops the instant the awaited chain has
+ * actually settled instead of guessing a tick count, and fails fast with a
+ * clear message if the condition never holds within the cap.
+ */
+async function waitForMicrotaskCondition(
+  condition: () => boolean,
+  maxTicks = 50,
+): Promise<void> {
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    if (condition()) return;
+    await Promise.resolve();
+  }
+  if (!condition()) {
+    throw new Error(
+      `Condition did not hold within ${maxTicks} microtask ticks.`,
+    );
+  }
+}
+
 function requireFailure(
   result: PluginInstallResult,
 ): Extract<PluginInstallResult, { ok: false }> {
@@ -486,11 +507,7 @@ describe("installPluginDependencies", () => {
     });
     await started.promise;
     controller.abort();
-    // The real table read races a timeout internally (posixSpawn.ts's
-    // readProcessTableWithTimeout), which costs a few more microtask ticks
-    // than a bare awaited read — flush enough for that race and the signal
-    // loop it gates to both settle before asserting on either.
-    await flushMicrotasks(10);
+    await waitForMicrotaskCondition(() => signalled.length >= 3);
 
     // Children before parents, so a signalled parent cannot leave a child
     // behind — and the whole tree is reached before the child is terminated.
@@ -499,6 +516,9 @@ describe("installPluginDependencies", () => {
       { pid: 4_243, signal: "SIGTERM" },
       { pid: 4_242, signal: "SIGTERM" },
     ]);
+    await waitForMicrotaskCondition(
+      () => child.terminate.mock.calls.length >= 1,
+    );
     expect(child.terminate).toHaveBeenCalledTimes(1);
 
     // pnpm itself is gone, but the git and tar processes it left are not, so

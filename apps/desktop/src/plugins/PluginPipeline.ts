@@ -1657,17 +1657,9 @@ export class PluginPipeline {
   }
 
   /**
-   * The one tree the door path may auto-approve: the approved per-file
-   * baseline overlaid with every door-written delta recorded since. Null
-   * when no baseline verifies against the approved hash — a fresh
-   * install's first approval is user-driven, and a baseline that cannot be
-   * read or does not describe the approved content proves nothing, so
-   * nothing auto-approves. Only handleDoorWrittenSourceChange writes
-   * deltas, so any other byte on disk — an interloper file, a
-   * watcher-class edit, an out-of-band delete — makes the live tree miss
-   * this hash and hold for approval. The SDK write surface has no delete,
-   * so a delta only ever adds or replaces one file. The retry also confirms
-   * ownership for a delta attributed through the landing-time path fold.
+   * Retries case recovery for every still-provisional delta before
+   * doorApprovedHash hashes them: confirms a landing-time fold's guessed
+   * ownership, or recovers a leaf's on-disk spelling.
    */
   private async retryProvisionalDeltaRecovery(pluginId: string): Promise<void> {
     if (this.platform !== "win32" && this.platform !== "darwin") return;
@@ -1718,6 +1710,19 @@ export class PluginPipeline {
     }
   }
 
+  /**
+   * The one tree the door path may auto-approve: the approved per-file
+   * baseline overlaid with every door-written delta recorded since. Null
+   * when no baseline verifies against the approved hash — a fresh
+   * install's first approval is user-driven, and a baseline that cannot be
+   * read or does not describe the approved content proves nothing, so
+   * nothing auto-approves. Only handleDoorWrittenSourceChange writes
+   * deltas, so any other byte on disk — an interloper file, a
+   * watcher-class edit, an out-of-band delete — makes the live tree miss
+   * this hash and hold for approval. The SDK write surface has no delete,
+   * so a delta only ever adds or replaces one file. The retry also confirms
+   * ownership for a delta attributed through the landing-time path fold.
+   */
   private async doorApprovedHash(
     pluginId: string,
     approvedHash: string,
