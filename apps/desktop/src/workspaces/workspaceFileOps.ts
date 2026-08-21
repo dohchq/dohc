@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
@@ -12,6 +13,7 @@ import {
 import {
   clearPendingMaterializationPaths,
   materializeSharedViewPaths,
+  resolvedShareViewTarget,
   type UnjournalablePath,
   unjournalablePathMessages,
   withShareViewRefreshLifecycleLock,
@@ -340,7 +342,7 @@ async function shareViewMove(
     if (sources.length === 0) {
       throw new Error(notInThisShareView(from, "Rename"));
     }
-    await refuseNonFileReplacement(input.rootPath, sources);
+    await refuseNonFileReplacement(input.rootPath, from, "Rename", held, sources);
     await refuseUntrackedUnder(input.rootPath, from, held);
     // The DESTINATION is screened too. A folder move merges into whatever is
     // already there, and the ordinary `movePath` refuses that outright; the files
@@ -486,7 +488,7 @@ async function shareViewDelete(
     if (targets.length === 0) {
       throw new Error(notInThisShareView(target, "Delete"));
     }
-    await refuseNonFileReplacement(input.rootPath, targets);
+    await refuseNonFileReplacement(input.rootPath, target, "Delete", held, targets);
     await refuseUntrackedUnder(input.rootPath, target, held);
 
     const changed = [
@@ -683,8 +685,8 @@ async function refuseUntrackedUnder(
 }
 
 /**
- * Refuse when a path the store treats as a FILE now names a directory or a
- * symlink on disk.
+ * Refuse when the operation's own path — or a FILE the store holds under it —
+ * now names something else on disk.
  *
  * Something outside dohc replaced it after the projection last matched the
  * store. `materializeSharedViewPaths` removes whatever sits at a target path
@@ -693,27 +695,62 @@ async function refuseUntrackedUnder(
  * store never described. The refresh side already refuses this under the
  * same reason (#850); this asks the same question, of the same disk entry,
  * before either operation is allowed to touch the store at all.
+ *
+ * TWO shapes, because a folder is checked differently from the files under
+ * it. A store leaf must be a FILE: the store never held a folder, so
+ * anything else there replaced one. The operation's OWN path, when it is not
+ * itself a leaf, must be a real DIRECTORY: a symlink standing in for it would
+ * route every leaf lstat below through the link — those resolve the SAME
+ * ancestor chain materialization does — and land this whole refusal on the
+ * files at wherever the link points, not the ones the store lost.
  */
 async function refuseNonFileReplacement(
   rootPath: string,
-  paths: readonly string[],
+  operationPath: string,
+  action: "Rename" | "Delete",
+  held: ReadonlyMap<string, unknown>,
+  leaves: readonly string[],
 ): Promise<void> {
   const replaced: UnjournalablePath[] = [];
-  for (const path of paths) {
-    let entry;
-    try {
-      entry = await lstat(join(rootPath, path));
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") continue;
-      throw error;
+  if (!held.has(operationPath)) {
+    const entry = await nonFileReplacementEntry(rootPath, operationPath);
+    if (entry !== null && !entry.isDirectory()) {
+      replaced.push({ path: operationPath, reason: "non-file-replacement" });
     }
-    if (entry.isSymbolicLink() || !entry.isFile()) {
+  }
+  for (const path of leaves) {
+    const entry = await nonFileReplacementEntry(rootPath, path);
+    if (entry !== null && !entry.isFile()) {
       replaced.push({ path, reason: "non-file-replacement" });
     }
   }
   if (replaced.length > 0) {
-    throw new Error(unjournalablePathMessages(replaced).join(" "));
+    throw new Error(
+      `dohc did not ${action.toLowerCase()} ${operationPath}. ` +
+        unjournalablePathMessages(replaced).join(" "),
+    );
+  }
+}
+
+/**
+ * The disk entry at a tracked path, resolved the SAME way
+ * `materializeSharedViewPaths` resolves it: `resolvedShareViewTarget` follows
+ * every ancestor symlink and holds back only the leaf itself. Guard and
+ * action then always agree on where a path leads, so an ancestor symlink
+ * can never make this check pass an entry that materialization then reaches
+ * by a different route.
+ */
+async function nonFileReplacementEntry(
+  rootPath: string,
+  path: string,
+): Promise<Stats | null> {
+  const resolvedAbsolute = await resolvedShareViewTarget(rootPath, path);
+  try {
+    return await lstat(resolvedAbsolute);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
   }
 }
 
