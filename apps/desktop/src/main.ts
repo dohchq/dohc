@@ -7214,10 +7214,20 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListOfferedPluginsPayload.parse(payload);
     try {
-      const { workspace } = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
+      // Redundant with ensurePluginPipeline's own check (activePluginPipelineFor
+      // already refuses a shared view before a pipeline exists to list from),
+      // but stated directly here too: this is the boundary a shared view's
+      // Plugins panel depends on, and it must stay visible to a reader — and
+      // to the grep-based governance test — at the call site itself, not only
+      // three functions deep in pipeline lifecycle plumbing that could change
+      // shape later without this handler's own gate ever moving.
+      assertWritableWorkspace(workspace);
+      const existingPluginIds = new Set(pipeline.list().map((plugin) => plugin.id));
       const offers = await listOfferedPlugins(
         builtinPluginsRoot(),
         workspace.rootPath,
+        existingPluginIds,
       );
       return ListOfferedPluginsResult.parse({ ok: true, offers });
     } catch (error) {
@@ -7233,6 +7243,11 @@ function registerIpcHandlers(
     const input = AddOfferedPluginPayload.parse(payload);
     try {
       const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
+      // See listOfferedPlugins above: redundant with ensurePluginPipeline's
+      // own check, stated directly here because this handler copies files
+      // into the workspace and that write boundary must be legible on its
+      // own, not inferred from a pipeline-lifecycle helper three calls away.
+      assertWritableWorkspace(workspace);
       await addOfferedPlugin({
         builtinPluginsRoot: builtinPluginsRoot(),
         workspaceRoot: workspace.rootPath,

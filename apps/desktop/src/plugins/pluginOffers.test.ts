@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +21,7 @@ import {
 } from "./pluginOffers";
 
 const roots: string[] = [];
+const NO_EXISTING_PLUGIN_IDS = new Set<string>();
 
 async function createFixture(): Promise<{
   root: string;
@@ -21,7 +31,12 @@ async function createFixture(): Promise<{
   const root = await mkdtemp(join(tmpdir(), "dohc-plugin-offers-"));
   roots.push(root);
   const builtinPluginsRoot = join(root, "builtin-plugins");
+  // A real workspace root always exists before any plugin operation runs —
+  // dohc only opens an already-materialized folder — so the fixture matches
+  // that rather than leaving addOfferedPlugin's realpath() call to hit an
+  // ENOENT this function was never meant to paper over.
   const workspaceRoot = join(root, "workspace");
+  await mkdir(workspaceRoot, { recursive: true });
 
   for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
     const pluginRoot = join(builtinPluginsRoot, directoryName);
@@ -58,6 +73,7 @@ describe("listOfferedPlugins", () => {
     const offers = await listOfferedPlugins(
       fixture.builtinPluginsRoot,
       fixture.workspaceRoot,
+      NO_EXISTING_PLUGIN_IDS,
     );
 
     expect(offers.map((offer) => offer.directoryName)).toEqual([
@@ -78,7 +94,11 @@ describe("listOfferedPlugins", () => {
     });
 
     await expect(
-      listOfferedPlugins(fixture.builtinPluginsRoot, fixture.workspaceRoot),
+      listOfferedPlugins(
+        fixture.builtinPluginsRoot,
+        fixture.workspaceRoot,
+        NO_EXISTING_PLUGIN_IDS,
+      ),
     ).resolves.toEqual([
       expect.objectContaining({ directoryName: "claude-code" }),
     ]);
@@ -95,8 +115,36 @@ describe("listOfferedPlugins", () => {
     );
 
     await expect(
-      listOfferedPlugins(fixture.builtinPluginsRoot, fixture.workspaceRoot),
+      listOfferedPlugins(
+        fixture.builtinPluginsRoot,
+        fixture.workspaceRoot,
+        NO_EXISTING_PLUGIN_IDS,
+      ),
     ).resolves.toEqual([]);
+  });
+
+  // Identity is the manifest id, not the directory: a driver copied and then
+  // renamed by hand (or an agent) still claims the id "codex", and offering
+  // "codex" again would only degrade to discovery's existing duplicate-id
+  // handling on install, never a clean one.
+  it("suppresses an offer whose manifest id already exists under a different directory", async () => {
+    const fixture = await createFixture();
+    const renamedRoot = join(fixture.workspaceRoot, "plugins", "my-codex");
+    await mkdir(join(renamedRoot, "src"), { recursive: true });
+    await writeFile(
+      join(renamedRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(renamedRoot, "src", "main.ts"), "export default {};\n");
+
+    const discovered = await discoverInstalledPlugins(fixture.workspaceRoot, new Map());
+    const existingPluginIds = new Set(discovered.map((plugin) => plugin.id));
+
+    await expect(
+      listOfferedPlugins(fixture.builtinPluginsRoot, fixture.workspaceRoot, existingPluginIds),
+    ).resolves.toEqual([
+      expect.objectContaining({ directoryName: "claude-code" }),
+    ]);
   });
 });
 
@@ -194,5 +242,31 @@ describe("addOfferedPlugin", () => {
         directoryName: "sites",
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
+  });
+
+  // A hostile or corrupted sync could plant plugins/ as a junction pointing
+  // outside the workspace before this ever runs. mkdir({recursive:true})
+  // would follow that transparently, so the fix has to refuse before any
+  // write, not merely detect the escape after one already landed.
+  it("refuses when plugins/ is a junction pointing outside the workspace", async () => {
+    const fixture = await createFixture();
+    const outside = await mkdtemp(join(tmpdir(), "dohc-plugin-offers-outside-"));
+    roots.push(outside);
+    await symlink(
+      outside,
+      join(fixture.workspaceRoot, "plugins"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(
+      addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    // Nothing landed outside the workspace through the link.
+    await expect(readdir(outside)).resolves.toEqual([]);
   });
 });

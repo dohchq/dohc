@@ -44,6 +44,7 @@ export function PluginsView(props: {
   onOpenDetails: (pluginId: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
+  const offersLoad = catalog.offersLoad;
   const [filter, setFilter] = useState("");
 
   const plugins = catalog.load.status === "ready" ? catalog.load.plugins : [];
@@ -53,9 +54,10 @@ export function PluginsView(props: {
   );
   const installedPlugins = matched.filter(isInstalled);
   const candidatePlugins = matched.filter((plugin) => !isInstalled(plugin));
+  const offersReady = offersLoad.status === "ready" ? offersLoad.offers : [];
   const offers = useMemo(
-    () => catalog.offers.filter((offer) => matchesFilter(offer, filter)),
-    [catalog.offers, filter],
+    () => offersReady.filter((offer) => matchesFilter(offer, filter)),
+    [offersReady, filter],
   );
 
   function renderRow(plugin: PluginStatusRecord) {
@@ -274,18 +276,16 @@ export function PluginsView(props: {
             Retry
           </button>
         </div>
-      ) : plugins.length === 0 && catalog.offers.length === 0 ? (
+      ) : plugins.length === 0 && offersReady.length === 0 && offersLoad.status !== "error" ? (
         <div data-testid="plugins-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
-            icon={<Blocks size={22} aria-hidden className="text-line" />}
             title="No plugins yet"
             hint="Ask your agent to add a plugin folder under plugins/."
           />
         </div>
-      ) : matched.length === 0 && offers.length === 0 ? (
+      ) : matched.length === 0 && offers.length === 0 && offersLoad.status !== "error" ? (
         <div data-testid="plugins-filter-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
-            icon={<Blocks size={22} aria-hidden className="text-line" />}
             title={`No plugins match "${filter.trim()}"`}
             hint="Try a shorter search."
           />
@@ -302,6 +302,22 @@ export function PluginsView(props: {
               <ul className="m-0 flex list-none flex-col p-0">{section.rows}</ul>
             </section>
           ))}
+          {offersLoad.status === "error" ? (
+            <section
+              data-testid="plugins-offers-error"
+              className={sections.length > 0 ? "mt-4" : undefined}
+            >
+              <SectionLabel className="block px-2 pb-1">Built in</SectionLabel>
+              <div className="flex flex-col items-start gap-2 px-2 py-1.5">
+                <p role="alert" className="m-0 text-[11px] text-danger">
+                  {offersLoad.message}
+                </p>
+                <button type="button" onClick={catalog.reload} className={retryButton}>
+                  Retry
+                </button>
+              </div>
+            </section>
+          ) : null}
         </div>
       )}
     </div>

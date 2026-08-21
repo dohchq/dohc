@@ -154,6 +154,13 @@ describe("PluginsView", () => {
     view.rerender(
       <PluginsView workspaceId="ws-new" activePluginId={null} onOpenDetails={noop} />,
     );
+    // Synchronously after the switch, before either bridge call resolves:
+    // neither workspace's offers show. usePluginCatalog tags every non-
+    // loading offers state with the workspaceId it was fetched for and
+    // checks that tag on every render, so a workspace switch can never
+    // paint a still-pending or still-resolving fetch's stale data.
+    expect(screen.queryByText("Codex")).toBeNull();
+    expect(screen.queryByText("Claude Code")).toBeNull();
 
     await act(async () => {
       newList.resolve({ ok: true, offers: [offers[1]] });
@@ -219,6 +226,34 @@ describe("PluginsView", () => {
     expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(1);
   });
 
+  it("offers a plugin again once it is uninstalled (removed status event)", async () => {
+    bridgeMock.listOfferedPlugins
+      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
+      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
+    bridgeMock.addOfferedPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("codex", {
+        status: "discovered",
+        runtimeStatus: null,
+        sourceHash: null,
+        approvedHash: null,
+        installedBaselineHash: null,
+      }),
+    });
+
+    renderList();
+    await userEvent.click(await screen.findByTestId("plugin-offer-add"));
+    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
+
+    act(() => {
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "codex" });
+    });
+
+    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
+    expect(screen.getByText("Codex")).toBeTruthy();
+    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
+  });
+
   it("shows an Adding state and a named error when Add fails", async () => {
     const addResult = deferred<{
       ok: false;
@@ -253,6 +288,49 @@ describe("PluginsView", () => {
       "dohc could not add Codex. plugins/codex already exists in this workspace.",
     );
     expect(addButton.textContent).toBe("Add");
+  });
+
+  it("shows a visible offers error with a working retry, without hiding installed plugins", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("installed-plugin")],
+    });
+    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        stage: "state",
+        code: "pipeline-unavailable",
+        message: "The plugin pipeline could not start.",
+      },
+    });
+
+    renderList();
+
+    // A rejected or {ok:false} offers load must not silently read as an
+    // empty list: the installed plugin still renders, and the offers
+    // section names its own failure instead of just vanishing.
+    expect(await screen.findByText("installed-plugin")).toBeTruthy();
+    const offersError = await screen.findByTestId("plugins-offers-error");
+    expect(offersError.textContent).toContain("The plugin pipeline could not start.");
+    expect(screen.queryByTestId("plugins-section-offered")).toBeNull();
+
+    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
+    await userEvent.click(within(offersError).getByText("Retry"));
+
+    expect(await screen.findByTestId("plugins-section-offered")).toBeTruthy();
+    expect(screen.queryByTestId("plugins-offers-error")).toBeNull();
+    expect(screen.getByText("installed-plugin")).toBeTruthy();
+    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the offers error even when the workspace has no plugins of its own", async () => {
+    bridgeMock.listOfferedPlugins.mockRejectedValueOnce(new Error("IPC unavailable"));
+
+    renderList();
+
+    const offersError = await screen.findByTestId("plugins-offers-error");
+    expect(offersError.textContent).toContain("IPC unavailable");
+    expect(screen.queryByTestId("plugins-empty")).toBeNull();
   });
 
   it("drops a stale plugin list after switching workspaces", async () => {
@@ -491,9 +569,9 @@ describe("PluginsView", () => {
     await userEvent.clear(filter);
     await userEvent.type(filter, "nothing-here");
     expect(screen.queryAllByTestId("plugin-row")).toHaveLength(0);
-    expect(screen.getByTestId("plugins-filter-empty").textContent).toContain(
-      'No plugins match "nothing-here"',
-    );
+    const filterEmpty = screen.getByTestId("plugins-filter-empty");
+    expect(filterEmpty.textContent).toContain('No plugins match "nothing-here"');
+    expect(within(filterEmpty).getByRole("img", { name: "dohc" })).toBeTruthy();
 
     await userEvent.clear(filter);
     expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
@@ -596,6 +674,8 @@ describe("PluginsView", () => {
     expect(empty.textContent).toContain("No plugins yet");
     expect(empty.textContent).toContain("plugins/");
     expect(screen.queryByTestId("plugins-filter-empty")).toBeNull();
+    // The brand mark, not a generic lucide glyph: EmptyState's own default.
+    expect(within(empty).getByRole("img", { name: "dohc" })).toBeTruthy();
   });
 
   it("shows a busy Install and an actionable error when the install fails", async () => {

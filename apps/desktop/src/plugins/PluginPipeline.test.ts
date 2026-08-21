@@ -367,6 +367,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     roots.push(targetRoot);
     const workspaceRoot = join(targetRoot, "workspace");
     const stateDir = join(targetRoot, "state");
+    // A real workspace root always exists before any plugin operation runs —
+    // dohc only opens an already-materialized folder — so this matches that
+    // rather than leaving addOfferedPlugin's realpath() call to hit an
+    // ENOENT this function was never meant to paper over.
+    await mkdir(workspaceRoot, { recursive: true });
     await mkdir(stateDir, { recursive: true });
 
     await addOfferedPlugin({

@@ -38,6 +38,18 @@ export type PluginLoadState =
   | { status: "ready"; plugins: PluginStatusRecord[] }
   | { status: "error"; message: string };
 
+// Tagged with the workspace it was fetched for. usePluginCatalog's own
+// epoch/token guards stop a STALE response from a previous workspace being
+// APPLIED, but a re-render can still observe this hook's state one paint
+// behind a workspaceId prop change (React commits the new props before the
+// effect that resets this state runs) — the render-time reader below checks
+// this tag against the current workspaceId argument rather than trusting
+// that ordering.
+export type OfferedPluginLoadState =
+  | { status: "loading" }
+  | { status: "ready"; workspaceId: string; offers: OfferedPluginRecord[] }
+  | { status: "error"; workspaceId: string; message: string };
+
 export type PluginUninstallConfirmation = {
   plugin: PluginStatusRecord;
   confirmationToken: string;
@@ -281,7 +293,7 @@ export interface PluginCatalog {
   errors: Record<string, string | undefined>;
   confirmation: PluginUninstallConfirmation | null;
   /** Built-in driver plugins this workspace doesn't have yet. */
-  offers: OfferedPluginRecord[];
+  offersLoad: OfferedPluginLoadState;
   reload: () => void;
   runAction: (
     plugin: PluginStatusRecord,
@@ -313,7 +325,7 @@ export function usePluginCatalog(
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
   const [confirmation, setConfirmation] =
     useState<PluginUninstallConfirmation | null>(null);
-  const [offers, setOffers] = useState<OfferedPluginRecord[]>([]);
+  const [offersLoad, setOffersLoad] = useState<OfferedPluginLoadState>({ status: "loading" });
   // The request token orders list responses. The workspace epoch invalidates
   // list and action responses after unmount or a workspace switch. Offers
   // are a separate bridge call from the plugin list, so they order their own
@@ -372,6 +384,8 @@ export function usePluginCatalog(
   async function loadOffers() {
     const requestToken = ++offersRequestToken.current;
     const epoch = workspaceEpoch.current;
+    const forWorkspaceId = workspaceId;
+    setOffersLoad({ status: "loading" });
     try {
       const result = await bridge().listOfferedPlugins({ workspaceId });
       if (
@@ -380,14 +394,28 @@ export function usePluginCatalog(
       ) {
         return;
       }
-      setOffers(result.ok ? result.offers : []);
-    } catch {
-      if (
-        requestToken === offersRequestToken.current &&
-        epoch === workspaceEpoch.current
-      ) {
-        setOffers([]);
+      if (!result.ok) {
+        setOffersLoad({
+          status: "error",
+          workspaceId: forWorkspaceId,
+          message: `Offers could not load. ${result.error.message}`,
+        });
+        return;
       }
+      setOffersLoad({ status: "ready", workspaceId: forWorkspaceId, offers: result.offers });
+    } catch (error) {
+      if (
+        requestToken !== offersRequestToken.current ||
+        epoch !== workspaceEpoch.current
+      ) {
+        return;
+      }
+      const reason = error instanceof Error ? error.message : "Try again.";
+      setOffersLoad({
+        status: "error",
+        workspaceId: forWorkspaceId,
+        message: `Offers could not load. ${reason}`,
+      });
     }
   }
 
@@ -401,7 +429,7 @@ export function usePluginCatalog(
     // cleanup on the epoch guard, so this workspace clears it. Without this
     // every Open control here stays disabled for the rest of the session.
     setOpeningWebApp(null);
-    setOffers([]);
+    setOffersLoad({ status: "loading" });
     pendingStatusEvents.current.clear();
     statusRevision.current = 0;
     void loadPlugins();
@@ -424,6 +452,13 @@ export function usePluginCatalog(
           plugins: applyStatusEvents(current.plugins, [pending]),
         };
       });
+      if (event.kind === "removed") {
+        // The uninstalled plugin's built-in directory may be gone now, so
+        // whatever it was may be offerable again. Offers have no per-event
+        // incremental merge the way plugins do, so a removal re-fetches
+        // rather than guessing which offer (if any) should come back.
+        void loadOffers();
+      }
     });
     return () => {
       unsubscribe();
@@ -590,6 +625,10 @@ export function usePluginCatalog(
               }
             : current,
         );
+        // Uninstall's own "removed" status event covers this too, but this
+        // caller already knows the outcome — no reason to wait for the event
+        // to round-trip back through main.
+        void loadOffers();
       } else {
         if (result.plugin) replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
         setErrors((current) => ({
@@ -625,8 +664,16 @@ export function usePluginCatalog(
       const result = await bridge().addOfferedPlugin({ workspaceId, directoryName });
       if (epoch !== workspaceEpoch.current) return;
       if (result.ok) {
-        setOffers((current) =>
-          current.filter((entry) => entry.directoryName !== directoryName),
+        setOffersLoad((current) =>
+          current.status === "ready" && current.workspaceId === workspaceId
+            ? {
+                status: "ready",
+                workspaceId,
+                offers: current.offers.filter(
+                  (entry) => entry.directoryName !== directoryName,
+                ),
+              }
+            : current,
         );
         // Upserted in the same tick the offer disappears, so the plugin
         // never spends a render in neither the offered nor the installed
@@ -652,13 +699,25 @@ export function usePluginCatalog(
     }
   }
 
+  // React commits a new workspaceId prop before this hook's own effect runs
+  // to reset offersLoad — a render can observe this state one paint behind
+  // the prop it was tagged for. Every non-"loading" variant carries the
+  // workspaceId it was fetched for, so this checks it against the CURRENT
+  // argument (always fresh — it's this render's own parameter) rather than
+  // trusting that the effect already ran. The renderer invariant: exposed
+  // data is for this workspace or it doesn't get exposed at all.
+  const offersLoadForWorkspace: OfferedPluginLoadState =
+    offersLoad.status !== "loading" && offersLoad.workspaceId !== workspaceId
+      ? { status: "loading" }
+      : offersLoad;
+
   return {
     load,
     busy,
     openingWebApp,
     errors,
     confirmation,
-    offers,
+    offersLoad: offersLoadForWorkspace,
     reload: () => {
       void loadPlugins();
       void loadOffers();
