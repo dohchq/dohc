@@ -244,30 +244,168 @@ describe("stopProcessTreePosix", () => {
     expect(onTreeKillFailure).not.toHaveBeenCalled();
   });
 
-  it("falls back when the first process-table read fails", async () => {
-    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+  it("does not fall back when both reads succeed and SIGKILL stops the root", async () => {
+    vi.useFakeTimers();
+    try {
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      const onTreeKillFailure = vi.fn();
+      let killed = false;
+
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        100,
+        onTreeKillFailure,
+        {
+          readProcessTable: async () => psRow(100, 1),
+          sendSignal: (pid, signal) => {
+            signalled.push({ pid, signal });
+            if (signal === "SIGKILL") killed = true;
+          },
+          isAlive: () => !killed,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(100);
+      await pending;
+
+      expect(signalled).toEqual([
+        { pid: 100, signal: "SIGTERM" },
+        { pid: 100, signal: "SIGKILL" },
+      ]);
+      expect(onTreeKillFailure).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back after grace when only the force-round table read fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const onTreeKillFailure = vi.fn();
+      let readCount = 0;
+
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        100,
+        onTreeKillFailure,
+        {
+          readProcessTable: async () => {
+            readCount += 1;
+            if (readCount === 2) throw new Error("ps: transient failure");
+            return psRow(100, 1);
+          },
+          sendSignal: () => undefined,
+          isAlive: () => true,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onTreeKillFailure).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(onTreeKillFailure).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+
+      expect(onTreeKillFailure).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back after grace when only the first table read fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+      const onTreeKillFailure = vi.fn();
+      let readCount = 0;
+
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        100,
+        onTreeKillFailure,
+        {
+          readProcessTable: async () => {
+            readCount += 1;
+            if (readCount === 1) throw new Error("ps: not found");
+            return psRow(100, 1);
+          },
+          sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+          isAlive: () => true,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onTreeKillFailure).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(onTreeKillFailure).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+
+      expect(signalled).toEqual([
+        { pid: 100, signal: "SIGTERM" },
+      ]);
+      expect(onTreeKillFailure).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back once after grace when both table reads fail", async () => {
+    vi.useFakeTimers();
+    try {
+      const onTreeKillFailure = vi.fn();
+
+      const pending = stopProcessTreePosix(
+        100,
+        Promise.resolve(),
+        100,
+        onTreeKillFailure,
+        {
+          readProcessTable: () => Promise.reject(new Error("ps: not found")),
+          sendSignal: () => undefined,
+          isAlive: () => true,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onTreeKillFailure).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(onTreeKillFailure).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await pending;
+
+      expect(onTreeKillFailure).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fall back when SIGTERM stops the root", async () => {
     const onTreeKillFailure = vi.fn();
+    let alive = true;
     let readCount = 0;
 
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
-      0,
+      100,
       onTreeKillFailure,
       {
         readProcessTable: async () => {
           readCount += 1;
-          if (readCount === 1) throw new Error("ps: not found");
-          return psRow(100, 1);
+          return readCount === 1 ? psRow(100, 1) : "";
         },
-        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+        sendSignal: (_pid, signal) => {
+          if (signal === "SIGTERM") alive = false;
+        },
+        isAlive: () => alive,
       },
     );
 
-    expect(signalled).toEqual([
-      { pid: 100, signal: "SIGTERM" },
-    ]);
-    expect(onTreeKillFailure).toHaveBeenCalledOnce();
+    expect(onTreeKillFailure).not.toHaveBeenCalled();
   });
 
   it("force-signals a root captured with the same identity", async () => {
@@ -297,39 +435,16 @@ describe("stopProcessTreePosix", () => {
     ]);
   });
 
-  it("skips a captured root when the force-round process table cannot be read", async () => {
-    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
-    let readCount = 0;
-
-    await stopProcessTreePosix(
-      100,
-      Promise.resolve(),
-      0,
-      undefined,
-      {
-        readProcessTable: async () => {
-          readCount += 1;
-          if (readCount === 1) return psRow(100, 1);
-          throw new Error("ps: transient failure");
-        },
-        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
-      },
-    );
-
-    expect(signalled).toEqual([
-      { pid: 100, signal: "SIGTERM" },
-    ]);
-  });
-
   it("skips a root pid reused by a different process", async () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const onTreeKillFailure = vi.fn();
     let readCount = 0;
 
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
       0,
-      undefined,
+      onTreeKillFailure,
       {
         readProcessTable: async () => {
           readCount += 1;
@@ -344,6 +459,7 @@ describe("stopProcessTreePosix", () => {
     expect(signalled).toEqual([
       { pid: 100, signal: "SIGTERM" },
     ]);
+    expect(onTreeKillFailure).not.toHaveBeenCalled();
   });
 
   it("still signals the root pid with the same process identity", async () => {
@@ -468,7 +584,7 @@ describe("stopProcessTreePosix", () => {
       await vi.advanceTimersByTimeAsync(50);
       await pending;
 
-      expect(descendantAliveChecks).toBe(4);
+      expect(descendantAliveChecks).toBe(5);
       expect(signalled).toEqual([
         { pid: 200, signal: "SIGTERM" },
         { pid: 100, signal: "SIGTERM" },
@@ -546,7 +662,7 @@ describe("stopProcessTreePosix", () => {
       await vi.advanceTimersByTimeAsync(50);
       await pending;
 
-      expect(aliveChecks).toBe(3);
+      expect(aliveChecks).toBe(4);
       expect(resolved).toBe(true);
     } finally {
       vi.useRealTimers();

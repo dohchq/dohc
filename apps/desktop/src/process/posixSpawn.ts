@@ -228,40 +228,43 @@ export async function stopProcessTreePosix(
   onTreeKillFailure?: () => void,
   options: StopProcessTreePosixOptions = {},
 ): Promise<void> {
+  const isAlive = options.isAlive ?? isProcessAlive;
   let captured: readonly number[] = [];
   let capturedIdentities: readonly ProcessIdentity[] = [];
-  let termTableReadFailed = false;
+  let unverifiable = false;
   try {
     const result = await signalProcessTreePosix(pid, "SIGTERM", options);
     captured = result.pids;
     capturedIdentities = result.identities;
-    termTableReadFailed = result.tableReadFailed;
+    unverifiable = result.tableReadFailed;
   } catch {
-    onTreeKillFailure?.();
+    unverifiable = true;
   }
-  if (termTableReadFailed && captured.length > 0) {
-    // The caller's owned process handle targets the process it already holds,
-    // not an unverified numeric pid. It is safe when table-based identity
-    // checks are unavailable and necessary because the force round cannot act.
-    onTreeKillFailure?.();
-  }
+
   const settledPromise = typeof settled === "function" ? settled() : settled;
   await Promise.all([
     Promise.race([settledPromise, unrefDelay(settleMs)]),
-    waitForProcessExit(captured, settleMs, options.isAlive ?? isProcessAlive),
+    waitForProcessExit(captured, settleMs, isAlive),
   ]);
+
+  let forceResultPids: readonly number[] = [];
   try {
     const result = await signalProcessTreePosix(pid, "SIGKILL", {
       ...options,
       alsoSignal: captured,
       alsoSignalIdentities: capturedIdentities,
     });
-    await waitForProcessExit(
-      result.pids,
-      settleMs,
-      options.isAlive ?? isProcessAlive,
-    );
+    forceResultPids = result.pids;
+    unverifiable ||= result.tableReadFailed;
+    await waitForProcessExit(forceResultPids, settleMs, isAlive);
   } catch {
+    unverifiable = true;
+  }
+
+  // A failed table read prevents identity verification. A surviving verified
+  // SIGKILL target also proves the tree did not stop. The caller's owned
+  // process handle cannot target an unrelated process through pid reuse.
+  if (unverifiable || forceResultPids.some(isAlive)) {
     onTreeKillFailure?.();
   }
 }
