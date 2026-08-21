@@ -20,6 +20,10 @@ import {
 } from "./siteRunner";
 import { listFiles } from "./workspaceFiles";
 
+export type SiteAuthority =
+  | { kind: "workspace" }
+  | { kind: "share"; mountRoot: string };
+
 export interface SitePackageInfo {
   root: string;
   title: string;
@@ -37,9 +41,7 @@ export interface SitePackageInfo {
   sourceFiles: string[];
   shareManifest: SiteShareManifestResult;
   diagnostics: SiteDiagnostic[];
-  authority:
-    | { kind: "workspace" }
-    | { kind: "share"; mountRoot: string };
+  authority: SiteAuthority;
 }
 
 export interface SiteShareManifest {
@@ -176,6 +178,31 @@ function blankHtmlRawTextContents(text: string): string {
   );
 }
 
+function openingHtmlTags(text: string): string[] {
+  const tags: string[] = [];
+  const start = /<[A-Za-z][A-Za-z0-9-]*\b/g;
+  for (const match of text.matchAll(start)) {
+    let quote: "\"" | "'" | null = null;
+    let position = (match.index ?? 0) + match[0].length;
+    for (; position < text.length; position += 1) {
+      const character = text[position]!;
+      if (quote) {
+        if (character === quote) quote = null;
+        continue;
+      }
+      if (character === "\"" || character === "'") {
+        quote = character;
+        continue;
+      }
+      if (character === ">") {
+        tags.push(text.slice(match.index, position + 1));
+        break;
+      }
+    }
+  }
+  return tags;
+}
+
 function htmlBaseDirectory(
   text: string,
   fromPath: string,
@@ -285,46 +312,69 @@ function referencesFromSrcset(value: string): string[] {
   return references;
 }
 
-function referencesFromBrowserText(text: string, sourcePath: string): string[] {
-  if (/\.webmanifest$/i.test(sourcePath)) return referencesFromWebManifest(text);
-  const references: string[] = [];
+export interface BrowserTextReference {
+  value: string;
+  // True for a reference the browser resolves against the DOCUMENT's base
+  // URL at runtime (fetch/Worker/SharedWorker/serviceWorker.register, and an
+  // assignment-shaped src/href/poster). False for a reference ES modules
+  // resolve against the SCRIPT's own module URL (import/export, dynamic
+  // import, new URL(...,import.meta.url)) or CSS resolves against the
+  // stylesheet's own location (url()/@import). An HTML file's own markup
+  // (attributes, inline CSS, inline modules) already resolves uniformly
+  // against that file's own <base>-aware directory regardless of this flag —
+  // it only changes resolution for a reference read out of a separate
+  // external .js/.mjs file, where the script's own location and the
+  // document's location can genuinely differ.
+  documentRelative: boolean;
+}
+
+function referencesFromBrowserText(text: string, sourcePath: string): BrowserTextReference[] {
+  if (/\.webmanifest$/i.test(sourcePath)) {
+    return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: true }));
+  }
+  const references: BrowserTextReference[] = [];
   const isHtml = /\.html?$/i.test(sourcePath);
   const scanText = isHtml ? blankHtmlComments(text) : text;
   const attributeText = isHtml
     ? blankHtmlRawTextContents(scanText).replace(/<base\b[^>]*>/gi, "")
     : scanText;
-  const addMatches = (input: string, pattern: RegExp) => {
+  const htmlTags = isHtml ? openingHtmlTags(attributeText) : [];
+  const addMatches = (input: string, pattern: RegExp, documentRelative: boolean) => {
     for (const match of input.matchAll(pattern)) {
       const value = (match[1] ?? match[2] ?? match[3])?.trim();
-      if (value) references.push(value);
+      if (value) references.push({ value, documentRelative });
     }
   };
 
   if (isHtml) {
     const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
-    for (const match of attributeText.matchAll(attribute)) {
-      const value = (match[2] ?? match[3] ?? match[4])?.trim();
-      if (!value) continue;
-      if (match[1]?.toLowerCase() !== "srcset") {
-        references.push(value);
-        continue;
+    for (const tag of htmlTags) {
+      for (const match of tag.matchAll(attribute)) {
+        const value = (match[2] ?? match[3] ?? match[4])?.trim();
+        if (!value) continue;
+        if (match[1]?.toLowerCase() !== "srcset") {
+          references.push({ value, documentRelative: true });
+          continue;
+        }
+        for (const srcsetValue of referencesFromSrcset(value)) {
+          references.push({ value: srcsetValue, documentRelative: true });
+        }
       }
-      references.push(...referencesFromSrcset(value));
     }
   }
 
   if (/\.(?:html?|css)$/i.test(sourcePath)) {
-    addMatches(scanText, /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi);
-    addMatches(scanText, /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi);
+    addMatches(scanText, /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi, false);
+    addMatches(scanText, /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi, false);
   }
 
   if (/\.(?:html?|js|mjs)$/i.test(sourcePath)) {
-    addMatches(scanText, /\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(scanText, /\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(scanText, /\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g);
-    addMatches(scanText, /\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(scanText, /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(isHtml ? attributeText : scanText, /\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(scanText, /\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g, false);
+    addMatches(scanText, /\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, false);
+    addMatches(scanText, /\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g, false);
+    addMatches(scanText, /\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, true);
+    addMatches(scanText, /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, true);
+    addMatches(isHtml ? htmlTags.join("\n") : scanText, /\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g, true);
   }
   return references;
 }
@@ -341,7 +391,7 @@ async function shareManifestForSite(
     artifactRoot = joinSitePath(site.root, output);
     entryPath = `${artifactRoot}/index.html`;
   } else if (!needsBuiltArtifact(site) && site.entryPath) {
-    artifactRoot = site.root;
+    artifactRoot = ownedStaticEntryTarget(site).root;
     const entryRelative = pathRelativeToArtifact(artifactRoot, site.entryPath);
     if (!entryRelative || !/\.html?$/i.test(entryRelative)) {
       return { ok: false, reason: "no-runnable-artifact" };
@@ -388,16 +438,26 @@ async function shareManifestForSite(
         };
       }
       const text = await readFile(join(rootPath, current), "utf8");
-      const base = /\.html?$/i.test(current)
+      const isHtmlFile = /\.html?$/i.test(current);
+      const base = isHtmlFile
         ? htmlBaseDirectory(text, current, artifactRoot)
         : { kind: "none" as const };
+      // A separate .js/.mjs file has no <base> of its own, but a reference
+      // the browser resolves against the DOCUMENT's base (fetch, Worker,
+      // an assignment-shaped src/href) still needs the document's own
+      // directory, not the script's — reuse the same local-base mechanism
+      // an HTML file's own <base> tag already uses.
+      const documentBase: HtmlBaseResolution = isHtmlFile
+        ? base
+        : { kind: "local", directory: artifactRoot };
       for (const reference of referencesFromBrowserText(text, current)) {
+        const referenceBase = reference.documentRelative ? documentBase : base;
         for (const target of localReferenceCandidates(
-          reference,
+          reference.value,
           current,
           artifactRoot,
           available,
-          base,
+          referenceBase,
         )) {
           approved.add(target);
           queue.push(target);
@@ -457,14 +517,7 @@ export function staticPreviewTargetForSite(
     if (output) return { root: buildOutputSiteRoot(site, output), entry: "index.html" };
     return { root: site.root, entry: sharedStaticEntryRelativeToSite(site) };
   }
-  const entry = entryRelativeToSite(site);
-  if (!entry) return { root: site.root, entry: null };
-  const directory = posix.dirname(entry);
-  if (directory === ".") return { root: site.root, entry };
-  return {
-    root: joinSitePath(site.root, directory),
-    entry: posix.basename(entry),
-  };
+  return ownedStaticEntryTarget(site);
 }
 
 function packagePathFor(root: string, sourceFiles: string[]): string | null {
@@ -656,12 +709,37 @@ export function requireExactSiteRoot(
   return site;
 }
 
-export function entryRelativeToSite(site: SitePackageInfo): string | null {
+export function entryRelativeToSite(
+  site: Pick<SitePackageInfo, "root" | "entryPath">,
+): string | null {
   if (!site.entryPath) return null;
   if (site.root === ".") return site.entryPath;
   return site.entryPath.startsWith(`${site.root}/`)
     ? site.entryPath.slice(site.root.length + 1)
     : null;
+}
+
+/**
+ * Where an ordinary (non-shared, non-build-output) configured entry is
+ * actually served from. A browser resolves the page's own root-absolute
+ * asset URLs against the SERVED root, so an entry in a subdirectory
+ * (public/index.html) must be served from that subdirectory (public/), not
+ * from site.root — otherwise its own relative assets resolve beside the
+ * subdirectory instead of inside it. Both the static preview server
+ * (staticPreviewTargetForSite) and the share-manifest scanner
+ * (shareManifestForSite) must agree on this root; they call this one
+ * function instead of computing it twice.
+ */
+function ownedStaticEntryTarget(
+  site: Pick<SitePackageInfo, "root" | "entryPath">,
+): { root: string; entry: string | null } {
+  const entry = entryRelativeToSite(site);
+  if (!entry) return { root: site.root, entry: null };
+  const directory = posix.dirname(entry);
+  return {
+    root: directory === "." ? site.root : joinSitePath(site.root, directory),
+    entry: posix.basename(entry),
+  };
 }
 
 export function buildOutputSiteRoot(

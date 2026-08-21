@@ -55,6 +55,7 @@ const bridgeMock = {
     mode: "static" as const,
     url: "http://127.0.0.1:49152/",
     logs: [],
+    exited: false,
   })),
   getSitePreviewLogs: vi.fn(
     async (): Promise<GetSitePreviewLogsResult> => ({ logs: [], exited: false }),
@@ -121,6 +122,7 @@ describe("SitePreviewPage", () => {
       mode: "dev",
       url: "http://127.0.0.1:49152/",
       logs: [],
+      exited: false,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -146,6 +148,7 @@ describe("SitePreviewPage", () => {
       mode: "static",
       url: "http://127.0.0.1:49152/",
       logs: [],
+      exited: false,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -198,6 +201,7 @@ describe("SitePreviewPage", () => {
       mode: "build",
       url: "http://127.0.0.1:49152/",
       logs: [],
+      exited: false,
     });
 
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -433,6 +437,7 @@ describe("SitePreviewPage", () => {
       mode: "dev",
       url: "http://127.0.0.1:49152/",
       logs: [{ stream: "stdout", text: "ready", at: 1 }],
+      exited: false,
     });
     bridgeMock.getSitePreviewLogs.mockResolvedValueOnce({
       logs: [
@@ -452,6 +457,45 @@ describe("SitePreviewPage", () => {
     ).toBeTruthy();
   });
 
+  it("shows retained logs when a dev server exits before start responds", async () => {
+    const devSite: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+    };
+    bridgeMock.getSitePackage.mockResolvedValueOnce(devSite);
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "dev",
+      url: "http://127.0.0.1:49152/",
+      logs: [
+        { stream: "stdout", text: "ready", at: 1 },
+        {
+          stream: "stderr",
+          text: "fatal: address became unavailable",
+          at: 2,
+        },
+        {
+          stream: "system",
+          text: "Dev server exited unexpectedly.",
+          at: 3,
+        },
+      ],
+      exited: true,
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    expect(
+      await screen.findByText("Dev server exited. Use Preview options to run it again."),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText(/fatal: address became unavailable/),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+  });
+
   it("clears a crashed dev preview and keeps its final logs visible", async () => {
     const exitedLogs = deferred<GetSitePreviewLogsResult>();
     const devSite: SitePackageInfo = {
@@ -466,6 +510,7 @@ describe("SitePreviewPage", () => {
       mode: "dev",
       url: "http://127.0.0.1:49152/",
       logs: [{ stream: "stdout", text: "ready", at: 1 }],
+      exited: false,
     });
     bridgeMock.getSitePreviewLogs.mockReturnValueOnce(exitedLogs.promise);
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -518,12 +563,14 @@ describe("SitePreviewPage", () => {
         mode: "dev",
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "report ready", at: 1 }],
+        exited: false,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
         mode: "dev",
         url: "http://127.0.0.1:49153/",
         logs: [{ stream: "stdout", text: "replacement ready", at: 2 }],
+        exited: false,
       });
     bridgeMock.getSitePreviewLogs
       .mockReturnValueOnce(pendingLogs.promise)
@@ -693,12 +740,14 @@ describe("SitePreviewPage", () => {
         mode: "dev",
         url: "http://127.0.0.1:49152/",
         logs: [],
+        exited: false,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
         mode: "static",
         url: "http://127.0.0.1:49153/",
         logs: [],
+        exited: false,
       });
     const onShareSite = vi.fn();
     const user = userEvent.setup();
@@ -764,12 +813,14 @@ describe("SitePreviewPage", () => {
         mode: "dev",
         url: "http://127.0.0.1:49152/",
         logs: [],
+        exited: false,
       })
       .mockResolvedValueOnce({
         siteRoot: "replacement",
         mode: "static",
         url: "http://127.0.0.1:49153/",
         logs: [],
+        exited: false,
       });
     const user = userEvent.setup();
     const view = render(
@@ -904,6 +955,7 @@ describe("SitePreviewPage", () => {
       mode: "static",
       url: "https://example.com/preview",
       logs: [],
+      exited: false,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -922,6 +974,7 @@ describe("SitePreviewPage", () => {
       mode: "static",
       url: "https://127.0.0.1:49152/",
       logs: [],
+      exited: false,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -937,6 +990,7 @@ describe("SitePreviewPage", () => {
       mode: "static",
       url: "http://user:pass@127.0.0.1:49152/",
       logs: [],
+      exited: false,
     });
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
@@ -994,12 +1048,14 @@ describe("SitePreviewPage", () => {
         mode: "dev",
         url: "http://127.0.0.1:49152/",
         logs: [],
+        exited: false,
       })
       .mockResolvedValueOnce({
         siteRoot: "report",
         mode: "static",
         url: "http://127.0.0.1:49153/",
         logs: [],
+        exited: false,
       });
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -1028,6 +1084,7 @@ describe("SitePreviewPage", () => {
         mode: "dev",
         url: "http://127.0.0.1:49152/",
         logs: [{ stream: "stdout", text: "ready", at: 1 }],
+        exited: false,
       })
       .mockRejectedValueOnce(new Error("Replacement preview failed"));
     const user = userEvent.setup();
@@ -1062,6 +1119,7 @@ describe("SitePreviewPage", () => {
       mode: "static",
       url: "http://127.0.0.1:49153/",
       logs: [],
+      exited: false,
     });
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
 
@@ -1094,6 +1152,7 @@ describe("SitePreviewPage", () => {
       mode: "static",
       url: "http://127.0.0.1:49153/",
       logs: [],
+      exited: false,
     });
     view.rerender(<SitePreviewPage workspaceId="ws-sites" siteRoot="replacement" />);
 

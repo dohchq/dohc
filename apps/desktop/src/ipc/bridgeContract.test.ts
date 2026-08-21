@@ -1235,6 +1235,7 @@ describe("site IPC contract", () => {
         mode: "build",
         url: "http://127.0.0.1:4173/",
         logs: [{ stream: "stdout", text: "built", at: 1 }],
+        exited: false,
         build: {
           ok: true,
           command: "pnpm",
@@ -1250,6 +1251,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://localhost:4173/",
         logs: [],
+        exited: false,
       }).logs,
     ).toEqual([]);
     expect(
@@ -1325,6 +1327,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://127.0.0.1:43210",
         logs: [],
+        exited: false,
       }).success,
     ).toBe(true);
     expect(
@@ -1333,6 +1336,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://[::1]:43210/",
         logs: [],
+        exited: false,
       }).success,
     ).toBe(true);
     expect(
@@ -1341,6 +1345,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://[::ffff:127.0.0.1]:43210/",
         logs: [],
+        exited: false,
       }).success,
     ).toBe(true);
     expect(
@@ -1349,6 +1354,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://127.0.0.1/",
         logs: [],
+        exited: false,
       }).success,
     ).toBe(true);
     expect(
@@ -1357,6 +1363,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://127.42.0.7:43210/",
         logs: [],
+        exited: false,
       }).success,
     ).toBe(true);
     for (const url of [
@@ -1376,6 +1383,7 @@ describe("site IPC contract", () => {
           mode: "static",
           url,
           logs: [],
+          exited: false,
         }).success,
       ).toBe(false);
     }

@@ -1268,7 +1268,7 @@ async function rememberCurrentSitePreviewHandle(
   sitePreviews.remember(input.workspaceId, input.site.root, handle);
 }
 
-type StartedSitePreview = StartSitePreviewResult & {
+type StartedSitePreview = Omit<StartSitePreviewResult, "exited"> & {
   handle: SitePreviewHandle;
 };
 
@@ -1305,6 +1305,7 @@ async function startPreviewForSiteUnlocked(
       );
     }
     const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
+      authority: input.site.authority,
       entry,
     });
     await rememberCurrentSitePreviewHandle(input, handle);
@@ -1395,6 +1396,7 @@ async function startPreviewForSiteUnlocked(
   const handle = await startStaticSitePreview(
     input.workspaceRoot,
     buildOutputSiteRoot(input.site, outputRoot),
+    { authority: input.site.authority },
   );
   await rememberCurrentSitePreviewHandle(input, handle);
   return {
@@ -6906,12 +6908,28 @@ function registerIpcHandlers(
         signal: pendingStart.controller.signal,
         sharedView: !!sharedView,
       });
-      const result = StartSitePreviewResult.parse(started);
+      const result = StartSitePreviewResult.parse({
+        ...started,
+        exited: false,
+      });
       if (!isCurrent()) {
         await sitePreviews.stop(input.workspaceId, site.root, started.handle);
         throw new Error("Site preview start was cancelled because the renderer restarted.");
       }
       if (!sitePreviews.isCurrent(input.workspaceId, site.root, started.handle)) {
+        if (
+          sitePreviews.exited(
+            input.workspaceId,
+            site.root,
+            started.handle,
+          )
+        ) {
+          return StartSitePreviewResult.parse({
+            ...result,
+            logs: sitePreviews.logs(input.workspaceId, site.root),
+            exited: true,
+          });
+        }
         if (sitePreviews.isRunning(input.workspaceId, site.root)) {
           throw new Error("A newer site preview replaced this start.");
         }

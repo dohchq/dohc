@@ -152,6 +152,25 @@ describe("site preview lifecycle", () => {
     ]);
   });
 
+  it("matches an exited record to the handle that actually exited", () => {
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const oldServer = fakeProcessHandle("http://127.0.0.1:4173/");
+    const replacement = fakeProcessHandle("http://127.0.0.1:5173/");
+    previews.remember("workspace-1", "site", oldServer.handle);
+    previews.remember("workspace-1", "site", replacement.handle);
+
+    replacement.exit();
+
+    expect(
+      previews.exited("workspace-1", "site", oldServer.handle),
+    ).toBe(false);
+    expect(
+      previews.exited("workspace-1", "site", replacement.handle),
+    ).toBe(true);
+  });
+
   it("removes the handle and origin even when stop fails", async () => {
     const previews = createSitePreviewLifecycle({
       allowOrigin: allowLoopbackFrameOrigin,

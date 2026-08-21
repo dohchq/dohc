@@ -350,6 +350,20 @@ describe("discoverSites", () => {
   it("does not classify diagnostics-only folders as sites", () => {
     expect(discoverSites([{ path: "not-a-site/package.json", body: "{ bad" }])).toEqual([]);
   });
+
+  it("ignores non-site dohc.json unless website signals conflict", () => {
+    const sites = discoverSites([
+      { path: "workflow/dohc.json", body: JSON.stringify({ type: "workflow" }) },
+      { path: "conflict/dohc.json", body: JSON.stringify({ type: "workflow" }) },
+      "conflict/index.html",
+    ]);
+
+    expect(sites).toHaveLength(1);
+    expect(sites[0]).toMatchObject({ root: "conflict" });
+    expect(sites[0]?.diagnostics).toEqual([
+      expect.objectContaining({ code: "unexpected_dohc_type" }),
+    ]);
+  });
 });
 
 describe("parseDohcSiteConfig", () => {
@@ -371,6 +385,7 @@ describe("parseDohcSiteConfig", () => {
         preview: { mode: "build", command: "pnpm preview", entry: "dist/index.html" },
         build: { command: "pnpm build", output: "dist" },
       },
+      declaredType: "site",
       diagnostics: [
         expect.objectContaining({
           path: "client-dashboard/dohc.json",
@@ -385,7 +400,7 @@ describe("parseDohcSiteConfig", () => {
   it("returns repairable diagnostics for invalid fields", () => {
     const parsed = parseDohcSiteConfig(
       JSON.stringify({
-        type: "dashboard",
+        type: 42,
         title: "",
         preview: { mode: "server", command: "", entry: "/index.html" },
         build: { output: "../dist" },
@@ -401,6 +416,14 @@ describe("parseDohcSiteConfig", () => {
       "invalid-preview-entry",
       "invalid-build-output",
     ]);
+  });
+
+  it("keeps a non-site type as a declared type without an invalid-type diagnostic", () => {
+    const parsed = parseDohcSiteConfig(JSON.stringify({ type: "workflow" }));
+
+    expect(parsed.config).toEqual({});
+    expect(parsed.declaredType).toBe("workflow");
+    expect(parsed.diagnostics).toEqual([]);
   });
 
   it("explains config paths that normalize to the current directory", () => {

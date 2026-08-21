@@ -56,4 +56,20 @@ describe("commandForSiteScript", () => {
 
     expect(() => commandForSiteScript(site, "dev")).toThrow(/loopback/);
   });
+
+  it.each(["bun run dev", "bun dev"])(
+    "validates lifecycle hooks behind the configured %s wrapper",
+    (configuredCommand) => {
+      const site = packageSite({
+        packageManager: "bun",
+        configuredScripts: { dev: configuredCommand },
+        scripts: {
+          dev: "vite --host 127.0.0.1",
+          predev: "vite --host 0.0.0.0",
+        },
+      });
+
+      expect(() => commandForSiteScript(site, "dev")).toThrow(/loopback/);
+    },
+  );
 });

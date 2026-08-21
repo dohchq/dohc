@@ -12,6 +12,7 @@ import {
   startStaticDirectoryPreview,
 } from "../security/staticDirectoryPreview";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import type { SiteAuthority } from "./sitePackage";
 
 export interface SiteLogEntry {
   stream: "stdout" | "stderr" | "system";
@@ -113,21 +114,34 @@ function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: str
 export async function startStaticSitePreview(
   workspaceRoot: string,
   siteRoot: string,
-  options: { entry?: string } = {},
+  options: { authority: SiteAuthority; entry?: string },
 ): Promise<StaticSitePreview> {
   const root = await resolveContainedDir(workspaceRoot, siteRoot);
   const realWorkspaceRoot = await realpath(workspaceRoot);
   const resolvedRelative = relative(realWorkspaceRoot, root).replaceAll("\\", "/");
-  if (
-    isSharedWithMePath(siteRoot === "." ? "" : siteRoot) ||
-    isSharedWithMePath(resolvedRelative)
-  ) {
+  const spelledRelative = siteRoot === "." ? "" : siteRoot;
+  const isAllowedByAuthority = (candidate: string): boolean => {
+    if (options.authority.kind === "workspace") {
+      return !isSharedWithMePath(candidate);
+    }
+    return (
+      candidate === options.authority.mountRoot ||
+      candidate.startsWith(`${options.authority.mountRoot}/`)
+    );
+  };
+  if (!isAllowedByAuthority(spelledRelative) || !isAllowedByAuthority(resolvedRelative)) {
+    const constraint = options.authority.kind === "workspace"
+      ? "inside shared-with-me"
+      : `outside its own shared mount ${options.authority.mountRoot}`;
     throw new Error(
-      `This site's served root is inside shared-with-me. dohc cannot preview it: ${siteRoot}`,
+      `This site's served root is ${constraint}. dohc cannot preview it: ${siteRoot}`,
     );
   }
+  const containmentRoot = options.authority.kind === "share"
+    ? join(workspaceRoot, ...options.authority.mountRoot.split("/"))
+    : workspaceRoot;
   return startStaticDirectoryPreview(root, {
-    containmentRoot: workspaceRoot,
+    containmentRoot,
     entry: options.entry ?? "index.html",
     entryLabel: "site entry",
     forbidSharedWithMePaths: true,

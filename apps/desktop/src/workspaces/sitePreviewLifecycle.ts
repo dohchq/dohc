@@ -89,6 +89,7 @@ export function createSitePreviewLifecycle(input: {
     state: "exited";
     workspaceId: string;
     siteRoot: string;
+    handle: SiteProcessHandle;
     logs: SiteLogEntry[];
   };
   type PreviewRecord = RunningPreview | ExitedPreview;
@@ -112,6 +113,7 @@ export function createSitePreviewLifecycle(input: {
       state: "exited",
       workspaceId,
       siteRoot,
+      handle: active.handle,
       logs,
     });
     active.releaseOrigin();
@@ -157,8 +159,16 @@ export function createSitePreviewLifecycle(input: {
       return active && "logs" in active.handle ? active.handle.logs() : [];
     },
 
-    exited(workspaceId: string, siteRoot: string): boolean {
-      return activePreviews.get(previewKey(workspaceId, siteRoot))?.state === "exited";
+    exited(
+      workspaceId: string,
+      siteRoot: string,
+      expected?: SitePreviewHandle,
+    ): boolean {
+      const active = activePreviews.get(previewKey(workspaceId, siteRoot));
+      return (
+        active?.state === "exited" &&
+        (!expected || active.handle === expected)
+      );
     },
 
     previewsForWorkspace(

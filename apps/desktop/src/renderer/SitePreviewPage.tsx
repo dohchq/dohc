@@ -274,9 +274,15 @@ export function SitePreviewPage(props: {
         mode,
       });
       if (request !== previewStartRequestRef.current) return;
-      setPreview(result);
       setPreviewLogs(result.logs);
       rememberMode(props.workspaceId, props.siteRoot, mode);
+      if (result.exited) {
+        setPreview(null);
+        setPreviewExited(true);
+        setLogsOpen(result.logs.length > 0);
+        return result;
+      }
+      setPreview(result);
       return result;
     } catch (error) {
       if (request !== previewStartRequestRef.current) return;

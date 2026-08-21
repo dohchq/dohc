@@ -9,7 +9,7 @@ export type SitePreviewScript = "dev" | "start" | "build";
 
 function packageManagerScriptRun(
   parsed: ReturnType<typeof splitCommandLine>,
-): { manager: "npm" | "pnpm" | "yarn"; script: string } | null {
+): { manager: "npm" | "pnpm" | "yarn" | "bun"; script: string } | null {
   const [first, second, ...rest] = parsed.args;
   if (rest.length > 0) return null;
   if (parsed.command === "npm") {
@@ -18,7 +18,11 @@ function packageManagerScriptRun(
     }
     return null;
   }
-  if (parsed.command === "pnpm" || parsed.command === "yarn") {
+  if (
+    parsed.command === "pnpm" ||
+    parsed.command === "yarn" ||
+    parsed.command === "bun"
+  ) {
     if (first === "run" && second) {
       return { manager: parsed.command, script: second };
     }

@@ -120,11 +120,16 @@ describe("shareMountRootForSite", () => {
       entry: "index.html",
     });
     const target = staticPreviewTargetForSite(site!);
-    await expect(
-      startStaticSitePreview(root, target.root, {
+    const preview = await startStaticSitePreview(root, target.root, {
+        authority: site!.authority,
         entry: target.entry ?? undefined,
-      }),
-    ).rejects.toThrow(/shared-with-me.*cannot preview/i);
+    });
+    try {
+      await expect(fetch(preview.url).then((response) => response.text()))
+        .resolves.toContain("/assets/main.js");
+    } finally {
+      await preview.stop();
+    }
     expect(
       sharedStaticEntryRelativeToSite({
         ...site!,
@@ -184,6 +189,7 @@ describe("listSitePackages", () => {
     if (!site) throw new Error("Expected the configured root site.");
     const target = staticPreviewTargetForSite(site);
     const preview = await startStaticSitePreview(root, target.root, {
+      authority: site.authority,
       entry: target.entry ?? undefined,
     });
     let assetStatus = 0;
@@ -197,6 +203,37 @@ describe("listSitePackages", () => {
 
     expect.soft(target).toEqual({ root: "public", entry: "index.html" });
     expect.soft(assetStatus).toBe(200);
+  });
+
+  it("shares a subdirectory entry's root-relative asset from the same root the preview serves", async () => {
+    await mkdir(join(root, "public", "assets"), { recursive: true });
+    await writeFile(
+      join(root, "dohc.json"),
+      JSON.stringify({
+        type: "site",
+        preview: { mode: "static", entry: "public/index.html" },
+      }),
+    );
+    await writeFile(
+      join(root, "public", "index.html"),
+      '<script src="/assets/app.js"></script>',
+    );
+    await writeFile(
+      join(root, "public", "assets", "app.js"),
+      "window.ready = true;",
+    );
+    // A same-named sibling outside public/ — the file the manifest would
+    // incorrectly select if artifactRoot stayed at the site root instead of
+    // shifting to public/, the same directory the preview server serves.
+    await mkdir(join(root, "assets"), { recursive: true });
+    await writeFile(join(root, "assets", "app.js"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === ".",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("public/assets/app.js");
+    expect(manifestOf(site)?.assets).not.toContain("assets/app.js");
   });
 
   it("keeps a root-level static entry at the site root", async () => {
@@ -358,6 +395,22 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toEqual(["commented/real.png"]);
   });
 
+  it("reads browser attributes only from real HTML tags", async () => {
+    await mkdir(join(root, "attribute-context"), { recursive: true });
+    await writeFile(
+      join(root, "attribute-context", "index.html"),
+      '<pre>src="private.txt"</pre><img src="real.png">',
+    );
+    await writeFile(join(root, "attribute-context", "private.txt"), "private");
+    await writeFile(join(root, "attribute-context", "real.png"), "real");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "attribute-context",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual(["attribute-context/real.png"]);
+  });
+
   it("keeps inline module and style references without treating script strings as markup", async () => {
     await mkdir(join(root, "inline-context"), { recursive: true });
     await writeFile(
@@ -385,6 +438,49 @@ describe("listSitePackages", () => {
       "inline-context/real.js",
       "inline-context/real.png",
     ]);
+  });
+
+  it("resolves a fetch-like reference from an external script against the document, not the script", async () => {
+    await mkdir(join(root, "fetch-base", "js"), { recursive: true });
+    await writeFile(
+      join(root, "fetch-base", "index.html"),
+      '<script src="js/app.js"></script>',
+    );
+    await writeFile(join(root, "fetch-base", "js", "app.js"), 'fetch("data.json");');
+    // The real, document-relative file the browser actually requests.
+    await writeFile(join(root, "fetch-base", "data.json"), "{}");
+    // An unrelated same-named file where naive script-relative resolution
+    // would incorrectly look instead.
+    await writeFile(join(root, "fetch-base", "js", "data.json"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "fetch-base",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("fetch-base/data.json");
+    expect(manifestOf(site)?.assets).not.toContain("fetch-base/js/data.json");
+  });
+
+  it("keeps a module import script-relative even when a fetch call in the same file is document-relative", async () => {
+    await mkdir(join(root, "mixed-base", "js"), { recursive: true });
+    await writeFile(
+      join(root, "mixed-base", "index.html"),
+      '<script type="module" src="js/app.js"></script>',
+    );
+    await writeFile(
+      join(root, "mixed-base", "js", "app.js"),
+      'import "./helper.js";\nfetch("data.json");',
+    );
+    await writeFile(join(root, "mixed-base", "js", "helper.js"), "export {};");
+    await writeFile(join(root, "mixed-base", "data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "mixed-base",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual(
+      expect.arrayContaining(["mixed-base/js/helper.js", "mixed-base/data.json"]),
+    );
   });
 
   it("resolves relative references from the document base href", async () => {

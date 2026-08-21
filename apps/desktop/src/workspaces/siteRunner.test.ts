@@ -30,6 +30,7 @@ import {
 } from "./siteRunner";
 
 let root: string;
+const workspaceAuthority = { kind: "workspace" } as const;
 
 beforeEach(async () => {
   root = await createTestScratch("dohc-sites-");
@@ -40,6 +41,34 @@ afterEach(async () => {
 });
 
 describe("startStaticSitePreview", () => {
+  it("serves only the mounted site's own shared-with-me subtree", async () => {
+    const mountRoot = "shared-with-me/alex";
+    const siteRoot = `${mountRoot}/portal`;
+    await mkdir(join(root, siteRoot), { recursive: true });
+    await mkdir(join(root, "shared-with-me", "blair", "portal"), { recursive: true });
+    await writeFile(join(root, siteRoot, "index.html"), "<h1>Alex portal</h1>");
+    await writeFile(
+      join(root, "shared-with-me", "blair", "portal", "index.html"),
+      "<h1>Blair portal</h1>",
+    );
+
+    const preview = await startStaticSitePreview(root, siteRoot, {
+      authority: { kind: "share", mountRoot },
+    });
+    try {
+      await expect(fetch(preview.url).then((response) => response.text()))
+        .resolves.toContain("Alex portal");
+    } finally {
+      await preview.stop();
+    }
+
+    await expect(
+      startStaticSitePreview(root, "shared-with-me/blair/portal", {
+        authority: { kind: "share", mountRoot },
+      }),
+    ).rejects.toThrow(/own shared mount/i);
+  });
+
   it("refuses a configured build output inside shared-with-me", async () => {
     const configuredBuildOutput = "shared-with-me/alex/site";
     await mkdir(join(root, configuredBuildOutput), { recursive: true });
@@ -52,7 +81,9 @@ describe("startStaticSitePreview", () => {
       site,
       configuredBuildOutput,
     );
-    const outcome = await startStaticSitePreview(root, servedRoot).then(
+    const outcome = await startStaticSitePreview(root, servedRoot, {
+      authority: workspaceAuthority,
+    }).then(
       (preview) => ({ kind: "started" as const, preview }),
       (error: unknown) => ({ kind: "refused" as const, error }),
     );
@@ -77,7 +108,9 @@ describe("startStaticSitePreview", () => {
       configuredBuildOutput,
     );
 
-    const preview = await startStaticSitePreview(root, servedRoot);
+    const preview = await startStaticSitePreview(root, servedRoot, {
+      authority: workspaceAuthority,
+    });
     try {
       await expect(fetch(preview.url).then((response) => response.text()))
         .resolves.toContain("Owned build");
@@ -91,7 +124,9 @@ describe("startStaticSitePreview", () => {
     await writeFile(join(root, "report", "index.html"), '<link rel="stylesheet" href="./style.css"><h1>Report</h1>');
     await writeFile(join(root, "report", "style.css"), "body { color: rgb(1, 2, 3); }");
 
-    const preview = await startStaticSitePreview(root, "report");
+    const preview = await startStaticSitePreview(root, "report", {
+      authority: workspaceAuthority,
+    });
     try {
       const html = await fetch(preview.url).then((res) => res.text());
       expect(html).toContain("<h1>Report</h1>");
@@ -105,7 +140,9 @@ describe("startStaticSitePreview", () => {
   it("serves a root-level workspace website", async () => {
     await writeFile(join(root, "index.html"), "<h1>Root Site</h1>");
 
-    const preview = await startStaticSitePreview(root, ".");
+    const preview = await startStaticSitePreview(root, ".", {
+      authority: workspaceAuthority,
+    });
     try {
       await expect(fetch(preview.url).then((res) => res.text())).resolves.toContain("Root Site");
     } finally {
@@ -122,7 +159,9 @@ describe("startStaticSitePreview", () => {
     );
     await writeFile(join(root, "shared-with-me-notes.txt"), "owned sibling file");
 
-    const preview = await startStaticSitePreview(root, ".");
+    const preview = await startStaticSitePreview(root, ".", {
+      authority: workspaceAuthority,
+    });
     try {
       const shared = await fetch(
         new URL("/shared-with-me/Alex/private.txt", preview.url),
@@ -141,11 +180,18 @@ describe("startStaticSitePreview", () => {
 
   it("rejects traversal and missing entry files", async () => {
     await mkdir(join(root, "empty"), { recursive: true });
-    await expect(startStaticSitePreview(root, "../escape")).rejects.toThrow(/traversal|relative/);
-    await expect(startStaticSitePreview(root, "empty")).rejects.toThrow();
+    await expect(
+      startStaticSitePreview(root, "../escape", { authority: workspaceAuthority }),
+    ).rejects.toThrow(/traversal|relative/);
+    await expect(
+      startStaticSitePreview(root, "empty", { authority: workspaceAuthority }),
+    ).rejects.toThrow();
     await mkdir(join(root, "site"), { recursive: true });
     await writeFile(join(root, "site", "index.html"), "ok");
-    await expect(startStaticSitePreview(root, "site", { entry: "../index.html" })).rejects.toThrow(
+    await expect(startStaticSitePreview(root, "site", {
+      authority: workspaceAuthority,
+      entry: "../index.html",
+    })).rejects.toThrow(
       /Invalid site entry/,
     );
   });
@@ -155,7 +201,9 @@ describe("startStaticSitePreview", () => {
     await writeFile(join(root, "site", "index.html"), "public");
     await writeFile(join(root, "site", "nested", ".dohc", "secret.txt"), "secret");
 
-    const preview = await startStaticSitePreview(root, "site");
+    const preview = await startStaticSitePreview(root, "site", {
+      authority: workspaceAuthority,
+    });
     try {
       const direct = await fetch(new URL("/nested/.dohc/secret.txt", preview.url));
       expect(direct.status).toBe(403);
@@ -166,7 +214,10 @@ describe("startStaticSitePreview", () => {
     }
 
     await expect(
-      startStaticSitePreview(root, "site", { entry: "nested/.dohc/secret.txt" }),
+      startStaticSitePreview(root, "site", {
+        authority: workspaceAuthority,
+        entry: "nested/.dohc/secret.txt",
+      }),
     ).rejects.toThrow(/reserved metadata path/);
   });
 });
@@ -457,6 +508,7 @@ describe("startSiteDevServer", () => {
           mode: "dev",
           url: handle.url,
           logs,
+          exited: false,
         }).success,
         later: GetSitePreviewLogsResult.safeParse({
           logs,

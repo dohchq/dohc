@@ -99,6 +99,13 @@ export interface DohcSiteConfig {
 export interface ParsedDohcSiteConfig {
   config?: DohcSiteConfig;
   diagnostics: SiteDiagnostic[];
+  // The raw `type` string as written, kept even when it isn't "site" (and so
+  // isn't carried onto `config.type`, which stays a strict "site" | undefined
+  // literal for the invalid-type diagnostic path). A dohc.json can legitimately
+  // declare a type for a different dohc feature (e.g. "workflow") — that is
+  // not an invalid config, so this is tracked separately from the validation
+  // that flags a genuinely malformed type.
+  declaredType?: string;
 }
 
 export type PackageJson = {
@@ -123,6 +130,7 @@ type Candidate = {
   packageJson?: PackageJson;
   packageManager?: SitePackageManager;
   dohcConfig?: DohcSiteConfig;
+  dohcConfigDeclaredType?: string;
   dohcConfigPath?: string;
   frameworkConfigPath?: string;
   buildOutputs: Set<string>;
@@ -472,9 +480,17 @@ export function parseDohcSiteConfig(json: string, path = "dohc.json"): ParsedDoh
   }
 
   const config: DohcSiteConfig = {};
+  let declaredType: string | undefined;
   if (parsed.type !== undefined) {
     if (parsed.type === "site") {
       config.type = "site";
+      declaredType = "site";
+    } else if (typeof parsed.type === "string" && parsed.type.trim() !== "") {
+      // A non-"site" string names a different dohc feature (e.g. "workflow")
+      // and is a legitimate, well-formed value — not an invalid config.
+      // discoverSites decides inclusion/diagnostics for this case on its own
+      // independent-website-signal rule, not here.
+      declaredType = parsed.type;
     } else {
       diagnostics.push(
         diagnostic(path, "warning", "invalid-type", 'dohc.json type should be "site".'),
@@ -496,7 +512,7 @@ export function parseDohcSiteConfig(json: string, path = "dohc.json"): ParsedDoh
   const build = parseBuild(parsed.build, path, diagnostics);
   if (build) config.build = build;
 
-  return { config, diagnostics };
+  return { config, diagnostics, declaredType };
 }
 
 function parsePackageJson(body: string, path: string): { json?: PackageJson; diagnostics: SiteDiagnostic[] } {
@@ -670,7 +686,28 @@ function siteConfidence(candidate: Candidate): SiteConfidence {
   return "low";
 }
 
+function hasIndependentWebsiteSignal(candidate: Candidate): boolean {
+  return (
+    candidate.hasIndexHtml ||
+    candidate.hasWebPackageSignal ||
+    candidate.hasFrameworkConfig ||
+    candidate.hasBuildOutputSignal
+  );
+}
+
+// A dohc.json whose `type` is present and not "site" declares the folder for
+// a different dohc feature, not a website — packages/mcp/src/tools.ts's
+// detectSiteAt applies the same rule and this mirrors it so both detectors
+// agree on the same input.
+function isExplicitNonSite(candidate: Candidate): boolean {
+  const type = candidate.dohcConfigDeclaredType;
+  return type !== undefined && type !== "site";
+}
+
 function shouldIncludeCandidate(candidate: Candidate): boolean {
+  if (candidate.hasDohcConfig && isExplicitNonSite(candidate)) {
+    return hasIndependentWebsiteSignal(candidate);
+  }
   return (
     candidate.hasDohcConfig ||
     candidate.hasIndexHtml ||
@@ -751,6 +788,7 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
       if (source.body !== undefined) {
         const parsed = parseDohcSiteConfig(source.body, source.path);
         candidate.dohcConfig = parsed.config;
+        candidate.dohcConfigDeclaredType = parsed.declaredType;
         candidate.diagnostics.push(...parsed.diagnostics);
         if (parsed.config?.preview?.entry) candidate.entry = parsed.config.preview.entry;
       }
@@ -796,6 +834,21 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
       candidate.packageJson,
     );
     if (candidate.dohcConfig?.build?.output) candidate.hasBuildOutputSignal = true;
+    if (
+      candidate.hasDohcConfig &&
+      isExplicitNonSite(candidate) &&
+      hasIndependentWebsiteSignal(candidate)
+    ) {
+      candidate.diagnostics.push(
+        diagnostic(
+          candidate.dohcConfigPath ??
+            (candidate.root === "." ? "dohc.json" : `${candidate.root}/dohc.json`),
+          "warning",
+          "unexpected_dohc_type",
+          'dohc.json has website signals but its type is not "site".',
+        ),
+      );
+    }
   }
 
   return [...candidates.values()]

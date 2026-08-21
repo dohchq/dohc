@@ -2309,6 +2309,7 @@ export const StartSitePreviewResult = z.object({
   mode: SitePreviewMode,
   url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry).max(500),
+  exited: z.boolean(),
   build: z
     .object({
       ok: z.boolean(),
