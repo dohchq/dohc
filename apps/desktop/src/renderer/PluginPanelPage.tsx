@@ -6,7 +6,7 @@ import {
   type DohcThemeMessage,
 } from "@dohc/sdk";
 import { AlertTriangle, Plug } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { StartPluginPanelResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { THEME_ATTRIBUTES, readDohcTheme } from "./pluginPanelTheme";
@@ -255,7 +255,16 @@ export function PluginPanelPage(props: {
   // appearance state is these three attributes, so watching them covers every
   // way a user changes it — settings, the command palette, or the OS flipping
   // while the mode is "system".
-  useEffect(() => {
+  //
+  // A layout effect, not a passive one: the panel becomes queryable (its
+  // iframe testid, its ready DOM) in the same commit that makes panelOrigin
+  // truthy, but a passive effect's flush is scheduled after that commit, not
+  // inside it. An attribute change landing in that gap fires no observer —
+  // MutationObserver never sees mutations from before it was created — and
+  // the panel silently keeps the theme it opened with. A layout effect runs
+  // synchronously in the same commit that exposes the panel, so nothing can
+  // observe the panel as ready before its theme watcher is armed.
+  useLayoutEffect(() => {
     if (!panelOrigin) return;
     const root = document.documentElement;
     const push = () =>

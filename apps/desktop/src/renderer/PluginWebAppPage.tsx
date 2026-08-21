@@ -1,5 +1,5 @@
 import { AlertTriangle, Plug } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 
@@ -137,7 +137,15 @@ export function PluginWebAppPage(props: {
   // so a ResizeObserver plus window resize covers repositioning.
   const ready = load.status === "ready";
   const hiddenByOverlay = props.hiddenByOverlay ?? false;
-  useEffect(() => {
+  // A layout effect, not a passive one: the frame testid becomes queryable
+  // in the same commit that makes `ready` true, but a passive effect's
+  // flush is scheduled after that commit, not inside it. Anything that
+  // reads main's bounds/visibility report between the commit and that later
+  // flush — a test's very next assertion, a guest-blocking check driven by
+  // the same tick — sees the placeholder's stale (or absent) first report.
+  // A layout effect runs synchronously in the same commit that exposes the
+  // frame, so main always has a bounds report before the frame is visible.
+  useLayoutEffect(() => {
     if (!ready) return;
     const request = startRequestRef.current;
     let frame: number | null = null;
