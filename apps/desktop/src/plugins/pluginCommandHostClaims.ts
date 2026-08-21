@@ -7,12 +7,21 @@ export class PluginCommandHostClaims {
   // start put this host into running" check had nothing to find (round-9
   // finding 1).
   private readonly startedHosts = new Set<string>();
-  // Keys a rebuild's old-runtime stop is waiting to drain — set the
-  // instant drain() is called (synchronously, before its promise
-  // executor returns), so a caller that checks isDraining() before
-  // claim() can never lose the race: JS runs both on one thread with no
-  // await between the check and the claim (round-10 finding 2).
-  private readonly draining = new Map<string, () => void>();
+  // Keys a rebuild's old-runtime stop is refusing new claims for — the
+  // barrier itself. Set the instant drain() is called (synchronously,
+  // before its promise executor returns), so a caller that checks
+  // isDraining() before claim() can never lose the race: JS runs both on
+  // one thread with no await between the check and the claim (round-10
+  // finding 2). Cleared only by the caller's own clearDrain(), not by
+  // drain()'s promise resolving — the caller's real teardown
+  // (PluginHost.stop()) still runs after every claim has drained, and a
+  // command arriving in that window must be refused too, or it reaches a
+  // host mid-dispose instead of a clean "try again" (round-11).
+  private readonly draining = new Set<string>();
+  // The resolver a pending drain() is waiting to fire once this key's
+  // claims reach zero — separate from `draining` itself, which outlives
+  // this resolving on the caller's own schedule.
+  private readonly drainResolvers = new Map<string, () => void>();
 
   claim(key: string): void {
     this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
@@ -23,7 +32,8 @@ export class PluginCommandHostClaims {
     if (count === undefined) return;
     if (count <= 1) {
       this.counts.delete(key);
-      this.draining.get(key)?.();
+      this.drainResolvers.get(key)?.();
+      this.drainResolvers.delete(key);
       return;
     }
     this.counts.set(key, count - 1);
@@ -58,9 +68,10 @@ export class PluginCommandHostClaims {
   }
 
   /**
-   * True while an old-runtime stop is waiting on this key's claims to
-   * drain. A caller about to claim a new command must check this first
-   * and refuse instead of joining — otherwise the wait a rebuild is doing
+   * True while an old-runtime stop is refusing new claims on this key —
+   * from the moment drain() is called until the caller's own clearDrain().
+   * A caller about to claim a new command must check this first and
+   * refuse instead of joining — otherwise the wait a rebuild is doing
    * before it disposes the transport would never end, chasing new
    * arrivals instead of the claims that existed when it began
    * (round-10 finding 2).
@@ -70,22 +81,31 @@ export class PluginCommandHostClaims {
   }
 
   /**
-   * Marks a key draining and resolves once every claim already
-   * outstanding for it has released — or immediately, if there are none.
-   * Call exactly once per key, before disposing a host claims might still
-   * be mid-command against: severing the transport under a claim already
-   * running would dispose it after only some of that command's side
-   * effects ran. The caller is expected to have every new claim on this
-   * key check isDraining() and refuse before this settles, or a claim
-   * could still land after the drain begins and this would wait on it too.
+   * Marks a key draining — refusing new claims — and resolves once every
+   * claim already outstanding for it has released, or immediately if
+   * there are none. Marks even with zero claims outstanding: a rebuild
+   * that finds nothing to wait for still has real work left (disposing
+   * the transport), and a command racing in during that window must be
+   * refused too, or it reaches a host mid-dispose instead of getting the
+   * retryable refusal (round-11). The marker itself outlives this
+   * resolving — call clearDrain() once that real work is actually done.
    */
   drain(key: string): Promise<void> {
+    this.draining.add(key);
     if (!this.counts.has(key)) return Promise.resolve();
     return new Promise((resolve) => {
-      this.draining.set(key, () => {
-        this.draining.delete(key);
-        resolve();
-      });
+      this.drainResolvers.set(key, resolve);
     });
+  }
+
+  /**
+   * Clears a key's draining barrier. Call once the caller's own teardown
+   * — the host stop this barrier exists to protect — has actually
+   * finished, not when drain()'s promise resolves: that only means every
+   * claim that existed has released, and the stop it unblocks still has
+   * to run (round-11).
+   */
+  clearDrain(key: string): void {
+    this.draining.delete(key);
   }
 }

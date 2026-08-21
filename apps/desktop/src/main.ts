@@ -1046,10 +1046,11 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       notifyPluginStatusChanged(workspace.workspaceId, event),
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
-    awaitCommandClaimsDrained: (pluginId) =>
-      activeCommandClaims.drain(
-        pluginLifecycleKey(workspace.workspaceId, pluginId),
-      ),
+    awaitCommandClaimsDrained: async (pluginId) => {
+      const key = pluginLifecycleKey(workspace.workspaceId, pluginId);
+      await activeCommandClaims.drain(key);
+      return () => activeCommandClaims.clearDrain(key);
+    },
   });
   return pipeline;
 }

@@ -218,12 +218,16 @@ export interface PluginPipelineOptions {
    * Lets an old-runtime stop wait for the caller's own in-flight command
    * claims on that plugin to drain before it disposes the transport —
    * severing it under a claim still running would dispose it after only
-   * some of that command's side effects ran (round-10 finding 2). Optional:
-   * a caller with no command-claim concept of its own (every existing test,
+   * some of that command's side effects ran (round-10 finding 2). Resolves
+   * to a callback the stop calls once it has actually disposed the
+   * transport: the caller's own claim-refusal barrier must outlive the
+   * wait itself, covering the stop's own remaining work too, not just the
+   * claims that existed when the wait began (round-11). Optional: a
+   * caller with no command-claim concept of its own (every existing test,
    * and any path that never claims a host for a command) omits it and the
    * stop proceeds immediately, exactly as before.
    */
-  awaitCommandClaimsDrained?: (pluginId: string) => Promise<void>;
+  awaitCommandClaimsDrained?: (pluginId: string) => Promise<() => void>;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -1646,9 +1650,14 @@ export class PluginPipeline {
     // it could dispose the transport after only some of that command's
     // side effects ran. A command arriving after this wait begins is the
     // caller's own concern to refuse (round-10 finding 2): this only
-    // drains what was already claimed.
-    await this.options.awaitCommandClaimsDrained?.(pluginId);
+    // drains what was already claimed. The returned callback clears that
+    // refusal — called only now, after the transport is actually gone,
+    // so a command racing in during the stop itself still gets refused
+    // instead of reaching a host mid-dispose (round-11).
+    const clearDrainBarrier =
+      (await this.options.awaitCommandClaimsDrained?.(pluginId)) ?? (() => {});
     await this.options.pluginHost.stop(pluginId);
+    clearDrainBarrier();
     this.recoveredManifests.delete(pluginId);
     // The stop already happened — mark it before running its consequences,
     // so a throwing notification can never look like the stop never occurred.

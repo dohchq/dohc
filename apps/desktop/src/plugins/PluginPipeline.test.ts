@@ -49,6 +49,7 @@ import {
   startPluginForPanel,
 } from "./pluginPanelRegistration";
 import { invokeRegisteredPluginCommand } from "./pluginCommandInvocation";
+import { PluginCommandHostClaims } from "./pluginCommandHostClaims";
 import type { PluginSettingDeclaration } from "./pluginManifestSchema";
 import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
 import {
@@ -2707,6 +2708,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let nextBuildGate: { entered: Deferred; release: Deferred } | null = null;
       let nextCommandDrainGate: { entered: Deferred; release: Deferred } | null =
         null;
+      // A real instance, wired the same way main.ts wires
+      // activeCommandClaims — so isDraining() reflects genuine barrier
+      // state (round-11), not a simulation of it.
+      const commandClaims = new PluginCommandHostClaims();
       let buildCalls = 0;
       let registeredCommands = (options.commands ?? [])
         .map((command) => command.id);
@@ -2739,12 +2744,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         onStatusChange: (event) => {
           if (event.kind === "changed") statuses.push(event.plugin.status);
         },
-        awaitCommandClaimsDrained: async () => {
+        awaitCommandClaimsDrained: async (pluginId) => {
           const gate = nextCommandDrainGate;
-          if (!gate) return;
-          nextCommandDrainGate = null;
-          gate.entered.resolve();
-          await gate.release.promise;
+          const drained = commandClaims.drain(pluginId);
+          if (gate) {
+            nextCommandDrainGate = null;
+            gate.entered.resolve();
+            await gate.release.promise;
+          }
+          await drained;
+          return () => commandClaims.clearDrain(pluginId);
         },
         operations: {
           install: (input) =>
@@ -2839,6 +2848,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           nextCommandDrainGate = gate;
           return gate;
         },
+        commandClaims,
         setRegisteredCommands: (commands: string[]) => {
           registeredCommands = [...commands];
         },
@@ -3430,6 +3440,50 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           () => setup.pipeline.list()[0]?.status === "ready",
           "Plugin did not reach ready after the drain released.",
         );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps refusing new command claims through the whole stop, not just the drain wait (round-11)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        const stopGate = setup.gateNextStop();
+        await writeFile(setup.entryPath, [
+          'export const marker = "replacement";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        const approving = setup.pipeline.approve("example-plugin");
+
+        // Nothing ever claimed this key — a "zero-claim rebuild" — and the
+        // barrier still marks: a command racing in has to be refused even
+        // when there was never anything for drain() itself to wait on
+        // (round-11 pin 2).
+        await waitFor(
+          () => setup.commandClaims.isDraining(key),
+          "The drain barrier never marked with zero claims outstanding.",
+        );
+
+        // The drain resolved instantly, so stopOldRuntime has already
+        // moved on to the real stop, which this gate now holds mid-flight.
+        await stopGate.entered.promise;
+        // A command arriving right now — between the last claim releasing
+        // (there was never one) and the stop's own completion — must
+        // still be refused (round-11 pin 1).
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        stopGate.release.resolve();
+        const approved = await approving;
+
+        expect(approved.ok).toBe(true);
+        // Only once the stop actually finished does the barrier clear —
+        // a new invocation is normal again (round-11 pin 3).
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
       } finally {
         await setup.pipeline.dispose();
       }

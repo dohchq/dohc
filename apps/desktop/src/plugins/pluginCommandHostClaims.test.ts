@@ -89,17 +89,31 @@ describe("PluginCommandHostClaims", () => {
   // otherwise it could dispose the transport under a command still
   // running its side effects, or never finish if new commands keep
   // arriving.
-  describe("isDraining / drain", () => {
-    it("resolves immediately for a key nothing has claimed", async () => {
+  //
+  // round-11: the barrier (isDraining) and the wait (drain()'s promise)
+  // are two different lifetimes. The wait ends once existing claims
+  // release; the caller's own teardown (PluginHost.stop()) still has
+  // real work left after that, so the barrier stays up until the caller
+  // explicitly calls clearDrain() — never merely because drain()
+  // resolved.
+  describe("isDraining / drain / clearDrain", () => {
+    it("marks a key draining even with zero claims outstanding, and resolves immediately", async () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
 
       expect(claims.isDraining(key)).toBe(false);
-      await claims.drain(key);
-      expect(claims.isDraining(key)).toBe(false);
+      const drained = claims.drain(key);
+      // A "zero-claim rebuild" still marks: a command racing in before
+      // the caller's own teardown finishes must be refused just the
+      // same as one that raced a real claim (round-11).
+      expect(claims.isDraining(key)).toBe(true);
+
+      await drained;
+      // The wait is over, but the barrier itself outlives it.
+      expect(claims.isDraining(key)).toBe(true);
     });
 
-    it("marks a key draining the instant drain() is called, and resolves once its one claim releases", async () => {
+    it("marks a key draining the instant drain() is called, and resolves once its one claim releases — but the barrier stays up", async () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
       claims.claim(key);
@@ -121,6 +135,12 @@ describe("PluginCommandHostClaims", () => {
       await drained;
 
       expect(settled).toBe(true);
+      // A command arriving right now — after the last claim released,
+      // before the caller's own stop has actually finished — must still
+      // be refused (round-11).
+      expect(claims.isDraining(key)).toBe(true);
+
+      claims.clearDrain(key);
       expect(claims.isDraining(key)).toBe(false);
     });
 
@@ -149,6 +169,29 @@ describe("PluginCommandHostClaims", () => {
       await drained;
 
       expect(settled).toBe(true);
+    });
+
+    it("only clearDrain() lowers the barrier — a caller's own stop can take real time after the wait ends", async () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      await claims.drain(key);
+      expect(claims.isDraining(key)).toBe(true);
+      expect(claims.isDraining(key)).toBe(true);
+      expect(claims.isDraining(key)).toBe(true);
+
+      claims.clearDrain(key);
+
+      expect(claims.isDraining(key)).toBe(false);
+    });
+
+    it("clearing an undrained key is a no-op", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      claims.clearDrain(key);
+
+      expect(claims.isDraining(key)).toBe(false);
     });
   });
 });
