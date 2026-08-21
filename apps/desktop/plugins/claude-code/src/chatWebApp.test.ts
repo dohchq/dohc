@@ -48,6 +48,8 @@ interface FakeSession extends PluginAgentSession {
   stopError: Error | null;
   /** Same idea, for dispose(). */
   disposeError: Error | null;
+  /** Same idea, for prompt() -- a driver that rejects a submitted turn. */
+  promptError: Error | null;
 }
 
 interface FakeDriverOptions {
@@ -61,6 +63,10 @@ interface FakeDriverOptions {
   /** Same pair, for session.stop(). */
   onStopEntered?: () => void;
   stopGate?: () => Promise<void>;
+  /** If set, every session this driver creates rejects its first prompt()
+   * with this error, then clears (a retry through a fresh session
+   * succeeds normally). */
+  promptError?: Error;
 }
 
 interface FakeDriver {
@@ -110,10 +116,16 @@ function fakeDriver(
         permissionCalls,
         stopError: null,
         disposeError: null,
+        promptError: options.promptError ?? null,
         get stopCalls() {
           return stopCalls;
         },
         async prompt(message) {
+          if (session.promptError) {
+            const error = session.promptError;
+            session.promptError = null;
+            throw error;
+          }
           promptCalls.push(message.text);
           return { turnId: `turn-${promptCalls.length}` };
         },
@@ -249,6 +261,10 @@ describe("Claude Code chat web app", () => {
     expect(fake.startInputs[0]?.resumeCursor).toBeUndefined();
     expect(fake.sessions[0]?.promptCalls).toEqual(["First message"]);
 
+    // The first turn has to settle before a second message is accepted --
+    // see the "overlapping turns" describe block for the 409 itself.
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
     expect(await post(url, "message", { text: "Second message" }, token)).toMatchObject({
       status: 202,
     });
@@ -368,6 +384,12 @@ describe("Claude Code chat web app", () => {
     expect(html).toContain("<title>Claude Code Chat</title>");
     expect(html).not.toContain("__CHAT_TOKEN__");
     expect(html).toMatch(/<meta name="chat-token" content="[0-9a-f]{48}">/);
+    // The transcript itself is not a live region: a streamed reply fires
+    // one text-delta per fragment, and announcing every one would drown
+    // out a permission request or failure. A separate, visually hidden
+    // region carries only settled announcements.
+    expect(html).not.toMatch(/id="transcript"[^>]*aria-live/);
+    expect(html).toMatch(/id="status"[^>]*aria-live="polite"/);
 
     const css = await fetch(new URL("chat.css", url));
     expect(css.status).toBe(200);
@@ -443,10 +465,34 @@ describe("Claude Code chat web app", () => {
       status: 503,
     });
     expect(fake.startInputs).toHaveLength(0);
-    expect(await stream.next()).toEqual({ kind: "user-message", text: "Hello", clientId: "c1" });
+    // No user-message echo: the probe failed before the driver ever
+    // accepted the prompt, so the message was never really sent.
     expect(await stream.next()).toEqual({
       kind: "error",
       message: "Claude Code failed its probe.",
+      fatal: true,
+    });
+    await stream.close();
+  });
+
+  it("does not log an accepted-message echo for a message the driver goes on to reject", async () => {
+    // The probe and session start both succeed; only prompt() rejects --
+    // this is the specific gap CR-I5 named: the earlier code published
+    // user-message before this point, so a prompt failure left an
+    // accepted-looking echo in the log for a message that never sent.
+    const fake = fakeDriver(undefined, { promptError: new Error("Claude Code refused the turn.") });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    const response = await post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    expect(response.status).toBe(500);
+
+    // Only the fatal error reaches the log -- no user-message frame ever
+    // arrives, before it or after it, for the rejected send.
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "Claude Code refused the turn.",
       fatal: true,
     });
     await stream.close();
@@ -631,5 +677,125 @@ describe("Claude Code chat web app", () => {
       await messagePromise.catch(() => undefined);
       expect(fake.disposed).toEqual(["session-1"]);
     });
+
+    it("stop during a pending startup does not leave a later message reusing the doomed promise", async () => {
+      const entered = deferred();
+      const gate = deferred();
+      const fake = fakeDriver(undefined, {
+        onStartSessionEntered: () => entered.resolve(),
+        startGate: () => gate.promise,
+      });
+      const { url, token } = await start(fake);
+      const stream = await eventStream(url, token);
+      expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+      const firstMessage = post(url, "message", { text: "Hello" }, token);
+      await entered.promise;
+
+      const stopResponse = await post(url, "stop", undefined, token);
+      expect(stopResponse.status).toBe(204);
+      // Without the fix, this never arrives: the pill would sit on
+      // Starting with no closed event to bring it back, since /stop
+      // returned 204 without publishing anything for a session that was
+      // still only pending.
+      expect(await stream.next()).toEqual({
+        kind: "session-state",
+        state: "closed",
+        reason: "Stopped",
+      });
+
+      // Sent before the doomed first attempt even settles. Without the
+      // fix, liveSession() reuses the same still-pending sessionStart
+      // promise instead of starting a fresh attempt, and this 503s along
+      // with the first one.
+      const secondMessage = post(url, "message", { text: "Fresh" }, token);
+      gate.resolve();
+
+      const [firstResponse, secondResponse] = await Promise.all([firstMessage, secondMessage]);
+      expect(firstResponse.status).toBe(503);
+      expect(secondResponse.status).toBe(202);
+      expect(fake.startInputs).toHaveLength(2);
+      expect(fake.disposed).toEqual(["session-1"]);
+      await stream.close();
+    });
   });
+
+  describe("stopWebApp retires the pairing", () => {
+    it("tears down for real, so the next start is completely fresh", async () => {
+      const fake = fakeDriver();
+      const { app, url, token } = await start(fake);
+      await post(url, "message", { text: "First" }, token);
+      expect(fake.startInputs).toHaveLength(1);
+
+      // The host dispatches this on failed-guest-load recovery, not on an
+      // ordinary tab close -- see the comment on stopWebApp itself.
+      await app.stopWebApp("chat", null);
+
+      // The old server is really gone: nothing to reattach to.
+      await expect(fetch(new URL("/", url))).rejects.toThrow();
+
+      const restarted = await app.startWebApp("chat", null);
+      expect(restarted.url).not.toBe(url);
+      const freshToken = await fetchToken(restarted.url);
+      expect(freshToken).not.toBe(token);
+
+      // A fresh session, not the old one reused or reattached.
+      const response = await post(restarted.url, "message", { text: "Second" }, freshToken);
+      expect(response.status).toBe(202);
+      expect(fake.startInputs).toHaveLength(2);
+    });
+  });
+
+  describe("overlapping turns", () => {
+    it("refuses a second message while a turn is active, and never overwrites the single active turn", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+
+      const first = await post(url, "message", { text: "First" }, token);
+      expect(first.status).toBe(202);
+      expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+
+      // No turn-completed yet: the turn is still active.
+      const second = await post(url, "message", { text: "Second" }, token);
+      expect(second.status).toBe(409);
+      // The driver never saw the second prompt at all -- one active turn,
+      // never overwritten.
+      expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+      expect(fake.startInputs).toHaveLength(1);
+
+      fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+      const third = await post(url, "message", { text: "Third" }, token);
+      expect(third.status).toBe(202);
+      expect(fake.sessions[0]?.promptCalls).toEqual(["First", "Third"]);
+    });
+
+    it("a fatal error also releases the active-turn gate", async () => {
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+      await post(url, "message", { text: "First" }, token);
+
+      fake.startInputs[0]?.onEvent({ kind: "error", message: "Codex crashed.", fatal: true });
+
+      const retry = await post(url, "message", { text: "Retry" }, token);
+      expect(retry.status).toBe(202);
+    });
+  });
+
+  it("a deactivate racing the server's own listen never leaves either promise pending forever", async () => {
+    // Best-effort race reproduction: listen(0, "127.0.0.1", ...) genuinely
+    // crosses into async OS-level work, so firing deactivate immediately
+    // after startWebApp without awaiting it has a real chance of landing
+    // in the window between `server = nextServer` and the listen callback.
+    // Whether or not this run lands exactly there, neither promise may
+    // hang: before the fix, landing in that window left listen()'s own
+    // promise (and everything awaiting startServer() through it) pending
+    // forever, and this test would time out instead of completing.
+    const fake = fakeDriver();
+    const app = createChatWebApp(fake.driver, "C:\\workspace", PLUGIN_UI_ROOT);
+    runningApps.push(app);
+    const startPromise = app.startWebApp("chat", null);
+    const deactivatePromise = app.deactivate();
+    await Promise.allSettled([startPromise, deactivatePromise]);
+  }, 10_000);
 });

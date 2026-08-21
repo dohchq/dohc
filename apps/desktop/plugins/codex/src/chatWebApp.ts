@@ -29,7 +29,9 @@ type SessionStateEvent = Extract<PluginAgentEvent, { kind: "session-state" }>;
 
 /** A submitted prompt, recorded so a reconnect replays both sides of the
  * conversation. clientId lets the submitting page's own optimistic card
- * recognize its own echo instead of rendering a duplicate. */
+ * recognize its own echo instead of rendering a duplicate. Published only
+ * once the driver has accepted the prompt -- a rejected message never
+ * appears here, so the log never claims a failed send was accepted. */
 interface UserMessageEvent {
   kind: "user-message";
   text: string;
@@ -154,6 +156,13 @@ function staticAsset(pathname: string): { file: string; contentType: string } | 
 async function listen(server: Server): Promise<string> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
+    // A close before the server ever started listening (deactivate or
+    // stopWebApp racing this same startup) fires no "error" and no listen
+    // callback -- only "close". Without this, that race left this promise,
+    // and everything awaiting startServer() through it, pending forever.
+    server.once("close", () =>
+      reject(new Error("The chat server closed before it started listening.")),
+    );
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
@@ -175,6 +184,11 @@ export function createChatWebApp(
   let sessionStart: Promise<PluginAgentSession> | null = null;
   let sessionGeneration = 0;
   let processSession: PluginAgentSession | null = null;
+  // True from the moment a prompt is accepted until its turn settles
+  // (turn-completed, or a fatal error). /message refuses a second prompt
+  // while this is true instead of overlapping it on the single active turn
+  // both concrete drivers track.
+  let turnActive = false;
   // Set while a session is tearing down (POST /stop's own driver.stop()
   // call). liveSession() awaits this before starting a fresh session, so a
   // message that races a stop cannot start a second driver session while
@@ -193,9 +207,11 @@ export function createChatWebApp(
     if (event.kind === "session-state") state = event;
     if (event.kind === "error" && event.fatal) {
       state = { kind: "session-state", state: "error", reason: event.message };
+      turnActive = false;
     }
     if (event.kind === "turn-completed") {
       state = { kind: "session-state", state: "ready" };
+      turnActive = false;
     }
     if (event.kind === "permission-request") pendingPermissions.add(event.requestId);
     if (event.kind === "permission-resolved") pendingPermissions.delete(event.requestId);
@@ -217,6 +233,7 @@ export function createChatWebApp(
   async function startSession(): Promise<PluginAgentSession> {
     const generation = ++sessionGeneration;
     pendingPermissions.clear();
+    turnActive = false;
     // Set once this driver.startSession call itself ends before it even
     // resolves (a session that fails during its own handshake).
     let ended = false;
@@ -266,9 +283,20 @@ export function createChatWebApp(
       publish({ kind: "error", message, fatal: true });
       throw requestError(503, message);
     }
-    sessionStart ??= startSession().finally(() => {
-      sessionStart = null;
-    });
+    if (!sessionStart) {
+      const attempt = startSession();
+      sessionStart = attempt;
+      // A separate chain off the same promise, not the one callers await:
+      // this one only ever clears the slot, and only if a later attempt
+      // (from /stop clearing sessionStart directly, then a fresh message
+      // starting a new one) has not already replaced it. Caught here so
+      // this cleanup-only chain can never itself become an unhandled
+      // rejection -- attempt's real rejection still reaches every caller
+      // that awaits liveSession() through sessionStart itself.
+      attempt.catch(() => undefined).finally(() => {
+        if (sessionStart === attempt) sessionStart = null;
+      });
+    }
     return sessionStart;
   }
 
@@ -277,12 +305,11 @@ export function createChatWebApp(
     if (!isRecord(body) || typeof body.text !== "string" || body.text.trim() === "") {
       throw requestError(400, "Enter a message before sending.");
     }
+    if (turnActive) {
+      throw requestError(409, "Wait for the current response to finish.");
+    }
     const clientId =
       typeof body.clientId === "string" && body.clientId ? body.clientId : randomUUID();
-    // Recorded before the session even starts: the user did send this, and
-    // a reconnect should show it regardless of whether the prompt below
-    // succeeds. A failure follows as its own fatal error event.
-    publish({ kind: "user-message", text: body.text, clientId });
     const live = await liveSession();
     try {
       await live.prompt({ text: body.text });
@@ -296,6 +323,12 @@ export function createChatWebApp(
       await Promise.resolve(live.dispose()).catch(() => undefined);
       throw requestError(500, message);
     }
+    // Published only now that the driver actually accepted it: a reconnect
+    // must never replay a message that was never really sent, and the
+    // submitting page's own optimistic card must never be told "not sent"
+    // for one that in fact was.
+    turnActive = true;
+    publish({ kind: "user-message", text: body.text, clientId });
     writeEmpty(response, 202);
   }
 
@@ -308,7 +341,19 @@ export function createChatWebApp(
     const live = processSession;
     processSession = null;
     pendingPermissions.clear();
+    turnActive = false;
     if (!live) {
+      if (sessionStart) {
+        // A start is still pending. The generation bump above already
+        // dooms it -- once driver.startSession resolves it disposes itself
+        // instead of installing -- but sessionStart still points at that
+        // doomed promise until then. Clear it now, or a message sent
+        // before it settles would await the same dying attempt instead of
+        // starting fresh, and the pill would sit on Starting with nothing
+        // left to bring it back.
+        sessionStart = null;
+        publish({ kind: "session-state", state: "closed", reason: "Stopped" });
+      }
       writeEmpty(response, 204);
       return;
     }
@@ -452,6 +497,42 @@ export function createChatWebApp(
     }
   }
 
+  /** Full teardown: ends the session best-effort, closes the server, and
+   * clears every field a later startWebApp must not see stale. Shared by
+   * stopWebApp (the host's failed-load recovery path -- see the comment on
+   * stopWebApp below) and deactivate. */
+  async function shutdown(): Promise<void> {
+    // Bumped first, unconditionally: a start pending through this teardown
+    // must not be able to install itself as the live session afterward.
+    sessionGeneration += 1;
+    const live = processSession;
+    processSession = null;
+    pendingPermissions.clear();
+    turnActive = false;
+    sessionStart = null;
+    // Guarded: a rejection here must not skip the cleanup below and leave
+    // the server listening (and the session's process running) after
+    // teardown.
+    await Promise.resolve(live?.dispose()).catch(() => undefined);
+    for (const client of clients) client.end();
+    clients.clear();
+    eventLog.length = 0;
+    state = { kind: "session-state", state: "closed" };
+    const runningServer = server;
+    server = null;
+    serverUrl = null;
+    token = null;
+    if (runningServer) {
+      const closed = new Promise<void>((resolve) => runningServer.close(() => resolve()));
+      // close() alone waits for every open connection to end on its own --
+      // an in-flight request (one still awaiting a gated driver call, for
+      // instance) would hold this open indefinitely. Force any still-open
+      // sockets closed right behind it so this always settles.
+      runningServer.closeAllConnections();
+      await closed;
+    }
+  }
+
   return {
     async startWebApp(webAppId, instanceKey) {
       if (webAppId !== CHAT_WEB_APP_ID || instanceKey !== null) {
@@ -471,34 +552,16 @@ export function createChatWebApp(
           'The Codex plugin serves only the singleton "' + CHAT_WEB_APP_ID + '" web app.',
         );
       }
-      // Closing the tab does not stop the server or the agent. A later tab reattaches to both.
+      // The host calls this to retire a pairing whose guest failed to load
+      // (recovery after a bad start) so the next start pairs completely
+      // fresh -- not on an ordinary tab close, which never dispatches this
+      // method. Tearing down for real here is safe for exactly that reason:
+      // a closed tab still reattaches to the live server and session, and
+      // this path is never reached by closing one.
+      await shutdown();
     },
     async deactivate() {
-      // Bumped first, unconditionally: a start pending through deactivation
-      // must not be able to install itself as the live session afterward.
-      sessionGeneration += 1;
-      const live = processSession;
-      processSession = null;
-      pendingPermissions.clear();
-      // Guarded: a rejection here must not skip the cleanup below and leave
-      // the server listening (and the session's process running) after the
-      // plugin deactivates.
-      await Promise.resolve(live?.dispose()).catch(() => undefined);
-      for (const client of clients) client.end();
-      clients.clear();
-      const runningServer = server;
-      server = null;
-      serverUrl = null;
-      token = null;
-      if (runningServer) {
-        const closed = new Promise<void>((resolve) => runningServer.close(() => resolve()));
-        // close() alone waits for every open connection to end on its own --
-        // an in-flight request (one still awaiting a gated driver call, for
-        // instance) would hold deactivate() open indefinitely. Force any
-        // still-open sockets closed right behind it so this always settles.
-        runningServer.closeAllConnections();
-        await closed;
-      }
+      await shutdown();
     },
   };
 }

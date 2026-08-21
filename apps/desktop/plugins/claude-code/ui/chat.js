@@ -1,5 +1,6 @@
 const transcript = document.querySelector("#transcript");
 const emptyState = document.querySelector("#empty-state");
+const statusRegion = document.querySelector("#status");
 const statePill = document.querySelector("#session-state");
 const stopButton = document.querySelector("#stop");
 const composer = document.querySelector("#composer");
@@ -10,6 +11,7 @@ const tokenMeta = document.querySelector('meta[name="chat-token"]');
 if (
   !transcript ||
   !emptyState ||
+  !statusRegion ||
   !statePill ||
   !stopButton ||
   !composer ||
@@ -47,6 +49,15 @@ function scrollToLatest() {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
+// The transcript itself carries no aria-live: a streamed reply fires one
+// text-delta per fragment, and a live region on the whole thing would
+// announce every fragment. This region instead speaks only settled
+// moments -- state changes (which already cover a turn completing), a new
+// permission request, and a non-fatal error.
+function announce(text) {
+  statusRegion.textContent = text;
+}
+
 function messageCard(author, text, className) {
   hideEmptyState();
   const card = document.createElement("article");
@@ -76,9 +87,15 @@ function setSessionState(state, reason) {
     error: "Error",
     closed: "Closed",
   };
-  statePill.textContent = labels[state] || state;
+  const label = labels[state] || state;
+  statePill.textContent = label;
   statePill.dataset.state = state;
   stopButton.disabled = state === "closed" || state === "error";
+  // Send re-enables only once the turn settles (back to Ready) or the
+  // session ends -- not on the message's own 202, which lands well before
+  // the driver's turn actually finishes.
+  sendButton.disabled = state === "running";
+  announce(label);
   if (state === "closed" && reason) {
     recoveryCard(reason);
   }
@@ -168,10 +185,10 @@ function resolvePermission(requestId, label) {
   if (!card) return;
   permissions.delete(requestId);
   for (const button of card.querySelectorAll("button")) button.disabled = true;
-  const status = document.createElement("span");
-  status.className = "timestamp";
-  status.textContent = label;
-  card.querySelector(".permission-actions").append(status);
+  const statusLabel = document.createElement("span");
+  statusLabel.className = "timestamp";
+  statusLabel.textContent = label;
+  card.querySelector(".permission-actions").append(statusLabel);
 }
 
 function showPermissionError(requestId, message) {
@@ -239,6 +256,7 @@ function renderPermission(event) {
   transcript.append(card);
   permissions.set(event.requestId, card);
   scrollToLatest();
+  announce("Permission needed: " + event.title);
 }
 
 function renderEvent(event) {
@@ -279,6 +297,7 @@ function renderEvent(event) {
         recoveryCard(event.message);
       } else {
         messageCard("Claude Code", event.message, "agent");
+        announce(event.message);
       }
       break;
   }
@@ -305,18 +324,26 @@ events.addEventListener("error", () => {
   statePill.dataset.state = "starting";
 });
 
+function markMessageFailed(clientId, card, message) {
+  pendingMessages.delete(clientId);
+  card.dataset.failed = "true";
+  const note = document.createElement("p");
+  note.className = "send-failed";
+  note.textContent = message;
+  card.append(note);
+  sendButton.disabled = false;
+}
+
 composer.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = messageInput.value.trim();
-  if (!text) return;
+  if (!text || sendButton.disabled) return;
   const clientId = crypto.randomUUID();
   const { card } = messageCard("You", text, "user");
   card.dataset.pending = "true";
   pendingMessages.set(clientId, card);
   messageInput.value = "";
   sendButton.disabled = true;
-  statePill.textContent = "Starting";
-  statePill.dataset.state = "starting";
   try {
     const response = await fetch("/message", {
       method: "POST",
@@ -324,22 +351,20 @@ composer.addEventListener("submit", async (event) => {
       body: JSON.stringify({ text, clientId }),
     });
     if (!response.ok) {
-      pendingMessages.delete(clientId);
-      card.dataset.failed = "true";
-      const note = document.createElement("p");
-      note.className = "send-failed";
-      note.textContent = "This message was not sent. Send it again.";
-      card.append(note);
+      markMessageFailed(
+        clientId,
+        card,
+        response.status === 409
+          ? "Wait for the current response to finish."
+          : "This message was not sent. Send it again.",
+      );
     }
+    // A successful 202 leaves Send disabled: the session-state:running
+    // event that follows drives it, and re-enables Send once the turn
+    // actually settles rather than as soon as the request lands.
   } catch {
-    pendingMessages.delete(clientId);
-    card.dataset.failed = "true";
-    const note = document.createElement("p");
-    note.className = "send-failed";
-    note.textContent = "This message was not sent. Send it again.";
-    card.append(note);
+    markMessageFailed(clientId, card, "This message was not sent. Send it again.");
   } finally {
-    sendButton.disabled = false;
     messageInput.focus();
   }
 });
