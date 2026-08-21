@@ -175,6 +175,42 @@ export class SharePinInvalidError extends Error {
   }
 }
 
+// Capture failing mid-pass still leaves whatever it fixed before the throw —
+// the pending marker for the ONE unreadable path survives (capture's
+// pending branch fails closed rather than guessing, per #867), but the
+// repairs or edits capture already applied to every entry visited before it
+// are real and already durable. This carries those counts past the throw so
+// a caller wrapping capture in a failure outcome doesn't report zero changes
+// and skip the repaint those repairs earned.
+class CapturePartialFailureError extends Error {
+  constructor(
+    readonly capturedPaths: number,
+    readonly repairedPaths: number,
+    readonly path: string,
+    readonly reason: "unreadable" | "other",
+    options: { cause: unknown },
+  ) {
+    super(
+      options.cause instanceof Error ? options.cause.message : String(options.cause),
+      options,
+    );
+    this.name = "CapturePartialFailureError";
+  }
+}
+
+// A failure while resolving the target, before any lock or store mutation
+// runs. This lets callers distinguish an unreachable path from a failure
+// inside the locked operation while preserving the cause's message.
+class SharedViewTargetResolutionError extends Error {
+  constructor(options: { cause: unknown }) {
+    super(
+      options.cause instanceof Error ? options.cause.message : String(options.cause),
+      options,
+    );
+    this.name = "SharedViewTargetResolutionError";
+  }
+}
+
 /**
  * A registry record is data, not a contract: read the pinned selector back
  * defensively, against the relay's OWN rules for the selector it issued.
@@ -308,7 +344,12 @@ async function withCaptureMutationLock<T>(
   path: string,
   operation: (resolvedTarget: string) => Promise<T>,
 ): Promise<T> {
-  const resolvedTarget = await resolvedShareViewTarget(rootDir, path);
+  let resolvedTarget: string;
+  try {
+    resolvedTarget = await resolvedShareViewTarget(rootDir, path);
+  } catch (error) {
+    throw new SharedViewTargetResolutionError({ cause: error });
+  }
   return withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, () =>
     operation(resolvedTarget),
   );
@@ -912,137 +953,173 @@ export async function captureSharedViewLocalDivergence(
 
     if (pendingPaths.has(entry.path)) {
       visitedPendingPaths.add(entry.path);
-      const result = await withCaptureMutationLock(
-        rootDir,
-        entry.path,
-        async (resolvedTarget): Promise<
-          | { kind: "captured" }
-          | { kind: "repaired" }
-          | { kind: "unjournalable"; path: UnjournalablePath }
-          | { kind: "unchanged" }
-        > => {
-          let targetStat: Stats | null;
-          try {
-            targetStat = await lstat(resolvedTarget);
-          } catch (error) {
-            const code = (error as NodeJS.ErrnoException).code;
-            if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-            targetStat = null;
-          }
-          // `lstat` never follows the final component, so a symlink entry
-          // already answers `isFile()` false — `isSymbolicLink()` decided
-          // nothing this didn't.
-          if (targetStat !== null && !targetStat.isFile()) {
-            return {
-              kind: "unjournalable",
-              path: { path: entry.path, reason: "non-file-replacement" },
-            };
-          }
+      let result:
+        | { kind: "captured" }
+        | { kind: "repaired" }
+        | { kind: "unjournalable"; path: UnjournalablePath }
+        | { kind: "unchanged" };
+      try {
+        result = await withCaptureMutationLock(
+          rootDir,
+          entry.path,
+          async (resolvedTarget): Promise<
+            | { kind: "captured" }
+            | { kind: "repaired" }
+            | { kind: "unjournalable"; path: UnjournalablePath }
+            | { kind: "unchanged" }
+          > => {
+            let targetStat: Stats | null;
+            try {
+              targetStat = await lstat(resolvedTarget);
+            } catch (error) {
+              const code = (error as NodeJS.ErrnoException).code;
+              if (code !== "ENOENT" && code !== "ENOTDIR") {
+                throw new CapturePartialFailureError(
+                  capturedPaths,
+                  repairedPaths,
+                  entry.path,
+                  "unreadable",
+                  { cause: error },
+                );
+              }
+              targetStat = null;
+            }
+            // `lstat` never follows the final component, so a symlink entry
+            // already answers `isFile()` false — `isSymbolicLink()` decided
+            // nothing this didn't.
+            if (targetStat !== null && !targetStat.isFile()) {
+              return {
+                kind: "unjournalable",
+                path: { path: entry.path, reason: "non-file-replacement" },
+              };
+            }
 
-          const disk = await readDiskContent(resolvedTarget);
-          const currentSnapshot = await store.readTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-          });
-          const currentEntry: {
-            contentKind: "text" | "binary";
-            sha256: string | null;
-            latestMomentId: string;
-          } =
-            currentSnapshot === null
-              ? entry
-              : {
-                  ...entry,
-                  contentKind:
-                    currentSnapshot.contentKind === "binary" ? "binary" : "text",
-                  sha256: currentSnapshot.sha256 ?? null,
-                  latestMomentId: currentSnapshot.latestMomentId,
-                };
-          if (diskMatchesSnapshot(disk, currentEntry)) {
-            return {
-              kind: pendingState.recordedPaths.has(entry.path)
-                ? "repaired"
-                : "unchanged",
-            };
-          }
-
-          const latestMoment = await store.getMoment({
-            workspaceId,
-            momentId: currentEntry.latestMomentId,
-          });
-          const before = latestMoment?.payload.before;
-          const matchesPreimage =
-            latestMoment !== null &&
-            (before === null
-              ? disk.kind === "absent"
-              : before !== undefined && diskMatchesSnapshot(disk, before));
-          if (matchesPreimage) {
-            await materializeSharedViewPaths(
-              rootDir,
+            const disk = await readDiskContent(resolvedTarget);
+            const currentSnapshot = await store.readTextFile({
               workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind: currentEntry.contentKind,
-                },
-              ],
-              store,
-            );
-            return { kind: "repaired" };
-          }
+              versionId: main.id,
+              path: entry.path,
+            });
+            const currentEntry: {
+              contentKind: "text" | "binary";
+              sha256: string | null;
+              latestMomentId: string;
+            } =
+              currentSnapshot === null
+                ? entry
+                : {
+                    ...entry,
+                    contentKind:
+                      currentSnapshot.contentKind === "binary" ? "binary" : "text",
+                    sha256: currentSnapshot.sha256 ?? null,
+                    latestMomentId: currentSnapshot.latestMomentId,
+                  };
+            if (diskMatchesSnapshot(disk, currentEntry)) {
+              return {
+                kind: pendingState.recordedPaths.has(entry.path)
+                  ? "repaired"
+                  : "unchanged",
+              };
+            }
 
-          if (disk.kind === "absent") {
-            // A pending write removes the target before it writes. An absent
-            // path here is an interrupted materialization, not a delete.
-            await materializeSharedViewPaths(
-              rootDir,
+            const latestMoment = await store.getMoment({
               workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind: currentEntry.contentKind,
-                },
-              ],
+              momentId: currentEntry.latestMomentId,
+            });
+            const before = latestMoment?.payload.before;
+            const matchesPreimage =
+              latestMoment !== null &&
+              (before === null
+                ? disk.kind === "absent"
+                : before !== undefined && diskMatchesSnapshot(disk, before));
+            if (matchesPreimage) {
+              await materializeSharedViewPaths(
+                rootDir,
+                workspaceId,
+                [
+                  {
+                    path: entry.path,
+                    operation: "write",
+                    contentKind: currentEntry.contentKind,
+                  },
+                ],
+                store,
+              );
+              return { kind: "repaired" };
+            }
+
+            if (disk.kind === "absent") {
+              // A pending write removes the target before it writes. An absent
+              // path here is an interrupted materialization, not a delete.
+              await materializeSharedViewPaths(
+                rootDir,
+                workspaceId,
+                [
+                  {
+                    path: entry.path,
+                    operation: "write",
+                    contentKind: currentEntry.contentKind,
+                  },
+                ],
+                store,
+              );
+              return { kind: "repaired" };
+            }
+            if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
+              return {
+                kind: "unjournalable",
+                path: unjournalableFromDisk(entry.path, disk),
+              };
+            }
+            if (disk.kind !== "text" && disk.kind !== "binary") {
+              return { kind: "unchanged" };
+            }
+            if (!allowLocalJournaling) {
+              await rematerializeHead(entry.path, currentEntry.contentKind);
+              return { kind: "repaired" };
+            }
+            await writeDiskContentToStore({
               store,
-            );
-            return { kind: "repaired" };
-          }
-          if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
-            return {
-              kind: "unjournalable",
-              path: unjournalableFromDisk(entry.path, disk),
-            };
-          }
-          if (disk.kind !== "text" && disk.kind !== "binary") {
-            return { kind: "unchanged" };
-          }
-          if (!allowLocalJournaling) {
-            await rematerializeHead(entry.path, currentEntry.contentKind);
-            return { kind: "repaired" };
-          }
-          await writeDiskContentToStore({
-            store,
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-            content: disk,
-          });
-          return { kind: "captured" };
-        },
-      );
-      await clearCapturePendingMarker(
-        rootDir,
-        entry.path,
-        result.kind,
-        pendingState,
-      );
+              workspaceId,
+              versionId: main.id,
+              path: entry.path,
+              content: disk,
+            });
+            return { kind: "captured" };
+          },
+        );
+      } catch (error) {
+        if (error instanceof CapturePartialFailureError) throw error;
+        const reason =
+          error instanceof SharedViewTargetResolutionError ? "unreadable" : "other";
+        throw new CapturePartialFailureError(
+          capturedPaths,
+          repairedPaths,
+          entry.path,
+          reason,
+          { cause: error },
+        );
+      }
       if (result.kind === "captured") capturedPaths += 1;
       if (result.kind === "repaired") repairedPaths += 1;
       if (result.kind === "unjournalable") {
         unjournalablePaths.push(result.path);
+      }
+      try {
+        await clearCapturePendingMarker(
+          rootDir,
+          entry.path,
+          result.kind,
+          pendingState,
+        );
+      } catch (error) {
+        throw new CapturePartialFailureError(
+          capturedPaths,
+          repairedPaths,
+          entry.path,
+          "other",
+          { cause: error },
+        );
       }
       continue;
     }
@@ -1162,60 +1239,87 @@ export async function captureSharedViewLocalDivergence(
 
   for (const path of pendingPaths) {
     if (visitedPendingPaths.has(path)) continue;
-    const result = await withCaptureMutationLock(
-      rootDir,
-      path,
-      async (resolvedTarget): Promise<
-        | { kind: "repaired" }
-        | { kind: "unchanged" }
-        | { kind: "unjournalable"; path: UnjournalablePath }
-      > => {
-        try {
-          if (await pathConfirmedAbsentOnDisk(resolvedTarget)) {
+    let result:
+      | { kind: "repaired" }
+      | { kind: "unchanged" }
+      | { kind: "unjournalable"; path: UnjournalablePath };
+    try {
+      result = await withCaptureMutationLock(
+        rootDir,
+        path,
+        async (resolvedTarget): Promise<
+          | { kind: "repaired" }
+          | { kind: "unchanged" }
+          | { kind: "unjournalable"; path: UnjournalablePath }
+        > => {
+          try {
+            if (await pathConfirmedAbsentOnDisk(resolvedTarget)) {
+              return { kind: "repaired" };
+            }
+          } catch {
+            return {
+              kind: "unjournalable",
+              path: { path, reason: "unreadable" },
+            };
+          }
+
+          const disk = await readDiskContent(resolvedTarget);
+          if (disk.kind === "absent") return { kind: "repaired" };
+
+          const latestMoment = await latestMomentForPath(store, workspaceId, path);
+          const preimage = latestMoment?.payload.before;
+          if (
+            preimage !== null &&
+            preimage !== undefined &&
+            diskMatchesSnapshot(disk, preimage)
+          ) {
+            await materializeSharedViewPaths(
+              rootDir,
+              workspaceId,
+              [{ path, operation: "delete", contentKind: "text" }],
+              store,
+            );
             return { kind: "repaired" };
           }
-        } catch {
-          return {
-            kind: "unjournalable",
-            path: { path, reason: "unreadable" },
-          };
-        }
 
-        const disk = await readDiskContent(resolvedTarget);
-        if (disk.kind === "absent") return { kind: "repaired" };
-
-        const latestMoment = await latestMomentForPath(store, workspaceId, path);
-        const preimage = latestMoment?.payload.before;
-        if (
-          preimage !== null &&
-          preimage !== undefined &&
-          diskMatchesSnapshot(disk, preimage)
-        ) {
-          await materializeSharedViewPaths(
-            rootDir,
-            workspaceId,
-            [{ path, operation: "delete", contentKind: "text" }],
-            store,
-          );
-          return { kind: "repaired" };
-        }
-
-        if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
-          return {
-            kind: "unjournalable",
-            path: unjournalableFromDisk(path, disk),
-          };
-        }
-        // The store no longer tracks this path. Readable content that does not
-        // match the delete preimage belongs to the recipient, so leave it on
-        // disk and outside dohc's journal.
-        return { kind: "unchanged" };
-      },
-    );
-    await clearCapturePendingMarker(rootDir, path, result.kind, pendingState);
+          if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
+            return {
+              kind: "unjournalable",
+              path: unjournalableFromDisk(path, disk),
+            };
+          }
+          // The store no longer tracks this path. Readable content that does not
+          // match the delete preimage belongs to the recipient, so leave it on
+          // disk and outside dohc's journal.
+          return { kind: "unchanged" };
+        },
+      );
+    } catch (error) {
+      if (error instanceof CapturePartialFailureError) throw error;
+      const reason =
+        error instanceof SharedViewTargetResolutionError ? "unreadable" : "other";
+      throw new CapturePartialFailureError(
+        capturedPaths,
+        repairedPaths,
+        path,
+        reason,
+        { cause: error },
+      );
+    }
     if (result.kind === "repaired") repairedPaths += 1;
     if (result.kind === "unjournalable") {
       unjournalablePaths.push(result.path);
+    }
+    try {
+      await clearCapturePendingMarker(rootDir, path, result.kind, pendingState);
+    } catch (error) {
+      throw new CapturePartialFailureError(
+        capturedPaths,
+        repairedPaths,
+        path,
+        "other",
+        { cause: error },
+      );
     }
   }
 
@@ -1481,9 +1585,10 @@ export async function refreshStandaloneShareViewOnce(
   input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
 ): Promise<StandaloneShareViewRefreshOutcome> {
   return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
-    const captured = await captureStandaloneShareViewDivergence(input);
-    const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
+    let totalLocalChanges = 0;
     try {
+      const captured = await captureStandaloneShareViewDivergence(input);
+      totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
       const main = await input.store.ensureMainVersion({
         workspaceId: input.workspaceId,
       });
@@ -1517,6 +1622,22 @@ export async function refreshStandaloneShareViewOnce(
         changedPaths: outcome.changedPaths + totalLocalChanges,
       };
     } catch (error) {
+      // A damaged pin never heals on retry; main.ts turns it into a specific
+      // "record is damaged" message and depends on it escaping as a
+      // rejection, not becoming a generic outcome.
+      if (error instanceof SharePinInvalidError) throw error;
+      if (error instanceof CapturePartialFailureError) {
+        return {
+          ok: false,
+          changedPaths: error.capturedPaths + error.repairedPaths,
+          errorMessage:
+            error.reason === "unreadable"
+              ? (unjournalablePathMessages([
+                  { path: error.path, reason: "unreadable" },
+                ])[0] ?? error.message)
+              : error.message,
+        };
+      }
       return {
         ok: false,
         changedPaths: totalLocalChanges,
