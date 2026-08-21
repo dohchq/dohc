@@ -62,7 +62,7 @@ export interface RefreshSharedViewOutcome {
 }
 
 export type StandaloneShareViewRefreshOutcome =
-  | ({ ok: true } & RefreshSharedViewOutcome)
+  | ({ ok: true; collisionRecordQuarantined: boolean } & RefreshSharedViewOutcome)
   | { ok: false; changedPaths: number; errorMessage: string };
 
 export interface UnjournalablePath {
@@ -80,6 +80,7 @@ export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
   repairedPaths: number;
   unjournalablePaths: UnjournalablePath[];
+  collisionRecordQuarantined: boolean;
 }
 
 function namedPaths(paths: readonly UnjournalablePath[]): string {
@@ -879,6 +880,7 @@ async function writeCollisionRecordUnlocked(
 async function readCollisionRecordLocked(
   rootDir: string,
   shareId: string,
+  onQuarantine?: () => void,
 ): Promise<Set<string>> {
   const target = collisionRecordPath(rootDir);
   let record: { shareId: string; paths: Set<string> };
@@ -890,6 +892,7 @@ async function readCollisionRecordLocked(
         "A previously-excluded path will follow this share's ordinary capture " +
         `rules on the next capture: ${String(error)}`,
     );
+    onQuarantine?.();
     await quarantineSidecar(target, "share collision record");
     return new Set<string>();
   }
@@ -898,6 +901,7 @@ async function readCollisionRecordLocked(
       `[desktop] share collision record at ${target} belongs to share ` +
         `${record.shareId}, not ${shareId}; quarantining the stale record.`,
     );
+    onQuarantine?.();
     await quarantineSidecar(target, "stale share collision record");
     return new Set<string>();
   }
@@ -907,9 +911,10 @@ async function readCollisionRecordLocked(
 export async function readCollisionRecordPaths(
   rootDir: string,
   shareId: string,
+  onQuarantine?: () => void,
 ): Promise<Set<string>> {
   return withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), () =>
-    readCollisionRecordLocked(rootDir, shareId),
+    readCollisionRecordLocked(rootDir, shareId, onQuarantine),
   );
 }
 
@@ -1014,7 +1019,12 @@ export async function captureSharedViewLocalDivergence(
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const realRoot = await realpath(rootDir).catch(() => null);
   if (realRoot === null) {
-    return { capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] };
+    return {
+      capturedPaths: 0,
+      repairedPaths: 0,
+      unjournalablePaths: [],
+      collisionRecordQuarantined: false,
+    };
   }
 
   const main = await store.ensureMainVersion({ workspaceId });
@@ -1030,7 +1040,10 @@ export async function captureSharedViewLocalDivergence(
     tracked.map((entry) => entry.path),
   );
   const pendingPaths = pendingState.paths;
-  const collisionRecordedPaths = await readCollisionRecordPaths(rootDir, shareId);
+  let collisionRecordQuarantined = false;
+  const collisionRecordedPaths = await readCollisionRecordPaths(rootDir, shareId, () => {
+    collisionRecordQuarantined = true;
+  });
   const trackedPathSet = new Set(tracked.map((entry) => entry.path));
 
   let capturedPaths = 0;
@@ -1117,60 +1130,66 @@ export async function captureSharedViewLocalDivergence(
 
     if (collisionRecordedPaths.has(entry.path)) {
       visitedPendingPaths.add(entry.path);
-      const result = await withCaptureMutationLock(
-        rootDir,
-        entry.path,
-        async (resolvedTarget): Promise<
-          | { kind: "repaired" }
-          | { kind: "unchanged" }
-          | { kind: "unjournalable"; path: UnjournalablePath }
-        > => {
-          const disk = await readDiskContent(resolvedTarget);
-          if (disk.kind === "unreadable") {
-            return {
-              kind: "unjournalable",
-              path: { path: entry.path, reason: "unreadable" },
-            };
-          }
-          const current = await store.readTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-          });
-          if (current === null) {
-            console.error(
-              `[desktop] shared view store lost tracked path ${entry.path} ` +
-                `in workspace ${workspaceId} version ${main.id}`,
-            );
-            return { kind: "unchanged" };
-          }
-          const alreadyMatchesGranter = diskMatchesSnapshot(disk, {
-            contentKind: current.contentKind === "binary" ? "binary" : "text",
-            sha256: current.sha256 ?? null,
-          });
-          if (disk.kind !== "absent" && !alreadyMatchesGranter) {
-            return {
-              kind: "unjournalable",
-              path: { path: entry.path, reason: "local-collision" },
-            };
-          }
-          if (!alreadyMatchesGranter) {
-            await materializeSharedViewPaths(
-              rootDir,
+      let result:
+        | { kind: "repaired" }
+        | { kind: "unchanged" }
+        | { kind: "unjournalable"; path: UnjournalablePath };
+      try {
+        result = await withCaptureMutationLock(
+          rootDir,
+          entry.path,
+          async (resolvedTarget) => {
+            const disk = await readDiskContent(resolvedTarget);
+            if (disk.kind === "unreadable") {
+              return {
+                kind: "unjournalable",
+                path: { path: entry.path, reason: "unreadable" },
+              };
+            }
+            const current = await store.readTextFile({
               workspaceId,
-              [
-                {
-                  path: entry.path,
-                  operation: "write",
-                  contentKind: current.contentKind === "binary" ? "binary" : "text",
-                },
-              ],
-              store,
-            );
-          }
-          return { kind: "repaired" };
-        },
-      );
+              versionId: main.id,
+              path: entry.path,
+            });
+            if (current === null) {
+              console.error(
+                `[desktop] shared view store lost tracked path ${entry.path} ` +
+                  `in workspace ${workspaceId} version ${main.id}`,
+              );
+              return { kind: "unchanged" };
+            }
+            const alreadyMatchesGranter = diskMatchesSnapshot(disk, {
+              contentKind: current.contentKind === "binary" ? "binary" : "text",
+              sha256: current.sha256 ?? null,
+            });
+            if (disk.kind !== "absent" && !alreadyMatchesGranter) {
+              return {
+                kind: "unjournalable",
+                path: { path: entry.path, reason: "local-collision" },
+              };
+            }
+            if (!alreadyMatchesGranter) {
+              await materializeSharedViewPaths(
+                rootDir,
+                workspaceId,
+                [
+                  {
+                    path: entry.path,
+                    operation: "write",
+                    contentKind:
+                      current.contentKind === "binary" ? "binary" : "text",
+                  },
+                ],
+                store,
+              );
+            }
+            return { kind: "repaired" };
+          },
+        );
+      } catch {
+        unjournalablePaths.push({ path: entry.path, reason: "unreadable" });
+        continue;
+      }
       if (result.kind === "repaired") {
         repairedPaths += 1;
         await clearCollisionRecordPaths(rootDir, shareId, [entry.path]);
@@ -1554,32 +1573,37 @@ export async function captureSharedViewLocalDivergence(
 
   for (const path of collisionRecordedPaths) {
     if (trackedPathSet.has(path)) continue;
-    const result = await withCaptureMutationLock(
-      rootDir,
-      path,
-      async (resolvedTarget): Promise<
-        | { kind: "repaired" }
-        | { kind: "unjournalable"; path: UnjournalablePath }
-      > => {
-        const disk = await readDiskContent(resolvedTarget);
-        if (disk.kind === "unreadable") {
-          return {
-            kind: "unjournalable",
-            path: { path, reason: "unreadable" },
-          };
-        }
-        if (disk.kind !== "absent") {
-          return {
-            kind: "unjournalable",
-            path: { path, reason: "local-collision" },
-          };
-        }
-        // The granter deleted the path while the collision was unresolved,
-        // and the recipient's entry is now gone too. A later re-add must not
-        // inherit this stale exclusion.
-        return { kind: "repaired" };
-      },
-    );
+    let result:
+      | { kind: "repaired" }
+      | { kind: "unjournalable"; path: UnjournalablePath };
+    try {
+      result = await withCaptureMutationLock(
+        rootDir,
+        path,
+        async (resolvedTarget) => {
+          const disk = await readDiskContent(resolvedTarget);
+          if (disk.kind === "unreadable") {
+            return {
+              kind: "unjournalable",
+              path: { path, reason: "unreadable" },
+            };
+          }
+          if (disk.kind !== "absent") {
+            return {
+              kind: "unjournalable",
+              path: { path, reason: "local-collision" },
+            };
+          }
+          // The granter deleted the path while the collision was unresolved,
+          // and the recipient's entry is now gone too. A later re-add must not
+          // inherit this stale exclusion.
+          return { kind: "repaired" };
+        },
+      );
+    } catch {
+      unjournalablePaths.push({ path, reason: "unreadable" });
+      continue;
+    }
     if (result.kind === "repaired") {
       repairedPaths += 1;
       await clearCollisionRecordPaths(rootDir, shareId, [path]);
@@ -1588,7 +1612,12 @@ export async function captureSharedViewLocalDivergence(
     }
   }
 
-  return { capturedPaths, repairedPaths, unjournalablePaths };
+  return {
+    capturedPaths,
+    repairedPaths,
+    unjournalablePaths,
+    collisionRecordQuarantined,
+  };
 }
 
 export async function captureStandaloneShareViewDivergence(input: {
@@ -1928,6 +1957,7 @@ export async function refreshStandaloneShareViewOnce(
       return {
         ok: true,
         ...outcome,
+        collisionRecordQuarantined: captured.collisionRecordQuarantined,
         status:
           outcome.status === "unchanged" && totalLocalChanges > 0
             ? "updated"

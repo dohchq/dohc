@@ -242,6 +242,7 @@ describe("share-view file operations through the real store", () => {
         ),
       ).resolves.toEqual({
         capturedPaths: 1,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -351,6 +352,7 @@ describe("share-view file operations through the real store", () => {
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -483,6 +485,7 @@ describe("share-view file operations through the real store", () => {
       ).toBe(false);
       expect(captured).toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -1404,6 +1407,7 @@ describe("share-view file operations through the real store", () => {
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });

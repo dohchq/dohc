@@ -4651,6 +4651,11 @@ export function DesktopWorkspaceShell(props: {
         );
         return;
       }
+      if (outcome.collisionRecordQuarantined) {
+        showShellNotice(
+          "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+        );
+      }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
         setShareViewEnded(true);

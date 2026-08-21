@@ -3690,6 +3690,32 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
   });
 
+  it("warns when a refresh quarantines the share collision record", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    bridge.refreshSharedView = vi.fn(async () => ({
+      ok: true as const,
+      status: "unchanged" as const,
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
+      collisionRecordQuarantined: true,
+      refusedOps: 0,
+      refusedDetail: null,
+    }));
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
+    });
+
+    expect((await screen.findByTestId("shell-notice")).textContent).toBe(
+      "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+    );
+  });
+
   it("repaints changed files before an ended share becomes read-only", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),

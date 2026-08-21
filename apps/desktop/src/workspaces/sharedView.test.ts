@@ -482,6 +482,7 @@ describe("shared view refresh", () => {
         }),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -519,6 +520,7 @@ describe("shared view refresh", () => {
         }),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -713,6 +715,7 @@ describe("shared view refresh", () => {
       await expect(saving).resolves.toMatchObject({ status: "written" });
       await expect(capturing).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -784,6 +787,7 @@ describe("shared view refresh", () => {
 
       await expect(capturing).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -875,6 +879,7 @@ describe("shared view refresh", () => {
       await expect(saving).resolves.toMatchObject({ status: "written" });
       await expect(repairing).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -1051,6 +1056,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [
           { path: scenePath, reason: "non-utf8" },
@@ -1211,6 +1217,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 1,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -1254,6 +1261,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -1326,6 +1334,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, captureStore, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -1511,7 +1520,12 @@ describe("shared view refresh", () => {
 
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
-      ).resolves.toEqual({ capturedPaths: 0, repairedPaths: 1, unjournalablePaths: [] });
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
       expect(await momentIds(store)).toEqual(before);
       await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set());
@@ -1551,6 +1565,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -1589,6 +1604,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [{ path, reason: "unreadable" }],
       });
@@ -1625,7 +1641,12 @@ describe("shared view refresh", () => {
 
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
-      ).resolves.toEqual({ capturedPaths: 1, repairedPaths: 0, unjournalablePaths: [] });
+      ).resolves.toEqual({
+        capturedPaths: 1,
+        collisionRecordQuarantined: false,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
       await expect(
         store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
       ).resolves.toMatchObject({ text: "moment three" });
@@ -2258,6 +2279,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [{ path, reason: "local-collision" }],
       });
@@ -2321,6 +2343,117 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("keeps a recorded collision protected for a view-access share", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/view-access-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "view" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [path],
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([path]),
+      );
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "view" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        collisionRecordQuarantined: false,
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+    } finally {
+      await store.close();
+    }
+  });
+
+  itNonRoot.each([
+    ["tracked collision record", true, true],
+    ["ordinary tracked path", true, false],
+    ["collision-record sweep", false, true],
+  ] as const)(
+    "reports an unreadable escaped ancestor for a %s without aborting capture",
+    async (_case, tracked, collisionRecorded) => {
+      const rootDir = await tempRoot();
+      const outsideRoot = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "docs/escaped.md";
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite("seed.md", "seed");
+      if (tracked) relay.addWrite(path, "tracked body");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+        pinnedSelector: { paths: ["seed.md", "docs"], versionId: null, access: "view" },
+      });
+      if (collisionRecorded) {
+        await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+      }
+      await rm(join(rootDir, "docs"), { recursive: true, force: true });
+      await writeFile(join(outsideRoot, "escaped.md"), "outside data", "utf8");
+      await symlink(
+        outsideRoot,
+        join(rootDir, "docs"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+
+      const store = harness.openStore(target);
+      let outsideDenied = false;
+      try {
+        await denyRead(outsideRoot, "dir");
+        outsideDenied = true;
+        await expect(
+          captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
+        ).resolves.toMatchObject({
+          capturedPaths: 0,
+          collisionRecordQuarantined: false,
+          repairedPaths: 0,
+          unjournalablePaths: [{ path, reason: "unreadable" }],
+        });
+      } finally {
+        if (outsideDenied) await restoreRead(outsideRoot, 0o755);
+        await store.close();
+      }
+    },
+  );
+
   it("resolves a recorded local collision without journaling a delete", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -2379,6 +2512,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -2426,6 +2560,7 @@ describe("shared view refresh", () => {
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -2504,6 +2639,54 @@ describe("shared view refresh", () => {
       }
     },
   );
+
+  it("catches a collision that appears after the page recording pass, before materialization", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/late-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      const realPull = harness.pullFor(target);
+      const lateCreatingPull: typeof realPull = async (input) => {
+        const result = await realPull(input);
+        await writeFile(join(rootDir, path), "recipient data", "utf8");
+        return result;
+      };
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: lateCreatingPull,
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [path],
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([path]),
+      );
+    } finally {
+      await store.close();
+    }
+  });
 
   it("publishes a durable collision record without leaving a temp file", async () => {
     const rootDir = await tempRoot();
@@ -2642,7 +2825,11 @@ describe("shared view refresh", () => {
           recordRefusals: async () => undefined,
           ended: false,
         }),
-      ).resolves.toMatchObject({ status: "updated", unjournalablePaths: [] });
+      ).resolves.toMatchObject({
+        status: "updated",
+        unjournalablePaths: [],
+        collisionRecordQuarantined: true,
+      });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
       await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
       expect(errorLog).toHaveBeenCalledWith(
@@ -2899,6 +3086,7 @@ describe("shared view refresh", () => {
       ).toBe(false);
       expect(captured).toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -2945,6 +3133,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 1,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -3003,6 +3192,7 @@ describe("shared view refresh", () => {
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -3236,7 +3426,12 @@ describe("shared view refresh", () => {
 
       await expect(
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
-      ).resolves.toEqual({ capturedPaths: 0, repairedPaths: 1, unjournalablePaths: [] });
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
       await expect(stat(join(rootDir, path))).rejects.toMatchObject({ code: "ENOENT" });
       expect(await momentIds(store)).toEqual(before);
       await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set());
@@ -3322,7 +3517,13 @@ describe("shared view refresh", () => {
       await expect(readFile(join(rootDir, paths[0]), "utf8")).resolves.toBe("one");
       await expect(readFile(join(rootDir, paths[1]), "utf8")).resolves.toBe("two");
 
-      const outcome = await captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true);
+      const outcome = await captureSharedViewLocalDivergence(
+        rootDir,
+        WORKSPACE,
+        store,
+        true,
+        SHARE_ID,
+      );
       expect(outcome.repairedPaths).toBe(2);
       expect(outcome.unjournalablePaths).toEqual([]);
       for (const path of paths) {
@@ -3373,6 +3574,7 @@ describe("shared view refresh", () => {
           captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
         ).resolves.toEqual({
           capturedPaths: 0,
+          collisionRecordQuarantined: false,
           repairedPaths: 0,
           unjournalablePaths: [{ path, reason: "unreadable" }],
         });
@@ -3440,6 +3642,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, pagingStore, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -3520,6 +3723,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -3569,7 +3773,12 @@ describe("shared view refresh", () => {
           true,
           SHARE_ID,
         ),
-      ).resolves.toEqual({ capturedPaths: 0, repairedPaths: 0, unjournalablePaths: [] });
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
       expect(error).toHaveBeenCalledWith(
         expect.stringContaining(
           `workspace ${WORKSPACE} version ${main.id}`,
@@ -4043,6 +4252,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });
@@ -4169,6 +4379,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -4199,6 +4410,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 1,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
@@ -4242,6 +4454,7 @@ describe("shared view refresh", () => {
             captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
           ).resolves.toEqual({
             capturedPaths: 0,
+            collisionRecordQuarantined: false,
             repairedPaths: 0,
             unjournalablePaths: [{ path, reason: "unreadable" }],
           });
@@ -4254,6 +4467,7 @@ describe("shared view refresh", () => {
           captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
         ).resolves.toEqual({
           capturedPaths: 1,
+          collisionRecordQuarantined: false,
           repairedPaths: 0,
           unjournalablePaths: [],
         });
@@ -4594,6 +4808,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [
           { path, reason: "non-file-replacement" },
@@ -4652,6 +4867,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 0,
         unjournalablePaths: [],
       });
