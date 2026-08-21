@@ -221,13 +221,14 @@ describe("killProcessTreePosix", () => {
 describe("stopProcessTreePosix", () => {
   it("omits an uncaptured root from the force round", async () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const onTreeKillFailure = vi.fn();
     let readCount = 0;
 
     await stopProcessTreePosix(
       100,
       Promise.resolve(),
       0,
-      undefined,
+      onTreeKillFailure,
       {
         readProcessTable: async () => {
           readCount += 1;
@@ -240,6 +241,33 @@ describe("stopProcessTreePosix", () => {
     expect(signalled).toEqual([
       { pid: 100, signal: "SIGTERM" },
     ]);
+    expect(onTreeKillFailure).not.toHaveBeenCalled();
+  });
+
+  it("falls back when the first process-table read fails", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const onTreeKillFailure = vi.fn();
+    let readCount = 0;
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      onTreeKillFailure,
+      {
+        readProcessTable: async () => {
+          readCount += 1;
+          if (readCount === 1) throw new Error("ps: not found");
+          return psRow(100, 1);
+        },
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 100, signal: "SIGTERM" },
+    ]);
+    expect(onTreeKillFailure).toHaveBeenCalledOnce();
   });
 
   it("force-signals a root captured with the same identity", async () => {

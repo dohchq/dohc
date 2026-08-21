@@ -154,7 +154,20 @@ export function createPluginUtilityTransport(
         if (child.pid === undefined) return;
         child.kill();
       } else {
-        await stopProcessTreePosix(pid, exited, 2_000, () => child.kill());
+        await stopProcessTreePosix(pid, exited, 2_000, () => {
+          try {
+            child.kill();
+          } catch {
+            // The force signal below is the owned-handle fallback's guarantee.
+          }
+          const livePid = child.pid;
+          if (livePid === undefined) return;
+          try {
+            process.kill(livePid, "SIGKILL");
+          } catch {
+            // The process exited before the force signal reached it.
+          }
+        });
       }
       const capped = unrefDelay(5_000).then(() => "capped" as const);
       const outcome = await Promise.race([

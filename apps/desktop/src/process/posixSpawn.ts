@@ -105,6 +105,7 @@ function readProcessTableWithPs(): Promise<string> {
 interface ProcessTreeSignalResult {
   pids: number[];
   identities: ProcessIdentity[];
+  tableReadFailed: boolean;
 }
 
 async function signalProcessTreePosix(
@@ -127,6 +128,7 @@ async function signalProcessTreePosix(
 
   let pids = [...new Set(unverifiedRoots)];
   let identities: ProcessIdentity[] = [];
+  let tableReadFailed = false;
   try {
     const table = parseProcessTable(await readProcessTable());
     const entriesByPid = new Map(table.map((entry) => [entry.pid, entry]));
@@ -149,6 +151,7 @@ async function signalProcessTreePosix(
       return entry ? [{ pid, startedAt: entry.startedAt }] : [];
     });
   } catch {
+    tableReadFailed = true;
     // The process table is unavailable. Signal only roots that do not need an
     // identity check; a captured pid is unsafe without a fresh table row.
   }
@@ -166,7 +169,7 @@ async function signalProcessTreePosix(
     }
   }
   if (rootFailure !== undefined) throw rootFailure;
-  return { pids, identities };
+  return { pids, identities, tableReadFailed };
 }
 
 /**
@@ -227,11 +230,19 @@ export async function stopProcessTreePosix(
 ): Promise<void> {
   let captured: readonly number[] = [];
   let capturedIdentities: readonly ProcessIdentity[] = [];
+  let termTableReadFailed = false;
   try {
     const result = await signalProcessTreePosix(pid, "SIGTERM", options);
     captured = result.pids;
     capturedIdentities = result.identities;
+    termTableReadFailed = result.tableReadFailed;
   } catch {
+    onTreeKillFailure?.();
+  }
+  if (termTableReadFailed && captured.length > 0) {
+    // The caller's owned process handle targets the process it already holds,
+    // not an unverified numeric pid. It is safe when table-based identity
+    // checks are unavailable and necessary because the force round cannot act.
     onTreeKillFailure?.();
   }
   const settledPromise = typeof settled === "function" ? settled() : settled;

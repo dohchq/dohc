@@ -10,6 +10,58 @@ import { createPluginUtilityTransport } from "./pluginUtilityTransport";
 
 describe("createPluginUtilityTransport", () => {
   it.skipIf(process.platform === "win32")(
+    "force-kills a SIGTERM-ignoring process when ps is unavailable",
+    async () => {
+      const scratch = await createTestScratch("plugin-utility-no-ps-");
+      const originalPath = process.env.PATH;
+      const parent = spawn(
+        process.execPath,
+        [
+          "-e",
+          'process.on("SIGTERM", () => {}); process.stdout.write("ready\\n"); setInterval(() => {}, 1_000);',
+        ],
+        { stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const parentPid = parent.pid;
+      expect(parentPid).toBeGreaterThan(0);
+      const transport = createPluginUtilityTransport(
+        parent as unknown as UtilityProcess,
+        {
+          onExit: vi.fn(),
+          onNotification: vi.fn(),
+          onRequest: vi.fn(async () => undefined),
+          onStderr: vi.fn(),
+        },
+      );
+
+      try {
+        await new Promise<void>((resolveReady, reject) => {
+          parent.stdout?.once("data", () => resolveReady());
+          parent.once("error", reject);
+        });
+        process.env.PATH = join(scratch, "missing-bin");
+
+        await transport.dispose();
+
+        expect(() => process.kill(parentPid as number, 0)).toThrow(
+          expect.objectContaining({ code: "ESRCH" }),
+        );
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+        if (parent.pid !== undefined) {
+          try {
+            process.kill(parent.pid, "SIGKILL");
+          } catch {
+            // The transport already stopped it.
+          }
+        }
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(process.platform === "win32")(
     "stops a detached descendant on POSIX",
     async () => {
       const scratch = await createTestScratch("plugin-utility-tree-");
