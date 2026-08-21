@@ -2,6 +2,7 @@ import {
   defaultWorkspaceRoot,
   isSharedWithMePath,
   normalizeAbsolutePath,
+  type WatcherEvent,
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
@@ -114,6 +115,10 @@ import {
   ImportWorkspaceFilesResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
+  ListOfferedPluginsPayload,
+  ListOfferedPluginsResult,
+  AddOfferedPluginPayload,
+  AddOfferedPluginResult,
   ListPluginsPayload,
   PluginSettingsResult,
   SetPluginSettingsPayload,
@@ -635,6 +640,7 @@ import {
 } from "./plugins/pluginAgentDrivers";
 import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
+import { addOfferedPlugin, listOfferedPlugins } from "./plugins/pluginOffers";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
@@ -866,6 +872,15 @@ function pluginResourcesBasePath(): string {
   return app.isPackaged
     ? process.resourcesPath
     : join(import.meta.dirname, "..", "..", "resources");
+}
+
+function builtinPluginsRoot(): string {
+  // Packaged plugin sources live in extraResources as a plain directory.
+  // In dev, import.meta.dirname is dist/main, so two levels up reaches the
+  // desktop package and its checked-in plugins directory.
+  return app.isPackaged
+    ? join(process.resourcesPath, "builtin-plugins")
+    : join(import.meta.dirname, "..", "..", "plugins");
 }
 
 function notifyPluginStatusChanged(
@@ -7187,6 +7202,58 @@ function registerIpcHandlers(
       return ListPluginsResult.parse({ ok: true, plugins: pipeline.list() });
     } catch (error) {
       return ListPluginsResult.parse({ ok: false, error: pluginIpcError(error) });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.listOfferedPlugins, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListOfferedPluginsPayload.parse(payload);
+    try {
+      await activePluginPipelineFor(event, input.workspaceId);
+      const workspace = requireWorkspace(input.workspaceId);
+      const offers = await listOfferedPlugins(
+        builtinPluginsRoot(),
+        workspace.rootPath,
+      );
+      return ListOfferedPluginsResult.parse({ ok: true, offers });
+    } catch (error) {
+      return ListOfferedPluginsResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.addOfferedPlugin, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AddOfferedPluginPayload.parse(payload);
+    try {
+      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const workspace = requireWorkspace(input.workspaceId);
+      await addOfferedPlugin({
+        builtinPluginsRoot: builtinPluginsRoot(),
+        workspaceRoot: workspace.rootPath,
+        directoryName: input.directoryName,
+      });
+      const rediscoveryEvent: WatcherEvent = {
+        operation: "create",
+        path: `plugins/${input.directoryName}`,
+      };
+      await pipeline.handleWatcherEvents([rediscoveryEvent]);
+      const plugin = pipeline.list().find(
+        (entry) => entry.directoryName === input.directoryName,
+      );
+      if (!plugin) {
+        throw new Error(
+          `plugins/${input.directoryName} did not appear after it was added.`,
+        );
+      }
+      return AddOfferedPluginResult.parse({ ok: true, plugin });
+    } catch (error) {
+      return AddOfferedPluginResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+      });
     }
   });
 

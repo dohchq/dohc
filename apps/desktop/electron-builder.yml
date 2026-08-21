@@ -54,6 +54,20 @@ extraResources:
     to: plugin-tools
     filter:
       - "**/*"
+  # Built-in driver plugin sources stay outside app.asar so main can read
+  # them through the same plain-directory resolver used for plugin tools.
+  - from: plugins/codex
+    to: builtin-plugins/codex
+    filter:
+      - "**/*"
+      - "!node_modules/**"
+      - "!dist/**"
+  - from: plugins/claude-code
+    to: builtin-plugins/claude-code
+    filter:
+      - "**/*"
+      - "!node_modules/**"
+      - "!dist/**"
   # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
   # outside app.asar so the main process can execute it directly.
   - from: resources/workspace-engine

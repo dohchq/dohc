@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type {
+  OfferedPluginRecord,
   PluginPipelineError,
   PluginStatusChangedEvent,
   PluginStatusRecord,
@@ -247,16 +248,112 @@ export function pluginTitle(plugin: PluginStatusRecord): string {
 // Every name a plugin answers to, plus what it says it does. A reader
 // searching "agent" should find the plugin whose description says so, not
 // only the one whose folder happens to spell it.
-export function matchesFilter(plugin: PluginStatusRecord, filter: string): boolean {
+type PluginFilterRecord = Pick<
+  PluginStatusRecord,
+  "directoryName" | "displayName" | "description" | "publisher"
+> & { id?: string };
+
+export function matchesFilter(plugin: PluginFilterRecord, filter: string): boolean {
   const needle = filter.trim().toLowerCase();
   if (needle.length === 0) return true;
   return [
-    plugin.id,
+    plugin.id ?? plugin.directoryName,
     plugin.directoryName,
     plugin.displayName,
     plugin.description,
     plugin.publisher,
   ].some((field) => field !== null && field.toLowerCase().includes(needle));
+}
+
+export interface OfferedPlugins {
+  offers: OfferedPluginRecord[];
+  add: (offer: OfferedPluginRecord) => void;
+  busyDirectoryName: string | null;
+  errors: Record<string, string | undefined>;
+}
+
+export function useOfferedPlugins(
+  workspaceId: string,
+  enabled: boolean = true,
+): OfferedPlugins {
+  const [offers, setOffers] = useState<OfferedPluginRecord[]>([]);
+  const [busyDirectoryName, setBusyDirectoryName] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string | undefined>>({});
+  const listRequestToken = useRef(0);
+  const workspaceEpoch = useRef(0);
+
+  async function loadOffers() {
+    const requestToken = ++listRequestToken.current;
+    const epoch = workspaceEpoch.current;
+    try {
+      const result = await bridge().listOfferedPlugins({ workspaceId });
+      if (
+        requestToken !== listRequestToken.current ||
+        epoch !== workspaceEpoch.current
+      ) {
+        return;
+      }
+      setOffers(result.ok ? result.offers : []);
+    } catch {
+      if (
+        requestToken === listRequestToken.current &&
+        epoch === workspaceEpoch.current
+      ) {
+        setOffers([]);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!enabled) return;
+    setOffers([]);
+    setBusyDirectoryName(null);
+    setErrors({});
+    void loadOffers();
+    return () => {
+      listRequestToken.current += 1;
+      workspaceEpoch.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId, enabled]);
+
+  async function add(offer: OfferedPluginRecord) {
+    const epoch = workspaceEpoch.current;
+    const directoryName = offer.directoryName;
+    const title = offer.displayName ?? directoryName;
+    setBusyDirectoryName(directoryName);
+    setErrors((current) => ({ ...current, [directoryName]: undefined }));
+    try {
+      const result = await bridge().addOfferedPlugin({ workspaceId, directoryName });
+      if (epoch !== workspaceEpoch.current) return;
+      if (result.ok) {
+        setOffers((current) =>
+          current.filter((entry) => entry.directoryName !== directoryName),
+        );
+      } else {
+        setErrors((current) => ({
+          ...current,
+          [directoryName]: `dohc could not add ${title}. ${result.error.message}`,
+        }));
+      }
+    } catch (error) {
+      if (epoch !== workspaceEpoch.current) return;
+      const reason = error instanceof Error ? error.message : "Try again.";
+      setErrors((current) => ({
+        ...current,
+        [directoryName]: `dohc could not add ${title}. ${reason}`,
+      }));
+    } finally {
+      if (epoch === workspaceEpoch.current) setBusyDirectoryName(null);
+    }
+  }
+
+  return {
+    offers,
+    add: (offer) => void add(offer),
+    busyDirectoryName,
+    errors,
+  };
 }
 
 export interface PluginCatalog {

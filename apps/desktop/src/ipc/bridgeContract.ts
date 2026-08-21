@@ -37,6 +37,7 @@ import {
   SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
+  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
   PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
@@ -2309,6 +2310,18 @@ export const PluginPipelineError = z.object({
 }).strict();
 export type PluginPipelineError = z.infer<typeof PluginPipelineError>;
 
+const OFFERED_PLUGIN_DIRECTORY_NAME = z.enum(
+  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
+);
+
+export const OfferedPluginRecord = z.object({
+  directoryName: OFFERED_PLUGIN_DIRECTORY_NAME,
+  displayName: z.string().min(1).max(120).nullable(),
+  description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
+  publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
+}).strict();
+export type OfferedPluginRecord = z.infer<typeof OfferedPluginRecord>;
+
 export const PluginStatusRecord = z.object({
   id: PLUGIN_ID,
   directoryName: z.string().min(1).max(255),
@@ -2379,6 +2392,17 @@ export const ListPluginsPayload = z.object({
 }).strict();
 export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
 
+export const ListOfferedPluginsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+}).strict();
+export type ListOfferedPluginsPayload = z.infer<typeof ListOfferedPluginsPayload>;
+
+export const AddOfferedPluginPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  directoryName: OFFERED_PLUGIN_DIRECTORY_NAME,
+}).strict();
+export type AddOfferedPluginPayload = z.infer<typeof AddOfferedPluginPayload>;
+
 // A plugin's settings values. Bounded by the same declaration count the
 // manifest allows, because a plugin can never have more settings than it
 // declares — main resolves the stored file against the manifest before this
@@ -2412,6 +2436,18 @@ export const ListPluginsResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
 ]);
 export type ListPluginsResult = z.infer<typeof ListPluginsResult>;
+
+export const ListOfferedPluginsResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), offers: z.array(OfferedPluginRecord) }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type ListOfferedPluginsResult = z.infer<typeof ListOfferedPluginsResult>;
+
+export const AddOfferedPluginResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type AddOfferedPluginResult = z.infer<typeof AddOfferedPluginResult>;
 
 export const PluginActionResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
@@ -4256,6 +4292,10 @@ export interface DohcDesktopBridge {
     listener: (event: PluginWebAppFailedEvent) => void,
   ): () => void;
   listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
+  listOfferedPlugins(
+    payload: ListOfferedPluginsPayload,
+  ): Promise<ListOfferedPluginsResult>;
+  addOfferedPlugin(payload: AddOfferedPluginPayload): Promise<AddOfferedPluginResult>;
   installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;

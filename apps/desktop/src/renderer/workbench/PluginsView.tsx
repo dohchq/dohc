@@ -1,6 +1,9 @@
 import { AlertTriangle, Blocks, Search } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { PluginStatusRecord } from "../../ipc/bridgeContract";
+import type {
+  OfferedPluginRecord,
+  PluginStatusRecord,
+} from "../../ipc/bridgeContract";
 import { EmptyState, SectionLabel } from "../ui/controls";
 import { PluginIcon } from "./PluginIcon";
 import {
@@ -12,6 +15,7 @@ import {
   pluginTitle,
   statusText,
   statusTone,
+  useOfferedPlugins,
   usePluginCatalog,
 } from "./pluginCatalog";
 
@@ -41,6 +45,7 @@ export function PluginsView(props: {
   onOpenDetails: (pluginId: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
+  const offersHook = useOfferedPlugins(props.workspaceId);
   const [filter, setFilter] = useState("");
 
   const plugins = catalog.load.status === "ready" ? catalog.load.plugins : [];
@@ -50,6 +55,10 @@ export function PluginsView(props: {
   );
   const installedPlugins = matched.filter(isInstalled);
   const candidatePlugins = matched.filter((plugin) => !isInstalled(plugin));
+  const offers = useMemo(
+    () => offersHook.offers.filter((offer) => matchesFilter(offer, filter)),
+    [offersHook.offers, filter],
+  );
 
   function renderRow(plugin: PluginStatusRecord) {
     const busyAction = catalog.busy[plugin.id];
@@ -160,6 +169,59 @@ export function PluginsView(props: {
     );
   }
 
+  function renderOfferRow(offer: OfferedPluginRecord) {
+    const busy = offersHook.busyDirectoryName === offer.directoryName;
+    const error = offersHook.errors[offer.directoryName];
+    return (
+      <li key={offer.directoryName} className="list-none">
+        <div
+          data-testid="plugin-offer-row"
+          data-plugin-directory={offer.directoryName}
+          className="flex items-center gap-1 rounded-md pr-1.5"
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-2.5 px-1.5 py-1.5">
+            <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-md border border-line bg-bg text-subtle">
+              <Blocks size={15} strokeWidth={1.9} aria-hidden />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px] font-medium text-ink">
+                {offer.displayName ?? offer.directoryName}
+              </span>
+              {offer.description ? (
+                <span className="mt-0.5 block truncate text-[11px] text-muted">
+                  {offer.description}
+                </span>
+              ) : null}
+              {offer.publisher ? (
+                <span className="mt-0.5 block truncate text-[11px] text-subtle">
+                  {offer.publisher}
+                </span>
+              ) : null}
+            </span>
+          </div>
+          <button
+            type="button"
+            data-testid="plugin-offer-add"
+            disabled={offersHook.busyDirectoryName !== null}
+            onClick={() => offersHook.add(offer)}
+            className={installButton}
+          >
+            {busy ? "Adding" : "Add"}
+          </button>
+        </div>
+        {error ? (
+          <p
+            data-testid="plugin-action-error"
+            role="alert"
+            className="m-0 px-1.5 pb-1 text-[11px] text-danger"
+          >
+            {error}
+          </p>
+        ) : null}
+      </li>
+    );
+  }
+
   return (
     <div data-testid="plugins-view" className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 border-b border-line px-2 py-2">
@@ -196,7 +258,7 @@ export function PluginsView(props: {
             Retry
           </button>
         </div>
-      ) : plugins.length === 0 ? (
+      ) : plugins.length === 0 && offersHook.offers.length === 0 ? (
         <div data-testid="plugins-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
             icon={<Blocks size={22} aria-hidden className="text-line" />}
@@ -204,7 +266,7 @@ export function PluginsView(props: {
             hint="Ask your agent to add a plugin folder under plugins/."
           />
         </div>
-      ) : matched.length === 0 ? (
+      ) : matched.length === 0 && offers.length === 0 ? (
         <div data-testid="plugins-filter-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
             icon={<Blocks size={22} aria-hidden className="text-line" />}
@@ -232,6 +294,21 @@ export function PluginsView(props: {
               </SectionLabel>
               <ul className="m-0 flex list-none flex-col p-0">
                 {candidatePlugins.map(renderRow)}
+              </ul>
+            </section>
+          ) : null}
+          {offers.length > 0 ? (
+            <section
+              data-testid="plugins-section-offered"
+              className={
+                installedPlugins.length > 0 || candidatePlugins.length > 0
+                  ? "mt-4"
+                  : undefined
+              }
+            >
+              <SectionLabel className="block px-2 pb-1">Offered</SectionLabel>
+              <ul className="m-0 flex list-none flex-col p-0">
+                {offers.map(renderOfferRow)}
               </ul>
             </section>
           ) : null}

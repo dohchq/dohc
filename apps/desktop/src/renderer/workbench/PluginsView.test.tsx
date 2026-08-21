@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  OfferedPluginRecord,
   PluginStatusChangedEvent,
   PluginStatusRecord,
 } from "../../ipc/bridgeContract";
@@ -12,6 +13,8 @@ let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
 const bridgeMock = {
   listPlugins: vi.fn(),
+  listOfferedPlugins: vi.fn(),
+  addOfferedPlugin: vi.fn(),
   openPluginWebApp: vi.fn(),
   installPlugin: vi.fn(),
   disablePlugin: vi.fn(),
@@ -105,6 +108,7 @@ beforeEach(() => {
     };
   });
   bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
+  bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers: [] });
 });
 
 afterEach(() => {
@@ -112,6 +116,145 @@ afterEach(() => {
 });
 
 describe("PluginsView", () => {
+  const offers: OfferedPluginRecord[] = [
+    {
+      directoryName: "codex",
+      displayName: "Codex",
+      description: "Runs the Codex CLI on this workspace as a dohc agent.",
+      publisher: "dohc",
+    },
+    {
+      directoryName: "claude-code",
+      displayName: "Claude Code",
+      description: "Runs the Claude Code CLI on this workspace as a dohc agent.",
+      publisher: "dohc",
+    },
+  ];
+
+  it("shows both offered driver plugins when the workspace has no plugins", async () => {
+    bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers });
+
+    renderList();
+
+    const section = await screen.findByTestId("plugins-section-offered");
+    expect(within(section).getAllByTestId("plugin-offer-row")).toHaveLength(2);
+    expect(within(section).getByText("Codex")).toBeTruthy();
+    expect(within(section).getByText("Claude Code")).toBeTruthy();
+  });
+
+  it("drops a stale offer list after switching workspaces", async () => {
+    const oldList = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
+    const newList = deferred<{ ok: true; offers: OfferedPluginRecord[] }>();
+    bridgeMock.listOfferedPlugins.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) =>
+        workspaceId === "ws-old" ? oldList.promise : newList.promise,
+    );
+
+    const view = renderList({ workspaceId: "ws-old" });
+    view.rerender(
+      <PluginsView workspaceId="ws-new" activePluginId={null} onOpenDetails={noop} />,
+    );
+
+    await act(async () => {
+      newList.resolve({ ok: true, offers: [offers[1]] });
+      await newList.promise;
+    });
+    expect(await screen.findByText("Claude Code")).toBeTruthy();
+
+    await act(async () => {
+      oldList.resolve({ ok: true, offers: [offers[0]] });
+      await oldList.promise;
+    });
+    expect(screen.queryByText("Codex")).toBeNull();
+    expect(screen.getByText("Claude Code")).toBeTruthy();
+  });
+
+  it("does not offer a driver plugin already present in the workspace", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("codex")],
+    });
+    bridgeMock.listOfferedPlugins.mockResolvedValue({
+      ok: true,
+      offers: [offers[1]],
+    });
+
+    renderList();
+
+    const section = await screen.findByTestId("plugins-section-offered");
+    expect(within(section).queryByText("Codex")).toBeNull();
+    expect(within(section).getByText("Claude Code")).toBeTruthy();
+  });
+
+  it("adds an offered plugin and removes its row without reloading offers", async () => {
+    bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers });
+    bridgeMock.addOfferedPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("codex", {
+        status: "discovered",
+        runtimeStatus: null,
+        sourceHash: null,
+        approvedHash: null,
+        installedBaselineHash: null,
+      }),
+    });
+
+    renderList();
+    const codexRow = (await screen.findAllByTestId("plugin-offer-row")).find(
+      (row) => row.getAttribute("data-plugin-directory") === "codex",
+    );
+    expect(codexRow).toBeTruthy();
+
+    await userEvent.click(within(codexRow!).getByTestId("plugin-offer-add"));
+
+    expect(bridgeMock.addOfferedPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      directoryName: "codex",
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("plugin-offer-row")?.getAttribute("data-plugin-directory"),
+      ).toBe("claude-code"),
+    );
+    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an Adding state and a named error when Add fails", async () => {
+    const addResult = deferred<{
+      ok: false;
+      error: { stage: "state"; code: string; message: string };
+    }>();
+    bridgeMock.listOfferedPlugins.mockResolvedValue({
+      ok: true,
+      offers: [offers[0]],
+    });
+    bridgeMock.addOfferedPlugin.mockReturnValue(addResult.promise);
+
+    renderList();
+    const addButton = await screen.findByTestId("plugin-offer-add");
+    await userEvent.click(addButton);
+
+    expect(addButton.textContent).toBe("Adding");
+    expect((addButton as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      addResult.resolve({
+        ok: false,
+        error: {
+          stage: "state",
+          code: "pipeline-unavailable",
+          message: "plugins/codex already exists in this workspace.",
+        },
+      });
+      await addResult.promise;
+    });
+
+    expect((await screen.findByTestId("plugin-action-error")).textContent).toBe(
+      "dohc could not add Codex. plugins/codex already exists in this workspace.",
+    );
+    expect(addButton.textContent).toBe("Add");
+  });
+
   it("drops a stale plugin list after switching workspaces", async () => {
     const oldList = deferred<{
       ok: true;

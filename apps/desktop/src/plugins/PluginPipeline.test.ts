@@ -26,6 +26,7 @@ import {
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { addOfferedPlugin } from "./pluginOffers";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
@@ -355,6 +356,76 @@ afterAll(async () => {
 });
 
 describe("PluginPipeline real filesystem lifecycle", () => {
+  it("discovers an added offer unapproved and installs it through the ordinary pipeline", async () => {
+    const sourceFixture = await createPluginWorkspace();
+    const builtinPluginsRoot = join(sourceFixture.root, "builtin-plugins");
+    await cp(sourceFixture.pluginRoot, join(builtinPluginsRoot, "codex"), {
+      recursive: true,
+    });
+
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-pipeline-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(stateDir, { recursive: true });
+
+    await addOfferedPlugin({
+      builtinPluginsRoot,
+      workspaceRoot,
+      directoryName: "codex",
+    });
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.list()).toEqual([
+        expect.objectContaining({
+          id: "example-plugin",
+          directoryName: "codex",
+          status: "discovered",
+          valid: true,
+          approvedHash: null,
+        }),
+      ]);
+
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Added offered plugin did not reach ready after install.",
+      );
+      expect(pipeline.list()[0]).toMatchObject({
+        id: "example-plugin",
+        directoryName: "codex",
+        status: "ready",
+      });
+      expect(pipeline.list()[0]?.approvedHash).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   it("installs, hot reloads with one coalesced follow-up, disables, enables, approves, and uninstalls", async () => {
     const fixture = await createPluginWorkspace();
     const installGate = deferred();
