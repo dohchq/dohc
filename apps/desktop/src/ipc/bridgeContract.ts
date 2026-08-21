@@ -2177,9 +2177,13 @@ export type InvokePluginCommandPayload = z.infer<
 >;
 
 export const InvokePluginCommandResult = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("ok"), result: z.unknown() }).strict(),
+  z.object({ status: z.literal("ok") }).strict(),
   z.object({
     status: z.literal("plugin-not-found"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("plugin-not-running"),
     message: z.string(),
   }).strict(),
   z.object({

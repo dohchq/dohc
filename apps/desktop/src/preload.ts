@@ -173,9 +173,10 @@ const bridge: DohcDesktopBridge = {
     StartPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
     ),
-  invokePluginCommand: (payload: InvokePluginCommandPayload) =>
-    ipcRenderer.invoke(CHANNELS.invokePluginCommand, payload)
-      .then((result) => InvokePluginCommandResult.parse(result)),
+  invokePluginCommand: async (payload: InvokePluginCommandPayload) =>
+    InvokePluginCommandResult.parse(
+      await ipcRenderer.invoke(CHANNELS.invokePluginCommand, payload),
+    ),
   stopPluginPanel: (payload: StopPluginPanelPayload) =>
     ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
   invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>

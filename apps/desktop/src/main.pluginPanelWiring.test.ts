@@ -185,14 +185,23 @@ describe("plugin panel main-process wiring", () => {
   it("routes plugin commands through the declared-command guard", () => {
     const invoke = handler("invokePluginCommand");
     const currentAt = invoke.indexOf("activeWorkspaceIdBySender.get(");
+    const pipelineAt = invoke.indexOf("await ensurePluginPipeline(workspace);");
     const lookupAt = invoke.indexOf("registeredPlugin(");
     const routeAt = invoke.indexOf("invokeRegisteredPluginCommand({");
+    const lockAt = invoke.indexOf("return withPluginHostLifecycleLock(", routeAt);
+    const startAt = invoke.indexOf("ensurePluginStarted(", lockAt);
 
     expect(currentAt).toBeGreaterThan(-1);
-    expect(lookupAt).toBeGreaterThan(currentAt);
+    expect(pipelineAt).toBeGreaterThan(currentAt);
+    expect(lookupAt).toBeGreaterThan(pipelineAt);
     expect(routeAt).toBeGreaterThan(lookupAt);
+    expect(lockAt).toBeGreaterThan(routeAt);
+    expect(startAt).toBeGreaterThan(lockAt);
     expect(invoke).toContain("assertWritableWorkspace(workspace);");
-    expect(invoke).toContain("return ensurePluginStarted(workspace, registration);");
+    expect(invoke).toContain(
+      "pluginLifecycleKey(workspace.workspaceId, input.pluginId)",
+    );
+    expect(invoke).toContain("claim: false");
   });
 
   it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {

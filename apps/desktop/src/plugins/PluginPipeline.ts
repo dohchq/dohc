@@ -811,6 +811,21 @@ export class PluginPipeline {
     });
   }
 
+  private buildFromCurrentSource(
+    pluginId: string,
+    candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+  ): Promise<PluginPipelineActionResult> {
+    const staysDisabled =
+      this.statuses.get(pluginId)?.disabledReason === "user";
+    return this.runFullBuild({
+      candidate,
+      startRuntime: !staysDisabled,
+      disabledReasonAfterBuild: staysDisabled ? "user" : null,
+      resetCrashAccounting: true,
+      freshInstall: false,
+    });
+  }
+
   approve(pluginId: string): Promise<PluginPipelineActionResult> {
     return this.enqueueAction(pluginId, async () => {
       const candidate = this.requireValidCandidate(pluginId);
@@ -818,18 +833,11 @@ export class PluginPipeline {
       // approving new content trusts that content, but must never silently
       // re-enable a plugin the user explicitly turned off before the
       // out-of-band change arrived (#779 round 3 finding 5).
-      const staysDisabled = this.statuses.get(pluginId)?.disabledReason === "user";
-      return this.runFullBuild({
-        candidate,
-        startRuntime: !staysDisabled,
-        disabledReasonAfterBuild: staysDisabled ? "user" : null,
-        resetCrashAccounting: true,
-        freshInstall: false,
-      });
+      return this.buildFromCurrentSource(pluginId, candidate);
     });
   }
 
-  rebuildPlugin(pluginId: string): Promise<PluginPipelineActionResult> {
+  rebuild(pluginId: string): Promise<PluginPipelineActionResult> {
     return this.enqueueAction(pluginId, async () => {
       const candidate = this.requireValidCandidate(pluginId);
       const state = this.statuses.get(pluginId);
@@ -843,14 +851,7 @@ export class PluginPipeline {
           ),
         );
       }
-      const staysDisabled = state.disabledReason === "user";
-      return this.runFullBuild({
-        candidate,
-        startRuntime: !staysDisabled,
-        disabledReasonAfterBuild: staysDisabled ? "user" : null,
-        resetCrashAccounting: true,
-        freshInstall: false,
-      });
+      return this.buildFromCurrentSource(pluginId, candidate);
     });
   }
 

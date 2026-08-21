@@ -18,12 +18,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function invokeRegisteredPluginCommand<
-  TPlugin extends PluginCommandRegistration,
->(options: {
+export async function invokeRegisteredPluginCommand(options: {
   input: InvokePluginCommandPayload;
-  plugin: TPlugin;
-  ensureStarted: (plugin: TPlugin) => Promise<PluginCommandHost>;
+  plugin: PluginCommandRegistration;
+  ensureStarted: () => Promise<PluginCommandHost>;
 }): Promise<InvokePluginCommandResult> {
   const { input, plugin } = options;
   const command = plugin.manifest.commands?.find(
@@ -39,20 +37,20 @@ export async function invokeRegisteredPluginCommand<
 
   let host: PluginCommandHost;
   try {
-    host = await options.ensureStarted(plugin);
+    host = await options.ensureStarted();
   } catch (error) {
     return { status: "command-failed", message: errorMessage(error) };
   }
   if (!host.getSpawnId(input.pluginId)) {
     return {
-      status: "plugin-not-found",
+      status: "plugin-not-running",
       message: `Plugin "${input.pluginId}" has no active process.`,
     };
   }
 
   try {
-    const result = await host.invokeCommand(input.pluginId, input.commandId);
-    return { status: "ok", result };
+    await host.invokeCommand(input.pluginId, input.commandId);
+    return { status: "ok" };
   } catch (error) {
     return { status: "command-failed", message: errorMessage(error) };
   }

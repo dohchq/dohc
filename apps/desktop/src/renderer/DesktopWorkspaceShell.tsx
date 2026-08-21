@@ -1656,8 +1656,6 @@ export function DesktopWorkspaceShell(props: {
   }, [flushStableDrafts]);
 
   const workspaceId = props.workspace.workspaceId;
-  const workspaceIdRef = useRef(workspaceId);
-  workspaceIdRef.current = workspaceId;
   // Set-aside recovery markers (#567): every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them (#579 review, r4). Deliberately NOT part of
@@ -4425,21 +4423,24 @@ export function DesktopWorkspaceShell(props: {
         id: `plugin-command-${entry.pluginId}-${entry.commandId}`,
         label: `${entry.pluginTitle}: ${entry.title}`,
         run: () => {
-          const requestedWorkspaceId = workspaceId;
+          // No staleness guard is needed: DesktopRoot's
+          // key={workspace.workspaceId} remounts this shell on a switch, so
+          // this callback cannot report into the next workspace.
           void bridge()
             .invokePluginCommand({
-              workspaceId: requestedWorkspaceId,
+              workspaceId,
               pluginId: entry.pluginId,
               commandId: entry.commandId,
             })
             .then((outcome) => {
-              if (workspaceIdRef.current !== requestedWorkspaceId) return;
               if (outcome.status !== "ok") {
-                reportShellError(outcome.message, null);
+                reportShellError(
+                  "Could not run the plugin command.",
+                  new Error(outcome.message),
+                );
               }
             })
             .catch((error) => {
-              if (workspaceIdRef.current !== requestedWorkspaceId) return;
               reportShellError(
                 `Could not run plugin command "${entry.title}".`,
                 error,

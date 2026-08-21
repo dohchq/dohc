@@ -103,6 +103,20 @@ async function seedFixtureDatabase(root: string): Promise<void> {
   }
 }
 
+const HELLO_PLUGIN_FIXTURE_COMMANDS: Record<string, readonly string[]> = {
+  hello: ["hello.write"],
+  "use-workspace": ["database.roundTrip", "ui.tryOpen"],
+  "async-throw-after-activate": ["noop"],
+  "grandchild-heartbeat": [],
+  "report-context": ["report.context"],
+  "report-settings": ["report.settings"],
+  "instanced-web-app": ["webapp.running"],
+  "web-app": [],
+  "web-app-pairing": [],
+  "web-app-hang": [],
+  "web-app-bad-result": [],
+};
+
 async function fixtureManifest(
   commandIds?: readonly string[],
 ): Promise<DohcPluginManifest> {
@@ -397,7 +411,7 @@ describe("PluginHost", () => {
 
     await host.start(
       helloPluginRoot,
-      await fixtureManifest(["database.roundTrip", "ui.tryOpen"]),
+      await fixtureManifest(HELLO_PLUGIN_FIXTURE_COMMANDS["use-workspace"]),
     );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
@@ -456,7 +470,7 @@ describe("PluginHost", () => {
 
     await host.start(
       helloPluginRoot,
-      await fixtureManifest(["database.roundTrip", "ui.tryOpen"]),
+      await fixtureManifest(HELLO_PLUGIN_FIXTURE_COMMANDS["use-workspace"]),
     );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
@@ -938,7 +952,12 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest(["noop"]));
+    await host.start(
+      helloPluginRoot,
+      await fixtureManifest(
+        HELLO_PLUGIN_FIXTURE_COMMANDS["async-throw-after-activate"],
+      ),
+    );
     await waitFor(
       () => statuses.includes("ready"),
       "Plugin did not become ready before the asynchronous error.",
@@ -2215,7 +2234,12 @@ describe("PluginHost", () => {
     });
     const heartbeatPath = join(root, "grandchild-heartbeat.txt");
 
-    await host.start(helloPluginRoot, await fixtureManifest([]));
+    await host.start(
+      helloPluginRoot,
+      await fixtureManifest(
+        HELLO_PLUGIN_FIXTURE_COMMANDS["grandchild-heartbeat"],
+      ),
+    );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Heartbeat plugin did not become ready.",
@@ -2400,7 +2424,7 @@ describe("PluginHost web apps", () => {
     });
     await host.start(
       helloPluginRoot,
-      await webAppManifest(options.mode === "hello" ? ["hello.write"] : []),
+      await webAppManifest(HELLO_PLUGIN_FIXTURE_COMMANDS[options.mode]),
     );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
@@ -2524,7 +2548,7 @@ describe("PluginHost web apps", () => {
     });
     await host.start(
       helloPluginRoot,
-      await fixtureManifest(["report.context"]),
+      await fixtureManifest(HELLO_PLUGIN_FIXTURE_COMMANDS["report-context"]),
     );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
@@ -2556,7 +2580,7 @@ describe("PluginHost web apps", () => {
     });
     await host.start(
       helloPluginRoot,
-      await fixtureManifest(["report.settings"]),
+      await fixtureManifest(HELLO_PLUGIN_FIXTURE_COMMANDS["report-settings"]),
     );
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
@@ -2625,7 +2649,9 @@ describe("PluginHost web apps", () => {
 describe("PluginHost instanced web apps", () => {
   async function instancedManifest(): Promise<DohcPluginManifest> {
     return {
-      ...(await fixtureManifest(["webapp.running"])),
+      ...(await fixtureManifest(
+        HELLO_PLUGIN_FIXTURE_COMMANDS["instanced-web-app"],
+      )),
       webApps: [
         { id: "preview", title: "Preview", instanced: true },
         { id: "main-app", title: "Hello App", instanced: false },

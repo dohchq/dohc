@@ -21,7 +21,6 @@ export interface PluginCommandEntry {
   commandId: string;
   title: string;
   pluginTitle: string;
-  plugin: PluginStatusRecord;
 }
 
 /** Every view the rail shows, in plugin order, then manifest order. */
@@ -58,7 +57,6 @@ export function pluginCommandEntries(
         commandId: command.id,
         title: command.title,
         pluginTitle: pluginTitle(plugin),
-        plugin,
       });
     }
   }

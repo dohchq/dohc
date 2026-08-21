@@ -70,9 +70,9 @@ export type PluginPanelHostStartResult =
   | { ok: false; error: { message: string } };
 
 /**
- * Starts a plugin because a panel or a web app needs it, and records the
- * surface's claim on the host's lifetime. It returns when the plugin can
- * serve the surface's own start call, and throws the reason it cannot.
+ * Starts a plugin because a caller needs it. Panel and web-app callers record
+ * a claim on the host's lifetime. Other callers can opt out when the host
+ * should live for the workspace instead.
  *
  * Returning on a spawned-but-still-activating host is what made a cold open
  * fail: the surface's next call reached the plugin before `activate()`
@@ -91,6 +91,7 @@ export async function startPluginForPanel(input: {
   panelStartedHosts: Set<string>;
   workspaceId: string;
   pluginId: string;
+  claim?: boolean;
   /** The running host's activation, or undefined when no host is running. */
   hostActivation: () => Promise<void> | undefined;
   ensureStarted: () => Promise<PluginPanelHostStartResult>;
@@ -99,7 +100,7 @@ export async function startPluginForPanel(input: {
   if (running) return running;
   const result = await input.ensureStarted();
   if (!result.ok) throw new Error(result.error.message);
-  if (result.startedHost) {
+  if (result.startedHost && input.claim !== false) {
     input.panelStartedHosts.add(
       pluginLifecycleKey(input.workspaceId, input.pluginId),
     );

@@ -1165,7 +1165,6 @@ describe("plugin activity-bar views", () => {
   it("invokes a plugin command from the command palette", async () => {
     const invokePluginCommand = vi.fn(async () => ({
       status: "ok" as const,
-      result: null,
     }));
     const bridge = Object.assign(
       withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {

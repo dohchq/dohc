@@ -8,7 +8,7 @@ const input = {
 };
 
 describe("invokeRegisteredPluginCommand", () => {
-  it("returns the result from a declared, registered plugin command", async () => {
+  it("invokes a declared, registered plugin command", async () => {
     const invokeCommand = vi.fn(async () => ({ written: "hello.txt" }));
     const host = {
       getSpawnId: vi.fn(() => "spawn-1"),
@@ -26,10 +26,8 @@ describe("invokeRegisteredPluginCommand", () => {
         },
         ensureStarted,
       }),
-    ).resolves.toEqual({
-      status: "ok",
-      result: { written: "hello.txt" },
-    });
+    ).resolves.toEqual({ status: "ok" });
+    expect(ensureStarted).toHaveBeenCalledWith();
     expect(invokeCommand).toHaveBeenCalledWith("hello-plugin", "hello.write");
   });
 
@@ -56,5 +54,78 @@ describe("invokeRegisteredPluginCommand", () => {
     });
     expect(ensureStarted).not.toHaveBeenCalled();
     expect(invokeCommand).not.toHaveBeenCalled();
+  });
+
+  it("reports a start failure without invoking the plugin", async () => {
+    const invokeCommand = vi.fn(async () => null);
+    const ensureStarted = vi.fn(async () => {
+      throw new Error("Plugin build failed.");
+    });
+
+    await expect(
+      invokeRegisteredPluginCommand({
+        input,
+        plugin: {
+          manifest: {
+            commands: [{ id: "hello.write", title: "Write hello note" }],
+          },
+        },
+        ensureStarted,
+      }),
+    ).resolves.toEqual({
+      status: "command-failed",
+      message: "Plugin build failed.",
+    });
+    expect(invokeCommand).not.toHaveBeenCalled();
+  });
+
+  it("reports a started plugin with no live process", async () => {
+    const invokeCommand = vi.fn(async () => null);
+    const ensureStarted = vi.fn(async () => ({
+      getSpawnId: vi.fn(() => undefined),
+      invokeCommand,
+    }));
+
+    await expect(
+      invokeRegisteredPluginCommand({
+        input,
+        plugin: {
+          manifest: {
+            commands: [{ id: "hello.write", title: "Write hello note" }],
+          },
+        },
+        ensureStarted,
+      }),
+    ).resolves.toEqual({
+      status: "plugin-not-running",
+      message: 'Plugin "hello-plugin" has no active process.',
+    });
+    expect(invokeCommand).not.toHaveBeenCalled();
+  });
+
+  it("reports a command invocation failure", async () => {
+    const invokeCommand = vi.fn(async () => {
+      throw new Error("Command handler failed.");
+    });
+    const ensureStarted = vi.fn(async () => ({
+      getSpawnId: vi.fn(() => "spawn-1"),
+      invokeCommand,
+    }));
+
+    await expect(
+      invokeRegisteredPluginCommand({
+        input,
+        plugin: {
+          manifest: {
+            commands: [{ id: "hello.write", title: "Write hello note" }],
+          },
+        },
+        ensureStarted,
+      }),
+    ).resolves.toEqual({
+      status: "command-failed",
+      message: "Command handler failed.",
+    });
+    expect(invokeCommand).toHaveBeenCalledWith("hello-plugin", "hello.write");
   });
 });

@@ -2764,7 +2764,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       try {
         await setup.failEstablishedBuild();
 
-        const rebuilt = await setup.pipeline.rebuildPlugin("example-plugin");
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
 
         expect(rebuilt.ok).toBe(true);
         await waitFor(
@@ -2783,7 +2783,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         const approvedHash = setup.pipeline.list()[0]?.approvedHash;
         setup.failNextBuildPublish();
 
-        const rebuilt = await setup.pipeline.rebuildPlugin("example-plugin");
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
 
         expect(rebuilt.ok).toBe(false);
         expect(setup.pipeline.list()[0]).toMatchObject({
@@ -2802,7 +2802,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         const buildsBefore = setup.buildCalls();
         const statusesBefore = setup.statuses.length;
 
-        const rebuilt = await setup.pipeline.rebuildPlugin("example-plugin");
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
         expect(rebuilt).toMatchObject({

@@ -478,7 +478,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
       await until(
         () =>
           fixture.pluginStderr().find((line) =>
-            line.includes("did not register the driver ids")),
+            line.includes('did not register driver id "fixture-harness"')),
         `the activation failure (${fixture.pluginStderr().join(" | ")})`,
       );
       expect(fixture.host.getStatus("driver-plugin")).toBe("failed");
@@ -507,7 +507,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
       await until(
         () =>
           fixture.pluginStderr().find((line) =>
-            line.includes("its manifest does not declare: surprise-harness")),
+            line.includes('registered driver id "surprise-harness" that its manifest does not declare')),
         `the activation failure (${fixture.pluginStderr().join(" | ")})`,
       );
       expect(fixture.drivers.list()).toEqual([]);

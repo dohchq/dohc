@@ -314,6 +314,26 @@ describe("plugin panel registration", () => {
     ]);
   });
 
+  it("does not claim a host started for a plugin command", async () => {
+    const panelStartedHosts = new Set<string>();
+    let running = false;
+
+    await startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      claim: false,
+      hostActivation: () => (running ? Promise.resolve() : undefined),
+      ensureStarted: async () => {
+        running = true;
+        return { ok: true, startedHost: true };
+      },
+    });
+
+    expect(running).toBe(true);
+    expect(panelStartedHosts.size).toBe(0);
+  });
+
   it("reports a refused start instead of claiming the host", async () => {
     const panelStartedHosts = new Set<string>();
 

@@ -2893,12 +2893,14 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
 async function ensurePluginStarted(
   workspace: CreatedWorkspace,
   plugin: RegisteredPlugin,
+  options: { claim?: boolean } = {},
 ): Promise<PluginHost> {
   const pipeline = await ensurePluginPipeline(workspace);
   await startPluginForPanel({
     panelStartedHosts,
     workspaceId: workspace.workspaceId,
     pluginId: plugin.manifest.name,
+    claim: options.claim,
     hostActivation: () => pipeline.host.activationOf(plugin.manifest.name),
     ensureStarted: () => pipeline.ensureStarted(plugin.manifest.name),
   });
@@ -6760,7 +6762,7 @@ function registerIpcHandlers(
         "The plugin command request does not target the active workspace. Open the workspace and try again.",
       );
     }
-    await activePluginPipelineFor(event, input.workspaceId);
+    await ensurePluginPipeline(workspace);
     assertWritableWorkspace(workspace);
     const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
     if (!plugin) {
@@ -6773,14 +6775,17 @@ function registerIpcHandlers(
       await invokeRegisteredPluginCommand({
         input,
         plugin,
-        ensureStarted: async (registration) => {
+        ensureStarted: async () => {
           if (!isCurrent()) {
             throw new Error(
               "The plugin command request was cancelled because the renderer changed.",
             );
           }
           assertWritableWorkspace(workspace);
-          return ensurePluginStarted(workspace, registration);
+          return withPluginHostLifecycleLock(
+            pluginLifecycleKey(workspace.workspaceId, input.pluginId),
+            () => ensurePluginStarted(workspace, plugin, { claim: false }),
+          );
         },
       }),
     );
@@ -7261,7 +7266,7 @@ function registerIpcHandlers(
   pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
     pipeline.approve(pluginId));
   pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId) =>
-    pipeline.rebuildPlugin(pluginId));
+    pipeline.rebuild(pluginId));
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);
