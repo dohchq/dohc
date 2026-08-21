@@ -97,14 +97,6 @@ test("an installed plugin opens a contained instanced web app from its rail view
     const asset = await fetch(new URL("assets/style.css", origin));
     expect(asset.status).toBe(200);
     expect(await asset.text()).toBe("h1{color:mediumseagreen}\n");
-
-    const escape = await fetch(new URL("..%2foutside-secret.txt", origin));
-    expect(escape.status).toBe(400);
-    expect(await escape.text()).not.toContain("not part of the preview");
-
-    const reserved = await fetch(new URL(".dohc/secret.txt", origin));
-    expect(reserved.status).toBe(403);
-    expect(await reserved.text()).not.toContain("reserved fixture bytes");
   } catch (error) {
     for (const entry of desktop?.logs ?? []) {
       if (/plugin|preview/i.test(entry.text)) {

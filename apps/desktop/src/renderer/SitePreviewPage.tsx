@@ -10,6 +10,7 @@ import {
   Share2,
   Square,
 } from "lucide-react";
+import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton } from "./ui/controls";
 import type {
@@ -46,11 +47,11 @@ function availableModes(
   sharedView = false,
 ): SitePreviewMode[] {
   const modes: SitePreviewMode[] = [];
-  const sharedStaticEntry = presentBuildOutput(site) ??
-    (!needsBuiltArtifact(site)
-      ? site.entryPath
-      : null);
   if (sharedView || site.authority.kind === "share") {
+    const sharedStaticEntry = presentBuildOutput(site) ??
+      (!needsBuiltArtifact(site)
+        ? site.entryPath
+        : null);
     return sharedStaticEntry ? ["static"] : [];
   }
   if (site.entryPath) modes.push("static");
@@ -113,29 +114,6 @@ function preferredMode(
 export interface SiteShareTarget {
   paths: string[];
   label: string;
-}
-
-function presentBuildOutput(site: SitePackageInfo): string | null {
-  for (const output of site.buildOutputs) {
-    const entry = site.root === "."
-      ? `${output}/index.html`
-      : `${site.root}/${output}/index.html`;
-    if (site.sourceFiles.includes(entry)) return output;
-  }
-  return null;
-}
-
-function needsBuiltArtifact(site: SitePackageInfo): boolean {
-  return Boolean(
-    site.scripts.dev ||
-    site.scripts.start ||
-    site.scripts.build ||
-    site.configuredScripts?.dev ||
-    site.configuredScripts?.start ||
-    site.configuredScripts?.build ||
-    site.configuredScripts?.preview ||
-    site.buildOutputs.length > 0
-  );
 }
 
 /** Produces a relay selector containing the runnable browser artifact only. */
@@ -273,7 +251,7 @@ export function SitePreviewPage(props: {
       ) {
         if (!latest.scripts.build) {
           if (isCurrent()) {
-            setActionError("This package needs a static build before it can be shared.");
+            setActionError("This site needs a static build before it can be shared.");
           }
           return;
         }
@@ -289,9 +267,14 @@ export function SitePreviewPage(props: {
       }
       if (!target) {
         if (isCurrent()) {
+          const fileCount = latest.shareManifest
+            ? 1 + latest.shareManifest.assets.length
+            : 0;
           setActionError(
-            latest.root === "."
-              ? "This root site has too many or no identifiable browser assets. Move it into its own folder before sharing."
+            fileCount > 100
+              ? latest.root === "."
+                ? "This workspace root has more than 100 browser files, more than sharing allows. Move the site into its own folder first."
+                : "This site has more than 100 browser files, more than sharing allows."
               : "This site does not have a runnable static artifact to share.",
           );
         }
@@ -470,7 +453,7 @@ export function SitePreviewPage(props: {
 
       {load.status === "loading" ? (
         <div className="flex flex-1 items-center justify-center text-sm text-subtle">
-          Loading site...
+          Loading site…
         </div>
       ) : load.status === "missing" ? (
         <EmptyState title="Site not detected" body="The folder no longer looks like a website." />
@@ -487,7 +470,9 @@ export function SitePreviewPage(props: {
                 >
                   <AlertTriangle size={12} aria-hidden />
                   <span className="font-mono">{diagnostic.code}</span>
-                  <span>{diagnostic.message}</span>
+                  <span>
+                    {diagnostic.message || "Could not check this site fully."}
+                  </span>
                 </div>
               ))}
               {actionError ? (
@@ -499,36 +484,38 @@ export function SitePreviewPage(props: {
             </div>
           ) : null}
 
-          {preview ? (
-            !previewUrlAllowed ? (
-              <div data-testid="site-preview-error" className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger">
-                Preview URL must be an unauthenticated loopback HTTP URL.
-              </div>
-            ) : (
-              <div className="flex min-h-0 flex-1 flex-col">
-                {/* The frame can run normal site scripts but has no dohc bridge.
-                    Its source is restricted to a dohc-controlled loopback server,
-                    and the sandbox withholds popups, modals, and top navigation. */}
-                <iframe
-                  key={preview.url}
-                  data-testid="site-preview-frame"
-                  title={site.title}
-                  src={preview.url}
-                  sandbox="allow-forms allow-same-origin allow-scripts"
-                  referrerPolicy="no-referrer"
-                  className="min-h-0 flex-1 border-0 bg-bg"
-                />
-                {preview.logs.length > 0 ? (
-                  <details className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]">
-                    <summary className="cursor-pointer text-muted">Logs</summary>
-                    <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
-                      {preview.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
-                    </pre>
-                  </details>
-                ) : null}
-              </div>
-            )
-          ) : (
+          {preview && !previewUrlAllowed ? (
+            <div data-testid="site-preview-error" className="border-b border-line bg-panel px-4 py-2 text-[12px] text-danger">
+              This site tried to preview from an address dohc does not trust. Reload the preview.
+            </div>
+          ) : null}
+
+          {preview && previewUrlAllowed ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              {/* The frame can run normal site scripts but has no dohc bridge.
+                  Its source is restricted to a dohc-controlled loopback server,
+                  and the sandbox withholds popups, modals, and top navigation. */}
+              <iframe
+                key={preview.url}
+                data-testid="site-preview-frame"
+                title={site.title}
+                src={preview.url}
+                sandbox="allow-forms allow-same-origin allow-scripts"
+                referrerPolicy="no-referrer"
+                className="min-h-0 flex-1 border-0 bg-bg"
+              />
+              {preview.logs.length > 0 ? (
+                <details className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]">
+                  <summary className="cursor-pointer text-muted">Logs</summary>
+                  <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
+                    {preview.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+                  </pre>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
+
+          {!preview ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
               <Globe2 size={24} aria-hidden className="text-subtle" />
               <div className="max-w-sm text-sm text-muted">
@@ -536,12 +523,12 @@ export function SitePreviewPage(props: {
                   ? stoppedByUser
                     ? "Preview stopped. Use Preview options to run it again."
                     : runningMode
-                    ? `Starting ${modeLabel(runningMode).toLowerCase()} preview...`
+                    ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
                     : "This site did not start automatically. Choose another mode in Preview options."
                   : "This site has no previewable entry, dev script, or build output yet."}
               </div>
             </div>
-          )}
+          ) : null}
         </>
       ) : null}
     </div>

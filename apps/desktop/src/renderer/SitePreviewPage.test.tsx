@@ -19,6 +19,7 @@ const site: SitePackageInfo = {
   packagePath: null,
   packageManager: null,
   scripts: {},
+  configuredScripts: {},
   buildOutputs: [],
   sourceFiles: ["report/index.html"],
   shareManifest: { entryPath: "report/index.html", assets: [] },
@@ -533,7 +534,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
+    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
     expect(screen.queryByTestId("site-preview-reload")).toBeNull();
     expect(screen.queryByTestId("site-preview-open-external")).toBeNull();
@@ -551,7 +552,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
+    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
@@ -566,7 +567,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("Preview URL must be an unauthenticated loopback HTTP URL.")).toBeTruthy();
+    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 

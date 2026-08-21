@@ -3,16 +3,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
 import {
-  discoverSiteRoots,
   getSitePackage,
   listSitePackages,
   sharedStaticEntryRelativeToSite,
   shareMountRootForSite,
   staticPreviewTargetForSite,
 } from "./sitePackage";
-import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { startStaticSitePreview } from "./siteRunner";
-import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
 let root: string;
 
@@ -22,36 +19,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
-});
-
-function file(path: string): WorkspaceFileEntry {
-  return { path, kind: "file" };
-}
-
-describe("discoverSiteRoots", () => {
-  it("detects normal website roots from standard web signals", () => {
-    expect(
-      discoverSiteRoots(
-        [
-          file("report/index.html"),
-          file("dash/package.json"),
-          file("dash/vite.config.ts"),
-          file("portal/vite.config.ts"),
-          file(`${SHARED_WITH_ME_FOLDER}/alex/portal/index.html`),
-          file("notes/today.md"),
-          file("dohc.json"),
-        ],
-        ["built/dist", "plain"],
-      ),
-    ).toEqual([
-      ".",
-      "built",
-      "dash",
-      "portal",
-      "report",
-      `${SHARED_WITH_ME_FOLDER}/alex/portal`,
-    ]);
-  });
 });
 
 describe("shareMountRootForSite", () => {

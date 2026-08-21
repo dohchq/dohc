@@ -1,6 +1,6 @@
 import { Check, Copy, Share2, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { ShareAccess } from "../ipc/bridgeContract";
+import type { CreateRelaySharePayload, ShareAccess } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { IconButton, PrimaryButton } from "./ui/controls";
 
@@ -10,8 +10,7 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 // and addresses it.
 
 export interface RelayShareTarget {
-  path?: string;
-  paths?: string[];
+  paths: string[];
   label?: string;
   versionId?: string;
   versionName?: string;
@@ -65,7 +64,7 @@ export function RelayShareDialog(props: {
 
   const subject = props.target.versionId
     ? `version “${props.target.versionName ?? props.target.versionId}”`
-    : (props.target.label ?? props.target.path ?? "this selection");
+    : (props.target.label ?? props.target.paths[0] ?? "this selection");
 
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
 
@@ -74,17 +73,14 @@ export function RelayShareDialog(props: {
     setBusy(true);
     setError(null);
     try {
-      const result = await bridge().createRelayShare({
+      const payload: CreateRelaySharePayload = {
         workspaceId: props.workspaceId,
         recipientEmail: email.trim(),
         access,
-        ...(props.target.paths
-          ? { paths: props.target.paths }
-          : props.target.path
-            ? { paths: [props.target.path] }
-            : {}),
         ...(props.target.versionId ? { versionId: props.target.versionId } : {}),
-      });
+      };
+      if (props.target.paths.length > 0) payload.paths = props.target.paths;
+      const result = await bridge().createRelayShare(payload);
       setCreated({ shareCode: result.shareCode, recipientEmail: result.recipientEmail });
     } catch (cause) {
       setError(errorMessage(cause));

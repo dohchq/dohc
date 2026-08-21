@@ -662,7 +662,7 @@ export function SettingsDialog(props: {
           <div data-testid="settings-section-workbench">
             <SettingRow
               title="Site previews"
-              description="Choose the mode Sites tries first when a site has no saved preview mode."
+              description="Choose the mode Sites tries first when a site has no preview mode of its own."
               modified={isModified(
                 workspaceSettings.sites.defaultPreviewMode,
                 DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,

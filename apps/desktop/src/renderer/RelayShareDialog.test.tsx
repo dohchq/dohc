@@ -33,7 +33,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -61,7 +61,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ versionId: "version-7", versionName: "review" }}
+        target={{ paths: [], versionId: "version-7", versionName: "review" }}
         onClose={() => {}}
       />,
     );
@@ -84,7 +84,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -135,7 +135,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -148,7 +148,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -187,7 +187,7 @@ describe("RelayShareDialog", () => {
     );
     const user = userEvent.setup();
     render(
-      <RelayShareDialog workspaceId="ws-1" target={{ path: ".env" }} onClose={() => {}} />,
+      <RelayShareDialog workspaceId="ws-1" target={{ paths: [".env"] }} onClose={() => {}} />,
     );
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));

@@ -15,44 +15,7 @@ type SitesLoadState =
   | { status: "ready"; sites: SitePackageInfo[] }
   | { status: "error"; message: string };
 
-function staticSiteFromFiles(files: WorkspaceFileEntry[]): SitePackageInfo[] {
-  return files
-    .filter((file) => file.path.endsWith("/index.html") || file.path === "index.html")
-    .map((file) => {
-      const root = file.path === "index.html" ? "." : file.path.slice(0, -"/index.html".length);
-      const title =
-        root === "." || root === ""
-          ? "Workspace Site"
-          : (root.split("/").at(-1) ?? root)
-              .replace(/[-_]+/g, " ")
-              .replace(/\b\w/g, (letter) => letter.toUpperCase());
-      return {
-        root,
-        title,
-        kind: "static" as const,
-        confidence: "high" as const,
-        entryPath: file.path,
-        configPath: null,
-        packagePath: null,
-        packageManager: null,
-        scripts: {},
-        buildOutputs: [],
-        sourceFiles: [file.path],
-        // File-list fallback is not the authoritative packaging layer and
-        // therefore must never invent a relay sharing scope.
-        shareManifest: null,
-        diagnostics: [],
-        authority: root.startsWith("shared-with-me/")
-          ? {
-              kind: "share" as const,
-              mountRoot: root.split("/").slice(0, 2).join("/"),
-            }
-          : { kind: "workspace" as const },
-      };
-    });
-}
-
-function useSites(workspaceId: string, files: WorkspaceFileEntry[], refreshKey = 0): SitesLoadState {
+function useSites(workspaceId: string, refreshKey = 0): SitesLoadState {
   const [state, setState] = useState<SitesLoadState>({ status: "loading" });
 
   useEffect(() => {
@@ -76,9 +39,6 @@ function useSites(workspaceId: string, files: WorkspaceFileEntry[], refreshKey =
     };
   }, [workspaceId, refreshKey]);
 
-  if (state.status === "loading" && files.length > 0) {
-    return { status: "ready", sites: staticSiteFromFiles(files) };
-  }
   return state;
 }
 
@@ -88,7 +48,7 @@ function siteDiagnosticLabel(site: SitePackageInfo): string | null {
     site.diagnostics[0];
   if (!diagnostic) return null;
   const prefix = diagnostic.severity === "error" ? "Error" : "Warning";
-  const detail = diagnostic.message ?? diagnostic.code;
+  const detail = diagnostic.message || "Could not check this site fully.";
   return diagnostic.path ? `${prefix}: ${detail} (${diagnostic.path})` : `${prefix}: ${detail}`;
 }
 
@@ -98,7 +58,7 @@ export function SitesView(props: {
   refreshKey?: number;
   onOpenPath: (path: string) => void;
 }) {
-  const state = useSites(props.workspaceId, props.files, props.refreshKey);
+  const state = useSites(props.workspaceId, props.refreshKey);
   const sites = state.status === "ready" ? state.sites : [];
 
   return (
@@ -112,7 +72,7 @@ export function SitesView(props: {
 
       {state.status === "loading" ? (
         <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-          Loading sites...
+          Loading sites…
         </div>
       ) : state.status === "error" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
@@ -124,7 +84,7 @@ export function SitesView(props: {
           <Globe2 size={18} aria-hidden className="text-subtle" />
           <span className="text-xs font-medium text-ink">No sites yet</span>
           <span className="max-w-52 text-xs leading-relaxed text-muted">
-            Ask your agent to create a site for this workspace.
+            Add a folder with an index.html file, and it shows up here.
           </span>
         </div>
       ) : (

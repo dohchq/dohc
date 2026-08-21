@@ -12,18 +12,6 @@ export function assertActiveWorkspaceForSitePreviewStop(
   );
 }
 
-export async function stopSitePreviewForActiveWorkspace(input: {
-  activeWorkspaceId: () => string | undefined;
-  workspaceId: string;
-  stop: () => Promise<void>;
-}): Promise<void> {
-  assertActiveWorkspaceForSitePreviewStop(
-    input.activeWorkspaceId(),
-    input.workspaceId,
-  );
-  await input.stop();
-}
-
 function previewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
 }

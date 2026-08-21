@@ -19,8 +19,8 @@ import {
   isAllowedLoopbackFrameUrl,
 } from "../window/createMainWindow";
 import {
+  assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
-  stopSitePreviewForActiveWorkspace,
 } from "./sitePreviewLifecycle";
 import type { SiteProcessHandle } from "./siteRunner";
 
@@ -146,13 +146,10 @@ describe("site preview lifecycle", () => {
       releaseLock = resolve;
     });
     const stop = vi.fn(async () => undefined);
-    const queuedStop = lock.then(() =>
-      stopSitePreviewForActiveWorkspace({
-        activeWorkspaceId: () => activeWorkspaceId,
-        workspaceId: "workspace-1",
-        stop,
-      }),
-    );
+    const queuedStop = lock.then(async () => {
+      assertActiveWorkspaceForSitePreviewStop(activeWorkspaceId, "workspace-1");
+      await stop();
+    });
 
     activeWorkspaceId = "workspace-2";
     releaseLock();

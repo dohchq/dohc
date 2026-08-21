@@ -17,7 +17,6 @@ import {
   buildSite,
   detectBuildOutput,
   detectDevUrl,
-  detectPackageManager,
   packageManagerCommand,
   splitCommandLine,
   startSiteDevServer,
@@ -95,11 +94,7 @@ describe("startStaticSitePreview", () => {
 });
 
 describe("package manager helpers", () => {
-  it("detects package managers from lockfiles and produces script commands", () => {
-    expect(detectPackageManager(["site/pnpm-lock.yaml"])).toBe("pnpm");
-    expect(detectPackageManager(["site/bun.lock"])).toBe("bun");
-    expect(detectPackageManager(["site/yarn.lock"])).toBe("yarn");
-    expect(detectPackageManager(["site/package-lock.json"])).toBe("npm");
+  it("produces script commands", () => {
     expect(packageManagerCommand("pnpm", "dev")).toEqual({ command: "pnpm", args: ["dev"] });
     expect(packageManagerCommand("npm", "build")).toEqual({ command: "npm", args: ["run", "build"] });
   });

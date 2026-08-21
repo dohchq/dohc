@@ -9,6 +9,37 @@ export interface SiteScripts {
   preview?: string;
 }
 
+export interface SitePackageDerivedFactsInput {
+  root: string;
+  buildOutputs: readonly string[];
+  sourceFiles: readonly string[];
+  scripts: SiteScripts;
+  configuredScripts: SiteScripts;
+}
+
+export function presentBuildOutput(site: SitePackageDerivedFactsInput): string | null {
+  for (const output of site.buildOutputs) {
+    const entry = site.root === "."
+      ? `${output}/index.html`
+      : `${site.root}/${output}/index.html`;
+    if (site.sourceFiles.includes(entry)) return output;
+  }
+  return null;
+}
+
+export function needsBuiltArtifact(site: SitePackageDerivedFactsInput): boolean {
+  return Boolean(
+    site.scripts.dev ||
+    site.scripts.start ||
+    site.scripts.build ||
+    site.configuredScripts.dev ||
+    site.configuredScripts.start ||
+    site.configuredScripts.build ||
+    site.configuredScripts.preview ||
+    site.buildOutputs.length > 0
+  );
+}
+
 export interface SiteDiagnostic {
   path: string;
   severity: "warning" | "error";

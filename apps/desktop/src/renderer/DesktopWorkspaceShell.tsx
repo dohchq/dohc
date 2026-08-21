@@ -1360,7 +1360,7 @@ function InvalidSitePathFallback({
   useEffect(() => {
     console.error("[desktop] invalid site tab path", {
       activeTab,
-      detail: "active tab matched site tab format but activeSiteRoot parsed to null",
+      detail: "active tab matched site tab format but groupSiteRoot parsed to null",
     });
     onClose();
   }, [activeTab, onClose]);
@@ -1432,10 +1432,9 @@ export function DesktopWorkspaceShell(props: {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [agentSetup, setAgentSetup] = useState<AgentSetupSummary | null>(null);
   const agentSetupRequestRef = useRef(0);
-  // Relay-share dialog target (PR 18): one path, multiple paths, or a version.
+  // Relay-share dialog target (PR 18): paths, or a version with an empty path list.
   const [shareTarget, setShareTarget] = useState<{
-    path?: string;
-    paths?: string[];
+    paths: string[];
     label?: string;
     versionId?: string;
     versionName?: string;
@@ -4873,7 +4872,7 @@ export function DesktopWorkspaceShell(props: {
         shareView={shareView}
         onRefreshShareMounts={() => void refreshShareMounts(true)}
         onUnmountShare={(path) => void unmountShare(path)}
-        onShare={(path) => setShareTarget({ path })}
+        onShare={(path) => setShareTarget({ paths: [path] })}
         onRefresh={() =>
           void refreshFiles().catch((error) =>
             reportShellError("Could not refresh workspace files.", error),
@@ -5361,6 +5360,7 @@ export function DesktopWorkspaceShell(props: {
                     : {
                         onShareVersion: (version: { id: string; name: string }) =>
                           setShareTarget({
+                            paths: [],
                             versionId: version.id,
                             versionName: version.name,
                           }),
@@ -5761,7 +5761,7 @@ export function DesktopWorkspaceShell(props: {
                 }
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
-                  : { onSharePath: (path: string) => setShareTarget({ path }) })}
+                  : { onSharePath: (path: string) => setShareTarget({ paths: [path] }) })}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">

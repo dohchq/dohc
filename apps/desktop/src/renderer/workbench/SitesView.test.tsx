@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { SitesView } from "./SitesView";
 import { siteTabPath } from "./workbenchState";
 
@@ -16,6 +16,7 @@ const site: SitePackageInfo = {
   packagePath: "client-portal/package.json",
   packageManager: "pnpm",
   scripts: { dev: "vite", build: "vite build" },
+  configuredScripts: {},
   buildOutputs: ["dist"],
   sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
   shareManifest: null,
@@ -26,10 +27,6 @@ const site: SitePackageInfo = {
 const bridgeMock = {
   listSites: vi.fn(async () => ({ sites: [site] })),
 };
-
-function file(path: string): WorkspaceFileEntry {
-  return { path, kind: "file" };
-}
 
 describe("SitesView", () => {
   beforeEach(() => {
@@ -61,31 +58,19 @@ describe("SitesView", () => {
     expect(onOpenPath).toHaveBeenCalledWith(siteTabPath("client-portal"));
   });
 
-  it("falls back to static file detection while IPC is loading", async () => {
+  it("does not fabricate sites from files while IPC is loading", () => {
     bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[file("report/index.html")]}
+        files={[{ path: "report/index.html", kind: "file" }]}
         onOpenPath={vi.fn()}
       />,
     );
 
-    await waitFor(() => expect(screen.getByText("Report")).toBeTruthy());
-    expect(screen.getByTestId("sites-count").textContent).toContain("1 site");
-  });
-
-  it("uses a default title for root-level static detection", async () => {
-    bridgeMock.listSites.mockImplementationOnce(() => new Promise(() => undefined));
-    render(
-      <SitesView
-        workspaceId="ws-sites"
-        files={[file("index.html")]}
-        onOpenPath={vi.fn()}
-      />,
-    );
-
-    await waitFor(() => expect(screen.getByText("Workspace Site")).toBeTruthy());
+    expect(screen.queryByText("Report")).toBeNull();
+    expect(screen.queryByTestId("sites-row")).toBeNull();
+    expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
   });
 
   it("renders the IPC error state", async () => {
@@ -113,7 +98,9 @@ describe("SitesView", () => {
     );
 
     expect(await screen.findByText("No sites yet")).toBeTruthy();
-    expect(screen.getByText("Ask your agent to create a site for this workspace.")).toBeTruthy();
+    expect(
+      screen.getByText("Add a folder with an index.html file, and it shows up here."),
+    ).toBeTruthy();
     expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
   });
 

@@ -2,7 +2,9 @@ import {
   discoverSites,
   hasIgnoredSegment,
   isSharedWithMePath,
+  needsBuiltArtifact,
   parseDohcSiteConfig,
+  presentBuildOutput,
   type SiteDiagnostic,
   type SitePackageManager,
   type SiteScripts,
@@ -88,34 +90,6 @@ export function shareMountRootForSite(root: string): string | null {
     return null;
   }
   return `shared-with-me/${parts[1]}`;
-}
-
-/** A materialized build output that can be served without executing site code. */
-export function builtOutputRelativeToSite(site: SitePackageInfo): string | null {
-  for (const output of site.buildOutputs) {
-    const relativeEntry = `${output}/index.html`;
-    const workspaceEntry = joinSitePath(site.root, relativeEntry);
-    if (site.sourceFiles.includes(workspaceEntry)) return output;
-  }
-  return null;
-}
-
-export function builtEntryRelativeToSite(site: SitePackageInfo): string | null {
-  const output = builtOutputRelativeToSite(site);
-  return output ? `${output}/index.html` : null;
-}
-
-function needsBuiltArtifact(site: SitePackageInfo): boolean {
-  return Boolean(
-    site.scripts.dev ||
-    site.scripts.start ||
-    site.scripts.build ||
-    site.configuredScripts.dev ||
-    site.configuredScripts.start ||
-    site.configuredScripts.build ||
-    site.configuredScripts.preview ||
-    site.buildOutputs.length > 0
-  );
 }
 
 function pathRelativeToArtifact(artifactRoot: string, path: string): string | null {
@@ -246,14 +220,14 @@ async function shareManifestForSite(
   rootPath: string,
   site: Omit<SitePackageInfo, "shareManifest">,
 ): Promise<SitePackageInfo["shareManifest"]> {
-  const output = builtOutputRelativeToSite({ ...site, shareManifest: null });
+  const output = presentBuildOutput(site);
   let artifactRoot: string | null = null;
   let entryPath: string | null = null;
 
   if (output) {
     artifactRoot = joinSitePath(site.root, output);
     entryPath = `${artifactRoot}/index.html`;
-  } else if (!needsBuiltArtifact({ ...site, shareManifest: null }) && site.entryPath) {
+  } else if (!needsBuiltArtifact(site) && site.entryPath) {
     artifactRoot = site.root;
     const entryRelative = pathRelativeToArtifact(artifactRoot, site.entryPath);
     if (!entryRelative || !/\.html?$/i.test(entryRelative)) return null;
@@ -315,8 +289,8 @@ async function shareManifestForSite(
  * A source index.html from Vite/React/etc. is not a runnable static artifact.
  */
 export function sharedStaticEntryRelativeToSite(site: SitePackageInfo): string | null {
-  const built = builtEntryRelativeToSite(site);
-  if (built) return built;
+  const output = presentBuildOutput(site);
+  if (output) return `${output}/index.html`;
   if (needsBuiltArtifact(site)) return null;
   return entryRelativeToSite(site);
 }
@@ -334,7 +308,7 @@ export function staticPreviewTargetForSite(
   entry: string | null;
 } {
   if (options.sharedView || site.authority.kind === "share") {
-    const output = builtOutputRelativeToSite(site);
+    const output = presentBuildOutput(site);
     if (output) return { root: buildOutputSiteRoot(site, output), entry: "index.html" };
     return { root: site.root, entry: sharedStaticEntryRelativeToSite(site) };
   }
@@ -453,26 +427,6 @@ async function sourceForFile(rootPath: string, path: string): Promise<string | W
   } catch {
     return { path, body: null };
   }
-}
-
-export function discoverSiteRoots(
-  rootPathOrFiles: WorkspaceFileEntry[],
-  folders?: string[],
-): string[];
-export function discoverSiteRoots(rootPathOrFiles: string): Promise<string[]>;
-export function discoverSiteRoots(
-  rootPathOrFiles: string | WorkspaceFileEntry[],
-  folders: string[] = [],
-): Promise<string[]> | string[] {
-  if (Array.isArray(rootPathOrFiles)) {
-    const folderSignals = folders
-      .filter((folder) => BUILD_OUTPUT_FOLDER_NAMES.includes(posix.basename(folder)))
-      .map((folder) => `${folder}/index.html`);
-    return discoverSites([...rootPathOrFiles.map((file) => file.path), ...folderSignals]).map(
-      (site) => normalizeRoot(site.root),
-    );
-  }
-  return listSitePackages(rootPathOrFiles).then((sites) => sites.map((site) => site.root));
 }
 
 export async function listSitePackages(rootPath: string): Promise<SitePackageInfo[]> {

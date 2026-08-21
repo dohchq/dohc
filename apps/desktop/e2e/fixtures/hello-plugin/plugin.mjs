@@ -137,88 +137,32 @@ switch (mode) {
     handler = {
       activate(ctx) {
         pluginRoot = ctx.pluginRoot;
-        ctx.commands.register("webapp.running", () => [...servers.keys()].sort());
       },
       async startWebApp(_webAppId, instanceKey) {
         const existing = servers.get(instanceKey);
         if (existing) return { url: existing.url, title: `Preview ${instanceKey}` };
-        if (!pluginRoot) throw new Error("Fixture plugin root is unavailable.");
 
         const { readFile } = await import("node:fs/promises");
         const { createServer } = await import("node:http");
-        const { extname, join, resolve, sep } = await import("node:path");
-        const previewRoot = resolve(join(pluginRoot, "snapshot", "preview"));
-        const previewPrefix = `${previewRoot}${sep}`;
-        const contentTypes = new Map([
-          [".css", "text/css; charset=utf-8"],
-          [".html", "text/html; charset=utf-8"],
-          [".txt", "text/plain; charset=utf-8"],
-        ]);
-
+        const { join } = await import("node:path");
         const server = createServer(async (request, response) => {
-          let decodedPath;
-          try {
-            decodedPath = decodeURIComponent(
-              new URL(request.url ?? "/", "http://x").pathname,
-            );
-          } catch {
-            response.writeHead(400, {
-              "content-type": "text/plain; charset=utf-8",
-            });
-            response.end("Invalid path");
-            return;
-          }
-
+          const decodedPath = decodeURIComponent(
+            new URL(request.url ?? "/", "http://x").pathname,
+          );
           const relativePath =
             decodedPath === "/" ? "index.html" : decodedPath.replace(/^\/+/, "");
-          const target = resolve(join(previewRoot, relativePath));
-          if (target !== previewRoot && !target.startsWith(previewPrefix)) {
-            response.writeHead(400, {
-              "content-type": "text/plain; charset=utf-8",
-            });
-            response.end("Invalid path");
-            return;
-          }
-          if (
-            relativePath
-              .split(/[\\/]+/)
-              .filter(Boolean)
-              .some((segment) => segment === ".dohc")
-          ) {
-            response.writeHead(403, {
-              "content-type": "text/plain; charset=utf-8",
-            });
-            response.end("Forbidden");
-            return;
-          }
-
           try {
-            const body = await readFile(target);
-            response.writeHead(200, {
-              "cache-control": "no-store",
-              "content-type":
-                contentTypes.get(extname(target).toLowerCase()) ??
-                "application/octet-stream",
-              "x-content-type-options": "nosniff",
-            });
-            response.end(body);
+            response.end(
+              await readFile(join(pluginRoot, "snapshot", "preview", relativePath)),
+            );
           } catch {
-            response.writeHead(404, {
-              "content-type": "text/plain; charset=utf-8",
-            });
+            response.statusCode = 404;
             response.end("Not found");
           }
         });
-        await new Promise((resolveListen, rejectListen) => {
-          server.once("error", rejectListen);
-          server.listen(0, "127.0.0.1", resolveListen);
-        });
-        const address = server.address();
-        if (!address || typeof address === "string") {
-          await new Promise((resolveClose) => server.close(resolveClose));
-          throw new Error("Fixture preview server did not start.");
-        }
-        const url = `http://127.0.0.1:${address.port}/`;
+        await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const { port } = server.address();
+        const url = `http://127.0.0.1:${port}/`;
         servers.set(instanceKey, { server, url });
         return { url, title: `Preview ${instanceKey}` };
       },
@@ -226,11 +170,7 @@ switch (mode) {
         const running = servers.get(instanceKey);
         if (!running) return;
         servers.delete(instanceKey);
-        await new Promise((resolveClose, rejectClose) => {
-          running.server.close((error) =>
-            error ? rejectClose(error) : resolveClose(),
-          );
-        });
+        await new Promise((resolve) => running.server.close(resolve));
       },
     };
     break;

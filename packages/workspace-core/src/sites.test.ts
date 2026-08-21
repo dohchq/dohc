@@ -5,9 +5,56 @@ import {
   frameworkConfigName,
   hasWebDependency,
   inferSiteScripts,
+  needsBuiltArtifact,
   packageManagerFromFiles,
   parseDohcSiteConfig,
+  presentBuildOutput,
 } from "./sites";
+
+describe("site package derived facts", () => {
+  const base = {
+    buildOutputs: ["dist"],
+    scripts: {},
+    configuredScripts: {},
+  };
+
+  it("finds present build output for root and nested sites", () => {
+    expect(
+      presentBuildOutput({
+        ...base,
+        root: ".",
+        sourceFiles: ["dist/index.html"],
+      }),
+    ).toBe("dist");
+    expect(
+      presentBuildOutput({
+        ...base,
+        root: "sites/report",
+        sourceFiles: ["sites/report/dist/index.html"],
+      }),
+    ).toBe("dist");
+  });
+
+  it("identifies sites that need a built artifact", () => {
+    expect(
+      needsBuiltArtifact({
+        ...base,
+        root: ".",
+        sourceFiles: [],
+        buildOutputs: [],
+        configuredScripts: { preview: "serve dist" },
+      }),
+    ).toBe(true);
+    expect(
+      needsBuiltArtifact({
+        ...base,
+        root: ".",
+        sourceFiles: [],
+        buildOutputs: [],
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("discoverSites", () => {
   it("discovers a plain static website from index.html", () => {

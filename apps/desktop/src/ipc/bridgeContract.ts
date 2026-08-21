@@ -2154,7 +2154,7 @@ const SitePackageInfo = z
     packagePath: PATH_STRING.nullable(),
     packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
     scripts: SiteScripts,
-    configuredScripts: SiteScripts.optional(),
+    configuredScripts: SiteScripts,
     buildOutputs: z.array(PATH_STRING).max(100),
     sourceFiles: z.array(PATH_STRING).max(1000),
     shareManifest: SiteShareManifest.nullable(),

@@ -1,11 +1,14 @@
-import { hasIgnoredSegment } from "@dohc/workspace-core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { join } from "node:path";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
-import { startStaticDirectoryPreview } from "../security/staticDirectoryPreview";
+import {
+  assertContainedFilePath,
+  isInside,
+  startStaticDirectoryPreview,
+} from "../security/staticDirectoryPreview";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 export interface SiteLogEntry {
@@ -53,11 +56,6 @@ const DEV_URL_RE = /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^
 // eslint-disable-next-line no-control-regex
 const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
 const HOST_BIND_FLAGS = new Set(["--host", "--hostname", "-H"]);
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const rel = relative(parent, child);
-  return rel.length > 0 && !isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(sep);
-}
 
 async function resolveContainedDir(rootPath: string, relativePath: string): Promise<string> {
   if (relativePath.includes("\0") || relativePath.includes("\\")) {
@@ -92,21 +90,6 @@ async function resolveContainedDir(rootPath: string, relativePath: string): Prom
   return realSite;
 }
 
-function assertContainedFilePath(path: string, label: string): void {
-  if (
-    path.includes("\0") ||
-    path.includes("\\") ||
-    path.startsWith("/") ||
-    /^[A-Za-z]:/.test(path) ||
-    path.split("/").some((segment) => segment === "." || segment === "..")
-  ) {
-    throw new Error(`Invalid ${label}: ${path}`);
-  }
-  if (hasIgnoredSegment(path)) {
-    throw new Error(`Invalid ${label}: reserved metadata path ${path}`);
-  }
-}
-
 function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: string): void {
   const at = Date.now();
   for (const chunk of text.split(/\r?\n/)) {
@@ -127,14 +110,6 @@ export async function startStaticSitePreview(
     entry: options.entry ?? "index.html",
     entryLabel: "site entry",
   });
-}
-
-export function detectPackageManager(files: Iterable<string>): PackageManager {
-  const names = new Set([...files].map((file) => file.split("/").pop()));
-  if (names.has("pnpm-lock.yaml")) return "pnpm";
-  if (names.has("bun.lockb") || names.has("bun.lock")) return "bun";
-  if (names.has("yarn.lock")) return "yarn";
-  return "npm";
 }
 
 export function packageManagerCommand(manager: PackageManager, script: string): {

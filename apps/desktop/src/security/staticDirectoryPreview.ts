@@ -45,13 +45,13 @@ const MIME_TYPES: Record<string, string> = {
 // residual named at the read site.
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
-function isInside(parent: string, child: string): boolean {
+export function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const rel = relative(parent, child);
   return rel.length > 0 && !isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(sep);
 }
 
-function assertContainedFilePath(path: string, label: string): void {
+export function assertContainedFilePath(path: string, label: string): void {
   if (
     path.includes("\0") ||
     path.includes("\\") ||

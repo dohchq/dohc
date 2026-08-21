@@ -2113,7 +2113,7 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   const root = await safeResolve(ctx, siteRoot, "read");
   if (!root.ok) return root;
   // Mounted shares (shared-with-me/) are readable, but site tools execute
-  // or mutate the site (test/build/preview/publish/add-sdk) — running
+  // or mutate the site (test/build/preview/publish) — running
   // someone else's shared code with workspace access is refused. Copying
   // the site into the user's own files makes it runnable. The check is the
   // shared case-insensitive/alias-normalizing predicate, NOT a literal

@@ -632,7 +632,6 @@ import {
 import {
   assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
-  stopSitePreviewForActiveWorkspace,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
 import {
@@ -1231,7 +1230,7 @@ function commandForSiteScript(
   site: SitePackageInfo,
   script: keyof SitePackageInfo["scripts"],
 ): { command: string; args: string[] } {
-  const configuredCommand = site.configuredScripts?.[script];
+  const configuredCommand = site.configuredScripts[script];
   if (configuredCommand) return splitCommandLine(configuredCommand);
   const configured = site.scripts[script];
   if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
@@ -1323,7 +1322,7 @@ async function startPreviewForSiteUnlocked(
     const entry = target.entry ?? undefined;
     if ((input.sharedView || input.site.authority.kind === "share") && !entry) {
       throw new Error(
-        "This shared package does not include a built site artifact. Ask the owner to build and share it again.",
+        "This shared site does not include a built artifact. Ask the owner to build and share it again.",
       );
     }
     const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
@@ -6946,12 +6945,13 @@ function registerIpcHandlers(
     );
     await withSitePreviewStartLock(
       sitePreviewKey(workspace.workspaceId, input.siteRoot),
-      () =>
-        stopSitePreviewForActiveWorkspace({
-          activeWorkspaceId: () => activeWorkspaceIdBySender.get(senderId),
-          workspaceId: workspace.workspaceId,
-          stop: () => sitePreviews.stop(workspace.workspaceId, input.siteRoot),
-        }),
+      async () => {
+        assertActiveWorkspaceForSitePreviewStop(
+          activeWorkspaceIdBySender.get(senderId),
+          workspace.workspaceId,
+        );
+        await sitePreviews.stop(workspace.workspaceId, input.siteRoot);
+      },
     );
   });
 
