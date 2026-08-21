@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -10,6 +12,7 @@ import {
   assertShareChangesJournalable,
   captureSharedViewLocalDivergence,
   captureStandaloneShareViewDivergence,
+  clearPendingMaterializationPaths,
   readPendingMaterializationPaths,
   SharePinInvalidError,
   materializeSharedViewPaths,
@@ -26,6 +29,7 @@ import { routeWorkspaceFileCreate } from "./workspaceFileOps";
 import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
 import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
+import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createTestScratch } from "./testTemp";
 
 // These tests drive the pull with the selector a share record pins. It is a
@@ -40,6 +44,22 @@ const PINNED_SELECTOR = {
 const WORKSPACE = "shared-view-ws";
 const SHARE_ID = "share-1";
 const TOKEN = "test:recipient";
+
+// chmod-based fixtures cannot make a path unreadable for root. Windows uses
+// the workspace-fs NTFS deny-read fixture and has no getuid.
+const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
+
+async function denyFileContentRead(absolutePath: string): Promise<void> {
+  if (process.platform === "win32") {
+    execFileSync(
+      "icacls",
+      [absolutePath, "/deny", `${userInfo().username}:(RD)`],
+      { stdio: "pipe" },
+    );
+    return;
+  }
+  await denyRead(absolutePath, "file");
+}
 
 // This file no longer references the legacy TypeScript engine at all — not by import
 // and not by vi.mock. That is a stronger guarantee than a not-called spy: the
@@ -765,6 +785,55 @@ describe("shared view refresh", () => {
     }
   });
 
+  itNonRoot(
+    "leaves an unreadable tracked file untouched when the pull changes its path",
+    async () => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "docs/locked.md";
+      const absolutePath = join(rootDir, path);
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(path, "recipient bytes");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+
+      const store = harness.openStore(target);
+      let denied = false;
+      try {
+        await denyFileContentRead(absolutePath);
+        denied = true;
+        relay.addWrite(path, "new granter body");
+
+        const refreshed = await refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        });
+
+        expect(refreshed.excludedPaths).toEqual([path]);
+        expect(refreshed.unjournalablePaths).toEqual([
+          { path, reason: "unreadable" },
+        ]);
+        await restoreRead(absolutePath, 0o600);
+        denied = false;
+        expect(await readFile(absolutePath, "utf8")).toBe("recipient bytes");
+      } finally {
+        if (denied) await restoreRead(absolutePath, 0o600);
+        await store.close();
+      }
+    },
+  );
+
   it("reports oversized binary and non-UTF-8 causes separately", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -852,6 +921,20 @@ describe("shared view refresh", () => {
       expect.objectContaining({
         message: expect.stringMatching(
           /docs\/too-large\.md[^.]*10\.0 MB[\s\S]*Make[^.]*smaller[\s\S]*docs\/replaced\.md[\s\S]*(restore|Restore)[\s\S]*(move|Move)/,
+        ),
+      }),
+    );
+  });
+
+  it("tells the recipient how to retry an unreadable file without size guidance", () => {
+    expect(() =>
+      assertShareChangesJournalable([
+        { path: "docs/locked.md", reason: "unreadable" },
+      ]),
+    ).toThrowError(
+      expect.objectContaining({
+        message: expect.stringMatching(
+          /dohc could not read docs\/locked\.md\.[\s\S]*(close|Close)[\s\S]*(wait|Wait)[\s\S]*send your changes again/,
         ),
       }),
     );
@@ -989,6 +1072,50 @@ describe("shared view refresh", () => {
       expect(after.moments.map((moment) => moment.id)).toEqual(
         before.moments.map((moment) => moment.id),
       );
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("reports a repair-only standalone refresh as updated", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/repaint-after-repair.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment one");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await store.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+        path,
+        text: "moment two",
+        metadata: { origin: "sync" },
+      });
+      await writePendingMaterializationPaths(rootDir, [path]);
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ status: "updated", changedPaths: 1 });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
     } finally {
       await store.close();
     }
@@ -1205,7 +1332,7 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("keeps another pending path when an in-app save clears its own marker", async () => {
+  it("keeps existing pending references when an in-app save clears its own", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -1229,18 +1356,47 @@ describe("shared view refresh", () => {
         shareViewStore: () => store,
       });
       await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
-        new Set([otherPath]),
+        new Set([savedPath, otherPath]),
       );
     } finally {
       await store.close();
     }
   });
 
-  it("rejects a malformed pending-materialization record", async () => {
+  it("keeps a same-path marker until both pending producers clear it", async () => {
+    const rootDir = await tempRoot();
+    const path = "docs/overlap.md";
+
+    await writePendingMaterializationPaths(rootDir, [path, path]);
+    await writePendingMaterializationPaths(rootDir, [path]);
+    await clearPendingMaterializationPaths(rootDir, [path]);
+
+    await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+      new Set([path]),
+    );
+    await expect(
+      readFile(join(rootDir, ".dohc", "pending-materialization.json"), "utf8"),
+    ).resolves.toBe(JSON.stringify({ counts: { [path]: 1 } }));
+
+    await clearPendingMaterializationPaths(rootDir, [path]);
+    await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+      new Set(),
+    );
+  });
+
+  it("uses the same written error for an invalid pending shape and malformed JSON", async () => {
     const rootDir = await tempRoot();
     await mkdir(join(rootDir, ".dohc"), { recursive: true });
-    await writeFile(join(rootDir, ".dohc", "pending-materialization.json"), "not json", "utf8");
-    await expect(readPendingMaterializationPaths(rootDir)).rejects.toThrow();
+    const pendingPath = join(rootDir, ".dohc", "pending-materialization.json");
+    await writeFile(pendingPath, JSON.stringify({ counts: [] }), "utf8");
+    await expect(readPendingMaterializationPaths(rootDir)).rejects.toThrow(
+      "Invalid pending-materialization record.",
+    );
+
+    await writeFile(pendingPath, "not json", "utf8");
+    await expect(readPendingMaterializationPaths(rootDir)).rejects.toThrow(
+      "Invalid pending-materialization record.",
+    );
   });
 
   it("repairs a share-view create whose projection fails without journaling a delete", async () => {
@@ -1359,6 +1515,89 @@ describe("shared view refresh", () => {
       await expect(stat(join(rootDir, path))).rejects.toMatchObject({ code: "ENOENT" });
       expect(await momentIds(store)).toEqual(before);
       await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set());
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("S-leftover: a pending UNTRACKED path deletes the recipient's own new file", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/gone.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    relay.addWrite("docs/keep.md", "keep");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    relay.addDelete(path);
+
+    const store = harness.openStore(target);
+    try {
+      let armed = false;
+      const realPull = harness.pullFor(target);
+      const failingStore: typeof store = {
+        ...store,
+        async ensureMainVersion(input) {
+          if (armed) {
+            throw Object.assign(new Error("EBUSY: projection write failed"), {
+              code: "EBUSY",
+            });
+          }
+          return await store.ensureMainVersion(input);
+        },
+      };
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store: failingStore,
+          ended: false,
+          pull: async (input) => {
+            const page = await realPull(input);
+            armed = true;
+            return page;
+          },
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+        }),
+      ).rejects.toThrow("EBUSY: projection write failed");
+      armed = false;
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toBeNull();
+
+      await writeFile(join(rootDir, path), "my own new file", "utf8");
+      const beforeIds = await momentIds(store);
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("my own new file");
+      await expect(
+        store.readTextFile({
+          workspaceId: WORKSPACE,
+          versionId: main.id,
+          path,
+        }),
+      ).resolves.toBeNull();
+      expect(await momentIds(store)).toEqual(beforeIds);
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+        new Set(),
+      );
     } finally {
       await store.close();
     }
@@ -1488,7 +1727,7 @@ describe("shared view refresh", () => {
       ).rejects.toThrow("materialization interrupted");
       await expect(
         readFile(join(rootDir, ".dohc", "pending-materialization.json"), "utf8"),
-      ).resolves.toBe(JSON.stringify({ paths: [path] }));
+      ).resolves.toBe(JSON.stringify({ counts: { [path]: 1 } }));
       expect(commitCursor).not.toHaveBeenCalled();
 
       await expect(

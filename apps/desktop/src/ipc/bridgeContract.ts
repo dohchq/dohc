@@ -3321,6 +3321,7 @@ export const RefreshSharedViewResult = z.object({
         "oversized-binary",
         "non-utf8",
         "non-file-replacement",
+        "unreadable",
       ]),
     }),
   ),

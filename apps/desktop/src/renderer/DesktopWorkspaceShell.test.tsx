@@ -3609,6 +3609,7 @@ describe("ui-state merge-on-load", () => {
             path: "docs/replaced.md",
             reason: "non-file-replacement" as const,
           },
+          { path: "docs/locked.md", reason: "unreadable" as const },
         ],
         refusedOps: 0,
         refusedDetail: null,
@@ -3650,6 +3651,10 @@ describe("ui-state merge-on-load", () => {
     );
     expect(notice.textContent).toContain(
       "Restore the file or move the conflicting entry, then refresh.",
+    );
+    expect(notice.textContent).toContain("dohc could not read docs/locked.md.");
+    expect(notice.textContent).toContain(
+      "Close anything using the file, or wait, then refresh.",
     );
 
     await userEvent.click(screen.getByTestId("shared-view-refresh"));

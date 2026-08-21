@@ -1373,6 +1373,7 @@ function shareUnjournalableNotice(
     "oversized-binary",
     "non-utf8",
     "non-file-replacement",
+    "unreadable",
   ] as const) {
     const group = groups.get(reason);
     if (!group || group.length === 0) continue;
@@ -1396,11 +1397,16 @@ function shareUnjournalableNotice(
           `${one ? "This file is" : "These files are"} not readable as text. ` +
           `Save ${one ? "the file" : "the files"} as UTF-8 text, then refresh.`,
       );
-    } else {
+    } else if (reason === "non-file-replacement") {
       lines.push(
         `dohc could not track changes in ${names}. ` +
           `${one ? "A folder or another entry replaces this file" : "Folders or other entries replace these files"}. ` +
           `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
+      );
+    } else {
+      lines.push(
+        `dohc could not read ${names}. ` +
+          `Close anything using ${one ? "the file" : "the files"}, or wait, then refresh.`,
       );
     }
   }
