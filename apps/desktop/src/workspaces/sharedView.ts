@@ -488,6 +488,7 @@ export async function writeDiskContentToStore(input: {
 const PENDING_MATERIALIZATION_FILE = "pending-materialization.json";
 const PULL_IN_FLIGHT_FILE = "pull-in-flight.marker";
 const REFRESH_LIFECYCLE_LOCK = "refresh-lifecycle";
+const COLLISION_RECORD_FILE = "share-collision-record.json";
 
 function pendingMaterializationPath(rootDir: string): string {
   return join(rootDir, ".dohc", PENDING_MATERIALIZATION_FILE);
@@ -495,6 +496,10 @@ function pendingMaterializationPath(rootDir: string): string {
 
 function pullInFlightPath(rootDir: string): string {
   return join(rootDir, ".dohc", PULL_IN_FLIGHT_FILE);
+}
+
+function collisionRecordPath(rootDir: string): string {
+  return join(rootDir, ".dohc", COLLISION_RECORD_FILE);
 }
 
 function shareViewRefreshLifecycleLockKey(rootDir: string): string {
@@ -525,8 +530,9 @@ async function ensureRealMetadataDirectory(rootDir: string): Promise<string> {
 }
 
 // The refresh lifecycle lock is always the outermost lock for a view. Per-path
-// locks and the pending-materialization lock nest inside it as independent lock
-// domains. Never acquire this lock while holding either nested lock.
+// locks, the pending-materialization lock, and the collision-record lock nest
+// inside it as independent lock domains. Never acquire this lock while holding
+// any nested lock.
 export function withShareViewRefreshLifecycleLock<T>(
   rootDir: string,
   operation: () => Promise<T>,
@@ -784,6 +790,128 @@ export async function clearPendingMaterializationPaths(
   );
 }
 
+const INVALID_COLLISION_RECORD = "Invalid share collision record.";
+
+async function readCollisionRecordUnlocked(rootDir: string): Promise<Set<string>> {
+  let serialized: string;
+  try {
+    serialized = await readFile(collisionRecordPath(rootDir), "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return new Set();
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    throw new Error(INVALID_COLLISION_RECORD);
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    !("paths" in parsed) ||
+    !Array.isArray(parsed.paths) ||
+    !parsed.paths.every(
+      (path): path is string =>
+        typeof path === "string" && classifyEngineFilePath(path).kind === "tracked",
+    )
+  ) {
+    throw new Error(INVALID_COLLISION_RECORD);
+  }
+  return new Set(parsed.paths as string[]);
+}
+
+async function writeCollisionRecordUnlocked(
+  rootDir: string,
+  paths: ReadonlySet<string>,
+): Promise<void> {
+  const metadataDir = await ensureRealMetadataDirectory(rootDir);
+  const target = collisionRecordPath(rootDir);
+  if (paths.size === 0) {
+    await rm(target, { force: true });
+    await syncMetadataDirectory(metadataDir);
+    return;
+  }
+  const temp = join(
+    metadataDir,
+    `.${COLLISION_RECORD_FILE}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    const handle = await open(temp, "w");
+    try {
+      await handle.writeFile(JSON.stringify({ paths: [...paths].sort() }), "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temp, target);
+    await syncMetadataDirectory(metadataDir);
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+// Called while already holding the collision-record lock. Quarantines a
+// corrupt record and starts fresh rather than guessing which paths were
+// excluded: a lost record cannot be reconstructed, and the fallback (ordinary
+// capture adopts the recipient's local content as an edit moment) is exactly
+// this file's own established "journal rather than discard" floor — the same
+// severity #854 was parked at before this record existed, never data loss.
+async function readCollisionRecordLocked(rootDir: string): Promise<Set<string>> {
+  const target = collisionRecordPath(rootDir);
+  try {
+    return await readCollisionRecordUnlocked(rootDir);
+  } catch (error) {
+    console.error(
+      `[desktop] share collision record at ${target} is unreadable; quarantining it. ` +
+        "A previously-excluded local file may be journaled as an edit on the next " +
+        `capture instead of staying protected: ${String(error)}`,
+    );
+    const quarantine = `${target}.invalid-${Date.now()}`;
+    try {
+      await rename(target, quarantine);
+    } catch (quarantineError) {
+      console.error(
+        `[desktop] could not quarantine share collision record at ${target}: ` +
+          `${String(quarantineError)}`,
+      );
+    }
+    return new Set<string>();
+  }
+}
+
+export async function readCollisionRecordPaths(rootDir: string): Promise<Set<string>> {
+  return withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), () =>
+    readCollisionRecordLocked(rootDir),
+  );
+}
+
+export async function recordCollisionPaths(
+  rootDir: string,
+  paths: readonly string[],
+): Promise<void> {
+  if (paths.length === 0) return;
+  await withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), async () => {
+    const current = await readCollisionRecordLocked(rootDir);
+    for (const path of paths) current.add(path);
+    await writeCollisionRecordUnlocked(rootDir, current);
+  });
+}
+
+export async function clearCollisionRecordPaths(
+  rootDir: string,
+  paths: readonly string[],
+): Promise<void> {
+  if (paths.length === 0) return;
+  await withExclusiveWorkspaceOperation(collisionRecordPath(rootDir), async () => {
+    const current = await readCollisionRecordLocked(rootDir);
+    for (const path of paths) current.delete(path);
+    await writeCollisionRecordUnlocked(rootDir, current);
+  });
+}
+
 async function pathConfirmedAbsentOnDisk(resolvedTarget: string): Promise<boolean> {
   try {
     await lstat(resolvedTarget);
@@ -868,6 +996,7 @@ export async function captureSharedViewLocalDivergence(
     tracked.map((entry) => entry.path),
   );
   const pendingPaths = pendingState.paths;
+  const collisionRecordedPaths = await readCollisionRecordPaths(rootDir);
 
   let capturedPaths = 0;
   let repairedPaths = 0;
@@ -950,6 +1079,64 @@ export async function captureSharedViewLocalDivergence(
     // Defense in depth: the store already refuses secret paths, so ordinary
     // tracked metadata cannot reach this branch.
     if (classifyEngineFilePath(entry.path).kind === "secret") continue;
+
+    if (collisionRecordedPaths.has(entry.path)) {
+      const result = await withCaptureMutationLock(
+        rootDir,
+        entry.path,
+        async (resolvedTarget): Promise<
+          | { kind: "repaired" }
+          | { kind: "unjournalable"; path: UnjournalablePath }
+        > => {
+          let stillOccupied: boolean;
+          try {
+            stillOccupied = !(await pathConfirmedAbsentOnDisk(resolvedTarget));
+          } catch {
+            return {
+              kind: "unjournalable",
+              path: { path: entry.path, reason: "unreadable" },
+            };
+          }
+          if (stillOccupied) {
+            return {
+              kind: "unjournalable",
+              path: { path: entry.path, reason: "local-collision" },
+            };
+          }
+          // Resolution: the recipient's own entry no longer occupies the path
+          // (they moved or removed it, exactly what the local-collision message
+          // tells them to do). Materialize the granter's current stored version
+          // and journal nothing — this is a repair, not an edit.
+          const current = await store.readTextFile({
+            workspaceId,
+            versionId: main.id,
+            path: entry.path,
+          });
+          if (current !== null) {
+            await materializeSharedViewPaths(
+              rootDir,
+              workspaceId,
+              [
+                {
+                  path: entry.path,
+                  operation: "write",
+                  contentKind: current.contentKind === "binary" ? "binary" : "text",
+                },
+              ],
+              store,
+            );
+          }
+          return { kind: "repaired" };
+        },
+      );
+      if (result.kind === "repaired") {
+        repairedPaths += 1;
+        await clearCollisionRecordPaths(rootDir, [entry.path]);
+      } else {
+        unjournalablePaths.push(result.path);
+      }
+      continue;
+    }
 
     if (pendingPaths.has(entry.path)) {
       visitedPendingPaths.add(entry.path);
@@ -1507,13 +1694,22 @@ export async function refreshSharedViewOnce(input: {
   );
   const unjournalablePaths = [...(input.unjournalablePaths ?? [])];
   if (input.preTrackedPaths !== undefined) {
+    const collisionRecordedPaths = await readCollisionRecordPaths(input.rootDir);
+    const newlyCollidingPaths: string[] = [];
     for (const change of pull.changedPaths) {
-      if (
-        materializationExclusions.has(change.path) ||
-        input.preTrackedPaths.has(change.path)
-      ) {
+      if (materializationExclusions.has(change.path)) continue;
+
+      if (collisionRecordedPaths.has(change.path)) {
+        // Already-recorded: keep excluding every later write OR delete for
+        // this path, regardless of whether the store now tracks it — this is
+        // the persistence #854 adds. Only capture's resolution arm clears it.
+        materializationExclusions.add(change.path);
+        unjournalablePaths.push({ path: change.path, reason: "local-collision" });
         continue;
       }
+
+      if (input.preTrackedPaths.has(change.path)) continue;
+
       const target = await resolvedShareViewTarget(input.rootDir, change.path);
       let targetStat;
       try {
@@ -1524,13 +1720,15 @@ export async function refreshSharedViewOnce(input: {
         throw error;
       }
       materializationExclusions.add(change.path);
-      unjournalablePaths.push({
-        path: change.path,
-        reason:
-          targetStat.isSymbolicLink() || !targetStat.isFile()
-            ? "non-file-replacement"
-            : "local-collision",
-      });
+      const reason =
+        targetStat.isSymbolicLink() || !targetStat.isFile()
+          ? "non-file-replacement"
+          : "local-collision";
+      unjournalablePaths.push({ path: change.path, reason });
+      if (reason === "local-collision") newlyCollidingPaths.push(change.path);
+    }
+    if (newlyCollidingPaths.length > 0) {
+      await recordCollisionPaths(input.rootDir, newlyCollidingPaths);
     }
   }
   const excludedPaths = pull.changedPaths

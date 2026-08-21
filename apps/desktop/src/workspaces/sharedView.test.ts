@@ -26,8 +26,10 @@ import {
   readPendingMaterializationPaths,
   SharePinInvalidError,
   materializeSharedViewPaths,
+  readCollisionRecordPaths,
   refreshStandaloneShareViewOnce as refreshStandaloneShareViewOnceWithPull,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
+  recordCollisionPaths,
   shareViewIdentitySelector,
   withShareViewRefreshLifecycleLock,
   writePendingMaterializationPaths,
@@ -2071,6 +2073,310 @@ describe("shared view refresh", () => {
       });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
     } finally {
+      await store.close();
+    }
+  });
+
+  it("does not adopt a recorded local collision on a later refresh", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/recipient-file.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
+      const before = await momentIds(store);
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+
+      expect(await momentIds(store)).toEqual(before);
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("keeps a recorded local collision excluded from a later delete", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/recipient-delete-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
+      relay.addDelete(path);
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [path],
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("resolves a recorded local collision without journaling a delete", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/recipient-resolution.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
+      await rm(join(rootDir, path));
+      const before = await momentIds(store);
+
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+
+      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(new Set());
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
+      expect(await momentIds(store)).toEqual(before);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each(["write", "delete"] as const)(
+    "consults the collision record at the materialization boundary for a later %s",
+    async (operation) => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = `docs/boundary-${operation}-collision.md`;
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite("docs/seed.md", "seed");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+      await writeFile(join(rootDir, path), "recipient data", "utf8");
+      relay.addWrite(path, "granter file");
+
+      const store = harness.openStore(target);
+      try {
+        await refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        });
+        await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+          new Set([path]),
+        );
+        if (operation === "write") {
+          relay.addWrite(path, "granter revision");
+        } else {
+          relay.addDelete(path);
+        }
+
+        await expect(
+          refreshSharedViewOnceWithPull({
+            rootDir,
+            workspaceId: WORKSPACE,
+            relay: harness.relay,
+            shareId: SHARE_ID,
+            store,
+            pull: harness.pullFor(target),
+            pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+            recordRefusals: async () => undefined,
+            trackPendingMaterialization: true,
+            preTrackedPaths: new Set([path]),
+          }),
+        ).resolves.toMatchObject({
+          excludedPaths: [path],
+          unjournalablePaths: [{ path, reason: "local-collision" }],
+        });
+
+        expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it("publishes a durable collision record without leaving a temp file", async () => {
+    const rootDir = await tempRoot();
+    const paths = ["docs/b.md", "docs/a.md"];
+
+    await recordCollisionPaths(rootDir, paths);
+
+    await expect(
+      readFile(join(rootDir, ".dohc", "share-collision-record.json"), "utf8"),
+    ).resolves.toBe(JSON.stringify({ paths: [...paths].sort() }));
+    await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(new Set(paths));
+    expect(
+      (await readdir(join(rootDir, ".dohc"))).filter((name) =>
+        /^\.share-collision-record\.json\..+\.tmp$/.test(name),
+      ),
+    ).toEqual([]);
+  });
+
+  it("quarantines a corrupt collision record and accepts a clean write", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/corrupt-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "granter file");
+    const collisionPath = join(
+      rootDir,
+      ".dohc",
+      "share-collision-record.json",
+    );
+    const store = harness.openStore(target);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await refreshStandaloneShareViewOnceWithPull({
+        rootDir,
+        workspaceId: WORKSPACE,
+        relay: harness.relay,
+        shareId: SHARE_ID,
+        store,
+        pull: harness.pullFor(target),
+        pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+        recordRefusals: async () => undefined,
+        ended: false,
+      });
+      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
+      await writeFile(collisionPath, "not json", "utf8");
+
+      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(new Set());
+      expect(
+        (await readdir(join(rootDir, ".dohc"))).some((name) =>
+          /^share-collision-record\.json\.invalid-\d+$/.test(name),
+        ),
+      ).toBe(true);
+      await expect(lstat(collisionPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(collisionPath));
+
+      await recordCollisionPaths(rootDir, ["docs/fresh.md"]);
+      await expect(readCollisionRecordPaths(rootDir)).resolves.toEqual(
+        new Set(["docs/fresh.md"]),
+      );
+    } finally {
+      errorLog.mockRestore();
       await store.close();
     }
   });
