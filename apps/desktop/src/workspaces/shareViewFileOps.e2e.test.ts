@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -809,6 +809,182 @@ describe("share-view file operations through the real store", () => {
         "docs/plans/one.md",
         "docs/plans/two.md",
       ]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to delete a tracked file something outside dohc replaced with a directory",
+    async () => {
+      const view = await harness("dohc-share-delete-dir-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await mkdir(join(view.rootPath, "docs", "notes.md"));
+      await writeFile(
+        join(view.rootPath, "docs", "notes.md", "inside.txt"),
+        "recipient file\n",
+        "utf8",
+      );
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/notes.md",
+          trashItem: async () => {
+            throw new Error("a refused delete must not reach the trash");
+          },
+        }),
+        "MUTATION: deleting over a directory that replaced a tracked file recursively removes the directory and everything in it",
+      ).rejects.toThrow(
+        "dohc did not delete docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
+        "MUTATION: the recipient-owned directory must survive a refused delete",
+      ).toBe(true);
+      await expect(
+        readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
+      ).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+      await expect(
+        readPendingMaterializationPaths(view.rootPath),
+        "MUTATION: a refused delete that still marked the path pending leaves recovery believing a materialization is owed",
+      ).resolves.toEqual(new Set());
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to rename a tracked file something outside dohc replaced with a directory",
+    async () => {
+      const view = await harness("dohc-share-rename-dir-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await mkdir(join(view.rootPath, "docs", "notes.md"));
+      await writeFile(
+        join(view.rootPath, "docs", "notes.md", "inside.txt"),
+        "recipient file\n",
+        "utf8",
+      );
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/notes.md",
+          toPath: "docs/renamed.md",
+        }),
+        "MUTATION: renaming over a directory that replaced a tracked file recursively removes the directory and everything in it",
+      ).rejects.toThrow(
+        "dohc did not rename docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
+        "MUTATION: the recipient-owned directory must survive a refused rename",
+      ).toBe(true);
+      await expect(
+        readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
+      ).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+      expect(await exists(join(view.rootPath, "docs", "renamed.md"))).toBe(false);
+      await expect(
+        readPendingMaterializationPaths(view.rootPath),
+        "MUTATION: a refused rename that still marked the path pending leaves recovery believing a materialization is owed",
+      ).resolves.toEqual(new Set());
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to delete a tracked file something outside dohc replaced with a symlink",
+    async () => {
+      const view = await harness("dohc-share-delete-symlink-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      const outside = join(view.rootPath, "outside.md");
+      await writeFile(outside, "recipient file\n", "utf8");
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await symlink(outside, join(view.rootPath, "docs", "notes.md"), "file");
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/notes.md",
+          trashItem: async () => {
+            throw new Error("a refused delete must not reach the trash");
+          },
+        }),
+        "MUTATION: deleting over a symlink that replaced a tracked file follows it and destroys what it points at",
+      ).rejects.toThrow(
+        "dohc did not delete docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isSymbolicLink(),
+        "MUTATION: the symlink must survive a refused delete",
+      ).toBe(true);
+      await expect(readFile(outside, "utf8")).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+      await expect(readPendingMaterializationPaths(view.rootPath)).resolves.toEqual(
+        new Set(),
+      );
+    },
+    60_000,
+  );
+
+  // #861's escape: the earlier pins replace a tracked LEAF with something
+  // else, which the per-leaf lstat catches directly. A tracked FOLDER has no
+  // leaf of its own — only the files under it are tracked — so a symlink
+  // standing in for the FOLDER itself needs its own check. Without it, a
+  // RENAME materializes each leaf as its own delete, and each one resolves
+  // through the link (an ancestor symlink, not the final component held
+  // back) — landing `rm` on files at the link's target and destroying the
+  // RECIPIENT's own content there, not the ones the store lost. (A delete
+  // over the same setup only unlinks the junction itself — `rm` never
+  // recurses through a symlink at its own target — so rename is where this
+  // actually destroys data; the fix still refuses both, from the same
+  // folder-level check.)
+  it.skipIf(engine.missing)(
+    "refuses to rename a tracked folder something outside dohc replaced with a symlink to another directory",
+    async () => {
+      const view = await harness("dohc-share-rename-folder-symlink-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/plans/two.md", text: "two\n" },
+      ]);
+      const linkTarget = join(view.rootPath, "elsewhere");
+      await mkdir(linkTarget);
+      await writeFile(join(linkTarget, "one.md"), "recipient one\n", "utf8");
+      await writeFile(join(linkTarget, "two.md"), "recipient two\n", "utf8");
+      await rm(join(view.rootPath, "docs", "plans"), { recursive: true, force: true });
+      await symlink(linkTarget, join(view.rootPath, "docs", "plans"), "junction");
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+        }),
+        "MUTATION: renaming a folder a symlink replaced follows the link per leaf and destroys the recipient's files at its target",
+      ).rejects.toThrow(
+        "dohc did not rename docs/plans. docs/plans replaces this shared folder with a link or another entry. Restore the folder or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "plans"))).isSymbolicLink(),
+        "MUTATION: the symlink standing in for the folder must survive a refused rename",
+      ).toBe(true);
+      await expect(readFile(join(linkTarget, "one.md"), "utf8")).resolves.toBe(
+        "recipient one\n",
+      );
+      await expect(readFile(join(linkTarget, "two.md"), "utf8")).resolves.toBe(
+        "recipient two\n",
+      );
+      expect(await storePaths(view)).toEqual(["docs/plans/one.md", "docs/plans/two.md"]);
+      expect(await exists(join(view.rootPath, "docs", "roadmap"))).toBe(false);
+      await expect(readPendingMaterializationPaths(view.rootPath)).resolves.toEqual(
+        new Set(),
+      );
     },
     60_000,
   );

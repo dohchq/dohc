@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -278,7 +279,12 @@ function containedTarget(rootDir: string, relativePath: string): string {
   return target;
 }
 
-async function resolvedShareViewTarget(
+// Exported so a caller that must ask "what is at this path?" BEFORE it acts
+// resolves it exactly the way materialization itself will — an ancestor
+// symlink can then never make a guard look at one entry while the write or
+// removal that follows touches another. `workspaceFileOps.ts`'s in-app
+// rename and delete are that caller (#861).
+export async function resolvedShareViewTarget(
   rootDir: string,
   relativePath: string,
 ): Promise<string> {
@@ -923,7 +929,7 @@ export async function captureSharedViewLocalDivergence(
           | { kind: "unjournalable"; path: UnjournalablePath }
           | { kind: "unchanged" }
         > => {
-          let targetStat;
+          let targetStat: Stats | null;
           try {
             targetStat = await lstat(resolvedTarget);
           } catch (error) {
@@ -931,10 +937,10 @@ export async function captureSharedViewLocalDivergence(
             if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
             targetStat = null;
           }
-          if (
-            targetStat !== null &&
-            (targetStat.isSymbolicLink() || !targetStat.isFile())
-          ) {
+          // `lstat` never follows the final component, so a symlink entry
+          // already answers `isFile()` false — `isSymbolicLink()` decided
+          // nothing this didn't.
+          if (targetStat !== null && !targetStat.isFile()) {
             return {
               kind: "unjournalable",
               path: { path: entry.path, reason: "non-file-replacement" },
