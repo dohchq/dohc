@@ -1112,6 +1112,12 @@ describe("main-process chat authorization", () => {
       "assertShareChangesJournalable(captured.unjournalablePaths);",
     );
     const submitAt = submit.indexOf(").submitShareProposal({");
+    // indexOf returns -1 for an absent anchor, and -1 orders below every real
+    // position, so a removed guard would satisfy the comparisons below.
+    expect(lifecycleLockAt).toBeGreaterThan(-1);
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(refusalAt).toBeGreaterThan(-1);
+    expect(submitAt).toBeGreaterThan(-1);
     expect(lifecycleLockAt).toBeLessThan(captureAt);
     expect(captureAt).toBeLessThan(refusalAt);
     expect(refusalAt).toBeLessThan(submitAt);
