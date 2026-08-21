@@ -3,8 +3,12 @@ export type SiteConfidence = "high" | "medium" | "low";
 export type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
 
 export interface SiteScripts {
+  predev?: string;
   dev?: string;
+  postdev?: string;
+  prestart?: string;
   start?: string;
+  poststart?: string;
   build?: string;
 }
 
@@ -66,6 +70,7 @@ export interface WorkspaceSite {
   entry?: string;
   packageManager?: SitePackageManager;
   scripts: SiteScripts;
+  configuredPreviewMode?: "static" | "dev" | "build";
   configuredBuildOutput?: string;
   buildOutputs: string[];
   configPath?: string;
@@ -124,7 +129,15 @@ type Candidate = {
   diagnostics: SiteDiagnostic[];
 };
 
-const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build"] as const;
+const PACKAGE_SCRIPT_KEYS = [
+  "predev",
+  "dev",
+  "postdev",
+  "prestart",
+  "start",
+  "poststart",
+  "build",
+] as const;
 const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
 
 // Framework/package signals are intentionally limited to mainstream web stacks
@@ -681,6 +694,9 @@ function finalizeSite(candidate: Candidate): WorkspaceSite {
     ...(entry ? { entry } : {}),
     ...(candidate.packageManager ? { packageManager: candidate.packageManager } : {}),
     scripts,
+    ...(config?.preview?.mode
+      ? { configuredPreviewMode: config.preview.mode }
+      : {}),
     ...(config?.build?.output ? { configuredBuildOutput: config.build.output } : {}),
     buildOutputs: [...candidate.buildOutputs].sort(),
     ...(configPath ? { configPath } : {}),

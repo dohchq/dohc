@@ -21,6 +21,7 @@ import {
 import {
   assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
+  createSitePreviewStartRegistry,
 } from "./sitePreviewLifecycle";
 import type { SiteLogEntry, SiteProcessHandle } from "./siteRunner";
 
@@ -55,6 +56,29 @@ function fakeProcessHandle(url: string) {
 }
 
 describe("site preview lifecycle", () => {
+  it("aborts only the matching pending site start immediately", async () => {
+    const starts = createSitePreviewStartRegistry();
+    const matching = starts.begin(7, "workspace-1", "site");
+    const otherSite = starts.begin(7, "workspace-1", "other-site");
+    const otherWorkspace = starts.begin(8, "workspace-2", "site");
+    const matchingAbort = new Promise<boolean>((resolve) => {
+      matching.controller.signal.addEventListener(
+        "abort",
+        () => resolve(true),
+        { once: true },
+      );
+    });
+
+    starts.abortForSite("workspace-1", "site");
+
+    await expect(matchingAbort).resolves.toBe(true);
+    expect(matching.controller.signal.aborted).toBe(true);
+    expect(otherSite.controller.signal.aborted).toBe(false);
+    expect(otherWorkspace.controller.signal.aborted).toBe(false);
+    otherSite.finish();
+    otherWorkspace.finish();
+  });
+
   it("removes the handle and origin when a ready server exits", () => {
     const previews = createSitePreviewLifecycle({
       allowOrigin: allowLoopbackFrameOrigin,

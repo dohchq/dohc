@@ -2113,8 +2113,12 @@ const SiteDiagnostic = z.object({
 export type SiteDiagnostic = z.infer<typeof SiteDiagnostic>;
 
 const SiteScripts = z.object({
+  predev: z.string().optional(),
   dev: z.string().optional(),
+  postdev: z.string().optional(),
+  prestart: z.string().optional(),
   start: z.string().optional(),
+  poststart: z.string().optional(),
   build: z.string().optional(),
 });
 export type SiteScripts = z.infer<typeof SiteScripts>;
@@ -2181,6 +2185,7 @@ const SitePackageInfo = z
     packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
     scripts: SiteScripts,
     configuredScripts: SiteScripts,
+    configuredPreviewMode: z.enum(["static", "dev", "build"]).nullable(),
     configuredBuildOutput: PATH_STRING.nullable(),
     buildOutputs: z.array(PATH_STRING).max(100),
     sourceFiles: z.array(PATH_STRING),

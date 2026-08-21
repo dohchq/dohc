@@ -87,7 +87,9 @@ describe("discoverSites", () => {
         body: JSON.stringify({
           name: "@acme/client-dashboard",
           scripts: {
+            predev: "node verify-host.mjs",
             dev: "vite --host 127.0.0.1",
+            postdev: "node announce-ready.mjs",
             build: "vite build",
             preview: "vite preview",
           },
@@ -105,7 +107,9 @@ describe("discoverSites", () => {
       confidence: "medium",
       packageManager: "pnpm",
       scripts: {
+        predev: "node verify-host.mjs",
         dev: "vite --host 127.0.0.1",
+        postdev: "node announce-ready.mjs",
         build: "vite build",
       },
       diagnostics: [],
@@ -183,6 +187,7 @@ describe("discoverSites", () => {
       packageManager: "bun",
       configPath: "research/site/dohc.json",
       scripts: { dev: "pnpm dev", build: "pnpm build" },
+      configuredPreviewMode: "dev",
       configuredBuildOutput: "public/dist",
       buildOutputs: [],
       diagnostics: [],

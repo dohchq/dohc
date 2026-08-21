@@ -17,6 +17,7 @@ const site: SitePackageInfo = {
   packageManager: "pnpm",
   scripts: { dev: "vite", build: "vite build" },
   configuredScripts: {},
+  configuredPreviewMode: null,
   configuredBuildOutput: null,
   buildOutputs: ["dist"],
   sourceFiles: ["client-portal/index.html", "client-portal/package.json"],

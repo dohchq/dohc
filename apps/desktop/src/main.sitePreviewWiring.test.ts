@@ -27,6 +27,15 @@ afterEach(async () => {
 });
 
 describe("site preview main-process wiring", () => {
+  it("aborts the matching pending start before stop waits for its site lock", () => {
+    const handler = handlerSource("stopSitePreview");
+    const abortAt = handler.indexOf("abortSitePreviewStartsForSite(");
+    const lockAt = handler.indexOf("await withSitePreviewStartLock(");
+
+    expect(abortAt).toBeGreaterThanOrEqual(0);
+    expect(lockAt).toBeGreaterThan(abortAt);
+  });
+
   it("wires startSitePreview to call requireExactSiteRoot before starting", () => {
     // The handler must look up the site, then guard it through
     // requireExactSiteRoot, then start the preview — in that order. The

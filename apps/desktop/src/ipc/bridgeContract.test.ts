@@ -1019,6 +1019,7 @@ describe("site IPC contract", () => {
             packageManager: "pnpm",
             scripts: { dev: "vite", build: "vite build" },
             configuredScripts: {},
+            configuredPreviewMode: "build",
             configuredBuildOutput: null,
             buildOutputs: ["dist"],
             sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
@@ -1027,8 +1028,11 @@ describe("site IPC contract", () => {
             authority: { kind: "workspace" },
           },
         ],
-      }).sites[0]?.root,
-    ).toBe("client-portal");
+      }).sites[0],
+    ).toMatchObject({
+      root: "client-portal",
+      configuredPreviewMode: "build",
+    });
     expect(ListSitesResult.parse({ sites: [] }).sites).toEqual([]);
     expect(
       ListSitesResult.parse({
@@ -1044,6 +1048,7 @@ describe("site IPC contract", () => {
             packageManager: null,
             scripts: {},
             configuredScripts: {},
+            configuredPreviewMode: null,
             configuredBuildOutput: null,
             buildOutputs: [],
             sourceFiles: [],
@@ -1076,6 +1081,7 @@ describe("site IPC contract", () => {
             packageManager: "pnpm",
             scripts: { dev: "vite" },
             configuredScripts: {},
+            configuredPreviewMode: null,
             configuredBuildOutput: null,
             buildOutputs: [],
             sourceFiles,
@@ -1102,6 +1108,7 @@ describe("site IPC contract", () => {
           packageManager: null,
           scripts: { preview: "npm run preview" },
           configuredScripts: { preview: "serve dist" },
+          configuredPreviewMode: null,
           configuredBuildOutput: null,
           buildOutputs: [],
           sourceFiles: ["configured-site/index.html"],
@@ -1134,6 +1141,7 @@ describe("site IPC contract", () => {
       packageManager: null,
       scripts: {},
       configuredScripts: {},
+      configuredPreviewMode: null,
       configuredBuildOutput: null,
       buildOutputs: [],
       sourceFiles: [`site-${index}/index.html`],
@@ -1163,6 +1171,7 @@ describe("site IPC contract", () => {
       packageManager: null,
       scripts: {},
       configuredScripts: {},
+      configuredPreviewMode: null,
       configuredBuildOutput: null,
       buildOutputs: [],
       sourceFiles: ["shared-with-me/alex/report/index.html"],

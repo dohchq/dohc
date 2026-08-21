@@ -214,6 +214,56 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("media/intro.mp4");
   });
 
+  it("does not treat a comma inside a data URL srcset as a local file", async () => {
+    await mkdir(join(root, "data-srcset"), { recursive: true });
+    await writeFile(
+      join(root, "data-srcset", "index.html"),
+      '<img srcset="data:text/plain,secret.txt">',
+    );
+    await writeFile(join(root, "data-srcset", "secret.txt"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "data-srcset",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual([]);
+  });
+
+  it("includes every local candidate in a multi-candidate srcset", async () => {
+    await mkdir(join(root, "responsive-srcset"), { recursive: true });
+    await writeFile(
+      join(root, "responsive-srcset", "index.html"),
+      '<img srcset="a.png 1x, b.png 2x">',
+    );
+    await writeFile(join(root, "responsive-srcset", "a.png"), "one");
+    await writeFile(join(root, "responsive-srcset", "b.png"), "two");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "responsive-srcset",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual([
+      "responsive-srcset/a.png",
+      "responsive-srcset/b.png",
+    ]);
+  });
+
+  it("keeps a local srcset candidate after a data URL without leaking its payload", async () => {
+    await mkdir(join(root, "mixed-srcset"), { recursive: true });
+    await writeFile(
+      join(root, "mixed-srcset", "index.html"),
+      '<img srcset="data:text/plain,x 1x, real.png 2x">',
+    );
+    await writeFile(join(root, "mixed-srcset", "x"), "private");
+    await writeFile(join(root, "mixed-srcset", "real.png"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "mixed-srcset",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual(["mixed-srcset/real.png"]);
+  });
+
   it("does not invent extensions for browser references", async () => {
     await mkdir(join(root, "extensionless"), { recursive: true });
     await writeFile(
@@ -431,6 +481,28 @@ describe("listSitePackages", () => {
     expect(sites.find((site) => site.root === "broken")?.diagnostics).toEqual([
       expect.objectContaining({ code: "invalid-json" }),
     ]);
+  });
+
+  it("surfaces a configured preview mode without a static or build command", async () => {
+    await mkdir(join(root, "configured-mode"), { recursive: true });
+    await writeFile(join(root, "configured-mode", "index.html"), "<h1>Mode</h1>");
+    await writeFile(
+      join(root, "configured-mode", "package.json"),
+      JSON.stringify({ scripts: { dev: "vite" } }),
+    );
+    await writeFile(
+      join(root, "configured-mode", "dohc.json"),
+      JSON.stringify({ type: "site", preview: { mode: "static" } }),
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "configured-mode",
+    );
+
+    expect(site).toMatchObject({
+      configuredPreviewMode: "static",
+      configuredScripts: {},
+    });
   });
 
   it("reports configured preview commands that cannot run", async () => {

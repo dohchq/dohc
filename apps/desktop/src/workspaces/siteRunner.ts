@@ -119,6 +119,7 @@ export async function startStaticSitePreview(
     containmentRoot: workspaceRoot,
     entry: options.entry ?? "index.html",
     entryLabel: "site entry",
+    forbidSharedWithMePaths: siteRoot === ".",
   });
 }
 
@@ -273,9 +274,16 @@ export function packageManagerDevCommand(
   manager: PackageManager,
   script: "dev" | "start",
   scriptBody: string,
+  lifecycle: { pre?: string; post?: string } = {},
 ): ReturnType<typeof packageManagerCommand> {
-  const visibleCommand = splitCommandLine(scriptBody);
-  assertLoopbackOnlyDevServerCommand(visibleCommand.command, visibleCommand.args);
+  // npm, pnpm 11, Yarn Classic, and Bun run matching pre/post hooks. Yarn
+  // Modern does not, but the detected manager does not carry its major
+  // version, so validating Yarn hooks keeps Classic sites safe.
+  for (const body of [scriptBody, lifecycle.pre, lifecycle.post]) {
+    if (!body) continue;
+    const visibleCommand = splitCommandLine(body);
+    assertLoopbackOnlyDevServerCommand(visibleCommand.command, visibleCommand.args);
+  }
   const packageCommand = packageManagerCommand(manager, script);
   assertLoopbackOnlyDevServerCommand(packageCommand.command, packageCommand.args);
   return packageCommand;
@@ -524,7 +532,7 @@ export async function buildSite(input: {
 
     function abortBuild() {
       if (settled) return;
-      pushLog(logs, "system", "Build cancelled because the renderer restarted.");
+      pushLog(logs, "system", "Build cancelled.");
       void stopChild(child).then(() => finish(null));
     }
 

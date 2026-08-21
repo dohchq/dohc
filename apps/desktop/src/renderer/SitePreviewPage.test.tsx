@@ -33,6 +33,7 @@ const site: SitePackageInfo = {
   packageManager: null,
   scripts: {},
   configuredScripts: {},
+  configuredPreviewMode: null,
   configuredBuildOutput: null,
   buildOutputs: [],
   sourceFiles: ["report/index.html"],
@@ -132,6 +133,31 @@ describe("SitePreviewPage", () => {
     });
   });
 
+  it("prefers the site's configured preview mode when Auto is selected", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+      configuredPreviewMode: "static",
+    });
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "static",
+      url: "http://127.0.0.1:49152/",
+      logs: [],
+    });
+
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    expect(bridgeMock.startSitePreview).toHaveBeenCalledWith({
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      mode: "static",
+    });
+  });
+
   it("uses the workspace default for the initial preview mode", async () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce({
       ...site,
@@ -208,6 +234,7 @@ describe("SitePreviewPage", () => {
       kind: "package",
       packagePath: "report/package.json",
       scripts: { dev: "vite", build: "vite build" },
+      configuredPreviewMode: "dev",
       buildOutputs: ["dist"],
     });
     bridgeMock.getWorkspaceSettings.mockResolvedValueOnce({

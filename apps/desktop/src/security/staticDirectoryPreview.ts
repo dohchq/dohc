@@ -1,4 +1,4 @@
-import { hasIgnoredSegment } from "@dohc/workspace-core";
+import { hasIgnoredSegment, isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, open, realpath } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -96,6 +96,7 @@ export async function startStaticDirectoryPreview(
     containmentRoot: string;
     entry: string;
     entryLabel: string;
+    forbidSharedWithMePaths?: boolean;
   },
 ): Promise<StaticDirectoryPreview> {
   const root = await realpath(rootPath);
@@ -124,7 +125,10 @@ export async function startStaticDirectoryPreview(
         response.end("Invalid path");
         return;
       }
-      if (hasIgnoredSegment(relativePath)) {
+      if (
+        hasIgnoredSegment(relativePath) ||
+        (options.forbidSharedWithMePaths && isSharedWithMePath(relativePath))
+      ) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
         return;
@@ -150,6 +154,18 @@ export async function startStaticDirectoryPreview(
           })
         ).resolvedAbsolute;
       } catch {
+        response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Forbidden");
+        return;
+      }
+      const containmentRelative = relative(containmentRoot, realTarget).replaceAll(
+        "\\",
+        "/",
+      );
+      if (
+        options.forbidSharedWithMePaths &&
+        isSharedWithMePath(containmentRelative)
+      ) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
         return;

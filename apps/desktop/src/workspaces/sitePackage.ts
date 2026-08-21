@@ -31,6 +31,7 @@ export interface SitePackageInfo {
   packageManager: SitePackageManager | null;
   scripts: SiteScripts;
   configuredScripts: SiteScripts;
+  configuredPreviewMode: "static" | "dev" | "build" | null;
   configuredBuildOutput: string | null;
   buildOutputs: string[];
   sourceFiles: string[];
@@ -231,6 +232,39 @@ function referencesFromWebManifest(text: string): string[] {
   return references;
 }
 
+function referencesFromSrcset(value: string): string[] {
+  const references: string[] = [];
+  let position = 0;
+  while (position < value.length) {
+    while (position < value.length && /[\t\n\f\r ,]/.test(value[position]!)) {
+      position += 1;
+    }
+    if (position >= value.length) break;
+
+    const urlStart = position;
+    while (position < value.length && !/[\t\n\f\r ]/.test(value[position]!)) {
+      position += 1;
+    }
+    let url = value.slice(urlStart, position);
+    if (url.endsWith(",")) {
+      url = url.replace(/,+$/, "");
+      if (url) references.push(url);
+      continue;
+    }
+
+    let parentheses = 0;
+    while (position < value.length) {
+      const character = value[position]!;
+      position += 1;
+      if (character === "(") parentheses += 1;
+      else if (character === ")" && parentheses > 0) parentheses -= 1;
+      else if (character === "," && parentheses === 0) break;
+    }
+    references.push(url);
+  }
+  return references;
+}
+
 function referencesFromBrowserText(text: string, sourcePath: string): string[] {
   if (/\.webmanifest$/i.test(sourcePath)) return referencesFromWebManifest(text);
   const references: string[] = [];
@@ -251,10 +285,7 @@ function referencesFromBrowserText(text: string, sourcePath: string): string[] {
         references.push(value);
         continue;
       }
-      for (const candidate of value.split(",")) {
-        const srcsetPath = candidate.trim().split(/\s+/, 1)[0];
-        if (srcsetPath) references.push(srcsetPath);
-      }
+      references.push(...referencesFromSrcset(value));
     }
   }
 
@@ -457,6 +488,7 @@ async function mapWorkspaceSite(
     packageManager: site.packageManager ?? null,
     scripts: site.scripts,
     configuredScripts,
+    configuredPreviewMode: site.configuredPreviewMode ?? null,
     configuredBuildOutput: site.configuredBuildOutput ?? null,
     buildOutputs: site.buildOutputs,
     sourceFiles,

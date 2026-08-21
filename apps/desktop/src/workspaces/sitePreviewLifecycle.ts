@@ -20,6 +20,61 @@ function previewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
 }
 
+export function createSitePreviewStartRegistry() {
+  type PendingStart = {
+    senderId: number;
+    siteKey: string;
+    controller: AbortController;
+  };
+  const startsBySender = new Map<number, Set<PendingStart>>();
+  const startsBySite = new Map<string, Set<PendingStart>>();
+
+  const remove = (start: PendingStart): void => {
+    const senderStarts = startsBySender.get(start.senderId);
+    senderStarts?.delete(start);
+    if (senderStarts?.size === 0) startsBySender.delete(start.senderId);
+
+    const siteStarts = startsBySite.get(start.siteKey);
+    siteStarts?.delete(start);
+    if (siteStarts?.size === 0) startsBySite.delete(start.siteKey);
+  };
+
+  const abort = (starts: Iterable<PendingStart>): void => {
+    for (const start of [...starts]) {
+      remove(start);
+      start.controller.abort();
+    }
+  };
+
+  return {
+    begin(senderId: number, workspaceId: string, siteRoot: string) {
+      const start: PendingStart = {
+        senderId,
+        siteKey: previewKey(workspaceId, siteRoot),
+        controller: new AbortController(),
+      };
+      const senderStarts = startsBySender.get(senderId) ?? new Set<PendingStart>();
+      senderStarts.add(start);
+      startsBySender.set(senderId, senderStarts);
+      const siteStarts = startsBySite.get(start.siteKey) ?? new Set<PendingStart>();
+      siteStarts.add(start);
+      startsBySite.set(start.siteKey, siteStarts);
+      return {
+        controller: start.controller,
+        finish: () => remove(start),
+      };
+    },
+
+    abortForSender(senderId: number): void {
+      abort(startsBySender.get(senderId) ?? []);
+    },
+
+    abortForSite(workspaceId: string, siteRoot: string): void {
+      abort(startsBySite.get(previewKey(workspaceId, siteRoot)) ?? []);
+    },
+  };
+}
+
 export function createSitePreviewLifecycle(input: {
   allowOrigin: (url: string) => () => void;
 }) {

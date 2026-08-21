@@ -1707,7 +1707,15 @@ function packageNameFromPath(root: string): string {
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: SiteScripts = {};
-  for (const key of ["dev", "start", "build"] as const) {
+  for (const key of [
+    "predev",
+    "dev",
+    "postdev",
+    "prestart",
+    "start",
+    "poststart",
+    "build",
+  ] as const) {
     const value = pkg.scripts[key];
     if (typeof value === "string" && value.trim()) scripts[key] = value;
   }
@@ -1778,6 +1786,12 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   const scripts = readPackageScripts(pkg);
   const configPreviewCommand = configString(config?.preview, "command");
   const configPreviewMode = configString(config?.preview, "mode");
+  const configuredPreviewMode =
+    configPreviewMode === "static" ||
+    configPreviewMode === "dev" ||
+    configPreviewMode === "build"
+      ? configPreviewMode
+      : undefined;
   if (configPreviewCommand) {
     if (configPreviewMode === "static" || configPreviewMode === "build") {
       diagnostics.push({
@@ -1859,6 +1873,7 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     ...(entry ? { entry } : {}),
     ...(packageManager ? { packageManager } : {}),
     scripts,
+    ...(configuredPreviewMode ? { configuredPreviewMode } : {}),
     buildOutputs: uniqueBuildOutputs,
     ...(configPath ? { configPath } : {}),
     diagnostics,

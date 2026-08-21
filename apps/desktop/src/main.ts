@@ -637,6 +637,7 @@ import {
 import {
   assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
+  createSitePreviewStartRegistry,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
 import {
@@ -895,10 +896,7 @@ const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
 // reach the plugins running in that workspace.
 const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>();
 const sitePreviewStartLocks = new Map<string, Promise<void>>();
-const sitePreviewStartControllersBySender = new Map<
-  number,
-  Set<AbortController>
->();
+const sitePreviewStarts = createSitePreviewStartRegistry();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
@@ -1150,34 +1148,26 @@ function advanceRendererGeneration(senderId: number): void {
   rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
 }
 
-function beginSitePreviewStart(senderId: number): {
+function beginSitePreviewStart(
+  senderId: number,
+  workspaceId: string,
+  siteRoot: string,
+): {
   controller: AbortController;
   finish: () => void;
 } {
-  const controller = new AbortController();
-  const controllers =
-    sitePreviewStartControllersBySender.get(senderId) ??
-    new Set<AbortController>();
-  controllers.add(controller);
-  sitePreviewStartControllersBySender.set(senderId, controllers);
-  return {
-    controller,
-    finish: () => {
-      controllers.delete(controller);
-      if (
-        controllers.size === 0 &&
-        sitePreviewStartControllersBySender.get(senderId) === controllers
-      ) {
-        sitePreviewStartControllersBySender.delete(senderId);
-      }
-    },
-  };
+  return sitePreviewStarts.begin(senderId, workspaceId, siteRoot);
 }
 
 function abortSitePreviewStartsForSender(senderId: number): void {
-  const controllers = sitePreviewStartControllersBySender.get(senderId);
-  sitePreviewStartControllersBySender.delete(senderId);
-  for (const controller of controllers ?? []) controller.abort();
+  sitePreviewStarts.abortForSender(senderId);
+}
+
+function abortSitePreviewStartsForSite(
+  workspaceId: string,
+  siteRoot: string,
+): void {
+  sitePreviewStarts.abortForSite(workspaceId, siteRoot);
 }
 
 function sitePreviewKey(workspaceId: string, siteRoot: string): string {
@@ -1246,7 +1236,14 @@ function commandForSiteScript(
       // It cannot trace shell functions, environment-driven binds, config-file
       // binds, or commands past that depth, so tools with no visible host flag
       // still rely on their loopback default.
-      return packageManagerDevCommand(site.packageManager ?? "npm", script, configured);
+      return packageManagerDevCommand(
+        site.packageManager ?? "npm",
+        script,
+        configured,
+        script === "dev"
+          ? { pre: site.scripts.predev, post: site.scripts.postdev }
+          : { pre: site.scripts.prestart, post: site.scripts.poststart },
+      );
     }
     return packageManagerCommand(site.packageManager ?? "npm", script);
   }
@@ -6894,7 +6891,11 @@ function registerIpcHandlers(
     const input = StartSitePreviewPayload.parse(payload);
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
-    const pendingStart = beginSitePreviewStart(sender.id);
+    const pendingStart = beginSitePreviewStart(
+      sender.id,
+      input.workspaceId,
+      input.siteRoot,
+    );
     const isCurrent = () =>
       !pendingStart.controller.signal.aborted &&
       !sender.isDestroyed() &&
@@ -6974,6 +6975,7 @@ function registerIpcHandlers(
       activeWorkspaceIdBySender.get(senderId),
       workspace.workspaceId,
     );
+    abortSitePreviewStartsForSite(workspace.workspaceId, input.siteRoot);
     await withSitePreviewStartLock(
       sitePreviewKey(workspace.workspaceId, input.siteRoot),
       async () => {

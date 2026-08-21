@@ -104,6 +104,12 @@ function preferredMode(
     return modes.includes("static") ? "static" : null;
   }
   if (
+    site.configuredPreviewMode &&
+    modes.includes(site.configuredPreviewMode)
+  ) {
+    return site.configuredPreviewMode;
+  }
+  if (
     defaultPreviewMode !== "auto" &&
     modes.includes(defaultPreviewMode)
   ) {

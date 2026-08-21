@@ -66,6 +66,32 @@ describe("startStaticSitePreview", () => {
     }
   });
 
+  it("does not serve a shared-with-me mount from a root-level site", async () => {
+    await mkdir(join(root, "shared-with-me", "Alex"), { recursive: true });
+    await writeFile(join(root, "index.html"), "<h1>Root Site</h1>");
+    await writeFile(
+      join(root, "shared-with-me", "Alex", "private.txt"),
+      "shared private file",
+    );
+    await writeFile(join(root, "shared-with-me-notes.txt"), "owned sibling file");
+
+    const preview = await startStaticSitePreview(root, ".");
+    try {
+      const shared = await fetch(
+        new URL("/shared-with-me/Alex/private.txt", preview.url),
+      );
+      expect(shared.status).toBe(403);
+
+      const sibling = await fetch(
+        new URL("/shared-with-me-notes.txt", preview.url),
+      );
+      expect(sibling.status).toBe(200);
+      await expect(sibling.text()).resolves.toBe("owned sibling file");
+    } finally {
+      await preview.stop();
+    }
+  });
+
   it("rejects traversal and missing entry files", async () => {
     await mkdir(join(root, "empty"), { recursive: true });
     await expect(startStaticSitePreview(root, "../escape")).rejects.toThrow(/traversal|relative/);
@@ -112,6 +138,31 @@ describe("package manager helpers", () => {
       command: "pnpm",
       args: ["dev"],
     });
+  });
+
+  it.each(["npm", "pnpm"] as const)(
+    "validates implicit %s lifecycle hooks around a safe dev script",
+    (manager) => {
+      expect(() =>
+        packageManagerDevCommand(
+          manager,
+          "dev",
+          "vite --host 127.0.0.1",
+          { pre: "vite --host 0.0.0.0" },
+        ),
+      ).toThrow(/loopback/);
+    },
+  );
+
+  it("recursively validates a shell-wrapped implicit lifecycle hook", () => {
+    expect(() =>
+      packageManagerDevCommand(
+        "npm",
+        "dev",
+        "vite --host 127.0.0.1",
+        { post: "bash -lc 'vite --host 0.0.0.0'" },
+      ),
+    ).toThrow(/loopback/);
   });
 
   it("validates host flags inside visible shell-wrapped package scripts", () => {
