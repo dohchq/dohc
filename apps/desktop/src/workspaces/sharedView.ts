@@ -852,6 +852,39 @@ export async function captureSharedViewLocalDivergence(
     );
   }
 
+  async function captureAbsentTrackedPath(
+    path: string,
+    contentKind: "text" | "binary",
+    resolvedTarget: string,
+  ): Promise<
+    | "captured"
+    | "repaired"
+    | "unchanged"
+    | { kind: "unjournalable"; path: UnjournalablePath }
+  > {
+    try {
+      if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
+        return "unchanged";
+      }
+    } catch {
+      return {
+        kind: "unjournalable",
+        path: { path, reason: "unreadable" },
+      };
+    }
+    if (!allowLocalJournaling) {
+      await rematerializeHead(path, contentKind);
+      return "repaired";
+    }
+    await store.deleteTextFile({
+      workspaceId,
+      versionId: main.id,
+      path,
+      metadata: { origin: "local-file" },
+    });
+    return "captured";
+  }
+
   const unjournalableFromDisk = (
     path: string,
     disk: DiskTextState & { kind: "untracked-content" | "unreadable" },
@@ -1009,6 +1042,8 @@ export async function captureSharedViewLocalDivergence(
     }
 
     let onDisk: "file" | "directory" | "symlink" | "absent";
+    // On Windows, keep this pre-lock check: resolvedShareViewTarget throws on an
+    // unreadable ancestor, rejecting capture instead of recording it and continuing.
     try {
       const stat = await lstat(resolve(realRoot, entry.path));
       onDisk = stat.isSymbolicLink()
@@ -1038,37 +1073,12 @@ export async function captureSharedViewLocalDivergence(
       const deleted = await withCaptureMutationLock(
         rootDir,
         entry.path,
-        async (resolvedTarget): Promise<
-          | "captured"
-          | "repaired"
-          | "unchanged"
-          | { kind: "unjournalable"; path: UnjournalablePath }
-        > => {
-          try {
-            if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
-              return "unchanged";
-            }
-          } catch {
-            return {
-              kind: "unjournalable",
-              path: { path: entry.path, reason: "unreadable" },
-            };
-          }
-          if (!allowLocalJournaling) {
-            await rematerializeHead(
-              entry.path,
-              entry.contentKind === "binary" ? "binary" : "text",
-            );
-            return "repaired";
-          }
-          await store.deleteTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-            metadata: { origin: "local-file" },
-          });
-          return "captured";
-        },
+        (resolvedTarget) =>
+          captureAbsentTrackedPath(
+            entry.path,
+            entry.contentKind === "binary" ? "binary" : "text",
+            resolvedTarget,
+          ),
       );
       if (typeof deleted === "object") {
         unjournalablePaths.push(deleted.path);
@@ -1086,30 +1096,11 @@ export async function captureSharedViewLocalDivergence(
       async (resolvedTarget) => {
         const disk = await readDiskContent(resolvedTarget);
         if (disk.kind === "absent") {
-          try {
-            if (!(await pathConfirmedAbsentOnDisk(resolvedTarget))) {
-              return "unchanged" as const;
-            }
-          } catch {
-            return {
-              kind: "unjournalable" as const,
-              path: { path: entry.path, reason: "unreadable" as const },
-            };
-          }
-          if (!allowLocalJournaling) {
-            await rematerializeHead(
-              entry.path,
-              entry.contentKind === "binary" ? "binary" : "text",
-            );
-            return "repaired" as const;
-          }
-          await store.deleteTextFile({
-            workspaceId,
-            versionId: main.id,
-            path: entry.path,
-            metadata: { origin: "local-file" },
-          });
-          return "captured" as const;
+          return captureAbsentTrackedPath(
+            entry.path,
+            entry.contentKind === "binary" ? "binary" : "text",
+            resolvedTarget,
+          );
         }
         if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
           return {

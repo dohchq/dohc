@@ -53,6 +53,21 @@ import {
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createTestScratch } from "./testTemp";
 
+// A recording spy, not a poisoning one: every readdir call this file's own
+// setup or fixtures make is allowed through unchanged. It proves that capture
+// makes zero readdir calls, so the recursive tree walk #866 removed stays gone.
+let readdirCalls: string[] = [];
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readdir: (async (path: Parameters<typeof readdir>[0], options?: unknown) => {
+      readdirCalls.push(String(path));
+      return actual.readdir(path as string, options as never);
+    }) as typeof readdir,
+  };
+});
+
 // These tests drive the pull with the selector a share record pins. It is a
 // REAL selector — no paths and no version selects nothing at all, which the
 // engine refuses.
@@ -3296,6 +3311,41 @@ describe("shared view refresh", () => {
       ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       failProjection = false;
+      await store.close();
+    }
+  });
+
+  it("issues zero readdir calls when a tracked view sits beside an untracked subtree", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/tracked.md";
+    relay.addWrite(path, "tracked body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await mkdir(join(rootDir, "untracked", "nested"), { recursive: true });
+    await writeFile(join(rootDir, "untracked", "one.txt"), "one", "utf8");
+    await writeFile(
+      join(rootDir, "untracked", "nested", "two.txt"),
+      "two",
+      "utf8",
+    );
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      readdirCalls = [];
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      expect(readdirCalls).toEqual([]);
+    } finally {
       await store.close();
     }
   });
