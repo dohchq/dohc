@@ -711,23 +711,34 @@ async function refuseNonFileReplacement(
   held: ReadonlyMap<string, unknown>,
   leaves: readonly string[],
 ): Promise<void> {
-  const replaced: UnjournalablePath[] = [];
+  const messages: string[] = [];
+  // The operation's OWN path, checked separately from the leaves below: a
+  // share view has no tracked FOLDER for `unjournalablePathMessages`'s
+  // file-flavored copy to name, so this states the folder in its own words
+  // rather than telling the reader to "restore the file" a share view never
+  // held.
   if (!held.has(operationPath)) {
     const entry = await nonFileReplacementEntry(rootPath, operationPath);
     if (entry !== null && !entry.isDirectory()) {
-      replaced.push({ path: operationPath, reason: "non-file-replacement" });
+      messages.push(
+        `${operationPath} replaces this shared folder with a link or another entry. ` +
+          `Restore the folder or move the conflicting entry.`,
+      );
     }
   }
+  const replacedLeaves: UnjournalablePath[] = [];
   for (const path of leaves) {
     const entry = await nonFileReplacementEntry(rootPath, path);
     if (entry !== null && !entry.isFile()) {
-      replaced.push({ path, reason: "non-file-replacement" });
+      replacedLeaves.push({ path, reason: "non-file-replacement" });
     }
   }
-  if (replaced.length > 0) {
+  if (replacedLeaves.length > 0) {
+    messages.push(...unjournalablePathMessages(replacedLeaves));
+  }
+  if (messages.length > 0) {
     throw new Error(
-      `dohc did not ${action.toLowerCase()} ${operationPath}. ` +
-        unjournalablePathMessages(replaced).join(" "),
+      `dohc did not ${action.toLowerCase()} ${operationPath}. ${messages.join(" ")}`,
     );
   }
 }

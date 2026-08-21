@@ -967,7 +967,7 @@ describe("share-view file operations through the real store", () => {
         }),
         "MUTATION: renaming a folder a symlink replaced follows the link per leaf and destroys the recipient's files at its target",
       ).rejects.toThrow(
-        "dohc did not rename docs/plans. docs/plans replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+        "dohc did not rename docs/plans. docs/plans replaces this shared folder with a link or another entry. Restore the folder or move the conflicting entry.",
       );
 
       expect(
