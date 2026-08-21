@@ -1046,16 +1046,16 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       notifyPluginStatusChanged(workspace.workspaceId, event),
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
-    markCommandClaimsDraining: (pluginId) =>
-      activeCommandClaims.markDraining(
+    raiseCommandClaimsBarrier: (pluginId) =>
+      activeCommandClaims.raiseDrainBarrier(
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
     awaitCommandClaimsDrained: (pluginId) =>
       activeCommandClaims.drain(
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
-    clearCommandClaimsBarrier: (pluginId) =>
-      activeCommandClaims.clearDrain(
+    lowerCommandClaimsBarrier: (pluginId) =>
+      activeCommandClaims.lowerDrainBarrier(
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
   });
@@ -2788,11 +2788,18 @@ function destroyPluginWebAppViews(
 // Without it the page keeps a `ready` state over an empty frame and the user
 // sees a blank tab with nothing to act on. The event carries no failure text:
 // the load error can embed the start URL, credential fragment included.
+//
+// generation gates this the same way every other send in this file does
+// (round-13 finding 3): WebContents ids recycle across a crash-reload, so
+// a sender resolved by a stale id — or a captured reference whose renderer
+// has since reloaded — could otherwise deliver a dead guest's failure to
+// whatever unrelated page now answers to that id or generation.
 function notifyPluginWebAppFailed(
   sender: WebContents,
+  generation: number,
   event: PluginWebAppFailedEvent,
 ): void {
-  if (sender.isDestroyed()) return;
+  if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) return;
   sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
 }
 
@@ -2803,7 +2810,7 @@ function stopPluginWebAppsForPlugin(workspaceId: string, pluginId: string): void
     (record) => {
       const sender = webContents.fromId(record.senderId);
       if (sender) {
-        notifyPluginWebAppFailed(sender, {
+        notifyPluginWebAppFailed(sender, record.generation, {
           workspaceId: record.workspaceId,
           pluginId: record.pluginId,
           webAppId: record.webAppId,
@@ -7144,7 +7151,7 @@ function registerIpcHandlers(
         // hold that section open waiting for the handler it runs inside.
         const recoverConsumedCredential = (): void => {
           void recoverConsumedWebAppCredential({
-            notifyFailed: () => notifyPluginWebAppFailed(sender, identity),
+            notifyFailed: () => notifyPluginWebAppFailed(sender, generation, identity),
             withTeardownLock: (teardown) =>
               withPluginWebAppStartLock(
                 pluginWebAppKey(

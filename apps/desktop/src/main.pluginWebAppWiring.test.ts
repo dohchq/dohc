@@ -259,11 +259,37 @@ describe("plugin web app main-process wiring", () => {
     expect(notifyAt).toBeGreaterThan(resolveSenderAt);
     expect(destroyAt).toBeGreaterThan(notifyAt);
     expect(squeeze(stop)).toContain(
-      "notifyPluginWebAppFailed(sender,{workspaceId:record.workspaceId,pluginId:record.pluginId,webAppId:record.webAppId,instanceKey:record.instanceKey,})",
+      "notifyPluginWebAppFailed(sender,record.generation,{workspaceId:record.workspaceId,pluginId:record.pluginId,webAppId:record.webAppId,instanceKey:record.instanceKey,})",
     );
     // The isolation and always-destroy guarantees themselves are pinned
     // behaviorally in pluginWebAppViews.test.ts, against the shared
     // stopPluginWebAppGuests() this handler delegates to.
+  });
+
+  // round-13 finding 3 (CodeRabbit): WebContents ids recycle across a
+  // crash-reload, so a sender resolved by a stale id could otherwise
+  // deliver a dead guest's failure to whatever unrelated page now answers
+  // to that id — every other send in this file gates on the record's
+  // generation, and this one now does too.
+  it("refuses to notify a sender whose generation has moved on", () => {
+    const notify = functionSource("function notifyPluginWebAppFailed(");
+
+    expect(notify).toContain(
+      "sender.isDestroyed() || rendererGeneration(sender.id) !== generation",
+    );
+
+    // Both call sites pass a generation the record or the handler itself
+    // already carries, not a freshly re-derived one — the whole point is
+    // to compare against what the record was stamped with, not the
+    // sender's current generation (which would make the check vacuous).
+    const stop = functionSource("function stopPluginWebAppsForPlugin(");
+    expect(squeeze(stop)).toContain(
+      "notifyPluginWebAppFailed(sender,record.generation,",
+    );
+    const recover = mainSource.indexOf(
+      "notifyFailed: () => notifyPluginWebAppFailed(sender, generation, identity)",
+    );
+    expect(recover).toBeGreaterThan(-1);
   });
 
   it("clears the guest partition's storage after a successful uninstall", () => {

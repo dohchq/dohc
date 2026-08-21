@@ -2774,8 +2774,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         onStatusChange: (event) => {
           if (event.kind === "changed") statuses.push(event.plugin.status);
         },
-        markCommandClaimsDraining: (pluginId) => {
-          commandClaims.markDraining(pluginId);
+        raiseCommandClaimsBarrier: (pluginId) => {
+          commandClaims.raiseDrainBarrier(pluginId);
         },
         awaitCommandClaimsDrained: async (pluginId) => {
           const gate = nextCommandDrainGate;
@@ -2787,8 +2787,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           }
           await drained;
         },
-        clearCommandClaimsBarrier: (pluginId) => {
-          commandClaims.clearDrain(pluginId);
+        lowerCommandClaimsBarrier: (pluginId) => {
+          commandClaims.lowerDrainBarrier(pluginId);
         },
         operations: {
           install: (input) =>
@@ -3561,6 +3561,95 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("marks the drain barrier the instant a retry is called, even while it still sits queued behind another job for the same plugin (round-13 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      let buildGate: ReturnType<typeof setup.gateNextBuild> | undefined;
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // Occupy the plugin's own per-plugin job queue with an
+        // UNRELATED action — approve(), which raises no outer hold of
+        // its own and has not reached its own eventual stopOldRuntime
+        // either — held mid-build. Isolates this test to a retry's OWN
+        // raise timing: if approve() itself raised something, isDraining
+        // would already read true regardless of what retry does.
+        buildGate = setup.gateNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "queue occupant";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approving = setup.pipeline.approve("example-plugin");
+        await buildGate.entered.promise;
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // Called while the queue is still occupied by approve()'s own
+        // job — this call's own job has not started, let alone reached
+        // a build or snapshot step of its own. The mark still has to be
+        // up, or a command racing in right now would refuse nothing and
+        // could enqueue its own start behind this call — deadlocking
+        // whichever job eventually reaches its own stop.
+        const rebuilding = setup.pipeline.rebuild("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        buildGate.release.resolve();
+        const approved = await approving;
+        expect(approved.ok).toBe(true);
+        // Retry's own gate check, once it finally runs, finds nothing
+        // left to retry — approve() already published something new.
+        // That's fine: this pins the barrier's timing, not this call's
+        // outcome.
+        const rebuilt = await rebuilding;
+        expect(rebuilt.ok).toBe(false);
+
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        // A failed assertion above can leave the build gate held open —
+        // release it defensively so dispose()'s own queue-drain wait
+        // does not hang the whole suite behind a gate nothing else will
+        // ever release.
+        buildGate?.release.resolve();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("holds the drain barrier through the publish window after the old runtime stops, until the whole retry settles (round-13 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+
+        // onOldRuntimeStopped fires from inside stopOldRuntime, right
+        // after its own inner hold has already lowered (see
+        // PluginPipeline.stopOldRuntime — the lower runs in a finally
+        // immediately around PluginHost.stop(), strictly before this
+        // callback). Reading isDraining() from inside it is an exact,
+        // race-free snapshot of that instant — unlike polling
+        // getStatus(), which can flip old-stopped -> new-started faster
+        // than a poll interval ever observes it.
+        let isDrainingWhenOldRuntimeStopped: boolean | null = null;
+        const rebuilding = setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            isDrainingWhenOldRuntimeStopped = setup.commandClaims.isDraining(key);
+          },
+        });
+
+        const rebuilt = await rebuilding;
+
+        expect(rebuilt.ok).toBe(true);
+        // The inner hold is down, but the outer hold this retry raised
+        // before it was even enqueued is not — the action itself still
+        // has to publish the new source and build, and start the new
+        // host, before it settles (round-13 finding 2).
+        expect(isDrainingWhenOldRuntimeStopped).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("clears the drain barrier even when a retry is rejected before it ever reaches a stop (round-12 finding 1 and 3)", async () => {
       const setup = await setupEstablishedPlugin();
       try {
@@ -3604,7 +3693,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     it("clears the drain barrier via stopOldRuntime's own finally when nothing else wraps it (round-12 finding 3, isolated)", async () => {
       // disable() calls stopOldRuntime directly, with no early
-      // markCommandClaimsDraining call and no outer finally of its own —
+      // raiseCommandClaimsBarrier call and no outer finally of its own —
       // unlike rebuild()'s own wider barrier, stopOldRuntime's own
       // finally is the only thing standing between a rejecting stop and
       // a barrier that never comes down.

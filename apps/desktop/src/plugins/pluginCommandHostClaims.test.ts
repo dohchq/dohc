@@ -84,83 +84,94 @@ describe("PluginCommandHostClaims", () => {
     });
   });
 
-  // round-10 finding 2: a rebuild's old-runtime stop must wait for
-  // claims that already exist, and refuse ones that arrive after —
-  // otherwise it could dispose the transport under a command still
-  // running its side effects, or never finish if new commands keep
-  // arriving.
-  //
-  // round-11: the barrier (isDraining) and the wait (drain()'s promise)
-  // are two different lifetimes. The wait ends once existing claims
-  // release; the caller's own teardown (PluginHost.stop()) still has
-  // real work left after that, so the barrier stays up until the caller
-  // explicitly calls clearDrain() — never merely because drain()
-  // resolved.
-  // round-12 finding 1: a rebuild-class action's own barrier must cover
-  // its WHOLE run, not only the eventual stop inside it — a command that
-  // raced a claim before the barrier was up could enqueue its own start
-  // behind the same per-plugin job the action is already running, and
-  // that action's later wait for that exact claim to drain would then
-  // deadlock. markDraining() is the piece that lets a caller raise the
-  // barrier well before drain() has anything to wait on.
-  describe("markDraining", () => {
-    it("marks a key draining without touching the claim count or waiting on anything", () => {
+  // The drain barrier's full history: round-10 finding 2 (a rebuild's
+  // old-runtime stop must wait for claims that already exist, and refuse
+  // ones that arrive after); round-11 (the barrier and the wait for
+  // claims to empty are two different lifetimes — the caller's own
+  // teardown still has real work left once claims are empty); round-12
+  // finding 1 (a rebuild-class action's own barrier must cover its WHOLE
+  // run, not only the stop inside it); round-13 findings 1 and 2 (raising
+  // has to happen before an action is even enqueued, and different
+  // callers — an action and a narrower operation nested inside it — need
+  // independent, refcounted holds so one's lower can never undo the
+  // other's still-active hold).
+  describe("raiseDrainBarrier / lowerDrainBarrier / isDraining", () => {
+    it("raises and lowers a single hold", () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
 
-      claims.markDraining(key);
-
+      expect(claims.isDraining(key)).toBe(false);
+      claims.raiseDrainBarrier(key);
       expect(claims.isDraining(key)).toBe(true);
+      claims.lowerDrainBarrier(key);
+      expect(claims.isDraining(key)).toBe(false);
+    });
+
+    it("does not touch the claim count", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      claims.raiseDrainBarrier(key);
+
       expect(claims.has(key)).toBe(false);
     });
 
-    it("is idempotent, and composes with a later drain() on the same key", async () => {
+    // round-13 findings 1 and 2: a rebuild's own wide hold (raised before
+    // it is even enqueued) and its nested old-runtime stop's narrower
+    // hold are two independent owners of the same key's barrier — the
+    // genuine behavioral claim a single boolean flag could never
+    // distinguish (two raises look identical to one).
+    it("keeps the barrier up while a nested hold is still outstanding, even after the outer hold lowers", () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
 
-      claims.markDraining(key);
-      claims.claim(key);
-      claims.markDraining(key);
+      // The outer hold: a rebuild raises this before it is even enqueued.
+      claims.raiseDrainBarrier(key);
+      // The nested hold: its own old-runtime stop raises a second,
+      // independent hold once it actually begins draining.
+      claims.raiseDrainBarrier(key);
 
+      // The nested hold's own caller lowers only its own hold once its
+      // narrower protected work (the stop) finishes — long before the
+      // outer rebuild action itself has settled.
+      claims.lowerDrainBarrier(key);
       expect(claims.isDraining(key)).toBe(true);
 
-      const drained = claims.drain(key);
-      let settled = false;
-      void drained.then(() => {
-        settled = true;
-      });
-      await Promise.resolve();
-      expect(settled).toBe(false);
+      // Only once the outer action's own hold also lowers does the
+      // barrier actually come down.
+      claims.lowerDrainBarrier(key);
+      expect(claims.isDraining(key)).toBe(false);
+    });
 
-      claims.release(key);
-      await drained;
+    it("lowering a key with no hold outstanding is a no-op", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
 
-      expect(settled).toBe(true);
-      expect(claims.isDraining(key)).toBe(true);
+      claims.lowerDrainBarrier(key);
 
-      claims.clearDrain(key);
       expect(claims.isDraining(key)).toBe(false);
     });
   });
 
-  describe("isDraining / drain / clearDrain", () => {
-    it("marks a key draining even with zero claims outstanding, and resolves immediately", async () => {
+  describe("drain", () => {
+    it("raises a hold even with zero claims outstanding, and resolves immediately — the hold itself outlives the resolve", async () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
 
       expect(claims.isDraining(key)).toBe(false);
       const drained = claims.drain(key);
-      // A "zero-claim rebuild" still marks: a command racing in before
-      // the caller's own teardown finishes must be refused just the
-      // same as one that raced a real claim (round-11).
+      // A "zero-claim rebuild" still raises a hold: a command racing in
+      // before the caller's own teardown finishes must be refused just
+      // the same as one that raced a real claim (round-11).
       expect(claims.isDraining(key)).toBe(true);
 
       await drained;
-      // The wait is over, but the barrier itself outlives it.
+      // The wait is over, but the hold this raised outlives it — only
+      // the caller's own lowerDrainBarrier() brings it down.
       expect(claims.isDraining(key)).toBe(true);
     });
 
-    it("marks a key draining the instant drain() is called, and resolves once its one claim releases — but the barrier stays up", async () => {
+    it("raises a hold the instant it is called, and resolves once its one claim releases — the hold stays up", async () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
       claims.claim(key);
@@ -168,7 +179,7 @@ describe("PluginCommandHostClaims", () => {
       const drained = claims.drain(key);
       // Synchronous: a caller checking right after calling drain() must
       // see it, with no await between the two — the exact ordering
-      // isDraining()'s own guard in stopPluginHostIfUnclaimed relies on.
+      // isDraining()'s own guard in invokePluginCommand relies on.
       expect(claims.isDraining(key)).toBe(true);
 
       let settled = false;
@@ -187,11 +198,16 @@ describe("PluginCommandHostClaims", () => {
       // be refused (round-11).
       expect(claims.isDraining(key)).toBe(true);
 
-      claims.clearDrain(key);
+      claims.lowerDrainBarrier(key);
       expect(claims.isDraining(key)).toBe(false);
     });
 
-    it("waits for every claim that existed when it began, not ones that arrive after", async () => {
+    // round-13 finding 5: the previous version of this test claimed a
+    // late claim "would extend the wait if drain() re-armed on it" but
+    // never actually added one — it only reasserted isDraining(), which
+    // the tests above already cover. This version adds the late claim
+    // the comment always claimed to test.
+    it("waits only for the claims that existed when it began, not a claim that arrives mid-drain", async () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
       claims.claim(key);
@@ -207,10 +223,16 @@ describe("PluginCommandHostClaims", () => {
       await Promise.resolve();
       expect(settled).toBe(false);
 
-      // A claim arriving mid-drain would extend the wait if drain() re-armed
-      // on it — it must not: this key is already draining, so a real caller
-      // refuses this claim before it ever reaches claim().
-      expect(claims.isDraining(key)).toBe(true);
+      // A real caller refuses a new claim once isDraining() is true,
+      // before it ever reaches claim() — but this proves drain() itself
+      // would not extend its own wait even if one landed anyway.
+      claims.claim(key);
+
+      claims.release(key);
+      await Promise.resolve();
+      // The late claim is still outstanding: drain() must not have
+      // settled on the two pre-existing releases alone.
+      expect(settled).toBe(false);
 
       claims.release(key);
       await drained;
@@ -218,27 +240,31 @@ describe("PluginCommandHostClaims", () => {
       expect(settled).toBe(true);
     });
 
-    it("only clearDrain() lowers the barrier — a caller's own stop can take real time after the wait ends", async () => {
+    // round-13 finding 6: two independent drain() calls on the same key —
+    // a rebuild's own wide drain and, nested inside it, its old-runtime
+    // stop's own narrower drain — must both resolve once claims empty,
+    // instead of the second registration silently replacing the first's.
+    it("resolves every concurrent waiter on the same key, not only the most recent", async () => {
       const claims = new PluginCommandHostClaims();
       const key = "workspace-1\0example-plugin";
+      claims.claim(key);
 
-      await claims.drain(key);
-      expect(claims.isDraining(key)).toBe(true);
-      expect(claims.isDraining(key)).toBe(true);
-      expect(claims.isDraining(key)).toBe(true);
+      const first = claims.drain(key);
+      const second = claims.drain(key);
+      let firstSettled = false;
+      let secondSettled = false;
+      void first.then(() => {
+        firstSettled = true;
+      });
+      void second.then(() => {
+        secondSettled = true;
+      });
 
-      claims.clearDrain(key);
+      claims.release(key);
+      await Promise.all([first, second]);
 
-      expect(claims.isDraining(key)).toBe(false);
-    });
-
-    it("clearing an undrained key is a no-op", () => {
-      const claims = new PluginCommandHostClaims();
-      const key = "workspace-1\0example-plugin";
-
-      claims.clearDrain(key);
-
-      expect(claims.isDraining(key)).toBe(false);
+      expect(firstSettled).toBe(true);
+      expect(secondSettled).toBe(true);
     });
   });
 });

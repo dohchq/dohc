@@ -7,21 +7,20 @@ export class PluginCommandHostClaims {
   // start put this host into running" check had nothing to find (round-9
   // finding 1).
   private readonly startedHosts = new Set<string>();
-  // Keys a rebuild's old-runtime stop is refusing new claims for — the
-  // barrier itself. Set the instant drain() is called (synchronously,
-  // before its promise executor returns), so a caller that checks
-  // isDraining() before claim() can never lose the race: JS runs both on
-  // one thread with no await between the check and the claim (round-10
-  // finding 2). Cleared only by the caller's own clearDrain(), not by
-  // drain()'s promise resolving — the caller's real teardown
-  // (PluginHost.stop()) still runs after every claim has drained, and a
-  // command arriving in that window must be refused too, or it reaches a
-  // host mid-dispose instead of a clean "try again" (round-11).
-  private readonly draining = new Set<string>();
-  // The resolver a pending drain() is waiting to fire once this key's
-  // claims reach zero — separate from `draining` itself, which outlives
-  // this resolving on the caller's own schedule.
-  private readonly drainResolvers = new Map<string, () => void>();
+  // Refcounted holds on this key's drain barrier. Every independent
+  // caller that raises one — a rebuild's whole action, and separately the
+  // old-runtime stop nested inside it; a workspace disposal — keeps the
+  // barrier up until it lowers its OWN hold, so one caller's clear can
+  // never undo a hold a different caller, or a caller nested inside it,
+  // is still relying on. The barrier's owner is whichever caller raised
+  // it (round-13 findings 1 and 2).
+  private readonly drainHolds = new Map<string, number>();
+  // Waiters for a key's claims to reach zero. Every drain() call for the
+  // same key registers its own resolver here, and release() fires all of
+  // them once the count hits zero — two concurrent drains on one key
+  // (a rebuild's own wide drain and its nested stop's narrower one)
+  // never silently replace each other's resolver (round-13 finding 6).
+  private readonly drainWaiters = new Map<string, Array<() => void>>();
 
   claim(key: string): void {
     this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
@@ -32,8 +31,11 @@ export class PluginCommandHostClaims {
     if (count === undefined) return;
     if (count <= 1) {
       this.counts.delete(key);
-      this.drainResolvers.get(key)?.();
-      this.drainResolvers.delete(key);
+      const waiters = this.drainWaiters.get(key);
+      if (waiters) {
+        this.drainWaiters.delete(key);
+        for (const resolve of waiters) resolve();
+      }
       return;
     }
     this.counts.set(key, count - 1);
@@ -68,63 +70,62 @@ export class PluginCommandHostClaims {
   }
 
   /**
-   * True while an old-runtime stop is refusing new claims on this key —
-   * from the moment drain() is called until the caller's own clearDrain().
-   * A caller about to claim a new command must check this first and
-   * refuse instead of joining — otherwise the wait a rebuild is doing
-   * before it disposes the transport would never end, chasing new
+   * True while at least one caller's hold on this key's drain barrier is
+   * still up. A caller about to claim a new command must check this
+   * first and refuse instead of joining — otherwise a rebuild's own wait
+   * for its existing claims to drain would never end, chasing new
    * arrivals instead of the claims that existed when it began
    * (round-10 finding 2).
    */
   isDraining(key: string): boolean {
-    return this.draining.has(key);
+    return (this.drainHolds.get(key) ?? 0) > 0;
   }
 
   /**
-   * Marks a key draining — refusing new claims — without waiting for
-   * anything. Idempotent, and callable well before any claims exist to
-   * wait on: a rebuild-class action needs the refusal up for its WHOLE
-   * run, including the queue wait and the build/snapshot steps before it
-   * ever reaches its own stop boundary — a command that raced in during
-   * that earlier window and got a claim could enqueue its own start
-   * behind the same per-plugin job this action is already running in,
-   * deadlocking that job's later wait for the exact claim it's now
-   * behind (round-12 finding 1).
+   * Raises one independent hold on this key's drain barrier — refusing
+   * new claims — without waiting for anything. Holds compose by count:
+   * the barrier only comes down once every raised hold has been
+   * individually lowered via lowerDrainBarrier(), so a rebuild's own wide
+   * hold (raised before it is even enqueued) and the narrower hold its
+   * own old-runtime stop raises inside it can nest without one's lower
+   * undoing the other's still-active hold (round-13 findings 1 and 2).
+   * Never lower a hold you did not raise.
    */
-  markDraining(key: string): void {
-    this.draining.add(key);
+  raiseDrainBarrier(key: string): void {
+    this.drainHolds.set(key, (this.drainHolds.get(key) ?? 0) + 1);
   }
 
   /**
-   * Marks a key draining (see markDraining) and resolves once every
-   * claim already outstanding for it has released, or immediately if
-   * there are none. Marks even with zero claims outstanding: a rebuild
-   * that finds nothing to wait for still has real work left (disposing
-   * the transport), and a command racing in during that window must be
-   * refused too, or it reaches a host mid-dispose instead of getting the
-   * retryable refusal (round-11). The marker itself outlives this
-   * resolving — call clearDrain() once that real work is actually done.
+   * Lowers exactly one hold this same caller previously raised via
+   * raiseDrainBarrier() (directly, or through drain()). A no-op on a key
+   * with no hold outstanding, so a caller whose own raise never actually
+   * happened — an early return before it — can still call this
+   * unconditionally in a finally.
+   */
+  lowerDrainBarrier(key: string): void {
+    const count = this.drainHolds.get(key);
+    if (count === undefined) return;
+    if (count <= 1) {
+      this.drainHolds.delete(key);
+      return;
+    }
+    this.drainHolds.set(key, count - 1);
+  }
+
+  /**
+   * Raises one hold (see raiseDrainBarrier) and resolves once every claim
+   * already outstanding for this key has released, or immediately if
+   * there are none. The hold this raises is the caller's own to lower,
+   * separately, via lowerDrainBarrier() — resolving only means claims are
+   * empty, not that the caller's own protected work is done.
    */
   drain(key: string): Promise<void> {
-    this.markDraining(key);
+    this.raiseDrainBarrier(key);
     if (!this.counts.has(key)) return Promise.resolve();
     return new Promise((resolve) => {
-      this.drainResolvers.set(key, resolve);
+      const waiters = this.drainWaiters.get(key) ?? [];
+      waiters.push(resolve);
+      this.drainWaiters.set(key, waiters);
     });
-  }
-
-  /**
-   * Clears a key's draining barrier. Call once the caller's own teardown
-   * — the host stop this barrier exists to protect — has actually
-   * finished, not when drain()'s promise resolves: that only means every
-   * claim that existed has released, and the stop it unblocks still has
-   * to run (round-11). Idempotent and safe to call speculatively — every
-   * path that might have raised a barrier (a rebuild's early mark, a
-   * stop about to run, a workspace disposing) calls this in its own
-   * finally, so a rejection or an early return along any of them can
-   * never leave a key refused forever (round-12 finding 3).
-   */
-  clearDrain(key: string): void {
-    this.draining.delete(key);
   }
 }

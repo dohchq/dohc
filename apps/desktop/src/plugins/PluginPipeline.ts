@@ -215,39 +215,50 @@ export interface PluginPipelineOptions {
    * tests that don't care about this keep their current behavior. */
   isEngineCaptureAvailable?: () => boolean;
   /**
-   * Marks the caller's own command-claim barrier for this plugin raised,
-   * refusing new claims, without waiting for anything. Called at the
-   * START of any action whose queued work might end in a stop — before
-   * that work runs, not only once it reaches the stop itself — so a
-   * command that races in during the queue wait or the build/snapshot
-   * steps refuses instead of enqueuing its own start behind the same
-   * per-plugin job queue that action is already running in: enqueuing
-   * there would deadlock the eventual stop's wait for that exact claim
-   * to drain (round-12 finding 1). Optional: a caller with no
-   * command-claim concept of its own omits it.
+   * Raises one independent hold on the caller's own command-claim barrier
+   * for this plugin, refusing new claims, without waiting for anything.
+   * Holds are refcounted and OWNED by whichever caller raised them: an
+   * action wide enough to include a queue wait (rebuild) raises its own
+   * hold before it is even enqueued — not inside the job, and not only
+   * once it reaches its eventual stop — so a command racing in during
+   * that queue wait or the build/snapshot steps refuses instead of
+   * enqueuing its own start behind the same per-plugin job queue that
+   * action is already running in: enqueuing there would deadlock the
+   * eventual stop's wait for that exact claim to drain (round-12 finding
+   * 1, round-13 finding 1). A narrower operation nested inside that
+   * action (an old-runtime stop) raises its own separate hold; lowering
+   * one never undoes the other's still-active hold (round-13 finding 2).
+   * Optional: a caller with no command-claim concept of its own omits it.
    */
-  markCommandClaimsDraining?: (pluginId: string) => void;
+  raiseCommandClaimsBarrier?: (pluginId: string) => void;
   /**
-   * Waits for the caller's own in-flight command claims on this plugin to
-   * drain before an old-runtime stop disposes the transport — severing it
-   * under a claim still running would dispose it after only some of that
-   * command's side effects ran (round-10 finding 2). Optional: a caller
-   * with no command-claim concept of its own (every existing test, and
-   * any path that never claims a host for a command) omits it and the
+   * Raises one hold (see raiseCommandClaimsBarrier) and waits for the
+   * caller's own in-flight command claims on this plugin to drain before
+   * an old-runtime stop disposes the transport — severing it under a
+   * claim still running would dispose it after only some of that
+   * command's side effects ran (round-10 finding 2). The hold this raises
+   * is the caller's own to lower separately, once its own protected work
+   * is actually done — resolving only means claims are empty. Optional: a
+   * caller with no command-claim concept of its own (every existing test,
+   * and any path that never claims a host for a command) omits it and the
    * stop proceeds immediately, exactly as before.
    */
   awaitCommandClaimsDrained?: (pluginId: string) => Promise<void>;
   /**
-   * Clears the caller's own command-claim barrier for this plugin. Called
-   * in a `finally` around every stop this pipeline runs, and around every
-   * action wide enough to have raised the barrier early via
-   * markCommandClaimsDraining — a rejecting stop, or an action that never
-   * reaches its stop at all, must never leave every later command refused
-   * forever (round-11, round-12 finding 3). Expected to be idempotent:
-   * more than one of this pipeline's own paths can call it for the same
-   * key.
+   * Lowers exactly one hold this same caller previously raised, via
+   * raiseCommandClaimsBarrier or awaitCommandClaimsDrained. Called in a
+   * `finally` around every stop this pipeline runs, and around every
+   * action wide enough to have raised its own hold early — a rejecting
+   * stop, or an action that never reaches its stop at all, must never
+   * leave every later command refused forever (round-11, round-12
+   * finding 3). Safe to call on a key with no hold outstanding — a no-op,
+   * so a caller whose own raise never happened can still call this
+   * unconditionally. Never lowers a hold a DIFFERENT caller raised: this
+   * pipeline's own nested callers (a rebuild's whole action, and
+   * separately its own old-runtime stop) each lower only their own
+   * (round-13 findings 1 and 2).
    */
-  clearCommandClaimsBarrier?: (pluginId: string) => void;
+  lowerCommandClaimsBarrier?: (pluginId: string) => void;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -909,20 +920,24 @@ export class PluginPipeline {
     pluginId: string,
     options?: { onOldRuntimeStopped?: () => void },
   ): Promise<PluginPipelineActionResult> {
+    // Raised here, synchronously, before this action is even enqueued —
+    // not inside the job, which can sit queued behind another already-
+    // running job for the same plugin. A command racing in during that
+    // queue wait (not only once this job starts and reaches its
+    // build/snapshot steps or its eventual stop) must refuse before it
+    // can enqueue its own start behind this action's own job: enqueuing
+    // there would deadlock this action's later wait for that exact claim
+    // to drain (round-13 finding 1). This is the OUTER hold, owned by
+    // this action for its whole run — lowered in the finally below once
+    // this action's own job settles, which is after buildFromCurrentSource
+    // resolves: that includes the publish and new-host-start that happen
+    // AFTER stopOldRuntime's own separate, narrower hold has already
+    // lowered, so a command still can't slip through that later interval
+    // either (round-13 finding 2). The two holds are independent and
+    // refcounted — stopOldRuntime lowers only the hold it raised, never
+    // this one.
+    this.options.raiseCommandClaimsBarrier?.(pluginId);
     return this.enqueueAction(pluginId, async () => {
-      // Raised before this job does any of its own queued work — not
-      // only once it reaches its eventual stop — so a command racing in
-      // while this job is still validating, snapshotting, or building
-      // refuses up front instead of enqueuing its own start behind this
-      // job on the same per-plugin queue: that would deadlock this job's
-      // later wait for the exact claim it's now stuck behind (round-12
-      // finding 1). Cleared in the finally below on every path this job
-      // can take — an early rejection here must not leave every later
-      // command refused forever either (round-12 finding 3's principle,
-      // applied to this wider window; the clear is idempotent, so this
-      // never conflicts with stopOldRuntime's own clear when this job
-      // does reach it).
-      this.options.markCommandClaimsDraining?.(pluginId);
       try {
         const candidate = this.requireValidCandidate(pluginId);
         const state = this.statuses.get(pluginId);
@@ -964,7 +979,7 @@ export class PluginPipeline {
           },
         );
       } finally {
-        this.options.clearCommandClaimsBarrier?.(pluginId);
+        this.options.lowerCommandClaimsBarrier?.(pluginId);
       }
     });
   }
@@ -1288,17 +1303,21 @@ export class PluginPipeline {
     // defect the rebuild path had before round 10 fixed it for a single
     // plugin, reached here through workspace close instead: a command
     // still mid-flight against any of them would have its transport
-    // severed after only some of its side effects ran. Every plugin this
-    // pipeline tracks is marked draining up front (round-12 finding 1's
-    // own principle: mark before the work that could race a claim, not
-    // only at the stop itself), so a new invocation against ANY of them
-    // refuses through the same isDraining() check a command invocation
-    // already makes — bounded by whatever is genuinely in flight right
-    // now, since nothing new can join once marked (round-12 finding 2).
+    // severed after only some of its side effects ran.
+    //
+    // .map() invokes awaitCommandClaimsDrained for every plugin
+    // synchronously, one call after another with no await between them —
+    // and that call's own hold raises synchronously too (it is a plain
+    // function returning a Promise, not an async one; see
+    // PluginCommandHostClaims.drain()) — so every plugin's hold is up
+    // before any of the returned promises are awaited. A new invocation
+    // against ANY of them refuses through the same isDraining() check a
+    // command invocation already makes, bounded by whatever is genuinely
+    // in flight right now, since nothing new can join once raised
+    // (round-12 findings 1 and 2). This is dispose()'s own hold, one per
+    // plugin — nothing else is nested inside it the way stopOldRuntime
+    // nests inside rebuild(), so it needs no separate explicit raise.
     const pluginIds = [...this.statuses.keys()];
-    for (const pluginId of pluginIds) {
-      this.options.markCommandClaimsDraining?.(pluginId);
-    }
     try {
       await Promise.all(
         pluginIds.map((pluginId) =>
@@ -1310,8 +1329,10 @@ export class PluginPipeline {
       // plugin whose own drain never resolved, must not leave that
       // plugin's commands refused forever after this pipeline is already
       // gone (round-12 finding 3's principle, applied to this path too).
+      // Lowers exactly the one hold each plugin's awaitCommandClaimsDrained
+      // call above raised.
       for (const pluginId of pluginIds) {
-        this.options.clearCommandClaimsBarrier?.(pluginId);
+        this.options.lowerCommandClaimsBarrier?.(pluginId);
       }
     }
     this.uninstallConfirmations.clear();
@@ -1717,17 +1738,23 @@ export class PluginPipeline {
     // side effects ran. A command arriving after this wait begins is the
     // caller's own concern to refuse (round-10 finding 2): this only
     // drains what was already claimed.
+    // This is stopOldRuntime's OWN hold — narrower than, and nested
+    // inside, whatever wider hold the caller (a rebuild's whole action)
+    // may already have raised before enqueuing. Lowering this one never
+    // touches that outer hold, which is why a command still can't slip
+    // through after this stop finishes but before the outer action
+    // publishes and starts the new host (round-13 finding 2).
     await this.options.awaitCommandClaimsDrained?.(pluginId);
     try {
-      // The clear runs in this finally regardless of whether the stop
+      // The lower runs in this finally regardless of whether the stop
       // itself rejects — a stop that fails after taking the transport
       // partway down must not leave every later command against this
       // plugin refused forever (round-12 finding 3). A command racing in
       // while the stop is still running gets refused either way, since
-      // the barrier is still up until this settles.
+      // this hold is still up until this settles.
       await this.options.pluginHost.stop(pluginId);
     } finally {
-      this.options.clearCommandClaimsBarrier?.(pluginId);
+      this.options.lowerCommandClaimsBarrier?.(pluginId);
     }
     this.recoveredManifests.delete(pluginId);
     // The stop already happened — mark it before running its consequences,
