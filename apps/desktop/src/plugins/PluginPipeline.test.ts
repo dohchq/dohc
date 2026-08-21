@@ -431,6 +431,26 @@ describe("overlayDoorWrittenSourceDeltas", () => {
     ]);
   });
 
+  it("overlays a provisional delta onto its own exact baseline key, not a fold match", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [
+        { relPath: "SRC/a.ts", sha256: "upper" },
+        { relPath: "src/a.ts", sha256: "lower" },
+      ],
+      new Map([["SRC/a.ts", {
+        sha256: "written",
+        seq: 1,
+        provisional: true,
+      }]]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "SRC/a.ts", sha256: "written" },
+      { relPath: "src/a.ts", sha256: "lower" },
+    ]);
+  });
+
   it("folds provisional case variants for a new file in sequence order", () => {
     const files = overlayDoorWrittenSourceDeltas(
       [],

@@ -480,6 +480,7 @@ export function overlayDoorWrittenSourceDeltas(
   const files = new Map(
     baselineFiles.map((file) => [file.relPath, file.sha256]),
   );
+  const baselineKeys = new Set(files.keys());
   const byLowerCase = platform === "win32" || platform === "darwin"
     ? new Map([...files.keys()].map((relPath) => [foldForCompare(relPath), relPath]))
     : undefined;
@@ -487,7 +488,7 @@ export function overlayDoorWrittenSourceDeltas(
     const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
   ) {
     const lower = foldForCompare(relPath);
-    const target = delta.provisional && byLowerCase
+    const target = delta.provisional && byLowerCase && !baselineKeys.has(relPath)
       ? byLowerCase.get(lower) ?? relPath
       : relPath;
     files.set(target, delta.sha256);
