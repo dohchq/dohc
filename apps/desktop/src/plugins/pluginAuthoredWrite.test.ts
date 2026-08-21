@@ -277,6 +277,62 @@ describe("createPluginAuthoredTextWriter", () => {
     }
   });
 
+  it("canonicalizes before resolving ownership when darwin is injected", async () => {
+    const { capture } = recordingCapture();
+    const ownerPaths: string[] = [];
+    const doorWrites: {
+      pluginId: string;
+      write: { absolutePath: string; text: string };
+    }[] = [];
+    const workspaceRoot = join(tmpdir(), "workspace");
+    const callerSpelledPath = join(
+      workspaceRoot,
+      "PLUGINS",
+      "OWNED",
+      "src",
+      "a.ts",
+    );
+    const canonicalPluginRoot = join(workspaceRoot, "plugins", "owned");
+    const canonicalPath = join(canonicalPluginRoot, "src", "a.ts");
+    const realpath = vi
+      .spyOn(realpathSync, "native")
+      .mockReturnValue(canonicalPath);
+
+    try {
+      const write = createPluginAuthoredTextWriter(writerInput({
+        capture,
+        platform: "darwin",
+        workspaceRoot,
+        pipeline: {
+          pluginIdForPath: (absolutePath) => {
+            ownerPaths.push(absolutePath);
+            return absolutePath.startsWith(canonicalPluginRoot)
+              ? "owned-plugin"
+              : null;
+          },
+          handleDoorWrittenSourceChange: (pluginId, doorWrite) => {
+            doorWrites.push({ pluginId, write: doorWrite });
+          },
+        },
+      }));
+
+      await write(join("PLUGINS", "OWNED", "src", "a.ts"), "text\n", {
+        overwrite: true,
+        author,
+      });
+
+      expect(doorWrites).toEqual([{
+        pluginId: "owned-plugin",
+        write: { absolutePath: canonicalPath, text: "text\n" },
+      }]);
+      expect(ownerPaths).toEqual([canonicalPath]);
+      expect(realpath).toHaveBeenCalledOnce();
+      expect(realpath).toHaveBeenCalledWith(callerSpelledPath);
+    } finally {
+      realpath.mockRestore();
+    }
+  });
+
   it("preserves the caller-spelled path when linux is injected", async () => {
     const { capture } = recordingCapture();
     const reportedPaths: string[] = [];

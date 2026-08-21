@@ -70,21 +70,21 @@ export function createPluginAuthoredTextWriter(
       createOnly: !overwrite,
       signal: input.signal,
     });
-    const pipeline = input.pipeline();
-    const ownerId = pipeline?.pluginIdForPath(absolutePath);
-    if (ownerId && pipeline) {
-      let reportedPath = absolutePath;
-      if (platform === "win32" || platform === "darwin") {
-        try {
-          reportedPath = realpathSync.native(absolutePath);
-        } catch {
-          // The file vanished between the write and this report (for example a
-          // concurrent uninstall). The write itself succeeded; report the
-          // caller's spelling rather than failing a landed write.
-        }
+    let canonicalPath = absolutePath;
+    if (platform === "win32" || platform === "darwin") {
+      try {
+        canonicalPath = realpathSync.native(absolutePath);
+      } catch {
+        // The file vanished between the write and this report (for example a
+        // concurrent uninstall). The write itself succeeded; report the
+        // caller's spelling rather than failing a landed write.
       }
+    }
+    const pipeline = input.pipeline();
+    const ownerId = pipeline?.pluginIdForPath(canonicalPath);
+    if (ownerId && pipeline) {
       pipeline.handleDoorWrittenSourceChange(ownerId, {
-        absolutePath: reportedPath,
+        absolutePath: canonicalPath,
         text,
       });
     }
