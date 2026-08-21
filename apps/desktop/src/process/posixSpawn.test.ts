@@ -219,6 +219,56 @@ describe("killProcessTreePosix", () => {
 });
 
 describe("stopProcessTreePosix", () => {
+  it("omits an uncaptured root from the force round", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let readCount = 0;
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      undefined,
+      {
+        readProcessTable: async () => {
+          readCount += 1;
+          return readCount === 1 ? psRow(999, 1) : psRow(100, 1);
+        },
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 100, signal: "SIGTERM" },
+    ]);
+  });
+
+  it("force-signals a root captured with the same identity", async () => {
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const startedAt = "Fri Aug 21 10:00:05 2026";
+    let readCount = 0;
+
+    await stopProcessTreePosix(
+      100,
+      Promise.resolve(),
+      0,
+      undefined,
+      {
+        readProcessTable: async () => {
+          readCount += 1;
+          return readCount === 1
+            ? psRow(100, 1, startedAt)
+            : [psRow(100, 1, startedAt), psRow(999, 1)].join("\n");
+        },
+        sendSignal: (pid, signal) => signalled.push({ pid, signal }),
+      },
+    );
+
+    expect(signalled).toEqual([
+      { pid: 100, signal: "SIGTERM" },
+      { pid: 100, signal: "SIGKILL" },
+    ]);
+  });
+
   it("skips a captured root when the force-round process table cannot be read", async () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     let readCount = 0;

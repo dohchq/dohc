@@ -115,12 +115,15 @@ async function signalProcessTreePosix(
   const readProcessTable = options.readProcessTable ?? readProcessTableWithPs;
   const sendSignal = options.sendSignal ??
     ((pid, pidSignal) => process.kill(pid, pidSignal));
+  const isForceRound = options.alsoSignalIdentities !== undefined;
   const capturedIdentities = new Map(
     options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
   );
-  const unverifiedRoots = [rootPid, ...(options.alsoSignal ?? [])].filter(
-    (pid) => !capturedIdentities.has(pid),
-  );
+  const unverifiedRoots = isForceRound
+    ? []
+    : [rootPid, ...(options.alsoSignal ?? [])].filter(
+        (pid) => !capturedIdentities.has(pid),
+      );
 
   let pids = [...new Set(unverifiedRoots)];
   let identities: ProcessIdentity[] = [];
@@ -129,8 +132,13 @@ async function signalProcessTreePosix(
     const entriesByPid = new Map(table.map((entry) => [entry.pid, entry]));
     const identityMatches = (pid: number): boolean => {
       const captured = capturedIdentities.get(pid);
-      return captured === undefined ||
-        entriesByPid.get(pid)?.startedAt === captured.startedAt;
+      if (captured === undefined) {
+        // A process alive during round one would have supplied an identity.
+        // Without one, the force round cannot distinguish an exited process
+        // from an unrelated process that reused its pid, so signalling is unsafe.
+        return !isForceRound;
+      }
+      return entriesByPid.get(pid)?.startedAt === captured.startedAt;
     };
     const roots = [rootPid, ...(options.alsoSignal ?? [])].filter(
       identityMatches,
