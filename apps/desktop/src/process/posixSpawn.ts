@@ -14,6 +14,10 @@ import { execFile } from "node:child_process";
 // `ps -A -o pid=,ppid=,lstart=` took 5-10 ms.
 const PROCESS_TABLE_READ_TIMEOUT_MS = 2_000;
 
+// Limits ps stdout to 8 MiB, above execFile's 1 MiB default. At 41 measured
+// bytes per row, 64k rows need 2.6 MiB; this leaves about 3x headroom.
+const PROCESS_TABLE_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+
 function unrefDelay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -103,7 +107,10 @@ function readProcessTableWithPs(): Promise<string> {
     execFile(
       "ps",
       ["-A", "-o", "pid=,ppid=,lstart="],
-      { timeout: PROCESS_TABLE_READ_TIMEOUT_MS },
+      {
+        maxBuffer: PROCESS_TABLE_MAX_BUFFER_BYTES,
+        timeout: PROCESS_TABLE_READ_TIMEOUT_MS,
+      },
       (error, stdout) => {
         if (error) reject(error);
         else resolveOutput(stdout);

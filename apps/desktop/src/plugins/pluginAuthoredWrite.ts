@@ -1,26 +1,37 @@
-import { readdirSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 
-function recoverOnDiskCasing(root: string, relativePath: string): string {
+async function recoverOnDiskCasing(
+  root: string,
+  relativePath: string,
+  signal: AbortSignal | undefined,
+): Promise<string> {
   const segments = relativePath.split(/[\\/]+/).filter(Boolean);
   const recovered: string[] = [];
   let currentDir = root;
   let folding = true;
 
   for (const segment of segments) {
+    if (signal?.aborted) {
+      throw new Error("Plugin panel is no longer active.");
+    }
     if (folding) {
       let entries: string[] = [];
       let readable = true;
       try {
-        entries = readdirSync(currentDir);
+        entries = await readdir(currentDir);
       } catch {
         readable = false;
       }
+      const normalizedSegment = segment.normalize("NFC");
       const match = readable
-        ? entries.find((entry) => entry === segment) ??
+        ? entries.find(
+            (entry) => entry.normalize("NFC") === normalizedSegment,
+          ) ??
           entries.find(
-            (entry) => entry.toLowerCase() === segment.toLowerCase(),
+            (entry) => entry.normalize("NFC").toLowerCase() ===
+              normalizedSegment.toLowerCase(),
           )
         : undefined;
       if (match !== undefined) {
@@ -106,7 +117,11 @@ export function createPluginAuthoredTextWriter(
     });
     let canonicalPath = absolutePath;
     if (platform === "win32" || platform === "darwin") {
-      canonicalPath = recoverOnDiskCasing(workspaceRoot, path);
+      canonicalPath = await recoverOnDiskCasing(
+        workspaceRoot,
+        path,
+        input.signal,
+      );
     }
     const pipeline = input.pipeline();
     const ownerId = pipeline?.pluginIdForPath(canonicalPath);

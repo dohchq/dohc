@@ -92,6 +92,41 @@ describe("processTreePids", () => {
 });
 
 describe("killProcessTreePosix", () => {
+  it("sizes the real ps read above execFile's default buffer", async () => {
+    const execFileMock = vi.fn((
+      _file: string,
+      _args: readonly string[],
+      _options: { maxBuffer?: number; timeout?: number },
+      callback: (error: Error | null, stdout: string) => void,
+    ) => {
+      callback(null, psRow(100, 1));
+    });
+    vi.resetModules();
+    vi.doMock("node:child_process", () => ({
+      execFile: execFileMock,
+    }));
+
+    try {
+      const { killProcessTreePosix: killWithMockedPs } = await import(
+        "./posixSpawn"
+      );
+
+      await killWithMockedPs(100, "SIGTERM", {
+        sendSignal: () => undefined,
+      });
+
+      expect(execFileMock).toHaveBeenCalledWith(
+        "ps",
+        ["-A", "-o", "pid=,ppid=,lstart="],
+        { maxBuffer: 8 * 1024 * 1024, timeout: 2_000 },
+        expect.any(Function),
+      );
+    } finally {
+      vi.doUnmock("node:child_process");
+      vi.resetModules();
+    }
+  });
+
   it("signals the root and every descendant", async () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
 

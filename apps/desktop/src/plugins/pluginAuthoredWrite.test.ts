@@ -320,6 +320,86 @@ describe("createPluginAuthoredTextWriter", () => {
     }
   });
 
+  it("recovers an NFD on-disk segment from an NFC caller path", async () => {
+    const { capture } = recordingCapture();
+    const reportedPaths: string[] = [];
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-unicode-"));
+    const decomposedDirectory = "cafe\u0301";
+    const composedDirectory = "caf\u00e9";
+    const canonicalPath = join(
+      workspaceRoot,
+      "plugins",
+      "owned",
+      decomposedDirectory,
+      "src",
+      "a.ts",
+    );
+
+    try {
+      await mkdir(dirname(canonicalPath), { recursive: true });
+      await writeFile(canonicalPath, "before\n");
+      const write = createPluginAuthoredTextWriter(writerInput({
+        capture,
+        platform: "darwin",
+        workspaceRoot,
+        pipeline: {
+          pluginIdForPath: () => "owned-plugin",
+          handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
+            reportedPaths.push(doorWrite.absolutePath);
+          },
+        },
+      }));
+
+      await write(
+        join("PLUGINS", "OWNED", composedDirectory, "SRC", "a.ts"),
+        "text\n",
+        { overwrite: true, author },
+      );
+
+      expect(reportedPaths).toEqual([canonicalPath]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stops case recovery when the panel aborts after the capture lands", async () => {
+    const controller = new AbortController();
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-authored-abort-"));
+    const canonicalPath = join(workspaceRoot, "plugins", "owned", "src", "a.ts");
+    const doorWrites: string[] = [];
+
+    try {
+      await mkdir(dirname(canonicalPath), { recursive: true });
+      const write = createPluginAuthoredTextWriter(writerInput({
+        signal: controller.signal,
+        platform: "darwin",
+        workspaceRoot,
+        capture: {
+          writeAuthoredTextFile: async (_absolutePath, text) => {
+            await writeFile(canonicalPath, text);
+            controller.abort();
+          },
+        },
+        pipeline: {
+          pluginIdForPath: () => "owned-plugin",
+          handleDoorWrittenSourceChange: (_pluginId, doorWrite) => {
+            doorWrites.push(doorWrite.absolutePath);
+          },
+        },
+      }));
+
+      await expect(
+        write(join("PLUGINS", "OWNED", "SRC", "a.ts"), "text\n", {
+          overwrite: true,
+          author,
+        }),
+      ).rejects.toThrow("Plugin panel is no longer active.");
+      expect(doorWrites).toEqual([]);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("canonicalizes before resolving ownership when darwin is injected", async () => {
     const { capture } = recordingCapture();
     const ownerPaths: string[] = [];
