@@ -58,6 +58,7 @@ import { createTestScratch } from "./testTemp";
 // makes zero readdir calls, so the recursive tree walk #866 removed stays gone.
 let readdirCalls: string[] = [];
 let observeRealpath: ((path: string) => void) | null = null;
+let failRenameToPathOnce: { path: string; error: Error } | null = null;
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -74,6 +75,17 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       observeRealpath?.(String(path));
       return resolved;
     }) as typeof actual.realpath,
+    rename: (async (
+      oldPath: Parameters<typeof actual.rename>[0],
+      newPath: Parameters<typeof actual.rename>[1],
+    ) => {
+      const failure = failRenameToPathOnce;
+      if (failure !== null && String(newPath) === failure.path) {
+        failRenameToPathOnce = null;
+        throw failure.error;
+      }
+      return actual.rename(oldPath, newPath);
+    }) as typeof actual.rename,
   };
 });
 
@@ -135,9 +147,11 @@ beforeEach(() => {
   roots = [];
   harnesses = [];
   observeRealpath = null;
+  failRenameToPathOnce = null;
 });
 
 afterEach(async () => {
+  failRenameToPathOnce = null;
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -3575,6 +3589,162 @@ describe("shared view refresh", () => {
               ended: false,
             }),
           ).resolves.toMatchObject({ ok: false, changedPaths: 1 });
+        } finally {
+          await restoreRead(parent, 0o755);
+        }
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it("preserves a repair count when clearing its pending marker fails", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/already-correct.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "already correct body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writePendingMaterializationPaths(rootDir, [path]);
+    await writePendingMaterializationPaths(rootDir, [path]);
+
+    const store = harness.openStore(target);
+    try {
+      failRenameToPathOnce = {
+        path: join(rootDir, ".dohc", "pending-materialization.json"),
+        error: new Error("pending marker unavailable"),
+      };
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: PINNED_SELECTOR,
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ ok: false, changedPaths: 1 });
+    } finally {
+      failRenameToPathOnce = null;
+      await store.close();
+    }
+  });
+
+  it("keeps an engine failure inside pending repair distinct from an unreadable path", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/engine-failure.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment A");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await store.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+        path,
+        text: "moment B",
+        metadata: { origin: "sync" },
+      });
+      await writePendingMaterializationPaths(rootDir, [path]);
+      let pathReads = 0;
+      const failingStore: typeof store = {
+        ...store,
+        async readTextFile(input) {
+          if (input.path === path && ++pathReads === 2) {
+            throw new Error("engine store unavailable");
+          }
+          return await store.readTextFile(input);
+        },
+      };
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store: failingStore,
+          pull: harness.pullFor(target),
+          pinnedSelector: PINNED_SELECTOR,
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toEqual({
+        ok: false,
+        changedPaths: 0,
+        errorMessage: "engine store unavailable",
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
+  itNonRoot(
+    "preserves a leftover repair before pending path resolution finds an unreadable directory",
+    async () => {
+      const rootDir = await tempRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const repairedPath = "docs/a-repaired-first.md";
+      const deniedPath = "docs/z-locked/pending-delete.md";
+      const parent = join(rootDir, "docs", "z-locked");
+      const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+      relay.addWrite(repairedPath, "first body");
+      relay.addWrite(deniedPath, "second body");
+      await refreshSharedViewOnce(harness, {
+        rootDir,
+        workspaceId: WORKSPACE,
+        shareId: SHARE_ID,
+      });
+
+      const store = harness.openStore(target);
+      try {
+        const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+        for (const path of [repairedPath, deniedPath]) {
+          await store.deleteTextFile({
+            workspaceId: WORKSPACE,
+            versionId: main.id,
+            path,
+            metadata: { origin: "sync" },
+          });
+        }
+        await writePendingMaterializationPaths(rootDir, [repairedPath, deniedPath]);
+        await rm(join(rootDir, repairedPath));
+        await denyRead(parent, "dir");
+        try {
+          await expect(
+            refreshStandaloneShareViewOnceWithPull({
+              rootDir,
+              workspaceId: WORKSPACE,
+              relay: harness.relay,
+              shareId: SHARE_ID,
+              store,
+              pull: harness.pullFor(target),
+              pinnedSelector: PINNED_SELECTOR,
+              recordRefusals: async () => undefined,
+              ended: false,
+            }),
+          ).resolves.toEqual({
+            ok: false,
+            changedPaths: 1,
+            errorMessage: `dohc could not read ${deniedPath}. Close anything using this file, or wait.`,
+          });
         } finally {
           await restoreRead(parent, 0o755);
         }

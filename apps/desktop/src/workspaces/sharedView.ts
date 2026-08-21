@@ -187,6 +187,7 @@ class CapturePartialFailureError extends Error {
     readonly capturedPaths: number,
     readonly repairedPaths: number,
     readonly path: string,
+    readonly reason: "unreadable" | "other",
     options: { cause: unknown },
   ) {
     super(
@@ -194,6 +195,19 @@ class CapturePartialFailureError extends Error {
       options,
     );
     this.name = "CapturePartialFailureError";
+  }
+}
+
+// A failure while resolving the target, before any lock or store mutation
+// runs. This lets callers distinguish an unreachable path from a failure
+// inside the locked operation while preserving the cause's message.
+class SharedViewTargetResolutionError extends Error {
+  constructor(options: { cause: unknown }) {
+    super(
+      options.cause instanceof Error ? options.cause.message : String(options.cause),
+      options,
+    );
+    this.name = "SharedViewTargetResolutionError";
   }
 }
 
@@ -330,7 +344,12 @@ async function withCaptureMutationLock<T>(
   path: string,
   operation: (resolvedTarget: string) => Promise<T>,
 ): Promise<T> {
-  const resolvedTarget = await resolvedShareViewTarget(rootDir, path);
+  let resolvedTarget: string;
+  try {
+    resolvedTarget = await resolvedShareViewTarget(rootDir, path);
+  } catch (error) {
+    throw new SharedViewTargetResolutionError({ cause: error });
+  }
   return withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, () =>
     operation(resolvedTarget),
   );
@@ -955,7 +974,13 @@ export async function captureSharedViewLocalDivergence(
             } catch (error) {
               const code = (error as NodeJS.ErrnoException).code;
               if (code !== "ENOENT" && code !== "ENOTDIR") {
-                throw error;
+                throw new CapturePartialFailureError(
+                  capturedPaths,
+                  repairedPaths,
+                  entry.path,
+                  "unreadable",
+                  { cause: error },
+                );
               }
               targetStat = null;
             }
@@ -1064,23 +1089,37 @@ export async function captureSharedViewLocalDivergence(
           },
         );
       } catch (error) {
+        if (error instanceof CapturePartialFailureError) throw error;
+        const reason =
+          error instanceof SharedViewTargetResolutionError ? "unreadable" : "other";
         throw new CapturePartialFailureError(
           capturedPaths,
           repairedPaths,
           entry.path,
+          reason,
           { cause: error },
         );
       }
-      await clearCapturePendingMarker(
-        rootDir,
-        entry.path,
-        result.kind,
-        pendingState,
-      );
       if (result.kind === "captured") capturedPaths += 1;
       if (result.kind === "repaired") repairedPaths += 1;
       if (result.kind === "unjournalable") {
         unjournalablePaths.push(result.path);
+      }
+      try {
+        await clearCapturePendingMarker(
+          rootDir,
+          entry.path,
+          result.kind,
+          pendingState,
+        );
+      } catch (error) {
+        throw new CapturePartialFailureError(
+          capturedPaths,
+          repairedPaths,
+          entry.path,
+          "other",
+          { cause: error },
+        );
       }
       continue;
     }
@@ -1200,60 +1239,87 @@ export async function captureSharedViewLocalDivergence(
 
   for (const path of pendingPaths) {
     if (visitedPendingPaths.has(path)) continue;
-    const result = await withCaptureMutationLock(
-      rootDir,
-      path,
-      async (resolvedTarget): Promise<
-        | { kind: "repaired" }
-        | { kind: "unchanged" }
-        | { kind: "unjournalable"; path: UnjournalablePath }
-      > => {
-        try {
-          if (await pathConfirmedAbsentOnDisk(resolvedTarget)) {
+    let result:
+      | { kind: "repaired" }
+      | { kind: "unchanged" }
+      | { kind: "unjournalable"; path: UnjournalablePath };
+    try {
+      result = await withCaptureMutationLock(
+        rootDir,
+        path,
+        async (resolvedTarget): Promise<
+          | { kind: "repaired" }
+          | { kind: "unchanged" }
+          | { kind: "unjournalable"; path: UnjournalablePath }
+        > => {
+          try {
+            if (await pathConfirmedAbsentOnDisk(resolvedTarget)) {
+              return { kind: "repaired" };
+            }
+          } catch {
+            return {
+              kind: "unjournalable",
+              path: { path, reason: "unreadable" },
+            };
+          }
+
+          const disk = await readDiskContent(resolvedTarget);
+          if (disk.kind === "absent") return { kind: "repaired" };
+
+          const latestMoment = await latestMomentForPath(store, workspaceId, path);
+          const preimage = latestMoment?.payload.before;
+          if (
+            preimage !== null &&
+            preimage !== undefined &&
+            diskMatchesSnapshot(disk, preimage)
+          ) {
+            await materializeSharedViewPaths(
+              rootDir,
+              workspaceId,
+              [{ path, operation: "delete", contentKind: "text" }],
+              store,
+            );
             return { kind: "repaired" };
           }
-        } catch {
-          return {
-            kind: "unjournalable",
-            path: { path, reason: "unreadable" },
-          };
-        }
 
-        const disk = await readDiskContent(resolvedTarget);
-        if (disk.kind === "absent") return { kind: "repaired" };
-
-        const latestMoment = await latestMomentForPath(store, workspaceId, path);
-        const preimage = latestMoment?.payload.before;
-        if (
-          preimage !== null &&
-          preimage !== undefined &&
-          diskMatchesSnapshot(disk, preimage)
-        ) {
-          await materializeSharedViewPaths(
-            rootDir,
-            workspaceId,
-            [{ path, operation: "delete", contentKind: "text" }],
-            store,
-          );
-          return { kind: "repaired" };
-        }
-
-        if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
-          return {
-            kind: "unjournalable",
-            path: unjournalableFromDisk(path, disk),
-          };
-        }
-        // The store no longer tracks this path. Readable content that does not
-        // match the delete preimage belongs to the recipient, so leave it on
-        // disk and outside dohc's journal.
-        return { kind: "unchanged" };
-      },
-    );
-    await clearCapturePendingMarker(rootDir, path, result.kind, pendingState);
+          if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
+            return {
+              kind: "unjournalable",
+              path: unjournalableFromDisk(path, disk),
+            };
+          }
+          // The store no longer tracks this path. Readable content that does not
+          // match the delete preimage belongs to the recipient, so leave it on
+          // disk and outside dohc's journal.
+          return { kind: "unchanged" };
+        },
+      );
+    } catch (error) {
+      if (error instanceof CapturePartialFailureError) throw error;
+      const reason =
+        error instanceof SharedViewTargetResolutionError ? "unreadable" : "other";
+      throw new CapturePartialFailureError(
+        capturedPaths,
+        repairedPaths,
+        path,
+        reason,
+        { cause: error },
+      );
+    }
     if (result.kind === "repaired") repairedPaths += 1;
     if (result.kind === "unjournalable") {
       unjournalablePaths.push(result.path);
+    }
+    try {
+      await clearCapturePendingMarker(rootDir, path, result.kind, pendingState);
+    } catch (error) {
+      throw new CapturePartialFailureError(
+        capturedPaths,
+        repairedPaths,
+        path,
+        "other",
+        { cause: error },
+      );
     }
   }
 
@@ -1565,9 +1631,11 @@ export async function refreshStandaloneShareViewOnce(
           ok: false,
           changedPaths: error.capturedPaths + error.repairedPaths,
           errorMessage:
-            unjournalablePathMessages([
-              { path: error.path, reason: "unreadable" },
-            ])[0] ?? error.message,
+            error.reason === "unreadable"
+              ? (unjournalablePathMessages([
+                  { path: error.path, reason: "unreadable" },
+                ])[0] ?? error.message)
+              : error.message,
         };
       }
       return {
