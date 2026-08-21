@@ -2497,6 +2497,63 @@ describe("shared view refresh", () => {
     }
   });
 
+  // #859: a share-view FOLDER delete crashing between the store deleting its
+  // children and `materializeSharedViewPaths`' single recursive rm on the
+  // folder path used to leave the projection showing files the store had
+  // already deleted — `shareViewDelete` marked only the FOLDER path pending,
+  // so recovery never revisited the children at all, found a still-present
+  // directory with no matching preimage, and misclassified it as an
+  // unjournalable non-file replacement. #862 changed `shareViewDelete` to
+  // mark every CHILD path pending before the store mutation, which is what
+  // makes them reachable here: the leftover-pending arm below predates #862
+  // unchanged, but a path only reaches it when the marker names it. This pins
+  // the crash shape directly — the store already deleted both children, the
+  // marker already names them, and disk still holds both because nothing
+  // ever ran the folder-level rm.
+  it("finishes a pending folder delete per child after a crash between the store delete and the projection delete", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const paths = ["docs/plans/one.md", "docs/plans/two.md"];
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(paths[0], "one");
+    relay.addWrite(paths[1], "two");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      // The crash window: every child is gone from the store, but nothing
+      // has touched disk yet — the single recursive rm on the folder path
+      // never got the chance to run.
+      for (const path of paths) {
+        await store.deleteTextFile({
+          workspaceId: WORKSPACE,
+          versionId: main.id,
+          path,
+          metadata: { origin: "local-file" },
+        });
+      }
+      await writePendingMaterializationPaths(rootDir, paths);
+      const before = await momentIds(store);
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true),
+        "MUTATION: a folder delete's crash window must not leave stale files or a bogus moment behind",
+      ).resolves.toEqual({ capturedPaths: 0, repairedPaths: 2, unjournalablePaths: [] });
+      for (const path of paths) {
+        await expect(stat(join(rootDir, path))).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      expect(
+        await momentIds(store),
+        "MUTATION: recovery must not journal a new moment while finishing a pending delete",
+      ).toEqual(before);
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set());
+    } finally {
+      await store.close();
+    }
+  });
+
   itNonRoot(
     "keeps an unreadable pending delete marker for the next pass",
     async () => {
