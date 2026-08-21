@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,7 +37,10 @@ import {
 import { routeWorkspaceFileCreate } from "./workspaceFileOps";
 import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
-import type { ShareViewRefusal } from "@dohc/workspace-contracts/relay";
+import type {
+  PullShareViewResult,
+  ShareViewRefusal,
+} from "@dohc/workspace-contracts/relay";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createTestScratch } from "./testTemp";
 
@@ -680,12 +692,18 @@ describe("shared view refresh", () => {
         WORKSPACE,
         repairStore,
       );
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      for (let turn = 0; turn < 20 && !repairMaterializationStarted; turn += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       expect(repairMaterializationStarted).toBe(false);
       releaseSave();
 
       await expect(saving).resolves.toMatchObject({ status: "written" });
-      await expect(repairing).resolves.toMatchObject({ unjournalablePaths: [] });
+      await expect(repairing).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("saved in app");
     } finally {
       releaseSave();
@@ -1154,6 +1172,87 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("repairs an absent pending overwrite without journaling a delete", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/interrupted-overwrite.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment one");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await store.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+        path,
+        text: "moment two",
+        metadata: { origin: "sync" },
+      });
+      await writePendingMaterializationPaths(rootDir, [path]);
+      await rm(join(rootDir, path));
+      const before = await momentIds(store);
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
+      await expect(
+        store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
+      ).resolves.toMatchObject({ text: "moment two" });
+      expect(await momentIds(store)).toEqual(before);
+    } finally {
+      await store.close();
+    }
+  });
+
+  itNonRoot("keeps a pending marker while its tracked file is unreadable", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/pending-locked.md";
+    const absolutePath = join(rootDir, path);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "tracked body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    let denied = false;
+    try {
+      await writePendingMaterializationPaths(rootDir, [path]);
+      await denyFileContentRead(absolutePath);
+      denied = true;
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [{ path, reason: "unreadable" }],
+      });
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
+    } finally {
+      if (denied) await restoreRead(absolutePath, 0o600);
+      await store.close();
+    }
+  });
+
   it("journals a third body that landed after an interrupted materialization", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -1220,11 +1319,10 @@ describe("shared view refresh", () => {
         versionId: main.id,
         path,
       });
-      const disk = await readFile(join(rootDir, path), "utf8");
-      expect(
-        disk === "recipient real edit" || head?.text === "recipient real edit",
-        "the recipient out-of-app edit was silently discarded",
-      ).toBe(true);
+      expect(await readFile(join(rootDir, path), "utf8")).toBe(
+        "recipient real edit",
+      );
+      expect(head?.text).toBe("recipient real edit");
       expect(captured.capturedPaths).toBe(1);
       expect((await momentIds(store)).length).toBe(before.length + 1);
     } finally {
@@ -1399,6 +1497,68 @@ describe("shared view refresh", () => {
     );
   });
 
+  it("quarantines a corrupt pending record and verifies every tracked path", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/corrupt-sidecar.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "moment one");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await store.writeTextFile({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+        path,
+        text: "moment two",
+        metadata: { origin: "sync" },
+      });
+      const before = await momentIds(store);
+      const pendingPath = join(
+        rootDir,
+        ".dohc",
+        "pending-materialization.json",
+      );
+      await writeFile(pendingPath, "not json", "utf8");
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({ status: "updated", changedPaths: 1 });
+
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("moment two");
+      expect(await momentIds(store)).toEqual(before);
+      expect(
+        (await readdir(join(rootDir, ".dohc"))).some((name) =>
+          /^pending-materialization\.json\.invalid-\d+$/.test(name),
+        ),
+      ).toBe(true);
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining(pendingPath),
+      );
+    } finally {
+      errorLog.mockRestore();
+      await store.close();
+    }
+  });
+
   it("repairs a share-view create whose projection fails without journaling a delete", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -1520,7 +1680,74 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("S-leftover: a pending UNTRACKED path deletes the recipient's own new file", async () => {
+  it("pages past 500 newer moments to finish a pending delete", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/old-delete.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "delete me");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await store.deleteTextFile({
+        workspaceId: WORKSPACE,
+        versionId: main.id,
+        path,
+        metadata: { origin: "sync" },
+      });
+      await writePendingMaterializationPaths(rootDir, [path]);
+      const actualPage = await store.listMoments({
+        workspaceId: WORKSPACE,
+        limit: 500,
+      });
+      const deletion = actualPage.moments.find(
+        (moment) => moment.path === path && moment.operation === "delete",
+      );
+      expect(deletion).toBeDefined();
+      const listMoments = vi.fn(async (input: Parameters<typeof store.listMoments>[0]) => {
+        if (input.beforeMomentOrder === undefined) {
+          return {
+            ...actualPage,
+            moments: Array.from({ length: 500 }, (_, index) => ({
+              ...deletion!,
+              id: `newer-${index}`,
+              path: `docs/newer-${index}.md`,
+              momentOrder: 1_000 - index,
+            })),
+            nextBeforeMomentOrder: 40,
+          };
+        }
+        expect(input.beforeMomentOrder).toBe(40);
+        return { ...actualPage, nextBeforeMomentOrder: null };
+      });
+      const pagingStore: typeof store = { ...store, listMoments };
+      const before = await momentIds(store);
+
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, pagingStore),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      await expect(stat(join(rootDir, path))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await momentIds(store)).toEqual(before);
+      expect(listMoments).toHaveBeenCalledTimes(2);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("keeps the recipient's own new file at a pending untracked path", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -1583,7 +1810,7 @@ describe("shared view refresh", () => {
         captureSharedViewLocalDivergence(rootDir, WORKSPACE, store),
       ).resolves.toEqual({
         capturedPaths: 0,
-        repairedPaths: 1,
+        repairedPaths: 0,
         unjournalablePaths: [],
       });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("my own new file");
@@ -1696,6 +1923,16 @@ describe("shared view refresh", () => {
       await writeFile(join(rootDir, path), "moment A", "utf8");
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       const commitCursor = vi.fn(async () => undefined);
+      const pullResult: PullShareViewResult = {
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        nextCursor: 1,
+        refusalCount: 0,
+        refusals: [],
+        changedPaths: [{ path, operation: "write", contentKind: "text" }],
+        commitCursor,
+      };
       const throwingStore: typeof store = {
         ...store,
         async readTextFile() {
@@ -1713,17 +1950,8 @@ describe("shared view refresh", () => {
           recordRefusals: async () => undefined,
           store: throwingStore,
           trackPendingMaterialization: true,
-          pull: async () => ({
-            fetched: 1,
-            applied: 1,
-            skipped: 0,
-            nextCursor: 1,
-            refusalCount: 0,
-            refusals: [],
-            changedPaths: [{ path, operation: "write", contentKind: "text" }],
-            commitCursor,
-          }),
-        } as Parameters<typeof refreshSharedViewOnceWithPull>[0]),
+          pull: async () => pullResult,
+        }),
       ).rejects.toThrow("materialization interrupted");
       await expect(
         readFile(join(rootDir, ".dohc", "pending-materialization.json"), "utf8"),
@@ -1875,7 +2103,7 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("leaves a symlink at a tracked path outside the journal", async () => {
+  it("reports and preserves a symlink that replaced a tracked file", async () => {
     const rootDir = await tempRoot();
     const outsideRoot = await tempRoot();
     const relay = new FakeShareRelay();
@@ -1900,7 +2128,9 @@ describe("shared view refresh", () => {
       ).resolves.toEqual({
         capturedPaths: 0,
         repairedPaths: 0,
-        unjournalablePaths: [],
+        unjournalablePaths: [
+          { path, reason: "non-file-replacement" },
+        ],
       });
       const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
       await expect(
@@ -1910,6 +2140,28 @@ describe("shared view refresh", () => {
       expect(after.moments.map((moment) => moment.id)).toEqual(
         before.moments.map((moment) => moment.id),
       );
+
+      relay.addWrite(path, "new granter body");
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor({ workspaceId: WORKSPACE, rootPath: rootDir }),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [path],
+        unjournalablePaths: [
+          { path, reason: "non-file-replacement" },
+        ],
+      });
+      expect((await lstat(join(rootDir, path))).isSymbolicLink()).toBe(true);
+      expect(await readFile(outside, "utf8")).toBe("foreign body");
     } finally {
       await store.close();
     }

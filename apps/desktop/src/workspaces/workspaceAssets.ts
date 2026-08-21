@@ -403,6 +403,8 @@ export function createOrderedWorkspaceTextAccess(deps: {
           run(() => deps.readTarget(target)),
         ),
       ),
+    // The callback must not call read, write, or ordered for this resolved
+    // target. Re-entering targetTails would deadlock on the lock it holds.
     orderedOnResolvedTarget: <T>(
       rootPath: string,
       resolvedTarget: string,

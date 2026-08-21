@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
@@ -427,6 +428,38 @@ export async function readPendingMaterializationPaths(
   );
 }
 
+async function readPendingMaterializationPathsForCapture(
+  rootDir: string,
+  trackedPaths: readonly string[],
+): Promise<{ paths: Set<string>; canClearRecord: boolean }> {
+  const target = pendingMaterializationPath(rootDir);
+  return withExclusiveWorkspaceOperation(target, async () => {
+    try {
+      return {
+        paths: new Set(Object.keys(await readPendingFileUnlocked(rootDir))),
+        canClearRecord: true,
+      };
+    } catch (error) {
+      console.error(
+        `[desktop] pending materialization record at ${target} is unreadable; ` +
+          "quarantining it and verifying every tracked path. Pending paths " +
+          `that are no longer tracked cannot be recovered: ${String(error)}`,
+      );
+      const quarantine = `${target}.invalid-${Date.now()}`;
+      try {
+        await rename(target, quarantine);
+        return { paths: new Set(trackedPaths), canClearRecord: true };
+      } catch (quarantineError) {
+        console.error(
+          `[desktop] could not quarantine pending materialization record at ` +
+            `${target}: ${String(quarantineError)}`,
+        );
+        return { paths: new Set(trackedPaths), canClearRecord: false };
+      }
+    }
+  });
+}
+
 type PendingMaterializationCounts = Record<string, number>;
 const INVALID_PENDING_MATERIALIZATION_RECORD =
   "Invalid pending-materialization record.";
@@ -487,8 +520,25 @@ async function writePendingFileUnlocked(
   );
   await mkdir(metadataDir, { recursive: true });
   try {
-    await writeFile(temp, JSON.stringify({ counts }), "utf8");
+    // Flush before publish so a host crash cannot lose the marker and make an
+    // interrupted materialization look like a user edit.
+    const handle = await open(temp, "w");
+    try {
+      await handle.writeFile(JSON.stringify({ counts }), "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await rename(temp, target);
+    const dir = await open(metadataDir, "r");
+    try {
+      await dir.sync();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || code !== "EPERM") throw error;
+    } finally {
+      await dir.close();
+    }
   } finally {
     await rm(temp, { force: true });
   }
@@ -574,6 +624,30 @@ async function pathConfirmedAbsentOnDisk(
   }
 }
 
+async function latestMomentForPath(
+  store: CaptureVersionedTextStore,
+  workspaceId: string,
+  path: string,
+) {
+  let beforeMomentOrder: number | undefined;
+  for (;;) {
+    const page = await store.listMoments({
+      workspaceId,
+      limit: 500,
+      ...(beforeMomentOrder === undefined ? {} : { beforeMomentOrder }),
+    });
+    const summary = page.moments.find((moment) => moment.path === path);
+    if (summary) {
+      return await store.getMoment({
+        workspaceId,
+        momentId: summary.id,
+      });
+    }
+    if (page.nextBeforeMomentOrder === null) return null;
+    beforeMomentOrder = page.nextBeforeMomentOrder;
+  }
+}
+
 // Capture out-of-app modifications and deletes for paths the standalone share
 // view already tracks. A hand-placed file belongs to the recipient and stays
 // outside the journal. Comparing disk with the engine head avoids echoing
@@ -598,7 +672,11 @@ export async function captureSharedViewLocalDivergence(
     versionId: main.id,
   });
   const { filePaths, directoryPaths } = await captureDiskPaths(realRoot);
-  const pendingPaths = await readPendingMaterializationPaths(rootDir);
+  const pendingState = await readPendingMaterializationPathsForCapture(
+    rootDir,
+    tracked.map((entry) => entry.path),
+  );
+  const pendingPaths = pendingState.paths;
 
   let capturedPaths = 0;
   let repairedPaths = 0;
@@ -623,13 +701,13 @@ export async function captureSharedViewLocalDivergence(
     disk: DiskTextState & { kind: "untracked-content" | "unreadable" },
   ): UnjournalablePath => {
     if (disk.kind === "unreadable") return { path, reason: "unreadable" };
-    if (disk.reason === undefined) {
-      console.error(
-        `[desktop] shared view ${workspaceId} classified ${path} as ` +
-          "untracked content without a reason",
-      );
-    }
-    return { path, reason: disk.reason ?? "non-utf8" };
+    return {
+      path,
+      reason:
+        disk.reason === "non-file"
+          ? "non-file-replacement"
+          : disk.reason,
+    };
   };
 
   for (const entry of tracked) {
@@ -668,13 +746,20 @@ export async function captureSharedViewLocalDivergence(
           }
 
           const disk = await readDiskContent(resolvedTarget);
-          if (diskMatchesSnapshot(disk, entry)) {
+          const currentEntry =
+            (
+              await store.listTextFileMetadata!({
+                workspaceId,
+                versionId: main.id,
+              })
+            ).find((candidate) => candidate.path === entry.path) ?? entry;
+          if (diskMatchesSnapshot(disk, currentEntry)) {
             return { kind: "repaired" };
           }
 
           const latestMoment = await store.getMoment({
             workspaceId,
-            momentId: entry.latestMomentId,
+            momentId: currentEntry.latestMomentId,
           });
           const before = latestMoment?.payload.before;
           const matchesPreimage =
@@ -690,7 +775,7 @@ export async function captureSharedViewLocalDivergence(
                 {
                   path: entry.path,
                   operation: "write",
-                  contentKind: entry.contentKind,
+                  contentKind: currentEntry.contentKind,
                 },
               ],
               store,
@@ -699,13 +784,21 @@ export async function captureSharedViewLocalDivergence(
           }
 
           if (disk.kind === "absent") {
-            await store.deleteTextFile({
+            // A pending write removes the target before it writes. An absent
+            // path here is an interrupted materialization, not a delete.
+            await materializeSharedViewPaths(
+              rootDir,
               workspaceId,
-              versionId: main.id,
-              path: entry.path,
-              metadata: { origin: "local-file" },
-            });
-            return { kind: "captured" };
+              [
+                {
+                  path: entry.path,
+                  operation: "write",
+                  contentKind: currentEntry.contentKind,
+                },
+              ],
+              store,
+            );
+            return { kind: "repaired" };
           }
           if (disk.kind === "untracked-content" || disk.kind === "unreadable") {
             return {
@@ -726,7 +819,11 @@ export async function captureSharedViewLocalDivergence(
           return { kind: "captured" };
         },
       );
-      await clearPendingMaterializationPaths(rootDir, [entry.path]);
+      // The marker is the only record that a materialization was in flight.
+      // An unjournalable path is not yet resolved, so the marker stays.
+      if (result.kind !== "unjournalable" && pendingState.canClearRecord) {
+        await clearPendingMaterializationPaths(rootDir, [entry.path]);
+      }
       if (result.kind === "captured") capturedPaths += 1;
       if (result.kind === "repaired") repairedPaths += 1;
       if (result.kind === "unjournalable") {
@@ -752,9 +849,7 @@ export async function captureSharedViewLocalDivergence(
               : "file";
     }
 
-    if (onDisk === "symlink") continue;
-
-    if (onDisk === "directory") {
+    if (onDisk === "symlink" || onDisk === "directory") {
       unjournalablePaths.push({
         path: entry.path,
         reason: "non-file-replacement",
@@ -866,6 +961,7 @@ export async function captureSharedViewLocalDivergence(
       resolvedTarget,
       async (): Promise<
         | { kind: "repaired" }
+        | { kind: "unchanged" }
         | { kind: "unjournalable"; path: UnjournalablePath }
       > => {
         if (await pathConfirmedAbsentOnDisk(realRoot, path)) {
@@ -875,19 +971,7 @@ export async function captureSharedViewLocalDivergence(
         const disk = await readDiskContent(resolvedTarget);
         if (disk.kind === "absent") return { kind: "repaired" };
 
-        const recentMoments = await store.listMoments({
-          workspaceId,
-          limit: 500,
-        });
-        const latestSummary = recentMoments.moments.find(
-          (moment) => moment.path === path,
-        );
-        const latestMoment = latestSummary
-          ? await store.getMoment({
-              workspaceId,
-              momentId: latestSummary.id,
-            })
-          : null;
+        const latestMoment = await latestMomentForPath(store, workspaceId, path);
         const preimage = latestMoment?.payload.before;
         if (
           preimage !== null &&
@@ -912,10 +996,12 @@ export async function captureSharedViewLocalDivergence(
         // The store no longer tracks this path. Readable content that does not
         // match the delete preimage belongs to the recipient, so leave it on
         // disk and outside dohc's journal.
-        return { kind: "repaired" };
+        return { kind: "unchanged" };
       },
     );
-    await clearPendingMaterializationPaths(rootDir, [path]);
+    if (pendingState.canClearRecord) {
+      await clearPendingMaterializationPaths(rootDir, [path]);
+    }
     if (result.kind === "repaired") repairedPaths += 1;
     if (result.kind === "unjournalable") {
       unjournalablePaths.push(result.path);

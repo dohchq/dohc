@@ -1085,7 +1085,7 @@ export type DiskTextState =
   | {
       kind: "untracked-content";
       sha256?: string;
-      reason?: "oversized-text" | "oversized-binary" | "non-utf8";
+      reason: "oversized-text" | "oversized-binary" | "non-utf8" | "non-file";
     }
   // Transiently unreadable (EACCES/EBUSY/...): leave engine state alone.
   | { kind: "unreadable" };
@@ -1149,8 +1149,12 @@ async function readDiskTextState(rootPath: string, path: string): Promise<DiskTe
     // refuse symlinks; the live watcher can still emit the symlink path
     // itself, so this shared read refuses it too.
     const info = await lstat(absolute);
-    if (info.isSymbolicLink()) return { kind: "untracked-content" };
-    if (!info.isFile()) return { kind: "untracked-content" };
+    if (info.isSymbolicLink()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
+    if (!info.isFile()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
     if (!isTextMediaType(mediaTypeForPath(path), path)) {
       if (info.size > MAX_ENGINE_CAPTURE_BINARY_BYTES) {
         return { kind: "untracked-content", reason: "oversized-binary" };
@@ -1208,13 +1212,23 @@ async function readDiskSecretState(rootPath: string, path: string): Promise<Disk
   const absolute = join(rootPath, path);
   try {
     const info = await lstat(absolute);
-    if (info.isSymbolicLink()) return { kind: "untracked-content" };
-    if (!info.isFile()) return { kind: "untracked-content" };
-    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    if (info.isSymbolicLink()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
+    if (!info.isFile()) {
+      return { kind: "untracked-content", reason: "non-file" };
+    }
+    if (info.size > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      return { kind: "untracked-content", reason: "oversized-text" };
+    }
     const bytes = await readFile(absolute);
-    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) return { kind: "untracked-content" };
+    if (bytes.length > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+      return { kind: "untracked-content", reason: "oversized-text" };
+    }
     const text = bytes.toString("utf8");
-    if (!Buffer.from(text, "utf8").equals(bytes)) return { kind: "untracked-content" };
+    if (!Buffer.from(text, "utf8").equals(bytes)) {
+      return { kind: "untracked-content", reason: "non-utf8" };
+    }
     return { kind: "text", text, sha256: sha256Utf8(text) };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

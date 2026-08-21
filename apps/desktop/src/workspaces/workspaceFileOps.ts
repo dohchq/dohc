@@ -126,6 +126,7 @@ async function materializeWithPendingRecord(
   changed: readonly ShareViewChangedPath[],
   store: CaptureVersionedTextStore,
 ): Promise<void> {
+  if (changed.length === 0) return;
   const paths = changed.map((change) => change.path);
   await writePendingMaterializationPaths(rootPath, paths);
   await materializeSharedViewPaths(rootPath, workspaceId, changed, store);
