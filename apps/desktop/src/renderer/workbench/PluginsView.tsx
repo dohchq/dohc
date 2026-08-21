@@ -170,8 +170,8 @@ export function PluginsView(props: {
   }
 
   function renderOfferRow(offer: OfferedPluginRecord) {
-    const busyAction = catalog.busy[offer.directoryName];
-    const error = catalog.errors[offer.directoryName];
+    const busy = catalog.offerBusy[offer.directoryName] === true;
+    const error = catalog.offerErrors[offer.directoryName];
     return (
       <li key={offer.directoryName} className="list-none">
         <div
@@ -202,11 +202,11 @@ export function PluginsView(props: {
           <button
             type="button"
             data-testid="plugin-offer-add"
-            disabled={busyAction !== undefined}
+            disabled={busy}
             onClick={() => catalog.addOffer(offer)}
             className={installButton}
           >
-            {actionLabel("add", busyAction === "add")}
+            {actionLabel("add", busy)}
           </button>
         </div>
         {error ? (

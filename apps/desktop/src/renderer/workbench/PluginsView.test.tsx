@@ -338,6 +338,60 @@ describe("PluginsView", () => {
     expect(screen.queryByText("Codex")).toBeNull();
   });
 
+  it("clears a refused Add's error once the offer leaves the list, instead of leaking onto an installed row", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
+    bridgeMock.listOfferedPlugins
+      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
+      .mockResolvedValueOnce({ ok: true, offers: [] });
+    bridgeMock.addOfferedPlugin.mockResolvedValue({
+      ok: false,
+      error: {
+        stage: "state",
+        code: "pipeline-unavailable",
+        message: 'Another plugin already claims the id "codex" in this workspace.',
+      },
+    });
+
+    renderList();
+    await userEvent.click(await screen.findByTestId("plugin-offer-add"));
+    expect(await screen.findByTestId("plugin-action-error")).toBeTruthy();
+
+    // A refresh — a changed/removed status event — settles with the offer
+    // no longer listed.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("some-other-plugin"),
+      });
+    });
+    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
+    expect(screen.queryByTestId("plugin-action-error")).toBeNull();
+
+    // "codex" now shows as an installed row — a separate identity entirely
+    // from the offer that used to occupy this directoryName — and must not
+    // inherit the stale Add error. "some-other-plugin" (from the refresh
+    // trigger above) is already a row too, so this looks up "codex" by id
+    // rather than assuming it is the only row on screen.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex"),
+      });
+    });
+
+    const codexRow = await waitFor(() => {
+      const found = screen
+        .getAllByTestId("plugin-row")
+        .find((row) => row.getAttribute("data-plugin-id") === "codex");
+      if (!found) throw new Error("codex row not rendered yet");
+      return found;
+    });
+    expect(codexRow).toBeTruthy();
+    expect(screen.queryByTestId("plugin-action-error")).toBeNull();
+  });
+
   it("shows an Adding state and a named error when Add fails", async () => {
     const addResult = deferred<{
       ok: false;

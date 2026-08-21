@@ -640,7 +640,11 @@ import {
 } from "./plugins/pluginAgentDrivers";
 import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
-import { addOfferedPlugin, listOfferedPlugins } from "./plugins/pluginOffers";
+import {
+  addOfferedPlugin,
+  listOfferedPlugins,
+  removeAddedOfferedPlugin,
+} from "./plugins/pluginOffers";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
@@ -7280,6 +7284,23 @@ function registerIpcHandlers(
       if (!plugin) {
         throw new Error(
           `plugins/${input.directoryName} did not appear after it was added.`,
+        );
+      }
+      if (!plugin.valid) {
+        // The pre-copy rescan closed the window where an already-existing
+        // conflict went unnoticed, but a directory claiming the same
+        // manifest id can still appear WHILE this request is copying —
+        // discovery's own duplicate-id handling has now degraded one side
+        // of that collision, and it must not read as a successful add
+        // either way. Remove what this request wrote and let the rescan
+        // hand the id back to whichever side was already there.
+        await removeAddedOfferedPlugin({
+          workspaceRoot: workspace.rootPath,
+          directoryName: input.directoryName,
+        });
+        await pipeline.handleWatcherEvents([rediscoveryEvent]);
+        throw new Error(
+          `Another plugin already claims the id "${input.directoryName}" in this workspace.`,
         );
       }
       return AddOfferedPluginResult.parse({ ok: true, plugin });

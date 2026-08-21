@@ -24,6 +24,7 @@ import {
   canEnable,
   canInstall,
   canOpenWebApps,
+  canRemove,
   openableWebApps,
   canRetryInstall,
   isInstalled,
@@ -837,6 +838,21 @@ function PluginDetailsHeader(props: {
             {actionLabel("preflight", busyAction === "preflight")}
           </button>
         ) : null}
+        {canRemove(plugin) ? (
+          // Same confirm flow Uninstall opens (this plugin was never
+          // approved, so isInstalled's Uninstall button never shows here) —
+          // only the wording differs, since nothing installed is being
+          // undone, only a copy that was never installed being deleted.
+          <button
+            type="button"
+            data-testid="plugin-remove"
+            disabled={disabled}
+            onClick={() => catalog.prepareUninstall(plugin)}
+            className={dangerButton}
+          >
+            {busyAction === "preflight" ? "Checking" : "Remove"}
+          </button>
+        ) : null}
       </div>
 
       {actionError ? (
@@ -923,6 +939,11 @@ function PluginUninstallDialog(props: {
   if (!confirmation) return null;
   const uninstalling = catalog.busy[confirmation.plugin.id] === "uninstall";
   const warning = confirmation.preflight.warning;
+  // The same dialog and the same bridge call either way: this plugin was
+  // either running (Uninstall) or never approved (Remove) — the wording
+  // states which one is true instead of calling a never-installed copy
+  // "uninstalled".
+  const installed = isInstalled(confirmation.plugin);
 
   return (
     <Overlay
@@ -942,10 +963,14 @@ function PluginUninstallDialog(props: {
             id="plugin-uninstall-title"
             className="m-0 text-sm font-semibold text-ink"
           >
-            {`Uninstall ${confirmation.plugin.id}?`}
+            {installed
+              ? `Uninstall ${confirmation.plugin.id}?`
+              : `Remove ${confirmation.plugin.id}?`}
           </h2>
           <p className="m-0 mt-2 text-xs text-muted">
-            This removes the plugin source and build files from this workspace.
+            {installed
+              ? "This removes the plugin source and build files from this workspace."
+              : `This removes plugins/${confirmation.plugin.directoryName} from this workspace. Add ${pluginTitle(confirmation.plugin)} again to bring it back.`}
           </p>
           {warning ? (
             <div
@@ -1011,7 +1036,11 @@ function PluginUninstallDialog(props: {
             onClick={catalog.confirmUninstall}
             className="rounded-lg bg-danger px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
           >
-            {actionLabel("uninstall", uninstalling)}
+            {installed
+              ? actionLabel("uninstall", uninstalling)
+              : uninstalling
+                ? "Removing"
+                : "Remove plugin"}
           </button>
         </div>
       </div>

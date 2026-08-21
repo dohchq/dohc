@@ -235,3 +235,19 @@ export async function addOfferedPlugin(params: {
     throw toOfferedPluginAddError(error);
   }
 }
+
+/**
+ * Deletes what a successful addOfferedPlugin just placed at
+ * `plugins/<directoryName>`. Reserved for the caller's own post-copy
+ * validity check: a directory claiming the same manifest id can appear
+ * between this copy landing and the caller's rediscovery rescan — a race
+ * this module cannot close, only let the caller detect and unwind. Reuses
+ * removeStaging's Windows-lock-retry removal rather than a second copy of
+ * the same rm() call.
+ */
+export async function removeAddedOfferedPlugin(params: {
+  workspaceRoot: string;
+  directoryName: string;
+}): Promise<void> {
+  await removeStaging(join(params.workspaceRoot, "plugins", params.directoryName));
+}

@@ -26,7 +26,11 @@ import {
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
-import { OfferedPluginAddError, addOfferedPlugin } from "./pluginOffers";
+import {
+  OfferedPluginAddError,
+  addOfferedPlugin,
+  removeAddedOfferedPlugin,
+} from "./pluginOffers";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
@@ -507,6 +511,93 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await expect(
         lstat(join(workspaceRoot, "plugins", "codex")),
       ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("removes its own copy and leaves the concurrent plugin intact when a same-id directory appears mid-copy", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-conflict-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
+    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
+    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    await writeFile(
+      join(builtinCodexRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.list()).toEqual([]);
+
+      // The fixed handler's pre-copy rescan: nothing claims "codex" yet.
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
+      expect(existingPluginIds.size).toBe(0);
+
+      await addOfferedPlugin({
+        builtinPluginsRoot,
+        workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds,
+      });
+
+      // Injected between the copy and the post-copy rescan — sorts before
+      // "codex" lexically, so discovery's own tie-break hands the id to it
+      // and demotes the copy this request just made.
+      const concurrentRoot = join(workspaceRoot, "plugins", "aaa-codex");
+      await mkdir(join(concurrentRoot, "src"), { recursive: true });
+      await writeFile(
+        join(concurrentRoot, "dohc-plugin.json"),
+        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      );
+      await writeFile(join(concurrentRoot, "src", "main.ts"), "export default {};\n");
+
+      // The fixed handler's post-copy rescan, then its OWN validity check:
+      // the copy this request made lost the id it raced for.
+      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/codex" }]);
+      const copied = pipeline.list().find((entry) => entry.directoryName === "codex");
+      expect(copied?.valid).toBe(false);
+
+      // The handler's cleanup on that conflict: remove what this request
+      // wrote and rescan so the surviving side recovers.
+      await removeAddedOfferedPlugin({ workspaceRoot, directoryName: "codex" });
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+
+      await expect(
+        lstat(join(workspaceRoot, "plugins", "codex")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      const survivor = pipeline.list().find((entry) => entry.directoryName === "aaa-codex");
+      expect(survivor).toMatchObject({ id: "codex", valid: true });
     } finally {
       await pipeline.dispose();
     }

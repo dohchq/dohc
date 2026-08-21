@@ -13,6 +13,8 @@ let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
 const bridgeMock = {
   listPlugins: vi.fn(),
+  listOfferedPlugins: vi.fn(),
+  addOfferedPlugin: vi.fn(),
   openPluginWebApp: vi.fn(),
   installPlugin: vi.fn(),
   disablePlugin: vi.fn(),
@@ -125,6 +127,7 @@ beforeEach(() => {
     };
   });
   bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
+  bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers: [] });
   bridgeMock.pluginUninstallPreflight.mockResolvedValue({
     ok: true,
     confirmationToken: "00000000-0000-4000-8000-000000000001",
@@ -373,6 +376,58 @@ describe("PluginDetailsPage", () => {
       pluginId: "uninstall-plugin",
       confirmationToken: "00000000-0000-4000-8000-000000000001",
     });
+  });
+
+  it("offers Remove for a plugin that was added but never installed, and restores its offer on confirm", async () => {
+    // What Add's own result looks like: discovered, never approved.
+    // isInstalled (approvedHash !== null) is false, so Uninstall never
+    // shows — before this fix, undoing an add had no control at all.
+    const added = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [added] });
+    bridgeMock.uninstallPlugin.mockResolvedValue({ ok: true, plugin: added });
+
+    renderPage("codex");
+
+    expect(screen.queryByTestId("plugin-uninstall")).toBeNull();
+    const removeButton = await screen.findByTestId("plugin-remove");
+    await userEvent.click(removeButton);
+
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(within(dialog).getByText("Remove codex?")).toBeTruthy();
+    // The true recovery path, stated: this plugin's own files, not
+    // something running, and Add is how it comes back.
+    expect(
+      within(dialog).getByText(
+        "This removes plugins/codex from this workspace. Add codex again to bring it back.",
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).getByTestId("plugin-uninstall-confirm").textContent).toBe(
+      "Remove plugin",
+    );
+
+    await userEvent.click(within(dialog).getByTestId("plugin-uninstall-confirm"));
+
+    expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "codex",
+      confirmationToken: "00000000-0000-4000-8000-000000000001",
+    });
+    // The directory this page showed is gone.
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+    // confirmUninstall's own success path refreshes offers directly — it
+    // does not wait for the pipeline's "removed" status event to round-trip
+    // back through main first.
+    await waitFor(() =>
+      expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2),
+    );
   });
 
   // MUTATION (offer Open for a per-instance app too): this page has no
