@@ -233,6 +233,27 @@ describe("plugin web app main-process wiring", () => {
     expect(rebuildCallAt).toBeGreaterThan(rebuildStopAt);
   });
 
+  it("notifies each owner when plugin teardown destroys its guest view", () => {
+    const stop = functionSource("function stopPluginWebAppsForPlugin(");
+    const removeAt = stop.indexOf("pluginWebAppViews.removeForPlugin(");
+    const loopAt = stop.indexOf("for (const record of records)", removeAt);
+    const resolveSenderAt = stop.indexOf(
+      "webContents.fromId(record.senderId)",
+      loopAt,
+    );
+    const notifyAt = stop.indexOf("notifyPluginWebAppFailed(sender,", resolveSenderAt);
+    const destroyAt = stop.indexOf("destroyPluginWebAppViews(records);", notifyAt);
+
+    expect(removeAt).toBeGreaterThan(-1);
+    expect(loopAt).toBeGreaterThan(removeAt);
+    expect(resolveSenderAt).toBeGreaterThan(loopAt);
+    expect(notifyAt).toBeGreaterThan(resolveSenderAt);
+    expect(destroyAt).toBeGreaterThan(notifyAt);
+    expect(squeeze(stop)).toContain(
+      "notifyPluginWebAppFailed(sender,{workspaceId:record.workspaceId,pluginId:record.pluginId,webAppId:record.webAppId,instanceKey:record.instanceKey,})",
+    );
+  });
+
   it("clears the guest partition's storage after a successful uninstall", () => {
     const uninstall = handler("uninstallPlugin");
     const stopViewsAt = uninstall.indexOf(

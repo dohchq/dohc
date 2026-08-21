@@ -27,7 +27,7 @@ export function pluginCommandPaletteId(
   pluginId: string,
   commandId: string,
 ): string {
-  return `plugin-command-${encodeURIComponent(pluginId)}/${encodeURIComponent(commandId)}`;
+  return `plugin-command-${pluginId}\0${commandId}`;
 }
 
 /** Every view the rail shows, in plugin order, then manifest order. */

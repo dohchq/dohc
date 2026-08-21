@@ -31,6 +31,7 @@ import {
   shell,
   Tray,
   utilityProcess,
+  webContents,
   WebContentsView,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -2771,7 +2772,19 @@ function notifyPluginWebAppFailed(
 }
 
 function stopPluginWebAppsForPlugin(workspaceId: string, pluginId: string): void {
-  destroyPluginWebAppViews(pluginWebAppViews.removeForPlugin(workspaceId, pluginId));
+  const records = pluginWebAppViews.removeForPlugin(workspaceId, pluginId);
+  for (const record of records) {
+    const sender = webContents.fromId(record.senderId);
+    if (sender) {
+      notifyPluginWebAppFailed(sender, {
+        workspaceId: record.workspaceId,
+        pluginId: record.pluginId,
+        webAppId: record.webAppId,
+        instanceKey: record.instanceKey,
+      });
+    }
+  }
+  destroyPluginWebAppViews(records);
 }
 
 const withPluginHostLifecycleLock = <T>(

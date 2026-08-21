@@ -112,6 +112,10 @@ describe("pluginCommandPaletteId", () => {
       pluginCommandPaletteId("a", "b-c"),
     );
   });
+
+  it("accepts a command id containing an unpaired surrogate", () => {
+    expect(() => pluginCommandPaletteId("some-plugin", "\ud800")).not.toThrow();
+  });
 });
 
 describe("resolvePluginView", () => {

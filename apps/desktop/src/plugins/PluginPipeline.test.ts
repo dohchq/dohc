@@ -47,6 +47,7 @@ import {
   pluginLifecycleKey,
   startPluginForPanel,
 } from "./pluginPanelRegistration";
+import { invokeRegisteredPluginCommand } from "./pluginCommandInvocation";
 import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
@@ -2903,6 +2904,25 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         expect(setup.pipeline.host.getRegisteredCommands("example-plugin"))
           .toEqual(["old.cmd"]);
         expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
+        const recoveredRegistration =
+          setup.pipeline.pluginRegistration("example-plugin");
+        expect(recoveredRegistration).not.toBeNull();
+        if (!recoveredRegistration) {
+          throw new Error("The recovered plugin registration is missing.");
+        }
+        const invoked = await invokeRegisteredPluginCommand({
+          input: {
+            workspaceId: "workspace-1",
+            pluginId: "example-plugin",
+            commandId: "old.cmd",
+          },
+          plugin: recoveredRegistration,
+          ensureStarted: async () => setup.pipeline.host,
+        });
+        expect(invoked.status).toBe("ok");
 
         const approved = await setup.pipeline.approve("example-plugin");
 

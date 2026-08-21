@@ -481,6 +481,7 @@ export class PluginPipeline {
   private readonly dohcDir: string;
   private readonly operations: PluginPipelineOperations;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
+  private recoveredManifests = new Map<string, DohcPluginManifest>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
   /**
@@ -670,6 +671,10 @@ export class PluginPipeline {
   pluginRegistration(
     pluginId: string,
   ): { pluginRoot: string; manifest: DohcPluginManifest } | null {
+    const recovered = this.recoveredManifests.get(pluginId);
+    if (recovered) {
+      return { pluginRoot: this.liveRoot(pluginId), manifest: recovered };
+    }
     for (const candidate of this.discovery) {
       if (candidate.id !== pluginId || !candidate.manifest) continue;
       return { pluginRoot: candidate.rootPath, manifest: candidate.manifest };
@@ -1610,6 +1615,8 @@ export class PluginPipeline {
     input: FullBuildOptions,
   ): Promise<PluginPipelineActionResult> {
     const { candidate } = input;
+    const oldRuntime = this.options.pluginHost.getStatus(candidate.id) ?? null;
+    this.recoveredManifests.delete(candidate.id);
     if (!candidate.manifest) {
       return this.failure(
         candidate.id,
@@ -1617,7 +1624,6 @@ export class PluginPipeline {
       );
     }
     const validCandidate = { ...candidate, manifest: candidate.manifest };
-    const oldRuntime = this.options.pluginHost.getStatus(candidate.id) ?? null;
     let oldRuntimeStopped = false;
     let sourceHash: string | null = null;
     // The staged source tree, until it is published or discarded. Anything
@@ -1867,6 +1873,7 @@ export class PluginPipeline {
                 JSON.parse(manifestBody),
               );
               if (parsed.success) {
+                this.recoveredManifests.set(candidate.id, parsed.data);
                 liveContributions = {
                   commands: manifestCommands(parsed.data),
                   panels: manifestPanels(parsed.data),
