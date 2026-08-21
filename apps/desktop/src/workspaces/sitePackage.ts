@@ -136,7 +136,7 @@ function localReferenceCandidates(
     return [];
   }
   const artifactBase = artifactRoot === "." ? "" : artifactRoot;
-  if (!decoded.startsWith("/") && base.kind === "external") return [];
+  if (base.kind === "external") return [];
   const candidate = posix.normalize(
     decoded.startsWith("/")
       ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
@@ -149,14 +149,7 @@ function localReferenceCandidates(
     !pathRelativeToArtifact(artifactRoot, candidate) ||
     hasIgnoredSegment(candidate)
   ) return [];
-  const variants = [
-    candidate,
-    `${candidate}.js`,
-    `${candidate}.mjs`,
-    posix.join(candidate, "index.js"),
-    posix.join(candidate, "index.html"),
-  ];
-  return [...new Set(variants)].filter((path) => available.has(path));
+  return available.has(candidate) ? [candidate] : [];
 }
 
 type HtmlBaseResolution =
@@ -496,10 +489,9 @@ async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): 
     const scripts: SiteScripts = {};
     const preview = parsed.config?.preview;
     if (preview?.command) {
-      const command = configuredServerCommand(preview.command, site.configPath);
-      if (command) {
-        if (preview.mode === "build" || preview.mode === "static") scripts.preview = command;
-        else scripts.dev = command;
+      if (preview.mode !== "build" && preview.mode !== "static") {
+        const command = configuredServerCommand(preview.command, site.configPath);
+        if (command) scripts.dev = command;
       }
     }
     if (parsed.config?.build?.command) scripts.build = parsed.config.build.command;
@@ -556,6 +548,26 @@ export async function getSitePackage(
       .filter((site) => anyPath === site.root || root === site.root || isUnder(site.root, anyPath))
       .sort((a, b) => b.root.length - a.root.length)[0] ?? null
   );
+}
+
+/**
+ * `getSitePackage` intentionally returns the deepest CONTAINING site for a
+ * path, which is correct for ordinary lookups (a file inside a site still
+ * belongs to it). Starting a preview is different: a stale tab can name a
+ * root that stopped being a detected site while a detected ancestor still
+ * exists above it. Executing the ancestor's command for a tab that named its
+ * own now-gone child would run the wrong site's script. This requires the
+ * containing site's root to equal the requested root exactly before a
+ * preview may start.
+ */
+export function requireExactSiteRoot(
+  site: SitePackageInfo | null,
+  requestedRoot: string,
+): SitePackageInfo {
+  if (!site || site.root !== requestedRoot) {
+    throw new Error(`Not a detected site: ${requestedRoot}`);
+  }
+  return site;
 }
 
 export function entryRelativeToSite(site: SitePackageInfo): string | null {

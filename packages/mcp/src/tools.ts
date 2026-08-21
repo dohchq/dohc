@@ -1707,7 +1707,7 @@ function packageNameFromPath(root: string): string {
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: SiteScripts = {};
-  for (const key of ["dev", "start", "build", "preview"] as const) {
+  for (const key of ["dev", "start", "build"] as const) {
     const value = pkg.scripts[key];
     if (typeof value === "string" && value.trim()) scripts[key] = value;
   }
@@ -1779,8 +1779,17 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   const configPreviewCommand = configString(config?.preview, "command");
   const configPreviewMode = configString(config?.preview, "mode");
   if (configPreviewCommand) {
-    if (configPreviewMode === "dev") scripts.dev = configPreviewCommand;
-    else scripts.preview = configPreviewCommand;
+    if (configPreviewMode === "static" || configPreviewMode === "build") {
+      diagnostics.push({
+        severity: "warning",
+        code: "unsupported-preview-command-mode",
+        path: configPath ?? relativeJoin(root, "dohc.json"),
+        message:
+          "Configured preview commands run only in dev mode. Static and build previews use the site's entry file or build output.",
+      });
+    } else {
+      scripts.dev = configPreviewCommand;
+    }
   }
   const configBuildCommand = configString(config?.build, "command");
   if (configBuildCommand) scripts.build = configBuildCommand;

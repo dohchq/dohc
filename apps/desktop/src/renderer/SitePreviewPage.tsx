@@ -265,6 +265,7 @@ export function SitePreviewPage(props: {
       return result;
     } catch (error) {
       if (request !== previewStartRequestRef.current) return;
+      setPreview(null);
       setActionError(
         error instanceof Error
           ? error.message
@@ -289,7 +290,11 @@ export function SitePreviewPage(props: {
         path: props.siteRoot,
       });
       if (!isCurrent()) return;
-      if (fresh) latest = fresh;
+      if (!fresh) {
+        setActionError("This site is no longer part of the workspace.");
+        return;
+      }
+      latest = fresh;
       let target = shareTargetForSite(latest);
       if (
         !target &&

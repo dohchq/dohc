@@ -370,6 +370,29 @@ describe("SitePreviewPage", () => {
     });
   });
 
+  it("does not share a site that disappeared before preparation", async () => {
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(site)
+      .mockResolvedValueOnce(null);
+    const onShareSite = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={onShareSite}
+      />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(onShareSite).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
+      "This site is no longer part of the workspace.",
+    );
+  });
+
   it("shows dev logs written after the preview becomes ready", async () => {
     const devSite: SitePackageInfo = {
       ...site,
@@ -918,6 +941,32 @@ describe("SitePreviewPage", () => {
     await act(async () => Promise.resolve());
     expect(bridgeMock.startSitePreview).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+  });
+
+  it("clears a stopped preview when its replacement fails", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+    });
+    bridgeMock.startSitePreview
+      .mockResolvedValueOnce({
+        siteRoot: "report",
+        mode: "dev",
+        url: "http://127.0.0.1:49152/",
+        logs: [{ stream: "stdout", text: "ready", at: 1 }],
+      })
+      .mockRejectedValueOnce(new Error("Replacement preview failed"));
+    const user = userEvent.setup();
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-static"));
+
+    expect(await screen.findByText("Replacement preview failed")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+    expect(screen.queryByTestId("site-preview-stop")).toBeNull();
   });
 
   it("resets a manual stop when navigating to a different site", async () => {

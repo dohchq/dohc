@@ -2116,7 +2116,6 @@ const SiteScripts = z.object({
   dev: z.string().optional(),
   start: z.string().optional(),
   build: z.string().optional(),
-  preview: z.string().optional(),
 });
 export type SiteScripts = z.infer<typeof SiteScripts>;
 
@@ -2241,7 +2240,7 @@ export const ListSitesPayload = z.object({
 export type ListSitesPayload = z.infer<typeof ListSitesPayload>;
 
 export const ListSitesResult = z.object({
-  sites: z.array(SitePackageInfo).max(100),
+  sites: z.array(SitePackageInfo),
 });
 export type ListSitesResult = z.infer<typeof ListSitesResult>;
 

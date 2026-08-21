@@ -622,6 +622,7 @@ import {
   staticPreviewTargetForSite,
   getSitePackage,
   listSitePackages,
+  requireExactSiteRoot,
   type SitePackageInfo,
 } from "./workspaces/sitePackage";
 import {
@@ -6916,8 +6917,10 @@ function registerIpcHandlers(
           "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
         );
       }
-      const site = await getSitePackage(workspace.rootPath, input.siteRoot);
-      if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
+      const site = requireExactSiteRoot(
+        await getSitePackage(workspace.rootPath, input.siteRoot),
+        input.siteRoot,
+      );
       const started = await startPreviewForSite({
         workspaceId: input.workspaceId,
         workspaceRoot: workspace.rootPath,

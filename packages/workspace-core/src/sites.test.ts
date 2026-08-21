@@ -43,7 +43,7 @@ describe("site package derived facts", () => {
         root: ".",
         sourceFiles: [],
         buildOutputs: [],
-        configuredScripts: { preview: "serve dist" },
+        configuredScripts: { dev: "serve ." },
       }),
     ).toBe(true);
     expect(
@@ -107,7 +107,6 @@ describe("discoverSites", () => {
       scripts: {
         dev: "vite --host 127.0.0.1",
         build: "vite build",
-        preview: "vite preview",
       },
       diagnostics: [],
     });
@@ -367,7 +366,14 @@ describe("parseDohcSiteConfig", () => {
         preview: { mode: "build", command: "pnpm preview", entry: "dist/index.html" },
         build: { command: "pnpm build", output: "dist" },
       },
-      diagnostics: [],
+      diagnostics: [
+        expect.objectContaining({
+          path: "client-dashboard/dohc.json",
+          severity: "warning",
+          code: "unsupported-preview-command-mode",
+          message: expect.stringContaining("only in dev mode"),
+        }),
+      ],
     });
   });
 

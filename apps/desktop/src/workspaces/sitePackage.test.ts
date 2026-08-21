@@ -214,6 +214,23 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("media/intro.mp4");
   });
 
+  it("does not invent extensions for browser references", async () => {
+    await mkdir(join(root, "extensionless"), { recursive: true });
+    await writeFile(
+      join(root, "extensionless", "index.html"),
+      '<script src="app"></script><script src="exact"></script>',
+    );
+    await writeFile(join(root, "extensionless", "app.js"), "window.unrelated = true;");
+    await writeFile(join(root, "extensionless", "exact"), "window.exact = true;");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "extensionless",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("extensionless/app.js");
+    expect(manifestOf(site)?.assets).toContain("extensionless/exact");
+  });
+
   it("resolves relative references from the document base href", async () => {
     await mkdir(join(root, "manual", "docs"), { recursive: true });
     await writeFile(
@@ -231,9 +248,17 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "external-base"), { recursive: true });
     await writeFile(
       join(root, "external-base", "index.html"),
-      '<base href="https://cdn.example/"><script src="app.js"></script>',
+      [
+        '<base href="https://cdn.example/">',
+        '<script src="app.js"></script>',
+        '<script src="/private.js"></script>',
+      ].join(""),
     );
     await writeFile(join(root, "external-base", "app.js"), "window.localSecret = true;");
+    await writeFile(
+      join(root, "external-base", "private.js"),
+      "window.private = true;",
+    );
     await mkdir(join(root, "no-base"), { recursive: true });
     await writeFile(
       join(root, "no-base", "index.html"),
@@ -247,6 +272,10 @@ describe("listSitePackages", () => {
       manifestOf(sites.find((candidate) => candidate.root === "external-base"))
         ?.assets,
     ).not.toContain("external-base/app.js");
+    expect(
+      manifestOf(sites.find((candidate) => candidate.root === "external-base"))
+        ?.assets,
+    ).not.toContain("external-base/private.js");
     expect(
       manifestOf(sites.find((candidate) => candidate.root === "no-base"))?.assets,
     ).toContain("no-base/app.js");
@@ -404,13 +433,9 @@ describe("listSitePackages", () => {
     ]);
   });
 
-  it("keeps dohc.json preview commands separate from package scripts", async () => {
-    const cases = [
-      ["dev-site", "dev", "dev"],
-      ["static-site", "static", "preview"],
-      ["build-site", "build", "preview"],
-    ] as const;
-    for (const [folder, mode, slot] of cases) {
+  it("reports configured preview commands that cannot run", async () => {
+    for (const mode of ["static", "build"] as const) {
+      const folder = `${mode}-site`;
       await mkdir(join(root, folder), { recursive: true });
       await writeFile(
         join(root, folder, "package.json"),
@@ -427,10 +452,50 @@ describe("listSitePackages", () => {
     }
 
     const sites = await listSitePackages(root);
-    for (const [folder, , slot] of cases) {
+    for (const mode of ["static", "build"] as const) {
+      const folder = `${mode}-site`;
       const site = sites.find((entry) => entry.root === folder);
-      expect(site?.configuredScripts).toMatchObject({
-        [slot]: `node /tmp/${folder}.js --host 127.0.0.1`,
+      expect(site?.configuredScripts).not.toHaveProperty("preview");
+      expect(site?.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "unsupported-preview-command-mode",
+            message: expect.stringContaining("only in dev mode"),
+          }),
+        ]),
+      );
+    }
+  });
+
+  it("maps dev and mode-less configured preview commands to dev", async () => {
+    for (const [folder, mode] of [
+      ["dev-site", "dev"],
+      ["default-site", undefined],
+    ] as const) {
+      await mkdir(join(root, folder), { recursive: true });
+      await writeFile(
+        join(root, folder, "package.json"),
+        JSON.stringify({ scripts: { dev: "vite" } }),
+      );
+      await writeFile(
+        join(root, folder, "dohc.json"),
+        JSON.stringify({
+          type: "site",
+          title: folder,
+          preview: {
+            ...(mode ? { mode } : {}),
+            command: `node /tmp/${folder}.js --host 127.0.0.1`,
+          },
+        }),
+      );
+    }
+
+    const sites = await listSitePackages(root);
+    for (const folder of ["dev-site", "default-site"]) {
+      expect(
+        sites.find((entry) => entry.root === folder)?.configuredScripts,
+      ).toEqual({
+        dev: `node /tmp/${folder}.js --host 127.0.0.1`,
       });
     }
   });
@@ -444,7 +509,6 @@ describe("listSitePackages", () => {
         ["lan-dev", "dev", "vite --host 192.168.1.1", null],
         ["all-interfaces-dev", "dev", "vite --host", null],
         ["domain-dev", "dev", "next dev -H mysite.local", null],
-        ["public-static", "static", "serve dist --host=0.0.0.0", null],
       ] as const;
       const blockedCases = cases.filter((entry) => entry[3] === null);
 

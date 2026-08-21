@@ -2,6 +2,10 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  GetSitePreviewLogsResult,
+  StartSitePreviewResult,
+} from "../ipc/bridgeContract";
 
 // Every test here spawns real node children, honest work a busy machine
 // stretches (#568). Measured 2026-08-03 on a 24-process load (12 runs):
@@ -132,6 +136,34 @@ describe("package manager helpers", () => {
         "BASH -c 'vite --hostname 192.168.1.1'",
       ),
     ).toThrow(/loopback/);
+    expect(() =>
+      packageManagerDevCommand(
+        "pnpm",
+        "dev",
+        "bash -lc 'vite --host 0.0.0.0'",
+      ),
+    ).toThrow(/loopback/);
+    expect(() =>
+      packageManagerDevCommand(
+        "pnpm",
+        "dev",
+        "bash -lc 'vite --host 127.0.0.1'",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      packageManagerDevCommand(
+        "pnpm",
+        "dev",
+        "cmd /c 'vite --host 0.0.0.0'",
+      ),
+    ).toThrow(/loopback/);
+    expect(() =>
+      packageManagerDevCommand(
+        "pnpm",
+        "dev",
+        "powershell -Command 'vite --host 127.0.0.1'",
+      ),
+    ).not.toThrow();
   });
 
   it("extracts local dev server urls from common tool output", () => {
@@ -156,6 +188,23 @@ describe("package manager helpers", () => {
         "  \u001B[32m→\u001B[39m  \u001B[1mLocal\u001B[22m:   \u001B[36mhttp://127.0.0.1:\u001B[1m5173\u001B[22m/\u001B[39m",
       ),
     ).toBe("http://127.0.0.1:5173/");
+  });
+
+  it.each([
+    [
+      "Server ready (http://localhost:5173)",
+      "http://localhost:5173",
+    ],
+    [
+      'Local: "http://localhost:3000"',
+      "http://localhost:3000",
+    ],
+    [
+      "ready on http://localhost:5173/app.",
+      "http://localhost:5173/app",
+    ],
+  ])("removes delimiters from a detected dev URL in %s", (output, expected) => {
+    expect(detectDevUrl(output)).toBe(expected);
   });
 
   it("splits simple configured command strings", () => {
@@ -281,6 +330,43 @@ describe("startSiteDevServer", () => {
     try {
       expect(handle.url).toBe("http://127.0.0.1:43210");
       expect(handle.logs().some((entry) => entry.text.includes("Local:"))).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("keeps oversized log lines inside the preview IPC contract", async () => {
+    await mkdir(join(root, "site"), { recursive: true });
+    const handle = await startSiteDevServer({
+      workspaceRoot: root,
+      siteRoot: "site",
+      command: process.execPath,
+      args: [
+        "-e",
+        [
+          'console.log("x".repeat(10_001));',
+          "console.log('Local: http://127.0.0.1:43210');",
+          "setInterval(() => {}, 1000);",
+        ].join("\n"),
+      ],
+      readyTimeoutMs: 5000,
+    });
+    try {
+      const logs = handle.logs();
+      const parseResults = {
+        immediate: StartSitePreviewResult.safeParse({
+          siteRoot: "site",
+          mode: "dev",
+          url: handle.url,
+          logs,
+        }).success,
+        later: GetSitePreviewLogsResult.safeParse({ logs }).success,
+      };
+      expect(parseResults).toEqual({ immediate: true, later: true });
+
+      const oversized = logs.find((entry) => entry.text.startsWith("x"));
+      expect(oversized?.text.length).toBeLessThanOrEqual(10_000);
+      expect(oversized?.text).toContain("[truncated]");
     } finally {
       await handle.stop();
     }

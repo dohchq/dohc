@@ -1088,6 +1088,69 @@ describe("site IPC contract", () => {
     ).toHaveLength(1001);
   });
 
+  it("removes the deleted preview command slot from site metadata", () => {
+    const parsed = ListSitesResult.parse({
+      sites: [
+        {
+          root: "configured-site",
+          title: "Configured site",
+          kind: "configured",
+          confidence: "high",
+          entryPath: "configured-site/index.html",
+          configPath: "configured-site/dohc.json",
+          packagePath: null,
+          packageManager: null,
+          scripts: { preview: "npm run preview" },
+          configuredScripts: { preview: "serve dist" },
+          configuredBuildOutput: null,
+          buildOutputs: [],
+          sourceFiles: ["configured-site/index.html"],
+          shareManifest: {
+            ok: true,
+            manifest: {
+              entryPath: "configured-site/index.html",
+              assets: [],
+            },
+          },
+          diagnostics: [],
+          authority: { kind: "workspace" },
+        },
+      ],
+    }).sites[0];
+
+    expect(parsed?.scripts).toEqual({});
+    expect(parsed?.configuredScripts).toEqual({});
+  });
+
+  it("accepts more than 100 detected sites", () => {
+    const sites = Array.from({ length: 101 }, (_, index) => ({
+      root: `site-${index}`,
+      title: `Site ${index}`,
+      kind: "static" as const,
+      confidence: "high" as const,
+      entryPath: `site-${index}/index.html`,
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      configuredBuildOutput: null,
+      buildOutputs: [],
+      sourceFiles: [`site-${index}/index.html`],
+      shareManifest: {
+        ok: true as const,
+        manifest: {
+          entryPath: `site-${index}/index.html`,
+          assets: [],
+        },
+      },
+      diagnostics: [],
+      authority: { kind: "workspace" as const },
+    }));
+
+    expect(ListSitesResult.parse({ sites }).sites).toHaveLength(101);
+  });
+
   it("requires a mount root for shared-site authority", () => {
     const sharedSite = {
       root: "shared-with-me/alex/report",

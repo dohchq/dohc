@@ -46,10 +46,13 @@ export interface BuildSiteResult {
 export type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
 
 const MAX_LOG_ENTRIES = 500;
+const MAX_LOG_TEXT_CHARS = 10_000;
+const LOG_TRUNCATION_MARKER = "...[truncated]";
 const BUILD_TIMEOUT_MS = 120000;
 const BUILD_HARD_KILL_GRACE_MS = 5000;
 const DEV_URL_RE =
-  /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|\s)/i;
+  /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|[\s.)"'`,\]>])/i;
+const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;
 // Dev tools colorize their "Local: http://..." line when FORCE_COLOR reaches
 // them (Playwright workers set it; user shells can too). Vite bolds the PORT
 // — "http://127.0.0.1:\x1b[1m5173\x1b[22m/" — which used to split the URL at
@@ -98,7 +101,10 @@ function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: str
   const at = Date.now();
   for (const chunk of text.split(/\r?\n/)) {
     if (chunk.length === 0) continue;
-    logs.push({ stream, text: chunk, at });
+    const stored = chunk.length > MAX_LOG_TEXT_CHARS
+      ? `${chunk.slice(0, MAX_LOG_TEXT_CHARS - LOG_TRUNCATION_MARKER.length)}${LOG_TRUNCATION_MARKER}`
+      : chunk;
+    logs.push({ stream, text: stored, at });
   }
   if (logs.length > MAX_LOG_ENTRIES) logs.splice(0, logs.length - MAX_LOG_ENTRIES);
 }
@@ -210,7 +216,9 @@ function nestedShellCommand(command: string, args: string[]): string | null {
   const name = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   let flagIndex = -1;
   if (name === "sh" || name === "bash" || name === "zsh" || name === "dash") {
-    flagIndex = args.indexOf("-c");
+    flagIndex = args.findIndex(
+      (arg) => /^-[A-Za-z]+$/.test(arg) && arg.includes("c"),
+    );
   } else if (name === "cmd" || name === "cmd.exe") {
     flagIndex = args.findIndex((arg) => arg.toLowerCase() === "/c");
   } else if (
@@ -275,7 +283,10 @@ export function packageManagerDevCommand(
 
 export function detectDevUrl(text: string): string | null {
   const plain = text.replace(ANSI_SGR_RE, "");
-  return DEV_URL_RE.exec(plain)?.[1]?.replace("[::1]", "127.0.0.1") ?? null;
+  const matched = DEV_URL_RE.exec(plain)?.[1];
+  return matched
+    ?.replace(DEV_URL_TRAILING_PUNCTUATION_RE, "")
+    .replace("[::1]", "127.0.0.1") ?? null;
 }
 
 export async function startSiteDevServer(input: {

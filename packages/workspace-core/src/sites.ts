@@ -6,7 +6,6 @@ export interface SiteScripts {
   dev?: string;
   start?: string;
   build?: string;
-  preview?: string;
 }
 
 export interface SitePackageDerivedFactsInput {
@@ -47,7 +46,6 @@ export function needsBuiltArtifact(site: SitePackageDerivedFactsInput): boolean 
     site.configuredScripts.dev ||
     site.configuredScripts.start ||
     site.configuredScripts.build ||
-    site.configuredScripts.preview ||
     site.configuredBuildOutput ||
     site.buildOutputs.length > 0
   );
@@ -126,7 +124,7 @@ type Candidate = {
   diagnostics: SiteDiagnostic[];
 };
 
-const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build", "preview"] as const;
+const PACKAGE_SCRIPT_KEYS = ["dev", "start", "build"] as const;
 const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
 
 // Framework/package signals are intentionally limited to mainstream web stacks
@@ -363,6 +361,19 @@ function parsePreview(
       );
     }
   }
+  if (
+    preview.command &&
+    (preview.mode === "static" || preview.mode === "build")
+  ) {
+    diagnostics.push(
+      diagnostic(
+        path,
+        "warning",
+        "unsupported-preview-command-mode",
+        "Configured preview commands run only in dev mode. Static and build previews use the site's entry file or build output.",
+      ),
+    );
+  }
   return Object.keys(preview).length === 0 ? undefined : preview;
 }
 
@@ -574,9 +585,7 @@ export function inferSiteScripts(
   }
 
   if (config?.preview?.command) {
-    if (config.preview.mode === "build" || config.preview.mode === "static") {
-      inferred.preview = config.preview.command;
-    } else {
+    if (config.preview.mode !== "build" && config.preview.mode !== "static") {
       inferred.dev = config.preview.command;
     }
   }
