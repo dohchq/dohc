@@ -422,6 +422,7 @@ export async function writeDiskContentToStore(input: {
 const CAPTURE_IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
 const PENDING_MATERIALIZATION_FILE = "pending-materialization.json";
 const PULL_IN_FLIGHT_FILE = "pull-in-flight.marker";
+const REFRESH_LIFECYCLE_LOCK = "refresh-lifecycle";
 
 function pendingMaterializationPath(rootDir: string): string {
   return join(rootDir, ".dohc", PENDING_MATERIALIZATION_FILE);
@@ -429,6 +430,23 @@ function pendingMaterializationPath(rootDir: string): string {
 
 function pullInFlightPath(rootDir: string): string {
   return join(rootDir, ".dohc", PULL_IN_FLIGHT_FILE);
+}
+
+function shareViewRefreshLifecycleLockKey(rootDir: string): string {
+  return join(rootDir, ".dohc", REFRESH_LIFECYCLE_LOCK);
+}
+
+// The refresh lifecycle lock is always the outermost lock for a view. Per-path
+// locks and the pending-materialization lock nest inside it as independent lock
+// domains. Never acquire this lock while holding either nested lock.
+export function withShareViewRefreshLifecycleLock<T>(
+  rootDir: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withExclusiveWorkspaceOperation(
+    shareViewRefreshLifecycleLockKey(rootDir),
+    operation,
+  );
 }
 
 async function syncMetadataDirectory(metadataDir: string): Promise<void> {
@@ -445,14 +463,24 @@ async function syncMetadataDirectory(metadataDir: string): Promise<void> {
 
 async function writePullInFlightMarker(rootDir: string): Promise<void> {
   const metadataDir = join(rootDir, ".dohc");
+  const target = pullInFlightPath(rootDir);
+  const temp = join(
+    metadataDir,
+    `.${PULL_IN_FLIGHT_FILE}.${process.pid}.${randomUUID()}.tmp`,
+  );
   await mkdir(metadataDir, { recursive: true });
-  const handle = await open(pullInFlightPath(rootDir), "w");
   try {
-    await handle.sync();
+    const handle = await open(temp, "w");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temp, target);
+    await syncMetadataDirectory(metadataDir);
   } finally {
-    await handle.close();
+    await rm(temp, { force: true });
   }
-  await syncMetadataDirectory(metadataDir);
 }
 
 async function clearPullInFlightMarker(rootDir: string): Promise<void> {
@@ -1257,6 +1285,9 @@ export async function refreshSharedViewOnce(input: {
     });
   } catch (error) {
     if (error instanceof ShareUnavailableError) {
+      if (input.trackPendingMaterialization) {
+        await clearPullInFlightMarker(input.rootDir);
+      }
       return {
         status: "ended",
         changedPaths: 0,
@@ -1275,7 +1306,6 @@ export async function refreshSharedViewOnce(input: {
   if (input.preTrackedPaths !== undefined) {
     for (const change of pull.changedPaths) {
       if (
-        change.operation !== "write" ||
         materializationExclusions.has(change.path) ||
         input.preTrackedPaths.has(change.path)
       ) {
@@ -1351,40 +1381,42 @@ export async function refreshSharedViewOnce(input: {
 export async function refreshStandaloneShareViewOnce(
   input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
 ): Promise<RefreshSharedViewOutcome> {
-  const captured = await captureStandaloneShareViewDivergence(input);
-  const main = await input.store.ensureMainVersion({
-    workspaceId: input.workspaceId,
+  return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
+    const captured = await captureStandaloneShareViewDivergence(input);
+    const main = await input.store.ensureMainVersion({
+      workspaceId: input.workspaceId,
+    });
+    if (!input.store.listTextFileMetadata) {
+      throw new Error("Shared view reconciliation requires file metadata listing support.");
+    }
+    const preTrackedPaths = new Set(
+      (
+        await input.store.listTextFileMetadata({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+        })
+      ).map((entry) => entry.path),
+    );
+    const outcome = await refreshSharedViewOnce({
+      ...input,
+      excludeFromMaterialization: new Set(
+        captured.unjournalablePaths.map((path) => path.path),
+      ),
+      unjournalablePaths: captured.unjournalablePaths,
+      trackPendingMaterialization: true,
+      preTrackedPaths,
+    });
+    const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
+    return {
+      ...outcome,
+      status:
+        outcome.status === "unchanged" && totalLocalChanges > 0
+          ? "updated"
+          : outcome.status,
+      changedPaths:
+        outcome.status === "ended"
+          ? 0
+          : outcome.changedPaths + totalLocalChanges,
+    };
   });
-  if (!input.store.listTextFileMetadata) {
-    throw new Error("Shared view reconciliation requires file metadata listing support.");
-  }
-  const preTrackedPaths = new Set(
-    (
-      await input.store.listTextFileMetadata({
-        workspaceId: input.workspaceId,
-        versionId: main.id,
-      })
-    ).map((entry) => entry.path),
-  );
-  const outcome = await refreshSharedViewOnce({
-    ...input,
-    excludeFromMaterialization: new Set(
-      captured.unjournalablePaths.map((path) => path.path),
-    ),
-    unjournalablePaths: captured.unjournalablePaths,
-    trackPendingMaterialization: true,
-    preTrackedPaths,
-  });
-  const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-  return {
-    ...outcome,
-    status:
-      outcome.status === "unchanged" && totalLocalChanges > 0
-        ? "updated"
-        : outcome.status,
-    changedPaths:
-      outcome.status === "ended"
-        ? 0
-        : outcome.changedPaths + totalLocalChanges,
-  };
 }

@@ -1100,14 +1100,19 @@ describe("main-process chat authorization", () => {
     expect(
       submit,
       "MUTATION: submitting without a final disk capture drops edits made after the last refresh",
-    ).toContain("const captured = await captureStandaloneShareViewDivergence({");
+    ).toContain("const captured = await withShareViewRefreshLifecycleLock(");
+    expect(submit).toContain("scope.workspace.rootPath,");
+    const lifecycleLockAt = submit.indexOf(
+      "const captured = await withShareViewRefreshLifecycleLock(",
+    );
     const captureAt = submit.indexOf(
-      "const captured = await captureStandaloneShareViewDivergence({",
+      "captureStandaloneShareViewDivergence({",
     );
     const refusalAt = submit.indexOf(
       "assertShareChangesJournalable(captured.unjournalablePaths);",
     );
     const submitAt = submit.indexOf(").submitShareProposal({");
+    expect(lifecycleLockAt).toBeLessThan(captureAt);
     expect(captureAt).toBeLessThan(refusalAt);
     expect(refusalAt).toBeLessThan(submitAt);
     expect(submit).toContain(

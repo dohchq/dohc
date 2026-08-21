@@ -28,6 +28,7 @@ import {
   refreshStandaloneShareViewOnce as refreshStandaloneShareViewOnceWithPull,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
   shareViewIdentitySelector,
+  withShareViewRefreshLifecycleLock,
   writePendingMaterializationPaths,
 } from "./sharedView";
 import {
@@ -1430,6 +1431,46 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("serializes refresh lifecycle callers per view without blocking other views", async () => {
+    const firstRoot = await tempRoot();
+    const secondRoot = await tempRoot();
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    let signalFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      signalFirstEntered = resolve;
+    });
+    const holdFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = withShareViewRefreshLifecycleLock(firstRoot, async () => {
+      order.push("first:start");
+      signalFirstEntered();
+      await holdFirst;
+      order.push("first:end");
+    });
+    await firstEntered;
+
+    const sameView = withShareViewRefreshLifecycleLock(firstRoot, async () => {
+      order.push("same-view");
+    });
+    const otherView = withShareViewRefreshLifecycleLock(secondRoot, async () => {
+      order.push("other-view");
+    });
+    await otherView;
+
+    expect(order).toEqual(["first:start", "other-view"]);
+    releaseFirst();
+    await Promise.all([first, sameView]);
+    expect(order).toEqual([
+      "first:start",
+      "other-view",
+      "first:end",
+      "same-view",
+    ]);
+  });
+
   it("keeps existing pending references when an in-app save clears its own", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -1550,6 +1591,7 @@ describe("shared view refresh", () => {
           /^pending-materialization\.json\.invalid-\d+$/.test(name),
         ),
       ).toBe(true);
+      await expect(lstat(pendingPath)).rejects.toMatchObject({ code: "ENOENT" });
       expect(errorLog).toHaveBeenCalledWith(
         expect.stringContaining(pendingPath),
       );
@@ -1669,6 +1711,46 @@ describe("shared view refresh", () => {
     });
     await writeFile(join(rootDir, path), "recipient data", "utf8");
     relay.addWrite(path, "granter file");
+
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        excludedPaths: [path],
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("preserves an untracked file when a same-pull create and delete coalesce", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/recipient-delete-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite("docs/seed.md", "seed");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    relay.addWrite(path, "transient granter data");
+    relay.addDelete(path);
 
     const store = harness.openStore(target);
     try {
@@ -2027,6 +2109,9 @@ describe("shared view refresh", () => {
           ended: false,
         }),
       ).resolves.toMatchObject({ status: "ended", changedPaths: 0 });
+      await expect(
+        lstat(join(rootDir, ".dohc", "pull-in-flight.marker")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await store.close();
     }
@@ -2117,6 +2202,51 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("replaces a pull marker symlink without writing through it", async () => {
+    const rootDir = await tempRoot();
+    const outsideDir = await tempRoot();
+    const externalPath = join(outsideDir, "external.txt");
+    const markerPath = join(rootDir, ".dohc", "pull-in-flight.marker");
+    const original = Buffer.from("outside authority stays unchanged", "utf8");
+    await mkdir(join(rootDir, ".dohc"), { recursive: true });
+    await writeFile(externalPath, original);
+    await symlink(externalPath, markerPath, "file");
+
+    let externalAfterWrite: Buffer | null = null;
+    let markerWasSymlinkAfterWrite: boolean | null = null;
+    const emptyPull: PullShareViewResult = {
+      fetched: 0,
+      applied: 0,
+      skipped: 0,
+      nextCursor: 0,
+      refusalCount: 0,
+      refusals: [],
+      changedPaths: [],
+      commitCursor: async () => undefined,
+    };
+
+    await refreshSharedViewOnceWithPull({
+      rootDir,
+      workspaceId: WORKSPACE,
+      relay: new FakeShareRelay().connection(),
+      shareId: SHARE_ID,
+      pinnedSelector: PINNED_SELECTOR,
+      recordRefusals: async () => undefined,
+      store: stubStore(async () => ({ text: "unused" })),
+      trackPendingMaterialization: true,
+      pull: async () => {
+        externalAfterWrite = await readFile(externalPath);
+        markerWasSymlinkAfterWrite = (await lstat(markerPath)).isSymbolicLink();
+        return emptyPull;
+      },
+    });
+
+    expect(externalAfterWrite).toEqual(original);
+    expect(markerWasSymlinkAfterWrite).toBe(false);
+    await expect(readFile(externalPath)).resolves.toEqual(original);
+    await expect(lstat(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("still journals a genuine edit while recovering an interrupted pull", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -2202,6 +2332,9 @@ describe("shared view refresh", () => {
           path: editedPath,
         }),
       ).resolves.toMatchObject({ text: "recipient edit" });
+      expect(await readFile(join(rootDir, editedPath), "utf8")).toBe(
+        "recipient edit",
+      );
       const addedMoments = (
         await store.listMoments({ workspaceId: WORKSPACE, limit: 200 })
       ).moments.filter((moment) => !beforeRecovery.has(moment.id));

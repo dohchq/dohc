@@ -482,6 +482,7 @@ import {
   recordedShareSelector,
   refreshStandaloneShareViewOnce,
   shareViewIdentitySelector,
+  withShareViewRefreshLifecycleLock,
 } from "./workspaces/sharedView";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
@@ -5853,18 +5854,22 @@ function registerIpcHandlers(
       requireShareViewProposalScope,
     );
     const store = sharedViewStoreFor(scope.workspace);
-    const captured = await captureStandaloneShareViewDivergence({
-      rootDir: scope.workspace.rootPath,
-      workspaceId: scope.workspace.workspaceId,
-      store,
-      pinnedSelector: isRecordValue(scope.workspace.shareView)
-        ? scope.workspace.shareView.grantedSelector
-        : null,
-      shareId: scope.shareId,
-      ended:
-        isRecordValue(scope.workspace.shareView) &&
-        scope.workspace.shareView.ended === true,
-    });
+    const captured = await withShareViewRefreshLifecycleLock(
+      scope.workspace.rootPath,
+      async () =>
+        captureStandaloneShareViewDivergence({
+          rootDir: scope.workspace.rootPath,
+          workspaceId: scope.workspace.workspaceId,
+          store,
+          pinnedSelector: isRecordValue(scope.workspace.shareView)
+            ? scope.workspace.shareView.grantedSelector
+            : null,
+          shareId: scope.shareId,
+          ended:
+            isRecordValue(scope.workspace.shareView) &&
+            scope.workspace.shareView.ended === true,
+        }),
+    );
     assertShareChangesJournalable(captured.unjournalablePaths);
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
