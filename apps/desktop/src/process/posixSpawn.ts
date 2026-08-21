@@ -9,6 +9,8 @@
 // from the process table instead and signal each pid.
 import { execFile } from "node:child_process";
 
+const PROCESS_TABLE_READ_TIMEOUT_MS = 2_000;
+
 function unrefDelay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -95,10 +97,47 @@ export interface StopProcessTreePosixOptions extends Pick<
 
 function readProcessTableWithPs(): Promise<string> {
   return new Promise((resolveOutput, reject) => {
-    execFile("ps", ["-A", "-o", "pid=,ppid=,lstart="], (error, stdout) => {
-      if (error) reject(error);
-      else resolveOutput(stdout);
-    });
+    execFile(
+      "ps",
+      ["-A", "-o", "pid=,ppid=,lstart="],
+      { timeout: PROCESS_TABLE_READ_TIMEOUT_MS },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolveOutput(stdout);
+      },
+    );
+  });
+}
+
+function readProcessTableWithTimeout(
+  readProcessTable: () => Promise<string>,
+): Promise<string> {
+  return new Promise((resolveOutput, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(
+        new Error(
+          `Process table read exceeded ${PROCESS_TABLE_READ_TIMEOUT_MS} ms.`,
+        ),
+      );
+    }, PROCESS_TABLE_READ_TIMEOUT_MS);
+    timer.unref?.();
+    Promise.resolve().then(readProcessTable).then(
+      (output) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolveOutput(output);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
   });
 }
 
@@ -130,7 +169,9 @@ async function signalProcessTreePosix(
   let identities: ProcessIdentity[] = [];
   let tableReadFailed = false;
   try {
-    const table = parseProcessTable(await readProcessTable());
+    const table = parseProcessTable(
+      await readProcessTableWithTimeout(readProcessTable),
+    );
     const entriesByPid = new Map(table.map((entry) => [entry.pid, entry]));
     const identityMatches = (pid: number): boolean => {
       const captured = capturedIdentities.get(pid);
@@ -264,7 +305,13 @@ export async function stopProcessTreePosix(
   // A failed table read prevents identity verification. A surviving verified
   // SIGKILL target also proves the tree did not stop. The caller's owned
   // process handle cannot target an unrelated process through pid reuse.
-  if (unverifiable || forceResultPids.some(isAlive)) {
+  // A root omitted from the first table has no identity; if it is still alive,
+  // only the caller's owned process handle can stop it without pid-reuse risk.
+  const rootIdentityCaptured = capturedIdentities.some(
+    (identity) => identity.pid === pid,
+  );
+  const omittedLiveRoot = !rootIdentityCaptured && isAlive(pid);
+  if (unverifiable || forceResultPids.some(isAlive) || omittedLiveRoot) {
     onTreeKillFailure?.();
   }
 }
