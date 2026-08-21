@@ -23,7 +23,6 @@ const CHAT_WEB_APP_ID = "chat";
 // its transcript on every EventSource open and rebuilds it purely from
 // what this log currently holds.
 const MAX_BUFFERED_EVENTS = 500;
-const TOKEN_PLACEHOLDER = "__CHAT_TOKEN__";
 
 type SessionStateEvent = Extract<PluginAgentEvent, { kind: "session-state" }>;
 
@@ -89,6 +88,17 @@ function tokensMatch(provided: string, expected: string): boolean {
   const expectedBuffer = Buffer.from(expected, "utf8");
   if (providedBuffer.length !== expectedBuffer.length) return false;
   return timingSafeEqual(providedBuffer, expectedBuffer);
+}
+
+/** Anti-DNS-rebinding belt, alongside the token: a browser sets the Host
+ * header from the URL bar's hostname, not the address it actually resolved
+ * to, so an attacker-owned hostname that some DNS answer points at
+ * 127.0.0.1 would still reach this server carrying its own hostname in
+ * Host. Only a request that names our loopback address gets past this. */
+function isLoopbackHost(header: string | string[] | undefined): boolean {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return false;
+  return raw.split(":")[0].toLowerCase() === "127.0.0.1";
 }
 
 /** True for a mutating request carrying the per-start bearer token AND a
@@ -242,23 +252,30 @@ export function createChatWebApp(
     return "data: " + JSON.stringify({ ...state, snapshot: true }) + "\n\n";
   }
 
+  function trimLog(): void {
+    if (eventLog.length > MAX_BUFFERED_EVENTS) {
+      eventLog.splice(0, eventLog.length - MAX_BUFFERED_EVENTS);
+    }
+  }
+
   function publish(event: ChatStreamEvent): void {
     if (event.kind === "session-state") state = event;
     if (event.kind === "error" && event.fatal) {
       state = { kind: "session-state", state: "error", reason: event.message };
-      turnActive = false;
     }
-    if (event.kind === "turn-completed") {
-      state = { kind: "session-state", state: "ready" };
+    if (event.kind === "turn-completed") state = { kind: "session-state", state: "ready" };
+    // A turn is no longer active once it completes, or once the session
+    // itself ends -- a harness that exits mid-turn (closed with no
+    // turn-completed, say an idle CLI process dying) must not leave every
+    // later message refused with a stale 409 forever.
+    if (event.kind === "turn-completed" || (event.kind !== "user-message" && sessionEnded(event))) {
       turnActive = false;
     }
     if (event.kind === "permission-request") pendingPermissions.add(event.requestId);
     if (event.kind === "permission-resolved") pendingPermissions.delete(event.requestId);
     const at = Date.now();
     eventLog.push({ event, at });
-    if (eventLog.length > MAX_BUFFERED_EVENTS) {
-      eventLog.splice(0, eventLog.length - MAX_BUFFERED_EVENTS);
-    }
+    trimLog();
     const encoded = frame(event, at);
     for (const client of clients) client.write(encoded);
   }
@@ -342,9 +359,14 @@ export function createChatWebApp(
       throw requestError(503, message);
     });
     if (!available.installed) {
-      const message =
-        available.errorMessage?.trim() ||
-        "Codex isn't installed. Install the Codex CLI and add it to your PATH.";
+      // The provider's own diagnostic (often a raw "spawn codex ENOENT")
+      // always exists for a probe that reports not-installed, so it used to
+      // win over this guidance every time and the friendly install/PATH
+      // instruction never showed. Lead with the guidance; the diagnostic
+      // rides along as detail for anyone who needs it.
+      const guidance = "Codex isn't installed. Install the Codex CLI and add it to your PATH.";
+      const diagnostic = available.errorMessage?.trim();
+      const message = diagnostic ? guidance + " (" + diagnostic + ")" : guidance;
       publish({ kind: "error", message, fatal: true });
       throw requestError(503, message);
     }
@@ -376,9 +398,23 @@ export function createChatWebApp(
     const clientId =
       typeof body.clientId === "string" && body.clientId ? body.clientId : randomUUID();
     const live = await liveSession();
+    // Reserve this turn's own position in the replay log before invoking
+    // the driver: prompt() can itself publish turn events (through onEvent)
+    // before it resolves, and those must never replay ahead of the user's
+    // own message that caused them. Filled in on accept, dropped on
+    // rejection -- never broadcast live here, only once accepted below,
+    // same as before.
+    const reserved: { event: ChatStreamEvent; at: number } = {
+      event: { kind: "user-message", text: body.text, clientId },
+      at: Date.now(),
+    };
+    eventLog.push(reserved);
+    trimLog();
     try {
       await live.prompt({ text: body.text });
     } catch (error) {
+      const index = eventLog.indexOf(reserved);
+      if (index !== -1) eventLog.splice(index, 1);
       if (processSession === live) {
         processSession = null;
         settlePendingPermissions();
@@ -393,7 +429,16 @@ export function createChatWebApp(
     // submitting page's own optimistic card must never be told "not sent"
     // for one that in fact was.
     turnActive = true;
-    publish({ kind: "user-message", text: body.text, clientId });
+    reserved.at = Date.now();
+    // The reservation can have aged out of the buffer's cap while prompt()
+    // was still pending (a very active turn ahead of it) -- put it back at
+    // the end rather than lose the confirmation entirely.
+    if (!eventLog.includes(reserved)) {
+      eventLog.push(reserved);
+      trimLog();
+    }
+    const encoded = frame(reserved.event, reserved.at);
+    for (const client of clients) client.write(encoded);
     writeEmpty(response, 202);
   }
 
@@ -451,13 +496,23 @@ export function createChatWebApp(
     if (!live || !pendingPermissions.has(requestId)) {
       throw requestError(404, "This permission request is no longer pending.");
     }
-    const body = await jsonBody(request);
-    const decision = isRecord(body) ? body.decision : undefined;
-    if (!isPermissionDecision(decision)) {
-      throw requestError(400, "Choose a valid permission response.");
-    }
-    await live.answerPermission(requestId, decision);
+    // Claimed synchronously, before the first await: two concurrent POSTs
+    // for the same requestId must not both pass the check above and both
+    // answer the driver. The loser has to see it already gone and 404.
     pendingPermissions.delete(requestId);
+    try {
+      const body = await jsonBody(request);
+      const decision = isRecord(body) ? body.decision : undefined;
+      if (!isPermissionDecision(decision)) {
+        throw requestError(400, "Choose a valid permission response.");
+      }
+      await live.answerPermission(requestId, decision);
+    } catch (error) {
+      // The claim above didn't actually answer the driver -- put it back so
+      // the still-showing, still-clickable card can be retried.
+      pendingPermissions.add(requestId);
+      throw error;
+    }
     writeEmpty(response, 204);
   }
 
@@ -478,6 +533,9 @@ export function createChatWebApp(
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
+      if (!isLoopbackHost(request.headers.host)) {
+        throw requestError(403, "This request's Host header is not accepted.");
+      }
       if (!token) throw requestError(503, "The chat server is not ready yet.");
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (request.method === "GET" && url.pathname === "/events") {
@@ -512,17 +570,15 @@ export function createChatWebApp(
         await permission(request, response, decodeURIComponent(permissionMatch[1]));
         return;
       }
-      // Static assets stay tokenless: the browser cannot read a
-      // cross-origin response body without CORS permission this server
-      // never grants, so a hostile page gains nothing from fetching them --
-      // and the page needs to load them before it has a token to send.
+      // Static assets carry no token at all: the page reads its own
+      // credential from the URL fragment it was navigated to (see
+      // urlWithToken below), which never travels in this GET's request line
+      // and so never has to be embedded in what this route serves. Any
+      // local process fetching "/" learns nothing a hostile caller could
+      // use.
       const asset = request.method === "GET" ? staticAsset(url.pathname) : null;
       if (asset) {
-        const raw = await readFile(join(uiRoot, asset.file));
-        const body =
-          asset.file === "index.html"
-            ? Buffer.from(raw.toString("utf8").replace(TOKEN_PLACEHOLDER, token), "utf8")
-            : raw;
+        const body = await readFile(join(uiRoot, asset.file));
         response.writeHead(200, {
           "cache-control": "no-store",
           "content-type": asset.contentType,
@@ -598,6 +654,16 @@ export function createChatWebApp(
     }
   }
 
+  // The token reaches only the guest the host itself navigates: a URL
+  // fragment is never sent in an HTTP request (unlike a query string or
+  // header) and is invisible to any other local caller that only ever
+  // fetches "/". chat.js reads it from location.hash on load and strips it
+  // right back out with history.replaceState.
+  function urlWithToken(): string {
+    if (!serverUrl || !token) throw new Error("The chat server has no URL yet.");
+    return serverUrl + "#token=" + encodeURIComponent(token);
+  }
+
   return {
     async startWebApp(webAppId, instanceKey) {
       if (webAppId !== CHAT_WEB_APP_ID || instanceKey !== null) {
@@ -605,11 +671,12 @@ export function createChatWebApp(
           'The Codex plugin serves only the singleton "' + CHAT_WEB_APP_ID + '" web app.',
         );
       }
-      if (serverUrl) return { url: serverUrl };
+      if (serverUrl) return { url: urlWithToken() };
       serverStart ??= startServer().finally(() => {
         serverStart = null;
       });
-      return { url: await serverStart };
+      await serverStart;
+      return { url: urlWithToken() };
     },
     async stopWebApp(webAppId, instanceKey) {
       if (webAppId !== CHAT_WEB_APP_ID || instanceKey !== null) {

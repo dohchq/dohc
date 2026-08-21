@@ -1,4 +1,5 @@
 import { cpSync, mkdtempSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +64,17 @@ interface FakeDriverOptions {
   /** Same pair, for session.stop(). */
   onStopEntered?: () => void;
   stopGate?: () => Promise<void>;
+  /** Same pair, for session.prompt() -- lets a test inject driver events
+   * (through onEvent) while a prompt call is still pending, before it
+   * resolves. */
+  onPromptEntered?: () => void;
+  promptGate?: () => Promise<void>;
+  /** Same pair, for session.answerPermission() -- lets a test force a
+   * second concurrent POST to arrive while the first is still inside the
+   * driver call, deterministically, instead of hoping two real HTTP
+   * requests happen to interleave at the right instant. */
+  onAnswerPermissionEntered?: () => void;
+  answerPermissionGate?: () => Promise<void>;
   /** If set, every session this driver creates rejects its first prompt()
    * with this error, then clears (a retry through a fresh session
    * succeeds normally). */
@@ -125,6 +137,8 @@ function fakeDriver(
           return stopCalls;
         },
         async prompt(message) {
+          options.onPromptEntered?.();
+          if (options.promptGate) await options.promptGate();
           if (session.promptError) {
             const error = session.promptError;
             session.promptError = null;
@@ -135,6 +149,8 @@ function fakeDriver(
         },
         async cancel() {},
         async answerPermission(requestId, decision) {
+          options.onAnswerPermissionEntered?.();
+          if (options.answerPermissionGate) await options.answerPermissionGate();
           permissionCalls.push({ requestId, decision });
         },
         async stop() {
@@ -231,12 +247,36 @@ async function post(url: string, path: string, body: unknown, token: string): Pr
   });
 }
 
-async function fetchToken(url: string): Promise<string> {
-  const page = await fetch(new URL("/", url));
-  const html = await page.text();
-  const match = /<meta name="chat-token" content="([0-9a-f]+)">/.exec(html);
-  if (!match?.[1]) throw new Error("The chat page did not carry a session token.");
-  return match[1];
+/** The token startWebApp hands the guest travels only in the URL fragment
+ * it returns -- never in anything the server itself serves. */
+function tokenFromUrl(url: string): string {
+  const token = new URLSearchParams(new URL(url).hash.slice(1)).get("token");
+  if (!token) throw new Error("The chat page's URL did not carry a session token.");
+  return token;
+}
+
+/** Sends a GET with an arbitrary Host header -- fetch forbids overriding
+ * Host (a browser would too), so proving the anti-rebinding check needs
+ * Node's own low-level client instead. */
+async function fetchWithHost(url: string, host: string): Promise<{ status: number }> {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname + target.search,
+        method: "GET",
+        headers: { host },
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => resolve({ status: response.statusCode ?? 0 }));
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 const runningApps: ChatWebApp[] = [];
@@ -248,8 +288,7 @@ async function start(
   const app = createChatWebApp(fake.driver, "C:\\workspace", uiRoot);
   runningApps.push(app);
   const started = await app.startWebApp("chat", null);
-  const token = await fetchToken(started.url);
-  return { app, url: started.url, token };
+  return { app, url: started.url, token: tokenFromUrl(started.url) };
 }
 
 afterEach(async () => {
@@ -389,6 +428,37 @@ describe("Claude Code chat web app", () => {
     await reattached.close();
   });
 
+  it("keeps a reconnect's replay in turn order even when the driver publishes before its own prompt resolves", async () => {
+    // The driver can call onEvent synchronously (or on a fast tick) inside
+    // prompt() before that call ever resolves -- without reserving this
+    // turn's log position first, that early event would land in the log
+    // ahead of the user-message it was actually caused by, and a reconnect
+    // would replay the reply before the question.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    await entered.promise;
+    fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
+    gate.resolve();
+    expect((await sendPromise).status).toBe(202);
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial closed snapshot
+    expect(await reattached.next()).toEqual({
+      kind: "user-message",
+      text: "Hello",
+      clientId: "c1",
+    });
+    expect(await reattached.next()).toEqual({ kind: "session-state", state: "running" });
+    await reattached.close();
+  });
+
   it("stops the live session and starts a fresh session for the next message", async () => {
     const fake = fakeDriver();
     const { url, token } = await start(fake);
@@ -517,17 +587,74 @@ describe("Claude Code chat web app", () => {
     await reattached.close();
   });
 
-  it("serves its own static chat page, stylesheet, and script, with a real token injected", async () => {
+  it("answers a permission request exactly once even when two POSTs race for it", async () => {
+    // Forces the race deterministically instead of hoping two real HTTP
+    // requests happen to interleave at the right instant: the first POST
+    // is held inside the driver's own answerPermission() call, and only
+    // then does the test fire the second.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onAnswerPermissionEntered: () => entered.resolve(),
+      answerPermissionGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    fake.startInputs[0]?.onEvent({
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "command",
+      title: "Run tests",
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    });
+    await stream.next(); // the permission-request itself
+
+    const first = post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "allow_once" },
+      token,
+    );
+    await entered.promise;
+    // The first POST is now gated deep inside the driver call, having
+    // already claimed the requestId (with the fix) or not yet (without
+    // it) -- the second must see whichever is true right now, not
+    // whatever becomes true once the first eventually finishes.
+    const second = await post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "reject_once" },
+      token,
+    );
+    gate.resolve();
+    const firstResponse = await first;
+
+    expect(firstResponse.status).toBe(204);
+    expect(second.status).toBe(404);
+    expect(fake.sessions[0]?.permissionCalls).toEqual([
+      { requestId: "request/1", decision: "allow_once" },
+    ]);
+    await stream.close();
+  });
+
+  it("serves its own static chat page, stylesheet, and script -- the page itself is token-free", async () => {
     const fake = fakeDriver();
-    const { url } = await start(fake);
+    const { url, token } = await start(fake);
 
     const page = await fetch(new URL("/", url));
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toContain("text/html");
     const html = await page.text();
     expect(html).toContain("<title>Claude Code Chat</title>");
-    expect(html).not.toContain("__CHAT_TOKEN__");
-    expect(html).toMatch(/<meta name="chat-token" content="[0-9a-f]{48}">/);
+    // The token lives only in the fragment startWebApp returned -- anything
+    // "/" itself serves must never carry it, or any local process that
+    // merely fetches this route (or a rebound page reading its own
+    // same-origin response) would learn it too.
+    expect(html).not.toContain(token);
+    expect(html).not.toContain("chat-token");
     // The transcript itself is not a live region: a streamed reply fires
     // one text-delta per fragment, and announcing every one would drown
     // out a permission request or failure. A separate, visually hidden
@@ -542,6 +669,33 @@ describe("Claude Code chat web app", () => {
     const script = await fetch(new URL("chat.js", url));
     expect(script.status).toBe(200);
     expect(script.headers.get("content-type")).toContain("javascript");
+  });
+
+  it("hands the token only in the URL fragment startWebApp returns", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    expect(url).toContain("#token=" + token);
+
+    // Reattaching (already-running server) hands back the same URL, token
+    // included -- the guest can navigate back to it and still authenticate.
+    const app = runningApps.at(-1);
+    if (!app) throw new Error("No running app to reattach to.");
+    const again = await app.startWebApp("chat", null);
+    expect(again.url).toBe(url);
+  });
+
+  it("refuses a request whose Host header isn't this loopback server -- a DNS-rebound page can't just ask", async () => {
+    const fake = fakeDriver();
+    const { url } = await start(fake);
+    const target = new URL(url);
+
+    const rebound = await fetchWithHost(url, "attacker.example");
+    expect(rebound.status).toBe(403);
+
+    // The legitimate Host (what every other test's real fetch() sends)
+    // still works -- this isn't rejecting the server's own requests.
+    const legitimate = await fetchWithHost(url, target.host);
+    expect(legitimate.status).toBe(200);
   });
 
   it("500s a missing static asset without publishing a session error", async () => {
@@ -594,12 +748,16 @@ describe("Claude Code chat web app", () => {
     expect(fake.probeCalls()).toBe(2);
   });
 
-  it("streams a fatal probe error and does not start a missing harness", async () => {
+  it("streams the friendly install guidance first when not installed, with the raw diagnostic riding along as detail", async () => {
+    // The probe's own diagnostic (a raw "spawn claude ENOENT" from the real
+    // driver) always exists for a not-installed probe, so it used to win
+    // over the friendly guidance every time -- the reader never saw the
+    // one actionable instruction, only a message meant for a bug report.
     const fake = fakeDriver(() => ({
       installed: false,
       auth: { status: "unknown" },
       models: [],
-      errorMessage: "Claude Code failed its probe.",
+      errorMessage: "spawn claude ENOENT",
     }));
     const { url, token } = await start(fake);
     const stream = await eventStream(url, token);
@@ -613,7 +771,8 @@ describe("Claude Code chat web app", () => {
     // accepted the prompt, so the message was never really sent.
     expect(await stream.next()).toEqual({
       kind: "error",
-      message: "Claude Code failed its probe.",
+      message:
+        "Claude Code isn't installed. Install the Claude Code CLI and add it to your PATH. (spawn claude ENOENT)",
       fatal: true,
     });
     await stream.close();
@@ -914,7 +1073,7 @@ describe("Claude Code chat web app", () => {
 
       const restarted = await app.startWebApp("chat", null);
       expect(restarted.url).not.toBe(url);
-      const freshToken = await fetchToken(restarted.url);
+      const freshToken = tokenFromUrl(restarted.url);
       expect(freshToken).not.toBe(token);
 
       // A fresh session, not the old one reused or reattached.
@@ -954,6 +1113,21 @@ describe("Claude Code chat web app", () => {
       await post(url, "message", { text: "First" }, token);
 
       fake.startInputs[0]?.onEvent({ kind: "error", message: "Claude Code crashed.", fatal: true });
+
+      const retry = await post(url, "message", { text: "Retry" }, token);
+      expect(retry.status).toBe(202);
+    });
+
+    it("a mid-turn close with no turn-completed also releases the active-turn gate", async () => {
+      // A harness that exits idle mid-turn reports the session ending, not
+      // a fatal error and not turn-completed -- without releasing the gate
+      // here too, every later message would 409 forever with no live
+      // session left to blame it on.
+      const fake = fakeDriver();
+      const { url, token } = await start(fake);
+      await post(url, "message", { text: "First" }, token);
+
+      fake.startInputs[0]?.onEvent({ kind: "session-state", state: "closed" });
 
       const retry = await post(url, "message", { text: "Retry" }, token);
       expect(retry.status).toBe(202);

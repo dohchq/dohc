@@ -6,7 +6,6 @@ const stopButton = document.querySelector("#stop");
 const composer = document.querySelector("#composer");
 const messageInput = document.querySelector("#message");
 const sendButton = document.querySelector("#send");
-const tokenMeta = document.querySelector('meta[name="chat-token"]');
 
 if (
   !transcript ||
@@ -16,17 +15,23 @@ if (
   !stopButton ||
   !composer ||
   !messageInput ||
-  !sendButton ||
-  !tokenMeta
+  !sendButton
 ) {
   throw new Error("The Claude Code chat page is missing a required control.");
 }
 
-// This page's own per-start credential (injected by the server into the
-// page it served itself). Every mutating request carries it; a hostile
-// cross-origin page has no way to read it back out of this same-origin
-// document.
-const TOKEN = tokenMeta.content;
+// This page's own per-start credential, handed only to the guest the host
+// itself navigated: startWebApp returns the URL with the token in its
+// fragment, which reaches this script through location.hash but never
+// travels in an HTTP request (a fragment is client-side only), so no other
+// local caller that merely fetches "/" ever sees it. Read once, then
+// stripped from the visible URL so it doesn't linger in history.
+const tokenMatch = /(?:^|&)token=([^&]+)/.exec(location.hash.slice(1));
+if (!tokenMatch) {
+  throw new Error("The chat page did not receive a session token.");
+}
+const TOKEN = decodeURIComponent(tokenMatch[1]);
+history.replaceState(null, "", location.pathname + location.search);
 
 const textItems = new Map();
 const activityItems = new Map();
@@ -108,8 +113,13 @@ function setSessionState(state, reason, options = {}) {
   // too would duplicate whatever that replay is about to show.
   if (options.silent) return;
   announce(label);
-  if (state === "closed" && reason) {
-    recoveryCard(reason);
+  // A closed state reaching here (not the silent initial snapshot) is
+  // always a real transition away from a session that existed -- an idle
+  // CLI process can exit with no reason at all, and without a boundary
+  // card here the next message would silently start a fresh, context-free
+  // session under what still looks like one continuous transcript.
+  if (state === "closed") {
+    recoveryCard(reason || "This session ended.");
   }
 }
 

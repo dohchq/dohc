@@ -38,12 +38,22 @@ async function loadChatModule(): Promise<{
       <textarea id="message"></textarea>
       <button id="send" type="submit"></button>
     </form>
-    <meta name="chat-token" content="test-token">
   `;
   lastEventSource = null;
+  // The page's own credential, exactly as startWebApp hands it to the
+  // guest: in the URL fragment, not a meta tag.
+  location.hash = "token=test-token";
   const mod = await import(/* @vite-ignore */ `../ui/chat.js?t=${Date.now()}-${Math.random()}`);
   if (!lastEventSource) throw new Error("chat.js did not construct an EventSource.");
   return { module: mod, eventSource: lastEventSource };
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 function sendEvent(eventSource: FakeEventSource, data: unknown): void {
@@ -134,6 +144,14 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     globalThis.fetch = originalFetch;
   });
 
+  it("reads its token from the URL fragment and strips it from the visible URL", async () => {
+    await loadChatModule();
+    // chat.js already read TOKEN out of location.hash by the time it
+    // constructed the EventSource above (its very first act) -- what
+    // remains is what the page's own history.replaceState left behind.
+    expect(location.hash).toBe("");
+  });
+
   it("renders a replayed event's own publish time, not the reconnect moment", async () => {
     const { eventSource } = await loadChatModule();
     const at = new Date("2020-01-01T03:04:00Z").getTime();
@@ -168,15 +186,29 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(document.querySelectorAll(".error-card")).toHaveLength(1);
   });
 
+  it("renders a default boundary for a reasonless close, so the next message doesn't silently start a fresh session", async () => {
+    const { eventSource } = await loadChatModule();
+    // Not the initial snapshot -- a real, later transition, exactly what an
+    // idle CLI process exiting on its own looks like: closed, no reason.
+    sendEvent(eventSource, { kind: "session-state", state: "closed" });
+    expect(textOf("#session-state")).toBe("Closed");
+    const card = document.querySelector(".error-card");
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain("This session ended.");
+    expect(card?.textContent).toContain("Send a message to start a new session.");
+  });
+
   it("keeps a pending message's card recoverable across a reconnect that races its request", async () => {
     const { eventSource } = await loadChatModule();
     let capturedBody: string | undefined;
+    const entered = deferred();
     let settleFetch!: (response: Response) => void;
     const pending = new Promise<Response>((resolve) => {
       settleFetch = resolve;
     });
     globalThis.fetch = ((_url: string, init?: RequestInit) => {
       capturedBody = init?.body as string;
+      entered.resolve();
       return pending;
     }) as typeof fetch;
 
@@ -184,9 +216,9 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     const composer = document.querySelector("#composer") as HTMLFormElement;
     messageInput.value = "Hello";
     composer.requestSubmit();
-    // Let the submit handler's async body run up to its own await.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Tied to the submit handler actually reaching its fetch call -- not a
+    // guessed number of microtask hops.
+    await entered.promise;
 
     const card = document.querySelector(".message.user");
     expect(card).not.toBeNull();
@@ -202,9 +234,11 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
 
     // The request succeeds, and the server's own echo arrives over the
     // reconnected stream -- exactly what a real reconnect's replay does.
+    // Awaiting the same promise the submit handler itself awaits: its
+    // continuation was registered first, so it has already run once this
+    // resolves (promise reactions fire in registration order).
     settleFetch(new Response(null, { status: 202 }));
-    await Promise.resolve();
-    await Promise.resolve();
+    await pending;
     const clientId = (JSON.parse(capturedBody ?? "{}") as { clientId?: string }).clientId;
     sendEvent(eventSource, { kind: "user-message", text: "Hello", clientId });
 
@@ -222,18 +256,21 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
 
   it("keeps a pending message's card recoverable across a reconnect when the request then fails", async () => {
     const { eventSource } = await loadChatModule();
+    const entered = deferred();
     let settleFetch!: (response: Response) => void;
     const pending = new Promise<Response>((resolve) => {
       settleFetch = resolve;
     });
-    globalThis.fetch = (() => pending) as typeof fetch;
+    globalThis.fetch = (() => {
+      entered.resolve();
+      return pending;
+    }) as typeof fetch;
 
     const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
     const composer = document.querySelector("#composer") as HTMLFormElement;
     messageInput.value = "Hello";
     composer.requestSubmit();
-    await Promise.resolve();
-    await Promise.resolve();
+    await entered.promise;
     const card = document.querySelector(".message.user");
     expect(card).not.toBeNull();
 
@@ -241,8 +278,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(document.querySelector(".message.user")).toBeNull();
 
     settleFetch(new Response(null, { status: 500 }));
-    await Promise.resolve();
-    await Promise.resolve();
+    await pending;
 
     // The exact same node comes back, now carrying the failure notice --
     // not a lookalike, and not silently lost. Without the fix,
