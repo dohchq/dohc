@@ -259,6 +259,17 @@ button:disabled {
   font-size: 13px;
 }
 
+.permission-locations {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font: 11px/1.6 ui-monospace, "IBM Plex Mono", monospace;
+}
+
+.permission-locations li {
+  overflow-wrap: anywhere;
+}
+
 .permission-actions {
   flex-wrap: wrap;
   margin-top: 10px;

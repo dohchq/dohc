@@ -167,17 +167,28 @@ async function listen(
   beforeListen?: (server: Server) => Promise<void> | void,
 ): Promise<string> {
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
+    let settled = false;
+    const settle = (run: () => void) => {
+      if (settled) return;
+      settled = true;
+      run();
+    };
+    server.once("error", (error) => settle(() => reject(error)));
     // A close before the server ever started listening (deactivate or
     // stopWebApp racing this same startup) fires no "error" and no listen
     // callback -- only "close". Without this, that race left this promise,
     // and everything awaiting startServer() through it, pending forever.
     server.once("close", () =>
-      reject(new Error("The chat server closed before it started listening.")),
+      settle(() => reject(new Error("The chat server closed before it started listening."))),
     );
     Promise.resolve(beforeListen?.(server)).then(() => {
+      // The close handler above may already have settled this promise
+      // while beforeListen was pending (exactly the race a test forces).
+      // Calling listen() now would reopen a socket nothing tracks anymore
+      // -- shutdown() already forgot this server object.
+      if (settled) return;
       server.listen(0, "127.0.0.1", resolve);
-    }, reject);
+    }, (error) => settle(() => reject(error)));
   });
   const address = server.address();
   if (!address || typeof address === "string") {
@@ -245,27 +256,52 @@ export function createChatWebApp(
     );
   }
 
+  /** Answers every still-open permission card with "cancel" before clearing
+   * the set. Every path that ends a session (or the attempt to start one)
+   * must settle through here, not a bare pendingPermissions.clear() -- an
+   * unresolved card left in place stays clickable with no session behind
+   * it (every answer 404s), and a reconnect's replay would recreate the
+   * same unusable card from the buffered permission-request event. */
+  function settlePendingPermissions(): void {
+    for (const requestId of [...pendingPermissions]) {
+      publish({ kind: "permission-resolved", requestId, decision: "cancel" });
+    }
+    pendingPermissions.clear();
+  }
+
   async function startSession(): Promise<PluginAgentSession> {
     const generation = ++sessionGeneration;
-    pendingPermissions.clear();
+    settlePendingPermissions();
     turnActive = false;
     // Set once this driver.startSession call itself ends before it even
     // resolves (a session that fails during its own handshake).
     let ended = false;
-    const created = await driver.startSession({
-      workspaceRoot,
-      mode: "approval-required",
-      mcp: mcpConfig(workspaceRoot),
-      onEvent(event) {
-        if (generation !== sessionGeneration) return;
-        publish(event);
-        if (sessionEnded(event)) {
-          ended = true;
-          processSession = null;
-          pendingPermissions.clear();
-        }
-      },
-    });
+    let created: PluginAgentSession;
+    try {
+      created = await driver.startSession({
+        workspaceRoot,
+        mode: "approval-required",
+        mcp: mcpConfig(workspaceRoot),
+        onEvent(event) {
+          if (generation !== sessionGeneration) return;
+          publish(event);
+          if (sessionEnded(event)) {
+            ended = true;
+            processSession = null;
+            settlePendingPermissions();
+          }
+        },
+      });
+    } catch (error) {
+      // Both concrete drivers publish "starting" synchronously before this
+      // can reject (a spawn failure, an init or handshake error). Without a
+      // terminal event here, the pill would sit on Starting forever with
+      // Stop still enabled and no session behind it to stop.
+      if (generation === sessionGeneration) {
+        publish({ kind: "error", message: errorMessage(error), fatal: true });
+      }
+      throw requestError(503, errorMessage(error));
+    }
     // A newer generation means a /stop (or deactivate) ran while this
     // session was still starting -- it already bumped sessionGeneration
     // even though processSession was still null to invalidate. Either way,
@@ -331,7 +367,7 @@ export function createChatWebApp(
     } catch (error) {
       if (processSession === live) {
         processSession = null;
-        pendingPermissions.clear();
+        settlePendingPermissions();
       }
       const message = errorMessage(error);
       publish({ kind: "error", message, fatal: true });
@@ -355,7 +391,7 @@ export function createChatWebApp(
     sessionGeneration += 1;
     const live = processSession;
     processSession = null;
-    pendingPermissions.clear();
+    settlePendingPermissions();
     turnActive = false;
     if (!live) {
       if (sessionStart) {
@@ -522,7 +558,7 @@ export function createChatWebApp(
     sessionGeneration += 1;
     const live = processSession;
     processSession = null;
-    pendingPermissions.clear();
+    settlePendingPermissions();
     turnActive = false;
     sessionStart = null;
     // Guarded: a rejection here must not skip the cleanup below and leave

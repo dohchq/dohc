@@ -67,6 +67,9 @@ interface FakeDriverOptions {
    * with this error, then clears (a retry through a fresh session
    * succeeds normally). */
   promptError?: Error;
+  /** If set, driver.startSession() itself rejects with this error (a spawn
+   * or handshake failure) instead of ever returning a session. */
+  startSessionError?: Error;
 }
 
 interface FakeDriver {
@@ -102,6 +105,7 @@ function fakeDriver(
     async startSession(input) {
       options.onStartSessionEntered?.();
       if (options.startGate) await options.startGate();
+      if (options.startSessionError) throw options.startSessionError;
       startInputs.push(input);
       const promptCalls: string[] = [];
       const permissionCalls: Array<{
@@ -373,6 +377,87 @@ describe("Codex chat web app", () => {
     await stream.close();
   });
 
+  it("carries a permission request's affected locations through to the client", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next();
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next();
+    const request: PluginAgentEvent = {
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "file-change",
+      title: "Edit files",
+      locations: ["src/foo.ts", "src/bar.ts"],
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    };
+    fake.startInputs[0]?.onEvent(request);
+    const received = await stream.next();
+    expect(received).toEqual(request);
+    expect((received as { locations?: string[] }).locations).toEqual(["src/foo.ts", "src/bar.ts"]);
+    await stream.close();
+  });
+
+  it("settles a pending permission when the session dies, so a late answer 404s instead of reaching a dead session", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "Needs permission", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    const request: PluginAgentEvent = {
+      kind: "permission-request",
+      requestId: "request/1",
+      requestType: "command",
+      title: "Run tests",
+      options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+    };
+    fake.startInputs[0]?.onEvent(request);
+    expect(await stream.next()).toEqual(request);
+
+    // The session dies with the permission still pending.
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "Codex crashed.", fatal: true });
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "Codex crashed.",
+      fatal: true,
+    });
+    // Without the fix, this never arrives: the card stays "pending" forever
+    // with nothing to settle it, and a reconnect's replay recreates the
+    // same unusable card from the buffered permission-request event alone.
+    expect(await stream.next()).toEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+
+    // A late answer to the now-settled request 404s -- it is no longer
+    // pending, rather than reaching a session that no longer exists.
+    const lateAnswer = await post(
+      url,
+      `permission/${encodeURIComponent("request/1")}`,
+      { decision: "allow_once" },
+      token,
+    );
+    expect(lateAnswer.status).toBe(404);
+
+    // A reconnect's replay carries both the request and its resolution, in
+    // that order -- never just the request on its own. (Snapshot, then the
+    // buffered user-message, permission-request, error, and
+    // permission-resolved events, in publish order.)
+    const reattached = await eventStream(url, token);
+    const replayed: unknown[] = [];
+    for (let index = 0; index < 5; index += 1) replayed.push(await reattached.next());
+    expect(replayed).toContainEqual({
+      kind: "permission-resolved",
+      requestId: "request/1",
+      decision: "cancel",
+    });
+    await stream.close();
+    await reattached.close();
+  });
+
   it("serves its own static chat page, stylesheet, and script, with a real token injected", async () => {
     const fake = fakeDriver();
     const { url } = await start(fake);
@@ -473,6 +558,40 @@ describe("Codex chat web app", () => {
       fatal: true,
     });
     await stream.close();
+  });
+
+  it("publishes a terminal error when driver.startSession itself rejects", async () => {
+    // Unlike the probe failure above, the probe succeeds here -- the
+    // rejection comes from driver.startSession itself (a spawn or
+    // handshake failure), after the driver has already published
+    // "starting". Without a terminal event for this specific path, the
+    // pill sits on Starting forever with Stop still enabled and no session
+    // behind it.
+    const fake = fakeDriver(undefined, {
+      startSessionError: new Error("Codex failed to spawn."),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    const response = await post(url, "message", { text: "Hello" }, token);
+    expect(response.status).toBe(503);
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "Codex failed to spawn.",
+      fatal: true,
+    });
+    await stream.close();
+
+    // The internal snapshot settled too: a reconnect sees the real state
+    // immediately, not a stale "closed" with no explanation.
+    const reattached = await eventStream(url, token);
+    expect(await reattached.next()).toEqual({
+      kind: "session-state",
+      state: "error",
+      reason: "Codex failed to spawn.",
+    });
+    await reattached.close();
   });
 
   it("does not log an accepted-message echo for a message the driver goes on to reject", async () => {

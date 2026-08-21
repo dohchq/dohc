@@ -101,6 +101,7 @@ function setSessionState(state, reason) {
   }
 }
 
+// The session actually ended: sending a message means starting over.
 function recoveryCard(message) {
   hideEmptyState();
   const card = document.createElement("section");
@@ -110,6 +111,24 @@ function recoveryCard(message) {
   const next = document.createElement("p");
   next.className = "next-action";
   next.textContent = "Send a message to start a new session.";
+  card.append(heading, next);
+  transcript.append(card);
+  scrollToLatest();
+}
+
+// A turn failed, but the session itself is still alive (setSessionState
+// already went back to Ready by the time this renders) -- recoveryCard's
+// "start a new session" line would be false here, since there isn't a new
+// one to start.
+function failedTurnCard(message) {
+  hideEmptyState();
+  const card = document.createElement("section");
+  card.className = "error-card";
+  const heading = document.createElement("strong");
+  heading.textContent = message;
+  const next = document.createElement("p");
+  next.className = "next-action";
+  next.textContent = "Send a message to try again.";
   card.append(heading, next);
   transcript.append(card);
   scrollToLatest();
@@ -141,9 +160,30 @@ function renderText(event) {
   scrollToLatest();
 }
 
+/** Decides what an activity card should show after `item`, given what it
+ * already shows (or null for a brand new card). Exported and pure so a
+ * test can pin the merge rule without booting the page: a completion
+ * event can arrive sparse (a generic "finished"/"failed" title, no detail
+ * or locations) once the harness has moved past the richer detail its own
+ * start event carried, and overwriting with that would destroy real
+ * information the user was just shown. */
+export function mergedActivity(existing, item) {
+  const details = [item.detail, ...(item.locations || [])].filter(Boolean);
+  if (existing && details.length === 0) {
+    return { title: existing.title, detail: existing.detail };
+  }
+  return { title: item.title, detail: details.join("\n") };
+}
+
 function renderActivity(event) {
   hideEmptyState();
   let card = activityItems.get(event.item.id);
+  const existing = card
+    ? {
+        title: card.querySelector(".activity-title").textContent,
+        detail: card.querySelector(".activity-detail").textContent,
+      }
+    : null;
   if (!card) {
     card = document.createElement("section");
     card.className = "activity";
@@ -162,9 +202,9 @@ function renderActivity(event) {
     activityItems.set(event.item.id, card);
   }
   card.dataset.status = event.item.status;
-  card.querySelector(".activity-title").textContent = event.item.title;
-  const details = [event.item.detail, ...(event.item.locations || [])].filter(Boolean);
-  card.querySelector(".activity-detail").textContent = details.join("\n");
+  const merged = mergedActivity(existing, event.item);
+  card.querySelector(".activity-title").textContent = merged.title;
+  card.querySelector(".activity-detail").textContent = merged.detail;
   scrollToLatest();
 }
 
@@ -220,6 +260,14 @@ async function answerPermission(requestId, decision, label) {
   }
 }
 
+/** The affected paths a permission request names, in render order. Pure
+ * and exported for the same reason as mergedActivity above -- this is the
+ * permission surface's whole point (which file is this decision about),
+ * so the rule for what gets shown is worth pinning on its own. */
+export function permissionLocations(event) {
+  return (event.locations || []).filter(Boolean);
+}
+
 function renderPermission(event) {
   hideEmptyState();
   const card = document.createElement("section");
@@ -231,6 +279,17 @@ function renderPermission(event) {
     const detail = document.createElement("p");
     detail.textContent = event.detail;
     card.append(detail);
+  }
+  const locations = permissionLocations(event);
+  if (locations.length > 0) {
+    const list = document.createElement("ul");
+    list.className = "permission-locations";
+    for (const location of locations) {
+      const item = document.createElement("li");
+      item.textContent = location;
+      list.append(item);
+    }
+    card.append(list);
   }
   const actions = document.createElement("div");
   actions.className = "permission-actions";
@@ -286,7 +345,7 @@ function renderEvent(event) {
       break;
     case "turn-completed":
       setSessionState("ready");
-      if (event.status === "failed" && event.errorMessage) recoveryCard(event.errorMessage);
+      if (event.status === "failed" && event.errorMessage) failedTurnCard(event.errorMessage);
       break;
     case "auth":
       if (event.detail) messageCard("Claude Code", event.detail, "agent");
