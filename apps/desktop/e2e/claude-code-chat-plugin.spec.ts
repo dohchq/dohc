@@ -177,9 +177,19 @@ test("the Claude Code plugin serves its chat and answers a tool permission", asy
 
     await runInChatGuest(desktop, "document.querySelector('#stop').click(); true;");
 
+    // Round-8 fix 1's semantics: Stop now cancels the turn instead of
+    // ending the session, so it no longer renders a "Stopped" card. The
+    // visible proof is Stop re-enabling itself once its own fetch resolves
+    // (chat.js's fix for the case where nothing was left to interrupt) and
+    // no failure notice appearing.
     await expect
-      .poll(async () => readGuestText(desktop!), { timeout: 60_000 })
-      .toContain("Stopped");
+      .poll(
+        async () =>
+          evalInChatGuest<boolean>(desktop!, "(document.querySelector('#stop').disabled)"),
+        { timeout: 60_000 },
+      )
+      .toBe(false);
+    expect(await readGuestText(desktop)).not.toContain("dohc could not stop this session.");
 
     // Fix 1's proof against the real server, not the fake driver: a direct,
     // unauthenticated cross-origin-shaped POST (what a hostile local page

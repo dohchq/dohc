@@ -225,11 +225,6 @@ export function createChatWebApp(
   // while this is true instead of overlapping it on the single active turn
   // both concrete drivers track.
   let turnActive = false;
-  // Set while a session is tearing down (POST /stop's own driver.stop()
-  // call). liveSession() awaits this before starting a fresh session, so a
-  // message that races a stop cannot start a second driver session while
-  // the first one is still shutting down.
-  let teardown: Promise<void> | null = null;
   let state: SessionStateEvent = { kind: "session-state", state: "closed" };
   // Each entry's own publish time -- a replay renders it, not the moment
   // the reconnecting client happened to receive it, so history stays in
@@ -323,6 +318,19 @@ export function createChatWebApp(
     // Set once this driver.startSession call itself ends before it even
     // resolves (a session that fails during its own handshake).
     let ended = false;
+    // True only for the duration of the driver.startSession() call itself:
+    // both concrete drivers report their own cleanup with a bare "closed"
+    // (no reason) through onEvent just before a spawn or handshake failure
+    // rejects that call -- held back rather than published immediately
+    // while this is happening. If the call goes on to reject (the
+    // overwhelmingly common case), the catch below publishes one, more
+    // informative fatal error instead; publishing this too would render
+    // two boundary cards in the replay for the one failure. A bare
+    // "closed" arriving any time after startup (the session dying
+    // mid-conversation) is the only real signal for that and is never
+    // suppressed.
+    let starting = true;
+    let deferredClose: PluginAgentEvent | null = null;
     let created: PluginAgentSession;
     try {
       created = await driver.startSession({
@@ -331,6 +339,18 @@ export function createChatWebApp(
         mcp: mcpConfig(workspaceRoot),
         onEvent(event) {
           if (generation !== sessionGeneration) return;
+          if (
+            starting &&
+            event.kind === "session-state" &&
+            event.state === "closed" &&
+            !event.reason
+          ) {
+            ended = true;
+            processSession = null;
+            settlePendingPermissions();
+            deferredClose = event;
+            return;
+          }
           publish(event);
           if (sessionEnded(event)) {
             ended = true;
@@ -348,7 +368,10 @@ export function createChatWebApp(
         publish({ kind: "error", message: errorMessage(error), fatal: true });
       }
       throw requestError(503, errorMessage(error));
+    } finally {
+      starting = false;
     }
+    if (deferredClose && generation === sessionGeneration) publish(deferredClose);
     // A newer generation means a /stop (or deactivate) ran while this
     // session was still starting -- it already bumped sessionGeneration
     // even though processSession was still null to invalidate. Either way,
@@ -367,7 +390,6 @@ export function createChatWebApp(
   }
 
   async function liveSession(): Promise<PluginAgentSession> {
-    if (teardown) await teardown.catch(() => undefined);
     if (processSession) return processSession;
     const available = await Promise.resolve(driver.probe()).catch((error: unknown) => {
       const message = errorMessage(error);
@@ -461,47 +483,38 @@ export function createChatWebApp(
   }
 
   async function stop(response: ServerResponse): Promise<void> {
-    // Bumped unconditionally, even with no live session: a start can still
-    // be pending (processSession is null until driver.startSession
-    // resolves), and this is what tells that pending start to dispose
-    // itself instead of installing.
-    sessionGeneration += 1;
     const live = processSession;
-    processSession = null;
-    settlePendingPermissions();
-    turnActive = false;
     if (!live) {
+      // No live session: if a start is still pending, abort it -- there is
+      // no session or context yet to preserve, only an attempt to give up
+      // on.
       if (sessionStart) {
-        // A start is still pending. The generation bump above already
-        // dooms it -- once driver.startSession resolves it disposes itself
-        // instead of installing -- but sessionStart still points at that
-        // doomed promise until then. Clear it now, or a message sent
-        // before it settles would await the same dying attempt instead of
-        // starting fresh, and the pill would sit on Starting with nothing
-        // left to bring it back.
+        // The generation bump dooms the pending attempt -- once
+        // driver.startSession resolves it disposes itself instead of
+        // installing -- but sessionStart still points at that doomed
+        // promise until then. Clear it now, or a message sent before it
+        // settles would await the same dying attempt instead of starting
+        // fresh, and the pill would sit on Starting with nothing left to
+        // bring it back.
+        sessionGeneration += 1;
         sessionStart = null;
         publish({ kind: "session-state", state: "closed", reason: "Stopped" });
       }
       writeEmpty(response, 204);
       return;
     }
-    const settling = (async () => {
-      try {
-        await live.stop();
-        publish({ kind: "session-state", state: "closed", reason: "Stopped" });
-      } catch (error) {
-        // live.stop() itself failed (a transport error during cancel or
-        // dispose). Best effort: release the handle anyway so nothing keeps
-        // running with no owner, and say why it closed instead of leaving
-        // the page showing stale state under a 500.
-        await Promise.resolve(live.dispose()).catch(() => undefined);
-        publish({ kind: "session-state", state: "closed", reason: errorMessage(error) });
-      }
-    })();
-    teardown = settling.finally(() => {
-      if (teardown === settling) teardown = null;
-    });
-    await settling;
+    // The session and its context stay alive: this interrupts the current
+    // turn, if one is running, and nothing more. Session retirement is a
+    // different decision made elsewhere -- deactivate, stopWebApp, or a
+    // fatal error the driver reports on its own -- never through this
+    // route (a reversible action needs a reverse path; ending the session
+    // here would leave the next message silently starting one with no
+    // context, which is not that). turnActive clears on its own once the
+    // driver's own asynchronous turn-completed(cancelled) notification
+    // arrives; cancel() is a documented no-op on both concrete drivers
+    // when nothing was running.
+    settlePendingPermissions();
+    await live.cancel();
     writeEmpty(response, 204);
   }
 
@@ -514,16 +527,15 @@ export function createChatWebApp(
     if (!live || !pendingPermissions.has(requestId)) {
       throw requestError(404, "This permission request is no longer pending.");
     }
-    // Captured before the claim: tells the catch block below whether the
-    // SAME session attempt is still live once this settles, or whether a
-    // stop/restart raced in and already resolved this request itself.
-    const generation = sessionGeneration;
     // Claimed synchronously, before the first await: two concurrent POSTs
     // for the same requestId must not both pass the check above and both
     // answer the driver. The loser has to see it already gone and 404.
-    // Tracked in claimedPermissions (not just removed), so a session that
-    // ends while this is still in flight can still settle it through
-    // settlePendingPermissions.
+    // Tracked in claimedPermissions (not just removed), so anything that
+    // settles pending permissions while this is still in flight --
+    // settlePendingPermissions, from a Stop, a fresh session start, or
+    // teardown -- can still resolve it, and clears the claim here too:
+    // the catch below reads that absence as its signal not to resurrect
+    // a request someone else already settled.
     pendingPermissions.delete(requestId);
     claimedPermissions.add(requestId);
     try {
@@ -534,13 +546,13 @@ export function createChatWebApp(
       }
       await live.answerPermission(requestId, decision);
     } catch (error) {
-      // Only restore it as pending if the SAME session generation is still
-      // live. If the session ended while this was in flight,
-      // settlePendingPermissions already resolved it (or is about to) --
-      // resurrecting it here would recreate exactly the zombie card, stuck
-      // showing "pending" forever with every retry 404ing, that this claim
-      // exists to prevent.
-      if (sessionGeneration === generation) pendingPermissions.add(requestId);
+      // Only restore it as pending if nothing else settled it in the
+      // meantime -- if the claim is already gone from here, some
+      // settlePendingPermissions call already resolved it with its own
+      // cancellation. Resurrecting it here would recreate exactly the
+      // zombie card, stuck showing "pending" forever with every retry
+      // 404ing, that this claim exists to prevent.
+      if (claimedPermissions.has(requestId)) pendingPermissions.add(requestId);
       throw error;
     } finally {
       claimedPermissions.delete(requestId);

@@ -161,9 +161,30 @@ test("the Codex plugin serves its chat and sends a message to Codex", async () =
       throw new Error("The Codex chat guest did not open.");
     });
 
+    // Round-8 fix 1's semantics: Stop now cancels the turn instead of
+    // ending the session, so it no longer renders a "Stopped" card --
+    // nothing was running here (the fake driver's own turn never starts),
+    // so the visible proof is Stop re-enabling itself once its own fetch
+    // resolves (chat.js's fix for exactly this no-turn-to-interrupt case)
+    // and no failure notice appearing.
     await expect
-      .poll(async () => (await readGuest())?.text ?? "", { timeout: 60_000 })
-      .toContain("Stopped");
+      .poll(
+        async () =>
+          desktop!.app.evaluate(async ({ webContents }) => {
+            for (const contents of webContents.getAllWebContents()) {
+              if (!contents.getURL().startsWith("http://127.0.0.1")) continue;
+              const title = (await contents.executeJavaScript("document.title")) as string;
+              if (title !== "Codex Chat") continue;
+              return (await contents.executeJavaScript(
+                "document.querySelector('#stop').disabled",
+              )) as boolean;
+            }
+            return null;
+          }),
+        { timeout: 60_000 },
+      )
+      .toBe(false);
+    expect((await readGuest())?.text ?? "").not.toContain("dohc could not stop this session.");
 
     // Fix 1's proof against the real server, not the fake driver: a direct,
     // unauthenticated cross-origin-shaped POST (what a hostile local page

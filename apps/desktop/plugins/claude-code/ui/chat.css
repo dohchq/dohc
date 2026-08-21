@@ -249,6 +249,11 @@ button:disabled {
   border-color: var(--danger);
 }
 
+.activity-status {
+  color: var(--danger);
+  font: 11px/1.5 ui-monospace, "IBM Plex Mono", monospace;
+}
+
 .permission {
   border-color: var(--warning);
   background: var(--panel);

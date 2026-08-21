@@ -51,12 +51,8 @@ async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | "tim
 
 interface FakeSession extends PluginAgentSession {
   promptCalls: string[];
-  stopCalls: number;
+  cancelCalls: number;
   permissionCalls: Array<{ requestId: string; decision: PluginPermissionDecision }>;
-  /** Set by a test right before triggering /stop, to make this session's
-   * own stop() reject exactly once (a transport failure during cancel or
-   * dispose, from the concrete drivers' perspective). */
-  stopError: Error | null;
   /** Same idea, for dispose(). */
   disposeError: Error | null;
   /** Same idea, for prompt() -- a driver that rejects a submitted turn. */
@@ -64,6 +60,10 @@ interface FakeSession extends PluginAgentSession {
   /** Same idea, for answerPermission() -- a driver call that fails because
    * the session it belonged to is already gone underneath it. */
   answerPermissionError: Error | null;
+  /** Set by a test right before triggering /stop, to make this session's
+   * own cancel() reject exactly once (a transport failure while
+   * interrupting the turn). */
+  cancelError: Error | null;
 }
 
 interface FakeDriverOptions {
@@ -74,9 +74,6 @@ interface FakeDriverOptions {
   /** Awaited inside driver.startSession before it does anything else, so a
    * test can hold a session "starting" open on demand. */
   startGate?: () => Promise<void>;
-  /** Same pair, for session.stop(). */
-  onStopEntered?: () => void;
-  stopGate?: () => Promise<void>;
   /** Same pair, for session.prompt() -- lets a test inject driver events
    * (through onEvent) while a prompt call is still pending, before it
    * resolves. */
@@ -88,6 +85,10 @@ interface FakeDriverOptions {
    * requests happen to interleave at the right instant. */
   onAnswerPermissionEntered?: () => void;
   answerPermissionGate?: () => Promise<void>;
+  /** Same pair, for session.cancel() -- /stop's own driver call now that
+   * Stop interrupts the turn instead of ending the session. */
+  onCancelEntered?: () => void;
+  cancelGate?: () => Promise<void>;
   /** If set, every session this driver creates rejects its first prompt()
    * with this error, then clears (a retry through a fresh session
    * succeeds normally). */
@@ -130,25 +131,30 @@ function fakeDriver(
     async startSession(input) {
       options.onStartSessionEntered?.();
       if (options.startGate) await options.startGate();
-      if (options.startSessionError) throw options.startSessionError;
+      if (options.startSessionError) {
+        // Mirrors both real drivers: a bare "closed" (no reason) reported
+        // through onEvent right before the call itself rejects.
+        input.onEvent({ kind: "session-state", state: "closed" });
+        throw options.startSessionError;
+      }
       startInputs.push(input);
       const promptCalls: string[] = [];
       const permissionCalls: Array<{
         requestId: string;
         decision: PluginPermissionDecision;
       }> = [];
-      let stopCalls = 0;
+      let cancelCalls = 0;
       const sessionId = `session-${sessions.length + 1}`;
       const session: FakeSession = {
         sessionId,
         promptCalls,
         permissionCalls,
-        stopError: null,
         disposeError: null,
         promptError: options.promptError ?? null,
         answerPermissionError: null,
-        get stopCalls() {
-          return stopCalls;
+        cancelError: null,
+        get cancelCalls() {
+          return cancelCalls;
         },
         async prompt(message) {
           options.onPromptEntered?.();
@@ -161,7 +167,16 @@ function fakeDriver(
           promptCalls.push(message.text);
           return { turnId: `turn-${promptCalls.length}` };
         },
-        async cancel() {},
+        async cancel() {
+          cancelCalls += 1;
+          options.onCancelEntered?.();
+          if (options.cancelGate) await options.cancelGate();
+          if (session.cancelError) {
+            const error = session.cancelError;
+            session.cancelError = null;
+            throw error;
+          }
+        },
         async answerPermission(requestId, decision) {
           options.onAnswerPermissionEntered?.();
           if (options.answerPermissionGate) await options.answerPermissionGate();
@@ -172,15 +187,12 @@ function fakeDriver(
           }
           permissionCalls.push({ requestId, decision });
         },
+        // Not exercised by chatWebApp.ts (it calls cancel() directly, never
+        // this) -- kept only to satisfy the SDK interface, mirroring both
+        // real drivers' own stop() = cancel() + dispose().
         async stop() {
-          stopCalls += 1;
-          options.onStopEntered?.();
-          if (options.stopGate) await options.stopGate();
-          if (session.stopError) {
-            const error = session.stopError;
-            session.stopError = null;
-            throw error;
-          }
+          await session.cancel();
+          await session.dispose();
         },
         async dispose() {
           disposed.push(sessionId);
@@ -418,10 +430,23 @@ describe("Codex chat web app", () => {
   });
 
   it("marks the initial connection snapshot, so a reasoned terminal state renders exactly one card, not two", async () => {
-    const fake = fakeDriver();
+    // Stop only produces a reasoned "closed" event now while a session is
+    // still starting (there is no session or context yet to preserve, only
+    // an attempt to give up on) -- a live session's Stop cancels the turn
+    // instead and publishes nothing terminal, so that is the one remaining
+    // source of the transition this test needs.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onStartSessionEntered: () => entered.resolve(),
+      startGate: () => gate.promise,
+    });
     const { url, token } = await start(fake);
-    await post(url, "message", { text: "First", clientId: "c1" }, token);
+    const messagePromise = post(url, "message", { text: "First" }, token);
+    await entered.promise;
     await post(url, "stop", undefined, token);
+    gate.resolve();
+    await messagePromise.catch(() => undefined);
 
     const reattached = await eventStream(url, token);
     const snapshot = await reattached.nextRaw();
@@ -435,8 +460,6 @@ describe("Codex chat web app", () => {
     // The buffered replay carries the same transition again -- the client
     // must be able to tell these apart, or it renders the "Stopped" card
     // twice: once for the snapshot, once for the replayed event.
-    const userMessageReplay = await reattached.nextRaw();
-    expect(userMessageReplay.kind).toBe("user-message");
     const closedReplay = await reattached.nextRaw();
     expect(closedReplay).toMatchObject({
       kind: "session-state",
@@ -511,20 +534,88 @@ describe("Codex chat web app", () => {
     await after.close();
   });
 
-  it("stops the live session and starts a fresh session for the next message", async () => {
+  it("Stop cancels the current turn -- the session and its context stay alive, never a fresh one", async () => {
+    // Per the product invariant (a reversible action needs a reverse path,
+    // or the user has to be told before it runs): ending the whole session
+    // on Stop made the next message silently start context-free, with no
+    // warning. Stop now interrupts the turn and nothing else.
     const fake = fakeDriver();
     const { url, token } = await start(fake);
     await post(url, "message", { text: "First session" }, token);
 
     expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
-    expect(fake.sessions[0]?.stopCalls).toBe(1);
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+    // Never disposed -- the session and its context are still there.
+    expect(fake.disposed).toEqual([]);
 
-    expect(await post(url, "message", { text: "Fresh session" }, token)).toMatchObject({
+    // Still refused: the driver hasn't reported the turn as actually
+    // settled yet (no turn-completed arrived), same as any other message
+    // racing an active turn.
+    expect(await post(url, "message", { text: "Too soon" }, token)).toMatchObject({
+      status: 409,
+    });
+
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "cancelled" });
+
+    expect(await post(url, "message", { text: "Second turn" }, token)).toMatchObject({
       status: 202,
     });
-    expect(fake.startInputs).toHaveLength(2);
-    expect(fake.sessions[1]?.promptCalls).toEqual(["Fresh session"]);
-    expect(fake.startInputs[1]?.resumeCursor).toBeUndefined();
+    // The SAME session, not a fresh one: no second startSession call.
+    expect(fake.startInputs).toHaveLength(1);
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First session", "Second turn"]);
+  });
+
+  it("Stop is a safe no-op when nothing is running -- cancel() still reaches the driver", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "First" }, token);
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    // No turn active -- both concrete drivers document cancel() as a safe
+    // no-op here, so this still calls it (simplest, and harmless) rather
+    // than special-casing idle client-side.
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+    expect(fake.disposed).toEqual([]);
+
+    // Immediately usable: no turn was active, so nothing gates the next
+    // message.
+    expect(await post(url, "message", { text: "Still here" }, token)).toMatchObject({
+      status: 202,
+    });
+    expect(fake.startInputs).toHaveLength(1);
+  });
+
+  it("a cancel that rejects doesn't end the session either", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.next(); // initial closed snapshot
+    await post(url, "message", { text: "First", clientId: "c1" }, token);
+    await stream.next(); // the user-message echo
+    const session = fake.sessions[0];
+    if (!session) throw new Error("The fake driver did not start a session.");
+    session.cancelError = new Error("Codex refused to interrupt.");
+
+    // Reported honestly rather than faked as a success, but never at the
+    // cost of the session: no session-state event, no dispose.
+    const stopResponse = await post(url, "stop", undefined, token);
+    expect(stopResponse.status).toBe(500);
+    expect(session.cancelCalls).toBe(1);
+    expect(fake.disposed).toEqual([]);
+
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "cancelled" });
+    expect(await stream.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "cancelled",
+    });
+
+    // The SAME session, not a fresh one.
+    const nextResponse = await post(url, "message", { text: "Second" }, token);
+    expect(nextResponse.status).toBe(202);
+    expect(fake.startInputs).toHaveLength(1);
+    await stream.close();
   });
 
   it("answers the pending permission request with the selected decision", async () => {
@@ -721,37 +812,34 @@ describe("Codex chat web app", () => {
     );
     await entered.promise; // claimed, gated deep inside the driver call
 
-    // The underlying session is gone by the time the gate releases -- the
-    // exact interleaving the bug depended on: the claim already removed
-    // the id from pendingPermissions before Stop got a chance to see it.
+    // The claim already removed the id from pendingPermissions before Stop
+    // (now a cancel, not a teardown) got a chance to see it there -- the
+    // exact interleaving the bug depended on. The session itself stays
+    // alive throughout: Stop cancels the turn, not the session.
     const fakeSession = fake.sessions[0];
     if (!fakeSession) throw new Error("No session started.");
-    fakeSession.answerPermissionError = new Error("The session ended while answering.");
+    fakeSession.answerPermissionError = new Error("The driver refused to answer.");
 
     const stopResponse = await post(url, "stop", undefined, token);
     expect(stopResponse.status).toBe(204);
+    expect(fake.disposed).toEqual([]);
 
     gate.resolve();
     const answerResponse = await answerPromise;
     expect(answerResponse.status).toBe(500);
 
-    // The cancellation published by Stop's own settlePendingPermissions
-    // (before the driver call even started rejecting) reaches the stream
-    // first, then the session's own closed transition.
+    // Stop's own settlePendingPermissions published the cancellation
+    // before the driver call even started rejecting -- there is nothing
+    // else for the session to publish, since it never ends here.
     expect(await stream.next()).toEqual({
       kind: "permission-resolved",
       requestId: "request/1",
       decision: "cancel",
     });
-    expect(await stream.next()).toEqual({
-      kind: "session-state",
-      state: "closed",
-      reason: "Stopped",
-    });
 
-    // A retry 404s because there's no live session -- never because the
-    // claim wrongly resurrected the id as pending for a session generation
-    // that no longer exists.
+    // A retry 404s because the request is already resolved -- never
+    // because the claim wrongly resurrected the id as pending for a
+    // request that was never actually re-opened.
     const retry = await post(
       url,
       `permission/${encodeURIComponent("request/1")}`,
@@ -761,19 +849,22 @@ describe("Codex chat web app", () => {
     expect(retry.status).toBe(404);
 
     // A second /stop still runs settlePendingPermissions unconditionally --
-    // if the catch above had ignored the generation check and re-added the
-    // id anyway, this would publish a second, bogus cancellation for a
-    // request that was already fully settled.
+    // if the catch above had ignored the claimedPermissions check and
+    // re-added the id anyway, this would publish a second, bogus
+    // cancellation for a request that was already fully settled.
     const secondStop = await post(url, "stop", undefined, token);
     expect(secondStop.status).toBe(204);
     const racedSecondCancel = await raceTimeout(stream.next(), 200);
     expect(racedSecondCancel).toBe("timeout");
 
     // A reconnect's replay carries the cancellation, not a bare unanswered
-    // request that would recreate a clickable, dead-end card.
+    // request that would recreate a clickable, dead-end card. Four frames
+    // total: the snapshot, then the user-message, permission-request, and
+    // permission-resolved replay entries -- Stop no longer adds a fifth
+    // (a session-state closed) now that the session survives it.
     const reattached = await eventStream(url, token);
     const replayed: unknown[] = [];
-    for (let index = 0; index < 5; index += 1) replayed.push(await reattached.next());
+    for (let index = 0; index < 4; index += 1) replayed.push(await reattached.next());
     expect(replayed).toContainEqual({
       kind: "permission-resolved",
       requestId: "request/1",
@@ -955,6 +1046,35 @@ describe("Codex chat web app", () => {
     await reattached.close();
   });
 
+  it("renders exactly one boundary card for a startup failure, not the driver's own closed plus our fatal error", async () => {
+    // Both concrete drivers report their own cleanup with a bare "closed"
+    // (no reason) through onEvent right before a spawn or handshake
+    // failure rejects driver.startSession -- without deduping, a
+    // reconnect's replay would carry both that and the more informative
+    // fatal error this catch publishes, rendering two boundary cards for
+    // one failure.
+    const fake = fakeDriver(undefined, {
+      startSessionError: new Error("Codex failed to spawn."),
+    });
+    const { url, token } = await start(fake);
+
+    const response = await post(url, "message", { text: "Hello" }, token);
+    expect(response.status).toBe(503);
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the internal snapshot, already settled to error
+    const replayed: unknown[] = [];
+    for (;;) {
+      const raced = await raceTimeout(reattached.next(), 200);
+      if (raced === "timeout") break;
+      replayed.push(raced);
+    }
+    expect(replayed).toEqual([
+      { kind: "error", message: "Codex failed to spawn.", fatal: true },
+    ]);
+    await reattached.close();
+  });
+
   it("does not log an accepted-message echo for a message the driver goes on to reject", async () => {
     // The probe and session start both succeed; only prompt() rejects --
     // this is the specific gap CR-I5 named: the earlier code published
@@ -983,18 +1103,18 @@ describe("Codex chat web app", () => {
       const fake = fakeDriver();
       const { url, token } = await start(fake);
       await post(url, "message", { text: "Live one" }, token);
-      expect(fake.sessions[0]?.stopCalls).toBe(0);
+      expect(fake.sessions[0]?.cancelCalls).toBe(0);
 
       const unauthenticated = await rawPost(url, "stop", {
         headers: { "content-type": "application/json" },
       });
       expect(unauthenticated.status).toBe(401);
       // The session is untouched: no stop reached the driver.
-      expect(fake.sessions[0]?.stopCalls).toBe(0);
+      expect(fake.sessions[0]?.cancelCalls).toBe(0);
 
       const authenticated = await post(url, "stop", undefined, token);
       expect(authenticated.status).toBe(204);
-      expect(fake.sessions[0]?.stopCalls).toBe(1);
+      expect(fake.sessions[0]?.cancelCalls).toBe(1);
     });
 
     it("rejects a mutation sent with a CORS-simple content type, even with the right token", async () => {
@@ -1065,59 +1185,31 @@ describe("Codex chat web app", () => {
       expect(fake.startInputs).toHaveLength(2);
     });
 
-    it("message during stop waits for teardown instead of starting a second session", async () => {
-      const stopEntered = deferred();
-      const stopGate = deferred();
-      const fake = fakeDriver(undefined, {
-        onStopEntered: () => stopEntered.resolve(),
-        stopGate: () => stopGate.promise,
-      });
+    it("a message sent right after Stop reuses the same session once the interrupted turn clears", async () => {
+      // Superseded by cancel-based Stop: there is no teardown to race
+      // anymore, since the session is never disposed here. What still
+      // matters is that the turn-active gate is honest about the turn not
+      // being over yet, and that the eventual clear reuses the same
+      // session rather than starting a fresh one.
+      const fake = fakeDriver();
       const { url, token } = await start(fake);
       await post(url, "message", { text: "First" }, token);
       expect(fake.startInputs).toHaveLength(1);
 
-      const stopPromise = post(url, "stop", undefined, token);
-      await stopEntered.promise;
-
-      const duringStop = post(url, "message", { text: "During stop" }, token);
-      // Give the event loop a real turn: if liveSession() were not gated on
-      // teardown, a second session would already exist by now.
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(fake.startInputs).toHaveLength(1);
-
-      stopGate.resolve();
-      await stopPromise;
-      const duringStopResponse = await duringStop;
-      expect(duringStopResponse.status).toBe(202);
-      expect(fake.startInputs).toHaveLength(2);
-      expect(fake.sessions[1]?.promptCalls).toEqual(["During stop"]);
-    });
-
-    it("a stop that rejects still closes the session and recovers a startable state", async () => {
-      const fake = fakeDriver();
-      const { url, token } = await start(fake);
-      const stream = await eventStream(url, token);
-      await stream.next(); // initial closed snapshot
-      await post(url, "message", { text: "First", clientId: "c1" }, token);
-      await stream.next(); // the user-message echo
-      const session = fake.sessions[0];
-      if (!session) throw new Error("The fake driver did not start a session.");
-      session.stopError = new Error("Codex refused to stop.");
-
       const stopResponse = await post(url, "stop", undefined, token);
       expect(stopResponse.status).toBe(204);
-      expect(session.stopCalls).toBe(1);
-      expect(fake.disposed).toEqual(["session-1"]);
-      expect(await stream.next()).toEqual({
-        kind: "session-state",
-        state: "closed",
-        reason: "Codex refused to stop.",
-      });
+      expect(fake.sessions[0]?.cancelCalls).toBe(1);
 
-      const nextResponse = await post(url, "message", { text: "Fresh" }, token);
-      expect(nextResponse.status).toBe(202);
-      expect(fake.startInputs).toHaveLength(2);
-      await stream.close();
+      const tooSoon = await post(url, "message", { text: "Too soon" }, token);
+      expect(tooSoon.status).toBe(409);
+      expect(fake.startInputs).toHaveLength(1);
+
+      fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "cancelled" });
+
+      const afterCancel = await post(url, "message", { text: "After cancel" }, token);
+      expect(afterCancel.status).toBe(202);
+      expect(fake.startInputs).toHaveLength(1);
+      expect(fake.sessions[0]?.promptCalls).toEqual(["First", "After cancel"]);
     });
 
     it("deactivate closes the server and its clients even when session dispose rejects", async () => {

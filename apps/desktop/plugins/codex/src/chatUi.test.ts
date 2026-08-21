@@ -220,6 +220,26 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(card?.textContent).toContain("Send a message to start a new session.");
   });
 
+  it("renders a fallback failure line for a failed turn with no errorMessage, so it doesn't look like it succeeded", async () => {
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, { kind: "turn-completed", turnId: "t1", status: "failed" });
+    expect(textOf("#session-state")).toBe("Ready");
+    const card = document.querySelector(".error-card");
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain("This response failed.");
+  });
+
+  it("labels a failed activity item as Failed in text, not just a border color", async () => {
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, {
+      kind: "item",
+      phase: "completed",
+      item: { id: "tool-1", type: "command", title: "Run tests", status: "failed" },
+    });
+    const status = document.querySelector(".activity-status");
+    expect(status?.textContent).toBe("Failed");
+  });
+
   it("keeps a pending message's card recoverable across a reconnect that races its request", async () => {
     const { eventSource } = await loadChatModule();
     let capturedBody: string | undefined;
@@ -313,5 +333,27 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(restored?.querySelector(".send-failed")?.textContent).toBe(
       "This message was not sent. Send it again.",
     );
+  });
+
+  it("re-enables Stop after a successful cancel, with no turn-completed event of its own to bring it back", async () => {
+    await loadChatModule();
+    let settleFetch!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      settleFetch = resolve;
+    });
+    globalThis.fetch = (() => pending) as typeof fetch;
+
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    stopButton.click();
+    expect(stopButton.disabled).toBe(true);
+
+    // Stop now cancels the turn rather than ending the session -- if
+    // nothing was running, cancel() is a documented no-op on both
+    // concrete drivers, so no turn-completed event ever arrives to
+    // re-enable this button otherwise.
+    settleFetch(new Response(null, { status: 204 }));
+    await pending;
+
+    expect(stopButton.disabled).toBe(false);
   });
 });

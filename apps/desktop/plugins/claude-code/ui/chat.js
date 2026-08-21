@@ -221,9 +221,14 @@ function renderActivity(event) {
     const id = document.createElement("span");
     id.className = "item-id";
     id.textContent = event.item.id;
+    // The border color alone (see chat.css's [data-status="failed"] rule)
+    // is invisible to a screen reader and unreliable for color-blind
+    // readers -- this text mirror is what actually says "Failed".
+    const status = document.createElement("span");
+    status.className = "activity-status";
     const detail = document.createElement("p");
     detail.className = "activity-detail";
-    header.append(title, id);
+    header.append(title, id, status);
     card.append(header, detail);
     transcript.append(card);
     activityItems.set(event.item.id, card);
@@ -232,6 +237,8 @@ function renderActivity(event) {
   const merged = mergedActivity(existing, event.item);
   card.querySelector(".activity-title").textContent = merged.title;
   card.querySelector(".activity-detail").textContent = merged.detail;
+  card.querySelector(".activity-status").textContent =
+    event.item.status === "failed" ? "Failed" : "";
   scrollToLatest();
 }
 
@@ -396,7 +403,7 @@ function renderEvent(event) {
       break;
     case "turn-completed":
       setSessionState("ready");
-      if (event.status === "failed" && event.errorMessage) failedTurnCard(event.errorMessage);
+      if (event.status === "failed") failedTurnCard(event.errorMessage || "This response failed.");
       break;
     case "auth":
       if (event.detail) messageCard("Claude Code", event.detail, "agent", event.at);
@@ -513,7 +520,15 @@ stopButton.addEventListener("click", async () => {
     if (!response.ok) {
       stopButton.disabled = false;
       transientError("dohc could not stop this session.");
+      return;
     }
+    // Stop now cancels the current turn rather than ending the session --
+    // if nothing was running, cancel() is a safe no-op with no event of
+    // its own to ever re-enable this button otherwise. A turn actually
+    // interrupted still settles asynchronously (its own turn-completed
+    // event drives the pill and Send back to ready); re-enabling Stop a
+    // little early alongside that is harmless.
+    stopButton.disabled = false;
   } catch {
     stopButton.disabled = false;
     transientError("dohc could not stop this session.");
