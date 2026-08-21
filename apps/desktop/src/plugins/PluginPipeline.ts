@@ -12,7 +12,10 @@ import {
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import { buildPluginBundle } from "./pluginBuildRunner";
-import { recoverOnDiskSegments } from "./pluginCaseRecovery";
+import {
+  foldForCompare,
+  recoverOnDiskSegments,
+} from "./pluginCaseRecovery";
 import { installPluginDependencies } from "./pluginInstallRunner";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
 import {
@@ -699,9 +702,9 @@ export class PluginPipeline {
       if (isInside(resolve(candidate.rootPath), target)) return candidate.id;
     }
     if (this.platform === "win32" || this.platform === "darwin") {
-      const lowerTarget = target.toLowerCase();
+      const foldedTarget = foldForCompare(target);
       for (const candidate of this.discovery) {
-        if (isInside(resolve(candidate.rootPath).toLowerCase(), lowerTarget)) {
+        if (isInside(foldForCompare(resolve(candidate.rootPath)), foldedTarget)) {
           return candidate.id;
         }
       }
@@ -729,17 +732,18 @@ export class PluginPipeline {
     if (this.platform !== "win32" && this.platform !== "darwin") return null;
     const root = resolve(candidate.rootPath);
     const target = resolve(absolutePath);
-    const lowerRoot = root.toLowerCase();
-    const lowerTarget = target.toLowerCase();
-    if (lowerTarget === lowerRoot || !isInside(lowerRoot, lowerTarget)) return null;
+    const foldedRoot = foldForCompare(root);
+    const foldedTarget = foldForCompare(target);
+    if (foldedTarget === foldedRoot || !isInside(foldedRoot, foldedTarget)) return null;
     const rootSegments = root.split(/[\\/]+/).filter(Boolean);
     const targetSegments = target.split(/[\\/]+/).filter(Boolean);
     if (
       rootSegments.length >= targetSegments.length ||
-      rootSegments.some(
-        (segment, index) => segment.toLowerCase() !==
-          targetSegments[index]?.toLowerCase(),
-      )
+      rootSegments.some((segment, index) => {
+        const targetSegment = targetSegments[index];
+        return targetSegment === undefined ||
+          foldForCompare(segment) !== foldForCompare(targetSegment);
+      })
     ) {
       return null;
     }

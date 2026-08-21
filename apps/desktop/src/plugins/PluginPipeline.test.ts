@@ -445,6 +445,84 @@ describe("overlayDoorWrittenSourceDeltas", () => {
 });
 
 describe("PluginPipeline real filesystem lifecycle", () => {
+  it("attributes and confirms an NFC-spelled write under an NFD plugin root", async () => {
+    const nfdDirectory = "caf\u0065\u0301";
+    const nfcDirectory = "caf\u00e9";
+    const fixture = await createNamedPluginWorkspace(
+      nfdDirectory,
+      "unicode-plugin",
+    );
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const callerPath = join(
+        fixture.workspaceRoot,
+        "plugins",
+        nfcDirectory,
+        "src",
+        "index.ts",
+      );
+      expect(pipeline.pluginIdForPath(callerPath)).toBe("unicode-plugin");
+
+      const text = "normalization-equivalent root\n";
+      const write = createPluginAuthoredTextWriter({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async () => {
+              await writeFile(fixture.entryPath, text);
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      await write(
+        join("plugins", nfcDirectory, "src", "index.ts"),
+        text,
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:unicode-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+
+      expect(doorWrittenDeltasOf(pipeline).get("unicode-plugin"))
+        .toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+            seq: 1,
+          },
+        ]]));
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
   it("attributes a mixed-case directory that the source snapshot includes", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;

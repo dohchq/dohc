@@ -2,6 +2,17 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
+ * Folds a path segment for case-insensitive comparison: NFC-normalize first,
+ * then lowercase. Recovery already compares this way; every other
+ * case-insensitive ownership or path fold must match it exactly, or a
+ * caller-spelled path that normalizes differently than a discovery root can
+ * silently miss ownership recovery would otherwise confirm.
+ */
+export function foldForCompare(value: string): string {
+  return value.normalize("NFC").toLowerCase();
+}
+
+/**
  * Walks `relativePath`'s segments under `root`, folding each one to its true
  * on-disk spelling via a real readdir at every level (never realpathSync,
  * which resolves symlinks and junctions instead of just recovering case).
@@ -46,8 +57,7 @@ export async function recoverOnDiskSegments(
             (entry) => entry.normalize("NFC") === normalizedSegment,
           ) ??
           entries.find(
-            (entry) => entry.normalize("NFC").toLowerCase() ===
-              normalizedSegment.toLowerCase(),
+            (entry) => foldForCompare(entry) === foldForCompare(segment),
           );
         if (match !== undefined) {
           recovered.push(match);
