@@ -1314,8 +1314,12 @@ function quoteWindowsArg(value: string): string {
 
 // One user-settings write queue for every caller. Full saves and zoom steps
 // cannot interleave their file mutations.
+//
+// Tracked workspace windows only, never getAllWindows(): a hidden utility
+// window (the PDF export renderer) must keep its own zoom, or an export
+// mid-render would change layout with the user's keystroke.
 function applyZoomLevelToWindows(zoomLevel: number): void {
-  for (const window of BrowserWindow.getAllWindows()) {
+  for (const window of workspaceWindows.allLive()) {
     window.webContents.setZoomLevel(zoomLevel);
   }
 }
@@ -1332,7 +1336,7 @@ async function stepWindowZoom(
   step: Parameters<typeof mutateWindowZoom>[0],
 ): Promise<DesktopUserSettingsResult> {
   const result = DesktopUserSettingsResult.parse(await mutateWindowZoom(step));
-  for (const window of BrowserWindow.getAllWindows()) {
+  for (const window of workspaceWindows.allLive()) {
     window.webContents.send(CHANNELS.userSettingsChanged, result);
   }
   return result;
@@ -1355,6 +1359,15 @@ function refreshApplicationMenu(): void {
         stepZoom: (step) => {
           void stepWindowZoom(step).catch((error) => {
             console.error("[desktop] window zoom:", error);
+            // The accelerator path has no renderer surface to answer on (the
+            // palette and Settings show their own errors), so the refusal —
+            // e.g. an unreadable settings file — must reach the user here.
+            dialog.showErrorBox(
+              "Zoom",
+              error instanceof Error
+                ? error.message
+                : "dohc could not change the window zoom.",
+            );
           });
         },
         openRecentWorkspace: (window, workspace) => {
