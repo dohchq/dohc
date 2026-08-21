@@ -2123,6 +2123,11 @@ const SiteScripts = z.object({
 });
 export type SiteScripts = z.infer<typeof SiteScripts>;
 
+const SitePackageScripts = z.record(
+  z.string().min(1).max(200),
+  z.string().max(10_000),
+);
+
 const SiteSharePath = SITE_ROOT_STRING.refine((path) => path !== ".", {
   message: "site share paths must name a file",
 });
@@ -2183,7 +2188,7 @@ const SitePackageInfo = z
     configPath: PATH_STRING.nullable(),
     packagePath: PATH_STRING.nullable(),
     packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
-    scripts: SiteScripts,
+    scripts: SitePackageScripts,
     configuredScripts: SiteScripts,
     configuredPreviewMode: z.enum(["static", "dev", "build"]).nullable(),
     configuredBuildOutput: PATH_STRING.nullable(),
@@ -2326,6 +2331,7 @@ export type GetSitePreviewLogsPayload = z.infer<
 
 export const GetSitePreviewLogsResult = z.object({
   logs: z.array(SiteLogEntry).max(500),
+  exited: z.boolean(),
 });
 export type GetSitePreviewLogsResult = z.infer<
   typeof GetSitePreviewLogsResult

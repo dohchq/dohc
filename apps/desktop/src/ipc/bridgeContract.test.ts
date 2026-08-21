@@ -1094,7 +1094,7 @@ describe("site IPC contract", () => {
     ).toHaveLength(1001);
   });
 
-  it("removes the deleted preview command slot from site metadata", () => {
+  it("keeps package script names while removing the deleted configured preview slot", () => {
     const parsed = ListSitesResult.parse({
       sites: [
         {
@@ -1125,7 +1125,7 @@ describe("site IPC contract", () => {
       ],
     }).sites[0];
 
-    expect(parsed?.scripts).toEqual({});
+    expect(parsed?.scripts).toEqual({ preview: "npm run preview" });
     expect(parsed?.configuredScripts).toEqual({});
   });
 
@@ -1267,6 +1267,7 @@ describe("site IPC contract", () => {
     expect(
       GetSitePreviewLogsResult.parse({
         logs: [{ stream: "stderr", text: "late output", at: 2 }],
+        exited: false,
       }).logs,
     ).toEqual([{ stream: "stderr", text: "late output", at: 2 }]);
     for (const workspaceId of ["", "WS-SITES", "ws_sites"]) {

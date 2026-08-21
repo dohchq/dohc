@@ -78,23 +78,42 @@ export function createSitePreviewStartRegistry() {
 export function createSitePreviewLifecycle(input: {
   allowOrigin: (url: string) => () => void;
 }) {
-  type ActivePreview = {
+  type RunningPreview = {
+    state: "running";
     workspaceId: string;
     siteRoot: string;
     handle: SitePreviewHandle;
     releaseOrigin: () => void;
   };
-  const activePreviews = new Map<string, ActivePreview>();
+  type ExitedPreview = {
+    state: "exited";
+    workspaceId: string;
+    siteRoot: string;
+    logs: SiteLogEntry[];
+  };
+  type PreviewRecord = RunningPreview | ExitedPreview;
+  const activePreviews = new Map<string, PreviewRecord>();
 
-  const removeIfCurrent = (
+  const markExitedIfCurrent = (
     workspaceId: string,
     siteRoot: string,
-    expected: SitePreviewHandle,
+    expected: SiteProcessHandle,
   ): void => {
     const key = previewKey(workspaceId, siteRoot);
     const active = activePreviews.get(key);
-    if (active?.handle !== expected) return;
-    activePreviews.delete(key);
+    if (active?.state !== "running" || active.handle !== expected) return;
+    const logs = active.handle.logs().slice(-499);
+    logs.push({
+      stream: "system",
+      text: "Dev server exited unexpectedly.",
+      at: Date.now(),
+    });
+    activePreviews.set(key, {
+      state: "exited",
+      workspaceId,
+      siteRoot,
+      logs,
+    });
     active.releaseOrigin();
   };
 
@@ -105,15 +124,17 @@ export function createSitePreviewLifecycle(input: {
       handle: SitePreviewHandle,
     ): void {
       const key = previewKey(workspaceId, siteRoot);
-      activePreviews.get(key)?.releaseOrigin();
+      const previous = activePreviews.get(key);
+      if (previous?.state === "running") previous.releaseOrigin();
       activePreviews.set(key, {
+        state: "running",
         workspaceId,
         siteRoot,
         handle,
         releaseOrigin: input.allowOrigin(handle.url),
       });
       if ("onExit" in handle) {
-        handle.onExit(() => removeIfCurrent(workspaceId, siteRoot, handle));
+        handle.onExit(() => markExitedIfCurrent(workspaceId, siteRoot, handle));
       }
     },
 
@@ -122,24 +143,32 @@ export function createSitePreviewLifecycle(input: {
       siteRoot: string,
       handle: SitePreviewHandle,
     ): boolean {
-      return activePreviews.get(previewKey(workspaceId, siteRoot))?.handle === handle;
+      const active = activePreviews.get(previewKey(workspaceId, siteRoot));
+      return active?.state === "running" && active.handle === handle;
     },
 
     isRunning(workspaceId: string, siteRoot: string): boolean {
-      return activePreviews.has(previewKey(workspaceId, siteRoot));
+      return activePreviews.get(previewKey(workspaceId, siteRoot))?.state === "running";
     },
 
     logs(workspaceId: string, siteRoot: string): SiteLogEntry[] {
-      const handle =
-        activePreviews.get(previewKey(workspaceId, siteRoot))?.handle;
-      return handle && "logs" in handle ? handle.logs() : [];
+      const active = activePreviews.get(previewKey(workspaceId, siteRoot));
+      if (active?.state === "exited") return [...active.logs];
+      return active && "logs" in active.handle ? active.handle.logs() : [];
+    },
+
+    exited(workspaceId: string, siteRoot: string): boolean {
+      return activePreviews.get(previewKey(workspaceId, siteRoot))?.state === "exited";
     },
 
     previewsForWorkspace(
       workspaceId: string,
     ): Array<{ siteRoot: string; handle: SitePreviewHandle }> {
       return [...activePreviews.values()]
-        .filter((active) => active.workspaceId === workspaceId)
+        .filter(
+          (active): active is RunningPreview =>
+            active.workspaceId === workspaceId && active.state === "running",
+        )
         .map(({ siteRoot, handle }) => ({ siteRoot, handle }));
     },
 
@@ -150,9 +179,12 @@ export function createSitePreviewLifecycle(input: {
     ): Promise<void> {
       const key = previewKey(workspaceId, siteRoot);
       const active = activePreviews.get(key);
-      if (expected && active?.handle !== expected) return;
+      if (
+        expected &&
+        (active?.state !== "running" || active.handle !== expected)
+      ) return;
       activePreviews.delete(key);
-      if (!active) return;
+      if (!active || active.state === "exited") return;
       try {
         await active.handle.stop();
       } finally {
@@ -163,8 +195,10 @@ export function createSitePreviewLifecycle(input: {
     stopAll(): void {
       for (const [key, active] of [...activePreviews]) {
         activePreviews.delete(key);
-        active.releaseOrigin();
-        void active.handle.stop().catch(() => undefined);
+        if (active.state === "running") {
+          active.releaseOrigin();
+          void active.handle.stop().catch(() => undefined);
+        }
       }
     },
   };

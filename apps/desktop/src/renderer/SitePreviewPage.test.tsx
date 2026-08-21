@@ -57,7 +57,7 @@ const bridgeMock = {
     logs: [],
   })),
   getSitePreviewLogs: vi.fn(
-    async (): Promise<GetSitePreviewLogsResult> => ({ logs: [] }),
+    async (): Promise<GetSitePreviewLogsResult> => ({ logs: [], exited: false }),
   ),
   stopSitePreview: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
@@ -439,6 +439,7 @@ describe("SitePreviewPage", () => {
         { stream: "stdout", text: "ready", at: 1 },
         { stream: "stderr", text: "compiler warning after readiness", at: 2 },
       ],
+      exited: false,
     });
     const user = userEvent.setup();
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
@@ -451,10 +452,48 @@ describe("SitePreviewPage", () => {
     ).toBeTruthy();
   });
 
+  it("clears a crashed dev preview and keeps its final logs visible", async () => {
+    const exitedLogs = deferred<GetSitePreviewLogsResult>();
+    const devSite: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { dev: "vite" },
+    };
+    bridgeMock.getSitePackage.mockResolvedValueOnce(devSite);
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "dev",
+      url: "http://127.0.0.1:49152/",
+      logs: [{ stream: "stdout", text: "ready", at: 1 }],
+    });
+    bridgeMock.getSitePreviewLogs.mockReturnValueOnce(exitedLogs.promise);
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByTestId("site-preview-frame");
+    await vi.waitFor(() =>
+      expect(bridgeMock.getSitePreviewLogs).toHaveBeenCalled(),
+    );
+    await act(async () => {
+      exitedLogs.resolve({
+        logs: [
+          { stream: "stdout", text: "ready", at: 1 },
+          { stream: "stderr", text: "fatal: address became unavailable", at: 2 },
+        ],
+        exited: true,
+      });
+      await exitedLogs.promise;
+    });
+
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+    expect(screen.queryByTestId("site-preview-stop")).toBeNull();
+    expect(
+      await screen.findByText(/fatal: address became unavailable/),
+    ).toBeTruthy();
+  });
+
   it("does not apply a stale dev-log response after the site context changes", async () => {
-    const pendingLogs = deferred<{
-      logs: Array<{ stream: "stdout"; text: string; at: number }>;
-    }>();
+    const pendingLogs = deferred<GetSitePreviewLogsResult>();
     const devSite: SitePackageInfo = {
       ...site,
       kind: "package",
@@ -486,7 +525,12 @@ describe("SitePreviewPage", () => {
         url: "http://127.0.0.1:49153/",
         logs: [{ stream: "stdout", text: "replacement ready", at: 2 }],
       });
-    bridgeMock.getSitePreviewLogs.mockReturnValueOnce(pendingLogs.promise);
+    bridgeMock.getSitePreviewLogs
+      .mockReturnValueOnce(pendingLogs.promise)
+      .mockResolvedValueOnce({
+        logs: [{ stream: "stdout", text: "replacement ready", at: 2 }],
+        exited: false,
+      });
     const user = userEvent.setup();
     const view = render(
       <SitePreviewPage workspaceId="ws-sites" siteRoot="report" />,
@@ -507,6 +551,7 @@ describe("SitePreviewPage", () => {
     await act(async () => {
       pendingLogs.resolve({
         logs: [{ stream: "stdout", text: "stale report output", at: 3 }],
+        exited: false,
       });
       await pendingLogs.promise;
     });

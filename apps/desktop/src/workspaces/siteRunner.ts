@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { killProcessTreePosix } from "../process/posixSpawn";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
@@ -115,11 +116,21 @@ export async function startStaticSitePreview(
   options: { entry?: string } = {},
 ): Promise<StaticSitePreview> {
   const root = await resolveContainedDir(workspaceRoot, siteRoot);
+  const realWorkspaceRoot = await realpath(workspaceRoot);
+  const resolvedRelative = relative(realWorkspaceRoot, root).replaceAll("\\", "/");
+  if (
+    isSharedWithMePath(siteRoot === "." ? "" : siteRoot) ||
+    isSharedWithMePath(resolvedRelative)
+  ) {
+    throw new Error(
+      `This site's served root is inside shared-with-me. dohc cannot preview it: ${siteRoot}`,
+    );
+  }
   return startStaticDirectoryPreview(root, {
     containmentRoot: workspaceRoot,
     entry: options.entry ?? "index.html",
     entryLabel: "site entry",
-    forbidSharedWithMePaths: siteRoot === ".",
+    forbidSharedWithMePaths: true,
   });
 }
 
@@ -270,9 +281,9 @@ export function assertLoopbackOnlyDevServerCommand(command: string, args: string
   assertLoopbackOnlyDevServerCommandAtDepth(command, args, 0);
 }
 
-export function packageManagerDevCommand(
+export function packageManagerValidatedScriptCommand(
   manager: PackageManager,
-  script: "dev" | "start",
+  script: string,
   scriptBody: string,
   lifecycle: { pre?: string; post?: string } = {},
 ): ReturnType<typeof packageManagerCommand> {

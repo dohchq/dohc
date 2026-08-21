@@ -16,13 +16,14 @@ import {
 // widened timeout bands are documented at the tests.
 vi.setConfig({ testTimeout: 15_000 });
 import { createTestScratch } from "./testTemp";
+import { buildOutputSiteRoot } from "./sitePackage";
 import {
   assertLoopbackOnlyDevServerCommand,
   buildSite,
   detectBuildOutput,
   detectDevUrl,
   packageManagerCommand,
-  packageManagerDevCommand,
+  packageManagerValidatedScriptCommand,
   splitCommandLine,
   startSiteDevServer,
   startStaticSitePreview,
@@ -39,6 +40,52 @@ afterEach(async () => {
 });
 
 describe("startStaticSitePreview", () => {
+  it("refuses a configured build output inside shared-with-me", async () => {
+    const configuredBuildOutput = "shared-with-me/alex/site";
+    await mkdir(join(root, configuredBuildOutput), { recursive: true });
+    await writeFile(
+      join(root, configuredBuildOutput, "index.html"),
+      "<h1>Mounted build</h1>",
+    );
+    const site = { root: ".", configuredBuildOutput };
+    const servedRoot = buildOutputSiteRoot(
+      site,
+      configuredBuildOutput,
+    );
+    const outcome = await startStaticSitePreview(root, servedRoot).then(
+      (preview) => ({ kind: "started" as const, preview }),
+      (error: unknown) => ({ kind: "refused" as const, error }),
+    );
+    if (outcome.kind === "started") await outcome.preview.stop();
+
+    expect(outcome.kind).toBe("refused");
+    if (outcome.kind === "refused") {
+      expect(String(outcome.error)).toMatch(/shared-with-me.*cannot preview/i);
+    }
+  });
+
+  it("serves a normal configured build output", async () => {
+    const configuredBuildOutput = "release/site";
+    await mkdir(join(root, configuredBuildOutput), { recursive: true });
+    await writeFile(
+      join(root, configuredBuildOutput, "index.html"),
+      "<h1>Owned build</h1>",
+    );
+    const site = { root: ".", configuredBuildOutput };
+    const servedRoot = buildOutputSiteRoot(
+      site,
+      configuredBuildOutput,
+    );
+
+    const preview = await startStaticSitePreview(root, servedRoot);
+    try {
+      await expect(fetch(preview.url).then((response) => response.text()))
+        .resolves.toContain("Owned build");
+    } finally {
+      await preview.stop();
+    }
+  });
+
   it("serves a normal static website from a contained workspace folder", async () => {
     await mkdir(join(root, "report"), { recursive: true });
     await writeFile(join(root, "report", "index.html"), '<link rel="stylesheet" href="./style.css"><h1>Report</h1>');
@@ -132,9 +179,9 @@ describe("package manager helpers", () => {
 
   it("validates the visible body of package-backed dev scripts", () => {
     expect(() =>
-      packageManagerDevCommand("pnpm", "dev", "vite --host 0.0.0.0"),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "vite --host 0.0.0.0"),
     ).toThrow(/loopback/);
-    expect(packageManagerDevCommand("pnpm", "dev", "vite")).toEqual({
+    expect(packageManagerValidatedScriptCommand("pnpm", "dev", "vite")).toEqual({
       command: "pnpm",
       args: ["dev"],
     });
@@ -144,7 +191,7 @@ describe("package manager helpers", () => {
     "validates implicit %s lifecycle hooks around a safe dev script",
     (manager) => {
       expect(() =>
-        packageManagerDevCommand(
+        packageManagerValidatedScriptCommand(
           manager,
           "dev",
           "vite --host 127.0.0.1",
@@ -156,7 +203,7 @@ describe("package manager helpers", () => {
 
   it("recursively validates a shell-wrapped implicit lifecycle hook", () => {
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "npm",
         "dev",
         "vite --host 127.0.0.1",
@@ -167,49 +214,49 @@ describe("package manager helpers", () => {
 
   it("validates host flags inside visible shell-wrapped package scripts", () => {
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "pnpm",
         "dev",
         "sh -c 'vite --host 0.0.0.0'",
       ),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "pnpm",
         "dev",
         "sh -c 'vite --host 127.0.0.1'",
       ),
     ).not.toThrow();
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "pnpm",
         "dev",
         "BASH -c 'vite --hostname 192.168.1.1'",
       ),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "pnpm",
         "dev",
         "bash -lc 'vite --host 0.0.0.0'",
       ),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "pnpm",
         "dev",
         "bash -lc 'vite --host 127.0.0.1'",
       ),
     ).not.toThrow();
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "pnpm",
         "dev",
         "cmd /c 'vite --host 0.0.0.0'",
       ),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerDevCommand(
+      packageManagerValidatedScriptCommand(
         "pnpm",
         "dev",
         "powershell -Command 'vite --host 127.0.0.1'",
@@ -411,7 +458,10 @@ describe("startSiteDevServer", () => {
           url: handle.url,
           logs,
         }).success,
-        later: GetSitePreviewLogsResult.safeParse({ logs }).success,
+        later: GetSitePreviewLogsResult.safeParse({
+          logs,
+          exited: false,
+        }).success,
       };
       expect(parseResults).toEqual({ immediate: true, later: true });
 

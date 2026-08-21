@@ -55,8 +55,14 @@ function availableModes(
     return sharedStaticEntry ? ["static"] : [];
   }
   if (site.entryPath) modes.push("static");
-  if (site.scripts.dev || site.scripts.start) modes.push("dev");
   if (
+    site.configuredScripts.dev ||
+    site.scripts.dev ||
+    site.configuredScripts.start ||
+    site.scripts.start
+  ) modes.push("dev");
+  if (
+    site.configuredScripts.build ||
     site.scripts.build ||
     site.buildOutputs.length > 0 ||
     presentBuildOutput(site)
@@ -176,6 +182,7 @@ export function SitePreviewPage(props: {
   const [runningMode, setRunningMode] = useState<SitePreviewMode | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [stoppedByUser, setStoppedByUser] = useState(false);
+  const [previewExited, setPreviewExited] = useState(false);
   const autoStartKeyRef = useRef<string | null>(null);
   const loadRequestRef = useRef(0);
   const previewStartRequestRef = useRef(0);
@@ -196,6 +203,7 @@ export function SitePreviewPage(props: {
     logsRequestRef.current += 1;
     setRunningMode(null);
     setStoppedByUser(false);
+    setPreviewExited(false);
     autoStartKeyRef.current = null;
     try {
       const [site, workspaceResult] = await Promise.all([
@@ -258,6 +266,7 @@ export function SitePreviewPage(props: {
     setRunningMode(mode);
     setActionError(null);
     setStoppedByUser(false);
+    setPreviewExited(false);
     try {
       const result = await bridge().startSitePreview({
         workspaceId: props.workspaceId,
@@ -306,7 +315,7 @@ export function SitePreviewPage(props: {
         !target &&
         needsBuiltArtifact(latest)
       ) {
-        if (!latest.scripts.build) {
+        if (!latest.configuredScripts.build && !latest.scripts.build) {
           if (isCurrent()) {
             setActionError("This site needs a static build before it can be shared.");
           }
@@ -341,7 +350,11 @@ export function SitePreviewPage(props: {
   }, [props.onShareSite, props.siteRoot, props.workspaceId, siteContext, start]);
 
   const refreshPreviewLogs = useCallback(async () => {
-    if (!preview || preview.mode !== "dev") return;
+    if (
+      !preview ||
+      preview.mode !== "dev" ||
+      preview.siteRoot !== props.siteRoot
+    ) return;
     const request = ++logsRequestRef.current;
     const requestContext = siteContext;
     const previewRequest = previewStartRequestRef.current;
@@ -356,13 +369,18 @@ export function SitePreviewPage(props: {
         previewRequest !== previewStartRequestRef.current
       ) return;
       setPreviewLogs(result.logs);
+      if (result.exited) {
+        setPreview(null);
+        setPreviewExited(true);
+        setLogsOpen(true);
+      }
     } catch {
       // Starting, stopping, and workspace changes can invalidate a poll.
     }
   }, [preview, props.siteRoot, props.workspaceId, siteContext]);
 
   useEffect(() => {
-    if (!logsOpen || preview?.mode !== "dev") return;
+    if (preview?.mode !== "dev") return;
     void refreshPreviewLogs();
     const interval = setInterval(() => {
       void refreshPreviewLogs();
@@ -371,13 +389,14 @@ export function SitePreviewPage(props: {
       clearInterval(interval);
       logsRequestRef.current += 1;
     };
-  }, [logsOpen, preview?.mode, refreshPreviewLogs]);
+  }, [preview?.mode, refreshPreviewLogs]);
 
   useEffect(() => {
     if (
       load.status !== "ready" ||
       load.site.root !== props.siteRoot ||
       preview ||
+      previewExited ||
       stoppedByUser
     ) return;
     const mode = preferredMode(
@@ -397,6 +416,7 @@ export function SitePreviewPage(props: {
     load,
     modes,
     preview,
+    previewExited,
     props.sharedView,
     props.siteRoot,
     props.workspaceId,
@@ -418,6 +438,7 @@ export function SitePreviewPage(props: {
       setPreview(null);
       setPreviewLogs([]);
       setStoppedByUser(true);
+      setPreviewExited(false);
     } catch (error) {
       if (request !== previewStartRequestRef.current) return;
       setActionError(error instanceof Error ? error.message : "Could not stop preview.");
@@ -615,13 +636,27 @@ export function SitePreviewPage(props: {
               <Globe2 size={24} aria-hidden className="text-subtle" />
               <div className="max-w-sm text-sm text-muted">
                 {modes.length > 0
-                  ? stoppedByUser
+                  ? previewExited
+                    ? "Dev server exited. Use Preview options to run it again."
+                    : stoppedByUser
                     ? "Preview stopped. Use Preview options to run it again."
                     : runningMode
                     ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
                     : "This site did not start automatically. Choose another mode in Preview options."
                   : "This site has no previewable entry, dev script, or build output yet."}
               </div>
+              {previewExited && previewLogs.length > 0 ? (
+                <details
+                  open={logsOpen}
+                  onToggle={(event) => setLogsOpen(event.currentTarget.open)}
+                  className="max-h-36 w-full max-w-3xl overflow-auto border-t border-line bg-panel px-3 py-2 text-left text-[11px]"
+                >
+                  <summary className="cursor-pointer text-muted">Logs</summary>
+                  <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
+                    {previewLogs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+                  </pre>
+                </details>
+              ) : null}
             </div>
           ) : null}
         </>

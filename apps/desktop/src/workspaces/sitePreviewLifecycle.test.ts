@@ -124,6 +124,34 @@ describe("site preview lifecycle", () => {
     server.exit();
   });
 
+  it("retains the final process logs after a ready server exits", () => {
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const server = fakeProcessHandle("http://127.0.0.1:4173/");
+    previews.remember("workspace-1", "site", server.handle);
+    server.appendLog({
+      stream: "stderr",
+      text: "fatal: address became unavailable",
+      at: 3,
+    });
+
+    server.exit();
+
+    expect(previews.isRunning("workspace-1", "site")).toBe(false);
+    expect(previews.logs("workspace-1", "site")).toEqual([
+      {
+        stream: "stderr",
+        text: "fatal: address became unavailable",
+        at: 3,
+      },
+      expect.objectContaining({
+        stream: "system",
+        text: "Dev server exited unexpectedly.",
+      }),
+    ]);
+  });
+
   it("removes the handle and origin even when stop fails", async () => {
     const previews = createSitePreviewLifecycle({
       allowOrigin: allowLoopbackFrameOrigin,

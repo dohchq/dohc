@@ -29,7 +29,7 @@ export interface SitePackageInfo {
   configPath: string | null;
   packagePath: string | null;
   packageManager: SitePackageManager | null;
-  scripts: SiteScripts;
+  scripts: Record<string, string>;
   configuredScripts: SiteScripts;
   configuredPreviewMode: "static" | "dev" | "build" | null;
   configuredBuildOutput: string | null;
@@ -158,12 +158,32 @@ type HtmlBaseResolution =
   | { kind: "external" }
   | { kind: "none" };
 
+function blankPreservingLines(text: string): string {
+  return text.replace(/[^\x0d\x0a]/g, " ");
+}
+
+function blankHtmlComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?(?:-->|$)/g, (comment) =>
+    blankPreservingLines(comment),
+  );
+}
+
+function blankHtmlRawTextContents(text: string): string {
+  return text.replace(
+    /(<(script|style)\b[^>]*>)([\s\S]*?)(<\/\2\s*>|$)/gi,
+    (_match, open: string, _tag: string, content: string, close: string) =>
+      `${open}${blankPreservingLines(content)}${close}`,
+  );
+}
+
 function htmlBaseDirectory(
   text: string,
   fromPath: string,
   artifactRoot: string,
 ): HtmlBaseResolution {
-  const baseTag = /<base\b[^>]*>/i.exec(text)?.[0];
+  const baseTag = /<base\b[^>]*>/i.exec(
+    blankHtmlRawTextContents(blankHtmlComments(text)),
+  )?.[0];
   if (!baseTag) return { kind: "none" };
   const hrefMatch =
     /\bhref\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>]{1,2048}))/i.exec(
@@ -268,17 +288,21 @@ function referencesFromSrcset(value: string): string[] {
 function referencesFromBrowserText(text: string, sourcePath: string): string[] {
   if (/\.webmanifest$/i.test(sourcePath)) return referencesFromWebManifest(text);
   const references: string[] = [];
-  const addMatches = (pattern: RegExp) => {
-    for (const match of text.matchAll(pattern)) {
+  const isHtml = /\.html?$/i.test(sourcePath);
+  const scanText = isHtml ? blankHtmlComments(text) : text;
+  const attributeText = isHtml
+    ? blankHtmlRawTextContents(scanText).replace(/<base\b[^>]*>/gi, "")
+    : scanText;
+  const addMatches = (input: string, pattern: RegExp) => {
+    for (const match of input.matchAll(pattern)) {
       const value = (match[1] ?? match[2] ?? match[3])?.trim();
       if (value) references.push(value);
     }
   };
 
-  if (/\.html?$/i.test(sourcePath)) {
+  if (isHtml) {
     const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
-    const htmlWithoutBase = text.replace(/<base\b[^>]*>/gi, "");
-    for (const match of htmlWithoutBase.matchAll(attribute)) {
+    for (const match of attributeText.matchAll(attribute)) {
       const value = (match[2] ?? match[3] ?? match[4])?.trim();
       if (!value) continue;
       if (match[1]?.toLowerCase() !== "srcset") {
@@ -290,17 +314,17 @@ function referencesFromBrowserText(text: string, sourcePath: string): string[] {
   }
 
   if (/\.(?:html?|css)$/i.test(sourcePath)) {
-    addMatches(/url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi);
-    addMatches(/@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi);
+    addMatches(scanText, /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi);
+    addMatches(scanText, /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi);
   }
 
   if (/\.(?:html?|js|mjs)$/i.test(sourcePath)) {
-    addMatches(/\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(/\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(/\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g);
-    addMatches(/\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(/\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
-    addMatches(/\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(scanText, /\b(?:import|export)\s+(?:[^"'`\r\n]{0,2048}?\s+from\s+)?["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(scanText, /\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(scanText, /\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g);
+    addMatches(scanText, /\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(scanText, /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
+    addMatches(isHtml ? attributeText : scanText, /\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g);
   }
   return references;
 }
@@ -433,7 +457,14 @@ export function staticPreviewTargetForSite(
     if (output) return { root: buildOutputSiteRoot(site, output), entry: "index.html" };
     return { root: site.root, entry: sharedStaticEntryRelativeToSite(site) };
   }
-  return { root: site.root, entry: entryRelativeToSite(site) };
+  const entry = entryRelativeToSite(site);
+  if (!entry) return { root: site.root, entry: null };
+  const directory = posix.dirname(entry);
+  if (directory === ".") return { root: site.root, entry };
+  return {
+    root: joinSitePath(site.root, directory),
+    entry: posix.basename(entry),
+  };
 }
 
 function packagePathFor(root: string, sourceFiles: string[]): string | null {
@@ -477,6 +508,7 @@ async function mapWorkspaceSite(
     .sort();
   const entryPath = entryPathFor(root, site.entry);
   const shareMountRoot = shareMountRootForSite(root);
+  const packagePath = packagePathFor(root, sourceFiles);
   const packageInfo: Omit<SitePackageInfo, "shareManifest"> = {
     root,
     title: site.title,
@@ -484,9 +516,9 @@ async function mapWorkspaceSite(
     confidence: site.confidence,
     entryPath,
     configPath: site.configPath ?? null,
-    packagePath: packagePathFor(root, sourceFiles),
+    packagePath,
     packageManager: site.packageManager ?? null,
-    scripts: site.scripts,
+    scripts: await packageScriptsForSite(rootPath, packagePath),
     configuredScripts,
     configuredPreviewMode: site.configuredPreviewMode ?? null,
     configuredBuildOutput: site.configuredBuildOutput ?? null,
@@ -501,6 +533,28 @@ async function mapWorkspaceSite(
     ...packageInfo,
     shareManifest: await shareManifestForSite(rootPath, packageInfo),
   };
+}
+
+async function packageScriptsForSite(
+  rootPath: string,
+  packagePath: string | null,
+): Promise<Record<string, string>> {
+  if (!packagePath) return {};
+  try {
+    const parsed: unknown = JSON.parse(
+      await readFile(join(rootPath, packagePath), "utf8"),
+    );
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const scripts = (parsed as Record<string, unknown>).scripts;
+    if (!scripts || typeof scripts !== "object" || Array.isArray(scripts)) return {};
+    const result: Record<string, string> = {};
+    for (const [name, body] of Object.entries(scripts)) {
+      if (typeof body === "string") result[name] = body;
+    }
+    return result;
+  } catch {
+    return {};
+  }
 }
 
 async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): Promise<SiteScripts> {
@@ -610,6 +664,9 @@ export function entryRelativeToSite(site: SitePackageInfo): string | null {
     : null;
 }
 
-export function buildOutputSiteRoot(site: SitePackageInfo, output: string): string {
+export function buildOutputSiteRoot(
+  site: Pick<SitePackageInfo, "root">,
+  output: string,
+): string {
   return site.root === "." ? output : `${site.root}/${output}`;
 }

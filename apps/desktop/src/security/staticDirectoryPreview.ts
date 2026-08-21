@@ -117,6 +117,9 @@ export async function startStaticDirectoryPreview(
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const decoded = decodeURIComponent(url.pathname);
       const relativePath = decoded === "/" ? entry : decoded.replace(/^\/+/, "");
+      const containmentSpelledPath = rootRelative
+        ? `${rootRelative}/${relativePath}`
+        : relativePath;
       if (
         relativePath.includes("\0") ||
         relativePath.split("/").some((segment) => segment === ".." || segment === ".")
@@ -127,7 +130,8 @@ export async function startStaticDirectoryPreview(
       }
       if (
         hasIgnoredSegment(relativePath) ||
-        (options.forbidSharedWithMePaths && isSharedWithMePath(relativePath))
+        (options.forbidSharedWithMePaths &&
+          isSharedWithMePath(containmentSpelledPath))
       ) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");

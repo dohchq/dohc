@@ -627,13 +627,11 @@ import {
 } from "./workspaces/sitePackage";
 import {
   buildSite,
-  packageManagerCommand,
-  packageManagerDevCommand,
-  splitCommandLine,
   startSiteDevServer,
   startStaticSitePreview,
   type SiteLogEntry,
 } from "./workspaces/siteRunner";
+import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
   assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
@@ -1221,35 +1219,6 @@ async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> 
   );
 }
 
-function commandForSiteScript(
-  site: SitePackageInfo,
-  script: keyof SitePackageInfo["scripts"],
-): { command: string; args: string[] } {
-  const configuredCommand = site.configuredScripts[script];
-  if (configuredCommand) return splitCommandLine(configuredCommand);
-  const configured = site.scripts[script];
-  if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
-  if (site.packagePath) {
-    if (script === "dev" || script === "start") {
-      // This checks visible host flags in the package script and recursively
-      // inspects visible shell command strings through three wrapper levels.
-      // It cannot trace shell functions, environment-driven binds, config-file
-      // binds, or commands past that depth, so tools with no visible host flag
-      // still rely on their loopback default.
-      return packageManagerDevCommand(
-        site.packageManager ?? "npm",
-        script,
-        configured,
-        script === "dev"
-          ? { pre: site.scripts.predev, post: site.scripts.postdev }
-          : { pre: site.scripts.prestart, post: site.scripts.poststart },
-      );
-    }
-    return packageManagerCommand(site.packageManager ?? "npm", script);
-  }
-  return splitCommandLine(configured);
-}
-
 function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
   const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
   if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
@@ -1349,10 +1318,16 @@ async function startPreviewForSiteUnlocked(
   }
 
   if (input.mode === "dev") {
-    if (!input.site.scripts.dev && !input.site.scripts.start) {
+    if (
+      !input.site.configuredScripts.dev &&
+      !input.site.scripts.dev &&
+      !input.site.configuredScripts.start &&
+      !input.site.scripts.start
+    ) {
       throw new Error(`Site has no dev or start script: ${input.site.root}`);
     }
-    const script = input.site.scripts.dev ? "dev" : "start";
+    const script =
+      input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
     const command = commandForSiteScript(input.site, script);
     const handle = await startSiteDevServer({
       workspaceRoot: input.workspaceRoot,
@@ -1382,7 +1357,7 @@ async function startPreviewForSiteUnlocked(
       }
     | undefined;
   let outputRoot = preferredBuildOutput(input.site);
-  if (input.site.scripts.build) {
+  if (input.site.configuredScripts.build || input.site.scripts.build) {
     const command = commandForSiteScript(input.site, "build");
     const result = await buildSite({
       workspaceRoot: input.workspaceRoot,
@@ -6963,6 +6938,7 @@ function registerIpcHandlers(
     }
     return GetSitePreviewLogsResult.parse({
       logs: sitePreviews.logs(workspace.workspaceId, input.siteRoot),
+      exited: sitePreviews.exited(workspace.workspaceId, input.siteRoot),
     });
   });
 

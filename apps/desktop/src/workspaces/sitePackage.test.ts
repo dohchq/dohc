@@ -120,16 +120,11 @@ describe("shareMountRootForSite", () => {
       entry: "index.html",
     });
     const target = staticPreviewTargetForSite(site!);
-    const preview = await startStaticSitePreview(root, target.root, {
-      entry: target.entry ?? undefined,
-    });
-    try {
-      await expect(
-        fetch(new URL("/assets/main.js", preview.url)).then((response) => response.text()),
-      ).resolves.toContain("window.built = true");
-    } finally {
-      await preview.stop();
-    }
+    await expect(
+      startStaticSitePreview(root, target.root, {
+        entry: target.entry ?? undefined,
+      }),
+    ).rejects.toThrow(/shared-with-me.*cannot preview/i);
     expect(
       sharedStaticEntryRelativeToSite({
         ...site!,
@@ -166,6 +161,62 @@ describe("shareMountRootForSite", () => {
 });
 
 describe("listSitePackages", () => {
+  it("serves a configured subdirectory entry from its containing directory", async () => {
+    await mkdir(join(root, "public", "assets"), { recursive: true });
+    await writeFile(
+      join(root, "dohc.json"),
+      JSON.stringify({
+        type: "site",
+        preview: { mode: "static", entry: "public/index.html" },
+      }),
+    );
+    await writeFile(
+      join(root, "public", "index.html"),
+      '<script src="./assets/app.js"></script>',
+    );
+    await writeFile(
+      join(root, "public", "assets", "app.js"),
+      "window.ready = true;",
+    );
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === ".",
+    );
+    if (!site) throw new Error("Expected the configured root site.");
+    const target = staticPreviewTargetForSite(site);
+    const preview = await startStaticSitePreview(root, target.root, {
+      entry: target.entry ?? undefined,
+    });
+    let assetStatus = 0;
+    try {
+      assetStatus = await fetch(
+        new URL("/assets/app.js", preview.url),
+      ).then((response) => response.status);
+    } finally {
+      await preview.stop();
+    }
+
+    expect.soft(target).toEqual({ root: "public", entry: "index.html" });
+    expect.soft(assetStatus).toBe(200);
+  });
+
+  it("keeps a root-level static entry at the site root", async () => {
+    await mkdir(join(root, "root-entry"), { recursive: true });
+    await writeFile(
+      join(root, "root-entry", "index.html"),
+      "<h1>Root entry</h1>",
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "root-entry",
+    );
+    if (!site) throw new Error("Expected the root-entry site.");
+
+    expect(staticPreviewTargetForSite(site)).toEqual({
+      root: "root-entry",
+      entry: "index.html",
+    });
+  });
+
   it("returns static and package sites with inferred scripts and manager", async () => {
     await mkdir(join(root, "report"), { recursive: true });
     await writeFile(join(root, "report", "index.html"), "<h1>Report</h1>");
@@ -279,6 +330,61 @@ describe("listSitePackages", () => {
 
     expect(manifestOf(site)?.assets).not.toContain("extensionless/app.js");
     expect(manifestOf(site)?.assets).toContain("extensionless/exact");
+  });
+
+  it("ignores every browser reference inside HTML comments", async () => {
+    await mkdir(join(root, "commented"), { recursive: true });
+    await writeFile(
+      join(root, "commented", "index.html"),
+      [
+        '<!-- <img src="private.txt">',
+        '<style>@import "commented.css";</style>',
+        '<script type="module">import "./commented.js";</script>',
+        "-->",
+        '<img src="real.png">',
+        '<!-- <img src="never-closed.txt">',
+      ].join(""),
+    );
+    await writeFile(join(root, "commented", "private.txt"), "private");
+    await writeFile(join(root, "commented", "commented.css"), "private");
+    await writeFile(join(root, "commented", "commented.js"), "private");
+    await writeFile(join(root, "commented", "never-closed.txt"), "private");
+    await writeFile(join(root, "commented", "real.png"), "real");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "commented",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual(["commented/real.png"]);
+  });
+
+  it("keeps inline module and style references without treating script strings as markup", async () => {
+    await mkdir(join(root, "inline-context"), { recursive: true });
+    await writeFile(
+      join(root, "inline-context", "index.html"),
+      [
+        '<script type="module">',
+        'import "./real.js";',
+        'const html = \'<img src="fake.png">\';',
+        "</script>",
+        '<style>@import "real.css";</style>',
+        '<img src="real.png">',
+      ].join(""),
+    );
+    await writeFile(join(root, "inline-context", "real.js"), "export {};");
+    await writeFile(join(root, "inline-context", "real.css"), "body {}");
+    await writeFile(join(root, "inline-context", "real.png"), "real");
+    await writeFile(join(root, "inline-context", "fake.png"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "inline-context",
+    );
+
+    expect(manifestOf(site)?.assets).toEqual([
+      "inline-context/real.css",
+      "inline-context/real.js",
+      "inline-context/real.png",
+    ]);
   });
 
   it("resolves relative references from the document base href", async () => {
@@ -570,6 +676,39 @@ describe("listSitePackages", () => {
         dev: `node /tmp/${folder}.js --host 127.0.0.1`,
       });
     }
+  });
+
+  it("keeps package script bodies separate from a configured package-manager wrapper", async () => {
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          predev: "vite --host 0.0.0.0",
+          dev: "vite --host 127.0.0.1",
+        },
+      }),
+    );
+    await writeFile(
+      join(root, "dohc.json"),
+      JSON.stringify({
+        type: "site",
+        preview: { mode: "dev", command: "npm run dev" },
+      }),
+    );
+    await writeFile(join(root, "index.html"), "<h1>Configured</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === ".",
+    );
+
+    expect(site).toMatchObject({
+      scripts: {
+        predev: "vite --host 0.0.0.0",
+        dev: "vite --host 127.0.0.1",
+      },
+      configuredScripts: { dev: "npm run dev" },
+    });
   });
 
   it("drops configured preview commands that explicitly bind outside loopback", async () => {
