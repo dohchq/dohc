@@ -2512,6 +2512,100 @@ describe("shared view refresh", () => {
     }
   });
 
+  // #859: a share-view FOLDER delete crashing between the store deleting its
+  // children and `materializeSharedViewPaths`' single recursive rm on the
+  // folder path used to leave the projection showing files the store had
+  // already deleted — `shareViewDelete` marked only the FOLDER path pending,
+  // so recovery never revisited the children at all, found a still-present
+  // directory with no matching preimage, and misclassified it as an
+  // unjournalable non-file replacement. #862 changed `shareViewDelete` to
+  // mark every CHILD path pending before the store mutation, which is what
+  // makes them reachable here: the leftover-pending arm below predates #862
+  // unchanged, but a path only reaches it when the marker names it.
+  //
+  // The crash is driven through the REAL writer, not hand-assembled: a
+  // failing store proxy lets both `deleteTextFile` calls succeed, then makes
+  // the very first call `materializeSharedViewPaths` itself makes
+  // (`ensureMainVersion`) throw — so `routeWorkspacePathDelete` leaves
+  // whatever state `shareViewDelete` actually produces at that exact point,
+  // with disk untouched because materialization never ran its rm.
+  //
+  // Also pins a known, accepted residue (finding 6): recovery finishes each
+  // child individually and has no equivalent of the folder-level rm's
+  // directory removal, so the emptied `docs/plans` stays on disk after
+  // recovery where an uninterrupted delete would have removed it too.
+  it("recovers a crashed folder delete's children, but leaves the emptied folder until something prunes it", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const paths = ["docs/plans/one.md", "docs/plans/two.md"];
+    relay.addWrite(paths[0], "one");
+    relay.addWrite(paths[1], "two");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      let deletesDone = 0;
+      const failingStore: typeof store = {
+        ...store,
+        async deleteTextFile(input) {
+          const result = await store.deleteTextFile(input);
+          deletesDone += 1;
+          return result;
+        },
+        async ensureMainVersion(input) {
+          // Both children are gone from the store by the time materialization
+          // asks for the main version, which is the first thing it does — so
+          // this fails materialization before its rm ever runs, and only
+          // after the store mutation shareViewDelete makes is already done.
+          if (deletesDone >= paths.length) {
+            throw Object.assign(new Error("EBUSY: projection delete failed"), {
+              code: "EBUSY",
+            });
+          }
+          return await store.ensureMainVersion(input);
+        },
+      };
+
+      await expect(
+        routeWorkspacePathDelete({
+          workspaceId: WORKSPACE,
+          rootPath: rootDir,
+          shareView: { access: "edit", ended: false, granterEmail: null },
+          shareViewStore: () => failingStore,
+          relativePath: "docs/plans",
+          trashItem: async () => {
+            throw new Error("a share view's delete must not reach the ordinary trash path");
+          },
+        }),
+      ).rejects.toThrow("EBUSY: projection delete failed");
+
+      // What shareViewDelete actually left behind: both children gone from
+      // the store, both children (not the folder path) marked pending, disk
+      // untouched because materialization died before its rm.
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+        new Set(paths),
+      );
+      await expect(readFile(join(rootDir, paths[0]), "utf8")).resolves.toBe("one");
+      await expect(readFile(join(rootDir, paths[1]), "utf8")).resolves.toBe("two");
+
+      const outcome = await captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true);
+      expect(outcome.repairedPaths).toBe(2);
+      expect(outcome.unjournalablePaths).toEqual([]);
+      for (const path of paths) {
+        await expect(stat(join(rootDir, path))).rejects.toMatchObject({ code: "ENOENT" });
+      }
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(new Set());
+
+      // The documented residue: recovery completed each child but never
+      // touched their now-empty parent, unlike an uninterrupted delete's
+      // single recursive rm on the folder path.
+      expect(await readdir(join(rootDir, "docs", "plans"))).toEqual([]);
+    } finally {
+      await store.close();
+    }
+  });
+
   itNonRoot(
     "keeps an unreadable pending delete marker for the next pass",
     async () => {
