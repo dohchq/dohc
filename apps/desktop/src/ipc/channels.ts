@@ -136,6 +136,22 @@ export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = [
   "claude-code",
 ] as const;
 
+/**
+ * The packaged manifest's own displayName for each built-in driver — a
+ * plugins/<directoryName> copy in a workspace has no guaranteed connection
+ * to this at all (its manifest can be hand-edited, or too broken to read),
+ * so a caller naming what Add restores reads this, never a workspace
+ * copy's own metadata. main.pluginOffersSecurity.test.ts pins these against
+ * the packaged manifests themselves so the two cannot drift apart silently.
+ */
+export const BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES: Record<
+  (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number],
+  string
+> = {
+  codex: "Codex",
+  "claude-code": "Claude Code",
+};
+
 // How many unrecoverable paths the uninstall preflight sends to the renderer.
 // The dialog lists this sample and says how many more there are; a plugin
 // tree can hold thousands, and the whole inventory stays in main.

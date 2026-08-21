@@ -1,7 +1,10 @@
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
-import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
+import {
+  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
+  BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES,
+} from "../ipc/channels";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   isHttpsUrl,
@@ -955,6 +958,14 @@ function PluginUninstallDialog(props: {
   const isBuiltinOffer = (
     BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES as readonly string[]
   ).includes(confirmation.plugin.directoryName);
+  // The packaged plugin's own name, never this copy's — a directory named
+  // "codex" carries no guarantee its manifest still says so: it can be
+  // hand-edited, or too broken to read at all.
+  const packagedDisplayName = isBuiltinOffer
+    ? BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES[
+        confirmation.plugin.directoryName as (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number]
+      ]
+    : null;
 
   return (
     <Overlay
@@ -982,7 +993,7 @@ function PluginUninstallDialog(props: {
             {installed
               ? "This removes the plugin source and build files from this workspace."
               : isBuiltinOffer
-                ? `This deletes plugins/${confirmation.plugin.directoryName}'s files from this workspace. Add restores dohc's packaged ${pluginTitle(confirmation.plugin)} plugin, not this copy.`
+                ? `This deletes plugins/${confirmation.plugin.directoryName}'s files from this workspace. Add restores dohc's packaged ${packagedDisplayName} plugin, not this copy.`
                 : `This permanently deletes plugins/${confirmation.plugin.directoryName} from this workspace. dohc has no way to bring it back.`}
           </p>
           {warning ? (

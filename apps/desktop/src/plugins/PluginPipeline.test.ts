@@ -29,6 +29,7 @@ import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
   OfferedPluginAddError,
   addOfferedPlugin,
+  listOfferedPlugins,
   removeAddedOfferedPlugin,
 } from "./pluginOffers";
 import {
@@ -602,6 +603,113 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       ).rejects.toMatchObject({ code: "ENOENT" });
       const survivor = pipeline.list().find((entry) => entry.directoryName === "aaa-codex");
       expect(survivor).toMatchObject({ id: "codex", valid: true });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Round 8 finding 4: uninstallableCandidate() only fell back to a
+  // discovery entry for a plugin that had SOME prior installation —
+  // validCandidate() rejects an invalid manifest outright, so a copy added
+  // by Add and never installed had no candidate at all, and Remove's
+  // preflight dead-ended with "preflight-failed". A broken manifest must
+  // not remove the only way back to delete it.
+  it("lets Remove delete a discovered plugin whose manifest is invalid and was never installed", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-remove-invalid-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
+    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
+    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    await writeFile(
+      join(builtinCodexRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "codex",
+        displayName: "Codex",
+        entry: "src/main.ts",
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+    // listOfferedPlugins reads every built-in's manifest, not only codex's.
+    const builtinClaudeCodeRoot = join(builtinPluginsRoot, "claude-code");
+    await mkdir(join(builtinClaudeCodeRoot, "src"), { recursive: true });
+    await writeFile(
+      join(builtinClaudeCodeRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "claude-code",
+        displayName: "Claude Code",
+        entry: "src/main.ts",
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(builtinClaudeCodeRoot, "src", "main.ts"), "export default {};\n");
+
+    await addOfferedPlugin({
+      builtinPluginsRoot,
+      workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: new Set(),
+    });
+    // Broken before the pipeline ever discovers it — the offer landed a
+    // real copy, but it never becomes a valid, installable plugin.
+    await writeFile(
+      join(workspaceRoot, "plugins", "codex", "dohc-plugin.json"),
+      "{ this is not valid JSON\n",
+    );
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const row = pipeline.list()[0];
+      expect(row).toMatchObject({
+        directoryName: "codex",
+        valid: false,
+        status: "invalid",
+        approvedHash: null,
+      });
+      const pluginId = row!.id;
+
+      const preflight = await pipeline.uninstallPreflight(pluginId);
+      if (!preflight.ok) {
+        throw new Error(`${preflight.error.stage}/${preflight.error.code}: ${preflight.error.message}`);
+      }
+      const removed = await pipeline.uninstall(pluginId, preflight.confirmationToken);
+      expect(removed.ok).toBe(true);
+
+      await expect(
+        lstat(join(workspaceRoot, "plugins", "codex")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(pipeline.list()).toEqual([]);
+
+      // The offer is restored now that nothing occupies plugins/codex.
+      const offers = await listOfferedPlugins(builtinPluginsRoot, workspaceRoot, new Set());
+      expect(offers.map((offer) => offer.directoryName)).toContain("codex");
     } finally {
       await pipeline.dispose();
     }
@@ -3680,6 +3788,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       manifest: null,
       iconPath: null,
       valid: false,
+      supersededPluginId: null,
       diagnostics: Array.from(
         { length: 400 },
         (_, index) => `manifest problem ${index}: ${"x".repeat(40)}`,

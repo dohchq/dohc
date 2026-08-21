@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, realpath } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { cp, lstat, mkdir, realpath, rmdir } from "node:fs/promises";
+import { basename, join, relative } from "node:path";
 import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
 import { readPluginManifestFile } from "./pluginManifest";
 import {
@@ -77,6 +77,24 @@ export async function listOfferedPlugins(
     });
   }
   return offers;
+}
+
+/**
+ * The plugin whose discovery entry lost a duplicate-id collision to
+ * `directoryName`'s own copy, if any — read from `supersededPluginId`, the
+ * discovery layer's own structured marker, never from scanning diagnostic
+ * text. That text is bounded and re-worded for display, so a record whose
+ * diagnostics merely happen to CONTAIN a similar-looking phrase for an
+ * unrelated reason must never read as a real collision.
+ */
+export function findDisplacedByAdd<
+  T extends { directoryName: string; supersededPluginId: string | null },
+>(plugins: readonly T[], directoryName: string): T | undefined {
+  return plugins.find(
+    (entry) =>
+      entry.directoryName !== directoryName &&
+      entry.supersededPluginId === directoryName,
+  );
 }
 
 export class OfferedPluginAddError extends Error {
@@ -162,6 +180,40 @@ async function ensureContainedDirectory(
 }
 
 /**
+ * Publishes `staged` at `target`, refusing to silently replace anything
+ * already there. A bare rename() cannot tell "nothing at target" from
+ * "something raced this call here": POSIX rename() atomically REPLACES an
+ * existing empty directory rather than failing, so a check-then-rename
+ * sequence still clobbers whatever a concurrent creator placed at target in
+ * the gap between the two. mkdir(target) is the one atomic claim Node
+ * exposes — it fails EEXIST the instant anything (a real plugin, or another
+ * concurrent add) already occupies the slot, before this ever touches it.
+ * `false` means the claim lost that race; `target` is left exactly as this
+ * call found it, for the caller to refuse over.
+ *
+ * A successful claim still has to be freed before the rename lands: Windows
+ * refuses rename() onto ANY existing directory, even an empty one this call
+ * just created and exclusively owns (verified empirically — MoveFileEx's
+ * REPLACE_EXISTING flag is documented not to accept a directory name, and
+ * throws EPERM in practice for both an empty and a populated destination).
+ * Freeing the claim with rmdir immediately before the rename keeps one
+ * sequence on every platform, at the cost of a narrow window between the
+ * free and the rename that is far smaller than, and never silently
+ * destructive like, the unconditional replace this replaces.
+ */
+async function publishStaged(staged: string, target: string): Promise<boolean> {
+  try {
+    await mkdir(target);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+  await rmdir(target);
+  await renameWithWindowsRetry(staged, target, (error) => error);
+  return true;
+}
+
+/**
  * @param existingPluginIds The workspace's current plugin ids, sampled
  * fresh right before this copy — not merely at the time the offer list was
  * loaded. A plugin can be discovered under a different directory between
@@ -227,13 +279,17 @@ export async function addOfferedPlugin(params: {
       recursive: true,
       filter: (source) => !EXCLUDED_SOURCE_NAMES.has(basename(source)),
     });
-    if (await pathExists(target)) throw existingTargetError(directoryName);
-    await renameWithWindowsRetry(staging, target, toOfferedPluginAddError);
-    // Captured the instant the rename lands, while target is still known to
-    // be exactly what this call just created — removeAddedOfferedPlugin's
-    // own re-check compares against this rather than trusting that the path
-    // still means the same thing by the time a caller decides to roll back.
-    const identity = await targetIdentity(target);
+    // Captured from the STAGING directory, before it is published — rename()
+    // preserves the inode, so this identity remains valid for `target`
+    // afterward. Reading it back off `target` after the rename would instead
+    // let anything that lands at that path in the instant between the
+    // rename and this read donate ITS identity to the value
+    // removeAddedOfferedPlugin later trusts; staging is private to this call
+    // the entire time it is being read, so nothing else can ever race it.
+    const identity = await targetIdentity(staging);
+    if (!(await publishStaged(staging, target))) {
+      throw existingTargetError(directoryName);
+    }
     return { rootPath: target, identity };
   } catch (error) {
     await removeStaging(staging).catch(() => undefined);
@@ -340,12 +396,52 @@ export async function removeAddedOfferedPlugin(params: {
     stagedStats.dev !== identity.dev ||
     stagedStats.ino !== identity.ino
   ) {
-    // Not what this request created — put it back exactly where it was
-    // and refuse, rather than delete something this call never verified.
-    await renameWithWindowsRetry(staged, target, toOfferedPluginAddError);
+    // Not what this request created. Putting it back is itself a write
+    // through the same swappable `plugins/` path the forward move already
+    // grabbed one entry away from — plugins/ could have been replaced with
+    // a symlink/junction in the window since the check at the top of this
+    // function ran, and the exact target slot could have been reoccupied in
+    // the window since that forward move landed. Re-verifying containment,
+    // and using the same claim-then-rename publish `addOfferedPlugin` uses
+    // rather than a bare rename, catches both without narrowing either gap
+    // to zero. Either failure leaves the content exactly where it safely
+    // sits — staged, inside this module's own contained area — rather than
+    // write it somewhere this call can no longer vouch for, or silently
+    // replace whatever now occupies target.
+    const strandedError = new OfferedPluginAddError(
+      `plugins/${directoryName} no longer matches what this request created; its ` +
+        `previous contents are stranded at ${relative(workspaceRoot, staged)} in ` +
+        "this workspace rather than restored.",
+    );
+    const stillContained = await pluginsPathStillContained(pluginsPath, realWorkspaceRoot);
+    if (!stillContained) throw strandedError;
+    const restored = await publishStaged(staged, target).catch(() => false);
+    if (!restored) throw strandedError;
     throw new OfferedPluginAddError(
       `plugins/${directoryName} no longer matches what this request created; refusing to remove it.`,
     );
   }
   await removeStaging(staged);
+}
+
+/** Re-checked immediately before a rollback writes back through
+ * `plugins/`: the top-of-function check already ran once, but this
+ * function's own forward move can take real time, and `plugins/` is a path
+ * a rollback does not own the way the module's own staging area does. */
+async function pluginsPathStillContained(
+  pluginsPath: string,
+  realWorkspaceRoot: string,
+): Promise<boolean> {
+  let stats;
+  try {
+    stats = await lstat(pluginsPath);
+  } catch {
+    return false;
+  }
+  if (stats.isSymbolicLink()) return false;
+  try {
+    return isInside(realWorkspaceRoot, await realpath(pluginsPath));
+  } catch {
+    return false;
+  }
 }

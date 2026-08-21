@@ -39,6 +39,16 @@ export interface InstalledPluginRecord {
   iconPath: string | null;
   diagnostics: string[];
   valid: boolean;
+  /**
+   * Set only on a record that just lost discovery's duplicate-id tie-break:
+   * the manifest id another directory kept instead. A caller that needs to
+   * know whether ITS OWN directory got displaced by this one reads this
+   * field, never `diagnostics` — that array is bounded and re-worded for
+   * display, so it is not a stable place to detect a specific collision
+   * from code (#779-style: display text and machine-checked state must not
+   * be the same value).
+   */
+  supersededPluginId: string | null;
 }
 
 // Mirrors PLUGIN_ID in ipc/bridgeContract.ts. A directory name may be up to
@@ -83,6 +93,7 @@ function recordFromCandidate(candidate: PluginDiscoveryCandidate): InstalledPlug
       candidate.rootKind === "directory" &&
       manifest !== null &&
       candidate.diagnostics.length === 0,
+    supersededPluginId: null,
   };
 }
 
@@ -123,6 +134,7 @@ function classifyInstalledPlugins(
       // owner's installation. Its directory names it instead, the same
       // identity a manifest-less candidate gets (#779 round 14 A4).
       record.id = record.directoryName.slice(0, PLUGIN_ID_MAX_LENGTH);
+      record.supersededPluginId = pluginId;
       record.diagnostics.push(
         `duplicate plugin id "${pluginId}": also declared at ${owner.rootPath}`,
       );

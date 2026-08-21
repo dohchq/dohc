@@ -7285,17 +7285,12 @@ function registerIpcHandlers(
       // request is copying — discovery's own duplicate-id handling then
       // degrades ONE side of that collision, and it must not read as a
       // successful add on EITHER side: !plugin.valid catches this add
-      // having lost, and the diagnostic scan catches it having WON (its own
-      // record stays valid, but some other directory's now carries
-      // discovery's "duplicate plugin id" note naming this one).
-      const conflictingDiagnostic = `duplicate plugin id "${input.directoryName}"`;
-      const displaced = pipeline.list().find(
-        (entry) =>
-          entry.directoryName !== input.directoryName &&
-          entry.diagnostics.some((diagnostic) =>
-            diagnostic.includes(conflictingDiagnostic),
-          ),
-      );
+      // having lost, and findDirectorySupersededBy catches it having WON
+      // (its own record stays valid, but some other directory's discovery
+      // entry now carries a structured marker naming this one as the id it
+      // lost) — read from discovery directly, never from list()'s
+      // wire-shaped status or a scan over diagnostic prose.
+      const displaced = pipeline.findDirectorySupersededBy(input.directoryName);
       if (!plugin || !plugin.valid || displaced) {
         // handleWatcherEvents logs and swallows a rescan failure rather than
         // throwing, so a transient fs error that left `plugin` missing must

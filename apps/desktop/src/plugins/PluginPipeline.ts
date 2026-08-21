@@ -14,6 +14,7 @@ import {
 import { buildPluginBundle } from "./pluginBuildRunner";
 import { installPluginDependencies } from "./pluginInstallRunner";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
+import { findDisplacedByAdd } from "./pluginOffers";
 import {
   mutatePluginRecord,
   pluginDataDir,
@@ -629,6 +630,21 @@ export class PluginPipeline {
       left.directoryName.localeCompare(right.directoryName) ||
       left.id.localeCompare(right.id)
     );
+  }
+
+  /**
+   * The directory (if any) whose discovery entry just lost a duplicate-id
+   * collision to `pluginId` — read from discovery's own structured
+   * supersededPluginId marker, never from list()'s wire-shaped status
+   * (that crosses ListPluginsResult's strict IPC schema, which has no room
+   * for an internal-only field) and never by scanning diagnostic text
+   * (bounded and re-worded for display, not a stable machine-checked
+   * signal). addOfferedPlugin's own handler uses this to detect its copy
+   * having WON a collision another directory already held the id under
+   * (#779-offers round 8 finding 5).
+   */
+  findDirectorySupersededBy(pluginId: string): string | null {
+    return findDisplacedByAdd(this.discovery, pluginId)?.directoryName ?? null;
   }
 
   /**
@@ -2013,6 +2029,16 @@ export class PluginPipeline {
   ): InstalledPluginRecord | null {
     const valid = this.validCandidate(pluginId);
     if (valid) return valid;
+    // Never approved: there is no installation for the root-path fallback
+    // below to find, but the discovered entry validCandidate() just
+    // rejected for being invalid is still the one thing Remove has to
+    // delete — an invalid manifest must not leave a never-installed copy
+    // with no way back either. Id-matched the same way discovery already
+    // identifies this exact directory (#779 round 8 finding 4).
+    if (!record?.approvedHash) {
+      const discovered = this.discovery.find((entry) => entry.id === pluginId);
+      if (discovered) return discovered;
+    }
     // Joined by root path, not by id: this plugin's discovery entry carries
     // the fallback id its broken manifest left it with, which is not the id
     // its installation is recorded under (#779 round 9 B3).
@@ -2098,6 +2124,7 @@ export class PluginPipeline {
       iconPath: null,
       diagnostics: status.diagnostics,
       valid: status.valid,
+      supersededPluginId: null,
     };
     this.setStatus(candidate, {
       status: "uninstalling",
@@ -2368,6 +2395,7 @@ export class PluginPipeline {
           iconPath: null,
           diagnostics: current.diagnostics,
           valid: current.valid,
+          supersededPluginId: null,
         },
         { error, valid: current.valid },
       );

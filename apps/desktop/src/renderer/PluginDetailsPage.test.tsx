@@ -402,10 +402,11 @@ describe("PluginDetailsPage", () => {
     expect(within(dialog).getByText("Remove codex?")).toBeTruthy();
     // The true consequence, stated: this copy's own files are deleted, and
     // Add restores dohc's packaged plugin — never a promise that Add
-    // restores whatever this specific copy held.
+    // restores whatever this specific copy held. Named "Codex" (the
+    // packaged manifest's own name), not derived from this copy's title.
     expect(
       within(dialog).getByText(
-        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged codex plugin, not this copy.",
+        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged Codex plugin, not this copy.",
       ),
     ).toBeTruthy();
     expect(within(dialog).getByTestId("plugin-uninstall-confirm").textContent).toBe(
@@ -429,6 +430,33 @@ describe("PluginDetailsPage", () => {
     await waitFor(() =>
       expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2),
     );
+  });
+
+  // A directoryName matching a built-in says nothing about what a copy's
+  // OWN manifest currently claims — it can be hand-edited, or too broken to
+  // read at all. The dialog must name the packaged plugin Add actually
+  // restores, never whatever title this specific copy happens to carry.
+  it("names the packaged plugin, not this copy's own display name, for a built-in directory", async () => {
+    const renamedCopy = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+      displayName: "Someone's Fork",
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [renamedCopy] });
+
+    renderPage("codex");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(
+      within(dialog).getByText(
+        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged Codex plugin, not this copy.",
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText(/Someone's Fork/)).toBeNull();
   });
 
   it("names the real consequence for a never-installed plugin that isn't a built-in offer", async () => {
