@@ -443,11 +443,22 @@ describe("installPluginDependencies", () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     // pnpm (4242) shelled out to git (4243), which shelled out to its own
     // helper (4244). 4242 is the only pid this runner was ever told about.
-    const liveTable = [" 4242     1", " 4243  4242", " 4244  4243", " 5000     1", ""]
-      .join("\n");
+    const startedAt = "Fri Aug 21 10:00:05 2026";
+    const liveTable = [
+      ` 4242     1 ${startedAt}`,
+      ` 4243  4242 ${startedAt}`,
+      ` 4244  4243 ${startedAt}`,
+      ` 5000     1 ${startedAt}`,
+      "",
+    ].join("\n");
     // By the force round the root is gone and its descendants are reparented
     // to init, so no ppid walk from 4242 can find them any more.
-    const orphanedTable = [" 4243     1", " 4244     1", " 5000     1", ""].join("\n");
+    const orphanedTable = [
+      ` 4243     1 ${startedAt}`,
+      ` 4244     1 ${startedAt}`,
+      ` 5000     1 ${startedAt}`,
+      "",
+    ].join("\n");
     let tableReads = 0;
 
     let settled = false;
@@ -475,7 +486,11 @@ describe("installPluginDependencies", () => {
     });
     await started.promise;
     controller.abort();
-    await flushMicrotasks();
+    // The real table read races a timeout internally (posixSpawn.ts's
+    // readProcessTableWithTimeout), which costs a few more microtask ticks
+    // than a bare awaited read — flush enough for that race and the signal
+    // loop it gates to both settle before asserting on either.
+    await flushMicrotasks(10);
 
     // Children before parents, so a signalled parent cannot leave a child
     // behind — and the whole tree is reached before the child is terminated.
