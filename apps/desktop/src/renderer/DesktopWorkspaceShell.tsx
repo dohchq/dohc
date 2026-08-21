@@ -35,6 +35,7 @@ import type {
   EngineMomentDetailRecord,
   EngineMomentRecord,
   MyShareChangeRow,
+  RefreshSharedViewResult,
   ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
@@ -43,6 +44,11 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
+import { formatSize } from "../plugins/pluginFormat";
+import {
+  MAX_ENGINE_CAPTURE_BINARY_BYTES,
+  MAX_ENGINE_CAPTURE_TEXT_BYTES,
+} from "../workspaces/workspaceEngineCaptureLimits";
 import { DohcMark } from "@dohc/brand";
 import {
   hasUnacknowledgedShareSkips,
@@ -1340,6 +1346,65 @@ function PanelLoading({ label }: { label: string }) {
       Loading {label}...
     </div>
   );
+}
+
+type UnjournalableSharePath = RefreshSharedViewResult["unjournalablePaths"][number];
+
+function namedUnjournalablePaths(paths: readonly UnjournalableSharePath[]): string {
+  const named = paths.slice(0, 3).map((entry) => entry.path).join(", ");
+  return paths.length > 3 ? `${named}, and ${paths.length - 3} more` : named;
+}
+
+function shareUnjournalableNotice(
+  paths: readonly UnjournalableSharePath[],
+): string {
+  const groups = new Map<
+    UnjournalableSharePath["reason"],
+    UnjournalableSharePath[]
+  >();
+  for (const path of paths) {
+    const group = groups.get(path.reason) ?? [];
+    group.push(path);
+    groups.set(path.reason, group);
+  }
+  const lines: string[] = [];
+  for (const reason of [
+    "oversized-text",
+    "oversized-binary",
+    "non-utf8",
+    "non-file-replacement",
+  ] as const) {
+    const group = groups.get(reason);
+    if (!group || group.length === 0) continue;
+    const names = namedUnjournalablePaths(group);
+    const one = group.length === 1;
+    if (reason === "oversized-text") {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text limit. ` +
+          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
+      );
+    } else if (reason === "oversized-binary") {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "This file is" : "These files are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary limit. ` +
+          `Make ${one ? "the file" : "the files"} smaller, then refresh.`,
+      );
+    } else if (reason === "non-utf8") {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "This file is" : "These files are"} not readable as text. ` +
+          `Save ${one ? "the file" : "the files"} as UTF-8 text, then refresh.`,
+      );
+    } else {
+      lines.push(
+        `dohc could not track changes in ${names}. ` +
+          `${one ? "A folder or another entry replaces this file" : "Folders or other entries replace these files"}. ` +
+          `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
+      );
+    }
+  }
+  return lines.join(" ");
 }
 
 export function DesktopWorkspaceShell(props: {
@@ -4508,7 +4573,7 @@ export function DesktopWorkspaceShell(props: {
   const [shareRefreshing, setShareRefreshing] = useState(false);
   const [shareExclusions, setShareExclusions] = useState<{
     workspaceId: string;
-    paths: string[];
+    paths: UnjournalableSharePath[];
   } | null>(null);
   const shareExcludedPaths =
     shareExclusions?.workspaceId === workspaceId ? shareExclusions.paths : [];
@@ -4547,7 +4612,7 @@ export function DesktopWorkspaceShell(props: {
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
       if (token !== shareRefreshToken.current) return;
-      setShareExclusions({ workspaceId, paths: outcome.excludedPaths });
+      setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       if (outcome.status === "ended") {
         setShareViewEnded(true);
         return;
@@ -5014,16 +5079,10 @@ export function DesktopWorkspaceShell(props: {
           {shareExcludedPaths.length > 0 ? (
             <span
               data-testid="shared-view-excluded"
-              title={shareExcludedPaths.join("\n")}
+              title={shareExcludedPaths.map((entry) => entry.path).join("\n")}
               className="flex shrink-0 items-center gap-1.5 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
             >
-              {shareExcludedPaths.length === 1
-                ? `${shareExcludedPaths[0]} didn't update from this share because it is too large for dohc to track. Your copy is still on this machine. Make the file smaller, then refresh.`
-                : `${shareExcludedPaths.slice(0, 3).join(", ")}${
-                    shareExcludedPaths.length > 3
-                      ? `, and ${shareExcludedPaths.length - 3} more`
-                      : ""
-                  } didn't update from this share because they are too large for dohc to track. Your copies are still on this machine. Make the files smaller, then refresh.`}
+              {shareUnjournalableNotice(shareExcludedPaths)}
             </span>
           ) : null}
           {shareSkipped

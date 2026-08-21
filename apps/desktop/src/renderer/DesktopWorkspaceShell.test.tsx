@@ -520,6 +520,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       }),
@@ -3582,6 +3583,7 @@ describe("ui-state merge-on-load", () => {
         status: "updated",
         changedPaths: 1,
         excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -3594,13 +3596,20 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
-  it("names excluded files after refresh and clears the notice after they recover", async () => {
+  it("groups unjournalable files by cause and clears the notice after recovery", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const outcomes = [
       {
         status: "unchanged" as const,
         changedPaths: 0,
-        excludedPaths: ["docs/oversized.md"],
+        excludedPaths: ["docs/pull-skipped.md"],
+        unjournalablePaths: [
+          { path: "docs/oversized.md", reason: "oversized-text" as const },
+          {
+            path: "docs/replaced.md",
+            reason: "non-file-replacement" as const,
+          },
+        ],
         refusedOps: 0,
         refusedDetail: null,
       },
@@ -3608,6 +3617,7 @@ describe("ui-state merge-on-load", () => {
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       },
@@ -3628,15 +3638,103 @@ describe("ui-state merge-on-load", () => {
 
     const notice = await screen.findByTestId("shared-view-excluded");
     expect(notice.textContent).toContain(
-      "docs/oversized.md didn't update from this share because it is too large for dohc to track.",
+      "dohc could not track changes in docs/oversized.md.",
     );
-    expect(notice.textContent).toContain("Your copy is still on this machine.");
+    expect(notice.textContent).toContain("10.0 MB text limit");
     expect(notice.textContent).toContain("Make the file smaller, then refresh.");
+    expect(notice.textContent).toContain(
+      "dohc could not track changes in docs/replaced.md.",
+    );
+    expect(notice.textContent).toContain(
+      "A folder or another entry replaces this file.",
+    );
+    expect(notice.textContent).toContain(
+      "Restore the file or move the conflicting entry, then refresh.",
+    );
 
     await userEvent.click(screen.getByTestId("shared-view-refresh"));
     await waitFor(() => {
       expect(screen.queryByTestId("shared-view-excluded")).toBeNull();
     });
+  });
+
+  it("keeps a late refresh from replacing the newer workspace notice", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const first = deferred<RefreshSharedViewResult>();
+    const second = deferred<RefreshSharedViewResult>();
+    let refreshCall = 0;
+    bridge.refreshSharedView = vi.fn(() =>
+      refreshCall++ === 0 ? first.promise : second.promise,
+    );
+    const firstWorkspace: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-first",
+      shareView: {
+        shareId: "share-first",
+        granterEmail: "first@dohc.test",
+        access: "edit",
+      },
+    };
+    const secondWorkspace: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-second",
+      shareView: {
+        shareId: "share-second",
+        granterEmail: "second@dohc.test",
+        access: "edit",
+      },
+    };
+    const rendered = renderShell(bridge, firstWorkspace, [
+      firstWorkspace,
+      secondWorkspace,
+    ]);
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+
+    rendered.rerender(
+      <DesktopWorkspaceShell
+        workspace={secondWorkspace}
+        workspaces={[firstWorkspace, secondWorkspace]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      second.resolve({
+        status: "unchanged",
+        changedPaths: 0,
+        excludedPaths: ["docs/new-pull.md"],
+        unjournalablePaths: [
+          { path: "docs/new-local.md", reason: "non-utf8" },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      });
+      await second.promise;
+    });
+    expect((await screen.findByTestId("shared-view-excluded")).textContent).toContain(
+      "docs/new-local.md",
+    );
+
+    await act(async () => {
+      first.resolve({
+        status: "unchanged",
+        changedPaths: 0,
+        excludedPaths: ["docs/stale-pull.md"],
+        unjournalablePaths: [
+          { path: "docs/stale-local.md", reason: "oversized-text" },
+        ],
+        refusedOps: 0,
+        refusedDetail: null,
+      });
+      await first.promise;
+    });
+    expect(screen.getByTestId("shared-view-excluded").textContent).toContain(
+      "docs/new-local.md",
+    );
+    expect(screen.getByTestId("shared-view-excluded").textContent).not.toContain(
+      "docs/stale-local.md",
+    );
   });
 
   // A refresh can record a refusal on an early page and then die on a later
@@ -3705,6 +3803,7 @@ describe("ui-state merge-on-load", () => {
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 1,
         refusedDetail: "the share granted version main, the relay offered version other",
       };
@@ -3770,6 +3869,7 @@ describe("ui-state merge-on-load", () => {
       status: "unchanged" as const,
       changedPaths: 0,
       excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     }));
@@ -10909,6 +11009,7 @@ describe("shared view versions surface", () => {
       status: "updated" as const,
       changedPaths: 1,
       excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     }));

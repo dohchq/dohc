@@ -6134,6 +6134,7 @@ function registerIpcHandlers(
         status: "ended",
         changedPaths: 0,
         excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -6151,6 +6152,7 @@ function registerIpcHandlers(
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });

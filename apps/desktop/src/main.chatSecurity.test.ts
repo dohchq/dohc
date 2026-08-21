@@ -1038,7 +1038,7 @@ describe("main-process chat authorization", () => {
   // rules live in shareProposals.ts and are driven behaviourally there; this
   // pin covers main's wiring — that both lanes go through them, and that
   // neither takes a share id from the renderer.
-  it("splits the share-changes lanes in main, and resolves every share id from the registry", () => {
+  it("wires share-change authorization and the submit guard in source order", () => {
     const granterLane = [
       "listShareProposals",
       "readShareProposalChanges",

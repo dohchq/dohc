@@ -1,0 +1,4 @@
+import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
+
+export const MAX_ENGINE_CAPTURE_TEXT_BYTES = 10 * 1024 * 1024;
+export const MAX_ENGINE_CAPTURE_BINARY_BYTES = MAX_VERSIONED_BINARY_FILE_BYTES;

@@ -115,7 +115,7 @@ async function writeShareViewText(input: {
       [{ path: path.normalized, operation: "write", contentKind: "text" }],
       store,
     );
-    await clearPendingMaterializationPaths(input.rootPath);
+    await clearPendingMaterializationPaths(input.rootPath, [path.normalized]);
     return {
       status: "written",
       contentHash: createHash("sha256").update(input.text).digest("hex"),

@@ -303,6 +303,8 @@ describe("refreshShareMountOnce", () => {
     expect(second).toEqual({
       status: "unchanged",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -348,6 +350,8 @@ describe("refreshShareMountOnce", () => {
     expect(outcome).toEqual({
       status: "updated",
       changedPaths: 1,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -374,6 +378,8 @@ describe("refreshShareMountOnce", () => {
     expect(outcome).toEqual({
       status: "ended",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -528,6 +534,8 @@ describe("refreshShareMountOnce", () => {
     expect(quiet).toEqual({
       status: "unchanged",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });

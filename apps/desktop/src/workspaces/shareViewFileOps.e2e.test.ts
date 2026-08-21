@@ -235,10 +235,28 @@ describe("share-view file operations through the real store", () => {
           view.workspaceId,
           view.store,
         ),
-      ).resolves.toEqual({ capturedPaths: 1, unjournalablePaths: [] });
+      ).resolves.toEqual({
+        capturedPaths: 1,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
       const afterOutside = replicationLogRows(view.rootPath);
       const outsideRows = afterOutside - beforeOutside;
       expect(outsideRows).toBeGreaterThan(0);
+      const outsideSummary = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments.find(
+        (moment) =>
+          moment.path === outsidePath && moment.metadata.origin === "local-file",
+      );
+      expect(outsideSummary?.metadata.origin).toBe("local-file");
+      const outsideMoment = outsideSummary
+        ? await view.store.getMoment({
+            workspaceId: view.workspaceId,
+            momentId: outsideSummary.id,
+          })
+        : null;
+      expect(outsideMoment?.payload.after.text).toBe("outside after\n");
 
       const result = await routeWorkspaceTextWrite({
         ...scope(view),
@@ -251,6 +269,20 @@ describe("share-view file operations through the real store", () => {
       expect(result.status).toBe("written");
       const inAppRows = replicationLogRows(view.rootPath) - afterOutside;
       expect(inAppRows).toBe(outsideRows);
+      const inAppSummary = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments.find(
+        (moment) =>
+          moment.path === inAppPath && moment.metadata.origin === "local-file",
+      );
+      expect(inAppSummary?.metadata.origin).toBe("local-file");
+      const inAppMoment = inAppSummary
+        ? await view.store.getMoment({
+            workspaceId: view.workspaceId,
+            momentId: inAppSummary.id,
+          })
+        : null;
+      expect(inAppMoment?.payload.after.text).toBe("in-app after\n");
     },
     60_000,
   );
@@ -965,6 +997,51 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "picture.png")),
       ).resolves.toEqual(Buffer.from([0x89, 0x50, 0x00, 0x01]));
       expect(await exists(join(view.rootPath, "docs", "folder"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "repairs an import whose store write landed before materialization failed",
+    async () => {
+      const view = await harness("dohc-share-import-repair-", "edit");
+      const sourceDir = await createTestScratch("dohc-share-import-repair-src-");
+      roots.push(sourceDir);
+      const source = join(sourceDir, "interrupted.md");
+      await writeFile(source, "imported body\n", "utf8");
+      await mkdir(join(view.rootPath, "docs"), { recursive: true });
+      const failingStore: CaptureVersionedTextStore = {
+        ...view.store,
+        async readTextFile() {
+          throw new Error("projection materialization failed");
+        },
+      };
+
+      await expect(
+        routeWorkspaceFileImport({
+          ...scope(view),
+          shareViewStore: () => failingStore,
+          absolutePaths: [source],
+          screenAgainstRoots: null,
+          targetDir: "docs",
+        }),
+      ).rejects.toThrow("projection materialization failed");
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      await expect(
+        readFile(join(view.rootPath, "docs", "interrupted.md"), "utf8"),
+      ).resolves.toBe("imported body\n");
+      expect(await storePaths(view)).toContain("docs/interrupted.md");
     },
     60_000,
   );

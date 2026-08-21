@@ -3313,6 +3313,17 @@ export const RefreshSharedViewResult = z.object({
   status: z.enum(["updated", "unchanged", "ended"]),
   changedPaths: z.number().int().nonnegative(),
   excludedPaths: z.array(z.string()),
+  unjournalablePaths: z.array(
+    z.object({
+      path: z.string(),
+      reason: z.enum([
+        "oversized-text",
+        "oversized-binary",
+        "non-utf8",
+        "non-file-replacement",
+      ]),
+    }),
+  ),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
   refusedOps: z.number().int().nonnegative(),

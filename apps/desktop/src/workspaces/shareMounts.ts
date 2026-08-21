@@ -309,6 +309,8 @@ export async function refreshShareMountOnce(input: {
     return {
       status: outcome.status === "ended" ? "ended" : "updated",
       changedPaths: outcome.changedPaths + repaired,
+      excludedPaths: outcome.excludedPaths,
+      unjournalablePaths: outcome.unjournalablePaths,
       // A repair changes what the projection holds, never why the pull
       // refused an op: those carry through untouched.
       refusedOps: outcome.refusedOps,

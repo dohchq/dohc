@@ -9,7 +9,12 @@ import {
   SharedFileReadOnlyError,
   type ShareViewChangedPath,
 } from "@dohc/workspace-contracts/relay";
-import { materializeSharedViewPaths, writeDiskContentToStore } from "./sharedView";
+import {
+  clearPendingMaterializationPaths,
+  materializeSharedViewPaths,
+  writeDiskContentToStore,
+  writePendingMaterializationPaths,
+} from "./sharedView";
 import {
   shareViewTakesLocalWrites,
   type ShareViewWriteScope,
@@ -113,6 +118,18 @@ function refuseUnlessWritable(shareView: ShareViewFileOpTarget): void {
   if (!shareViewTakesLocalWrites(shareView)) {
     throw new SharedFileReadOnlyError(readOnlyRefusal(shareView));
   }
+}
+
+async function materializeWithPendingRecord(
+  rootPath: string,
+  workspaceId: string,
+  changed: readonly ShareViewChangedPath[],
+  store: CaptureVersionedTextStore,
+): Promise<void> {
+  const paths = changed.map((change) => change.path);
+  await writePendingMaterializationPaths(rootPath, paths);
+  await materializeSharedViewPaths(rootPath, workspaceId, changed, store);
+  await clearPendingMaterializationPaths(rootPath, paths);
 }
 
 export async function routeWorkspaceFileCreate(
@@ -231,7 +248,7 @@ async function shareViewCreate(
     // The store has it and the folder does not, so the projection lost a file
     // the recipient can still see in the explorer. Put it back rather than
     // reporting success over a path that stays missing.
-    await materializeSharedViewPaths(
+    await materializeWithPendingRecord(
       input.rootPath,
       input.workspaceId,
       [
@@ -252,7 +269,7 @@ async function shareViewCreate(
     text: input.initialText,
     metadata: { origin: "local-file" },
   });
-  await materializeSharedViewPaths(
+  await materializeWithPendingRecord(
     input.rootPath,
     input.workspaceId,
     [{ path, operation: "write", contentKind: "text" }],
@@ -353,7 +370,12 @@ async function shareViewMove(
   if (!held.has(from) && !renamesInPlace) {
     changed.push({ path: from, operation: "delete", contentKind: "text" });
   }
-  await materializeSharedViewPaths(input.rootPath, input.workspaceId, changed, store);
+  await materializeWithPendingRecord(
+    input.rootPath,
+    input.workspaceId,
+    changed,
+    store,
+  );
   return to;
 }
 
@@ -447,7 +469,7 @@ async function shareViewDelete(
     // A delete cannot be put back, so the other rule applies: what happened is
     // visible. The projection follows the store for the files that actually
     // went, so nothing is left describing content the store no longer has.
-    await materializeSharedViewPaths(
+    await materializeWithPendingRecord(
       input.rootPath,
       input.workspaceId,
       applied.map((path) => ({
@@ -459,7 +481,7 @@ async function shareViewDelete(
     );
     throw error;
   }
-  await materializeSharedViewPaths(
+  await materializeWithPendingRecord(
     input.rootPath,
     input.workspaceId,
     [{ path: target, operation: "delete", contentKind: "text" }],
@@ -559,7 +581,12 @@ async function shareViewImport(
   } finally {
     // What landed is materialized even when a later source fails, so the
     // projection never lags the store.
-    await materializeSharedViewPaths(input.rootPath, input.workspaceId, changed, store);
+    await materializeWithPendingRecord(
+      input.rootPath,
+      input.workspaceId,
+      changed,
+      store,
+    );
   }
   return { imported, skipped };
 }

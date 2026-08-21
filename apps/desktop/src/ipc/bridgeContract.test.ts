@@ -110,16 +110,21 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
 
 describe("shared view refresh IPC contract", () => {
-  it("preserves excluded paths in the parsed refresh result", () => {
-    expect(
-      RefreshSharedViewResult.parse({
+  it("preserves pull exclusions and unjournalable paths independently", () => {
+    const parsed = RefreshSharedViewResult.parse({
         status: "unchanged",
         changedPaths: 0,
-        excludedPaths: ["docs/oversized.md"],
+        excludedPaths: ["docs/pull-excluded.md"],
+        unjournalablePaths: [
+          { path: "docs/oversized.md", reason: "oversized-text" },
+        ],
         refusedOps: 0,
         refusedDetail: null,
-      }).excludedPaths,
-    ).toEqual(["docs/oversized.md"]);
+      });
+    expect(parsed.excludedPaths).toEqual(["docs/pull-excluded.md"]);
+    expect(parsed.unjournalablePaths).toEqual([
+      { path: "docs/oversized.md", reason: "oversized-text" },
+    ]);
   });
 });
 

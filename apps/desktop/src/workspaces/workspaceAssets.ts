@@ -403,6 +403,14 @@ export function createOrderedWorkspaceTextAccess(deps: {
           run(() => deps.readTarget(target)),
         ),
       ),
+    orderedOnResolvedTarget: <T>(
+      rootPath: string,
+      resolvedTarget: string,
+      run: () => Promise<T>,
+    ): Promise<T> =>
+      scheduler.shared(rootPath, () =>
+        enqueueOrdered(targetTails, pathKey(resolvedTarget), run),
+      ),
   };
 }
 
@@ -506,6 +514,18 @@ export function withOrderedWorkspaceTextPath<T>(
       }
       throw error;
     });
+}
+
+export function withOrderedWorkspaceTargetPath<T>(
+  rootPath: string,
+  resolvedTarget: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return orderedWorkspaceTextAccess.orderedOnResolvedTarget(
+    rootPath,
+    resolvedTarget,
+    run,
+  );
 }
 
 export function withExclusiveWorkspaceOperation<T>(
