@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { killProcessTreePosix } from "../process/posixSpawn";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
 import {
@@ -47,7 +48,8 @@ export type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
 const MAX_LOG_ENTRIES = 500;
 const BUILD_TIMEOUT_MS = 120000;
 const BUILD_HARD_KILL_GRACE_MS = 5000;
-const DEV_URL_RE = /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s]*)?)/i;
+const DEV_URL_RE =
+  /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|\s)/i;
 // Dev tools colorize their "Local: http://..." line when FORCE_COLOR reaches
 // them (Playwright workers set it; user shells can too). Vite bolds the PORT
 // — "http://127.0.0.1:\x1b[1m5173\x1b[22m/" — which used to split the URL at
@@ -172,30 +174,46 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
   return { command, args };
 }
 
-function explicitHostBind(args: string[]): string | null {
+function explicitHostBinds(args: string[]): string[] {
+  const hosts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
-    const inlineHost = /^(?:--host|--hostname|-H)=(.+)$/i.exec(arg)?.[1];
-    if (inlineHost !== undefined) return inlineHost;
+    const inlineHost = /^(?:--host|--hostname|-H)=(.*)$/i.exec(arg)?.[1];
+    if (inlineHost !== undefined) {
+      hosts.push(inlineHost);
+      continue;
+    }
     if (HOST_BIND_FLAGS.has(arg)) {
       const next = args[index + 1];
-      return next && !next.startsWith("-") ? next : "";
+      hosts.push(next && !next.startsWith("-") ? next : "");
     }
   }
-  return null;
+  return hosts;
 }
 
 export function assertLoopbackOnlyDevServerCommand(command: string, args: string[]): void {
-  const host = explicitHostBind(args);
-  if (host === null) return;
-  if (host !== "" && isLoopbackHostname(host)) return;
-  const displayHost = host === "" ? "all interfaces" : host;
-  throw new Error(
-    `Site dev server command must bind to a loopback host, not ${displayHost}: ${[
-      command,
-      ...args,
-    ].join(" ")}`,
-  );
+  for (const host of explicitHostBinds(args)) {
+    if (host !== "" && isLoopbackHostname(host)) continue;
+    const displayHost = host === "" ? "all interfaces" : host;
+    throw new Error(
+      `Site dev server command must bind to a loopback host, not ${displayHost}: ${[
+        command,
+        ...args,
+      ].join(" ")}`,
+    );
+  }
+}
+
+export function packageManagerDevCommand(
+  manager: PackageManager,
+  script: "dev" | "start",
+  scriptBody: string,
+): ReturnType<typeof packageManagerCommand> {
+  const visibleCommand = splitCommandLine(scriptBody);
+  assertLoopbackOnlyDevServerCommand(visibleCommand.command, visibleCommand.args);
+  const packageCommand = packageManagerCommand(manager, script);
+  assertLoopbackOnlyDevServerCommand(packageCommand.command, packageCommand.args);
+  return packageCommand;
 }
 
 export function detectDevUrl(text: string): string | null {
@@ -321,19 +339,49 @@ async function stopChild(
 ): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   beforeKill?.();
-  await killChildTreeWin32(child);
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill("SIGTERM");
-  await new Promise<void>((resolve) => {
-    const hardKill = setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      resolve();
-    }, BUILD_HARD_KILL_GRACE_MS);
-    child.once("exit", () => {
-      clearTimeout(hardKill);
-      resolve();
+  if (process.platform === "win32") {
+    await killChildTreeWin32(child);
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGTERM");
+    await new Promise<void>((resolve) => {
+      const hardKill = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        resolve();
+      }, BUILD_HARD_KILL_GRACE_MS);
+      child.once("exit", () => {
+        clearTimeout(hardKill);
+        resolve();
+      });
     });
+    return;
+  }
+
+  const pid = child.pid;
+  if (pid === undefined) {
+    child.kill("SIGTERM");
+    return;
+  }
+  const exited =
+    child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  let captured: number[] = [];
+  try {
+    captured = await killProcessTreePosix(pid, "SIGTERM");
+  } catch {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  }
+  let graceTimer: NodeJS.Timeout | undefined;
+  const grace = new Promise<void>((resolve) => {
+    graceTimer = setTimeout(resolve, BUILD_HARD_KILL_GRACE_MS);
   });
+  await Promise.race([exited, grace]);
+  if (graceTimer) clearTimeout(graceTimer);
+  try {
+    await killProcessTreePosix(pid, "SIGKILL", { alsoSignal: captured });
+  } catch {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
 }
 
 async function pathExists(path: string): Promise<boolean> {

@@ -17,9 +17,10 @@ const site: SitePackageInfo = {
   packageManager: "pnpm",
   scripts: { dev: "vite", build: "vite build" },
   configuredScripts: {},
+  configuredBuildOutput: null,
   buildOutputs: ["dist"],
   sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
-  shareManifest: null,
+  shareManifest: { ok: false, reason: "no-runnable-artifact" },
   diagnostics: [],
   authority: { kind: "workspace" },
 };

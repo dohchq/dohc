@@ -18,6 +18,7 @@ import {
   detectBuildOutput,
   detectDevUrl,
   packageManagerCommand,
+  packageManagerDevCommand,
   splitCommandLine,
   startSiteDevServer,
   startStaticSitePreview,
@@ -99,6 +100,16 @@ describe("package manager helpers", () => {
     expect(packageManagerCommand("npm", "build")).toEqual({ command: "npm", args: ["run", "build"] });
   });
 
+  it("validates the visible body of package-backed dev scripts", () => {
+    expect(() =>
+      packageManagerDevCommand("pnpm", "dev", "vite --host 0.0.0.0"),
+    ).toThrow(/loopback/);
+    expect(packageManagerDevCommand("pnpm", "dev", "vite")).toEqual({
+      command: "pnpm",
+      args: ["dev"],
+    });
+  });
+
   it("extracts local dev server urls from common tool output", () => {
     expect(detectDevUrl("  Local:   http://localhost:5173/")).toBe("http://localhost:5173/");
     expect(detectDevUrl("ready on http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
@@ -112,6 +123,7 @@ describe("package manager helpers", () => {
     expect(detectDevUrl("ready on http://[2001:db8::1]:5173")).toBeNull();
     expect(detectDevUrl("ready on http://example.com:5173")).toBeNull();
     expect(detectDevUrl("ready on http://mysite.local:5173")).toBeNull();
+    expect(detectDevUrl("ready on http://localhost.tunnel.example:5173")).toBeNull();
     // Vite with FORCE_COLOR reaching it (Playwright workers set it; user
     // shells can too) bolds the PORT with ANSI SGR sequences mid-URL — the
     // port must not be dropped (a port-less URL loads a dead preview).
@@ -159,10 +171,57 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("vite", ["--host"]),
     ).toThrow(/all interfaces/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", [
+        "--host",
+        "127.0.0.1",
+        "--host",
+        "0.0.0.0",
+      ]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", [
+        "--host",
+        "127.0.0.1",
+        "--host",
+        "127.0.0.1",
+      ]),
+    ).not.toThrow();
   });
 });
 
 describe("startSiteDevServer", () => {
+  it.runIf(process.platform !== "win32")(
+    "stops descendants after the shell wrapper exits",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
+      const handle = await startSiteDevServer({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: "sh",
+        args: [
+          "-c",
+          "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43210'; wait",
+        ],
+        readyTimeoutMs: 5000,
+      });
+      const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
+      const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
+      expect(descendantPid).toBeGreaterThan(0);
+
+      try {
+        await handle.stop();
+        expect(() => process.kill(descendantPid, 0)).toThrow();
+      } finally {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // The fixed teardown already removed it.
+        }
+      }
+    },
+  );
+
   it("reports when a ready dev server exits on its own", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     const handle = await startSiteDevServer({

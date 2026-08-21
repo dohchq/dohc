@@ -11,14 +11,26 @@ export interface SiteScripts {
 
 export interface SitePackageDerivedFactsInput {
   root: string;
+  configuredBuildOutput?: string | null;
   buildOutputs: readonly string[];
   sourceFiles: readonly string[];
   scripts: SiteScripts;
   configuredScripts: SiteScripts;
 }
 
+export function preferredBuildOutput(
+  site: Pick<SitePackageDerivedFactsInput, "configuredBuildOutput" | "buildOutputs">,
+): string | null {
+  return site.configuredBuildOutput ?? site.buildOutputs[0] ?? null;
+}
+
 export function presentBuildOutput(site: SitePackageDerivedFactsInput): string | null {
-  for (const output of site.buildOutputs) {
+  const preferred = preferredBuildOutput(site);
+  const outputs = [
+    ...(preferred ? [preferred] : []),
+    ...site.buildOutputs,
+  ];
+  for (const output of new Set(outputs)) {
     const entry = site.root === "."
       ? `${output}/index.html`
       : `${site.root}/${output}/index.html`;
@@ -36,6 +48,7 @@ export function needsBuiltArtifact(site: SitePackageDerivedFactsInput): boolean 
     site.configuredScripts.start ||
     site.configuredScripts.build ||
     site.configuredScripts.preview ||
+    site.configuredBuildOutput ||
     site.buildOutputs.length > 0
   );
 }
@@ -55,6 +68,7 @@ export interface WorkspaceSite {
   entry?: string;
   packageManager?: SitePackageManager;
   scripts: SiteScripts;
+  configuredBuildOutput?: string;
   buildOutputs: string[];
   configPath?: string;
   diagnostics: SiteDiagnostic[];
@@ -207,9 +221,9 @@ function normalizeWorkspacePath(path: string): string | null {
     .replaceAll("\\", "/")
     .replace(/^\/+/, "")
     .split("/")
-    .filter((segment) => segment !== "" && segment !== ".")
-    .map(stripSiteIgnoredAliasSuffix);
-  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    .filter((segment) => segment !== "" && segment !== ".");
+  const aliasSegments = segments.map(stripSiteIgnoredAliasSuffix);
+  if (aliasSegments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     return null;
   }
   const normalized = segments.join("/");
@@ -647,8 +661,6 @@ function shouldIncludeCandidate(candidate: Candidate): boolean {
 function finalizeSite(candidate: Candidate): WorkspaceSite {
   const config = candidate.dohcConfig;
   const scripts = inferSiteScripts(candidate.packageJson, config);
-  const buildOutputs = new Set(candidate.buildOutputs);
-  if (config?.build?.output) buildOutputs.add(config.build.output);
 
   const configPath = candidate.dohcConfigPath ?? candidate.frameworkConfigPath;
   const entry = config?.preview?.entry ?? candidate.entry;
@@ -660,7 +672,8 @@ function finalizeSite(candidate: Candidate): WorkspaceSite {
     ...(entry ? { entry } : {}),
     ...(candidate.packageManager ? { packageManager: candidate.packageManager } : {}),
     scripts,
-    buildOutputs: [...buildOutputs].sort(),
+    ...(config?.build?.output ? { configuredBuildOutput: config.build.output } : {}),
+    buildOutputs: [...candidate.buildOutputs].sort(),
     ...(configPath ? { configPath } : {}),
     diagnostics: [...candidate.diagnostics],
   };
@@ -745,8 +758,8 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
     const outputDir = segments[index];
     const root = segments.slice(0, index).join("/");
     const candidate = getCandidate(candidates, root);
-    candidate.buildOutputs.add(outputDir);
     if (segments.slice(index + 1).join("/") === "index.html") {
+      candidate.buildOutputs.add(outputDir);
       candidate.hasBuildOutputSignal = true;
       candidate.entry ??= `${outputDir}/index.html`;
     }

@@ -2143,6 +2143,33 @@ const SiteShareManifest = z
     }
   });
 
+const SiteShareManifestResult = z.union([
+  z.object({ ok: z.literal(true), manifest: SiteShareManifest }),
+  z.object({ ok: z.literal(false), reason: z.literal("no-runnable-artifact") }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("byte-budget"),
+    limitBytes: z.number().int().positive(),
+    observedBytes: z.number().int().positive(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("file-count"),
+    limitFiles: z.number().int().positive(),
+    observedFiles: z.number().int().positive(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("unreadable"),
+    path: SiteSharePath,
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("non-file-reference"),
+    path: SiteSharePath,
+  }),
+]);
+
 const SitePackageInfo = z
   .object({
     root: PATH_STRING,
@@ -2155,9 +2182,10 @@ const SitePackageInfo = z
     packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
     scripts: SiteScripts,
     configuredScripts: SiteScripts,
+    configuredBuildOutput: PATH_STRING.nullable(),
     buildOutputs: z.array(PATH_STRING).max(100),
-    sourceFiles: z.array(PATH_STRING).max(1000),
-    shareManifest: SiteShareManifest.nullable(),
+    sourceFiles: z.array(PATH_STRING),
+    shareManifest: SiteShareManifestResult,
     diagnostics: z.array(SiteDiagnostic).max(100),
     authority: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("workspace") }),
@@ -2176,14 +2204,15 @@ const SitePackageInfo = z
         path: ["root"],
       });
     }
-    if (!site.shareManifest) return;
-    const paths = [site.shareManifest.entryPath, ...site.shareManifest.assets];
+    if (!site.shareManifest.ok) return;
+    const manifest = site.shareManifest.manifest;
+    const paths = [manifest.entryPath, ...manifest.assets];
     for (const path of paths) {
       if (!site.sourceFiles.includes(path)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: "site share manifest paths must exist in sourceFiles",
-          path: ["shareManifest"],
+          path: ["shareManifest", "manifest"],
         });
         return;
       }
@@ -2191,16 +2220,16 @@ const SitePackageInfo = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: "site share manifest paths must stay inside the site root",
-          path: ["shareManifest"],
+          path: ["shareManifest", "manifest"],
         });
         return;
       }
     }
-    if (!/\.html?$/i.test(site.shareManifest.entryPath)) {
+    if (!/\.html?$/i.test(manifest.entryPath)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "site share manifest entryPath must be HTML",
-        path: ["shareManifest", "entryPath"],
+        path: ["shareManifest", "manifest", "entryPath"],
       });
     }
   });

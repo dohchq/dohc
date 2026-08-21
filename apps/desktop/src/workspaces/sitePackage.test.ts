@@ -13,6 +13,10 @@ import { startStaticSitePreview } from "./siteRunner";
 
 let root: string;
 
+function manifestOf(site: Awaited<ReturnType<typeof listSitePackages>>[number] | undefined) {
+  return site?.shareManifest.ok ? site.shareManifest.manifest : null;
+}
+
 beforeEach(async () => {
   root = await createTestScratch("dohc-site-packages-");
 });
@@ -76,20 +80,20 @@ describe("shareMountRootForSite", () => {
       (candidate) => candidate.root === "shared-with-me/alex/portal",
     );
     expect(site).toBeDefined();
-    expect(site?.shareManifest).toEqual({
+    expect(manifestOf(site)).toEqual({
       entryPath: "shared-with-me/alex/portal/dist/index.html",
       assets: [
         "shared-with-me/alex/portal/dist/assets/chunk.js",
         "shared-with-me/alex/portal/dist/assets/main.js",
       ],
     });
-    expect(site?.shareManifest?.assets).not.toContain(
+    expect(manifestOf(site)?.assets).not.toContain(
       "shared-with-me/alex/portal/dist/assets/unused.js",
     );
-    expect(site?.shareManifest?.assets).not.toContain(
+    expect(manifestOf(site)?.assets).not.toContain(
       "shared-with-me/alex/portal/dist/assets/main.js.map",
     );
-    expect(site?.shareManifest?.assets).not.toContain(
+    expect(manifestOf(site)?.assets).not.toContain(
       "shared-with-me/alex/portal/dist/alternate.html",
     );
     expect(sharedStaticEntryRelativeToSite(site!)).toBe("dist/index.html");
@@ -149,7 +153,7 @@ describe("shareMountRootForSite", () => {
       (candidate) => candidate.root === "shared-with-me/alex/plain",
     );
     expect(site?.packagePath).toBe("shared-with-me/alex/plain/package.json");
-    expect(site?.shareManifest).toEqual({
+    expect(manifestOf(site)).toEqual({
       entryPath: "shared-with-me/alex/plain/index.html",
       assets: [],
     });
@@ -180,12 +184,47 @@ describe("listSitePackages", () => {
     expect(sites.find((site) => site.root === "dash")).toMatchObject({
       packageManager: "pnpm",
       scripts: { dev: "vite", build: "vite build" },
-      shareManifest: null,
+      shareManifest: { ok: false, reason: "no-runnable-artifact" },
     });
-    expect(sites.find((site) => site.root === "report")?.shareManifest).toEqual({
+    expect(manifestOf(sites.find((site) => site.root === "report"))).toEqual({
       entryPath: "report/index.html",
       assets: [],
     });
+  });
+
+  it("does not invent a site entry for an incomplete output folder", async () => {
+    await mkdir(join(root, "orphan", "dist"), { recursive: true });
+    await writeFile(join(root, "orphan", "dist", "README.md"), "not a build");
+
+    const sites = await listSitePackages(root);
+
+    expect(sites.find((site) => site.root === "orphan")).toBeUndefined();
+  });
+
+  it("includes referenced browser files without filtering by extension", async () => {
+    await mkdir(join(root, "media"), { recursive: true });
+    await writeFile(
+      join(root, "media", "index.html"),
+      '<video src="./intro.mp4"></video>',
+    );
+    await writeFile(join(root, "media", "intro.mp4"), "video");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "media");
+
+    expect(manifestOf(site)?.assets).toContain("media/intro.mp4");
+  });
+
+  it("resolves relative references from the document base href", async () => {
+    await mkdir(join(root, "manual", "docs"), { recursive: true });
+    await writeFile(
+      join(root, "manual", "index.html"),
+      '<base href="/docs/"><script src="app.js"></script>',
+    );
+    await writeFile(join(root, "manual", "docs", "app.js"), "window.ready = true;");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "manual");
+
+    expect(manifestOf(site)?.assets).toContain("manual/docs/app.js");
   });
 
   it("emits exact approved static browser files instead of a recursive site root", async () => {
@@ -238,7 +277,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "report", "alternate.html"), "<h1>Alternate</h1>");
 
     const site = (await listSitePackages(root)).find((candidate) => candidate.root === "report");
-    expect(site?.shareManifest).toEqual({
+    expect(manifestOf(site)).toEqual({
       entryPath: "report/index.html",
       assets: [
         "report/app.js",
@@ -254,12 +293,12 @@ describe("listSitePackages", () => {
         "report/vendor/dohc-sdk/index.js",
       ],
     });
-    expect(site?.shareManifest?.assets).not.toContain("report/private/secret.json");
-    expect(site?.shareManifest?.assets).not.toContain("report/secret.json");
-    expect(site?.shareManifest?.assets).not.toContain("report/data/customers.json");
-    expect(site?.shareManifest?.assets).not.toContain("report/notes.txt");
-    expect(site?.shareManifest?.assets).not.toContain("report/notes.md");
-    expect(site?.shareManifest?.assets).not.toContain("report/alternate.html");
+    expect(manifestOf(site)?.assets).not.toContain("report/private/secret.json");
+    expect(manifestOf(site)?.assets).not.toContain("report/secret.json");
+    expect(manifestOf(site)?.assets).not.toContain("report/data/customers.json");
+    expect(manifestOf(site)?.assets).not.toContain("report/notes.txt");
+    expect(manifestOf(site)?.assets).not.toContain("report/notes.md");
+    expect(manifestOf(site)?.assets).not.toContain("report/alternate.html");
   });
 
   it("fails closed when an exact share manifest would exceed the relay selector cap", async () => {
@@ -278,7 +317,29 @@ describe("listSitePackages", () => {
     );
 
     const site = (await listSitePackages(root)).find((candidate) => candidate.root === "crowded");
-    expect(site?.shareManifest).toBeNull();
+    expect(site?.shareManifest).toEqual({
+      ok: false,
+      reason: "file-count",
+      limitFiles: 100,
+      observedFiles: 101,
+    });
+  });
+
+  it("reports the byte budget and observed bytes when scanning exceeds it", async () => {
+    await mkdir(join(root, "large"), { recursive: true });
+    const html = '<script src="./app.js"></script>';
+    const script = "x".repeat(4 * 1024 * 1024);
+    await writeFile(join(root, "large", "index.html"), html);
+    await writeFile(join(root, "large", "app.js"), script);
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "large");
+
+    expect(site?.shareManifest).toEqual({
+      ok: false,
+      reason: "byte-budget",
+      limitBytes: 4 * 1024 * 1024,
+      observedBytes: Buffer.byteLength(html) + Buffer.byteLength(script),
+    });
   });
 
   it("marks mounted sites with share authority and keeps owned sites unrestricted", async () => {

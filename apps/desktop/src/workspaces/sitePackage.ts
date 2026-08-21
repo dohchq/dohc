@@ -31,17 +31,38 @@ export interface SitePackageInfo {
   packageManager: SitePackageManager | null;
   scripts: SiteScripts;
   configuredScripts: SiteScripts;
+  configuredBuildOutput: string | null;
   buildOutputs: string[];
   sourceFiles: string[];
-  shareManifest: {
-    entryPath: string;
-    assets: string[];
-  } | null;
+  shareManifest: SiteShareManifestResult;
   diagnostics: SiteDiagnostic[];
   authority:
     | { kind: "workspace" }
     | { kind: "share"; mountRoot: string };
 }
+
+export interface SiteShareManifest {
+  entryPath: string;
+  assets: string[];
+}
+
+export type SiteShareManifestResult =
+  | { ok: true; manifest: SiteShareManifest }
+  | { ok: false; reason: "no-runnable-artifact" }
+  | {
+      ok: false;
+      reason: "byte-budget";
+      limitBytes: number;
+      observedBytes: number;
+    }
+  | {
+      ok: false;
+      reason: "file-count";
+      limitFiles: number;
+      observedFiles: number;
+    }
+  | { ok: false; reason: "unreadable"; path: string }
+  | { ok: false; reason: "non-file-reference"; path: string };
 
 function normalizeRoot(root: string): string {
   return root === "" ? "." : root;
@@ -51,13 +72,8 @@ function denormalizeRoot(root: string): string {
   return root === "." ? "" : root;
 }
 
-// Conventional web build output folders that can signal a built/static site
-// even when discovery sees the folder before an index.html entry underneath it.
-const BUILD_OUTPUT_FOLDER_NAMES = ["dist", "build", "out"];
 const MAX_SHARE_MANIFEST_FILES = 100;
 const MAX_SHARE_MANIFEST_SCAN_BYTES = 4 * 1024 * 1024;
-const SHAREABLE_BROWSER_FILE_RE =
-  /\.(?:avif|css|gif|html?|ico|jpe?g|js|json|map|mjs|png|svg|ttf|txt|wasm|webmanifest|webp|woff2?)$/i;
 
 function joinSitePath(root: string, relativePath: string): string {
   const normalized = normalizeRoot(root);
@@ -104,6 +120,7 @@ function localReferenceCandidates(
   fromPath: string,
   artifactRoot: string,
   available: ReadonlySet<string>,
+  baseDirectory: string | null = null,
 ): string[] {
   const raw = rawReference.trim().split(/[?#]/, 1)[0]?.trim() ?? "";
   if (
@@ -122,7 +139,7 @@ function localReferenceCandidates(
   const candidate = posix.normalize(
     decoded.startsWith("/")
       ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
-      : posix.join(posix.dirname(fromPath), decoded),
+      : posix.join(baseDirectory ?? posix.dirname(fromPath), decoded),
   );
   if (
     !pathRelativeToArtifact(artifactRoot, candidate) ||
@@ -136,6 +153,47 @@ function localReferenceCandidates(
     posix.join(candidate, "index.html"),
   ];
   return [...new Set(variants)].filter((path) => available.has(path));
+}
+
+function htmlBaseDirectory(
+  text: string,
+  fromPath: string,
+  artifactRoot: string,
+): string | null {
+  const baseTag = /<base\b[^>]*>/i.exec(text)?.[0];
+  if (!baseTag) return null;
+  const hrefMatch =
+    /\bhref\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>]{1,2048}))/i.exec(
+      baseTag,
+    );
+  const href = (hrefMatch?.[1] ?? hrefMatch?.[2] ?? hrefMatch?.[3])?.trim();
+  if (
+    !href ||
+    href.startsWith("#") ||
+    href.startsWith("//") ||
+    /^(?:data|https?|javascript|mailto|tel):/i.test(href)
+  ) {
+    return null;
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "");
+  } catch {
+    return null;
+  }
+  if (!decoded) return null;
+  const artifactBase = artifactRoot === "." ? "" : artifactRoot;
+  const resolved = posix.normalize(
+    decoded.startsWith("/")
+      ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
+      : posix.join(posix.dirname(fromPath), decoded),
+  );
+  const directory = decoded.endsWith("/") ? resolved : posix.dirname(resolved);
+  return (directory === artifactRoot ||
+    pathRelativeToArtifact(artifactRoot, directory) !== null) &&
+    !hasIgnoredSegment(directory)
+    ? directory
+    : null;
 }
 
 function referencesFromWebManifest(text: string): string[] {
@@ -186,7 +244,8 @@ function referencesFromBrowserText(text: string, sourcePath: string): string[] {
 
   if (/\.html?$/i.test(sourcePath)) {
     const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
-    for (const match of text.matchAll(attribute)) {
+    const htmlWithoutBase = text.replace(/<base\b[^>]*>/gi, "");
+    for (const match of htmlWithoutBase.matchAll(attribute)) {
       const value = (match[2] ?? match[3] ?? match[4])?.trim();
       if (!value) continue;
       if (match[1]?.toLowerCase() !== "srcset") {
@@ -219,7 +278,7 @@ function referencesFromBrowserText(text: string, sourcePath: string): string[] {
 async function shareManifestForSite(
   rootPath: string,
   site: Omit<SitePackageInfo, "shareManifest">,
-): Promise<SitePackageInfo["shareManifest"]> {
+): Promise<SiteShareManifestResult> {
   const output = presentBuildOutput(site);
   let artifactRoot: string | null = null;
   let entryPath: string | null = null;
@@ -230,22 +289,27 @@ async function shareManifestForSite(
   } else if (!needsBuiltArtifact(site) && site.entryPath) {
     artifactRoot = site.root;
     const entryRelative = pathRelativeToArtifact(artifactRoot, site.entryPath);
-    if (!entryRelative || !/\.html?$/i.test(entryRelative)) return null;
+    if (!entryRelative || !/\.html?$/i.test(entryRelative)) {
+      return { ok: false, reason: "no-runnable-artifact" };
+    }
     entryPath = site.entryPath;
   }
 
-  if (!artifactRoot || !entryPath) return null;
+  if (!artifactRoot || !entryPath) {
+    return { ok: false, reason: "no-runnable-artifact" };
+  }
   const available = new Set(
     site.sourceFiles.filter(
       (path) =>
         path !== site.packagePath &&
         path !== site.configPath &&
         !hasIgnoredSegment(path) &&
-        SHAREABLE_BROWSER_FILE_RE.test(path) &&
         pathRelativeToArtifact(artifactRoot, path) !== null,
     ),
   );
-  if (!available.has(entryPath)) return null;
+  if (!available.has(entryPath)) {
+    return { ok: false, reason: "no-runnable-artifact" };
+  }
 
   const approved = new Set([entryPath]);
   const scanned = new Set<string>();
@@ -258,29 +322,56 @@ async function shareManifestForSite(
     try {
       const info = await stat(join(rootPath, current));
       scannedBytes += info.size;
-      if (!info.isFile() || scannedBytes > MAX_SHARE_MANIFEST_SCAN_BYTES) return null;
+      if (!info.isFile()) {
+        return { ok: false, reason: "non-file-reference", path: current };
+      }
+      if (scannedBytes > MAX_SHARE_MANIFEST_SCAN_BYTES) {
+        return {
+          ok: false,
+          reason: "byte-budget",
+          limitBytes: MAX_SHARE_MANIFEST_SCAN_BYTES,
+          observedBytes: scannedBytes,
+        };
+      }
       const text = await readFile(join(rootPath, current), "utf8");
+      const baseDirectory = /\.html?$/i.test(current)
+        ? htmlBaseDirectory(text, current, artifactRoot)
+        : null;
       for (const reference of referencesFromBrowserText(text, current)) {
         for (const target of localReferenceCandidates(
           reference,
           current,
           artifactRoot,
           available,
+          baseDirectory,
         )) {
           approved.add(target);
           queue.push(target);
         }
       }
     } catch {
-      return null;
+      return { ok: false, reason: "unreadable", path: current };
     }
   }
 
   const files = [...approved].sort((a, b) => a.localeCompare(b));
-  if (files.length === 0 || files.length > MAX_SHARE_MANIFEST_FILES) return null;
+  if (files.length === 0) {
+    return { ok: false, reason: "no-runnable-artifact" };
+  }
+  if (files.length > MAX_SHARE_MANIFEST_FILES) {
+    return {
+      ok: false,
+      reason: "file-count",
+      limitFiles: MAX_SHARE_MANIFEST_FILES,
+      observedFiles: files.length,
+    };
+  }
   return {
-    entryPath,
-    assets: files.filter((path) => path !== entryPath),
+    ok: true,
+    manifest: {
+      entryPath,
+      assets: files.filter((path) => path !== entryPath),
+    },
   };
 }
 
@@ -367,6 +458,7 @@ async function mapWorkspaceSite(
     packageManager: site.packageManager ?? null,
     scripts: site.scripts,
     configuredScripts,
+    configuredBuildOutput: site.configuredBuildOutput ?? null,
     buildOutputs: site.buildOutputs,
     sourceFiles,
     diagnostics: site.diagnostics,
@@ -432,10 +524,7 @@ async function sourceForFile(rootPath: string, path: string): Promise<string | W
 export async function listSitePackages(rootPath: string): Promise<SitePackageInfo[]> {
   const listed = await listFiles(rootPath);
   const sources = await Promise.all(listed.files.map((file) => sourceForFile(rootPath, file.path)));
-  const folderSignals = listed.folders
-    .filter((folder) => BUILD_OUTPUT_FOLDER_NAMES.includes(posix.basename(folder)))
-    .map((folder) => `${folder}/index.html`);
-  const sites = discoverSites([...sources, ...folderSignals]);
+  const sites = discoverSites(sources);
   const mapped = await Promise.all(
     sites.map(async (site) =>
       mapWorkspaceSite(

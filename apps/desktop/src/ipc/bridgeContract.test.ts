@@ -1017,9 +1017,10 @@ describe("site IPC contract", () => {
             packageManager: "pnpm",
             scripts: { dev: "vite", build: "vite build" },
             configuredScripts: {},
+            configuredBuildOutput: null,
             buildOutputs: ["dist"],
             sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
-            shareManifest: null,
+            shareManifest: { ok: false, reason: "no-runnable-artifact" },
             diagnostics: [],
             authority: { kind: "workspace" },
           },
@@ -1041,15 +1042,48 @@ describe("site IPC contract", () => {
             packageManager: null,
             scripts: {},
             configuredScripts: {},
+            configuredBuildOutput: null,
             buildOutputs: [],
             sourceFiles: [],
-            shareManifest: null,
+            shareManifest: { ok: false, reason: "no-runnable-artifact" },
             diagnostics: [],
             authority: { kind: "workspace" },
           },
         ],
       }).sites[0]?.entryPath,
     ).toBeNull();
+  });
+
+  it("accepts a site with more than 1000 discovered source files", () => {
+    const sourceFiles = Array.from(
+      { length: 1001 },
+      (_, index) => `large-site/assets/${index}.js`,
+    );
+
+    expect(
+      ListSitesResult.parse({
+        sites: [
+          {
+            root: "large-site",
+            title: "Large site",
+            kind: "package",
+            confidence: "high",
+            entryPath: null,
+            configPath: null,
+            packagePath: null,
+            packageManager: "pnpm",
+            scripts: { dev: "vite" },
+            configuredScripts: {},
+            configuredBuildOutput: null,
+            buildOutputs: [],
+            sourceFiles,
+            shareManifest: { ok: false, reason: "no-runnable-artifact" },
+            diagnostics: [],
+            authority: { kind: "workspace" },
+          },
+        ],
+      }).sites[0]?.sourceFiles,
+    ).toHaveLength(1001);
   });
 
   it("requires a mount root for shared-site authority", () => {
@@ -1064,11 +1098,15 @@ describe("site IPC contract", () => {
       packageManager: null,
       scripts: {},
       configuredScripts: {},
+      configuredBuildOutput: null,
       buildOutputs: [],
       sourceFiles: ["shared-with-me/alex/report/index.html"],
       shareManifest: {
-        entryPath: "shared-with-me/alex/report/index.html",
-        assets: [],
+        ok: true,
+        manifest: {
+          entryPath: "shared-with-me/alex/report/index.html",
+          assets: [],
+        },
       },
       diagnostics: [],
     };

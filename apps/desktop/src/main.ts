@@ -2,6 +2,7 @@ import {
   defaultWorkspaceRoot,
   isSharedWithMePath,
   normalizeAbsolutePath,
+  preferredBuildOutput,
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
@@ -624,6 +625,7 @@ import {
 import {
   buildSite,
   packageManagerCommand,
+  packageManagerDevCommand,
   splitCommandLine,
   startSiteDevServer,
   startStaticSitePreview,
@@ -1235,6 +1237,13 @@ function commandForSiteScript(
   const configured = site.scripts[script];
   if (!configured) throw new Error(`Site has no ${script} script: ${site.root}`);
   if (site.packagePath) {
+    if (script === "dev" || script === "start") {
+      // This checks each visible host flag in the package script text. It
+      // cannot trace shell functions, environment-driven binds, or config-file
+      // binds, so the spawned command still relies on each tool's loopback
+      // default when the visible script contains no host flag.
+      return packageManagerDevCommand(site.packageManager ?? "npm", script, configured);
+    }
     return packageManagerCommand(site.packageManager ?? "npm", script);
   }
   return splitCommandLine(configured);
@@ -1371,7 +1380,7 @@ async function startPreviewForSiteUnlocked(
         exitCode: number | null;
       }
     | undefined;
-  let outputRoot = input.site.buildOutputs[0] ?? null;
+  let outputRoot = preferredBuildOutput(input.site);
   if (input.site.scripts.build) {
     const command = commandForSiteScript(input.site, "build");
     const result = await buildSite({

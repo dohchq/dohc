@@ -119,13 +119,36 @@ export interface SiteShareTarget {
 /** Produces a relay selector containing the runnable browser artifact only. */
 export function shareTargetForSite(site: SitePackageInfo): SiteShareTarget | null {
   if (site.authority.kind === "share") return null;
-  const manifest = site.shareManifest;
-  if (!manifest) return null;
+  if (!site.shareManifest.ok) return null;
+  const manifest = site.shareManifest.manifest;
   const paths = [manifest.entryPath, ...manifest.assets];
   if (paths.length === 0 || paths.length > 100 || new Set(paths).size !== paths.length) {
     return null;
   }
   return { paths, label: site.title };
+}
+
+function formatMiB(bytes: number): string {
+  const value = bytes / (1024 * 1024);
+  return `${Number.isInteger(value) ? value : value.toFixed(1)} MiB`;
+}
+
+function shareRefusalMessage(
+  result: Extract<SitePackageInfo["shareManifest"], { ok: false }>,
+): string {
+  if (result.reason === "byte-budget") {
+    return `dohc scanned ${formatMiB(result.observedBytes)} for sharing. The configured limit is ${formatMiB(result.limitBytes)}. Reduce the site's referenced files and try again.`;
+  }
+  if (result.reason === "file-count") {
+    return `dohc found ${result.observedFiles} files for sharing. The configured limit is ${result.limitFiles} files. Remove referenced files and try again.`;
+  }
+  if (result.reason === "unreadable") {
+    return `dohc could not read ${result.path}. Check that the file is readable, then try again.`;
+  }
+  if (result.reason === "non-file-reference") {
+    return `dohc found a shared reference that is not a file: ${result.path}. Replace the reference, then try again.`;
+  }
+  return "This site does not have a runnable static artifact to share.";
 }
 
 export function SitePreviewPage(props: {
@@ -267,15 +290,10 @@ export function SitePreviewPage(props: {
       }
       if (!target) {
         if (isCurrent()) {
-          const fileCount = latest.shareManifest
-            ? 1 + latest.shareManifest.assets.length
-            : 0;
           setActionError(
-            fileCount > 100
-              ? latest.root === "."
-                ? "This workspace root has more than 100 browser files, more than sharing allows. Move the site into its own folder first."
-                : "This site has more than 100 browser files, more than sharing allows."
-              : "This site does not have a runnable static artifact to share.",
+            latest.shareManifest.ok
+              ? "This site does not have a runnable static artifact to share."
+              : shareRefusalMessage(latest.shareManifest),
           );
         }
         return;
@@ -337,7 +355,10 @@ export function SitePreviewPage(props: {
   }
 
   const site = load.status === "ready" ? load.site : null;
-  const canShare = site?.authority.kind === "workspace" && !!props.onShareSite;
+  const canShare =
+    !props.sharedView &&
+    site?.authority.kind === "workspace" &&
+    !!props.onShareSite;
 
   return (
     <div data-testid="site-preview-page" className="flex min-h-0 flex-1 flex-col bg-bg">

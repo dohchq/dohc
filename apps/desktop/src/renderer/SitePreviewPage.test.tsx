@@ -9,6 +9,18 @@ import type {
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { shareTargetForSite, SitePreviewPage } from "./SitePreviewPage";
 
+function readyShare(
+  entryPath: string,
+  assets: string[] = [],
+): SitePackageInfo["shareManifest"] {
+  return { ok: true, manifest: { entryPath, assets } };
+}
+
+const noRunnableArtifact = {
+  ok: false,
+  reason: "no-runnable-artifact",
+} as const;
+
 const site: SitePackageInfo = {
   root: "report",
   title: "Report",
@@ -20,9 +32,10 @@ const site: SitePackageInfo = {
   packageManager: null,
   scripts: {},
   configuredScripts: {},
+  configuredBuildOutput: null,
   buildOutputs: [],
   sourceFiles: ["report/index.html"],
-  shareManifest: { entryPath: "report/index.html", assets: [] },
+  shareManifest: readyShare("report/index.html"),
   diagnostics: [],
   authority: { kind: "workspace" },
 };
@@ -181,14 +194,16 @@ describe("SitePreviewPage", () => {
         "report/src/main.tsx",
         "report/dist/index.html",
       ],
-      shareManifest: { entryPath: "report/dist/index.html", assets: [] },
+      shareManifest: readyShare("report/dist/index.html"),
     });
+    const onShareSite = vi.fn();
 
     render(
       <SitePreviewPage
         workspaceId="ws-sites"
         siteRoot="report"
         sharedView
+        onShareSite={onShareSite}
       />,
     );
 
@@ -201,6 +216,7 @@ describe("SitePreviewPage", () => {
     expect(screen.getByTestId("site-preview-static")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-dev")).toBeNull();
     expect(screen.queryByTestId("site-preview-build")).toBeNull();
+    expect(screen.queryByTestId("site-preview-share")).toBeNull();
   });
 
   it("reuses the last successful preview mode when it remains available", async () => {
@@ -234,7 +250,7 @@ describe("SitePreviewPage", () => {
         `${sharedRoot}/index.html`,
         `${sharedRoot}/dist/index.html`,
       ],
-      shareManifest: { entryPath: `${sharedRoot}/dist/index.html`, assets: [] },
+      shareManifest: readyShare(`${sharedRoot}/dist/index.html`),
       authority: { kind: "share", mountRoot: "shared-with-me/alex" },
     });
     const onShareSite = vi.fn();
@@ -279,6 +295,101 @@ describe("SitePreviewPage", () => {
     });
   });
 
+  it("names the byte budget and observed scan size when sharing is refused", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      shareManifest: {
+        ok: false,
+        reason: "byte-budget",
+        limitBytes: 4 * 1024 * 1024,
+        observedBytes: 5 * 1024 * 1024,
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(
+      await screen.findByText(
+        "dohc scanned 5 MiB for sharing. The configured limit is 4 MiB. Reduce the site's referenced files and try again.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("names the file limit and observed count when sharing is refused", async () => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      shareManifest: {
+        ok: false,
+        reason: "file-count",
+        limitFiles: 100,
+        observedFiles: 101,
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(
+      await screen.findByText(
+        "dohc found 101 files for sharing. The configured limit is 100 files. Remove referenced files and try again.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it.each([
+    [
+      { ok: false, reason: "unreadable", path: "report/app.js" } as const,
+      "dohc could not read report/app.js. Check that the file is readable, then try again.",
+    ],
+    [
+      {
+        ok: false,
+        reason: "non-file-reference",
+        path: "report/assets",
+      } as const,
+      "dohc found a shared reference that is not a file: report/assets. Replace the reference, then try again.",
+    ],
+    [
+      noRunnableArtifact,
+      "This site does not have a runnable static artifact to share.",
+    ],
+  ])("renders the share refusal reason %#", async (shareManifest, message) => {
+    bridgeMock.getSitePackage.mockResolvedValueOnce({
+      ...site,
+      shareManifest,
+    });
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={vi.fn()}
+      />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(await screen.findByText(message)).toBeTruthy();
+  });
+
   it("does not open a stale share dialog when build refresh finishes after site replacement", async () => {
     const pendingRefresh = deferred<SitePackageInfo | null>();
     const buildableSite: SitePackageInfo = {
@@ -288,7 +399,7 @@ describe("SitePreviewPage", () => {
       scripts: { dev: "vite", build: "vite build" },
       buildOutputs: ["dist"],
       sourceFiles: ["report/package.json", "report/src/main.tsx"],
-      shareManifest: null,
+      shareManifest: noRunnableArtifact,
     };
     const replacementSite: SitePackageInfo = {
       ...site,
@@ -296,7 +407,7 @@ describe("SitePreviewPage", () => {
       title: "Replacement",
       entryPath: "replacement/index.html",
       sourceFiles: ["replacement/index.html"],
-      shareManifest: { entryPath: "replacement/index.html", assets: [] },
+      shareManifest: readyShare("replacement/index.html"),
     };
     bridgeMock.getSitePackage
       .mockResolvedValueOnce(buildableSite)
@@ -348,7 +459,7 @@ describe("SitePreviewPage", () => {
       pendingRefresh.resolve({
         ...buildableSite,
         sourceFiles: [...buildableSite.sourceFiles, "report/dist/index.html"],
-        shareManifest: { entryPath: "report/dist/index.html", assets: [] },
+        shareManifest: readyShare("report/dist/index.html"),
       });
       await pendingRefresh.promise;
     });
@@ -365,7 +476,7 @@ describe("SitePreviewPage", () => {
       scripts: { dev: "vite", build: "vite build" },
       buildOutputs: ["dist"],
       sourceFiles: ["report/package.json", "report/src/main.tsx"],
-      shareManifest: null,
+      shareManifest: noRunnableArtifact,
     };
     const replacementSite: SitePackageInfo = {
       ...site,
@@ -373,7 +484,7 @@ describe("SitePreviewPage", () => {
       title: "Replacement",
       entryPath: "replacement/index.html",
       sourceFiles: ["replacement/index.html"],
-      shareManifest: { entryPath: "replacement/index.html", assets: [] },
+      shareManifest: readyShare("replacement/index.html"),
     };
     bridgeMock.getSitePackage
       .mockResolvedValueOnce(buildableSite)
@@ -437,10 +548,9 @@ describe("SitePreviewPage", () => {
           "report/dist/index.html",
           "report/dist/assets/main.js",
         ],
-        shareManifest: {
-          entryPath: "report/dist/index.html",
-          assets: ["report/dist/assets/main.js"],
-        },
+        shareManifest: readyShare("report/dist/index.html", [
+          "report/dist/assets/main.js",
+        ]),
       }),
     ).toEqual({
       paths: ["report/dist/index.html", "report/dist/assets/main.js"],
@@ -459,10 +569,10 @@ describe("SitePreviewPage", () => {
           "report/package.json",
           "report/vendor/dohc-sdk/dist/index.js",
         ],
-        shareManifest: {
-          entryPath: "report/index.html",
-          assets: ["report/app.js", "report/vendor/dohc-sdk/dist/index.js"],
-        },
+        shareManifest: readyShare("report/index.html", [
+          "report/app.js",
+          "report/vendor/dohc-sdk/dist/index.js",
+        ]),
       }),
     ).toEqual({
       paths: [
@@ -489,14 +599,11 @@ describe("SitePreviewPage", () => {
           "notes/private.md",
           "projects/other/index.html",
         ],
-        shareManifest: {
-          entryPath: "index.html",
-          assets: [
-            "app.js",
-            "assets/logo.png",
-            "vendor/dohc-sdk/dist/index.js",
-          ],
-        },
+        shareManifest: readyShare("index.html", [
+          "app.js",
+          "assets/logo.png",
+          "vendor/dohc-sdk/dist/index.js",
+        ]),
       }),
     ).toEqual({
       paths: [
@@ -513,7 +620,7 @@ describe("SitePreviewPage", () => {
     expect(
       shareTargetForSite({
         ...site,
-        shareManifest: null,
+        shareManifest: noRunnableArtifact,
         sourceFiles: [
           "report/index.html",
           "report/app.js",
@@ -654,7 +761,7 @@ describe("SitePreviewPage", () => {
       title: "Replacement",
       entryPath: "replacement/index.html",
       sourceFiles: ["replacement/index.html"],
-      shareManifest: { entryPath: "replacement/index.html", assets: [] },
+      shareManifest: readyShare("replacement/index.html"),
     });
     bridgeMock.startSitePreview.mockResolvedValueOnce({
       siteRoot: "replacement",

@@ -8,6 +8,7 @@ import {
   needsBuiltArtifact,
   packageManagerFromFiles,
   parseDohcSiteConfig,
+  preferredBuildOutput,
   presentBuildOutput,
 } from "./sites";
 
@@ -183,9 +184,40 @@ describe("discoverSites", () => {
       packageManager: "bun",
       configPath: "research/site/dohc.json",
       scripts: { dev: "pnpm dev", build: "pnpm build" },
-      buildOutputs: ["public/dist"],
+      configuredBuildOutput: "public/dist",
+      buildOutputs: [],
       diagnostics: [],
     });
+  });
+
+  it("keeps configured build output separate from inferred output order", () => {
+    const [site] = discoverSites([
+      {
+        path: "portal/dohc.json",
+        body: JSON.stringify({
+          type: "site",
+          build: { command: "vite build", output: "dist" },
+        }),
+      },
+      "portal/build/index.html",
+      "portal/dist/index.html",
+    ]);
+
+    expect(site).toMatchObject({
+      configuredBuildOutput: "dist",
+      buildOutputs: ["build", "dist"],
+    });
+    expect(preferredBuildOutput(site)).toBe("dist");
+    expect(
+      presentBuildOutput({
+        root: site.root,
+        configuredBuildOutput: site.configuredBuildOutput,
+        buildOutputs: site.buildOutputs,
+        sourceFiles: ["portal/build/index.html", "portal/dist/index.html"],
+        scripts: site.scripts,
+        configuredScripts: {},
+      }),
+    ).toBe("dist");
   });
 
   it("surfaces invalid dohc.json diagnostics without hiding the site", () => {
@@ -221,6 +253,21 @@ describe("discoverSites", () => {
         diagnostics: [],
       },
     ]);
+  });
+
+  it("does not count an output folder without its root index", () => {
+    const [site] = discoverSites([
+      {
+        path: "portal/package.json",
+        body: JSON.stringify({
+          scripts: { dev: "vite" },
+          dependencies: { vite: "latest" },
+        }),
+      },
+      "portal/build/README.md",
+    ]);
+
+    expect(site?.buildOutputs).toEqual([]);
   });
 
   it("ignores workspace internals, package caches, and build cache internals", () => {
@@ -276,6 +323,10 @@ describe("discoverSites", () => {
 
   it("ignores site paths with Windows-aliased traversal segments", () => {
     expect(discoverSites(["evil/.. /index.html", "evil/... /index.html"])).toEqual([]);
+  });
+
+  it("keeps trailing dots in real path segments", () => {
+    expect(discoverSites(["notes./index.html"])[0]?.root).toBe("notes.");
   });
 
   it("keeps broken package.json repairable when it looks like a site root", () => {
