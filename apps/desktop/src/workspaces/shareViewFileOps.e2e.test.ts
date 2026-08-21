@@ -16,6 +16,7 @@ import {
 import {
   captureSharedViewLocalDivergence,
   materializeSharedViewPaths,
+  withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
@@ -367,6 +368,95 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
+    "keeps refresh capture outside a rename's store-to-projection gap",
+    async () => {
+      const view = await harness("dohc-share-rename-capture-race-", "edit");
+      const fromPath = "docs/note.md";
+      const toPath = "docs/renamed.md";
+      await seedSharedFiles(view, [{ path: fromPath, text: "granter\n" }]);
+
+      let signalStoreRenamed!: () => void;
+      const storeRenamed = new Promise<void>((resolve) => {
+        signalStoreRenamed = resolve;
+      });
+      let releaseRename!: () => void;
+      const holdRename = new Promise<void>((resolve) => {
+        releaseRename = resolve;
+      });
+      const pausedStore = new Proxy(view.store, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (property !== "renameTextFile" || typeof value !== "function") {
+            return value;
+          }
+          return async (...args: unknown[]) => {
+            const result = await (value as (...inner: unknown[]) => unknown).apply(
+              target,
+              args,
+            );
+            signalStoreRenamed();
+            await holdRename;
+            return result;
+          };
+        },
+      }) as CaptureVersionedTextStore;
+
+      const moving = routeWorkspacePathMove({
+        ...scope(view),
+        fromPath,
+        toPath,
+        shareViewStore: () => pausedStore,
+      });
+      await storeRenamed;
+
+      let captureEnteredGap = false;
+      const capturing = withShareViewRefreshLifecycleLock(view.rootPath, async () => {
+        captureEnteredGap = true;
+        return captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+        );
+      });
+      const captureStartedBeforeProjection = captureEnteredGap;
+
+      if (captureStartedBeforeProjection) await capturing;
+      releaseRename();
+      await moving;
+      const captured = await capturing;
+
+      expect(
+        captureStartedBeforeProjection,
+        "MUTATION: removing the mutation's lifecycle lock lets capture observe the renamed store before its projection",
+      ).toBe(false);
+      expect(captured).toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      expect(await storePaths(view)).toEqual([toPath]);
+      expect(await exists(join(view.rootPath, fromPath))).toBe(false);
+      await expect(readFile(join(view.rootPath, toPath), "utf8")).resolves.toBe(
+        "granter\n",
+      );
+
+      const destinationMoments = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments
+        .filter(
+          (moment) =>
+            moment.path === toPath && moment.metadata.origin === "local-file",
+        )
+        .map((moment) => moment.operation);
+      expect(
+        destinationMoments,
+        "MUTATION: capture in the rename gap journals a delete on top of the destination",
+      ).toEqual(["rename"]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "renames a folder as the files under it, and leaves no empty directory behind",
     async () => {
       const view = await harness("dohc-share-rename-dir-", "edit");
@@ -532,6 +622,49 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, outcome.imported[0]!), "utf8"),
       ).resolves.toBe("imported\n");
       expect(await storePaths(view)).toContain("docs/Note.md");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "reserves an absent projection's store name without regard to case",
+    async () => {
+      const view = await harness("dohc-share-import-store-case-", "edit");
+      const main = await view.store.ensureMainVersion({
+        workspaceId: view.workspaceId,
+      });
+      await view.store.writeTextFile({
+        workspaceId: view.workspaceId,
+        versionId: main.id,
+        path: "docs/Note.md",
+        text: "granter\n",
+        metadata: { origin: "sync" },
+      });
+      await mkdir(join(view.rootPath, "docs"), { recursive: true });
+      const sourceDir = await createTestScratch("dohc-share-import-store-case-src-");
+      roots.push(sourceDir);
+      const source = join(sourceDir, "note.md");
+      await writeFile(source, "imported\n", "utf8");
+
+      const outcome = await routeWorkspaceFileImport({
+        ...scope(view),
+        absolutePaths: [source],
+        screenAgainstRoots: null,
+        targetDir: "docs",
+      });
+
+      expect(
+        outcome,
+        "MUTATION: exact-case store lookup accepts a second engine path for the same physical name",
+      ).toEqual({ imported: ["docs/note (2).md"], skipped: 0 });
+      expect(await storePaths(view)).toEqual([
+        "docs/Note.md",
+        "docs/note (2).md",
+      ]);
+      expect(await exists(join(view.rootPath, "docs", "Note.md"))).toBe(false);
+      await expect(
+        readFile(join(view.rootPath, "docs", "note (2).md"), "utf8"),
+      ).resolves.toBe("imported\n");
     },
     60_000,
   );

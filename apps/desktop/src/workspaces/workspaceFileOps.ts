@@ -12,6 +12,7 @@ import {
 import {
   clearPendingMaterializationPaths,
   materializeSharedViewPaths,
+  withShareViewRefreshLifecycleLock,
   writeDiskContentToStore,
   writePendingMaterializationPaths,
 } from "./sharedView";
@@ -232,51 +233,53 @@ export async function routeWorkspaceFileImport(
 async function shareViewCreate(
   input: ShareViewFileOpScope & { relativePath: string; initialText: string },
 ): Promise<string> {
-  const path = requireValidPath(
-    validateUserMaterializePath(input.relativePath),
-    "file path",
-    input.relativePath,
-  );
-  if (await projectionHolds(input.rootPath, path)) return path;
-  const store = input.shareViewStore();
-  const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
-  const existing = await store.readTextFile({
-    workspaceId: input.workspaceId,
-    versionId: main.id,
-    path,
-  });
-  if (existing !== null) {
-    // The store has it and the folder does not, so the projection lost a file
-    // the recipient can still see in the explorer. Put it back rather than
-    // reporting success over a path that stays missing.
+  return withShareViewRefreshLifecycleLock(input.rootPath, async () => {
+    const path = requireValidPath(
+      validateUserMaterializePath(input.relativePath),
+      "file path",
+      input.relativePath,
+    );
+    if (await projectionHolds(input.rootPath, path)) return path;
+    const store = input.shareViewStore();
+    const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
+    const existing = await store.readTextFile({
+      workspaceId: input.workspaceId,
+      versionId: main.id,
+      path,
+    });
+    if (existing !== null) {
+      // The store has it and the folder does not, so the projection lost a file
+      // the recipient can still see in the explorer. Put it back rather than
+      // reporting success over a path that stays missing.
+      await materializeWithPendingRecord(
+        input.rootPath,
+        input.workspaceId,
+        [
+          {
+            path,
+            operation: "write",
+            contentKind: existing.contentKind === "binary" ? "binary" : "text",
+          },
+        ],
+        store,
+      );
+      return path;
+    }
+    await store.writeTextFile({
+      workspaceId: input.workspaceId,
+      versionId: main.id,
+      path,
+      text: input.initialText,
+      metadata: { origin: "local-file" },
+    });
     await materializeWithPendingRecord(
       input.rootPath,
       input.workspaceId,
-      [
-        {
-          path,
-          operation: "write",
-          contentKind: existing.contentKind === "binary" ? "binary" : "text",
-        },
-      ],
+      [{ path, operation: "write", contentKind: "text" }],
       store,
     );
     return path;
-  }
-  await store.writeTextFile({
-    workspaceId: input.workspaceId,
-    versionId: main.id,
-    path,
-    text: input.initialText,
-    metadata: { origin: "local-file" },
   });
-  await materializeWithPendingRecord(
-    input.rootPath,
-    input.workspaceId,
-    [{ path, operation: "write", contentKind: "text" }],
-    store,
-  );
-  return path;
 }
 
 /**
@@ -295,89 +298,91 @@ async function shareViewCreate(
 async function shareViewMove(
   input: ShareViewFileOpScope & { fromPath: string; toPath: string },
 ): Promise<string> {
-  const from = requireValidPath(
-    validateUserWritePath(input.fromPath),
-    "move source",
-    input.fromPath,
-  );
-  const to = requireValidPath(
-    validateUserMaterializePath(input.toPath),
-    "move destination",
-    input.toPath,
-  );
-  if (to === from || to.startsWith(`${from}/`)) {
-    throw new Error(`Cannot move a path into itself: ${input.fromPath}`);
-  }
-  const store = input.shareViewStore();
-  const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
-  const held = await shareViewPaths(store, input.workspaceId, main.id);
-  const sources = pathsUnder(held, from);
-  if (sources.length === 0) {
-    throw new Error(notInThisShareView(from, "Rename"));
-  }
-  await refuseUntrackedUnder(input.rootPath, from, held);
-  // The DESTINATION is screened too. A folder move merges into whatever is
-  // already there, and the ordinary `movePath` refuses that outright; the files
-  // the store holds are checked one by one below, so what is left to ask is
-  // whether the destination holds anything the store does not. Skipped when the
-  // two are the same entry, which is what a case-only rename is.
-  const renamesInPlace = await sameProjectionEntry(input.rootPath, from, to);
-  if (!renamesInPlace) await refuseUntrackedUnder(input.rootPath, to, held);
-  const moves = sources.map((path) => ({
-    from: path,
-    to: path === from ? to : `${to}/${path.slice(from.length + 1)}`,
-  }));
-  // Every destination, before ANY of them is applied. A collision found half
-  // way through would otherwise leave the files before it already moved.
-  for (const move of moves) {
-    if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
-      throw new Error(`Destination already exists: ${move.to}`);
+  return withShareViewRefreshLifecycleLock(input.rootPath, async () => {
+    const from = requireValidPath(
+      validateUserWritePath(input.fromPath),
+      "move source",
+      input.fromPath,
+    );
+    const to = requireValidPath(
+      validateUserMaterializePath(input.toPath),
+      "move destination",
+      input.toPath,
+    );
+    if (to === from || to.startsWith(`${from}/`)) {
+      throw new Error(`Cannot move a path into itself: ${input.fromPath}`);
     }
-  }
-
-  const applied: { from: string; to: string }[] = [];
-  try {
+    const store = input.shareViewStore();
+    const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
+    const held = await shareViewPaths(store, input.workspaceId, main.id);
+    const sources = pathsUnder(held, from);
+    if (sources.length === 0) {
+      throw new Error(notInThisShareView(from, "Rename"));
+    }
+    await refuseUntrackedUnder(input.rootPath, from, held);
+    // The DESTINATION is screened too. A folder move merges into whatever is
+    // already there, and the ordinary `movePath` refuses that outright; the files
+    // the store holds are checked one by one below, so what is left to ask is
+    // whether the destination holds anything the store does not. Skipped when the
+    // two are the same entry, which is what a case-only rename is.
+    const renamesInPlace = await sameProjectionEntry(input.rootPath, from, to);
+    if (!renamesInPlace) await refuseUntrackedUnder(input.rootPath, to, held);
+    const moves = sources.map((path) => ({
+      from: path,
+      to: path === from ? to : `${to}/${path.slice(from.length + 1)}`,
+    }));
+    // Every destination, before ANY of them is applied. A collision found half
+    // way through would otherwise leave the files before it already moved.
     for (const move of moves) {
-      await store.renameTextFile({
-        workspaceId: input.workspaceId,
-        versionId: main.id,
-        fromPath: move.from,
-        toPath: move.to,
-        metadata: { origin: "local-file" },
-      });
-      applied.push(move);
+      if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
+        throw new Error(`Destination already exists: ${move.to}`);
+      }
     }
-  } catch (error) {
-    await putBackMoves(store, input.workspaceId, main.id, applied);
-    throw error;
-  }
 
-  const changed: ShareViewChangedPath[] = [];
-  for (const move of moves) {
-    changed.push({ path: move.from, operation: "delete", contentKind: "text" });
-    changed.push({
-      path: move.to,
-      operation: "write",
-      contentKind: held.get(move.from) ?? "text",
-    });
-  }
-  // A FOLDER source has no file of its own to remove, so its entry goes last:
-  // with every file under it gone, what is left is the empty directory the
-  // projection made for them.
-  //
-  // Unless the source and the destination are the SAME folder, which is what a
-  // case-only folder rename is. Removing it there removes the files this rename
-  // just wrote into it.
-  if (!held.has(from) && !renamesInPlace) {
-    changed.push({ path: from, operation: "delete", contentKind: "text" });
-  }
-  await materializeWithPendingRecord(
-    input.rootPath,
-    input.workspaceId,
-    changed,
-    store,
-  );
-  return to;
+    const applied: { from: string; to: string }[] = [];
+    try {
+      for (const move of moves) {
+        await store.renameTextFile({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+          fromPath: move.from,
+          toPath: move.to,
+          metadata: { origin: "local-file" },
+        });
+        applied.push(move);
+      }
+    } catch (error) {
+      await putBackMoves(store, input.workspaceId, main.id, applied);
+      throw error;
+    }
+
+    const changed: ShareViewChangedPath[] = [];
+    for (const move of moves) {
+      changed.push({ path: move.from, operation: "delete", contentKind: "text" });
+      changed.push({
+        path: move.to,
+        operation: "write",
+        contentKind: held.get(move.from) ?? "text",
+      });
+    }
+    // A FOLDER source has no file of its own to remove, so its entry goes last:
+    // with every file under it gone, what is left is the empty directory the
+    // projection made for them.
+    //
+    // Unless the source and the destination are the SAME folder, which is what a
+    // case-only folder rename is. Removing it there removes the files this rename
+    // just wrote into it.
+    if (!held.has(from) && !renamesInPlace) {
+      changed.push({ path: from, operation: "delete", contentKind: "text" });
+    }
+    await materializeWithPendingRecord(
+      input.rootPath,
+      input.workspaceId,
+      changed,
+      store,
+    );
+    return to;
+  });
 }
 
 /**
@@ -441,54 +446,56 @@ async function putBackMoves(
 async function shareViewDelete(
   input: ShareViewFileOpScope & { relativePath: string },
 ): Promise<{ trashed: boolean }> {
-  const target = requireValidPath(
-    validateUserWritePath(input.relativePath),
-    "delete path",
-    input.relativePath,
-  );
-  const store = input.shareViewStore();
-  const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
-  const held = await shareViewPaths(store, input.workspaceId, main.id);
-  const targets = pathsUnder(held, target);
-  if (targets.length === 0) {
-    throw new Error(notInThisShareView(target, "Delete"));
-  }
-  await refuseUntrackedUnder(input.rootPath, target, held);
-
-  const applied: string[] = [];
-  try {
-    for (const path of targets) {
-      await store.deleteTextFile({
-        workspaceId: input.workspaceId,
-        versionId: main.id,
-        path,
-        metadata: { origin: "local-file" },
-      });
-      applied.push(path);
+  return withShareViewRefreshLifecycleLock(input.rootPath, async () => {
+    const target = requireValidPath(
+      validateUserWritePath(input.relativePath),
+      "delete path",
+      input.relativePath,
+    );
+    const store = input.shareViewStore();
+    const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
+    const held = await shareViewPaths(store, input.workspaceId, main.id);
+    const targets = pathsUnder(held, target);
+    if (targets.length === 0) {
+      throw new Error(notInThisShareView(target, "Delete"));
     }
-  } catch (error) {
-    // A delete cannot be put back, so the other rule applies: what happened is
-    // visible. The projection follows the store for the files that actually
-    // went, so nothing is left describing content the store no longer has.
+    await refuseUntrackedUnder(input.rootPath, target, held);
+
+    const applied: string[] = [];
+    try {
+      for (const path of targets) {
+        await store.deleteTextFile({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+          path,
+          metadata: { origin: "local-file" },
+        });
+        applied.push(path);
+      }
+    } catch (error) {
+      // A delete cannot be put back, so the other rule applies: what happened is
+      // visible. The projection follows the store for the files that actually
+      // went, so nothing is left describing content the store no longer has.
+      await materializeWithPendingRecord(
+        input.rootPath,
+        input.workspaceId,
+        applied.map((path) => ({
+          path,
+          operation: "delete" as const,
+          contentKind: "text" as const,
+        })),
+        store,
+      );
+      throw error;
+    }
     await materializeWithPendingRecord(
       input.rootPath,
       input.workspaceId,
-      applied.map((path) => ({
-        path,
-        operation: "delete" as const,
-        contentKind: "text" as const,
-      })),
+      [{ path: target, operation: "delete", contentKind: "text" }],
       store,
     );
-    throw error;
-  }
-  await materializeWithPendingRecord(
-    input.rootPath,
-    input.workspaceId,
-    [{ path: target, operation: "delete", contentKind: "text" }],
-    store,
-  );
-  return { trashed: false };
+    return { trashed: false };
+  });
 }
 
 /**
@@ -508,88 +515,95 @@ async function shareViewImport(
     targetDir: string | undefined;
   },
 ): Promise<ImportCopyOutcome> {
-  const screened =
-    input.screenAgainstRoots === null
-      ? { usable: input.absolutePaths, refused: 0 }
-      : await screenDroppedPaths(input.absolutePaths, input.screenAgainstRoots);
-  const { absDir, relDir } = await resolveImportDestination(
-    input.rootPath,
-    input.targetDir,
-  );
-  const store = input.shareViewStore();
-  const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
-  const held = await shareViewPaths(store, input.workspaceId, main.id);
-  // Names already occupied, on BOTH sides. The store is what a change is made
-  // of; the projection can also hold a file the recipient put there by hand,
-  // and the disk copy this replaces would never have overwritten it.
-  //
-  // The projection half is a FILESYSTEM probe, not a set of `readdir` strings:
-  // where the filesystem folds case, `Note.md` and `note.md` are one file, and
-  // a string set says the name is free right before the write destroys it. The
-  // ordinary import is safe here because COPYFILE_EXCL asks the filesystem the
-  // same question; this asks it too.
-  const heldInDir = new Set<string>(
-    [...held.keys()]
-      .filter((path) => (relDir === "" ? !path.includes("/") : path.startsWith(`${relDir}/`)))
-      .map((path) => (relDir === "" ? path : path.slice(relDir.length + 1))),
-  );
-  // Names claimed EARLIER IN THIS RUN have nothing on disk to probe yet, so
-  // they are compared case-folded: the conservative direction, and the only one
-  // available before the projection is written.
-  const claimed = new Set<string>();
-  const nameTaken = async (candidate: string): Promise<boolean> =>
-    heldInDir.has(candidate) ||
-    claimed.has(candidate.toLowerCase()) ||
-    (await projectionHolds(
+  return withShareViewRefreshLifecycleLock(input.rootPath, async () => {
+    const screened =
+      input.screenAgainstRoots === null
+        ? { usable: input.absolutePaths, refused: 0 }
+        : await screenDroppedPaths(input.absolutePaths, input.screenAgainstRoots);
+    const { absDir, relDir } = await resolveImportDestination(
       input.rootPath,
-      relDir === "" ? candidate : `${relDir}/${candidate}`,
-    ));
-
-  const imported: string[] = [];
-  const changed: ShareViewChangedPath[] = [];
-  let skipped = screened.refused;
-  try {
-    for (const source of screened.usable) {
-      const validated = validateUserMaterializePath(basename(source));
-      if (!validated.ok) {
-        skipped += 1;
-        continue;
-      }
-      // Read the content BEFORE claiming a name: a source the engine cannot
-      // own must not consume a collision variant it never used.
-      const content = await readDiskContent(source);
-      if (content.kind !== "text" && content.kind !== "binary") {
-        skipped += 1;
-        continue;
-      }
-      const name = await importNameFor(validated.normalized, absDir, nameTaken);
-      if (name === null) {
-        skipped += 1;
-        continue;
-      }
-      claimed.add(name.toLowerCase());
-      const path = relDir === "" ? name : `${relDir}/${name}`;
-      await writeDiskContentToStore({
-        store,
-        workspaceId: input.workspaceId,
-        versionId: main.id,
-        path,
-        content,
-      });
-      imported.push(path);
-      changed.push({ path, operation: "write", contentKind: content.kind });
-    }
-  } finally {
-    // What landed is materialized even when a later source fails, so the
-    // projection never lags the store.
-    await materializeWithPendingRecord(
-      input.rootPath,
-      input.workspaceId,
-      changed,
-      store,
+      input.targetDir,
     );
-  }
-  return { imported, skipped };
+    const store = input.shareViewStore();
+    const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
+    const held = await shareViewPaths(store, input.workspaceId, main.id);
+    // Names already occupied, on BOTH sides. The store is what a change is made
+    // of; the projection can also hold a file the recipient put there by hand,
+    // and the disk copy this replaces would never have overwritten it.
+    //
+    // The projection half is a FILESYSTEM probe, not a set of `readdir` strings:
+    // where the filesystem folds case, `Note.md` and `note.md` are one file, and
+    // a string set says the name is free right before the write destroys it. The
+    // ordinary import is safe here because COPYFILE_EXCL asks the filesystem the
+    // same question; this asks it too.
+    //
+    // Store-held names can also have no projection to probe, so use the same
+    // conservative case fold as `claimed` below.
+    const heldInDir = new Set<string>(
+      [...held.keys()]
+        .filter((path) => (relDir === "" ? !path.includes("/") : path.startsWith(`${relDir}/`)))
+        .map((path) =>
+          (relDir === "" ? path : path.slice(relDir.length + 1)).toLowerCase(),
+        ),
+    );
+    // Names claimed EARLIER IN THIS RUN have nothing on disk to probe yet, so
+    // they are compared case-folded: the conservative direction, and the only one
+    // available before the projection is written.
+    const claimed = new Set<string>();
+    const nameTaken = async (candidate: string): Promise<boolean> =>
+      heldInDir.has(candidate.toLowerCase()) ||
+      claimed.has(candidate.toLowerCase()) ||
+      (await projectionHolds(
+        input.rootPath,
+        relDir === "" ? candidate : `${relDir}/${candidate}`,
+      ));
+
+    const imported: string[] = [];
+    const changed: ShareViewChangedPath[] = [];
+    let skipped = screened.refused;
+    try {
+      for (const source of screened.usable) {
+        const validated = validateUserMaterializePath(basename(source));
+        if (!validated.ok) {
+          skipped += 1;
+          continue;
+        }
+        // Read the content BEFORE claiming a name: a source the engine cannot
+        // own must not consume a collision variant it never used.
+        const content = await readDiskContent(source);
+        if (content.kind !== "text" && content.kind !== "binary") {
+          skipped += 1;
+          continue;
+        }
+        const name = await importNameFor(validated.normalized, absDir, nameTaken);
+        if (name === null) {
+          skipped += 1;
+          continue;
+        }
+        claimed.add(name.toLowerCase());
+        const path = relDir === "" ? name : `${relDir}/${name}`;
+        await writeDiskContentToStore({
+          store,
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+          path,
+          content,
+        });
+        imported.push(path);
+        changed.push({ path, operation: "write", contentKind: content.kind });
+      }
+    } finally {
+      // What landed is materialized even when a later source fails, so the
+      // projection never lags the store.
+      await materializeWithPendingRecord(
+        input.rootPath,
+        input.workspaceId,
+        changed,
+        store,
+      );
+    }
+    return { imported, skipped };
+  });
 }
 
 /**
