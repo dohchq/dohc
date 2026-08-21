@@ -324,10 +324,14 @@ async function doorWrite(
   pipeline.handleDoorWrittenSourceChange(pluginId, { absolutePath, text });
 }
 
-function fakeSpawnTransport(): PluginHostOptions["spawnTransport"] {
+function fakeSpawnTransport(
+  registeredCommands: () => string[] = () => [],
+): PluginHostOptions["spawnTransport"] {
   return vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
     request: async <T = unknown>(method: string): Promise<T> => (
-      method === "plugin.activate" ? { commands: [], drivers: [] } : {}
+      method === "plugin.activate"
+        ? { commands: registeredCommands(), drivers: [] }
+        : {}
     ) as T,
     notify: () => undefined,
     dispose: async () => undefined,
@@ -2668,18 +2672,35 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   }, 60_000);
 
   describe("established plugin rebuild recovery", () => {
-    async function setupEstablishedPlugin() {
+    async function setupEstablishedPlugin(options: {
+      commands?: { id: string; title: string }[];
+    } = {}) {
       const fixture = await createPluginWorkspace();
+      const manifestPath = join(fixture.pluginRoot, "dohc-plugin.json");
+      const manifestText = (commands: { id: string; title: string }[]) =>
+        `${JSON.stringify({
+          version: 1,
+          name: "example-plugin",
+          displayName: "Example plugin",
+          entry: "src/index.ts",
+          commands,
+        }, null, 2)}\n`;
+      if (options.commands) {
+        await writeFile(manifestPath, manifestText(options.commands));
+      }
       let mismatchNextSnapshot = false;
       let failNextDiscard = false;
       let failPublish = false;
+      let failRecordWrite = false;
       let buildCalls = 0;
+      let registeredCommands = (options.commands ?? [])
+        .map((command) => command.id);
       const statuses: string[] = [];
       let pipeline: PluginPipeline;
       const host = new PluginHost({
         stateDir: fixture.stateDir,
         workspaceRoot: fixture.workspaceRoot,
-        spawnTransport: fakeSpawnTransport(),
+        spawnTransport: fakeSpawnTransport(() => [...registeredCommands]),
         routeSdkRequest: async () => ({}),
         onStatusChange: (pluginId, status) => {
           pipeline.noteRuntimeStatus(pluginId, status);
@@ -2697,6 +2718,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+          mutateRecord: async (stateDir, workspaceRoot, pluginId, mutate) => {
+            if (failRecordWrite) {
+              failRecordWrite = false;
+              throw new Error("simulated approval record write failure");
+            }
+            return mutatePluginRecord(stateDir, workspaceRoot, pluginId, mutate);
+          },
           snapshot: async (input) => {
             const result = await snapshotPluginSource(input);
             if (!result.ok || !mismatchNextSnapshot) return result;
@@ -2717,6 +2745,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             buildCalls += 1;
             const result = await buildPluginBundle(input);
             if (!result.ok || !failPublish) return result;
+            failPublish = false;
             return {
               ...result,
               publish: () => Promise.reject(new Error("simulated publish failure")),
@@ -2739,11 +2768,20 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       return {
         pipeline,
+        fixture,
         entryPath: fixture.entryPath,
+        manifestPath,
+        manifestText,
         statuses,
         buildCalls: () => buildCalls,
         failNextBuildPublish: () => {
           failPublish = true;
+        },
+        failNextRecordWrite: () => {
+          failRecordWrite = true;
+        },
+        setRegisteredCommands: (commands: string[]) => {
+          registeredCommands = [...commands];
         },
         failEstablishedBuild: async () => {
           mismatchNextSnapshot = true;
@@ -2760,6 +2798,57 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       };
     }
 
+    it("retries against the durable approval after a later publish failure", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const oldApprovedHash = setup.pipeline.list()[0]?.approvedHash;
+        await writeFile(setup.entryPath, [
+          'export const marker = "durably approved before publish";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        setup.failNextBuildPublish();
+
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "failed",
+          approvedHash: oldApprovedHash,
+        });
+        const durableState = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!durableState.ok) throw new Error(durableState.warning);
+        const durableApprovedHash =
+          durableState.state.plugins["example-plugin"]?.approvedHash;
+        expect(durableApprovedHash).toMatch(/^[0-9a-f]{64}$/);
+        expect(durableApprovedHash).not.toBe(oldApprovedHash);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: {
+            status: "starting",
+            approvedHash: durableApprovedHash,
+          },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after retrying its durably approved build.",
+        );
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "ready",
+          sourceHash: durableApprovedHash,
+          approvedHash: durableApprovedHash,
+        });
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("retries a failed build for an established plugin", async () => {
       const setup = await setupEstablishedPlugin();
       try {
@@ -2772,6 +2861,59 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           () => setup.pipeline.list()[0]?.status === "ready",
           "Plugin did not reach ready after retrying its build.",
         );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the running build's commands after a pre-stop failure", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        setup.failNextRecordWrite();
+        setup.setRegisteredCommands(newCommands.map((command) => command.id));
+        await writeFile(
+          setup.manifestPath,
+          setup.manifestText(newCommands),
+        );
+        // Refresh discovery without reconciling this plugin. The attempted
+        // approval below must see the edited manifest while the old runtime
+        // remains up until the build reaches its stop step.
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+
+        const failed = await setup.pipeline.approve("example-plugin");
+
+        expect(failed).toMatchObject({
+          ok: false,
+          plugin: { commands: oldCommands },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "failed",
+          "The pre-stop record write failure did not reach failed status.",
+        );
+
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.host.getRegisteredCommands("example-plugin"))
+          .toEqual(["old.cmd"]);
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after approving the replacement build.",
+        );
+        expect(setup.pipeline.list()[0]?.commands).toEqual(newCommands);
+        expect(setup.pipeline.host.getRegisteredCommands("example-plugin"))
+          .toEqual(["new.cmd"]);
       } finally {
         await setup.pipeline.dispose();
       }

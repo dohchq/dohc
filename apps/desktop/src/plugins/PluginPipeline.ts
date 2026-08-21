@@ -22,10 +22,11 @@ import {
   type PluginRecordShape,
 } from "./pluginLocalState";
 import { readPluginManifestFile } from "./pluginManifest";
-import type {
-  DohcPluginManifest,
-  PluginSettingDeclaration,
-  PluginSettingValue,
+import {
+  DohcPluginManifest as DohcPluginManifestSchema,
+  type DohcPluginManifest,
+  type PluginSettingDeclaration,
+  type PluginSettingValue,
 } from "./pluginManifestSchema";
 import {
   readPluginSettingsFile,
@@ -108,6 +109,11 @@ export interface PluginCommandContribution {
   id: string;
   title: string;
 }
+
+type PluginRuntimeContributions = Pick<
+  PluginPipelinePluginStatus,
+  "commands" | "panels" | "webApps"
+>;
 
 export interface PluginPipelinePluginStatus extends PluginMetadata {
   id: string;
@@ -843,7 +849,18 @@ export class PluginPipeline {
     return this.enqueueAction(pluginId, async () => {
       const candidate = this.requireValidCandidate(pluginId);
       const state = this.statuses.get(pluginId);
-      if (state?.status !== "failed" || state.approvedHash === null) {
+      if (state?.status !== "failed") {
+        return this.failure(
+          pluginId,
+          pipelineError(
+            "state",
+            "no-failed-build",
+            `Plugin "${pluginId}" has no failed build to retry.`,
+          ),
+        );
+      }
+      const record = await this.localRecord(pluginId);
+      if (!record?.approvedHash) {
         return this.failure(
           pluginId,
           pipelineError(
@@ -856,7 +873,7 @@ export class PluginPipeline {
       return this.buildFromCurrentSource(
         pluginId,
         candidate,
-        state.approvedHash,
+        record.approvedHash,
       );
     });
   }
@@ -1601,6 +1618,7 @@ export class PluginPipeline {
     }
     const validCandidate = { ...candidate, manifest: candidate.manifest };
     const oldRuntime = this.options.pluginHost.getStatus(candidate.id) ?? null;
+    let oldRuntimeStopped = false;
     let sourceHash: string | null = null;
     // The staged source tree, until it is published or discarded. Anything
     // that throws below leaves it staged, so the catch has to drop it.
@@ -1726,7 +1744,10 @@ export class PluginPipeline {
       // root is replaced let it overwrite the published bundle in the window
       // before the new process starts — unapproved bytes running under the
       // approvedBundleHash just recorded for them (#779 round 12 A3).
-      if (oldRuntime) await this.options.pluginHost.stop(candidate.id);
+      if (oldRuntime) {
+        await this.options.pluginHost.stop(candidate.id);
+        oldRuntimeStopped = true;
+      }
 
       // Both publishes happen only now, with the record that approves these
       // exact bytes already durable. The source goes first because the
@@ -1830,12 +1851,42 @@ export class PluginPipeline {
           error: detail,
         });
       } else {
+        let liveContributions: PluginRuntimeContributions | undefined;
+        if (oldRuntime !== null && !oldRuntimeStopped) {
+          try {
+            const manifestPath = join(
+              this.liveRoot(candidate.id),
+              "dohc-plugin.generated.json",
+            );
+            const [manifestStats, manifestBody] = await Promise.all([
+              this.operations.inspectPath(manifestPath),
+              this.operations.readFile(manifestPath, "utf8"),
+            ]);
+            if (manifestStats.isFile()) {
+              const parsed = DohcPluginManifestSchema.safeParse(
+                JSON.parse(manifestBody),
+              );
+              if (parsed.success) {
+                liveContributions = {
+                  commands: manifestCommands(parsed.data),
+                  panels: manifestPanels(parsed.data),
+                  webApps: manifestWebApps(parsed.data),
+                };
+              }
+            }
+          } catch {
+            // The existing candidate-manifest fallback below remains the
+            // best available answer when the live manifest cannot be read.
+          }
+        }
         this.setStatus(candidate, {
           status: "failed",
           runtimeStatus: oldRuntime,
           sourceHash,
           error: detail,
+          ...liveContributions,
         });
+        return this.failure(candidate.id, detail, liveContributions);
       }
       return this.failure(candidate.id, detail);
     } finally {
@@ -2411,7 +2462,11 @@ export class PluginPipeline {
     return { ok: true, plugin: cloneStatus(plugin) };
   }
 
-  private failure(pluginId: string, error: PluginPipelineError): PluginPipelineActionResult {
+  private failure(
+    pluginId: string,
+    error: PluginPipelineError,
+    contributions?: PluginRuntimeContributions,
+  ): PluginPipelineActionResult {
     const current = this.statuses.get(pluginId);
     if (current && current.error !== error) {
       this.setStatus(
@@ -2424,7 +2479,7 @@ export class PluginPipeline {
           diagnostics: current.diagnostics,
           valid: current.valid,
         },
-        { error, valid: current.valid },
+        { ...contributions, error, valid: current.valid },
       );
     }
     return {
