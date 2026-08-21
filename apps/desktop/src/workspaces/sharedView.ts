@@ -175,6 +175,28 @@ export class SharePinInvalidError extends Error {
   }
 }
 
+// Capture failing mid-pass still leaves whatever it fixed before the throw —
+// the pending marker for the ONE unreadable path survives (capture's
+// pending branch fails closed rather than guessing, per #867), but the
+// repairs or edits capture already applied to every entry visited before it
+// are real and already durable. This carries those counts past the throw so
+// a caller wrapping capture in a failure outcome doesn't report zero changes
+// and skip the repaint those repairs earned.
+class CapturePartialFailureError extends Error {
+  constructor(
+    readonly capturedPaths: number,
+    readonly repairedPaths: number,
+    readonly path: string,
+    options: { cause: unknown },
+  ) {
+    super(
+      options.cause instanceof Error ? options.cause.message : String(options.cause),
+      options,
+    );
+    this.name = "CapturePartialFailureError";
+  }
+}
+
 /**
  * A registry record is data, not a contract: read the pinned selector back
  * defensively, against the relay's OWN rules for the selector it issued.
@@ -926,7 +948,14 @@ export async function captureSharedViewLocalDivergence(
             targetStat = await lstat(resolvedTarget);
           } catch (error) {
             const code = (error as NodeJS.ErrnoException).code;
-            if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+            if (code !== "ENOENT" && code !== "ENOTDIR") {
+              throw new CapturePartialFailureError(
+                capturedPaths,
+                repairedPaths,
+                entry.path,
+                { cause: error },
+              );
+            }
             targetStat = null;
           }
           // `lstat` never follows the final component, so a symlink entry
@@ -1481,25 +1510,10 @@ export async function refreshStandaloneShareViewOnce(
   input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
 ): Promise<StandaloneShareViewRefreshOutcome> {
   return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
-    let captured: CaptureSharedViewLocalDivergenceOutcome;
+    let totalLocalChanges = 0;
     try {
-      captured = await captureStandaloneShareViewDivergence(input);
-    } catch (error) {
-      // The pending branch fails closed on an unreadable path rather than
-      // guessing (#867) — the marker is the recovery record, and it survives
-      // uncleared here (the mutation lock's callback never returns
-      // normally), so the next readable refresh repairs or reports the path
-      // normally. Report the failure through the same discriminated union
-      // every other failure in this function already uses, instead of
-      // rejecting raw.
-      return {
-        ok: false,
-        changedPaths: 0,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      };
-    }
-    const totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-    try {
+      const captured = await captureStandaloneShareViewDivergence(input);
+      totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
       const main = await input.store.ensureMainVersion({
         workspaceId: input.workspaceId,
       });
@@ -1533,6 +1547,20 @@ export async function refreshStandaloneShareViewOnce(
         changedPaths: outcome.changedPaths + totalLocalChanges,
       };
     } catch (error) {
+      // A damaged pin never heals on retry; main.ts turns it into a specific
+      // "record is damaged" message and depends on it escaping as a
+      // rejection, not becoming a generic outcome.
+      if (error instanceof SharePinInvalidError) throw error;
+      if (error instanceof CapturePartialFailureError) {
+        return {
+          ok: false,
+          changedPaths: error.capturedPaths + error.repairedPaths,
+          errorMessage:
+            unjournalablePathMessages([
+              { path: error.path, reason: "unreadable" },
+            ])[0] ?? error.message,
+        };
+      }
       return {
         ok: false,
         changedPaths: totalLocalChanges,

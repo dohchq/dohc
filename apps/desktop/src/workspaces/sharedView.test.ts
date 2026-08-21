@@ -57,6 +57,7 @@ import { createTestScratch } from "./testTemp";
 // setup or fixtures make is allowed through unchanged. It proves that capture
 // makes zero readdir calls, so the recursive tree walk #866 removed stays gone.
 let readdirCalls: string[] = [];
+let observeRealpath: ((path: string) => void) | null = null;
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -65,6 +66,14 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       readdirCalls.push(String(path));
       return actual.readdir(path as string, options as never);
     }) as typeof readdir,
+    realpath: (async (
+      path: Parameters<typeof actual.realpath>[0],
+      options?: unknown,
+    ) => {
+      const resolved = await actual.realpath(path, options as never);
+      observeRealpath?.(String(path));
+      return resolved;
+    }) as typeof actual.realpath,
   };
 });
 
@@ -125,6 +134,7 @@ let harnesses: ShareViewDaemonHarness[] = [];
 beforeEach(() => {
   roots = [];
   harnesses = [];
+  observeRealpath = null;
 });
 
 afterEach(async () => {
@@ -3535,44 +3545,82 @@ describe("shared view refresh", () => {
       const rootDir = await tempRoot();
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
-      const path = "locked/pending.md";
+      const repairedPath = "docs/repaired-first.md";
+      const deniedPath = "locked/pending.md";
       const parent = join(rootDir, "locked");
       const target = { workspaceId: WORKSPACE, rootPath: rootDir };
-      relay.addWrite(path, "tracked body");
+      relay.addWrite(repairedPath, "already correct body");
+      relay.addWrite(deniedPath, "tracked body");
       await refreshSharedViewOnce(harness, {
         rootDir,
         workspaceId: WORKSPACE,
         shareId: SHARE_ID,
       });
-      await writePendingMaterializationPaths(rootDir, [path]);
+      await writePendingMaterializationPaths(rootDir, [repairedPath, deniedPath]);
 
       const store = harness.openStore(target);
       try {
-        await denyRead(parent, "dir");
+        let releaseDeniedPathLock: () => void = () => undefined;
+        let markDeniedPathLockHeld: () => void = () => undefined;
+        const deniedPathLockHeld = new Promise<void>((resolve) => {
+          markDeniedPathLockHeld = resolve;
+        });
+        const holdDeniedPathLock = new Promise<void>((resolve) => {
+          releaseDeniedPathLock = resolve;
+        });
+        const deniedPathBlocker = withOrderedWorkspaceTextPath(
+          rootDir,
+          deniedPath,
+          async () => {
+            markDeniedPathLockHeld();
+            await holdDeniedPathLock;
+          },
+        );
+        await deniedPathLockHeld;
+
+        // Deny the parent after containment resolves it but before the queued
+        // pending branch runs, so that branch's own lstat reports the failure.
+        let markDeniedParentResolved: () => void = () => undefined;
+        const deniedParentResolved = new Promise<void>((resolve) => {
+          markDeniedParentResolved = resolve;
+        });
+        observeRealpath = (absolutePath) => {
+          if (absolutePath === parent) markDeniedParentResolved();
+        };
+        const refreshing = refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: PINNED_SELECTOR,
+          recordRefusals: async () => undefined,
+          ended: false,
+        });
+
+        let parentDenied = false;
         try {
-          const failed = await refreshStandaloneShareViewOnceWithPull({
-            rootDir,
-            workspaceId: WORKSPACE,
-            relay: harness.relay,
-            shareId: SHARE_ID,
-            store,
-            pull: harness.pullFor(target),
-            pinnedSelector: PINNED_SELECTOR,
-            recordRefusals: async () => undefined,
-            ended: false,
-          });
-          expect(failed).toMatchObject({
-            ok: false,
-            changedPaths: 0,
-            errorMessage: expect.any(String),
-          });
-          if (failed.ok) throw new Error("expected the unreadable refresh to fail");
-          expect(failed.errorMessage.length).toBeGreaterThan(0);
+          await deniedParentResolved;
+          await denyRead(parent, "dir");
+          parentDenied = true;
+          releaseDeniedPathLock();
+          const failed = await refreshing;
           await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
-            new Set([path]),
+            new Set([deniedPath]),
+          );
+          if (failed.ok) throw new Error("expected the unreadable refresh to fail");
+          expect(failed).toMatchObject({
+            changedPaths: 1,
+          });
+          expect(failed.errorMessage).toBe(
+            `dohc could not read ${deniedPath}. Close anything using this file, or wait.`,
           );
         } finally {
-          await restoreRead(parent, 0o755);
+          observeRealpath = null;
+          releaseDeniedPathLock();
+          await deniedPathBlocker;
+          if (parentDenied) await restoreRead(parent, 0o755);
         }
 
         await expect(
@@ -3887,6 +3935,32 @@ describe("shared view refresh", () => {
       await harness.closeAll();
     });
   }
+
+  it("rejects a damaged pin through the standalone refresh wrapper", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    const store = harness.openStore(target);
+
+    try {
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { versionId: "v1", access: "view" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).rejects.toBeInstanceOf(SharePinInvalidError);
+    } finally {
+      await store.close();
+    }
+  });
 
   // The refusal names the constraint, so the handler above it can tell the
   // user what to do instead of reporting "refreshed, nothing new" forever.
