@@ -111,6 +111,21 @@ function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: str
   if (logs.length > MAX_LOG_ENTRIES) logs.splice(0, logs.length - MAX_LOG_ENTRIES);
 }
 
+/**
+ * Whether `candidate` (a workspace-relative path) falls within `authority`'s
+ * bounds. A workspace-authority site excludes shared-with-me/ entirely — its
+ * own files can never legitimately reference into someone else's share. A
+ * share-authority site is confined to its own mount root. Both the preview
+ * server boundary below and the share-manifest scanner (sitePackage.ts)
+ * enforce this same rule from this one place.
+ */
+export function isPathAllowedForAuthority(authority: SiteAuthority, candidate: string): boolean {
+  if (authority.kind === "workspace") return !isSharedWithMePath(candidate);
+  return (
+    candidate === authority.mountRoot || candidate.startsWith(`${authority.mountRoot}/`)
+  );
+}
+
 export async function startStaticSitePreview(
   workspaceRoot: string,
   siteRoot: string,
@@ -120,15 +135,8 @@ export async function startStaticSitePreview(
   const realWorkspaceRoot = await realpath(workspaceRoot);
   const resolvedRelative = relative(realWorkspaceRoot, root).replaceAll("\\", "/");
   const spelledRelative = siteRoot === "." ? "" : siteRoot;
-  const isAllowedByAuthority = (candidate: string): boolean => {
-    if (options.authority.kind === "workspace") {
-      return !isSharedWithMePath(candidate);
-    }
-    return (
-      candidate === options.authority.mountRoot ||
-      candidate.startsWith(`${options.authority.mountRoot}/`)
-    );
-  };
+  const isAllowedByAuthority = (candidate: string): boolean =>
+    isPathAllowedForAuthority(options.authority, candidate);
   if (!isAllowedByAuthority(spelledRelative) || !isAllowedByAuthority(resolvedRelative)) {
     const constraint = options.authority.kind === "workspace"
       ? "inside shared-with-me"

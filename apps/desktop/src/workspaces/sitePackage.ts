@@ -16,6 +16,7 @@ import { join, posix } from "node:path";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 import {
   assertLoopbackOnlyDevServerCommand,
+  isPathAllowedForAuthority,
   splitCommandLine,
 } from "./siteRunner";
 import { listFiles } from "./workspaceFiles";
@@ -220,13 +221,18 @@ function extractHtmlRawText(text: string): HtmlRawTextExtraction {
     const openEnd = findOpeningTagEnd(text, elementStart + match[0].length);
     if (openEnd === null) continue;
     const afterOpen = openEnd + 1;
+    const openingTag = text.slice(elementStart, afterOpen);
     const closeMatch = new RegExp(`</${tagName}\\s*>`, "i").exec(text.slice(afterOpen));
     const contentEnd = closeMatch ? afterOpen + closeMatch.index : text.length;
     const closeTagEnd = closeMatch
       ? afterOpen + closeMatch.index + closeMatch[0].length
       : text.length;
     const content = text.slice(afterOpen, contentEnd);
-    (tagName === "script" ? scriptContents : styleContents).push(content);
+    if (tagName === "script") {
+      if (isExecutableScriptTag(openingTag)) scriptContents.push(content);
+    } else {
+      styleContents.push(content);
+    }
     blanked += text.slice(cursor, afterOpen);
     blanked += blankPreservingLines(content);
     blanked += text.slice(contentEnd, closeTagEnd);
@@ -262,20 +268,94 @@ function styleAttributeValues(tags: readonly string[]): string[] {
   return values;
 }
 
+/** One opening tag's value for `name`, quoted or bare — every attribute read
+ * in this file (type, href, on-handler presence, ...) shares this shape. */
+function attributeValue(tag: string, name: string): string | undefined {
+  const pattern = new RegExp(
+    `\\b${name}\\s*=\\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\\s"'=<>\`]{1,2048}))`,
+    "i",
+  );
+  const match = pattern.exec(tag);
+  return (match?.[1] ?? match?.[2] ?? match?.[3])?.trim();
+}
+
+const JS_SCRIPT_TYPE_PATTERN =
+  /^(?:text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript|text\/jscript|text\/x-javascript|text\/x-ecmascript|module)$/i;
+
+/**
+ * A `<script>` with its own `src` never executes its body — the browser
+ * fetches and runs the external file instead, and the body (sometimes a
+ * fallback/polyfill payload) is inert. A non-JavaScript `type`
+ * (`application/json`, `text/template`, ...) means the body is data, not
+ * code a browser ever executes. A missing type, `module`, and the classic JS
+ * MIME types are all executable.
+ */
+function isExecutableScriptTag(openingTag: string): boolean {
+  if (attributeValue(openingTag, "src") !== undefined) return false;
+  const type = attributeValue(openingTag, "type");
+  return !type || JS_SCRIPT_TYPE_PATTERN.test(type);
+}
+
+/** `<input src="...">` only fetches an image when it renders as one. */
+function isImageInputTag(openingTag: string): boolean {
+  return attributeValue(openingTag, "type")?.toLowerCase() === "image";
+}
+
+// Which elements a URL-bearing attribute actually fires a request from, per
+// the HTML spec — the same list every attribute-reference consumer below
+// shares, so a `<div data="...">` (data means nothing there) can't mint one.
+const URL_ATTRIBUTE_ELEMENTS: Readonly<Record<string, ReadonlySet<string>>> = {
+  src: new Set([
+    "script",
+    "img",
+    "audio",
+    "video",
+    "iframe",
+    "source",
+    "track",
+    "embed",
+    "input",
+  ]),
+  srcset: new Set(["img", "source"]),
+  href: new Set(["a", "link", "area"]),
+  poster: new Set(["video"]),
+  data: new Set(["object"]),
+};
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+  };
+  return value.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (match, entity: string) => {
+    if (entity[0] === "#") {
+      const codePoint =
+        entity[1]?.toLowerCase() === "x"
+          ? Number.parseInt(entity.slice(2), 16)
+          : Number.parseInt(entity.slice(1), 10);
+      return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match;
+    }
+    return named[entity.toLowerCase()] ?? match;
+  });
+}
+
 function htmlBaseDirectory(
   text: string,
   fromPath: string,
   artifactRoot: string,
 ): HtmlBaseResolution {
-  const baseTag = /<base\b[^>]*>/i.exec(
-    blankHtmlRawTextContents(blankHtmlComments(text)),
-  )?.[0];
+  const rawText = blankHtmlRawTextContents(blankHtmlComments(text));
+  const startMatch = /<base\b/i.exec(rawText);
+  const baseTag = (() => {
+    if (!startMatch) return undefined;
+    const end = findOpeningTagEnd(rawText, startMatch.index + startMatch[0].length);
+    return end === null ? undefined : rawText.slice(startMatch.index, end + 1);
+  })();
   if (!baseTag) return { kind: "none" };
-  const hrefMatch =
-    /\bhref\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>]{1,2048}))/i.exec(
-      baseTag,
-    );
-  const href = (hrefMatch?.[1] ?? hrefMatch?.[2] ?? hrefMatch?.[3])?.trim();
+  const href = attributeValue(baseTag, "href");
   if (!href || href.startsWith("#")) return { kind: "none" };
   if (
     href.startsWith("//") ||
@@ -385,6 +465,11 @@ export interface BrowserTextReference {
   // external .js/.mjs file, where the script's own location and the
   // document's location can genuinely differ.
   documentRelative: boolean;
+  // True only for a Worker/SharedWorker/serviceWorker.register target: that
+  // script runs in its OWN global scope with its own location, so anything
+  // IT references (once loaded) resolves against ITS directory, not the
+  // document that launched it.
+  entersOwnContext?: boolean;
 }
 
 const CSS_URL_PATTERN =
@@ -395,12 +480,27 @@ const JS_STATIC_IMPORT_PATTERN =
 const JS_DYNAMIC_IMPORT_PATTERN = /\bimport\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
 const JS_NEW_URL_PATTERN =
   /\bnew\s+URL\(\s*["'`]([^"'`\r\n]{1,2048})["'`]\s*,\s*import\.meta\.url/g;
-const JS_FETCH_LIKE_PATTERN =
-  /\b(?:fetch|Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_FETCH_PATTERN = /\bfetch\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+const JS_WORKER_PATTERN =
+  /\b(?:Worker|SharedWorker)\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
 const JS_SERVICE_WORKER_PATTERN =
   /\bserviceWorker\.register\s*\(\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
 const JS_ASSIGNMENT_SHAPED_PATTERN =
   /\b(?:src|href|poster)\s*=\s*["'`]([^"'`\r\n]{1,2048})["'`]/g;
+
+function eventHandlerAttributeValues(tags: readonly string[]): string[] {
+  // Inline `on*` handler attributes (onclick, onload, ...) hold real JS the
+  // browser executes, same as a <script> body.
+  const values: string[] = [];
+  const attribute = /\bon[a-z]+\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/gi;
+  for (const tag of tags) {
+    for (const match of tag.matchAll(attribute)) {
+      const value = match[1] ?? match[2];
+      if (value) values.push(value);
+    }
+  }
+  return values;
+}
 
 function referencesFromBrowserText(text: string, sourcePath: string): BrowserTextReference[] {
   if (/\.webmanifest$/i.test(sourcePath)) {
@@ -415,20 +515,33 @@ function referencesFromBrowserText(text: string, sourcePath: string): BrowserTex
   const rawText = isHtml ? extractHtmlRawText(scanText) : null;
   const attributeText = rawText ? rawText.blanked.replace(/<base\b[^>]*>/gi, "") : scanText;
   const htmlTags = isHtml ? openingHtmlTags(attributeText) : [];
-  const addMatches = (input: string, pattern: RegExp, documentRelative: boolean) => {
+  const addMatches = (
+    input: string,
+    pattern: RegExp,
+    documentRelative: boolean,
+    entersOwnContext = false,
+  ) => {
     for (const match of input.matchAll(pattern)) {
       const value = (match[1] ?? match[2] ?? match[3])?.trim();
-      if (value) references.push({ value, documentRelative });
+      if (value) references.push({ value, documentRelative, entersOwnContext });
     }
   };
 
   if (isHtml) {
     const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
     for (const tag of htmlTags) {
+      const tagName = /^<([A-Za-z][A-Za-z0-9-]*)/.exec(tag)?.[1]?.toLowerCase();
+      if (!tagName) continue;
       for (const match of tag.matchAll(attribute)) {
-        const value = (match[2] ?? match[3] ?? match[4])?.trim();
-        if (!value) continue;
-        if (match[1]?.toLowerCase() !== "srcset") {
+        const attributeName = match[1]!.toLowerCase();
+        // A URL attribute means a request only on the elements the HTML spec
+        // actually fires it from — a <div data="..."> never fetches "data".
+        if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
+        if (attributeName === "src" && tagName === "input" && !isImageInputTag(tag)) continue;
+        const rawValue = (match[2] ?? match[3] ?? match[4])?.trim();
+        if (!rawValue) continue;
+        const value = decodeHtmlEntities(rawValue);
+        if (attributeName !== "srcset") {
           references.push({ value, documentRelative: true });
           continue;
         }
@@ -457,21 +570,26 @@ function referencesFromBrowserText(text: string, sourcePath: string): BrowserTex
 
   if (isHtml) {
     // Likewise, JS syntax only means something inside a real <script>
-    // element — plain document text that happens to look like an import
+    // element the browser executes, or an inline on* event-handler
+    // attribute — plain document text that happens to look like an import
     // statement is not code a browser ever executes.
-    const jsText = (rawText?.scriptContents ?? []).join("\n");
+    const jsText = [
+      ...(rawText?.scriptContents ?? []),
+      ...eventHandlerAttributeValues(htmlTags),
+    ].join("\n");
     addMatches(jsText, JS_STATIC_IMPORT_PATTERN, false);
     addMatches(jsText, JS_DYNAMIC_IMPORT_PATTERN, false);
     addMatches(jsText, JS_NEW_URL_PATTERN, false);
-    addMatches(jsText, JS_FETCH_LIKE_PATTERN, true);
-    addMatches(jsText, JS_SERVICE_WORKER_PATTERN, true);
-    addMatches(htmlTags.join("\n"), JS_ASSIGNMENT_SHAPED_PATTERN, true);
+    addMatches(jsText, JS_FETCH_PATTERN, true);
+    addMatches(jsText, JS_WORKER_PATTERN, true, true);
+    addMatches(jsText, JS_SERVICE_WORKER_PATTERN, true, true);
   } else if (/\.(?:js|mjs)$/i.test(sourcePath)) {
     addMatches(scanText, JS_STATIC_IMPORT_PATTERN, false);
     addMatches(scanText, JS_DYNAMIC_IMPORT_PATTERN, false);
     addMatches(scanText, JS_NEW_URL_PATTERN, false);
-    addMatches(scanText, JS_FETCH_LIKE_PATTERN, true);
-    addMatches(scanText, JS_SERVICE_WORKER_PATTERN, true);
+    addMatches(scanText, JS_FETCH_PATTERN, true);
+    addMatches(scanText, JS_WORKER_PATTERN, true, true);
+    addMatches(scanText, JS_SERVICE_WORKER_PATTERN, true, true);
     addMatches(scanText, JS_ASSIGNMENT_SHAPED_PATTERN, true);
   }
   return references;
@@ -506,7 +624,13 @@ async function shareManifestForSite(
         path !== site.packagePath &&
         path !== site.configPath &&
         !hasIgnoredSegment(path) &&
-        pathRelativeToArtifact(artifactRoot, path) !== null,
+        pathRelativeToArtifact(artifactRoot, path) !== null &&
+        // A workspace-owned site's own files can never legitimately reference
+        // into someone else's mounted share — the relay refuses a selector
+        // that reaches outside the sharer's own authority, which would fail
+        // the WHOLE share rather than just dropping that one reference. The
+        // same rule the preview server boundary enforces (siteRunner).
+        isPathAllowedForAuthority(site.authority, path),
     ),
   );
   if (!available.has(entryPath)) {
@@ -514,20 +638,28 @@ async function shareManifestForSite(
   }
 
   const approved = new Set([entryPath]);
+  // Keyed by (path, documentBase): a file's OWN outgoing references only
+  // depend on its own content, but a document-relative reference inside it
+  // resolves against whichever document's base reached it here — two
+  // documents sharing one external script each need their own base's
+  // resolution, so scanning by path alone would silently drop the second.
   const scanned = new Set<string>();
+  const documentBaseKey = (base: HtmlBaseResolution): string =>
+    base.kind === "local" ? `local:${base.directory}` : base.kind;
   // Every file is scanned with its own referring document's base — an
   // external .js/.mjs file has no <base> of its own, but a reference the
-  // browser resolves against the DOCUMENT's base (fetch, Worker, an
-  // assignment-shaped src/href) must still use the document that linked it,
-  // including that document's own <base href> (not a blanket artifact root).
+  // browser resolves against the DOCUMENT's base (fetch, an assignment-
+  // shaped src/href) must still use the document that linked it, including
+  // that document's own <base href> (not a blanket artifact root).
   const queue: Array<{ path: string; documentBase: HtmlBaseResolution }> = [
     { path: entryPath, documentBase: { kind: "none" } },
   ];
   let scannedBytes = 0;
   while (queue.length > 0) {
     const { path: current, documentBase: inheritedDocumentBase } = queue.shift()!;
-    if (scanned.has(current) || !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current)) continue;
-    scanned.add(current);
+    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}`;
+    if (scanned.has(scanKey) || !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current)) continue;
+    scanned.add(scanKey);
     try {
       const info = await stat(join(rootPath, current));
       scannedBytes += info.size;
@@ -568,7 +700,13 @@ async function shareManifestForSite(
           referenceBase,
         )) {
           approved.add(target);
-          queue.push({ path: target, documentBase });
+          // A Worker/service-worker target runs in its own global scope with
+          // its own location, so what IT references resolves against ITS OWN
+          // directory, not the document that launched it.
+          const propagatedDocumentBase: HtmlBaseResolution = reference.entersOwnContext
+            ? { kind: "local", directory: posix.dirname(target) }
+            : documentBase;
+          queue.push({ path: target, documentBase: propagatedDocumentBase });
         }
       }
     } catch {

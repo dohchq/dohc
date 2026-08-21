@@ -311,7 +311,13 @@ export function SitePreviewPage(props: {
         path: props.siteRoot,
       });
       if (!isCurrent()) return;
-      if (!fresh) {
+      // getSitePackage intentionally returns the deepest CONTAINING site for
+      // a path (see requireExactSiteRoot's doc comment), so a stale tab whose
+      // own root stopped being a detected site can still get back a detected
+      // ANCESTOR above it. Sharing that ancestor would offer someone else's
+      // site under this tab's name, so both refresh points here require an
+      // exact root match before exposing a target.
+      if (!fresh || fresh.root !== props.siteRoot) {
         setActionError("This site is no longer part of the workspace.");
         return;
       }
@@ -334,6 +340,10 @@ export function SitePreviewPage(props: {
           path: props.siteRoot,
         });
         if (!isCurrent()) return;
+        if (refreshedAfterBuild && refreshedAfterBuild.root !== props.siteRoot) {
+          setActionError("This site is no longer part of the workspace.");
+          return;
+        }
         if (refreshedAfterBuild) latest = refreshedAfterBuild;
         target = shareTargetForSite(latest);
       }

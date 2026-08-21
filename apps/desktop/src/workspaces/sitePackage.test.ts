@@ -612,6 +612,152 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("quoted-tag/fake.png");
   });
 
+  it("does not scan a script body the browser never executes (has its own src, or a non-JS type)", async () => {
+    await mkdir(join(root, "inert-script"), { recursive: true });
+    await writeFile(
+      join(root, "inert-script", "index.html"),
+      [
+        '<script type="application/json">fetch("private.json")</script>',
+        '<script src="app.js">fetch("also-private.json")</script>',
+        '<script src="app.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "inert-script", "app.js"), "window.ready = true;");
+    await writeFile(join(root, "inert-script", "private.json"), "{}");
+    await writeFile(join(root, "inert-script", "also-private.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "inert-script",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("inert-script/app.js");
+    expect(manifestOf(site)?.assets).not.toContain("inert-script/private.json");
+    expect(manifestOf(site)?.assets).not.toContain("inert-script/also-private.json");
+  });
+
+  it("runs JS reference patterns over an inline event-handler attribute's value", async () => {
+    await mkdir(join(root, "handler"), { recursive: true });
+    await writeFile(
+      join(root, "handler", "index.html"),
+      '<button onclick="fetch(\'data.json\')"></button>',
+    );
+    await writeFile(join(root, "handler", "data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "handler",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("handler/data.json");
+  });
+
+  it("resolves each document's own base for a document-relative reference in a script two documents share", async () => {
+    await mkdir(join(root, "dedupe", "a"), { recursive: true });
+    await mkdir(join(root, "dedupe", "b"), { recursive: true });
+    await writeFile(
+      join(root, "dedupe", "index.html"),
+      '<iframe src="a/page.html"></iframe><iframe src="b/page.html"></iframe>',
+    );
+    await writeFile(join(root, "dedupe", "a", "page.html"), '<script src="/shared.js"></script>');
+    await writeFile(join(root, "dedupe", "b", "page.html"), '<script src="/shared.js"></script>');
+    await writeFile(join(root, "dedupe", "shared.js"), 'fetch("data.json");');
+    await writeFile(join(root, "dedupe", "a", "data.json"), "{}");
+    await writeFile(join(root, "dedupe", "b", "data.json"), "{}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "dedupe",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("dedupe/a/data.json");
+    expect(manifestOf(site)?.assets).toContain("dedupe/b/data.json");
+  });
+
+  it("parses a <base> tag with a quoted `>` in an earlier attribute before reading its href", async () => {
+    await mkdir(join(root, "based-quote", "docs"), { recursive: true });
+    await writeFile(
+      join(root, "based-quote", "index.html"),
+      '<base data-label=">" href="/docs/"><script src="app.js"></script>',
+    );
+    await writeFile(join(root, "based-quote", "docs", "app.js"), "window.ready = true;");
+    await writeFile(join(root, "based-quote", "app.js"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "based-quote",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("based-quote/docs/app.js");
+    expect(manifestOf(site)?.assets).not.toContain("based-quote/app.js");
+  });
+
+  it("switches a Worker's own references to the worker script's directory, not the launching document's", async () => {
+    await mkdir(join(root, "worker-base", "workers"), { recursive: true });
+    await writeFile(
+      join(root, "worker-base", "index.html"),
+      '<script>new Worker("workers/job.js");</script>',
+    );
+    await writeFile(join(root, "worker-base", "workers", "job.js"), 'fetch("payload.json");');
+    await writeFile(join(root, "worker-base", "workers", "payload.json"), "{}");
+    await writeFile(join(root, "worker-base", "payload.json"), "wrong file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "worker-base",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("worker-base/workers/payload.json");
+    expect(manifestOf(site)?.assets).not.toContain("worker-base/payload.json");
+  });
+
+  it("decodes an HTML character reference in an attribute value before resolving it", async () => {
+    await mkdir(join(root, "entity-ref", "assets"), { recursive: true });
+    await writeFile(
+      join(root, "entity-ref", "index.html"),
+      '<img src="assets&#x2f;hero.png">',
+    );
+    await writeFile(join(root, "entity-ref", "assets", "hero.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "entity-ref",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("entity-ref/assets/hero.png");
+  });
+
+  it("only mints a URL-attribute reference on an element the HTML spec actually fires it from", async () => {
+    await mkdir(join(root, "attr-elements"), { recursive: true });
+    await writeFile(
+      join(root, "attr-elements", "index.html"),
+      '<div data="private.txt"></div><object data="app.pdf"></object>',
+    );
+    await writeFile(join(root, "attr-elements", "private.txt"), "private");
+    await writeFile(join(root, "attr-elements", "app.pdf"), "pdf");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "attr-elements",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("attr-elements/app.pdf");
+    expect(manifestOf(site)?.assets).not.toContain("attr-elements/private.txt");
+  });
+
+  it("excludes a mounted share path from a workspace-authority site's own manifest", async () => {
+    await mkdir(join(root, "shared-with-me", "alex"), { recursive: true });
+    await writeFile(
+      join(root, "dohc.json"),
+      JSON.stringify({ type: "site", preview: { mode: "static", entry: "index.html" } }),
+    );
+    await writeFile(
+      join(root, "index.html"),
+      '<img src="/shared-with-me/alex/photo.png"><script src="./app.js"></script>',
+    );
+    await writeFile(join(root, "app.js"), "window.ready = true;");
+    await writeFile(join(root, "shared-with-me", "alex", "photo.png"), "photo bytes");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === ".");
+
+    expect(site?.shareManifest.ok).toBe(true);
+    expect(manifestOf(site)?.assets).toContain("app.js");
+    expect(manifestOf(site)?.assets).not.toContain("shared-with-me/alex/photo.png");
+  });
+
   it("emits exact approved static browser files instead of a recursive site root", async () => {
     await mkdir(join(root, "report", "assets"), { recursive: true });
     await mkdir(join(root, "report", "data"), { recursive: true });

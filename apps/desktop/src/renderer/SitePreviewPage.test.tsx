@@ -424,6 +424,66 @@ describe("SitePreviewPage", () => {
     );
   });
 
+  it("aborts a share when the pre-share refresh returns a different site's root than the tab's own", async () => {
+    // getSitePackage returns the deepest CONTAINING site for a path, so a
+    // stale tab whose own root stopped being a detected site can still get
+    // back a detected ancestor above it — sharing that ancestor would offer
+    // a different site than the one this tab names.
+    const mismatchedRootSite: SitePackageInfo = { ...site, root: "report/legacy" };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(site)
+      .mockResolvedValueOnce(mismatchedRootSite);
+    const onShareSite = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={onShareSite}
+      />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(onShareSite).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
+      "This site is no longer part of the workspace.",
+    );
+  });
+
+  it("aborts a share when the post-build refresh returns a different site's root than the tab's own", async () => {
+    const needsBuildSite: SitePackageInfo = {
+      ...site,
+      kind: "package",
+      packagePath: "report/package.json",
+      scripts: { build: "vite build" },
+      shareManifest: noRunnableArtifact,
+    };
+    const mismatchedRootSite: SitePackageInfo = { ...site, root: "report/legacy" };
+    bridgeMock.getSitePackage
+      .mockResolvedValueOnce(site)
+      .mockResolvedValueOnce(needsBuildSite)
+      .mockResolvedValueOnce(mismatchedRootSite);
+    const onShareSite = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={onShareSite}
+      />,
+    );
+
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(onShareSite).not.toHaveBeenCalled();
+    expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
+      "This site is no longer part of the workspace.",
+    );
+  });
+
   it("shows dev logs written after the preview becomes ready", async () => {
     const devSite: SitePackageInfo = {
       ...site,
