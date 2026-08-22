@@ -42,6 +42,29 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+// stopChild sends SIGKILL and returns without waiting for the kernel to
+// reap the process — signal delivery and reaping are asynchronous, so
+// process.kill(pid, 0) can still succeed for a short window right after
+// the signal on a loaded machine. Poll for the actual death instead of
+// asserting it happened immediately.
+async function waitForProcessDeath(pid: number, deadlineMs = 2000): Promise<boolean> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 describe("startStaticSitePreview", () => {
   it("serves only the mounted site's own shared-with-me subtree", async () => {
     const mountRoot = "shared-with-me/alex";
@@ -320,8 +343,11 @@ describe("package manager helpers", () => {
   it("extracts local dev server urls from common tool output", () => {
     expect(detectDevUrl("  Local:   http://localhost:5173/")).toBe("http://localhost:5173/");
     expect(detectDevUrl("ready on http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
-    // Normalize IPv6 loopback so downstream preview origin checks see one stable loopback form.
-    expect(detectDevUrl("ready on http://[::1]:5173/app")).toBe("http://127.0.0.1:5173/app");
+    // A server that only listens on the IPv6 loopback reports "[::1]" —
+    // rewriting it to "127.0.0.1" would point the preview at a different
+    // address nothing is necessarily listening on. isLoopbackHostname
+    // already accepts the bracketed IPv6 form as-is.
+    expect(detectDevUrl("ready on http://[::1]:5173/app")).toBe("http://[::1]:5173/app");
     expect(detectDevUrl("ready on https://localhost:5173")).toBeNull();
     expect(detectDevUrl("deployed at https://example.com")).toBeNull();
     expect(detectDevUrl("listening on http://0.0.0.0:3000")).toBeNull();
@@ -492,6 +518,23 @@ describe("package manager helpers", () => {
       assertLoopbackOnlyDevServerCommand("env", ["--made-up-option", "HOST=0.0.0.0", "vite"]),
     ).toThrow(/env/);
   });
+
+  it("refuses env -S/--split-string instead of silently skipping its embedded assignment", () => {
+    // GNU env's -S/--split-string re-splits ITS OWN payload into further
+    // OPTIONs, NAME=VALUE assignments, and the command, using env's own
+    // splitting rules (not shell quoting) — `env -S 'HOST=0.0.0.0 vite'`
+    // hides a real HOST assignment from a scanner that treats -S as an
+    // opaque value-carrying option the way -u/-C are.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["-S", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/env/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["--split-string=HOST=0.0.0.0 vite"]),
+    ).toThrow(/env/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["--split-string", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/env/);
+  });
 });
 
 describe("startSiteDevServer", () => {
@@ -515,7 +558,7 @@ describe("startSiteDevServer", () => {
 
       try {
         await handle.stop();
-        expect(() => process.kill(descendantPid, 0)).toThrow();
+        expect(await waitForProcessDeath(descendantPid)).toBe(true);
       } finally {
         try {
           process.kill(descendantPid, "SIGKILL");
@@ -560,7 +603,51 @@ describe("startSiteDevServer", () => {
 
       try {
         await handle.stop();
-        expect(() => process.kill(descendantPid, 0)).toThrow();
+        expect(await waitForProcessDeath(descendantPid)).toBe(true);
+      } finally {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // The fixed teardown already removed it.
+        }
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "captures a descendant that backgrounds and exits well inside the FIRST poll interval",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
+      // The poll interval is set far longer than this whole test takes, so
+      // the descendant can ONLY be captured by an immediate/near-immediate
+      // snapshot, never by the interval's own first tick. A brief real
+      // delay (well under the OLD 5s default, comfortably over one `ps`
+      // round-trip) keeps this realistic — the descendant tree walk itself
+      // takes real wall-clock time (spawning `ps`, reading /proc), so a
+      // wrapper that exits in literally zero time is an unfixable race
+      // no synchronous snapshot can win (the same residual #857 accepted);
+      // this pin proves the fix closes the gap from 5s down to tens of
+      // milliseconds, not that it closes it to zero.
+      const handle = await startSiteDevServer({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: "sh",
+        args: [
+          "-c",
+          "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43213'; sleep 0.05",
+        ],
+        readyTimeoutMs: 5000,
+        descendantCaptureIntervalMs: 60_000,
+      });
+      const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
+      const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
+      expect(descendantPid).toBeGreaterThan(0);
+
+      await new Promise<void>((resolve) => handle.onExit(resolve));
+
+      try {
+        await handle.stop();
+        expect(await waitForProcessDeath(descendantPid)).toBe(true);
       } finally {
         try {
           process.kill(descendantPid, "SIGKILL");

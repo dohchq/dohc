@@ -1803,10 +1803,26 @@ function siteEntryPathFor(root: string, entry: string): string {
   return relativeJoin(root, entry);
 }
 
+// A healthy dohc.json or package.json, even a large monorepo root listing
+// hundreds of dependencies, measures in the tens of kilobytes — mirrors
+// desktop's own MAX_METADATA_FILE_BYTES (apps/desktop/src/workspaces/
+// sitePackage.ts), so both detectors bound the same files the same way.
+// detect_sites calls this for every discovered dohc.json/package.json with
+// no per-call concurrency cap; without a size check first, a single very
+// large or sparse metadata file could stall or exhaust the MCP process.
+const MAX_SITE_METADATA_FILE_BYTES = 1024 * 1024;
+
 async function readJsonDetailed<T>(
   absolute: string,
 ): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
   try {
+    const info = await stat(absolute);
+    if (info.size > MAX_SITE_METADATA_FILE_BYTES) {
+      return {
+        ok: false,
+        reason: `exceeds the ${MAX_SITE_METADATA_FILE_BYTES / (1024 * 1024)} MiB metadata read limit (${info.size} bytes observed) and was not read`,
+      };
+    }
     return { ok: true, value: JSON.parse(await readFile(absolute, "utf8")) as T };
   } catch (error) {
     return { ok: false, reason: failureReason(error, "invalid JSON") };
@@ -2057,13 +2073,23 @@ export async function detectSites(
 
   const maxDepth = Math.min(12, Math.max(0, Math.floor(args.maxDepth ?? 5)));
   const sites: WorkspaceSite[] = [];
-  // A directory an already-visited ancestor reported as ITS OWN build
-  // output (conventional dist/build/out, or an explicitly configured
-  // build.output path, single- or multi-segment) is that site's artifact,
+  // A directory an already-visited ancestor reported as ITS OWN REAL build
+  // artifact (conventional dist/build/out, or an explicitly configured
+  // build.output path, single- or multi-segment — either way, backed by an
+  // actual <output>/index.html file on disk) is that site's own output,
   // not an independent site — matches workspace-core's discoverSites,
   // which never promotes a build output's own index.html into a separate
-  // site root. The walk visits a parent before its children, so a site's
-  // buildOutputs are always known before recursion reaches them.
+  // site root. A MERELY configured build.output with no real artifact
+  // there yet must NOT suppress the path: an independent site (its own
+  // package.json-based project, say) can genuinely live at a path a
+  // sibling's dohc.json only claims as a future build output, and
+  // workspace-core's own configuredOutputArtifacts crediting is likewise
+  // gated on a real index.html existing at the exact claimed path, never
+  // on the claim alone. site.buildOutputs mixes both detected-real and
+  // configured-only entries, so each candidate is independently verified
+  // against the filesystem here rather than trusted from the claim. The
+  // walk visits a parent before its children, so a site's real outputs are
+  // always known before recursion reaches them.
   const knownBuildOutputPaths = new Set<string>();
   async function walk(absolute: string, root: string, depth: number): Promise<void> {
     if (isIgnoredSitePath(root)) return;
@@ -2071,7 +2097,12 @@ export async function detectSites(
       const site = await detectSiteAt(ctx, absolute, root);
       if (site) {
         sites.push(site);
-        for (const output of site.buildOutputs) knownBuildOutputPaths.add(relativeJoin(root, output));
+        for (const output of site.buildOutputs) {
+          const hasRealArtifact = await stat(join(absolute, output, "index.html"))
+            .then((outputInfo) => outputInfo.isFile())
+            .catch(() => false);
+          if (hasRealArtifact) knownBuildOutputPaths.add(relativeJoin(root, output));
+        }
       }
     }
     if (depth >= maxDepth) return;

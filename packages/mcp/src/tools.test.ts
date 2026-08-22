@@ -1672,6 +1672,61 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites still finds an independent site at a path a sibling only CLAIMS as a build.output", async () => {
+    await withWorkspace(async (ctx) => {
+      // "portal" declares build.output: "dist", but nothing was ever built
+      // there yet — no dist/index.html on disk.
+      await mkdir(join(ctx.root, "portal"), { recursive: true });
+      await writeFile(join(ctx.root, "portal/index.html"), "<h1>Portal</h1>");
+      await writeFile(
+        join(ctx.root, "portal/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "dist" } }),
+      );
+      // A genuinely separate, independently detectable web project happens
+      // to live at that exact claimed (but unbuilt) path — the claim alone
+      // must not hide it, the same way workspace-core's discoverSites only
+      // credits a build.output claim to its declaring site once a REAL
+      // index.html exists at the claimed path, never on the claim alone.
+      await mkdir(join(ctx.root, "portal/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "portal/dist/package.json"),
+        JSON.stringify({ scripts: { dev: "vite" }, dependencies: { vite: "^5.0.0" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const roots = result.sites.map((site) => site.root);
+      expect(roots).toContain("portal");
+      expect(roots).toContain("portal/dist");
+    });
+  });
+
+  it("detect_sites refuses to read a dohc.json over the 1 MiB metadata bound, the same way desktop's own detector does", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "oversized-config"), { recursive: true });
+      await writeFile(join(ctx.root, "oversized-config/index.html"), "<h1>Site</h1>");
+      // Pad past the 1 MiB bound with a JSON string value so the file is
+      // still syntactically valid, in case the read ever silently succeeds.
+      const padding = "x".repeat(1024 * 1024 + 1);
+      await writeFile(
+        join(ctx.root, "oversized-config/dohc.json"),
+        JSON.stringify({ type: "site", title: padding }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "oversized-config");
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "invalid_dohc_json",
+          message: expect.stringMatching(/1 MiB metadata read limit/),
+        }),
+      );
+    });
+  });
+
   it("detect_sites drops an unsafe configured build.output (traversal) with the same diagnostic workspace-core would emit", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "site-unsafe-output"), { recursive: true });

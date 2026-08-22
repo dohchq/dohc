@@ -2742,4 +2742,134 @@ describe("listSitePackages", () => {
 
     expect(manifestOf(site)?.assets).toContain("css-applied-stylesheet/applied.png");
   });
+
+  // ---- round-18 review pins ----
+
+  it("does not treat an image-set() type() MIME string as a URL candidate", async () => {
+    await mkdir(join(root, "image-set-type-hint"), { recursive: true });
+    await writeFile(
+      join(root, "image-set-type-hint", "index.html"),
+      '<style>div { background: image-set(url("hero.avif") type("image/avif") 1x); }</style>',
+    );
+    await writeFile(join(root, "image-set-type-hint", "hero.avif"), "public");
+    await mkdir(join(root, "image-set-type-hint", "image"), { recursive: true });
+    await writeFile(join(root, "image-set-type-hint", "image", "avif"), "private, coincidentally shaped like the type string");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "image-set-type-hint",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("image-set-type-hint/hero.avif");
+    expect(manifestOf(site)?.assets).not.toContain("image-set-type-hint/image/avif");
+  });
+
+  it("counts an XHR target when send() is visited before open() in AST source order", async () => {
+    await mkdir(join(root, "xhr-source-order"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-source-order", "index.html"),
+      [
+        "<script>",
+        "var xhr = new XMLHttpRequest();",
+        "function issue() { xhr.send(); }",
+        'xhr.open("GET", "data.json");',
+        "issue();",
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-source-order", "data.json"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-source-order",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("xhr-source-order/data.json");
+  });
+
+  it("expands an SVG loaded as a document (<object data>) for its own <image>/<use> references", async () => {
+    await mkdir(join(root, "svg-object-document"), { recursive: true });
+    await writeFile(
+      join(root, "svg-object-document", "index.html"),
+      '<object data="diagram.svg"></object>',
+    );
+    await writeFile(
+      join(root, "svg-object-document", "diagram.svg"),
+      '<svg xmlns="http://www.w3.org/2000/svg"><image href="asset.png"/></svg>',
+    );
+    await writeFile(join(root, "svg-object-document", "asset.png"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "svg-object-document",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("svg-object-document/asset.png");
+  });
+
+  it("leaves an SVG loaded only as an image (<img src>) unexpanded", async () => {
+    await mkdir(join(root, "svg-img-only"), { recursive: true });
+    await writeFile(
+      join(root, "svg-img-only", "index.html"),
+      '<img src="icon.svg">',
+    );
+    await writeFile(
+      join(root, "svg-img-only", "icon.svg"),
+      '<svg xmlns="http://www.w3.org/2000/svg"><image href="hidden.png"/></svg>',
+    );
+    await writeFile(join(root, "svg-img-only", "hidden.png"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "svg-img-only",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("svg-img-only/icon.svg");
+    expect(manifestOf(site)?.assets).not.toContain("svg-img-only/hidden.png");
+  });
+
+  it("does not approve a script a document's own meta CSP blocks with script-src 'none'", async () => {
+    await mkdir(join(root, "csp-script-none"), { recursive: true });
+    await writeFile(
+      join(root, "csp-script-none", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'">',
+        '<script src="private.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-script-none", "private.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-script-none",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("csp-script-none/private.js");
+  });
+
+  it("does not let a CSP-blocked class suppress an UNRELATED class's resources", async () => {
+    await mkdir(join(root, "csp-script-none-img-ok"), { recursive: true });
+    await writeFile(
+      join(root, "csp-script-none-img-ok", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'">',
+        '<script src="private.js"></script>',
+        '<img src="ok.png">',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-script-none-img-ok", "private.js"), "console.log(1)");
+    await writeFile(join(root, "csp-script-none-img-ok", "ok.png"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-script-none-img-ok",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("csp-script-none-img-ok/private.js");
+    expect(manifestOf(site)?.assets).toContain("csp-script-none-img-ok/ok.png");
+  });
+
+  it("approves a script normally when the document declares no CSP at all", async () => {
+    await mkdir(join(root, "no-csp"), { recursive: true });
+    await writeFile(join(root, "no-csp", "index.html"), '<script src="a.js"></script>');
+    await writeFile(join(root, "no-csp", "a.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "no-csp");
+
+    expect(manifestOf(site)?.assets).toContain("no-csp/a.js");
+  });
 });

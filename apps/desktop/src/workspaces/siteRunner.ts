@@ -268,7 +268,16 @@ const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 // Each recognized option is skipped, along with the value token it takes,
 // so the scan can still reach a HOST/HOSTNAME assignment that follows it.
 const ENV_OPTIONS_WITHOUT_VALUE = new Set(["-i", "--ignore-environment", "-0", "--null", "-v", "--debug"]);
-const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]);
+const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
+// -S/--split-string re-parses its OWN payload into further OPTIONs,
+// NAME=VALUE assignments, and the command — using env(1)'s own splitting
+// rules, which are NOT the same as shell quoting (its backslash escapes and
+// quote handling differ). Treating it as an opaque value-carrying option
+// (the way -u/-C are) would skip a HOST assignment hidden inside it
+// entirely; reimplementing env's exact splitting risks a parity mismatch
+// that hides one just as effectively. Refuse it instead, the same way an
+// unrecognized option is refused below.
+const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 
 function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: boolean): string[] {
   const hosts: string[] = [];
@@ -302,6 +311,11 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
       // "--unset NAME" need the next token consumed too.
       index += token.includes("=") ? 1 : 2;
       continue;
+    }
+    if (ENV_OPTIONS_UNVERIFIABLE.has(longOptionName)) {
+      throw new Error(
+        `Site dev server command uses "env ${longOptionName}", whose payload dohc cannot statically re-split, so its loopback-only host binding cannot be verified: ${token}`,
+      );
     }
     // A token that isn't "-"-prefixed is the wrapped command itself — the
     // leading run of options and assignments is over.
@@ -418,9 +432,12 @@ export function packageManagerValidatedScriptCommand(
 export function detectDevUrl(text: string): string | null {
   const plain = text.replace(ANSI_SGR_RE, "");
   const matched = DEV_URL_RE.exec(plain)?.[1];
-  return matched
-    ?.replace(DEV_URL_TRAILING_PUNCTUATION_RE, "")
-    .replace("[::1]", "127.0.0.1") ?? null;
+  // A server that reports "[::1]" listens on the IPv6 loopback specifically
+  // — rewriting it to "127.0.0.1" pointed the preview at a DIFFERENT
+  // address nothing was necessarily listening on. isLoopbackHostname (and
+  // the LoopbackPreviewUrl IPC schema built on it) already accept the
+  // bracketed IPv6 form as-is, so there is nothing left to rewrite for.
+  return matched?.replace(DEV_URL_TRAILING_PUNCTUATION_RE, "") ?? null;
 }
 
 export async function startSiteDevServer(input: {
@@ -458,15 +475,34 @@ export async function startSiteDevServer(input: {
   // wrapper itself is gone and reparenting has moved it out of the
   // wrapper's own subtree. Best-effort: a descendant forked and orphaned
   // between two polls is still missed, the same residual #857 accepted.
+  // A poll that returns fewer pids than an earlier one (a transient `ps`
+  // failure, or a descendant that hadn't forked yet on an earlier tick)
+  // must not drop a pid an earlier poll already found — union every poll's
+  // result instead of replacing it. A stale pid costs nothing:
+  // killProcessTreePosix already treats ESRCH as success.
+  const capturedDescendantSet = new Set<number>();
   let capturedDescendants: number[] = [];
+  const captureDescendantsOnce = (pid: number) => {
+    void processDescendantsPosix(pid).then((pids) => {
+      for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
+      capturedDescendants = [...capturedDescendantSet];
+    });
+  };
   const descendantCaptureTimer =
     process.platform !== "win32" && child.pid !== undefined
-      ? setInterval(() => {
-          void processDescendantsPosix(child.pid!).then((pids) => {
-            capturedDescendants = pids;
-          });
-        }, input.descendantCaptureIntervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS)
+      ? setInterval(
+          () => captureDescendantsOnce(child.pid!),
+          input.descendantCaptureIntervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS,
+        )
       : undefined;
+  // setInterval's first tick only fires after a full interval — a wrapper
+  // that backgrounds its real server and exits well inside that window
+  // (the documented `server & echo URL` case) would otherwise never get
+  // captured at all. Take one snapshot immediately too — best-effort only,
+  // since spawn() returning is not proof the shell has executed anything
+  // yet; maybeResolve (below) takes a second, more reliable one once the
+  // wrapper's own ready output proves it already ran everything before it.
+  if (process.platform !== "win32" && child.pid !== undefined) captureDescendantsOnce(child.pid);
   descendantCaptureTimer?.unref?.();
   child.once("exit", () => {
     if (descendantCaptureTimer) clearInterval(descendantCaptureTimer);
@@ -524,6 +560,14 @@ export async function startSiteDevServer(input: {
       if (!url || resolved) return;
       resolved = true;
       clearTimers();
+      // The immediate post-spawn snapshot (above) can race a wrapper that
+      // hasn't finished forking its background server yet — spawn()
+      // returning is not proof the shell has executed anything. By the
+      // time its "ready" line is OUT, everything the script did BEFORE
+      // printing that line (backgrounding included) has already run, so
+      // this is a far more reliable synchronization point for a second
+      // snapshot than an arbitrary short delay would be.
+      if (process.platform !== "win32" && child.pid !== undefined) captureDescendantsOnce(child.pid);
       resolve({
         url,
         command: input.command,
