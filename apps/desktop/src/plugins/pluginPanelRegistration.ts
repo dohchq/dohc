@@ -1,6 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
+import { PluginClaimsDrainingError } from "./pluginCommandInvocation";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import type { PluginPipelineStatusEvent } from "./PluginPipeline";
@@ -82,7 +83,21 @@ export function pluginLifecycleKey(
 /** What `PluginPipeline.ensureStarted` reports back to a panel start. */
 export type PluginPanelHostStartResult =
   | { ok: true; startedHost: boolean }
-  | { ok: false; error: { message: string } };
+  | {
+    ok: false;
+    error: {
+      message: string;
+      /**
+       * "claims-draining" names the one pipeline failure a command's own
+       * ensureStarted() call can cause by holding its own claim — refused
+       * before a hold would have drained it (#779 round 25 finding 3).
+       * Only a command caller (claimHostForCommand) can ever produce this;
+       * a panel or web app never claims, so hasOutstandingCommandClaim is
+       * always false for them and this code never reaches their own catch.
+       */
+      code?: string;
+    };
+  };
 
 /**
  * Starts a plugin because a caller needs it. Panel and web-app callers record
@@ -122,7 +137,16 @@ export async function startPluginForPanel(input: {
   const running = input.hostActivation();
   if (running) return running;
   const result = await input.ensureStarted();
-  if (!result.ok) throw new Error(result.error.message);
+  if (!result.ok) {
+    // The one retryable pipeline failure a command's own claim can cause
+    // — the command layer recognizes this exact error class and maps it
+    // to its own "try again" status instead of a generic command failure
+    // (#779 round 25 finding 3).
+    if (result.error.code === "claims-draining") {
+      throw new PluginClaimsDrainingError(input.pluginId);
+    }
+    throw new Error(result.error.message);
+  }
   if (result.startedHost) {
     if (input.claim !== false) {
       input.panelStartedHosts.add(

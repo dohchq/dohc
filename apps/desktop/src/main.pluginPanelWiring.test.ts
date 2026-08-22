@@ -708,12 +708,20 @@ describe("plugin panel main-process wiring", () => {
       reregisterFilterAt,
     );
     const reregisterRecheckAt = reregisterFn.indexOf(
-      "if (!runningPluginPanels.has(key)) return;",
+      "const current = runningPluginPanels.get(key);",
       reregisterLockAt,
+    );
+    const reregisterIdentityAt = reregisterFn.indexOf(
+      "if (current !== panel) return;",
+      reregisterRecheckAt,
     );
     const registerCallAt = reregisterFn.indexOf(
       "registerPluginPanelGrant({",
-      reregisterRecheckAt,
+      reregisterIdentityAt,
+    );
+    const registerFieldsAt = reregisterFn.indexOf(
+      "senderId: current.senderId,",
+      registerCallAt,
     );
     // MUTATION (wrong panel re-granted, or none at all): a filter on
     // anything but this exact plugin's own mounted panels either grants
@@ -728,7 +736,17 @@ describe("plugin panel main-process wiring", () => {
     // meant to end (#779 round 23 finding 4).
     expect(reregisterLockAt).toBeGreaterThan(reregisterFilterAt);
     expect(reregisterRecheckAt).toBeGreaterThan(reregisterLockAt);
-    expect(registerCallAt).toBeGreaterThan(reregisterRecheckAt);
+    // MUTATION (fresh grant clobbered by a stale re-register): a panel that
+    // closed-and-reopened (or otherwise got a fresh record and its own
+    // fresh grant) while this call waited for the lock must not have that
+    // fresh grant revoked by a re-register still using the identity
+    // captured before the lock — register() always revokes whatever grant
+    // already exists for the same subject, fresh or not. Registering from
+    // `current`, not the outer `panel`, is what makes this land on
+    // whatever is actually there now (#779 round 25 finding 1).
+    expect(reregisterIdentityAt).toBeGreaterThan(reregisterRecheckAt);
+    expect(registerCallAt).toBeGreaterThan(reregisterIdentityAt);
+    expect(registerFieldsAt).toBeGreaterThan(registerCallAt);
   });
 
   it("never tears down a workspace's plugins while another window still has it open (#779 round 19 finding 2)", () => {

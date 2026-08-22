@@ -207,6 +207,26 @@ describe("plugin web app main-process wiring", () => {
     expect(surfacesForSender).toContain(
       "destroyPluginWebAppViews(removedWebApps);",
     );
+    // MUTATION (a rejecting host stop skips panel cleanup): an uncaught
+    // rejection from any one host's own stopPluginHostIfUnclaimed call
+    // would reject the whole Promise.all and skip everything queued after
+    // it in this function, including stopPluginPanelsForSender below — a
+    // single web-app host that fails to stop must not leave every panel
+    // this sender opened uncleaned too (#779 round 25 finding 4).
+    const stopHostAt = surfacesForSender.indexOf(
+      "() => stopPluginHostIfUnclaimed(workspaceId, pluginId),",
+    );
+    const stopHostCatchAt = surfacesForSender.indexOf(
+      ".catch((error: unknown) => {",
+      stopHostAt,
+    );
+    const panelsForSenderAt = surfacesForSender.indexOf(
+      "await stopPluginPanelsForSender(senderId);",
+      stopHostCatchAt,
+    );
+    expect(stopHostAt).toBeGreaterThan(-1);
+    expect(stopHostCatchAt).toBeGreaterThan(stopHostAt);
+    expect(panelsForSenderAt).toBeGreaterThan(stopHostCatchAt);
 
     const stopWorkspace = functionSource("async function stopPluginWorkspace(");
     expect(stopWorkspace).toContain(

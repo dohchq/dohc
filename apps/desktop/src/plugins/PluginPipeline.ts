@@ -12,6 +12,7 @@ import {
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import { buildPluginBundle } from "./pluginBuildRunner";
+import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
 import {
@@ -241,6 +242,19 @@ export interface PluginPipelineOptions {
    * command-claim concept of its own omits it.
    */
   resetCommandClaims?: (pluginId: string) => void;
+  /**
+   * True while the caller itself already holds one of this plugin's
+   * command claims. Checked right before startFromApprovedSource would
+   * hold for approval — holding always drains this plugin's command
+   * claims first, and a command that reached this through its own
+   * ensureStarted() call holds one of those claims itself, which can
+   * never release until this same call returns: draining anyway waits on
+   * itself until the deadline turns it into a stall. True here refuses
+   * with a retryable result instead of proceeding into that drain (#779
+   * round 25 finding 3). Optional: a caller with no command-claim concept
+   * of its own omits it.
+   */
+  hasOutstandingCommandClaim?: (pluginId: string) => boolean;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -2046,9 +2060,18 @@ export class PluginPipeline {
       // (and anything else that reads this.discovery) is accurate right
       // away instead of only after the next watcher rescan happens to run.
       // A later rescan still wins normally, the same as any other edit
-      // (#779 round 23 finding 5).
+      // (#779 round 23 finding 5). iconPath is manifest-derived the same
+      // way discovery's own scan computes it — left at its stale value, a
+      // build that added, removed or changed a plugin's icon would keep
+      // showing whatever discovery's last scan found instead (#779 round
+      // 25 finding 2).
+      const iconCheck = manifest.icon
+        ? await verifyPluginIcon(candidate.rootPath, manifest.icon)
+        : { icon: null, diagnostic: null };
       this.discovery = this.discovery.map((entry) =>
-        entry.id === candidate.id ? { ...entry, manifest } : entry
+        entry.id === candidate.id
+          ? { ...entry, manifest, iconPath: iconCheck.icon }
+          : entry
       );
       return this.success(this.setStatus(candidate, {
         status: input.startRuntime ? "starting" : "disabled",
@@ -2059,7 +2082,7 @@ export class PluginPipeline {
         installedBaselineHash: snapshot.sourceHash,
         warnings,
         error: null,
-      }, manifest));
+      }, { manifest, iconPath: iconCheck.icon }));
     } catch (error) {
       await unpublishedSource?.discard().catch(() => undefined);
       const detail = error instanceof PipelineFailure
@@ -2633,6 +2656,21 @@ export class PluginPipeline {
     const verified = await this.verifyApprovedSource(candidate, approvedHash);
     if (verified.kind === "failed") return verified.result;
     if (verified.kind === "changed") {
+      // holdForApproval always drains this plugin's command claims before
+      // it holds — a command reaching this through its own ensureStarted()
+      // call already holds one of those claims, which can never release
+      // until this same call returns. Refusing here, before that drain
+      // ever starts, is what a caller with that concept opts into: the
+      // same retryable code the command layer already recognizes and
+      // maps to its own "try again" status, not a generic failure (#779
+      // round 25 finding 3).
+      if (this.options.hasOutstandingCommandClaim?.(candidate.id)) {
+        return this.failure(candidate.id, pipelineError(
+          "runtime",
+          "claims-draining",
+          `dohc is still working on plugin "${candidate.id}". Try the command again in a moment.`,
+        ));
+      }
       return this.holdForApproval(candidate, verified.sourceHash);
     }
 
@@ -2713,14 +2751,16 @@ export class PluginPipeline {
   private setStatus(
     candidate: InstalledPluginRecord,
     patch: Partial<PluginPipelinePluginStatus>,
-    // The manifest a build actually installed, scanned and built, when this
-    // call reports on one. Discovery's own candidate.manifest can be stale
-    // by then — a plugin's own on-disk manifest can change again after
+    // The manifest (and its own derived icon) a build actually installed,
+    // scanned and built, when this call reports on one. Discovery's own
+    // candidate.manifest/iconPath can be stale by then — a plugin's own
+    // on-disk manifest (and the icon it declares) can change again after
     // discovery scanned it but before this exact snapshot was taken and
-    // built, and only that snapshot's manifest is what is now running.
-    // Left undefined, every derivation below falls back to
-    // candidate.manifest exactly as it always has (#779 round 23 finding 5).
-    builtManifest?: DohcPluginManifest,
+    // built, and only that snapshot is what is now running. Left
+    // undefined, every derivation below falls back to candidate's own
+    // fields exactly as it always has (#779 round 23 finding 5, round 25
+    // finding 2).
+    built?: { manifest: DohcPluginManifest; iconPath: string | null },
   ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
     // A failed replacement with no recovered manifest must not treat its
@@ -2731,13 +2771,13 @@ export class PluginPipeline {
     const authoritativeManifest = this.recoveredManifests.get(candidate.id) ??
       (this.failedReplacements.has(candidate.id)
         ? null
-        : (builtManifest ?? candidate.manifest));
-    // Only the manifest content this call reports on should prefer
-    // builtManifest — directoryName/rootPath/valid below stay tied to the
+        : (built?.manifest ?? candidate.manifest));
+    // Only the manifest content and icon this call reports on should
+    // prefer built — directoryName/rootPath/valid below stay tied to the
     // real discovery candidate, which is what identifies the plugin on
     // disk, not what it built.
-    const metadataSource: InstalledPluginRecord = builtManifest
-      ? { ...candidate, manifest: builtManifest }
+    const metadataSource: InstalledPluginRecord = built
+      ? { ...candidate, manifest: built.manifest, iconPath: built.iconPath }
       : candidate;
     const next: PluginPipelinePluginStatus = {
       ...current,

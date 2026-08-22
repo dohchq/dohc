@@ -1075,6 +1075,13 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       activeCommandClaims.reset(
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
+    hasOutstandingCommandClaim: (pluginId) => {
+      const key = pluginLifecycleKey(workspace.workspaceId, pluginId);
+      // The current call's own claim is one of these — draining them
+      // before a hold would wait on that claim releasing, which cannot
+      // happen until this same call returns (#779 round 25 finding 3).
+      return activeCommandClaims.has(key);
+    },
   });
   return pipeline;
 }
@@ -2804,15 +2811,22 @@ async function reregisterPluginPanels(
   );
   await Promise.all(matches.map(([key, panel]) =>
     withPluginPanelStartLock(key, async () => {
-      // Re-read inside the lock: a close that ran first already deleted
-      // this key, and there is nothing left here to re-grant.
-      if (!runningPluginPanels.has(key)) return;
+      // Re-read inside the lock and act on this exact record, not the one
+      // captured before it: a close that ran first already deleted this
+      // key (nothing left to re-grant), and a start that raced this
+      // rebuild's own wait for the lock already installed its own fresh
+      // record with its own live grant — re-registering the stale one
+      // captured before the lock would revoke that fresh grant right back
+      // out from under it, since register() always revokes whatever grant
+      // already exists for the same subject (#779 round 25 finding 1).
+      const current = runningPluginPanels.get(key);
+      if (current !== panel) return;
       registerPluginPanelGrant({
-        senderId: panel.senderId,
-        generation: panel.generation,
-        workspaceId: panel.workspaceId,
-        pluginId: panel.pluginId,
-        panelId: panel.panelId,
+        senderId: current.senderId,
+        generation: current.generation,
+        workspaceId: current.workspaceId,
+        pluginId: current.pluginId,
+        panelId: current.panelId,
       });
     })
   ));
@@ -3268,12 +3282,21 @@ async function stopPluginSurfacesForSender(senderId: number): Promise<void> {
       record,
     );
   }
+  // Each stop's own rejection is caught right here, not left to reach
+  // Promise.all — an uncaught one there would reject the whole call and
+  // skip every stop still queued behind it, including the panel cleanup
+  // below (#779 round 25 finding 4).
   await Promise.all(
     [...affected.values()].map(({ workspaceId, pluginId }) =>
       withPluginHostLifecycleLock(
         pluginLifecycleKey(workspaceId, pluginId),
         () => stopPluginHostIfUnclaimed(workspaceId, pluginId),
-      ),
+      ).catch((error: unknown) => {
+        console.warn(
+          `[desktop] failed to stop an unclaimed plugin host during sender cleanup (${pluginId})`,
+          error,
+        );
+      }),
     ),
   );
   await stopPluginPanelsForSender(senderId);

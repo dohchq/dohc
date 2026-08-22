@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
+import { PluginClaimsDrainingError } from "./pluginCommandInvocation";
 import {
   forgetRemovedPlugin,
   forgetUninstalledPlugin,
@@ -524,6 +525,31 @@ describe("plugin panel registration", () => {
         }),
       }),
     ).rejects.toThrow("Plugin source changed. Review it again.");
+    expect(panelStartedHosts.size).toBe(0);
+  });
+
+  it("reports the retryable claims-draining failure as PluginClaimsDrainingError, not a generic refusal (#779 round 25 finding 3)", async () => {
+    const panelStartedHosts = new Set<string>();
+
+    const start = startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      hostActivation: () => undefined,
+      // The one shape PluginPipeline.ensureStarted's own refusal takes for
+      // this exact case: the code, not the message text, is what this
+      // conversion recognizes — the command layer's own catch checks the
+      // error class, not the string.
+      ensureStarted: async () => ({
+        ok: false,
+        error: {
+          message: 'dohc is still working on plugin "hello-plugin". Try the command again in a moment.',
+          code: "claims-draining",
+        },
+      }),
+    });
+
+    await expect(start).rejects.toBeInstanceOf(PluginClaimsDrainingError);
     expect(panelStartedHosts.size).toBe(0);
   });
 

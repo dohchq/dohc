@@ -2795,6 +2795,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           return drained;
         },
         resetCommandClaims: (pluginId) => commandClaims.reset(pluginId),
+        // Mirrors main.ts's own wiring: a command that reached
+        // startFromApprovedSource through its own ensureStarted() call
+        // already holds one of the claims a hold would otherwise drain —
+        // refusing here instead of draining is what avoids waiting on
+        // itself (#779 round 25 finding 3).
+        hasOutstandingCommandClaim: (pluginId: string) => commandClaims.has(pluginId),
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -3662,6 +3668,67 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         await setup.pipeline.dispose();
       }
     }, 60_000);
+
+    it("refreshes the icon a build actually installed, not discovery's own stale one, when the source declared it again after discovery last scanned (#779 round 25 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        expect(setup.pipeline.list()[0]?.icon).toBeNull();
+        // No handleWatcherEvents call, same as the manifest-staleness pin
+        // above: discovery's own cached candidate still reports no icon.
+        // Only this build's own snapshot sees the file added below.
+        await writeFile(join(setup.fixture.pluginRoot, "icon.svg"), "<svg/>");
+        await writeFile(
+          setup.manifestPath,
+          `${JSON.stringify({
+            version: 1,
+            name: "example-plugin",
+            displayName: "Example plugin",
+            entry: "src/index.ts",
+            icon: "icon.svg",
+            commands: [],
+            settings: [],
+          }, null, 2)}\n`,
+        );
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(true);
+        expect(setup.pipeline.list()[0]?.icon).toBe("icon.svg");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("refuses instead of draining when the caller's own ensureStarted() call already holds this plugin's command claim and the approved source changed out of band (#779 round 25 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        // A raw write, not through the door-write path: verifyApprovedSource's
+        // own snapshot reads this file fresh and detects the mismatch
+        // against the approved hash, the same as any genuine out-of-band
+        // edit reaching a cold ensureStarted() call.
+        await writeFile(setup.entryPath, [
+          'export const marker = "edited out of band";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        // Simulates claimHostForCommand: the caller's own claim taken
+        // before it calls ensureStarted, released only once its own
+        // invocation finishes — the exact claim that could never release
+        // during a drain this same call triggered (#779 round 25 finding
+        // 3). Without the fix, this call hangs until this test harness's
+        // own undeadlined drain never resolves, and the test times out.
+        setup.commandClaims.claim("example-plugin");
+        try {
+          const result = await setup.pipeline.ensureStarted("example-plugin");
+          expect(result.ok).toBe(false);
+          if (result.ok) throw new Error("unreachable: expected a refusal");
+          expect(result.error.code).toBe("claims-draining");
+        } finally {
+          setup.commandClaims.release("example-plugin");
+        }
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 5_000);
 
     it("falls back to the prior contributions, not the failed candidate's own manifest, when a failed replacement has no readable recovered manifest (round-22 finding 5)", async () => {
       const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
