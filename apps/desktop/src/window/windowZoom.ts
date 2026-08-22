@@ -41,11 +41,11 @@ export function createZoomMutation(deps: {
       const current = await deps.read();
       if (current.source === "recovered") {
         // The read names why it recovered (not a regular file, too large,
-        // unsupported shape, unreadable) — repeat its reason, never a guess.
+        // unsupported shape, unreadable) — throw its reason, never a guess.
+        // The next step belongs to the caller: the surface showing this
+        // error knows which repair action it can actually offer.
         throw new Error(
-          `${
-            current.warning ?? "dohc could not read its settings file."
-          } Open Settings to repair or reset it.`,
+          current.warning ?? "dohc could not read its settings file.",
         );
       }
       const zoomLevel = nextZoomLevel(

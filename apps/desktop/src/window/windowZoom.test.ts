@@ -102,9 +102,10 @@ describe("the zoom mutation", () => {
       apply,
     });
 
-    // The refusal repeats the read's own recovery reason, never a guess.
+    // The refusal is the read's own recovery reason, never a guess; the
+    // caller's surface appends its own next step.
     await expect(step("in")).rejects.toThrow(
-      "The settings file could not be read. Open Settings to repair or reset it.",
+      "The settings file could not be read.",
     );
     expect(write).not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();

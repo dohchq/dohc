@@ -410,7 +410,13 @@ export function SettingsDialog(props: {
     } catch (cause) {
       if (userSaveRequestRef.current !== requestId) return;
       setSaveState("error");
-      setError(cause instanceof Error ? cause.message : String(cause));
+      // The refusal carries the reason; this surface owns the next step —
+      // "open Settings" would name the dialog the user is already in.
+      setError(
+        `${
+          cause instanceof Error ? cause.message : String(cause)
+        } Use Reset user settings in the Advanced section, or repair the file.`,
+      );
     }
   }, [markSaved, markSaving]);
 

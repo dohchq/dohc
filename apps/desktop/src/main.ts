@@ -1382,7 +1382,7 @@ function refreshApplicationMenu(): void {
             dialog.showErrorBox(
               "Zoom",
               error instanceof Error
-                ? error.message
+                ? `${error.message} Open Settings to repair or reset it.`
                 : "dohc could not change the window zoom.",
             );
           });
@@ -7209,7 +7209,18 @@ function registerIpcHandlers(
       generation: rendererGeneration(event.sender.id),
     });
     if (!record) return;
-    record.view.view.setBounds(input.bounds);
+    // The renderer reports CSS pixels; page zoom changes the CSS→DIP mapping,
+    // so a zoomed host would otherwise place the guest at the wrong
+    // rectangle — over neighboring chrome, taking clicks outside its frame.
+    // The renderer re-reports on the resize a zoom change triggers, so a
+    // report in flight across a zoom step corrects itself.
+    const zoomFactor = event.sender.getZoomFactor();
+    record.view.view.setBounds({
+      x: Math.round(input.bounds.x * zoomFactor),
+      y: Math.round(input.bounds.y * zoomFactor),
+      width: Math.round(input.bounds.width * zoomFactor),
+      height: Math.round(input.bounds.height * zoomFactor),
+    });
     record.view.view.setVisible(input.visible);
   });
 
