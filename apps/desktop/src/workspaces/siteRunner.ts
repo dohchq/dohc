@@ -240,6 +240,23 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
       quote = char;
       continue;
     }
+    // Subshell grouping (`(HOST=0.0.0.0 vite)`), brace grouping
+    // (`{ HOST=0.0.0.0 vite; }`), and command substitution (`$(...)`/
+    // `` `...` ``) are shell CONSTRUCTS this tokenizer has no way to
+    // decompose — `(` glues onto whatever token follows it, so
+    // "(HOST=0.0.0.0" never matches the leading-assignment scan's
+    // identifier-starting pattern, and the real command hidden inside
+    // never gets validated at all. splitShellStatements only recognizes
+    // statement SEPARATORS, not constructs that wrap a whole statement —
+    // there is no separator here for it to split on. Refuse outright, the
+    // same stance this file already takes on a shape it cannot safely
+    // parse (ENV_OPTIONS_UNVERIFIABLE, MAX_SHELL_NESTING_DEPTH).
+    if (char === "(" || char === ")" || char === "{" || char === "}" || char === "`") {
+      throw new Error(
+        `Site dev server command contains an unquoted "${char}", a shell grouping or command-substitution ` +
+        `construct dohc cannot statically decompose to verify its loopback-only host binding: ${commandLine}`,
+      );
+    }
     if (/\s/.test(char)) {
       if (token) {
         tokens.push(token);

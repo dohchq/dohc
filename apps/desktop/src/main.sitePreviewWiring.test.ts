@@ -87,4 +87,30 @@ describe("site preview main-process wiring", () => {
       "Not a detected site: gone",
     );
   });
+
+  it("wires listSites and getSitePackage to require the active workspace, the same as startSitePreview", () => {
+    // requireWorkspace alone only proves workspaceId names a workspace
+    // REGISTERED somewhere in this app instance — not that it's the one
+    // THIS sender's own window is currently showing. Without the active-
+    // workspace check, a stale or compromised renderer could read another
+    // workspace's site paths, titles, diagnostics, and full package-script
+    // bodies just by naming its id — main.ts cannot be imported directly
+    // under Vitest, so this checks the handler's own source text for the
+    // guard, the established pattern this file already uses above.
+    for (const channel of ["listSites", "getSitePackage"]) {
+      const handler = handlerSource(channel);
+      const workspaceAt = handler.indexOf("const workspace = requireWorkspace(");
+      const guardAt = handler.indexOf(
+        "activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId",
+        workspaceAt,
+      );
+      const readAt = handler.indexOf(
+        channel === "listSites" ? "await listSitePackages(" : "await getSitePackage(",
+        workspaceAt,
+      );
+      expect(workspaceAt).toBeGreaterThanOrEqual(0);
+      expect(guardAt).toBeGreaterThan(workspaceAt);
+      expect(readAt).toBeGreaterThan(guardAt);
+    }
+  });
 });

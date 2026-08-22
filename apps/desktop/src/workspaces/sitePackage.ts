@@ -13,6 +13,7 @@ import {
 } from "@dohc/workspace-core";
 import { MAX_SHARE_PATH_CHARS } from "@dohc/security-contract";
 import * as acorn from "acorn";
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { parse as parseHtml } from "parse5";
@@ -384,32 +385,78 @@ function blockedCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<Cs
   return blocked;
 }
 
-/** Whether a class's INLINE content (a <script> body, a <style> body/
- * style="" attribute, an on* handler) is permitted to run at all — a
- * SEPARATE question from whether EXTERNAL resources of that class are
- * allowed. `script-src 'self'` (or any source list at all) blocks inline
- * script/style UNLESS 'unsafe-inline' or a nonce-/hash-source is also
- * present — unlike blockedCspClasses' external-resource check, 'self'
- * alone is enough to block here; only 'unsafe-inline'/nonce/hash keep it
- * permitted. This scanner can't verify a SPECIFIC nonce/hash matches a
- * given element, so any nonce-/hash- token is treated as permitting
- * (avoiding a false exclusion for the common nonce-based CSP pattern) —
- * bounded to script/style, the only two classes inline content ever is. */
-function blockedInlineCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<CspClass> {
-  const blocked = new Set<CspClass>();
+// CSP nonce values are meant to be unguessable tokens — two nonces that
+// differ only in case are NOT the same one, so unlike the keyword prefix
+// this checks, the value itself must compare case-SENSITIVELY.
+function nonceSourceMatches(sourceList: readonly string[], nonce: string): boolean {
+  return sourceList.some((token) => /^'nonce-.+'$/i.test(token) && token.slice(7, -1) === nonce);
+}
+
+const HASH_SOURCE_PATTERN = /^'sha(256|384|512)-([A-Za-z0-9+/]+=*)'$/i;
+
+// A real browser hashes the element's exact text content (a <script>/
+// <style> body) or the attribute's exact value (style=""/an on* handler,
+// only reached when 'unsafe-hashes' also permits attribute matching —
+// see isInlineBlockPermitted) — UTF-8 encoded, base64-digested. Multiple
+// hash-source tokens can name the SAME algorithm; the digest for each
+// algorithm actually present is computed once and reused.
+function hashSourceMatches(sourceList: readonly string[], text: string): boolean {
+  const digests = new Map<string, string>();
+  for (const token of sourceList) {
+    const match = HASH_SOURCE_PATTERN.exec(token);
+    if (!match?.[1] || !match[2]) continue;
+    const algorithm = `sha${match[1]}`;
+    let digest = digests.get(algorithm);
+    if (digest === undefined) {
+      digest = createHash(algorithm).update(text, "utf8").digest("base64");
+      digests.set(algorithm, digest);
+    }
+    if (digest === match[2]) return true;
+  }
+  return false;
+}
+
+/** Whether a SPECIFIC inline block — a <script>/<style> element's own text
+ * (with its own `nonce` attribute, if any) or a style=""/on* handler
+ * ATTRIBUTE's own value (`isAttribute: true`, `nonce: undefined` — an
+ * attribute is never itself an element with a nonce) — is permitted to
+ * execute/apply under every policy collected so far in document order
+ * (CSP intersection: ANY one policy that doesn't permit it blocks the
+ * block document-wide, the same rule blockedCspClasses' external-resource
+ * check already follows). `script-src 'self'` (or any source list at
+ * all) blocks inline content UNLESS 'unsafe-inline' or a matching nonce-/
+ * hash-source is also present — unlike blockedCspClasses, 'self' alone is
+ * enough to block here. A hash-source only covers an ATTRIBUTE's value
+ * when the list also carries 'unsafe-hashes' (CSP3); nonce-sources never
+ * do, since only an ELEMENT — never an attribute value — carries a nonce
+ * of its own. 'unsafe-inline' is ignored the instant the list carries ANY
+ * nonce- or hash-source token at all, per CSP2+, even for a content type
+ * (an attribute against a nonce-only list) that token can never itself
+ * satisfy — a real, if surprising, spec-correct lockout. */
+function isInlineBlockPermitted(
+  cspPolicyContents: readonly string[],
+  cspClass: "script" | "style",
+  nonce: string | undefined,
+  text: string,
+  isAttribute: boolean,
+): boolean {
   for (const content of cspPolicyContents) {
     const directives = parseCspDirectives(content);
-    for (const cspClass of ["script", "style"] as const) {
-      const sourceList = directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
-      if (!sourceList) continue;
-      const permitsInline = sourceList.some((token) => {
-        const lower = token.toLowerCase();
-        return lower === "'unsafe-inline'" || lower.startsWith("'nonce-") || /^'sha(256|384|512)-/.test(lower);
-      });
-      if (!permitsInline) blocked.add(cspClass);
-    }
+    const sourceList = directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
+    if (!sourceList) continue;
+    const hasNonceOrHashSource = sourceList.some((token) => {
+      const lower = token.toLowerCase();
+      return lower.startsWith("'nonce-") || /^'sha(256|384|512)-/.test(lower);
+    });
+    const permittedByNonce = !isAttribute && nonce !== undefined && nonceSourceMatches(sourceList, nonce);
+    const permittedByHash =
+      (!isAttribute || sourceList.some((token) => token.toLowerCase() === "'unsafe-hashes'")) &&
+      hashSourceMatches(sourceList, text);
+    const permittedByUnsafeInline =
+      !hasNonceOrHashSource && sourceList.some((token) => token.toLowerCase() === "'unsafe-inline'");
+    if (!permittedByNonce && !permittedByHash && !permittedByUnsafeInline) return false;
   }
-  return blocked;
+  return true;
 }
 
 // Which elements a URL-bearing attribute actually fires a request from, per
@@ -757,6 +804,23 @@ function fontFaceBlockSpans(cssText: string): Array<[number, number]> {
   return spans;
 }
 
+// `@import url(theme.css)` contains a real url(...) call CSS_URL_PATTERN
+// ALSO matches on its own generic pass — without excluding it, the SAME
+// span mints two references for the same target: one classified "style"
+// (correct — @import pulls in a stylesheet) and one classified "img" (the
+// generic pass's default). A policy like `img-src 'self'; style-src
+// 'none'` then filters out the correct style-classified reference but
+// leaves the img-classified duplicate standing, silently approving a file
+// a real browser's style-src would have blocked entirely.
+function importSpans(cssText: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const match of cssText.matchAll(CSS_IMPORT_PATTERN)) {
+    const start = match.index ?? 0;
+    spans.push([start, start + match[0].length]);
+  }
+  return spans;
+}
+
 function blankCssStrings(cssText: string): string {
   return cssText.replace(CSS_STRING_PATTERN, (match, offset: number, full: string) => {
     const before = full.slice(Math.max(0, offset - 64), offset);
@@ -833,9 +897,15 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
   }
   const cssText = blankCssStrings(withoutComments);
   const fontFaceSpans = fontFaceBlockSpans(cssText);
+  const cssImportSpans = importSpans(cssText);
   for (const match of cssText.matchAll(CSS_URL_PATTERN)) {
     const value = (match[1] ?? match[2] ?? match[3])?.trim();
     if (!value) continue;
+    const start = match.index ?? 0;
+    // @import's OWN url(...) call is handled by the @import pass below,
+    // with the correct style-src classification — matching it again here
+    // would mint a second, wrongly-classified reference for the same span.
+    if (cssImportSpans.some(([spanStart, spanEnd]) => start >= spanStart && start < spanEnd)) continue;
     // A bare url() inside an @font-face block's own src is font-src, not
     // img-src — font-src isn't in this scan's bounded CSP set (see
     // blockedCspClasses), so it's left unclassified rather than
@@ -843,7 +913,6 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
     // wrongly remove a font a real browser is still allowed to fetch.
     // Everywhere else a bare url() is img-src, the more common case and
     // the one of the two actually in the bounded set.
-    const start = match.index ?? 0;
     const inFontFace = fontFaceSpans.some(([spanStart, spanEnd]) => start >= spanStart && start < spanEnd);
     references.push({
       value,
@@ -1376,6 +1445,36 @@ interface ImportMapResolution extends ResolvedSpecifierMap {
   // parent scope still applies when the most specific matching scope
   // doesn't map the specifier either.
   scopes: ReadonlyMap<string, ResolvedSpecifierMap>;
+}
+
+// A document can declare more than one <script type="importmap"> — the
+// HTML standard (and Chromium/WebKit as of the version this scanner
+// targets) merges each into a single global import map as it's parsed,
+// in document order: a key an EARLIER map already claimed (in imports,
+// urlLikeImports, OR externalUrlLikeKeys — never more than one of those
+// three for the same key) keeps its original value; a later map only
+// ever fills in a key nothing has claimed yet.
+function mergeSpecifierMaps(existing: ResolvedSpecifierMap, next: ResolvedSpecifierMap): ResolvedSpecifierMap {
+  const imports = new Map(existing.imports);
+  const urlLikeImports = new Map(existing.urlLikeImports);
+  const externalUrlLikeKeys = new Set(existing.externalUrlLikeKeys);
+  const claimed = (key: string) => imports.has(key) || urlLikeImports.has(key) || externalUrlLikeKeys.has(key);
+  for (const [key, value] of next.imports) if (!claimed(key)) imports.set(key, value);
+  for (const [key, value] of next.urlLikeImports) if (!claimed(key)) urlLikeImports.set(key, value);
+  for (const key of next.externalUrlLikeKeys) if (!claimed(key)) externalUrlLikeKeys.add(key);
+  return { imports, urlLikeImports, externalUrlLikeKeys };
+}
+
+// Scopes merge the same way, per prefix: a scope only the later map
+// declares is added wholesale; a scope BOTH declare merges its own
+// specifier map with the same earlier-wins rule.
+function mergeImportMapResolutions(existing: ImportMapResolution, next: ImportMapResolution): ImportMapResolution {
+  const scopes = new Map(existing.scopes);
+  for (const [prefix, nextScope] of next.scopes) {
+    const existingScope = scopes.get(prefix);
+    scopes.set(prefix, existingScope ? mergeSpecifierMaps(existingScope, nextScope) : nextScope);
+  }
+  return { ...mergeSpecifierMaps(existing, next), scopes };
 }
 
 function isBareModuleSpecifier(specifier: string): boolean {
@@ -2044,9 +2143,10 @@ function htmlReferencesFromDocument(
   const classicJsTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
   const moduleJsTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
   const handlerTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
-  // Only the FIRST import map counts per the HTML standard, and it takes
-  // effect the instant it's parsed — set once, on the first <script
-  // type="importmap"> visit() reaches, never again after.
+  // The HTML standard (and Chromium/WebKit's own current support) merges
+  // EVERY <script type="importmap"> into one global map, in document
+  // order, as each is parsed — grown via mergeImportMapResolutions
+  // (earlier-key-wins) each time visit() reaches one, never replaced.
   let activeImportMap: ImportMapResolution | undefined;
   const nestedReferences: BrowserTextReference[] = [];
   const cspPolicyContents: string[] = [];
@@ -2066,12 +2166,14 @@ function htmlReferencesFromDocument(
   // has it in <head>, before any meaningful inline block) is captured by
   // applying the FINAL state to all of those collectively.
   let blockedSoFar: ReadonlySet<CspClass> = new Set();
-  // A SEPARATE running state for whether inline script/style content is
-  // even permitted to RUN at all (see blockedInlineCspClasses) — 'self'
-  // blocks inline execution but does NOT make blockedSoFar's external-
-  // resource check treat the class as blocked, so gating inline
-  // collection on blockedSoFar alone missed this class of block entirely.
-  let inlineBlockedSoFar: ReadonlySet<CspClass> = new Set();
+  // A SEPARATE running snapshot of the RAW policy strings collected so far
+  // in document order, for isInlineBlockPermitted's own per-block nonce/
+  // hash matching — 'self' blocks inline execution but does NOT make
+  // blockedSoFar's external-resource check treat the class as blocked, so
+  // gating inline collection on blockedSoFar alone missed this class of
+  // block entirely, and a class-wide flag can't tell one script's nonce
+  // from another's.
+  let cspPolicyContentsSoFar: readonly string[] = [];
   const pushAttributeReference = (reference: BrowserTextReference): void => {
     if (reference.cspClass && blockedSoFar.has(reference.cspClass)) return;
     attributeReferences.push(reference);
@@ -2095,7 +2197,11 @@ function htmlReferencesFromDocument(
       // class those dependencies would themselves carry — script-src
       // 'none' blocking a <script> means a fetch() inside it never fires,
       // even though connect-src (the fetch's OWN class) might allow it.
-      if (styleAttribute && !inlineBlockedSoFar.has("style")) {
+      // A style="" attribute is never itself an element with a nonce of
+      // its own (isAttribute: true, nonce: undefined) — only 'unsafe-
+      // inline', or a hash of its OWN value alongside 'unsafe-hashes',
+      // can permit it.
+      if (styleAttribute && isInlineBlockPermitted(cspPolicyContentsSoFar, "style", undefined, styleAttribute, true)) {
         cssTexts.push({ text: styleAttribute, blocked: blockedSoFar });
       }
       for (const attribute of node.attrs) {
@@ -2103,7 +2209,10 @@ function htmlReferencesFromDocument(
         // <script> body — parse5 already decoded any entity in the value —
         // but they compile with function-body grammar, so they're parsed
         // separately (jsReferencesFromEventHandler), not joined into jsTexts.
-        if (/^on[a-z]+$/i.test(attribute.name) && !inlineBlockedSoFar.has("script")) {
+        if (
+          /^on[a-z]+$/i.test(attribute.name) &&
+          isInlineBlockPermitted(cspPolicyContentsSoFar, "script", undefined, attribute.value, true)
+        ) {
           handlerTexts.push({ text: attribute.value, blocked: blockedSoFar, importMap: activeImportMap });
         }
       }
@@ -2155,7 +2264,7 @@ function htmlReferencesFromDocument(
           // the running state rather than replacing it, the same
           // union-of-all-policies reasoning blockedCspClasses itself uses.
           blockedSoFar = new Set([...blockedSoFar, ...blockedCspClasses([policyContent])]);
-          inlineBlockedSoFar = new Set([...inlineBlockedSoFar, ...blockedInlineCspClasses([policyContent])]);
+          cspPolicyContentsSoFar = [...cspPolicyContentsSoFar, policyContent];
         }
       }
       const scriptKind: ScriptKind = attrs.get("type")?.toLowerCase() === "module" ? "module" : "classic";
@@ -2280,13 +2389,14 @@ function htmlReferencesFromDocument(
       }
       if (tagName === "script") {
         if (attrs.get("type")?.toLowerCase() === "importmap") {
-          // Only the FIRST import map counts, and it's active from THIS
+          // Merges into whatever's active so far — see
+          // mergeImportMapResolutions — and takes effect (for the merged
+          // keys a strictly EARLIER map hadn't already claimed) from THIS
           // point in document order onward.
-          if (activeImportMap === undefined) {
-            const rawImportMap = parseImportMap(html5TextContent(node));
-            if (rawImportMap) {
-              activeImportMap = resolveImportMapAddresses(rawImportMap, documentPath, documentBase, artifactRoot);
-            }
+          const rawImportMap = parseImportMap(html5TextContent(node));
+          if (rawImportMap) {
+            const resolved = resolveImportMapAddresses(rawImportMap, documentPath, documentBase, artifactRoot);
+            activeImportMap = activeImportMap ? mergeImportMapResolutions(activeImportMap, resolved) : resolved;
           }
         } else if (
           isExecutableScriptElement(attrs) &&
@@ -2295,20 +2405,25 @@ function htmlReferencesFromDocument(
           // executed — the same way an unsupported browser would be
           // expected to run it instead. A type="module" script ignores
           // nomodule per spec (nonsensical combination either way).
-          !(attrs.has("nomodule") && scriptKind === "classic") &&
-          !inlineBlockedSoFar.has("script")
+          !(attrs.has("nomodule") && scriptKind === "classic")
         ) {
-          (scriptKind === "module" ? moduleJsTexts : classicJsTexts).push({
-            text: html5TextContent(node),
-            blocked: blockedSoFar,
-            importMap: activeImportMap,
-          });
+          const scriptText = html5TextContent(node);
+          // isAttribute: false — a <script> element carries its OWN nonce
+          // attribute, unlike a style=""/on* attribute.
+          if (isInlineBlockPermitted(cspPolicyContentsSoFar, "script", attrs.get("nonce"), scriptText, false)) {
+            (scriptKind === "module" ? moduleJsTexts : classicJsTexts).push({
+              text: scriptText,
+              blocked: blockedSoFar,
+              importMap: activeImportMap,
+            });
+          }
         }
         return;
       }
       if (tagName === "style") {
-        if (!inlineBlockedSoFar.has("style")) {
-          cssTexts.push({ text: html5TextContent(node), blocked: blockedSoFar });
+        const styleText = html5TextContent(node);
+        if (isInlineBlockPermitted(cspPolicyContentsSoFar, "style", attrs.get("nonce"), styleText, false)) {
+          cssTexts.push({ text: styleText, blocked: blockedSoFar });
         }
         return;
       }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1270,6 +1271,37 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("import-map/public.js");
     expect(manifestOf(site)?.assets).not.toContain("import-map/lib");
     expect(manifestOf(site)?.assets).not.toContain("import-map/unmapped");
+  });
+
+  it("merges a second import map's new keys, but keeps an earlier map's own key when both declare it", async () => {
+    await mkdir(join(root, "import-map-merge"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-merge", "index.html"),
+      [
+        // Chromium/WebKit merge EVERY <script type="importmap"> into one
+        // global map as each is parsed, in document order — a key an
+        // earlier map already claims ("a") keeps its original value even
+        // if a later map also declares it; a key only a later map
+        // declares ("b") is still added.
+        '<script type="importmap">{"imports": {"a": "./from-first.js"}}</script>',
+        '<script type="importmap">{"imports": {"a": "./from-second.js", "b": "./from-second-b.js"}}</script>',
+        '<script type="module">import "a"; import "b";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-merge", "from-first.js"), "export {};");
+    await writeFile(join(root, "import-map-merge", "from-second.js"), "private file literally named from-second.js");
+    await writeFile(join(root, "import-map-merge", "from-second-b.js"), "export {};");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-merge",
+    );
+
+    // "a" still resolves to the FIRST map's own value...
+    expect(manifestOf(site)?.assets).toContain("import-map-merge/from-first.js");
+    expect(manifestOf(site)?.assets).not.toContain("import-map-merge/from-second.js");
+    // ...while "b", which only the SECOND map declares, is still merged in
+    // and resolves — not lost because a first map already existed.
+    expect(manifestOf(site)?.assets).toContain("import-map-merge/from-second-b.js");
   });
 
   it("does not apply an import map to a module script referenced earlier in document order", async () => {
@@ -3447,6 +3479,136 @@ describe("listSitePackages", () => {
     );
   });
 
+  it("does not treat the mere presence of a nonce source as class-wide permission for an un-nonced script", async () => {
+    await mkdir(join(root, "csp-nonce-mismatch"), { recursive: true });
+    await writeFile(
+      join(root, "csp-nonce-mismatch", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'nonce-approved\'; connect-src \'self\'">',
+        '<script>fetch("private.json");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-nonce-mismatch", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-nonce-mismatch",
+    );
+
+    // A source list carrying a nonce-source permits ONLY an element whose
+    // OWN nonce attribute matches it — a script with no nonce attribute at
+    // all is still blocked, the same way it would be under a plain
+    // script-src 'self' with no nonce/hash present at all.
+    expect(manifestOf(site)?.assets).not.toContain("csp-nonce-mismatch/private.json");
+  });
+
+  it("scans an inline script whose own nonce attribute matches the policy's nonce source", async () => {
+    await mkdir(join(root, "csp-nonce-match"), { recursive: true });
+    await writeFile(
+      join(root, "csp-nonce-match", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'nonce-approved\'; connect-src \'self\'">',
+        '<script nonce="approved">fetch("public.json");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-nonce-match", "public.json"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-nonce-match",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("csp-nonce-match/public.json");
+  });
+
+  it("scans an inline style whose own content hash matches the policy's hash source", async () => {
+    await mkdir(join(root, "csp-hash-match"), { recursive: true });
+    const styleText = 'body{background:url("public.png")}';
+    const digest = createHash("sha256").update(styleText, "utf8").digest("base64");
+    await writeFile(
+      join(root, "csp-hash-match", "index.html"),
+      [
+        `<meta http-equiv="Content-Security-Policy" content="style-src 'sha256-${digest}'; img-src 'self'">`,
+        `<style>${styleText}</style>`,
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-hash-match", "public.png"), "img");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-hash-match",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("csp-hash-match/public.png");
+  });
+
+  it("does not permit an inline event handler via a hash source without 'unsafe-hashes'", async () => {
+    await mkdir(join(root, "csp-handler-hash-no-unsafe-hashes"), { recursive: true });
+    const handlerText = 'fetch("private.json")';
+    const digest = createHash("sha256").update(handlerText, "utf8").digest("base64");
+    await writeFile(
+      join(root, "csp-handler-hash-no-unsafe-hashes", "index.html"),
+      [
+        `<meta http-equiv="Content-Security-Policy" content="script-src 'sha256-${digest}'; connect-src 'self'">`,
+        `<button onclick='${handlerText}'>go</button>`,
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-handler-hash-no-unsafe-hashes", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-handler-hash-no-unsafe-hashes",
+    );
+
+    // A hash-source only covers an on* handler's own value when the list
+    // ALSO carries 'unsafe-hashes' (CSP3) — a nonce never applies to an
+    // attribute at all, since an attribute is never itself an element with
+    // a nonce of its own.
+    expect(manifestOf(site)?.assets).not.toContain(
+      "csp-handler-hash-no-unsafe-hashes/private.json",
+    );
+  });
+
+  it("permits an inline event handler via a hash source once 'unsafe-hashes' is present", async () => {
+    await mkdir(join(root, "csp-handler-hash-unsafe-hashes"), { recursive: true });
+    const handlerText = 'fetch("public.json")';
+    const digest = createHash("sha256").update(handlerText, "utf8").digest("base64");
+    await writeFile(
+      join(root, "csp-handler-hash-unsafe-hashes", "index.html"),
+      [
+        `<meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-hashes' 'sha256-${digest}'; connect-src 'self'">`,
+        `<button onclick='${handlerText}'>go</button>`,
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-handler-hash-unsafe-hashes", "public.json"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-handler-hash-unsafe-hashes",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("csp-handler-hash-unsafe-hashes/public.json");
+  });
+
+  it("ignores 'unsafe-inline' once the source list also carries a nonce source, even for content neither can satisfy", async () => {
+    await mkdir(join(root, "csp-unsafe-inline-ignored"), { recursive: true });
+    await writeFile(
+      join(root, "csp-unsafe-inline-ignored", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\' \'nonce-approved\'; connect-src \'self\'">',
+        '<button onclick=\'fetch("private.json")\'>go</button>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-unsafe-inline-ignored", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-unsafe-inline-ignored",
+    );
+
+    // Per CSP2+, 'unsafe-inline' is ignored entirely once a nonce- or
+    // hash-source is ALSO present — even for an on* handler, which neither
+    // a nonce (attributes have none) nor this list's hash-less nonce
+    // source can ever cover.
+    expect(manifestOf(site)?.assets).not.toContain(
+      "csp-unsafe-inline-ignored/private.json",
+    );
+  });
+
   it("keeps a reference an inline script already requested before a later meta CSP blocks its class", async () => {
     await mkdir(join(root, "csp-inline-block-order"), { recursive: true });
     await writeFile(
@@ -3509,5 +3671,42 @@ describe("listSitePackages", () => {
     // rather than falling through to CSS_URL_PATTERN's generic "img"
     // classification, which img-src 'none' would wrongly block.
     expect(manifestOf(site)?.assets).toContain("css-import-unquoted/theme.css");
+  });
+
+  it("does not let @import's own url() also match the generic CSS pattern under a different, wrongly-permissive class", async () => {
+    await mkdir(join(root, "css-import-not-double-matched"), { recursive: true });
+    await writeFile(
+      join(root, "css-import-not-double-matched", "index.html"),
+      [
+        // The <link> is reached BEFORE the later meta CSP — it's approved
+        // under the permissive state active at THAT point in document
+        // order, and style.css itself is queued and scanned regardless.
+        // Its OWN discovered references are then filtered against the
+        // document's FINAL policy (style-src 'none', img-src 'self') —
+        // exactly the ordering a link-then-restrict document produces.
+        '<link rel="stylesheet" href="style.css">',
+        '<meta http-equiv="Content-Security-Policy" content="img-src \'self\'; style-src \'none\'">',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "css-import-not-double-matched", "style.css"),
+      "@import url(theme.css);",
+    );
+    await writeFile(join(root, "css-import-not-double-matched", "theme.css"), "body {}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "css-import-not-double-matched",
+    );
+
+    // @import's own url(...) call ALSO matches the generic CSS_URL_PATTERN
+    // pass — without excluding that span, the same target mints a SECOND
+    // reference classified "img" (permitted here) alongside the correctly
+    // classified "style" one (blocked here), and the img-classified
+    // duplicate would silently survive filtering even though a real
+    // browser's style-src 'none' blocks the whole @import.
+    expect(manifestOf(site)?.assets).toContain("css-import-not-double-matched/style.css");
+    expect(manifestOf(site)?.assets).not.toContain(
+      "css-import-not-double-matched/theme.css",
+    );
   });
 });

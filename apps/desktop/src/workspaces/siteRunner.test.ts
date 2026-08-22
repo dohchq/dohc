@@ -400,6 +400,38 @@ describe("package manager helpers", () => {
     }
   });
 
+  it("refuses subshell grouping, brace grouping, and command substitution it cannot statically decompose", () => {
+    // `(HOST=0.0.0.0 vite)` is one valid POSIX subshell statement — without
+    // recognizing "(" as a construct, splitCommandLine would tokenize the
+    // command as "(HOST=0.0.0.0" (glued to the paren), which the leading-
+    // assignment scan's identifier-starting pattern never matches, so the
+    // real "vite" invocation hidden inside is never validated at all.
+    expect(() => splitCommandLine("(HOST=0.0.0.0 vite)")).toThrow(
+      /shell grouping or command-substitution/,
+    );
+    expect(() => splitCommandLine("{ HOST=0.0.0.0 vite; }")).toThrow(
+      /shell grouping or command-substitution/,
+    );
+    expect(() => splitCommandLine("vite $(echo --host=0.0.0.0)")).toThrow(
+      /shell grouping or command-substitution/,
+    );
+    expect(() => splitCommandLine("vite `echo --host=0.0.0.0`")).toThrow(
+      /shell grouping or command-substitution/,
+    );
+    // The same characters, quoted, are ordinary literal argument bytes —
+    // over-refusing them would break a legitimate command.
+    expect(splitCommandLine('vite --define "X=(1)"')).toEqual({
+      command: "vite",
+      args: ["--define", "X=(1)"],
+    });
+  });
+
+  it("refuses a package script whose body hides a host rebind inside subshell grouping", () => {
+    expect(() =>
+      packageManagerValidatedScriptCommand("pnpm", "dev", "(HOST=0.0.0.0 vite)"),
+    ).toThrow(/shell grouping or command-substitution/);
+  });
+
   it("splits a shell body into the statements a real shell would run, not just whitespace-separated tokens", () => {
     expect(splitShellStatements("export HOST=0.0.0.0; vite")).toEqual([
       "export HOST=0.0.0.0",
