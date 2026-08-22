@@ -1161,6 +1161,52 @@ describe("PluginsView", () => {
     expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
   });
 
+  // Round 16 finding 1: with no prior ready list, the ambiguity check has
+  // nothing to count rows in — the naive read is "not ambiguous", so the
+  // initial request's OWN merge (once it lands) re-applies the removed
+  // event against whatever it fetched. If that fetch already reflects the
+  // removal (one row left, sharing the removed id with the survivor), the
+  // merge reads "only one row has this id now" as proof there was never a
+  // collision, and drops the survivor anyway.
+  it("keeps a survivor visible when a removal arrives before the initial load ever settles", async () => {
+    const initialLoad = deferred<{
+      ok: true;
+      plugins: PluginStatusRecord[];
+    }>();
+    bridgeMock.listPlugins
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        plugins: [plugin("codex", { directoryName: "codex-b", displayName: "Codex B" })],
+      });
+
+    renderList();
+
+    // The initial request is still in flight — loadRef has never held a
+    // ready list, so ambiguity cannot be read off it either way.
+    act(() => {
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "codex" });
+    });
+
+    // What the in-flight request resolves to: a same-tick backend snapshot
+    // already past the removal, showing only the survivor — exactly the
+    // shape a buggy merge reads as "unambiguous".
+    await act(async () => {
+      initialLoad.resolve({
+        ok: true,
+        plugins: [plugin("codex", { directoryName: "codex-b", displayName: "Codex B" })],
+      });
+      await initialLoad.promise;
+    });
+
+    await waitFor(() => expect(screen.getAllByTestId("plugin-row")).toHaveLength(1));
+    expect(screen.getByText("Codex B")).toBeTruthy();
+    // The unconditional reload this pins: a second request, issued after
+    // the removed event was recorded, whose own newerEvents excludes it —
+    // its fetch is trusted as-is instead of re-filtered.
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
+  });
+
   it("never repaints one workspace's rows from another workspace's status event", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,

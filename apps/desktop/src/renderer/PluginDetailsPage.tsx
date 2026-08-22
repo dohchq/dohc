@@ -89,18 +89,29 @@ function readmePath(directoryName: string): string {
 // unrelated rows). Prefer that exact (id, directoryName) pair so a collision
 // never repaints the wrong one. A rename moves the row this tab is tracking
 // to a new directoryName with no row left at the old one, so fall back to id
-// alone — but only when it names a single row; a rename that lands ON a
-// collision is genuine ambiguity, not a case to guess through.
+// alone — but only when it names a single row, and never onto a directory
+// `knownCollisions` already names: a directory that coexisted with the
+// tab's own exact row is a pre-existing, unrelated installation the id
+// merely happens to collide with, never a rename target — a rename moves
+// the SAME entry, so nothing else could have held this id under a
+// different name while the tab's own row was still there. Without this, a
+// successful Remove left this exact shape: the tab's own row gone, one
+// other row still naming the same id, and no way to tell that survivor
+// apart from a genuine rename target by row count alone (#779-offers round
+// 16 finding 2).
 function findTabPlugin(
   plugins: PluginStatusRecord[],
   pluginId: string,
   directoryName: string,
+  knownCollisions: ReadonlySet<string>,
 ): PluginStatusRecord | null {
   const exact = plugins.find(
     (entry) => entry.id === pluginId && entry.directoryName === directoryName,
   );
   if (exact) return exact;
-  const byId = plugins.filter((entry) => entry.id === pluginId);
+  const byId = plugins.filter(
+    (entry) => entry.id === pluginId && !knownCollisions.has(entry.directoryName),
+  );
   return byId.length === 1 ? byId[0] : null;
 }
 
@@ -632,9 +643,33 @@ export function PluginDetailsPage(props: {
   onTitle?: (pluginId: string, directoryName: string, title: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
+  // Every OTHER directoryName ever seen sharing props.pluginId while the
+  // tab's own exact (pluginId, directoryName) row was still present —
+  // recorded here, rather than read fresh each render, because the
+  // evidence only exists WHILE that exact row is still around: once it is
+  // gone, findTabPlugin can no longer tell a pre-existing collision from a
+  // rename target by looking at the current list alone.
+  const knownCollisionsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (catalog.load.status !== "ready") return;
+    const exact = catalog.load.plugins.some(
+      (entry) => entry.id === props.pluginId && entry.directoryName === props.directoryName,
+    );
+    if (!exact) return;
+    for (const entry of catalog.load.plugins) {
+      if (entry.id === props.pluginId && entry.directoryName !== props.directoryName) {
+        knownCollisionsRef.current.add(entry.directoryName);
+      }
+    }
+  }, [catalog.load, props.pluginId, props.directoryName]);
   const plugin =
     catalog.load.status === "ready"
-      ? findTabPlugin(catalog.load.plugins, props.pluginId, props.directoryName)
+      ? findTabPlugin(
+        catalog.load.plugins,
+        props.pluginId,
+        props.directoryName,
+        knownCollisionsRef.current,
+      )
       : null;
 
   // Held in a ref so a new callback identity never re-reports, and written

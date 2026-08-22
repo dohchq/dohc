@@ -225,7 +225,14 @@ describe("plugin web app main-process wiring", () => {
     const uninstallCallAt = uninstall.indexOf(
       "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
     );
-    const guardAt = uninstall.indexOf("if (result.ok) {", uninstallCallAt);
+    const idStillClaimedAt = uninstall.indexOf(
+      "pipeline.list().some((entry) => entry.id === input.pluginId)",
+      uninstallCallAt,
+    );
+    const guardAt = uninstall.indexOf(
+      "if (result.ok && !idStillClaimed) {",
+      idStillClaimedAt,
+    );
     const clearAt = uninstall.indexOf("clearPluginWebAppPartition({", guardAt);
 
     // MUTATION (session credential): without the clear, a reinstalled plugin
@@ -233,7 +240,30 @@ describe("plugin web app main-process wiring", () => {
     // What the clear targets is pinned in pluginWebAppGuest.test.ts.
     expect(stopViewsAt).toBeGreaterThan(-1);
     expect(uninstallCallAt).toBeGreaterThan(stopViewsAt);
-    expect(guardAt).toBeGreaterThan(uninstallCallAt);
+    // MUTATION (drop idStillClaimed): input.pluginId can still be claimed
+    // by a completely different, still-installed plugin a duplicate-id
+    // collision produced — the losing side removed, the winning side left
+    // running under the identical id. Without this check, an unconditional
+    // clear would reach into that surviving plugin's own live session
+    // (#779-offers round 16 finding 3).
+    expect(idStillClaimedAt).toBeGreaterThan(uninstallCallAt);
+    expect(guardAt).toBeGreaterThan(idStillClaimedAt);
     expect(clearAt).toBeGreaterThan(guardAt);
+  });
+
+  it("gates the registration forget the same way it gates the partition clear", () => {
+    const uninstall = handler("uninstallPlugin");
+    const idStillClaimedAt = uninstall.indexOf(
+      "pipeline.list().some((entry) => entry.id === input.pluginId)",
+    );
+    const forgetAt = uninstall.indexOf("forgetUninstalledPlugin({", idStillClaimedAt);
+    const forgetCall = uninstall.slice(forgetAt, uninstall.indexOf("});", forgetAt));
+
+    // MUTATION (uninstalled: result.ok, dropping !idStillClaimed): the same
+    // collision that must not clear a survivor's partition must not forget
+    // its registration either — both are keyed by id alone.
+    expect(idStillClaimedAt).toBeGreaterThan(-1);
+    expect(forgetAt).toBeGreaterThan(idStillClaimedAt);
+    expect(squeeze(forgetCall)).toContain("uninstalled:result.ok&&!idStillClaimed,");
   });
 });

@@ -547,10 +547,25 @@ export function usePluginCatalog(
       // functional updater's ordering against the code right after this
       // setLoad call is not guaranteed, and reading it correctly matters
       // here (#779-offers round 15 finding 2).
-      const priorPlugins = loadRef.current.status === "ready" ? loadRef.current.plugins : [];
+      //
+      // loadRef not yet "ready" means there is no prior list to check
+      // ambiguity against at all — the initial load (or a load still
+      // recovering from an error) has not landed once. Reloading
+      // unconditionally in that case, rather than reading an empty list as
+      // "unambiguous", closes a narrower version of the same hole: the
+      // in-flight request's OWN merge re-applies this event once it lands
+      // (newerEvents, above in loadPlugins), and by then the fetched list
+      // may already be the post-removal state — one row now sitting alone
+      // under a shared id, which looks unambiguous by count but is really
+      // an unrelated survivor. Reloading again with a fresh revisionAtStart
+      // excludes this exact event from that later call's own merge, so the
+      // fresh list it fetches is trusted as-is instead of re-filtered
+      // (#779-offers round 16 finding 1).
+      const priorLoad = loadRef.current;
       const ambiguousRemoval =
         event.kind === "removed" &&
-        priorPlugins.filter((plugin) => plugin.id === event.pluginId).length > 1;
+        (priorLoad.status !== "ready" ||
+          priorLoad.plugins.filter((plugin) => plugin.id === event.pluginId).length > 1);
       setLoad((current) => {
         if (current.status !== "ready") return current;
         return {

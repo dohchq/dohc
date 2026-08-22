@@ -389,6 +389,53 @@ describe("PluginDetailsPage", () => {
     });
   });
 
+  // Round 16 finding 2: id alone can name two rows (a broken manifest's
+  // directory-derived fallback colliding with some other, unrelated
+  // plugin's real id). Once the tab's own exact row is removed, the id
+  // alone fallback used to find the one row still sharing the id and adopt
+  // it — a successful Remove would rebind an already-open tab onto a
+  // completely different, unrelated plugin's page instead of showing that
+  // it is gone.
+  it("shows removed, not the survivor, after Remove on a row whose id collides with another row", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
+        plugin("codex", { directoryName: "codex-b", displayName: "Codex B" }),
+      ],
+    });
+    bridgeMock.uninstallPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("codex", {
+        directoryName: "codex-a",
+        displayName: "Codex A",
+        status: "disabled",
+        disabledReason: "user",
+        runtimeStatus: null,
+      }),
+    });
+
+    renderPage("codex", "ws-1", "codex-a");
+    expect(await screen.findByText("Codex A")).toBeTruthy();
+
+    await userEvent.click(await screen.findByTestId("plugin-uninstall"));
+    await userEvent.click(await screen.findByTestId("plugin-uninstall-confirm"));
+    expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "codex",
+      confirmationToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    // codex-b survives (round 15's own scoped removal), but this tab
+    // opened for codex-a specifically and must never silently show a
+    // different plugin's page in its place.
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+    expect(screen.getByText("codex is not in this workspace.")).toBeTruthy();
+    expect(screen.queryByText("Codex B")).toBeNull();
+  });
+
   it("offers Remove for a plugin that was added but never installed, and restores its offer on confirm", async () => {
     // What Add's own result looks like: discovered, never approved.
     // isInstalled (approvedHash !== null) is false, so Uninstall never

@@ -7461,14 +7461,27 @@ function registerIpcHandlers(
       const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.confirmationToken),
       );
+      // The pipeline's own cleanup already scopes file and record deletion
+      // to identities that trace to the removed directory (#779-offers
+      // round 14 finding 5/6) — but input.pluginId can still be claimed by
+      // a completely different, still-installed plugin the same collision
+      // produced: the losing side of a duplicate-id conflict gets removed
+      // while the winning side keeps running under the identical id.
+      // Registration and guest-partition state below are keyed by id
+      // alone, with no directoryName to disambiguate by, so clearing them
+      // unconditionally would reach into that surviving plugin's own live
+      // registration and session rather than the row that actually left
+      // (#779-offers round 16 finding 3).
+      const idStillClaimed =
+        result.ok && pipeline.list().some((entry) => entry.id === input.pluginId);
       forgetUninstalledPlugin({
         registrations: pluginRegistrations,
         panelStartedHosts,
         workspaceId: input.workspaceId,
         pluginId: input.pluginId,
-        uninstalled: result.ok,
+        uninstalled: result.ok && !idStillClaimed,
       });
-      if (result.ok) {
+      if (result.ok && !idStillClaimed) {
         // The guest partition holds the web app's session cookies — plugin
         // state as much as its data directory. A reinstall starts unpaired.
         await clearPluginWebAppPartition({
