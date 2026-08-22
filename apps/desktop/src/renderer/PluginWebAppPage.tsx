@@ -1,5 +1,5 @@
 import { AlertTriangle, Plug } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 
@@ -137,7 +137,9 @@ export function PluginWebAppPage(props: {
   // so a ResizeObserver plus window resize covers repositioning.
   const ready = load.status === "ready";
   const hiddenByOverlay = props.hiddenByOverlay ?? false;
-  useEffect(() => {
+  // A layout effect, not a passive one: it arms in the same commit that
+  // makes the frame queryable, so main always has a bounds report first.
+  useLayoutEffect(() => {
     if (!ready) return;
     const request = startRequestRef.current;
     let frame: number | null = null;

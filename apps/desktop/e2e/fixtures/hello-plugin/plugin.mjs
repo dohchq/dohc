@@ -47,6 +47,23 @@ switch (mode) {
       },
     };
     break;
+  case "non-json-command-result":
+    handler = {
+      activate(ctx) {
+        ctx.commands.register("transport.sideEffect", async () => {
+          await ctx.client.files.write(
+            "transport-command-output.txt",
+            "command ran\n",
+          );
+          // This fixture runs over the test harness's stdio JSON transport,
+          // where BigInt cannot be encoded. Electron's production utility
+          // process uses structured clone and does support BigInt. Command
+          // return values should cross neither transport.
+          return 1n;
+        });
+      },
+    };
+    break;
   case "async-throw-after-activate":
     handler = {
       activate(ctx) {
@@ -105,9 +122,7 @@ switch (mode) {
   case "instanced-web-app": {
     const servers = new Map();
     handler = {
-      activate(ctx) {
-        ctx.commands.register("webapp.running", () => [...servers.keys()].sort());
-      },
+      activate() {},
       async startWebApp(webAppId, instanceKey) {
         const existing = servers.get(instanceKey);
         if (existing) return { url: existing.url, title: `Preview ${instanceKey}` };
@@ -146,11 +161,16 @@ switch (mode) {
   case "report-context":
     handler = {
       activate(ctx) {
-        ctx.commands.register("report.context", () => ({
-          stateRoot: ctx.stateRoot,
-          workspaceRoot: ctx.workspaceRoot,
-          pluginRoot: ctx.pluginRoot,
-        }));
+        ctx.commands.register("report.context", async () => {
+          await ctx.client.files.write(
+            "plugin-context-report.json",
+            `${JSON.stringify({
+              stateRoot: ctx.stateRoot,
+              workspaceRoot: ctx.workspaceRoot,
+              pluginRoot: ctx.pluginRoot,
+            })}\n`,
+          );
+        });
       },
     };
     break;
@@ -167,12 +187,17 @@ switch (mode) {
           heard = values;
           changeCount += 1;
         });
-        ctx.commands.register("report.settings", () => ({
-          atActivation,
-          current: ctx.settings.get(),
-          heard,
-          changeCount,
-        }));
+        ctx.commands.register("report.settings", async () => {
+          await ctx.client.files.write(
+            "plugin-settings-report.json",
+            `${JSON.stringify({
+              atActivation,
+              current: ctx.settings.get(),
+              heard,
+              changeCount,
+            })}\n`,
+          );
+        });
       },
     };
     break;
@@ -187,6 +212,12 @@ switch (mode) {
           const before = await ctx.client.databases.read({
             path: "data/app.sqlite",
           });
+          await ctx.client.files.write(
+            "database-roundtrip-report.json",
+            `${JSON.stringify({
+              tables: before.tables.map((table) => table.name),
+            })}\n`,
+          );
           await ctx.client.databases.edit({
             path: "data/app.sqlite",
             operations: [
@@ -199,15 +230,22 @@ switch (mode) {
               },
             ],
           });
-          return { tables: before.tables.map((table) => table.name) };
         });
         ctx.commands.register("ui.tryOpen", async () => {
+          let result;
           try {
             await ctx.client.ui.open("notes/today.md");
-            return { opened: true, message: null };
+            result = { opened: true, message: null };
           } catch (error) {
-            return { opened: false, message: String(error?.message ?? error) };
+            result = {
+              opened: false,
+              message: String(error?.message ?? error),
+            };
           }
+          await ctx.client.files.write(
+            "ui-open-report.json",
+            `${JSON.stringify(result)}\n`,
+          );
         });
       },
     };
@@ -221,12 +259,25 @@ switch (mode) {
     let unsubscribe = null;
     handler = {
       async activate(ctx) {
-        ctx.commands.register("watch.received", () => received);
-        ctx.commands.register("watch.started", () => started);
+        ctx.commands.register("watch.received", async () => {
+          await ctx.client.files.write(
+            "watch-received-report.json",
+            `${JSON.stringify(received)}\n`,
+          );
+        });
+        ctx.commands.register("watch.started", async () => {
+          await ctx.client.files.write(
+            "watch-started-report.json",
+            `${JSON.stringify(started)}\n`,
+          );
+        });
         ctx.commands.register("watch.stop", async () => {
           await unsubscribe?.();
           unsubscribe = null;
-          return { stopped: true };
+          await ctx.client.files.write(
+            "watch-stop-report.json",
+            `${JSON.stringify({ stopped: true })}\n`,
+          );
         });
         try {
           unsubscribe = await ctx.client.files.watch(

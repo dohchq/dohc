@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
@@ -12,6 +13,9 @@ import {
 import {
   clearPendingMaterializationPaths,
   materializeSharedViewPaths,
+  resolvedShareViewTarget,
+  type UnjournalablePath,
+  unjournalablePathMessages,
   withShareViewRefreshLifecycleLock,
   writeDiskContentToStore,
   writePendingMaterializationPaths,
@@ -132,6 +136,22 @@ async function materializeWithPendingRecord(
   await writePendingMaterializationPaths(rootPath, paths);
   await materializeSharedViewPaths(rootPath, workspaceId, changed, store);
   await clearPendingMaterializationPaths(rootPath, paths);
+}
+
+async function markMutateMaterializeAndClear(
+  rootPath: string,
+  workspaceId: string,
+  targets: { paths: readonly string[]; changed: readonly ShareViewChangedPath[] },
+  store: CaptureVersionedTextStore,
+  mutate: () => Promise<void>,
+): Promise<void> {
+  const { paths, changed } = targets;
+  if (paths.length > 0) await writePendingMaterializationPaths(rootPath, paths);
+  await mutate();
+  if (changed.length > 0) {
+    await materializeSharedViewPaths(rootPath, workspaceId, changed, store);
+  }
+  if (paths.length > 0) await clearPendingMaterializationPaths(rootPath, paths);
 }
 
 export async function routeWorkspaceFileCreate(
@@ -265,18 +285,21 @@ async function shareViewCreate(
       );
       return path;
     }
-    await store.writeTextFile({
-      workspaceId: input.workspaceId,
-      versionId: main.id,
-      path,
-      text: input.initialText,
-      metadata: { origin: "local-file" },
-    });
-    await materializeWithPendingRecord(
+    const changed = [{ path, operation: "write" as const, contentKind: "text" as const }];
+    await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      [{ path, operation: "write", contentKind: "text" }],
+      { paths: [path], changed },
       store,
+      async () => {
+        await store.writeTextFile({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+          path,
+          text: input.initialText,
+          metadata: { origin: "local-file" },
+        });
+      },
     );
     return path;
   });
@@ -319,6 +342,7 @@ async function shareViewMove(
     if (sources.length === 0) {
       throw new Error(notInThisShareView(from, "Rename"));
     }
+    await refuseNonFileReplacement(input.rootPath, from, "Rename", held, sources);
     await refuseUntrackedUnder(input.rootPath, from, held);
     // The DESTINATION is screened too. A folder move merges into whatever is
     // already there, and the ordinary `movePath` refuses that outright; the files
@@ -337,23 +361,6 @@ async function shareViewMove(
       if (held.has(move.to) || (await projectionOccupies(input.rootPath, move))) {
         throw new Error(`Destination already exists: ${move.to}`);
       }
-    }
-
-    const applied: { from: string; to: string }[] = [];
-    try {
-      for (const move of moves) {
-        await store.renameTextFile({
-          workspaceId: input.workspaceId,
-          versionId: main.id,
-          fromPath: move.from,
-          toPath: move.to,
-          metadata: { origin: "local-file" },
-        });
-        applied.push(move);
-      }
-    } catch (error) {
-      await putBackMoves(store, input.workspaceId, main.id, applied);
-      throw error;
     }
 
     const changed: ShareViewChangedPath[] = [];
@@ -375,11 +382,33 @@ async function shareViewMove(
     if (!held.has(from) && !renamesInPlace) {
       changed.push({ path: from, operation: "delete", contentKind: "text" });
     }
-    await materializeWithPendingRecord(
+    const paths = changed.map((change) => change.path);
+    await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      changed,
+      { paths, changed },
       store,
+      async () => {
+        const applied: { from: string; to: string }[] = [];
+        try {
+          for (const move of moves) {
+            await store.renameTextFile({
+              workspaceId: input.workspaceId,
+              versionId: main.id,
+              fromPath: move.from,
+              toPath: move.to,
+              metadata: { origin: "local-file" },
+            });
+            applied.push(move);
+          }
+        } catch (error) {
+          await putBackMoves(store, input.workspaceId, main.id, applied);
+          // The store is back where it started, and materialization has not run.
+          // These markers no longer describe work that needs recovery.
+          await clearPendingMaterializationPaths(input.rootPath, paths);
+          throw error;
+        }
+      },
     );
     return to;
   });
@@ -459,40 +488,46 @@ async function shareViewDelete(
     if (targets.length === 0) {
       throw new Error(notInThisShareView(target, "Delete"));
     }
+    await refuseNonFileReplacement(input.rootPath, target, "Delete", held, targets);
     await refuseUntrackedUnder(input.rootPath, target, held);
 
-    const applied: string[] = [];
-    try {
-      for (const path of targets) {
-        await store.deleteTextFile({
-          workspaceId: input.workspaceId,
-          versionId: main.id,
-          path,
-          metadata: { origin: "local-file" },
-        });
-        applied.push(path);
-      }
-    } catch (error) {
-      // A delete cannot be put back, so the other rule applies: what happened is
-      // visible. The projection follows the store for the files that actually
-      // went, so nothing is left describing content the store no longer has.
-      await materializeWithPendingRecord(
-        input.rootPath,
-        input.workspaceId,
-        applied.map((path) => ({
-          path,
-          operation: "delete" as const,
-          contentKind: "text" as const,
-        })),
-        store,
-      );
-      throw error;
-    }
-    await materializeWithPendingRecord(
+    const changed = [
+      { path: target, operation: "delete" as const, contentKind: "text" as const },
+    ];
+    await markMutateMaterializeAndClear(
       input.rootPath,
       input.workspaceId,
-      [{ path: target, operation: "delete", contentKind: "text" }],
+      { paths: targets, changed },
       store,
+      async () => {
+        const applied: string[] = [];
+        try {
+          for (const path of targets) {
+            await store.deleteTextFile({
+              workspaceId: input.workspaceId,
+              versionId: main.id,
+              path,
+              metadata: { origin: "local-file" },
+            });
+            applied.push(path);
+          }
+        } catch (error) {
+          // A delete cannot be put back, so the other rule applies: what happened is
+          // visible. The projection follows the store for the files that actually
+          // went, so nothing is left describing content the store no longer has.
+          await materializeWithPendingRecord(
+            input.rootPath,
+            input.workspaceId,
+            applied.map((path) => ({
+              path,
+              operation: "delete" as const,
+              contentKind: "text" as const,
+            })),
+            store,
+          );
+          throw error;
+        }
+      },
     );
     return { trashed: false };
   });
@@ -582,6 +617,7 @@ async function shareViewImport(
         }
         claimed.add(name.toLowerCase());
         const path = relDir === "" ? name : `${relDir}/${name}`;
+        await writePendingMaterializationPaths(input.rootPath, [path]);
         await writeDiskContentToStore({
           store,
           workspaceId: input.workspaceId,
@@ -595,11 +631,15 @@ async function shareViewImport(
     } finally {
       // What landed is materialized even when a later source fails, so the
       // projection never lags the store.
-      await materializeWithPendingRecord(
+      await materializeSharedViewPaths(
         input.rootPath,
         input.workspaceId,
         changed,
         store,
+      );
+      await clearPendingMaterializationPaths(
+        input.rootPath,
+        changed.map((change) => change.path),
       );
     }
     return { imported, skipped };
@@ -641,6 +681,87 @@ async function refuseUntrackedUnder(
   );
   if (untracked.length > 0) {
     throw new Error(untrackedUnderRefusal(target, untracked));
+  }
+}
+
+/**
+ * Refuse when the operation's own path — or a FILE the store holds under it —
+ * now names something else on disk.
+ *
+ * Something outside dohc replaced it after the projection last matched the
+ * store. `materializeSharedViewPaths` removes whatever sits at a target path
+ * recursively, so a rename or delete that mutated the store over one of
+ * these paths would delete a directory — and everything in it — that the
+ * store never described. The refresh side already refuses this under the
+ * same reason (#850); this asks the same question, of the same disk entry,
+ * before either operation is allowed to touch the store at all.
+ *
+ * TWO shapes, because a folder is checked differently from the files under
+ * it. A store leaf must be a FILE: the store never held a folder, so
+ * anything else there replaced one. The operation's OWN path, when it is not
+ * itself a leaf, must be a real DIRECTORY: a symlink standing in for it would
+ * route every leaf lstat below through the link — those resolve the SAME
+ * ancestor chain materialization does — and land this whole refusal on the
+ * files at wherever the link points, not the ones the store lost.
+ */
+async function refuseNonFileReplacement(
+  rootPath: string,
+  operationPath: string,
+  action: "Rename" | "Delete",
+  held: ReadonlyMap<string, unknown>,
+  leaves: readonly string[],
+): Promise<void> {
+  const messages: string[] = [];
+  // The operation's OWN path, checked separately from the leaves below: a
+  // share view has no tracked FOLDER for `unjournalablePathMessages`'s
+  // file-flavored copy to name, so this states the folder in its own words
+  // rather than telling the reader to "restore the file" a share view never
+  // held.
+  if (!held.has(operationPath)) {
+    const entry = await nonFileReplacementEntry(rootPath, operationPath);
+    if (entry !== null && !entry.isDirectory()) {
+      messages.push(
+        `${operationPath} replaces this shared folder with a link or another entry. ` +
+          `Restore the folder or move the conflicting entry.`,
+      );
+    }
+  }
+  const replacedLeaves: UnjournalablePath[] = [];
+  for (const path of leaves) {
+    const entry = await nonFileReplacementEntry(rootPath, path);
+    if (entry !== null && !entry.isFile()) {
+      replacedLeaves.push({ path, reason: "non-file-replacement" });
+    }
+  }
+  if (replacedLeaves.length > 0) {
+    messages.push(...unjournalablePathMessages(replacedLeaves));
+  }
+  if (messages.length > 0) {
+    throw new Error(
+      `dohc did not ${action.toLowerCase()} ${operationPath}. ${messages.join(" ")}`,
+    );
+  }
+}
+
+/**
+ * The disk entry at a tracked path, resolved the SAME way
+ * `materializeSharedViewPaths` resolves it: `resolvedShareViewTarget` follows
+ * every ancestor symlink and holds back only the leaf itself. Guard and
+ * action then always agree on where a path leads, so an ancestor symlink
+ * can never make this check pass an entry that materialization then reaches
+ * by a different route.
+ */
+async function nonFileReplacementEntry(
+  rootPath: string,
+  path: string,
+): Promise<Stats | null> {
+  const resolvedAbsolute = await resolvedShareViewTarget(rootPath, path);
+  try {
+    return await lstat(resolvedAbsolute);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw error;
   }
 }
 

@@ -97,6 +97,7 @@ async function writeShareViewText(input: {
     }
     const store = input.shareViewStore();
     const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
+    await writePendingMaterializationPaths(input.rootPath, [path.normalized]);
     await store.writeTextFile({
       workspaceId: input.workspaceId,
       versionId: main.id,
@@ -108,7 +109,6 @@ async function writeShareViewText(input: {
     // share's pull uses: a share view's disk writes keep the realpath
     // containment that module owns, and the bytes on disk come from the store
     // rather than from a second copy of the text.
-    await writePendingMaterializationPaths(input.rootPath, [path.normalized]);
     await materializeSharedViewPaths(
       input.rootPath,
       input.workspaceId,

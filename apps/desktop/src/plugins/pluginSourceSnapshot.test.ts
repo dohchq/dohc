@@ -24,6 +24,7 @@ import {
   PINNED_PLUGIN_PACKAGE_MANAGER,
   assertSafeSnapshotEntryName,
   hashPluginSourceFiles,
+  isExcludedSourceName,
   isPluginRootArtifact,
   isPluginSourceRoot,
   pluginIdToSafePath,
@@ -41,6 +42,15 @@ interface PluginFixture {
   pluginRoot: string;
   manifest: DohcPluginManifestShape;
 }
+
+describe("isExcludedSourceName", () => {
+  it("matches only the exact on-disk excluded names", () => {
+    expect(isExcludedSourceName("node_modules")).toBe(true);
+    expect(isExcludedSourceName(".dohc")).toBe(true);
+    expect(isExcludedSourceName("Node_Modules")).toBe(false);
+    expect(isExcludedSourceName("NODE_MODULES")).toBe(false);
+  });
+});
 
 // Matches PluginPipeline's own computation exactly: derived plugin
 // artifacts live under <stateDir>/plugin-data/<workspaceStateKey>, never

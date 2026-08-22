@@ -23,6 +23,7 @@ export type PluginAction =
   | "disable"
   | "enable"
   | "approve"
+  | "rebuild"
   | "preflight"
   | "uninstall"
   | "add";
@@ -181,6 +182,7 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
       disable: "Disable",
       enable: "Enable",
       approve: "Approve",
+      rebuild: "Retry build",
       preflight: "Uninstall",
       uninstall: "Uninstall plugin",
       add: "Add",
@@ -192,6 +194,7 @@ export function actionLabel(action: PluginAction, busy: boolean): string {
     disable: "Disabling",
     enable: "Enabling",
     approve: "Approving",
+    rebuild: "Retrying build",
     preflight: "Checking",
     uninstall: "Uninstalling",
     add: "Adding",
@@ -209,6 +212,7 @@ function actionError(
     disable: "disable",
     enable: "enable",
     approve: "approve",
+    rebuild: "rebuild",
   };
   return `dohc could not ${verbs[action]} ${pluginId}. ${error.message}`;
 }
@@ -246,10 +250,19 @@ export function canRetryInstall(plugin: PluginStatusRecord): boolean {
   );
 }
 
+// While hasFailedReplacement, Enable's own verify pass compares the live
+// source against the durable approvedHash — the OLD bytes, since the
+// failed replacement's edit never earned a new one — finds them changed,
+// and holds for approval instead of restarting. That hold's stop clears
+// recoveredManifests, destroying the exact fact Retry build needs and
+// leaving neither action honest. Retry build already knows how to accept
+// this same source (lastApprovedAttemptHash); Enable does not
+// (round-10 finding 1).
 export function canEnable(plugin: PluginStatusRecord): boolean {
   return (
     plugin.status === "disabled" &&
-    (plugin.disabledReason === "user" || plugin.disabledReason === "crash-loop")
+    (plugin.disabledReason === "user" || plugin.disabledReason === "crash-loop") &&
+    !plugin.hasFailedReplacement
   );
 }
 
@@ -265,6 +278,18 @@ export function canApprove(plugin: PluginStatusRecord): boolean {
     plugin.approvedHash !== null &&
     plugin.sourceHash !== null &&
     plugin.sourceHash !== plugin.approvedHash
+  );
+}
+
+// hasFailedReplacement carries the fact through a crash-loop respawn that
+// flips status back to "ready"/"crashed" between the failure and the fix —
+// status === "failed" alone only covers the still-common case where nothing
+// respawned (round-8 finding 3).
+export function canRebuild(plugin: PluginStatusRecord): boolean {
+  return (
+    plugin.valid &&
+    plugin.approvedHash !== null &&
+    (plugin.status === "failed" || plugin.hasFailedReplacement)
   );
 }
 
@@ -762,7 +787,9 @@ export function usePluginCatalog(
             ? await bridge().disablePlugin(payload)
             : action === "enable"
               ? await bridge().enablePlugin(payload)
-              : await bridge().approvePlugin(payload);
+              : action === "approve"
+                ? await bridge().approvePlugin(payload)
+                : await bridge().rebuildPlugin(payload);
       if (epoch !== workspaceEpoch.current) return;
       if (result.ok) {
         replacePluginUnlessSuperseded(result.plugin, revisionAtStart);

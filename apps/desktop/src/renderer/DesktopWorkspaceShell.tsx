@@ -110,6 +110,8 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { PluginsView } from "./workbench/PluginsView";
 import {
   pluginActivityViews,
+  pluginCommandEntries,
+  pluginCommandPaletteId,
   resolvePluginView,
 } from "./workbench/pluginActivityViews";
 import { usePluginCatalog } from "./workbench/pluginCatalog";
@@ -1348,7 +1350,10 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
-type UnjournalableSharePath = RefreshSharedViewResult["unjournalablePaths"][number];
+type UnjournalableSharePath = Extract<
+  RefreshSharedViewResult,
+  { ok: true }
+>["unjournalablePaths"][number];
 
 function namedUnjournalablePaths(paths: readonly UnjournalableSharePath[]): string {
   const named = paths.slice(0, 3).map((entry) => entry.path).join(", ");
@@ -2115,6 +2120,17 @@ export function DesktopWorkspaceShell(props: {
         ? pluginActivityViews(pluginCatalogLoad.plugins)
         : [],
     [pluginCatalogLoad],
+  );
+  // A shared view can never write the workspace (assertWritableWorkspace
+  // refuses on the share's presence alone), so every plugin command
+  // invoked from one is a dead click regardless of which plugin or command
+  // it names — the palette offers none of them here (round-8 finding 2).
+  const pluginCommandItems = useMemo(
+    () =>
+      pluginCatalogLoad.status === "ready" && !props.workspace.shareView
+        ? pluginCommandEntries(pluginCatalogLoad.plugins)
+        : [],
+    [pluginCatalogLoad, props.workspace.shareView],
   );
   const selectedPluginView = parsePluginViewId(wb.activeView);
   const selectedPluginViewState =
@@ -4353,6 +4369,9 @@ export function DesktopWorkspaceShell(props: {
         }
         return;
       }
+      // Zoom chords are deliberately absent here: they are native menu
+      // accelerators (applicationMenu.ts), so they work on windows that
+      // never mount this shell.
       // This handler owns main-frame shortcuts. On Windows/Linux the menu only
       // displays them. On macOS it is the unhandled fallback, so preventing a
       // claimed keydown also prevents a duplicate menu command. Shift and Caps
@@ -4506,6 +4525,41 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${view.title}`,
         run: () => mutateWb((state) => setView(state, view.viewId)),
       })),
+      ...pluginCommandItems.map((entry) => ({
+        id: pluginCommandPaletteId(entry.pluginId, entry.commandId),
+        label: `${entry.pluginTitle}: ${entry.title}`,
+        run: () => {
+          // No staleness guard is needed: DesktopRoot's
+          // key={workspace.workspaceId} remounts this shell on a switch, so
+          // this callback cannot report into the next workspace.
+          void bridge()
+            .invokePluginCommand({
+              workspaceId,
+              pluginId: entry.pluginId,
+              commandId: entry.commandId,
+            })
+            .then((outcome) => {
+              if (outcome.status !== "ok") {
+                // reportShellError shows error.message and drops the
+                // fallback whenever the error carries one — a terse
+                // backend cause ("timeout") would otherwise displace the
+                // command's own name entirely. Composing the full
+                // sentence here, not relying on the fallback, keeps both
+                // regardless of which one reportShellError picks
+                // (round-10 finding 4).
+                const message =
+                  `Could not run plugin command "${entry.title}". ${outcome.message}`;
+                reportShellError(message, new Error(message));
+              }
+            })
+            .catch((error) => {
+              reportShellError(
+                `Could not run plugin command "${entry.title}".`,
+                error,
+              );
+            });
+        },
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -4541,10 +4595,35 @@ export function DesktopWorkspaceShell(props: {
         label: "Toggle light/dark theme",
         run: toggleTheme,
       },
+      {
+        id: "zoom-in",
+        label: "Zoom in",
+        run: () =>
+          void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
+      },
+      {
+        id: "zoom-out",
+        label: "Zoom out",
+        run: () =>
+          void bridge().stepWindowZoom({ step: "out" }).catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
+      },
+      {
+        id: "zoom-reset",
+        label: "Reset zoom",
+        run: () =>
+          void bridge().stepWindowZoom({ step: "reset" }).catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
+      },
     ],
     [
       activeDocumentPath,
       railPluginViews,
+      pluginCommandItems,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,
@@ -4639,9 +4718,37 @@ export function DesktopWorkspaceShell(props: {
     if (!shareView || shareViewEnded || shareViewDamaged) return;
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
+    const repaintAfterChange = async () => {
+      await refreshFiles();
+      setVersionEpoch((epoch) => epoch + 1);
+    };
+    const bestEffortRepaint = async () => {
+      try {
+        await repaintAfterChange();
+      } catch (repaintError) {
+        console.error(
+          "[desktop] repaint after shared-view refresh failed:",
+          repaintError,
+        );
+      }
+    };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
       if (token !== shareRefreshToken.current) return;
+      if (!outcome.ok) {
+        if (outcome.changedPaths > 0) await bestEffortRepaint();
+        if (token !== shareRefreshToken.current) return;
+        reportShellError(
+          "Couldn't refresh the shared view.",
+          new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
+        );
+        return;
+      }
+      if (outcome.collisionRecordQuarantined) {
+        showShellNotice(
+          "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+        );
+      }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
         setShareViewEnded(true);
@@ -4649,9 +4756,7 @@ export function DesktopWorkspaceShell(props: {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
       if (outcome.changedPaths > 0) {
-        await refreshFiles();
-        // Re-read open editors: the shared view's files changed on disk.
-        setVersionEpoch((epoch) => epoch + 1);
+        await repaintAfterChange();
       }
       if (outcome.status === "ended") {
         return;

@@ -386,6 +386,17 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     writeClipboardText: vi.fn(async () => undefined),
     setTitlebarTheme: vi.fn(async () => undefined),
+    onUserSettingsChanged: vi.fn(() => () => {}),
+    stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: {
+          ...DEFAULT_USER_SETTINGS.appearance,
+          zoomLevel: payload.step === "in" ? 1 : payload.step === "out" ? -1 : 0,
+        },
+      },
+      source: "stored" as const,
+    })),
     probeAgentDrivers: vi.fn(async () => ({
       drivers: [],
       session: null,
@@ -520,6 +531,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     ),
     refreshSharedView: vi.fn(
       async (): Promise<RefreshSharedViewResult> => ({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: [],
@@ -1124,7 +1136,9 @@ describe("plugin activity-bar views", () => {
 
   function withViewPlugin(
     bridge: ReturnType<typeof makeBridge>,
-    overrides: Partial<PluginStatusRecord> = {},
+    overrides: Partial<PluginStatusRecord> & {
+      commands?: { id: string; title: string }[];
+    } = {},
   ) {
     bridge.listPlugins = vi.fn(async () => ({
       ok: true as const,
@@ -1149,6 +1163,7 @@ describe("plugin activity-bar views", () => {
           license: null,
           icon: null,
           settings: [],
+          commands: [],
           panels: [
             { id: "main", title: "Hello", placement: "editor", icon: null },
             viewPanel,
@@ -1163,6 +1178,90 @@ describe("plugin activity-bar views", () => {
     }));
     return bridge;
   }
+
+  it("invokes a plugin command from the command palette", async () => {
+    const invokePluginCommand = vi.fn(async () => ({
+      status: "ok" as const,
+    }));
+    const bridge = Object.assign(
+      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
+        commands: [{ id: "hello.write", title: "Write hello note" }],
+      }),
+      { invokePluginCommand },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Hello Plugin: Write hello note",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(invokePluginCommand).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        commandId: "hello.write",
+      }),
+    );
+  });
+
+  // reportShellError shows error.message and drops the fallback whenever
+  // the error carries one — a terse backend cause alone would name
+  // neither the command nor that a command failed (round-10 finding 4).
+  it("names the command and the cause when a plugin command fails with a terse outcome", async () => {
+    const invokePluginCommand = vi.fn(async () => ({
+      status: "command-failed" as const,
+      message: "timeout",
+    }));
+    const bridge = Object.assign(
+      withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
+        commands: [{ id: "hello.write", title: "Write hello note" }],
+      }),
+      { invokePluginCommand },
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Hello Plugin: Write hello note",
+      ),
+    );
+
+    const banner = await screen.findByTestId("workspace-shell-error");
+    expect(banner.textContent).toContain("Write hello note");
+    expect(banner.textContent).toContain("timeout");
+  });
+
+  // assertWritableWorkspace refuses on the share's presence alone, so every
+  // invocation from a shared view was a dead click before this filter — the
+  // palette must not offer what it can never do (round-8 finding 2).
+  it("offers no plugin commands from a shared view", async () => {
+    const bridge = withViewPlugin(makeBridge(Promise.resolve(STORED_STATE)), {
+      commands: [{ id: "hello.write", title: "Write hello note" }],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    // The palette itself renders and lists something, so an empty list
+    // here is the filter working, not the palette failing to open.
+    await within(palette).findByText("New editor group right");
+    expect(within(palette).queryByText("Hello Plugin: Write hello note"))
+      .toBeNull();
+  });
 
   it("lists contributed views after the workspace opens", async () => {
     const workspaceOpen = deferred<SyncStatusResult>();
@@ -1304,8 +1403,10 @@ describe("plugin details tabs", () => {
           license: null,
           icon: null,
           settings: [],
+          commands: [],
           panels: [],
           webApps: [],
+          hasFailedReplacement: false,
           diagnostics: [],
           warnings: [],
           error: null,
@@ -1363,6 +1464,8 @@ describe("plugin details tabs", () => {
       settings: [],
       panels: [],
       webApps: [],
+      commands: [],
+      hasFailedReplacement: false,
       diagnostics: [],
       warnings: [],
       error: null,
@@ -1481,6 +1584,8 @@ describe("plugin details tabs", () => {
       settings: [],
       panels: [],
       webApps: [],
+      commands: [],
+      hasFailedReplacement: false,
       diagnostics: [],
       warnings: [],
       error: null,
@@ -3738,6 +3843,7 @@ describe("ui-state merge-on-load", () => {
     bridge.listWorkspaceFiles = listing("a.md", "b.md");
     await act(async () => {
       pull.resolve({
+        ok: true,
         status: "updated",
         changedPaths: 1,
         excludedPaths: [],
@@ -3758,6 +3864,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: ["docs/pull-skipped.md"],
@@ -3777,6 +3884,7 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: true as const,
         status: "ended" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3842,12 +3950,39 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("shared-view-banner").dataset.ended).toBe("true");
   });
 
+  it("warns when a refresh quarantines the share collision record", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    bridge.refreshSharedView = vi.fn(async () => ({
+      ok: true as const,
+      status: "unchanged" as const,
+      changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
+      collisionRecordQuarantined: true,
+      refusedOps: 0,
+      refusedDetail: null,
+    }));
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "view",
+      },
+    });
+
+    expect((await screen.findByTestId("shell-notice")).textContent).toBe(
+      "dohc could not read this share's collision record, so it set the record aside. A refresh may overwrite local files that collided.",
+    );
+  });
+
   it("repaints changed files before an ended share becomes read-only", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
     );
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3856,6 +3991,7 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: true as const,
         status: "ended" as const,
         changedPaths: 1,
         excludedPaths: [],
@@ -3906,12 +4042,13 @@ describe("ui-state merge-on-load", () => {
     ).toBeNull();
   });
 
-  it("keeps an ended share read-only when its changed-file listing fails", async () => {
+  it("repaints local repairs before reporting a failed share pull", async () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
     );
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -3920,6 +4057,122 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: false as const,
+        changedPaths: 1,
+        errorMessage: "relay failed",
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome as RefreshSharedViewResult;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    const listCallsBeforeFailure = bridge.listWorkspaceFiles.mock.calls.length;
+    const readCallsBeforeFailure = bridge.readWorkspaceText.mock.calls.length;
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+
+    let listCallsWhenReported = 0;
+    let readCallsWhenReported = 0;
+    await waitFor(() => {
+      const error = screen.getByTestId("workspace-shell-error");
+      expect(error.textContent).toContain("Couldn't refresh the shared view.");
+      expect(error.textContent).toContain("relay failed");
+      listCallsWhenReported = bridge.listWorkspaceFiles.mock.calls.length;
+      readCallsWhenReported = bridge.readWorkspaceText.mock.calls.length;
+    });
+    expect(listCallsWhenReported).toBeGreaterThan(listCallsBeforeFailure);
+    expect(readCallsWhenReported).toBeGreaterThan(readCallsBeforeFailure);
+  });
+
+  it("does not repaint a failed share pull when no paths changed", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    const outcomes = [
+      {
+        ok: true as const,
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        ok: false as const,
+        changedPaths: 0,
+        errorMessage: "relay failed",
+      },
+    ];
+    bridge.refreshSharedView = vi.fn(async () => {
+      const outcome = outcomes.shift();
+      if (!outcome) throw new Error("No refresh outcome left.");
+      return outcome as RefreshSharedViewResult;
+    });
+    renderShell(bridge, {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-1",
+        granterEmail: "granter@dohc.test",
+        access: "edit",
+      },
+    });
+
+    await screen.findByTestId("tab-b.md");
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    const listCallsBeforeFailure = bridge.listWorkspaceFiles.mock.calls.length;
+    const readCallsBeforeFailure = bridge.readWorkspaceText.mock.calls.length;
+
+    await userEvent.click(screen.getByTestId("shared-view-refresh"));
+
+    const error = await screen.findByTestId("workspace-shell-error");
+    expect(error.textContent).toContain("relay failed");
+    expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(
+      listCallsBeforeFailure,
+    );
+    expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(
+      readCallsBeforeFailure,
+    );
+  });
+
+  it("keeps an ended share read-only when its changed-file listing fails", async () => {
+    const bridge = makeBridge(
+      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
+    );
+    const outcomes = [
+      {
+        ok: true as const,
+        status: "unchanged" as const,
+        changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
+        refusedOps: 0,
+        refusedDetail: null,
+      },
+      {
+        ok: true as const,
         status: "ended" as const,
         changedPaths: 1,
         excludedPaths: [],
@@ -4002,6 +4255,7 @@ describe("ui-state merge-on-load", () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const outcomes = [
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -4012,6 +4266,7 @@ describe("ui-state merge-on-load", () => {
         refusedDetail: null,
       },
       {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -4086,6 +4341,7 @@ describe("ui-state merge-on-load", () => {
 
     await act(async () => {
       second.resolve({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: ["docs/new-pull.md"],
@@ -4103,6 +4359,7 @@ describe("ui-state merge-on-load", () => {
 
     await act(async () => {
       first.resolve({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: ["docs/stale-pull.md"],
@@ -4185,6 +4442,7 @@ describe("ui-state merge-on-load", () => {
       // What the recorder does mid-pull: the registry now holds the skip.
       recorded = true;
       return {
+        ok: true as const,
         status: "unchanged" as const,
         changedPaths: 0,
         excludedPaths: [],
@@ -4251,6 +4509,7 @@ describe("ui-state merge-on-load", () => {
     );
     // A refresh that finds nothing new. The warning must survive it.
     bridge.refreshSharedView = vi.fn(async () => ({
+      ok: true as const,
       status: "unchanged" as const,
       changedPaths: 0,
       excludedPaths: [],
@@ -6731,6 +6990,13 @@ describe("shared view editing", () => {
     const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
     renderShell(bridge, { ...SHARE_VIEW, shareView });
     const toggle = await screen.findByTestId("markdown-edit-toggle");
+    // The toggle mounts disabled while the file is still opening, a moment
+    // `findByTestId` does not wait out. Wait for the open to settle before
+    // reading `disabled` (the read-only cases below can't tell the
+    // difference either way).
+    await waitFor(() =>
+      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
+    );
     return toggle.hasAttribute("disabled");
   }
 
@@ -11495,6 +11761,7 @@ describe("shared view versions surface", () => {
   it("never asks a shared view for versions, and raises no banner across a share refresh", async () => {
     const bridge = makeShareBridge();
     bridge.refreshSharedView = vi.fn(async () => ({
+      ok: true as const,
       status: "updated" as const,
       changedPaths: 1,
       excludedPaths: [],

@@ -74,6 +74,7 @@ import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
+  ZOOM_STEPS,
 } from "../settings/userSettings";
 import type {
   DesktopUserSettings as DesktopUserSettingsType,
@@ -2168,6 +2169,46 @@ export const StartPluginPanelResult = z.discriminatedUnion("status", [
 ]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
 
+export const InvokePluginCommandPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  commandId: z.string().min(1).max(120),
+}).strict();
+export type InvokePluginCommandPayload = z.infer<
+  typeof InvokePluginCommandPayload
+>;
+
+export const InvokePluginCommandResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("ok") }).strict(),
+  z.object({
+    status: z.literal("plugin-not-found"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("plugin-not-running"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("command-not-declared"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("command-failed"),
+    message: z.string(),
+  }).strict(),
+  // A rebuild's old-runtime stop is already draining this plugin's
+  // in-flight command claims — refused outright rather than queued, so
+  // that wait stays bounded by the claims it began with (round-10
+  // finding 2).
+  z.object({
+    status: z.literal("plugin-rebuilding"),
+    message: z.string(),
+  }).strict(),
+]);
+export type InvokePluginCommandResult = z.infer<
+  typeof InvokePluginCommandResult
+>;
+
 // Stopping names the running panel, which is keyed by workspace, plugin, and
 // panel alone. It carries no placement: a panel must stop wherever it runs.
 export const StopPluginPanelPayload = z.object({
@@ -2354,6 +2395,10 @@ export const PluginStatusRecord = z.object({
   /** What the plugin declares the user may set. Values travel separately —
    * they are per-workspace state, not part of the plugin's identity. */
   settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
+  /** True while a build has failed and its replacement is still owed, even
+   * through a runtime health change (crash, respawn) that would otherwise
+   * hide it — see PluginPipelinePluginStatus.hasFailedReplacement. */
+  hasFailedReplacement: z.boolean(),
   /** The plugin's declared panels. `placement` says where each one shows:
    * "editor" opens a tab, "view" gets a button in the activity bar. The
    * entry path never crosses — the renderer asks for a panel by id. */
@@ -2365,6 +2410,12 @@ export const PluginStatusRecord = z.object({
       icon: z.string().min(1).max(1024).nullable(),
     }).strict(),
   ).max(100),
+  commands: z.array(
+    z.object({
+      id: z.string().min(1).max(120),
+      title: z.string().min(1).max(120),
+    }).strict(),
+  ).max(200),
   webApps: z.array(
     z.object({
       id: z.string().min(1).max(120),
@@ -3449,7 +3500,8 @@ export const DismissShareSkipsPayload = z.object({
 });
 export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
 
-export const RefreshSharedViewResult = z.object({
+const RefreshSharedViewSuccessResult = z.object({
+  ok: z.literal(true),
   // "ended" means the granter revoked the share: the local view stays
   // readable but stops refreshing, and the UI says so honestly.
   status: z.enum(["updated", "unchanged", "ended"]),
@@ -3468,6 +3520,7 @@ export const RefreshSharedViewResult = z.object({
       ]),
     }),
   ),
+  collisionRecordQuarantined: z.boolean().optional(),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
   refusedOps: z.number().int().nonnegative(),
@@ -3475,6 +3528,19 @@ export const RefreshSharedViewResult = z.object({
   // the log. Null when nothing was refused.
   refusedDetail: z.string().nullable(),
 });
+
+const RefreshSharedViewFailureResult = z.object({
+  ok: z.literal(false),
+  // Capture runs before the pull. A failed pull can still leave repaired
+  // projection files that the renderer must repaint.
+  changedPaths: z.number().int().nonnegative(),
+  errorMessage: z.string(),
+});
+
+export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
+  RefreshSharedViewSuccessResult,
+  RefreshSharedViewFailureResult,
+]);
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
 
 // ---- Share mounts ----
@@ -3771,6 +3837,16 @@ export const SetTitlebarThemePayload = z.object({
   theme: z.enum(["light", "dark"]),
 });
 export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
+
+// One zoom mutation, owned by main: it persists appearance.zoomLevel before
+// applying it to the windows, and answers with the settings now on disk so
+// the caller can paint the level in effect. The menu accelerators call the
+// same mutation directly in main; this channel is for the palette and the
+// Settings stepper.
+export const StepWindowZoomPayload = z.object({
+  step: z.enum(ZOOM_STEPS),
+}).strict();
+export type StepWindowZoomPayload = z.infer<typeof StepWindowZoomPayload>;
 
 // Application-menu commands. One closed set (channels.ts owns the tuple; the
 // sandboxed preload validates against it as a plain value): the menu sends
@@ -4337,6 +4413,9 @@ export interface DohcDesktopBridge {
     listener: (event: PluginPanelOpenedEvent) => void,
   ): () => void;
   startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
+  invokePluginCommand(
+    payload: InvokePluginCommandPayload,
+  ): Promise<InvokePluginCommandResult>;
   stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
   invokePluginPanelSdk(
     payload: InvokePluginPanelSdkPayload,
@@ -4365,6 +4444,7 @@ export interface DohcDesktopBridge {
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
+  rebuildPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   pluginUninstallPreflight(
     payload: PluginUninstallPreflightPayload,
   ): Promise<PluginUninstallPreflightResult>;
@@ -4564,6 +4644,12 @@ export interface DohcDesktopBridge {
   ): Promise<WorkspaceSettingsResult>;
   writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
+  onUserSettingsChanged(
+    listener: (result: DesktopUserSettingsResult) => void,
+  ): () => void;
+  stepWindowZoom(
+    payload: StepWindowZoomPayload,
+  ): Promise<DesktopUserSettingsResult>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
     payload: ListWorkspaceFilesPayload,

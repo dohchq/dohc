@@ -6,7 +6,7 @@ import {
   type DohcThemeMessage,
 } from "@dohc/sdk";
 import { AlertTriangle, Plug } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { StartPluginPanelResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { THEME_ATTRIBUTES, readDohcTheme } from "./pluginPanelTheme";
@@ -255,7 +255,10 @@ export function PluginPanelPage(props: {
   // appearance state is these three attributes, so watching them covers every
   // way a user changes it — settings, the command palette, or the OS flipping
   // while the mode is "system".
-  useEffect(() => {
+  //
+  // A layout effect, not a passive one: it arms in the same commit that
+  // makes the panel queryable, before anything could observe it un-watched.
+  useLayoutEffect(() => {
     if (!panelOrigin) return;
     const root = document.documentElement;
     const push = () =>

@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
+  CLAIMS_DRAINING_ERROR_CODE,
+  PluginClaimsDrainingError,
+} from "./pluginCommandInvocation";
+import {
   forgetRemovedPlugin,
   forgetUninstalledPlugin,
   forgetWorkspaceRegistrations,
@@ -10,7 +14,9 @@ import {
   loadPluginWebAppRegistration,
   pluginLifecycleKey,
   rememberPluginRegistration,
+  resolveRegisteredPlugin,
   startPluginForPanel,
+  toPluginPanelHostStartResult,
   type RegisteredPlugin,
 } from "./pluginPanelRegistration";
 
@@ -145,6 +151,93 @@ describe("plugin panel registration", () => {
     ).rejects.toThrow();
   });
 
+  it("prefers a recovered manifest while preserving plugin-root validation", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    await writePlugin(pluginRoot);
+    const recovered: RegisteredPlugin = {
+      pluginRoot,
+      directoryName: "hello-plugin",
+      manifest: {
+        version: 1,
+        name: "hello-plugin",
+        entry: "plugin.mjs",
+        panels: [{
+          id: "old-panel",
+          title: "Old panel",
+          entry: "panel/index.html",
+          placement: "editor",
+        }],
+        webApps: [{ id: "old-app", title: "Old app", instanced: false }],
+      },
+    };
+    const pluginRegistration = {
+      pluginRegistration: () => recovered,
+      hasUnrecoverableFailedReplacement: () => false,
+    };
+
+    await expect(loadPluginPanelRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      panelId: "old-panel",
+      pluginRegistration,
+    })).resolves.toMatchObject({
+      manifest: recovered.manifest,
+      panel: { id: "old-panel" },
+    });
+    await expect(loadPluginWebAppRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      webAppId: "old-app",
+      pluginRegistration,
+    })).resolves.toMatchObject({
+      manifest: recovered.manifest,
+      webApp: { id: "old-app" },
+    });
+    await expect(loadPluginWebAppRegistration({
+      workspaceRoot: workspace,
+      pluginRoot: "../outside",
+      pluginId: "hello-plugin",
+      webAppId: "old-app",
+      pluginRegistration,
+    })).rejects.toThrow(/Invalid asset path|escapes the workspace/);
+  });
+
+  it("refuses to open a panel or web app from the failed candidate's own manifest when nothing could be recovered (#779 round 23 finding 1)", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    // The on-disk manifest here is the failed, never-approved candidate's
+    // own — reachable only because loadValidatedPluginManifest's raw-read
+    // fallback would otherwise happily read it once pluginRegistration()
+    // itself refuses with null.
+    await writePlugin(pluginRoot);
+    const pluginRegistration = {
+      pluginRegistration: () => null,
+      hasUnrecoverableFailedReplacement: () => true,
+    };
+
+    await expect(loadPluginPanelRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      panelId: "main",
+      pluginRegistration,
+    })).rejects.toThrow(
+      /could not recover plugin "hello-plugin"'s last working build/,
+    );
+    await expect(loadPluginWebAppRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      webAppId: "app",
+      pluginRegistration,
+    })).rejects.toThrow(
+      /could not recover plugin "hello-plugin"'s last working build/,
+    );
+  });
+
   it("refuses a plugin root outside the workspace", async () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const outside = await scratch("dohc-plugin-panel-outside-");
@@ -272,6 +365,46 @@ describe("plugin panel registration", () => {
     expect(remembered.manifest.panels?.[0]?.title).toBe("Hello again");
   });
 
+  it("prefers the pipeline's current manifest over a remembered registration", () => {
+    const oldRegistration: RegisteredPlugin = {
+      pluginRoot: "plugins/hello-plugin",
+      directoryName: "hello-plugin",
+      manifest: {
+        version: 1,
+        name: "hello-plugin",
+        entry: "plugin.mjs",
+      },
+    };
+    const currentRegistration: RegisteredPlugin = {
+      pluginRoot: "plugins/hello-plugin",
+      directoryName: "hello-plugin",
+      manifest: {
+        version: 1,
+        name: "hello-plugin",
+        entry: "plugin.mjs",
+        commands: [{ id: "hello.write", title: "Write hello note" }],
+      },
+    };
+    const pipeline = {
+      pluginRegistration: () => currentRegistration,
+      hasUnrecoverableFailedReplacement: () => false,
+    };
+    const remembered = new Map([["hello-plugin", oldRegistration]]);
+
+    const resolved = resolveRegisteredPlugin(
+      "hello-plugin",
+      pipeline,
+      remembered,
+    );
+
+    expect(resolved).toBe(currentRegistration);
+    expect(
+      resolved?.manifest.commands?.find(
+        (command) => command.id === "hello.write",
+      ),
+    ).toEqual({ id: "hello.write", title: "Write hello note" });
+  });
+
   it("claims a plugin host only when the panel's own start ran it (#779 round 10 B3)", async () => {
     const panelStartedHosts = new Set<string>();
     const claim = (result: {
@@ -318,6 +451,76 @@ describe("plugin panel registration", () => {
     ]);
   });
 
+  it("does not claim a host started for a plugin command, and reports the cold start instead (round-9 finding 1)", async () => {
+    const panelStartedHosts = new Set<string>();
+    let running = false;
+    let coldStarts = 0;
+
+    await startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      claim: false,
+      onColdStartWithoutClaim: () => {
+        coldStarts += 1;
+      },
+      hostActivation: () => (running ? Promise.resolve() : undefined),
+      ensureStarted: async () => {
+        running = true;
+        return { ok: true, startedHost: true };
+      },
+    });
+
+    expect(running).toBe(true);
+    expect(panelStartedHosts.size).toBe(0);
+    // Without a panelStartedHosts entry, this is the only record that the
+    // host is running only because this command cold-started it — without
+    // it, nothing would ever stop it once the command settles.
+    expect(coldStarts).toBe(1);
+  });
+
+  it("does not report a cold start for a command that only rode an already-running host", async () => {
+    const panelStartedHosts = new Set<string>();
+    let coldStarts = 0;
+
+    await startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      claim: false,
+      onColdStartWithoutClaim: () => {
+        coldStarts += 1;
+      },
+      hostActivation: () => Promise.resolve(),
+      ensureStarted: async () => {
+        throw new Error("ensureStarted must not run when a host is already active.");
+      },
+    });
+
+    expect(coldStarts).toBe(0);
+  });
+
+  it("does not report a cold start for a normal panel claim (claim left at its default)", async () => {
+    const panelStartedHosts = new Set<string>();
+    let coldStarts = 0;
+
+    await startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      onColdStartWithoutClaim: () => {
+        coldStarts += 1;
+      },
+      hostActivation: () => undefined,
+      ensureStarted: async () => ({ ok: true, startedHost: true }),
+    });
+
+    expect([...panelStartedHosts]).toEqual([
+      pluginLifecycleKey("workspace-1", "hello-plugin"),
+    ]);
+    expect(coldStarts).toBe(0);
+  });
+
   it("reports a refused start instead of claiming the host", async () => {
     const panelStartedHosts = new Set<string>();
 
@@ -334,6 +537,76 @@ describe("plugin panel registration", () => {
       }),
     ).rejects.toThrow("Plugin source changed. Review it again.");
     expect(panelStartedHosts.size).toBe(0);
+  });
+
+  it("reports the retryable claims-draining failure as PluginClaimsDrainingError, not a generic refusal (#779 round 25 finding 3)", async () => {
+    const panelStartedHosts = new Set<string>();
+
+    const start = startPluginForPanel({
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      hostActivation: () => undefined,
+      // The one shape PluginPipeline.ensureStarted's own refusal takes for
+      // this exact case: the code, not the message text, is what this
+      // conversion recognizes — the command layer's own catch checks the
+      // error class, not the string.
+      ensureStarted: async () => ({
+        ok: false,
+        error: {
+          message: 'dohc is still working on plugin "hello-plugin". Try the command again in a moment.',
+          code: "claims-draining",
+        },
+      }),
+    });
+
+    await expect(start).rejects.toBeInstanceOf(PluginClaimsDrainingError);
+    expect(panelStartedHosts.size).toBe(0);
+  });
+
+  describe("toPluginPanelHostStartResult (#779 round 27)", () => {
+    // PluginPipelineEnsureStartedResult's own full shape carries fields this
+    // function never reads (plugin, stage) — only .ok and .error's own code
+    // and message. Cast rather than stub every unrelated required field.
+    function ensureStartedResult(input: unknown) {
+      return input as Parameters<typeof toPluginPanelHostStartResult>[0];
+    }
+
+    it("passes a started result through unchanged", () => {
+      expect(
+        toPluginPanelHostStartResult(
+          ensureStartedResult({ ok: true, startedHost: true }),
+        ),
+      ).toEqual({ ok: true, startedHost: true });
+    });
+
+    it("keeps the one code startPluginForPanel recognizes", () => {
+      expect(
+        toPluginPanelHostStartResult(
+          ensureStartedResult({
+            ok: false,
+            error: { stage: "runtime", code: CLAIMS_DRAINING_ERROR_CODE, message: "retry" },
+          }),
+        ),
+      ).toEqual({
+        ok: false,
+        error: { message: "retry", code: CLAIMS_DRAINING_ERROR_CODE },
+      });
+    });
+
+    it("drops any other pipeline error code to undefined — the same as no code at all, so a producer misspelling degrades honestly instead of matching by accident", () => {
+      expect(
+        toPluginPanelHostStartResult(
+          ensureStartedResult({
+            ok: false,
+            error: { stage: "runtime", code: "install-failed", message: "install failed" },
+          }),
+        ),
+      ).toEqual({
+        ok: false,
+        error: { message: "install failed", code: undefined },
+      });
+    });
   });
 
   it("waits for a host that is spawned but still activating (#798)", async () => {
@@ -623,8 +896,10 @@ describe("plugin panel registration", () => {
           license: null,
           icon: null,
           settings: [],
+          commands: [],
           panels: [],
           webApps: [],
+          hasFailedReplacement: false,
           sourceHash: null,
           approvedHash: null,
           installedBaselineHash: null,

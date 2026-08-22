@@ -145,3 +145,28 @@ export class PluginWebAppViewRegistry<TView> {
     return removed;
   }
 }
+
+/**
+ * Notifies every removed record's owner, one failure never silencing the
+ * rest, then always destroys the whole set — even when a notification threw,
+ * or when there was nothing to notify. A dying renderer must not leave a
+ * guest attached to a server nothing will ever tear down.
+ */
+export function stopPluginWebAppGuests<TRecord>(
+  records: readonly TRecord[],
+  notify: (record: TRecord) => void,
+  destroy: (records: readonly TRecord[]) => void,
+  onNotifyError?: (record: TRecord, error: unknown) => void,
+): void {
+  try {
+    for (const record of records) {
+      try {
+        notify(record);
+      } catch (error) {
+        onNotifyError?.(record, error);
+      }
+    }
+  } finally {
+    destroy(records);
+  }
+}
