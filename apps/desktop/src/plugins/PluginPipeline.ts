@@ -139,10 +139,9 @@ export interface PluginPipelinePluginStatus extends PluginMetadata {
    * True from the moment a build fails while an old runtime keeps serving,
    * until a replacement build succeeds — independent of runtimeStatus, so a
    * crash-loop respawn between the failure and the fix can never make the
-   * still-owed replacement disappear from status. Mirrors whether
-   * recoveredManifests holds this plugin's recovery cache (round-8 finding
-   * 3): that map is the one existing fact honest enough to carry this,
-   * already cleared the moment a replacement publishes or the plugin stops.
+   * still-owed replacement disappear from status. Mirrors recoveryState's
+   * own has() (round-8 finding 3), cleared the moment a replacement
+   * publishes or the plugin stops.
    */
   hasFailedReplacement: boolean;
   diagnostics: string[];
@@ -224,6 +223,18 @@ export interface PluginPipelineOptions {
    * its own omits it.
    */
   raiseCommandClaimsBarrier?: (pluginId: string) => () => void;
+  /**
+   * Called the instant stopOldRuntime actually stops or begins replacing
+   * this plugin's old runtime — not just whenever the action that
+   * reached it settles. A caller's own barrier-lower (see
+   * raiseCommandClaimsBarrier) reads this to tell an action that
+   * genuinely decided the runtime from a no-op reconcile or a
+   * precondition failure that never touched it: eating a command's own
+   * cold-start marker for the latter leaks the host ownerless until
+   * workspace close (#779 round 26 note A). Optional: a caller with no
+   * command-claim concept of its own omits it.
+   */
+  onOldRuntimeStopBoundary?: (pluginId: string) => void;
   /**
    * Raises a hold (see raiseCommandClaimsBarrier) and waits for the
    * caller's own in-flight command claims on this plugin to drain,
@@ -533,15 +544,14 @@ export class PluginPipeline {
   private readonly dohcDir: string;
   private readonly operations: PluginPipelineOperations;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
-  private recoveredManifests = new Map<string, DohcPluginManifest>();
-  // The fact a build failed with an old runtime still standing in for it —
-  // set whenever captureRecoveredManifest runs, whether or not the
-  // generated manifest it also tries to cache into recoveredManifests
-  // turns out to be readable. hasRecoverableFailure is Retry's own
-  // precondition; recoveredManifests alone is only what the palette has to
-  // show for it (#779 round 21 finding 5).
-  private failedReplacements = new Set<string>();
-  private lastApprovedAttemptHash = new Map<string, string>();
+  // A key's presence is the fact a build failed with an old runtime still
+  // standing in for it — set whenever captureRecoveredManifest runs, keyed
+  // by has(). The value is the generated manifest it also tries to cache,
+  // or null when that read wasn't readable; hasRecoverableFailure only
+  // needs the key, the palette needs the value too (#779 round 21 finding
+  // 5, merged #779 round 26 simplification 8).
+  private readonly recoveryState = new Map<string, DohcPluginManifest | null>();
+  private readonly lastApprovedAttemptHash = new Map<string, string>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
   /**
@@ -699,7 +709,7 @@ export class PluginPipeline {
           webApps: manifestWebApps(candidate.manifest),
           panels: manifestPanels(candidate.manifest),
           commands: manifestCommands(candidate.manifest),
-          hasFailedReplacement: this.failedReplacements.has(candidate.id),
+          hasFailedReplacement: this.recoveryState.has(candidate.id),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
@@ -732,17 +742,18 @@ export class PluginPipeline {
   pluginRegistration(
     pluginId: string,
   ): { pluginRoot: string; manifest: DohcPluginManifest } | null {
-    const recovered = this.recoveredManifests.get(pluginId);
-    if (recovered) {
-      return { pluginRoot: this.liveRoot(pluginId), manifest: recovered };
-    }
     // A failed replacement with nothing recoverable from the live root must
     // not fall through to the freshly discovered candidate's own manifest
     // either — that candidate was never approved and may not even be
     // compatible with what is still running. Callers already treat a null
     // registration as "nothing new to serve" and fall back to their own
     // last-known-good record (#779 round 22 finding 5).
-    if (this.failedReplacements.has(pluginId)) return null;
+    if (this.recoveryState.has(pluginId)) {
+      const recovered = this.recoveryState.get(pluginId);
+      return recovered
+        ? { pluginRoot: this.liveRoot(pluginId), manifest: recovered }
+        : null;
+    }
     for (const candidate of this.discovery) {
       if (candidate.id !== pluginId || !candidate.manifest) continue;
       return { pluginRoot: candidate.rootPath, manifest: candidate.manifest };
@@ -760,8 +771,7 @@ export class PluginPipeline {
    * pluginRegistration()'s own refusal was for (#779 round 23 finding 1).
    */
   hasUnrecoverableFailedReplacement(pluginId: string): boolean {
-    return this.failedReplacements.has(pluginId) &&
-      !this.recoveredManifests.has(pluginId);
+    return this.recoveryState.get(pluginId) === null;
   }
 
   /**
@@ -1056,8 +1066,8 @@ export class PluginPipeline {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
     if (runtimeStatus === "disabled") {
-      // recoveredManifests staying set is what keeps hasFailedReplacement
-      // true through this transition: a build that failed and was never
+      // recoveryState staying set is what keeps hasFailedReplacement true
+      // through this transition: a build that failed and was never
       // replaced is still owed one whether or not the old runtime that
       // outlived it just gave up crash-looping. Clearing it here hid Retry
       // build and routed Enable through an approval hold instead (round-9
@@ -1774,9 +1784,9 @@ export class PluginPipeline {
     // now, whatever reason stopped it — the recovery this key stood for
     // ends here too, or a stale attempt hash could resurrect it later for
     // content that only happens to match again (#779 round 21 finding 3).
-    this.recoveredManifests.delete(pluginId);
-    this.failedReplacements.delete(pluginId);
+    this.recoveryState.delete(pluginId);
     this.lastApprovedAttemptHash.delete(pluginId);
+    this.options.onOldRuntimeStopBoundary?.(pluginId);
     // The stop already happened — mark it before running its consequences,
     // so a throwing notification can never look like the stop never occurred.
     markStopped?.();
@@ -1832,11 +1842,10 @@ export class PluginPipeline {
     // Every setStatus call this attempt makes below — "snapshotting",
     // "installing", "scanning", "building" — optimistically re-derives
     // commands/webApps/panels/settings from this candidate's own manifest,
-    // since failedReplacements is not set yet for any of them. If the
-    // attempt then fails with nothing recoverable from the live root, the
-    // catch below needs what those fields held before this attempt touched
-    // them, not whatever they drifted to along the way (#779 round 22
-    // finding 5).
+    // since recoveryState has no key for it yet. If the attempt then fails
+    // with nothing recoverable from the live root, the catch below needs
+    // what those fields held before this attempt touched them, not
+    // whatever they drifted to along the way (#779 round 22 finding 5).
     const priorStatus = this.statuses.get(candidate.id) ?? null;
     let oldRuntimeStopped = false;
     let sourceHash: string | null = null;
@@ -2051,8 +2060,7 @@ export class PluginPipeline {
         );
       }
 
-      this.recoveredManifests.delete(candidate.id);
-      this.failedReplacements.delete(candidate.id);
+      this.recoveryState.delete(candidate.id);
       // Discovery's own cached candidate for this id can be stale by now —
       // a source edit made again right after discovery's last scan (but
       // before this exact snapshot was taken) still lands in the snapshot,
@@ -2065,12 +2073,12 @@ export class PluginPipeline {
       // build that added, removed or changed a plugin's icon would keep
       // showing whatever discovery's last scan found instead (#779 round
       // 25 finding 2).
-      const iconCheck = manifest.icon
-        ? await verifyPluginIcon(candidate.rootPath, manifest.icon)
-        : { icon: null, diagnostic: null };
+      const builtIcon = manifest.icon
+        ? (await verifyPluginIcon(candidate.rootPath, manifest.icon)).icon
+        : null;
       this.discovery = this.discovery.map((entry) =>
         entry.id === candidate.id
-          ? { ...entry, manifest, iconPath: iconCheck.icon }
+          ? { ...entry, manifest, iconPath: builtIcon }
           : entry
       );
       return this.success(this.setStatus(candidate, {
@@ -2082,7 +2090,7 @@ export class PluginPipeline {
         installedBaselineHash: snapshot.sourceHash,
         warnings,
         error: null,
-      }, { manifest, iconPath: iconCheck.icon }));
+      }, { manifest, iconPath: builtIcon }));
     } catch (error) {
       await unpublishedSource?.discard().catch(() => undefined);
       const detail = error instanceof PipelineFailure
@@ -2119,23 +2127,15 @@ export class PluginPipeline {
         let recovered = false;
         if (!oldRuntimeStopped) {
           await this.captureRecoveredManifest(candidate.id);
-          recovered = this.recoveredManifests.has(candidate.id);
+          recovered = Boolean(this.recoveryState.get(candidate.id));
         }
         this.setStatus(candidate, {
           status: "failed",
           runtimeStatus: currentRuntimeStatus,
           sourceHash,
           error: detail,
-          // The recovery cache above can still come back empty (an
-          // unreadable or missing generated manifest) even though
-          // failedReplacements is now set. setStatus's own
-          // authoritativeManifest fallback would otherwise fall to
-          // whatever these fields already drifted to during this same
-          // attempt's own "snapshotting"/"installing"/"scanning"/
-          // "building" stages — each one re-derived them from this
-          // candidate's own never-approved manifest before failedReplacements
-          // existed to stop it. priorStatus is what they held before this
-          // attempt touched them (#779 round 22 finding 5).
+          // priorStatus: see its own definition above (#779 round 22
+          // finding 5).
           ...(!recovered && priorStatus
             ? {
               settings: priorStatus.settings,
@@ -2145,7 +2145,6 @@ export class PluginPipeline {
             }
             : {}),
         });
-        return this.failure(candidate.id, detail);
       }
       return this.failure(candidate.id, detail);
     } finally {
@@ -2282,12 +2281,13 @@ export class PluginPipeline {
    * land with an old runtime still serving — one entry point missing this
    * call is how round-8 finding 1 escaped runFullBuild's own version of it.
    *
-   * Marks failedReplacements before attempting the read: an unreadable or
-   * missing generated manifest must not cost Retry its own availability,
-   * only the palette's manifest to show (#779 round 21 finding 5).
+   * Marks recoveryState's own key (has(), value null) before attempting
+   * the read: an unreadable or missing generated manifest must not cost
+   * Retry its own availability, only the palette's manifest to show
+   * (#779 round 21 finding 5).
    */
   private async captureRecoveredManifest(pluginId: string): Promise<void> {
-    this.failedReplacements.add(pluginId);
+    if (!this.recoveryState.has(pluginId)) this.recoveryState.set(pluginId, null);
     try {
       const manifestPath = join(
         this.liveRoot(pluginId),
@@ -2302,7 +2302,7 @@ export class PluginPipeline {
           JSON.parse(manifestBody),
         );
         if (parsed.success) {
-          this.recoveredManifests.set(pluginId, parsed.data);
+          this.recoveryState.set(pluginId, parsed.data);
         }
       }
     } catch {
@@ -2315,7 +2315,7 @@ export class PluginPipeline {
    * standing in for it, whether or not its manifest could be cached. */
   private hasRecoverableFailure(pluginId: string): boolean {
     return this.statuses.get(pluginId)?.status === "failed" ||
-      this.failedReplacements.has(pluginId);
+      this.recoveryState.has(pluginId);
   }
 
   private async snapshotOrThrow(
@@ -2656,14 +2656,8 @@ export class PluginPipeline {
     const verified = await this.verifyApprovedSource(candidate, approvedHash);
     if (verified.kind === "failed") return verified.result;
     if (verified.kind === "changed") {
-      // holdForApproval always drains this plugin's command claims before
-      // it holds — a command reaching this through its own ensureStarted()
-      // call already holds one of those claims, which can never release
-      // until this same call returns. Refusing here, before that drain
-      // ever starts, is what a caller with that concept opts into: the
-      // same retryable code the command layer already recognizes and
-      // maps to its own "try again" status, not a generic failure (#779
-      // round 25 finding 3).
+      // See hasOutstandingCommandClaim's own doc above (#779 round 25
+      // finding 3).
       if (this.options.hasOutstandingCommandClaim?.(candidate.id)) {
         return this.failure(candidate.id, pipelineError(
           "runtime",
@@ -2741,7 +2735,7 @@ export class PluginPipeline {
       webApps: manifestWebApps(candidate.manifest),
       panels: manifestPanels(candidate.manifest),
       commands: manifestCommands(candidate.manifest),
-      hasFailedReplacement: this.failedReplacements.has(candidate.id),
+      hasFailedReplacement: this.recoveryState.has(candidate.id),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
@@ -2763,15 +2757,12 @@ export class PluginPipeline {
     built?: { manifest: DohcPluginManifest; iconPath: string | null },
   ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
-    // A failed replacement with no recovered manifest must not treat its
-    // own (possibly broken, never-approved) candidate manifest as
-    // authoritative while the old build still serves it — null falls
-    // every derivation below back to the prior status's own contributions
-    // instead (#779 round 22 finding 5).
-    const authoritativeManifest = this.recoveredManifests.get(candidate.id) ??
-      (this.failedReplacements.has(candidate.id)
-        ? null
-        : (built?.manifest ?? candidate.manifest));
+    // null (a failed replacement, nothing recovered) falls every
+    // derivation below back to current's own contributions instead of
+    // this candidate's own untrusted manifest (#779 round 22 finding 5).
+    const authoritativeManifest = this.recoveryState.has(candidate.id)
+      ? (this.recoveryState.get(candidate.id) ?? null)
+      : (built?.manifest ?? candidate.manifest);
     // Only the manifest content and icon this call reports on should
     // prefer built — directoryName/rootPath/valid below stay tied to the
     // real discovery candidate, which is what identifies the plugin on
@@ -2812,7 +2803,7 @@ export class PluginPipeline {
       commands: patch.commands ?? (authoritativeManifest
         ? manifestCommands(authoritativeManifest)
         : current.commands),
-      hasFailedReplacement: this.failedReplacements.has(candidate.id),
+      hasFailedReplacement: this.recoveryState.has(candidate.id),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),

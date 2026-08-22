@@ -2776,13 +2776,21 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         },
         // Mirrors main.ts's own wiring: the marker settles at the same
         // lower every barrier-raising action already shares, not only on
-        // an explicit reset (#779 round 19 finding 3).
+        // an explicit reset (#779 round 19 finding 3) — but only when
+        // this barrier's own action actually stopped or replaced the
+        // runtime, or a no-op reconcile eats a cold start's own marker
+        // for a runtime it never touched (#779 round 26 note A).
         raiseCommandClaimsBarrier: (pluginId) => {
           const lower = commandClaims.raiseDrainBarrier(pluginId);
           return () => {
             lower();
-            commandClaims.consumeStartedHost(pluginId);
+            if (commandClaims.consumeRuntimeStop(pluginId)) {
+              commandClaims.consumeStartedHost(pluginId);
+            }
           };
+        },
+        onOldRuntimeStopBoundary: (pluginId) => {
+          commandClaims.markRuntimeStopped(pluginId);
         },
         awaitCommandClaimsDrained: async (pluginId) => {
           const gate = nextCommandDrainGate;
@@ -3123,6 +3131,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
           plugin: recoveredRegistration,
           ensureStarted: async () => setup.pipeline.host,
+          ensureCurrent: () => {},
         });
         expect(invoked.status).toBe("ok");
 
@@ -3244,7 +3253,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const setup = await setupEstablishedPlugin();
       try {
         // Approve new content, but the build behind it fails —
-        // recoveredManifests captures the still-running old build, and
+        // recoveryState captures the still-running old build, and
         // lastApprovedAttemptHash remembers this exact attempted content
         // (the same hash Retry's own buildFromCurrentSource later accepts
         // via alsoAcceptHash).
@@ -3587,11 +3596,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         );
 
         await setup.failEstablishedBuild();
-        // hasFailedReplacement reports the fact (failedReplacements), not
-        // the cache: it stays true even though recoveredManifests never
-        // populated, since the manifest above could not be parsed — only
-        // the palette's own preview of what the recovered build contains
-        // is missing (#779 round 22 finding 2).
+        // hasFailedReplacement reports recoveryState's own has(), true
+        // regardless of its value: the manifest above could not be
+        // parsed, so the value stays null — only the palette's own
+        // preview of what the recovered build contains is missing (#779
+        // round 22 finding 2).
         expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
 
         // A crash-loop respawn between the failure and the fix — the
@@ -3736,9 +3745,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const setup = await setupEstablishedPlugin({ commands: oldCommands });
       try {
         // captureRecoveredManifest's own read of this file fails, so
-        // recoveredManifests never populates — the fallback this pin
-        // exercises has nothing but the fact and the failed candidate's
-        // own (different, never-approved) manifest to choose between.
+        // recoveryState's value stays null — the fallback this pin
+        // exercises has nothing but that and the failed candidate's own
+        // (different, never-approved) manifest to choose between.
         const liveRoot = join(pluginsDataRoot(setup.fixture), "example-plugin");
         await writeFile(
           join(liveRoot, "dohc-plugin.generated.json"),
@@ -4396,6 +4405,32 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         // longer describes what's running, so a later, unrelated release
         // must not consume it and stop the replacement it never claimed.
         expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps a command's own cold-start marker through a precondition-failed rebuild, so the host still stops once that command releases (#779 round 26 note A)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // A command cold-started this host before the rebuild below — its
+        // own on-demand marker, set the same way main.ts's
+        // invokePluginCommand does on a claimless cold start.
+        setup.commandClaims.markStartedHost(key);
+
+        // Nothing is currently failed, so rebuild()'s own precondition
+        // (hasRecoverableFailure) refuses here — this raise/lower cycle
+        // never reaches stopOldRuntime at all, unlike the twin test above.
+        const rebuilt = await setup.pipeline.rebuild(key);
+        expect(rebuilt.ok).toBe(false);
+
+        // The marker must have survived this no-op cycle: consuming it
+        // here is exactly what the cold-starting command's own eventual
+        // release does to decide whether it, and nothing else, is why the
+        // host is running — eating it here would leak that host ownerless
+        // until workspace close.
+        expect(setup.commandClaims.consumeStartedHost(key)).toBe(true);
       } finally {
         await setup.pipeline.dispose();
       }

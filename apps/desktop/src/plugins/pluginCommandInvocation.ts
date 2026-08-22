@@ -38,7 +38,7 @@ export async function invokeRegisteredPluginCommand(options: {
   input: InvokePluginCommandPayload;
   plugin: PluginCommandRegistration;
   ensureStarted: () => Promise<PluginCommandHost>;
-  ensureCurrent?: () => void;
+  ensureCurrent: () => void;
 }): Promise<InvokePluginCommandResult> {
   const { input, plugin } = options;
   const command = plugin.manifest.commands?.find(
@@ -62,7 +62,7 @@ export async function invokeRegisteredPluginCommand(options: {
     return { status: "command-failed", message: errorMessage(error) };
   }
   try {
-    options.ensureCurrent?.();
+    options.ensureCurrent();
   } catch (error) {
     return { status: "command-failed", message: errorMessage(error) };
   }

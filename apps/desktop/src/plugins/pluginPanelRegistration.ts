@@ -88,12 +88,10 @@ export type PluginPanelHostStartResult =
     error: {
       message: string;
       /**
-       * "claims-draining" names the one pipeline failure a command's own
-       * ensureStarted() call can cause by holding its own claim — refused
-       * before a hold would have drained it (#779 round 25 finding 3).
-       * Only a command caller (claimHostForCommand) can ever produce this;
-       * a panel or web app never claims, so hasOutstandingCommandClaim is
-       * always false for them and this code never reaches their own catch.
+       * "claims-draining": the one pipeline failure a command's own claim
+       * can cause (see PluginPipeline's hasOutstandingCommandClaim, #779
+       * round 25 finding 3). Never reached by a panel or web app, which
+       * never claims.
        */
       code?: string;
     };
@@ -138,10 +136,8 @@ export async function startPluginForPanel(input: {
   if (running) return running;
   const result = await input.ensureStarted();
   if (!result.ok) {
-    // The one retryable pipeline failure a command's own claim can cause
-    // — the command layer recognizes this exact error class and maps it
-    // to its own "try again" status instead of a generic command failure
-    // (#779 round 25 finding 3).
+    // See PluginPanelHostStartResult's own code field above (#779 round
+    // 25 finding 3).
     if (result.error.code === "claims-draining") {
       throw new PluginClaimsDrainingError(input.pluginId);
     }

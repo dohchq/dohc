@@ -76,6 +76,36 @@ describe("PluginCommandHostClaims", () => {
     });
   });
 
+  describe("markRuntimeStopped / consumeRuntimeStop (#779 round 26 note A)", () => {
+    it("reports true only once, for a key that was actually flagged", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      claims.markRuntimeStopped(key);
+
+      expect(claims.consumeRuntimeStop(key)).toBe(true);
+      // Consuming clears it: nothing left for a second check to find.
+      expect(claims.consumeRuntimeStop(key)).toBe(false);
+    });
+
+    it("reports false for a key nothing ever flagged — the no-op case a precondition failure or reconcile leaves behind", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      expect(claims.consumeRuntimeStop(key)).toBe(false);
+    });
+
+    it("clears at reset, alongside every other piece of this key's state", () => {
+      const claims = new PluginCommandHostClaims();
+      const key = "workspace-1\0example-plugin";
+
+      claims.markRuntimeStopped(key);
+      claims.reset(key);
+
+      expect(claims.consumeRuntimeStop(key)).toBe(false);
+    });
+  });
+
   describe("raiseDrainBarrier / isDraining", () => {
     it("raises and lowers a single hold via the returned function", () => {
       const claims = new PluginCommandHostClaims();

@@ -28,6 +28,7 @@ describe("invokeRegisteredPluginCommand", () => {
           },
         },
         ensureStarted,
+        ensureCurrent: () => {},
       }),
     ).resolves.toEqual({ status: "ok" });
     expect(ensureStarted).toHaveBeenCalledWith();
@@ -50,6 +51,7 @@ describe("invokeRegisteredPluginCommand", () => {
           },
         },
         ensureStarted,
+        ensureCurrent: () => {},
       }),
     ).resolves.toEqual({
       status: "command-not-declared",
@@ -74,6 +76,7 @@ describe("invokeRegisteredPluginCommand", () => {
           },
         },
         ensureStarted,
+        ensureCurrent: () => {},
       }),
     ).resolves.toEqual({
       status: "command-failed",
@@ -99,6 +102,7 @@ describe("invokeRegisteredPluginCommand", () => {
           },
         },
         ensureStarted,
+        ensureCurrent: () => {},
       }),
     ).resolves.toEqual({
       status: "plugin-rebuilding",
@@ -157,6 +161,7 @@ describe("invokeRegisteredPluginCommand", () => {
           },
         },
         ensureStarted,
+        ensureCurrent: () => {},
       }),
     ).resolves.toEqual({
       status: "plugin-not-running",
@@ -183,6 +188,7 @@ describe("invokeRegisteredPluginCommand", () => {
           },
         },
         ensureStarted,
+        ensureCurrent: () => {},
       }),
     ).resolves.toEqual({
       status: "command-failed",

@@ -824,7 +824,7 @@ function PluginDetailsHeader(props: {
             disabled={disabled}
             onClick={() => catalog.runAction(plugin, "rebuild")}
           >
-            {busyAction === "rebuild" ? "Retrying build" : "Retry build"}
+            {actionLabel("rebuild", busyAction === "rebuild")}
           </PrimaryButton>
         ) : null}
         {canDisable(plugin) ? (

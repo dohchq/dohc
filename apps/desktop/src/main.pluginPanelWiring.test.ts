@@ -213,9 +213,9 @@ describe("plugin panel main-process wiring", () => {
       "pluginLifecycleKey(workspace.workspaceId, input.pluginId)",
     );
     expect(invoke).toContain("claim: false");
-    expect(invoke).toContain("claimHostForCommand(claimKey);");
+    expect(invoke).toContain("activeCommandClaims.claim(claimKey);");
     expect(invoke).toContain("finally {");
-    expect(invoke).toContain("releaseHostForCommand(claimKey);");
+    expect(invoke).toContain("activeCommandClaims.release(claimKey);");
     expect(invoke).toContain(
       "() => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId)",
     );
@@ -456,7 +456,7 @@ describe("plugin panel main-process wiring", () => {
       'dohc is still working on plugin "${input.pluginId}". Try the command again in a moment.',
       refusalAt,
     );
-    const claimAt = invoke.indexOf("claimHostForCommand(claimKey);", refusalAt);
+    const claimAt = invoke.indexOf("activeCommandClaims.claim(claimKey);", refusalAt);
     // MUTATION (unbounded wait): dropping this refusal lets a new command
     // join a plugin whose rebuild or workspace close is already draining
     // it, so drain()'s own wait would never end.
@@ -482,16 +482,42 @@ describe("plugin panel main-process wiring", () => {
       raiseAt,
     );
     const lowerCallAt = createPipeline.indexOf("lower();", raiseCallAt);
+    const stopGateAt = createPipeline.indexOf(
+      "if (activeCommandClaims.consumeRuntimeStop(key)) {",
+      lowerCallAt,
+    );
     const consumeAt = createPipeline.indexOf(
       "activeCommandClaims.consumeStartedHost(key);",
-      lowerCallAt,
+      stopGateAt,
     );
     // MUTATION (stale marker survives a rebuild): a marker not settled at
     // this same lower survives a successful in-queue rebuild that replaced
     // the runtime — a later, unrelated release then finds it and stops the
     // replacement it never claimed (#779 round 19 finding 3).
     expect(lowerCallAt).toBeGreaterThan(raiseCallAt);
-    expect(consumeAt).toBeGreaterThan(lowerCallAt);
+    // MUTATION (no-op reconcile eats a live marker): consuming unconditionally
+    // here, not only when consumeRuntimeStop reports this exact barrier's own
+    // action actually stopped or replaced the runtime, eats a command's own
+    // cold-start marker for a no-op reconcile or a precondition-failed action
+    // that never touched the runtime — nothing is then left to stop the host
+    // it started until workspace close (#779 round 26 note A).
+    expect(stopGateAt).toBeGreaterThan(lowerCallAt);
+    expect(consumeAt).toBeGreaterThan(stopGateAt);
+
+    const boundaryAt = createPipeline.indexOf(
+      "onOldRuntimeStopBoundary: (pluginId) => {",
+      optionsAt,
+    );
+    const boundaryMarkAt = createPipeline.indexOf(
+      "activeCommandClaims.markRuntimeStopped(",
+      boundaryAt,
+    );
+    // MUTATION (nothing ever flags the stop): without this wire-up,
+    // consumeRuntimeStop above can never report true for any action, so the
+    // gate it guards permanently withholds the started-host marker instead
+    // of only withholding it from no-op reconciles (#779 round 26 note A).
+    expect(boundaryAt).toBeGreaterThan(optionsAt);
+    expect(boundaryMarkAt).toBeGreaterThan(boundaryAt);
 
     const drainedAt = createPipeline.indexOf(
       "awaitCommandClaimsDrained: (pluginId) =>",

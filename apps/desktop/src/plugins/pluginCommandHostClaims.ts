@@ -3,10 +3,19 @@ export class PluginCommandHostClaims {
   private readonly startedHosts = new Set<string>();
   private readonly drainHolds = new Map<string, number>();
   private readonly drainWaiters = new Map<string, Array<() => void>>();
+  private readonly runtimeStopped = new Set<string>();
 
   /** Claims a key's host for the duration of one command. */
   claim(key: string): void {
     this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
+  }
+
+  /** Resolves and clears every waiter drain() parked on this key. */
+  private flushWaiters(key: string): void {
+    const waiters = this.drainWaiters.get(key);
+    if (!waiters) return;
+    this.drainWaiters.delete(key);
+    for (const resolve of waiters) resolve();
   }
 
   /** Releases one claim made by claim(). */
@@ -15,11 +24,7 @@ export class PluginCommandHostClaims {
     if (count === undefined) return;
     if (count <= 1) {
       this.counts.delete(key);
-      const waiters = this.drainWaiters.get(key);
-      if (waiters) {
-        this.drainWaiters.delete(key);
-        for (const resolve of waiters) resolve();
-      }
+      this.flushWaiters(key);
       return;
     }
     this.counts.set(key, count - 1);
@@ -40,6 +45,20 @@ export class PluginCommandHostClaims {
    * to being alive. */
   consumeStartedHost(key: string): boolean {
     return this.startedHosts.delete(key);
+  }
+
+  /** Flags that this key's old runtime was actually stopped or replaced
+   * just now — a barrier's own lower reads this (via consumeRuntimeStop)
+   * to tell an action that genuinely decided the runtime from a no-op
+   * reconcile or a precondition failure that never reached that point. */
+  markRuntimeStopped(key: string): void {
+    this.runtimeStopped.add(key);
+  }
+
+  /** Consumes and reports whether markRuntimeStopped fired for this key
+   * since the last consumption. */
+  consumeRuntimeStop(key: string): boolean {
+    return this.runtimeStopped.delete(key);
   }
 
   /** True while any drain barrier is raised on this key. */
@@ -95,10 +114,7 @@ export class PluginCommandHostClaims {
     this.counts.delete(key);
     this.startedHosts.delete(key);
     this.drainHolds.delete(key);
-    const waiters = this.drainWaiters.get(key);
-    if (waiters) {
-      this.drainWaiters.delete(key);
-      for (const resolve of waiters) resolve();
-    }
+    this.runtimeStopped.delete(key);
+    this.flushWaiters(key);
   }
 }

@@ -1055,14 +1055,21 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       const lower = activeCommandClaims.raiseDrainBarrier(key);
       return () => {
         lower();
-        // The action this barrier belonged to just decided this key's
-        // runtime — stopped it, or replaced it with a fresh instance the
-        // action itself now owns. Either way, a marker from before that
-        // decision no longer describes what's running, so it settles here
-        // instead of surviving to misattribute a later, unrelated release
-        // (#779 round 19 finding 3).
-        activeCommandClaims.consumeStartedHost(key);
+        // Only when this barrier's own action actually stopped or
+        // replaced the runtime (onOldRuntimeStopBoundary flagged this
+        // key) — a no-op reconcile or a precondition failure that never
+        // reached that point must not eat a command's own cold-start
+        // marker, or nothing left stops the host it started until
+        // workspace close (#779 round 19 finding 3, round 26 note A).
+        if (activeCommandClaims.consumeRuntimeStop(key)) {
+          activeCommandClaims.consumeStartedHost(key);
+        }
       };
+    },
+    onOldRuntimeStopBoundary: (pluginId) => {
+      activeCommandClaims.markRuntimeStopped(
+        pluginLifecycleKey(workspace.workspaceId, pluginId),
+      );
     },
     awaitCommandClaimsDrained: (pluginId) =>
       awaitCommandClaimsDrainedWithDeadline(
@@ -1075,13 +1082,10 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       activeCommandClaims.reset(
         pluginLifecycleKey(workspace.workspaceId, pluginId),
       ),
-    hasOutstandingCommandClaim: (pluginId) => {
-      const key = pluginLifecycleKey(workspace.workspaceId, pluginId);
-      // The current call's own claim is one of these — draining them
-      // before a hold would wait on that claim releasing, which cannot
-      // happen until this same call returns (#779 round 25 finding 3).
-      return activeCommandClaims.has(key);
-    },
+    // See PluginPipeline's hasOutstandingCommandClaim doc (#779 round 25
+    // finding 3).
+    hasOutstandingCommandClaim: (pluginId) =>
+      activeCommandClaims.has(pluginLifecycleKey(workspace.workspaceId, pluginId)),
   });
   return pipeline;
 }
@@ -2843,14 +2847,6 @@ const panelStartedHosts = new Set<string>();
 // claims need separate reference counts so one command cannot release another.
 const activeCommandClaims = new PluginCommandHostClaims();
 
-function claimHostForCommand(key: string): void {
-  activeCommandClaims.claim(key);
-}
-
-function releaseHostForCommand(key: string): void {
-  activeCommandClaims.release(key);
-}
-
 function pluginPanelKey(
   workspaceId: string,
   pluginId: string,
@@ -3718,8 +3714,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   await Promise.all([
     closeEngineYDocSessionsForSender(senderId),
     waitForPendingEngineYDocOpens(senderId),
-    // This sender's own panels and web apps are gone regardless of
-    // whether the workspace itself survives (#779 round 20 finding 1).
+    // See stopPluginSurfacesForSender's own doc (#779 round 20 finding 1).
     stopPluginSurfacesForSender(senderId),
     // This sender's own entry has not been cleared yet, so it would
     // otherwise always count as "another window" — excluded here so full
@@ -7025,6 +7020,13 @@ function registerIpcHandlers(
       });
     }
     const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);
+    const assertCurrent = () => {
+      if (!isCurrent()) {
+        throw new Error(
+          "The plugin command request was cancelled because the renderer changed.",
+        );
+      }
+    };
     // A rebuild or a workspace close is already draining this key's
     // claims (round-10 finding 2; round-12 finding 2 for the workspace
     // path) — joining now would extend a wait meant to be bounded by the
@@ -7037,18 +7039,14 @@ function registerIpcHandlers(
         message: `dohc is still working on plugin "${input.pluginId}". Try the command again in a moment.`,
       });
     }
-    claimHostForCommand(claimKey);
+    activeCommandClaims.claim(claimKey);
     try {
       return InvokePluginCommandResult.parse(
         await invokeRegisteredPluginCommand({
           input,
           plugin,
           ensureStarted: async () => {
-            if (!isCurrent()) {
-              throw new Error(
-                "The plugin command request was cancelled because the renderer changed.",
-              );
-            }
+            assertCurrent();
             assertWritableWorkspace(workspace);
             return withPluginHostLifecycleLock(
               claimKey,
@@ -7064,17 +7062,11 @@ function registerIpcHandlers(
               }),
             );
           },
-          ensureCurrent: () => {
-            if (!isCurrent()) {
-              throw new Error(
-                "The plugin command request was cancelled because the renderer changed.",
-              );
-            }
-          },
+          ensureCurrent: assertCurrent,
         }),
       );
     } finally {
-      releaseHostForCommand(claimKey);
+      activeCommandClaims.release(claimKey);
       // Best-effort: a `finally` that itself throws replaces whatever the
       // `try` returned or threw, so a host-stop rejection here must never
       // reach the renderer in place of a command result the invocation
@@ -7747,10 +7739,7 @@ function registerIpcHandlers(
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
         workspaceSwitchTokenBySender.delete(senderId);
-        // This sender's own panels and web apps are gone regardless of
-        // whether the workspace itself survives — a survivor sharing it
-        // still needs those claims gone, or its guest records outlive the
-        // window that opened them (#779 round 20 finding 1).
+        // See stopPluginSurfacesForSender's own doc (#779 round 20 finding 1).
         void (async () => {
           try {
             await stopPluginSurfacesForSender(senderId);
