@@ -829,7 +829,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   // among valid manifests — used to hand this call the wrong plugin
   // entirely: the unrelated one whose id string happens to match, not the
   // one at the directory the caller actually named.
-  it("resolves Remove by the exact directory named, even when an invalid row's fallback id collides with another plugin's real id", async () => {
+  it("resolves Remove by the exact directory named, even when an invalid row's fallback id collides with another plugin's real, INSTALLED id", async () => {
     const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-id-collision-"));
     roots.push(targetRoot);
     const workspaceRoot = join(targetRoot, "workspace");
@@ -837,52 +837,105 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await mkdir(workspaceRoot, { recursive: true });
     await mkdir(stateDir, { recursive: true });
 
-    // The row the user actually clicked Remove on: a broken manifest, so
-    // discovery names it by its directory — "target-dir" — which is ALSO,
-    // coincidentally, the real manifest id an entirely unrelated, valid
-    // plugin in a DIFFERENT directory declares.
+    // The plugin genuinely installed and running under id "target-dir" —
+    // in a directory named "other-dir", nothing to do with the row about
+    // to be removed.
+    const otherRoot = join(workspaceRoot, "plugins", "other-dir");
+    await mkdir(join(otherRoot, "src"), { recursive: true });
+    await writeFile(
+      join(otherRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "target-dir", entry: "src/index.ts" }, null, 2)}\n`,
+    );
+    await writeFile(
+      join(otherRoot, "package.json"),
+      `${JSON.stringify({
+        name: "target-dir",
+        version: "1.0.0",
+        private: true,
+        type: "module",
+        packageManager: "pnpm@11.20.0",
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(otherRoot, "pnpm-lock.yaml"), [
+      "lockfileVersion: '9.0'",
+      "settings:",
+      "  autoInstallPeers: true",
+      "  excludeLinksFromLockfile: false",
+      "importers:",
+      "  .: {}",
+      "",
+    ].join("\n"));
+    await writeFile(
+      join(otherRoot, "src", "index.ts"),
+      'export default { activate() {} };\n',
+    );
+
+    let pipeline: PluginPipeline;
+    const newHost = () =>
+      new PluginHost({
+        stateDir,
+        workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+    const newPipeline = () =>
+      new PluginPipeline({
+        workspaceRoot,
+        stateDir,
+        pluginHost: newHost(),
+        resourcesBasePath,
+        pnpmRunnerEntry,
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        },
+      });
+
+    pipeline = newPipeline();
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("target-dir");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The unrelated plugin did not reach ready.",
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+
+    // The row the user actually clicks Remove on, added AFTER the other
+    // plugin is already running: a broken manifest, so discovery names it
+    // by its directory — "target-dir" — which is ALSO, coincidentally,
+    // the real, installed manifest id the unrelated plugin above declares.
     const invalidRoot = join(workspaceRoot, "plugins", "target-dir");
     await mkdir(join(invalidRoot, "src"), { recursive: true });
     await writeFile(join(invalidRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
     await writeFile(join(invalidRoot, "src", "main.ts"), "export default {};\n");
 
-    const otherRoot = join(workspaceRoot, "plugins", "other-dir");
-    await mkdir(join(otherRoot, "src"), { recursive: true });
-    await writeFile(
-      join(otherRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "target-dir", entry: "src/main.ts" }, null, 2)}\n`,
-    );
-    await writeFile(join(otherRoot, "src", "main.ts"), "export default {};\n");
-
-    let pipeline: PluginPipeline;
-    const host = new PluginHost({
-      stateDir,
-      workspaceRoot,
-      spawnTransport: fakeSpawnTransport(),
-      routeSdkRequest: async () => ({}),
-      onStatusChange: (pluginId, status) => {
-        pipeline.noteRuntimeStatus(pluginId, status);
-      },
-    });
-    pipeline = new PluginPipeline({
-      workspaceRoot,
-      stateDir,
-      pluginHost: host,
-      resourcesBasePath,
-      pnpmRunnerEntry,
-      operations: {
-        install: (input) =>
-          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-      },
-    });
-
+    pipeline = newPipeline();
     try {
       await pipeline.start();
+      await waitFor(
+        () => pipeline.list().some((row) => row.directoryName === "other-dir" && row.status === "ready"),
+        "The unrelated plugin was not running after reopening.",
+      );
       const invalidRow = pipeline.list().find((row) => row.directoryName === "target-dir");
       const otherRow = pipeline.list().find((row) => row.directoryName === "other-dir");
       // The collision itself: both rows claim id "target-dir".
       expect(invalidRow).toMatchObject({ id: "target-dir", valid: false });
-      expect(otherRow).toMatchObject({ id: "target-dir", valid: true });
+      expect(otherRow).toMatchObject({
+        id: "target-dir",
+        valid: true,
+        approvedHash: expect.any(String),
+      });
 
       // The user named the invalid row specifically — its own id AND its
       // own directory, exactly what the renderer sends for a discovered
@@ -894,25 +947,26 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // The invalid directory is gone...
       await expect(lstat(invalidRoot)).rejects.toMatchObject({ code: "ENOENT" });
-      // ...and the unrelated, valid plugin's own FILES are completely
-      // untouched — the harm this finding names (Remove deleting the wrong
-      // plugin's source) never happens.
+      // ...and the unrelated, installed plugin is completely untouched:
+      // its source, its build, its state, and its running process all
+      // survive — not only its files (#779-offers round 12 finding 1).
       await expect(readFile(join(otherRoot, "dohc-plugin.json"), "utf8"))
         .resolves.toContain('"name": "target-dir"');
-      // The two rows shared one id string, so this.statuses — still keyed
-      // by that string, a residual effect of the collision this fix does
-      // not extend to — transiently drops the surviving row's status
-      // alongside the deleted one's. Its files were never touched, and a
-      // rescan (the same reconciliation an ordinary watcher batch runs)
-      // finds them and reseeds it correctly.
-      pipeline.handleWatcherEvents([{ path: "plugins", operation: "update" }]);
-      await waitFor(
-        () => pipeline.list().some((row) => row.directoryName === "other-dir"),
-        "The surviving plugin's status did not reseed after the rescan.",
-      );
-      expect(
-        pipeline.list().find((row) => row.directoryName === "other-dir"),
-      ).toMatchObject({ id: "target-dir", valid: true });
+      const survivor = pipeline.list().find((row) => row.directoryName === "other-dir");
+      expect(survivor).toMatchObject({
+        id: "target-dir",
+        valid: true,
+        status: "ready",
+        approvedHash: expect.any(String),
+      });
+      expect(await readFile(liveBundlePath({ stateDir, workspaceRoot }, "target-dir"), "utf8"))
+        .toContain("activate");
+      const state = await readPluginLocalState(stateDir, workspaceRoot);
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["target-dir"]).toMatchObject({
+        disabled: false,
+        directoryName: "other-dir",
+      });
     } finally {
       await pipeline.dispose();
     }

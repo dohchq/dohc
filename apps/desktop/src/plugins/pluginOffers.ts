@@ -213,6 +213,12 @@ async function removeOwnedEmptyClaim(
     return;
   }
   if (entries.length > 0) return;
+  // Node has no dirfd-relative rmdir, so this still names `target` by path
+  // rather than the handle just verified — the same platform floor as the
+  // rollback's move-into-staging, with strictly smaller harm here: the
+  // worst case is deleting a competitor's just-created EMPTY directory in
+  // a microsecond window, never real content, and their own Add simply
+  // refuses and can retry.
   await rmdir(target).catch(() => undefined);
 }
 

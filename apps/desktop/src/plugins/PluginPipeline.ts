@@ -1020,7 +1020,24 @@ export class PluginPipeline {
       // pluginId strands the other key's state and plugin data forever —
       // nothing else ever visits it again once the discovery entry for
       // this directory is gone (#779-offers round 9 finding 3).
-      const cleanupIds = new Set([pluginId, ...this.additionalCleanupIds(candidate, state)]);
+      //
+      // pluginId itself only joins cleanup when nothing PROVES it belongs
+      // to a different directory — a persisted record's own directoryName
+      // is that proof. Round 11 finding 3 fixed which directory's SOURCE
+      // gets deleted, but every other piece of cleanup here still used
+      // pluginId unconditionally: an invalid row's own fallback id can
+      // coincide with some OTHER, unrelated, installed plugin's real id,
+      // and that installation's record genuinely lives under this exact
+      // key — disabling it, stopping its running process, and deleting its
+      // build and state right along with the invalid row's source
+      // (#779-offers round 12 finding 1).
+      const pluginIdTracesHere =
+        record?.directoryName === undefined ||
+        record.directoryName === candidate.directoryName;
+      const cleanupIds = new Set([
+        ...(pluginIdTracesHere ? [pluginId] : []),
+        ...this.additionalCleanupIds(candidate, state),
+      ]);
       if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
         return this.failure(
           pluginId,
@@ -1058,19 +1075,36 @@ export class PluginPipeline {
         );
       }
 
-      this.setStatus(candidate, {
-        status: "uninstalling",
-        disabledReason: "user",
-        error: null,
-      });
+      // Guarded: candidate.id can collide with an unrelated, installed
+      // plugin's real id, and this.statuses is keyed by that id alone — an
+      // unguarded write here would show THAT plugin as uninstalling and
+      // then, on this action's own status transitions below, keep
+      // overwriting an entry that was never this row's to begin with
+      // (#779-offers round 12 finding 1). Skipping the write costs the
+      // invalid row nothing visible: list() never reads this.statuses for
+      // an invalid candidate that failed this same check to begin with.
+      if (this.ownsStatusEntry(candidate)) {
+        this.setStatus(candidate, {
+          status: "uninstalling",
+          disabledReason: "user",
+          error: null,
+        });
+      }
       try {
-        await this.operations.mutateRecord(
-          this.options.stateDir,
-          this.workspaceRoot,
-          pluginId,
-          (existing) => ({ ...existing, disabled: true }),
-        );
-        await this.options.pluginHost.stop(pluginId);
+        // Guarded the same way cleanupIds is: pluginId's own record here
+        // can genuinely belong to a different, unrelated installation
+        // (#779-offers round 12 finding 1) — marking IT disabled and
+        // stopping ITS running process would be exactly the harm this
+        // fix closes, done a step earlier than the delete itself.
+        if (pluginIdTracesHere) {
+          await this.operations.mutateRecord(
+            this.options.stateDir,
+            this.workspaceRoot,
+            pluginId,
+            (existing) => ({ ...existing, disabled: true }),
+          );
+          await this.options.pluginHost.stop(pluginId);
+        }
 
         // Re-verify immediately before the actual delete: pluginHost.stop()
         // can take real wall-clock time (a grace period, then signal
@@ -1102,12 +1136,14 @@ export class PluginPipeline {
           // Nothing was deleted, the record still says disabled, and the host
           // is stopped — but the status set above still reads "uninstalling",
           // which disables every action for good (#779 round 7 B6).
-          this.setStatus(candidate, {
-            status: "disabled",
-            disabledReason: "user",
-            runtimeStatus: null,
-            error: detail,
-          });
+          if (this.ownsStatusEntry(candidate)) {
+            this.setStatus(candidate, {
+              status: "disabled",
+              disabledReason: "user",
+              runtimeStatus: null,
+              error: detail,
+            });
+          }
           return this.failure(pluginId, detail);
         }
 
@@ -1139,8 +1175,13 @@ export class PluginPipeline {
             )
           ),
         );
-        this.statuses.delete(pluginId);
-        this.doorWrittenDeltas.delete(pluginId);
+        // Same guard: pluginId's tracked status and door-write deltas are
+        // not this action's to clear when the record proved they belong to
+        // a different, unrelated installation.
+        if (pluginIdTracesHere) {
+          this.statuses.delete(pluginId);
+          this.doorWrittenDeltas.delete(pluginId);
+        }
         // One directory is one discovery entry, so the deleted root — not the
         // id, which an invalid candidate does not share with its record — is
         // what identifies the entry that just went away.
@@ -1165,12 +1206,14 @@ export class PluginPipeline {
         // disabled-pending-repair state a failed fresh install already uses
         // (#779 round 4 finding 2).
         const detail = pipelineError("uninstall", "delete-failed", errorMessage(error));
-        this.setStatus(candidate, {
-          status: "disabled-pending-repair",
-          disabledReason: "repair",
-          runtimeStatus: null,
-          error: detail,
-        });
+        if (this.ownsStatusEntry(candidate)) {
+          this.setStatus(candidate, {
+            status: "disabled-pending-repair",
+            disabledReason: "repair",
+            runtimeStatus: null,
+            error: detail,
+          });
+        }
         return this.failure(pluginId, detail);
       }
     });
@@ -1267,6 +1310,22 @@ export class PluginPipeline {
       }
     }
     return ids;
+  }
+
+  /**
+   * Whether this.statuses' entry at candidate.id — if any — genuinely
+   * belongs to candidate's own directory, rather than to some OTHER,
+   * unrelated installation whose real id happens to collide with this
+   * candidate's own fallback id. setStatus(candidate, ...) writes THAT
+   * key; calling it when this is false would overwrite an entry that
+   * belongs entirely to someone else's plugin — exactly the harm
+   * cleanupIds's own pluginIdTracesHere guard closes for disk state, kept
+   * as its own check here because it reads this.statuses rather than the
+   * persisted record (#779-offers round 12 finding 1).
+   */
+  private ownsStatusEntry(candidate: InstalledPluginRecord): boolean {
+    const existing = this.statuses.get(candidate.id);
+    return !existing || existing.directoryName === candidate.directoryName;
   }
 
   /** additionalCleanupIds's state roots, keyed as uninstallPreflight's
