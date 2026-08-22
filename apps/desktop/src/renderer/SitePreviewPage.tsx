@@ -258,9 +258,19 @@ export function SitePreviewPage(props: {
   }, [props.workspaceId, props.siteRoot]);
 
 
+  // getSitePackage intentionally returns the deepest CONTAINING site for a
+  // path (see requireExactSiteRoot's doc comment), so a stale tab whose own
+  // root stopped being a detected site can still get back a detected
+  // ANCESTOR above it — offering that ancestor's modes here would let this
+  // tab start (or share) someone else's site under its own name. The exact
+  // root match this checks is the same one prepareShare already requires
+  // before sharing.
   const modes = useMemo(
-    () => (load.status === "ready" ? availableModes(load.site, props.sharedView) : []),
-    [load, props.sharedView],
+    () =>
+      load.status === "ready" && load.site.root === props.siteRoot
+        ? availableModes(load.site, props.sharedView)
+        : [],
+    [load, props.siteRoot, props.sharedView],
   );
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
@@ -482,7 +492,9 @@ export function SitePreviewPage(props: {
     }
   }
 
-  const site = load.status === "ready" ? load.site : null;
+  // Same exact-root requirement as `modes` above — an ancestor site never
+  // renders as if it were this tab's own.
+  const site = load.status === "ready" && load.site.root === props.siteRoot ? load.site : null;
   const canShare =
     !props.sharedView &&
     site?.authority.kind === "workspace" &&
@@ -608,6 +620,11 @@ export function SitePreviewPage(props: {
         <EmptyState title="Site not detected" body="The folder no longer looks like a website." />
       ) : load.status === "error" ? (
         <EmptyState title="Could not load site" body={load.message} />
+      ) : load.status === "ready" && !site ? (
+        <EmptyState
+          title="Site not detected"
+          body="This site is no longer part of the workspace."
+        />
       ) : site ? (
         <>
           {site.diagnostics.length > 0 || actionError ? (

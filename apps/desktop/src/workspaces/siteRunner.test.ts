@@ -557,6 +557,28 @@ describe("package manager helpers", () => {
     ).not.toThrow();
   });
 
+  it("recognizes a host-bind flag case-insensitively, inline and as a separate token alike", () => {
+    // The inline form (--host=X) was ALREADY case-insensitive; the
+    // separate-token form (--host X) matched a plain, case-sensitive Set —
+    // "--HOST 0.0.0.0" silently passed neither form's check. A real CLI
+    // parser is typically case-sensitive itself (so "--HOST" likely does
+    // nothing to the actual tool), but refusing it anyway is the safe
+    // direction: over-refusing a spelling that turns out to be inert costs
+    // nothing, unlike trusting it silently.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--HOST", "0.0.0.0"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--HOSTNAME", "0.0.0.0"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("next", ["-h", "0.0.0.0"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--HOST", "127.0.0.1"]),
+    ).not.toThrow();
+  });
+
   it("gives the will-quit teardown enough budget to reach a site preview's own hard-kill deadline", () => {
     // stopChild's POSIX/Windows path waits BUILD_HARD_KILL_GRACE_MS for a
     // graceful exit before it can even issue SIGKILL — quit exiting before
@@ -685,6 +707,55 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["--made-up-option", "HOST=0.0.0.0", "vite"]),
     ).toThrow(/env/);
+  });
+
+  it("validates a shell env wraps, not just env's own leading assignments", () => {
+    // `env sh -c "HOST=0.0.0.0 vite"` looks like a completely unrecognized
+    // command to nestedShellCommand (which only ever switches on the
+    // command it's GIVEN — "env" — never on what env goes on to run), and
+    // assertDirectHostBinds only ever checks env's OWN leading options/
+    // assignments, never the wrapped command's. Without recursing into
+    // what env actually runs, the shell body's own HOST rebind is
+    // completely unchecked.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["sh", "-c", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/loopback/);
+    // env's own OPTIONs can precede the wrapped command too.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["-i", "sh", "-c", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/loopback/);
+    // A path-qualified env is the identical wrapper.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("/usr/bin/env", ["sh", "-c", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/loopback/);
+    // Every shell nestedShellCommand already recognizes is reachable
+    // through env, not just sh.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["bash", "-c", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/loopback/);
+    // A genuinely safe wrapped shell command must still work — env's own
+    // recursion doesn't turn into a blanket refusal.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["sh", "-c", "vite --host 127.0.0.1"]),
+    ).not.toThrow();
+  });
+
+  it("refuses nice/nohup/stdbuf outright — passthrough wrappers this scanner cannot statically re-parse", () => {
+    // Unlike env, none of these share a single, already-implemented option
+    // grammar (nice/stdbuf take their OWN prefix-attached, value-carrying
+    // options before the wrapped command; nohup takes none). Reimplementing
+    // each utility's own option grammar isn't proportionate for a rare
+    // wrapper shape — refused outright instead, even for an OTHERWISE safe
+    // wrapped command, the same "cannot statically verify" stance this file
+    // already takes elsewhere (env -S, an unrecognized env option, ...).
+    for (const wrapper of ["nice", "nohup", "stdbuf"]) {
+      expect(() =>
+        assertLoopbackOnlyDevServerCommand(wrapper, ["sh", "-c", "HOST=0.0.0.0 vite"]),
+      ).toThrow(/nice|nohup|stdbuf/);
+      expect(() =>
+        assertLoopbackOnlyDevServerCommand(wrapper, ["vite", "--host", "127.0.0.1"]),
+      ).toThrow(/nice|nohup|stdbuf/);
+    }
   });
 
   it("refuses env -S/--split-string instead of silently skipping its embedded assignment", () => {

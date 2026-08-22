@@ -82,7 +82,13 @@ const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;
 // SGR sequences before matching.
 // eslint-disable-next-line no-control-regex
 const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
-const HOST_BIND_FLAGS = new Set(["--host", "--hostname", "-H"]);
+// Case-insensitive for BOTH the inline (--host=X) and separate-token
+// (--host X) forms — a CLI flag parser is typically case-sensitive itself,
+// so "--HOST" likely does nothing to a real tool, but that's exactly why
+// treating it as a possible host bind is the safe direction: refusing a
+// flag spelling that turns out to be inert costs nothing, while trusting
+// it silently (on the chance some tool DOES accept it) would not.
+const HOST_BIND_FLAG_PATTERN = /^(?:--host|--hostname|-H)(?:=(.*))?$/i;
 const MAX_SHELL_NESTING_DEPTH = 3;
 const DEV_URL_CARRY_CHARS = 2 * 1024;
 
@@ -339,16 +345,14 @@ export function splitShellStatements(commandLine: string): string[] {
 function explicitHostBinds(args: string[]): string[] {
   const hosts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    const inlineHost = /^(?:--host|--hostname|-H)=(.*)$/i.exec(arg)?.[1];
-    if (inlineHost !== undefined) {
-      hosts.push(inlineHost);
+    const match = HOST_BIND_FLAG_PATTERN.exec(args[index]!);
+    if (!match) continue;
+    if (match[1] !== undefined) {
+      hosts.push(match[1]);
       continue;
     }
-    if (HOST_BIND_FLAGS.has(arg)) {
-      const next = args[index + 1];
-      hosts.push(next && !next.startsWith("-") ? next : "");
-    }
+    const next = args[index + 1];
+    hosts.push(next && !next.startsWith("-") ? next : "");
   }
   return hosts;
 }
@@ -384,7 +388,39 @@ const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
 // unrecognized option is refused below.
 const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 
-function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: boolean): string[] {
+// Sibling prefix wrappers to env(1): each runs an ARBITRARY command it's
+// given, the same "smuggle a shell past validation" risk env had before its
+// own fix — but unlike env, none of these are grouped by a single, already-
+// implemented option grammar. `nohup` takes no options of its own at all;
+// `nice`'s (`-n <adjustment>`, or a bare `-<adjustment>`) and `stdbuf`'s
+// (`-i`/`-o`/`-e <size>`) both take prefix-attached, value-carrying options
+// before the wrapped command, and reimplementing each utility's own option
+// grammar here — the same reimplementation risk ENV_OPTIONS_UNVERIFIABLE
+// already declines for env's own -S/--split-string — isn't proportionate
+// for what's otherwise a rare wrapper shape. Refused outright instead: the
+// same "cannot statically verify, so don't approve" stance this file
+// already takes throughout, rather than silently trusting an unexamined
+// wrapped command's own loopback binding.
+const PASSTHROUGH_WRAPPER_COMMAND_NAMES = new Set(["nice", "nohup", "stdbuf"]);
+
+// `hosts` is every HOST/HOSTNAME value this scan found; `consumedThrough` is
+// how far into `tokens` it got before stopping — for an env(1) wrapper,
+// that's the index of the wrapped command itself (or tokens.length if the
+// whole array was assignments/options with nothing left, or the scan
+// stopped on export/declare/typeset/local, which never leave a wrapped
+// command behind at all). Callers that need to know WHAT comes after env's
+// own options and assignments (see assertLoopbackOnlyDevServerCommandAtDepth's
+// env-wrapped-shell recursion) read consumedThrough; callers that only need
+// the collected hosts (assertDirectHostBinds) read .hosts.
+interface HostEnvironmentAssignmentsResult {
+  hosts: string[];
+  consumedThrough: number;
+}
+
+function explicitHostEnvironmentAssignments(
+  tokens: string[],
+  isEnvWrapper: boolean,
+): HostEnvironmentAssignmentsResult {
   const hosts: string[] = [];
   let index = 0;
   while (index < tokens.length) {
@@ -496,18 +532,18 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
       `Site dev server command uses an unrecognized "env" option, so its loopback-only host binding cannot be verified: ${token}`,
     );
   }
-  return hosts;
+  return { hosts, consumedThrough: index };
 }
 
 function assertDirectHostBinds(command: string, args: string[]): void {
   const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   const hosts = [
     ...explicitHostBinds(args),
-    ...explicitHostEnvironmentAssignments([command, ...args], false),
+    ...explicitHostEnvironmentAssignments([command, ...args], false).hosts,
     // env itself sets each assignment before running the wrapped command,
     // so the SAME assignments matter here too, just one token later since
     // "env" itself isn't one — and env's own OPTIONs may precede them.
-    ...(commandName === "env" ? explicitHostEnvironmentAssignments(args, true) : []),
+    ...(commandName === "env" ? explicitHostEnvironmentAssignments(args, true).hosts : []),
   ];
   for (const host of hosts) {
     if (host !== "" && isLoopbackHostname(host)) continue;
@@ -540,14 +576,44 @@ function nestedShellCommand(command: string, args: string[]): string | null {
   return flagIndex >= 0 ? args[flagIndex + 1] ?? null : null;
 }
 
+// What env(1) actually runs, once its own OPTIONs and NAME=VALUE
+// assignments are consumed — `env sh -c 'HOST=0.0.0.0 vite'` looks like a
+// completely unrecognized command to nestedShellCommand, which only ever
+// switches on the command it's GIVEN ("env" here), never on what that
+// command goes on to run. Without this, a shell (or any further wrapper)
+// env wraps is never validated at all: assertDirectHostBinds only checks
+// env's OWN leading assignments, and nestedShellCommand's plain name
+// switch has nothing named "env" in it. explicitHostEnvironmentAssignments
+// already walks past every OPTION/assignment env(1) accepts to find
+// exactly this boundary; consumedThrough IS the wrapped command's index.
+function envWrappedCommand(command: string, args: string[]): { command: string; args: string[] } | null {
+  const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+  if (commandName !== "env") return null;
+  const { consumedThrough } = explicitHostEnvironmentAssignments(args, true);
+  const wrapped = args[consumedThrough];
+  if (wrapped === undefined) return null;
+  return { command: wrapped, args: args.slice(consumedThrough + 1) };
+}
+
 function assertLoopbackOnlyDevServerCommandAtDepth(
   command: string,
   args: string[],
   shellDepth: number,
 ): void {
+  const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
+  if (commandName && PASSTHROUGH_WRAPPER_COMMAND_NAMES.has(commandName)) {
+    throw new Error(
+      `Site dev server command uses "${commandName}", whose own wrapped command dohc cannot statically ` +
+      `re-parse to verify its loopback-only host binding: ${[command, ...args].join(" ")}`,
+    );
+  }
   assertDirectHostBinds(command, args);
   const nested = nestedShellCommand(command, args);
-  if (nested === null) return;
+  // env's own leading options/assignments were already checked by
+  // assertDirectHostBinds above — only relevant here when this command
+  // ISN'T itself sh/cmd/powershell (env never is).
+  const wrappedByEnv = nested === null ? envWrappedCommand(command, args) : null;
+  if (nested === null && wrappedByEnv === null) return;
   if (shellDepth >= MAX_SHELL_NESTING_DEPTH) {
     throw new Error(
       "Site dev server command could not statically validate the nested shell command " +
@@ -556,6 +622,16 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
       " shell levels.",
     );
   }
+  if (wrappedByEnv) {
+    // Recurse through the WHOLE validator (not just a raw string re-split
+    // the way the nested-shell-statement case below needs) — an env-
+    // wrapped shell (env sh -c "...", env -i bash -c "...", a nested `env
+    // env ...`, ...) gets exactly the treatment a bare invocation of that
+    // same wrapped command would, at the next shell depth.
+    assertLoopbackOnlyDevServerCommandAtDepth(wrappedByEnv.command, wrappedByEnv.args, shellDepth + 1);
+    return;
+  }
+  if (nested === null) return;
   // The nested body is itself a real shell command line — `sh -c 'true &&
   // HOST=0.0.0.0 vite'` genuinely runs two statements, not one — so it
   // gets the same statement-by-statement treatment as a package script

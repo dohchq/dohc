@@ -427,6 +427,27 @@ describe("SitePreviewPage", () => {
     });
   });
 
+  it("refuses an ancestor site instead of showing it as this tab's own", async () => {
+    // getSitePackage returns the deepest CONTAINING site for a path, so a
+    // stale tab whose own root stopped being a detected site can still get
+    // back a detected ancestor above it — here the tab names "report/legacy"
+    // but the workspace only has a site rooted at "report" above it.
+    // Rendering that ancestor's title, modes, and share affordance under
+    // this tab's own name would let it start or share a different site than
+    // the one it names — refuse the same way prepareShare already does for
+    // a stale share, instead of silently offering the ancestor's UI.
+    const ancestorSite: SitePackageInfo = { ...site, root: "report" };
+    bridgeMock.getSitePackage.mockResolvedValueOnce(ancestorSite);
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report/legacy" />);
+
+    await screen.findByText("This site is no longer part of the workspace.");
+    expect(screen.queryByText(site.title)).toBeNull();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+    expect(screen.queryByTestId("site-preview-share")).toBeNull();
+    expect(screen.queryByTestId("site-preview-options")).toBeNull();
+    expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
+  });
+
   it("does not share a site that disappeared before preparation", async () => {
     bridgeMock.getSitePackage
       .mockResolvedValueOnce(site)
