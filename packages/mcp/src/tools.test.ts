@@ -9,16 +9,13 @@ import {
   rm,
   stat,
   symlink,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, parse, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   createWorkspaceDirectory,
-  addSiteSdk,
   buildSite,
   createSite,
   deleteWorkspacePath,
@@ -165,10 +162,6 @@ const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
 const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
 
-const TEST_SDK_PACKAGE_JSON_PATH =
-  process.env.DOHC_TEST_SDK_PACKAGE_JSON?.trim() ||
-  join(dirname(fileURLToPath(import.meta.url)), "../../sdk/package.json");
-
 const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (request) => {
   if (request.verb === "moments") {
     return {
@@ -195,7 +188,6 @@ async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T
     return await fn({
       root,
       home,
-      sdkPackageJsonPath: TEST_SDK_PACKAGE_JSON_PATH,
       request: emptyDesktopHistoryRequest,
     });
   } finally {
@@ -348,7 +340,6 @@ describe("mcp tool path containment", () => {
         await expect(buildSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
         await expect(previewSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
         await expect(publishSite(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
-        await expect(addSiteSdk(ctx, { siteRoot: evil })).resolves.toMatchObject({ ok: false });
       }
     });
   });
@@ -479,7 +470,6 @@ describe("mcp tool path containment", () => {
           () => buildSite(ctx, { siteRoot }),
           () => previewSite(ctx, { siteRoot }),
           () => publishSite(ctx, { siteRoot }),
-          () => addSiteSdk(ctx, { siteRoot }),
         ]) {
           await expect(run()).resolves.toMatchObject({
             ok: false,
@@ -1542,14 +1532,142 @@ describe("mcp tools operate on allowed paths", () => {
       const result = await detectSites(ctx);
       expect(result).toMatchObject({ ok: true, detector: "mcp-local", count: 3 });
       if (!result.ok) return;
+      // Matches workspace-core's siteKind/siteConfidence exactly: a real
+      // index.html is a high-confidence static site, and a framework
+      // config file (vite.config.ts) makes a site "configured"/"high" the
+      // same way a dohc.json does — even with a package.json alongside it.
       expect(result.sites.map((site) => [site.root, site.kind, site.confidence])).toEqual([
         ["configured", "configured", "high"],
-        ["static", "static", "medium"],
-        ["vitey", "package", "medium"],
+        ["static", "static", "high"],
+        ["vitey", "configured", "high"],
       ]);
       expect(result.sites.find((site) => site.root === "vitey")).toMatchObject({
         scripts: { dev: "vite", build: "vite build" },
       });
+    });
+  });
+
+  it("detect_sites classifies a framework-config-only folder the same way workspace-core does", async () => {
+    await withWorkspace(async (ctx) => {
+      // No dohc.json, no package.json, no index.html — the config file
+      // alone is the only signal.
+      await mkdir(join(ctx.root, "framework-only"), { recursive: true });
+      await writeFile(join(ctx.root, "framework-only/vite.config.ts"), "export default {};");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "framework-only");
+      expect(site).toMatchObject({ kind: "configured", confidence: "high" });
+    });
+  });
+
+  it("detect_sites sets entry for a real build at a nested configured output, not just the conventional names", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "nested-output/public/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "nested-output/public/dist/index.html"),
+        "<h1>Built</h1>",
+      );
+      await writeFile(
+        join(ctx.root, "nested-output/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "nested-output");
+      expect(site?.entry).toBe("nested-output/public/dist/index.html");
+    });
+  });
+
+  it("detect_sites prefers a real configured build output over a real conventional one", async () => {
+    await withWorkspace(async (ctx) => {
+      // Both a conventional "dist" AND a configured, nested "public/dist"
+      // hold a real index.html — the conventional loop runs first and would
+      // claim builtEntry before the configured check ever gets a chance to
+      // run, unless that check is unconditional (not gated on builtEntry
+      // still being undefined). workspace-core's preferredBuildOutput/
+      // presentBuildOutput (packages/workspace-core/src/sites.ts) give the
+      // configured artifact priority whenever both are real, so a stale
+      // "dist" left over from an earlier build must not win here either.
+      await mkdir(join(ctx.root, "dual-output/dist"), { recursive: true });
+      await writeFile(join(ctx.root, "dual-output/dist/index.html"), "<h1>Stale</h1>");
+      await mkdir(join(ctx.root, "dual-output/public/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "dual-output/public/dist/index.html"),
+        "<h1>Configured</h1>",
+      );
+      await writeFile(
+        join(ctx.root, "dual-output/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "dual-output");
+      expect(site?.entry).toBe("dual-output/public/dist/index.html");
+    });
+  });
+
+  it("detect_sites flags an invalid preview.mode the same way workspace-core's shared validator would", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "bad-preview-mode"), { recursive: true });
+      await writeFile(join(ctx.root, "bad-preview-mode/index.html"), "<h1>Site</h1>");
+      await writeFile(
+        join(ctx.root, "bad-preview-mode/dohc.json"),
+        JSON.stringify({ type: "site", preview: { mode: "invalid" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "bad-preview-mode");
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "invalid-preview-mode",
+          message: "dohc.json preview.mode must be static, dev, or build.",
+        }),
+      );
+    });
+  });
+
+  it("detect_sites gives medium confidence to a folder detected only from a real build output", async () => {
+    await withWorkspace(async (ctx) => {
+      // No dohc.json, no package.json, no root-level index.html — the
+      // ONLY website signal at all is the real, conventional build
+      // output. workspace-core's own siteConfidence returns "medium" for
+      // exactly this (hasBuildOutputSignal), not "low" — the two
+      // detectors have to agree on the same input.
+      await mkdir(join(ctx.root, "build-only/dist"), { recursive: true });
+      await writeFile(join(ctx.root, "build-only/dist/index.html"), "<h1>Built</h1>");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "build-only");
+      expect(site?.confidence).toBe("medium");
+    });
+  });
+
+  it("detect_sites does not give an empty dohc.json high confidence, matching workspace-core's own detector", async () => {
+    await withWorkspace(async (ctx) => {
+      // {} parses cleanly (configPath set, no error diagnostic) but
+      // declares no type at all — workspace-core's siteConfidence only
+      // returns "high" for a config reason when it explicitly declares
+      // type: "site"; a valid-but-empty config isn't itself a
+      // high-confidence website signal. Both detectors have to agree on
+      // the SAME dohc.json.
+      await mkdir(join(ctx.root, "empty-config"), { recursive: true });
+      await writeFile(join(ctx.root, "empty-config/dohc.json"), JSON.stringify({}));
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "empty-config");
+      expect(site?.confidence).not.toBe("high");
     });
   });
 
@@ -1568,6 +1686,64 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites rejects a dohc.json that parses to a non-object, mirroring workspace-core's code", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "not-an-object"), { recursive: true });
+      await writeFile(join(ctx.root, "not-an-object/dohc.json"), "[]");
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      // A genuinely valid dohc.json ({"type":"site"}) reads kind "configured"
+      // and confidence "high" here (see the "finds configured, package, and
+      // static sites" test above); an array parses without throwing, so
+      // without the shape check this folder would misclassify the same way.
+      // kind stays "configured" (dohc.json is present, matching
+      // workspace-core's own siteKind rule) but confidence must not.
+      expect(result.sites[0]).toMatchObject({
+        root: "not-an-object",
+        kind: "configured",
+        confidence: "low",
+        diagnostics: [
+          expect.objectContaining({
+            code: "invalid-config",
+            severity: "error",
+            message: "dohc.json must contain a JSON object.",
+          }),
+        ],
+      });
+    });
+  });
+
+  it("detect_sites rejects a package.json that parses to a non-object, mirroring workspace-core's code", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "pkg-not-an-object"), { recursive: true });
+      // An index.html gives the folder an independent site signal so a
+      // rejected package.json still surfaces as a site with a diagnostic,
+      // instead of vanishing from detect_sites entirely (package.json alone
+      // carries no site signal of its own once it fails the shape check).
+      await writeFile(join(ctx.root, "pkg-not-an-object/index.html"), "<h1>Static</h1>");
+      await writeFile(join(ctx.root, "pkg-not-an-object/package.json"), "[]");
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true, count: 1 });
+      if (!result.ok) return;
+      // A silently-accepted array pkg would look like an empty, valid
+      // package.json (no scripts, no dependencies, no diagnostic at all) and
+      // would never explain why no package signal was picked up.
+      expect(result.sites[0]).toMatchObject({
+        root: "pkg-not-an-object",
+        kind: "static",
+        scripts: {},
+        diagnostics: [
+          expect.objectContaining({
+            code: "invalid-package-json",
+            severity: "error",
+            message: "package.json must contain a JSON object.",
+          }),
+        ],
+      });
+    });
+  });
+
   it("detect_sites ignores non-site dohc.json unless website signals conflict", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "workflow"), { recursive: true });
@@ -1582,6 +1758,247 @@ describe("mcp tools operate on allowed paths", () => {
       expect(result.sites[0]).toMatchObject({
         root: "conflict",
         diagnostics: [expect.objectContaining({ code: "unexpected_dohc_type" })],
+      });
+    });
+  });
+
+  it("detect_sites ignores a non-site dohc.json whose only signal is a configured build.output PATH, not a real build", async () => {
+    await withWorkspace(async (ctx) => {
+      // Claims a build output at "dist", but nothing was ever actually
+      // built there — matches workspace-core's hasIndependentWebsiteSignal:
+      // an explicitly non-site config's own build.output claim can't be the
+      // independent signal that overrides its own type declaration.
+      await mkdir(join(ctx.root, "workflow-claims-build"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "workflow-claims-build/dohc.json"),
+        JSON.stringify({ type: "workflow", build: { output: "dist" } }),
+      );
+      // A sibling with the SAME non-site type but a REAL build artifact on
+      // disk (an actual dist/index.html, not just an empty dist/) still
+      // counts, proving the detected-vs-configured distinction (not a
+      // blanket refusal of every build.output claim).
+      await mkdir(join(ctx.root, "workflow-real-build/dist"), { recursive: true });
+      await writeFile(join(ctx.root, "workflow-real-build/dist/index.html"), "<h1>Built</h1>");
+      await writeFile(
+        join(ctx.root, "workflow-real-build/dohc.json"),
+        JSON.stringify({ type: "workflow" }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const roots = result.sites.map((site) => site.root);
+      expect(roots).toContain("workflow-real-build");
+      expect(roots).not.toContain("workflow-claims-build");
+      // "workflow-real-build/dist" is workflow-real-build's OWN build
+      // output, not an independent site — matches workspace-core's
+      // discoverSites, which never promotes a build output's own
+      // index.html into a separate site root.
+      expect(roots).not.toContain("workflow-real-build/dist");
+      const builtSite = result.sites.find((site) => site.root === "workflow-real-build");
+      expect(builtSite?.buildOutputs).toContain("dist");
+    });
+  });
+
+  it("detect_sites still finds an independent site at a path a sibling only CLAIMS as a build.output", async () => {
+    await withWorkspace(async (ctx) => {
+      // "portal" declares build.output: "dist", but nothing was ever built
+      // there yet — no dist/index.html on disk.
+      await mkdir(join(ctx.root, "portal"), { recursive: true });
+      await writeFile(join(ctx.root, "portal/index.html"), "<h1>Portal</h1>");
+      await writeFile(
+        join(ctx.root, "portal/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "dist" } }),
+      );
+      // A genuinely separate, independently detectable web project happens
+      // to live at that exact claimed (but unbuilt) path — the claim alone
+      // must not hide it, the same way workspace-core's discoverSites only
+      // credits a build.output claim to its declaring site once a REAL
+      // index.html exists at the claimed path, never on the claim alone.
+      await mkdir(join(ctx.root, "portal/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "portal/dist/package.json"),
+        JSON.stringify({ scripts: { dev: "vite" }, dependencies: { vite: "^5.0.0" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const roots = result.sites.map((site) => site.root);
+      expect(roots).toContain("portal");
+      expect(roots).toContain("portal/dist");
+    });
+  });
+
+  it("detect_sites refuses to read a dohc.json over the 1 MiB metadata bound, the same way desktop's own detector does", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "oversized-config"), { recursive: true });
+      await writeFile(join(ctx.root, "oversized-config/index.html"), "<h1>Site</h1>");
+      // Pad past the 1 MiB bound with a JSON string value so the file is
+      // still syntactically valid, in case the read ever silently succeeds.
+      const padding = "x".repeat(1024 * 1024 + 1);
+      await writeFile(
+        join(ctx.root, "oversized-config/dohc.json"),
+        JSON.stringify({ type: "site", title: padding }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "oversized-config");
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "invalid_dohc_json",
+          message: expect.stringMatching(/1 MiB metadata read limit/),
+        }),
+      );
+    });
+  });
+
+  it("detect_sites drops an unsafe configured build.output (traversal) with the same diagnostic workspace-core would emit", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "site-unsafe-output"), { recursive: true });
+      await writeFile(join(ctx.root, "site-unsafe-output/index.html"), "<h1>Site</h1>");
+      await writeFile(
+        join(ctx.root, "site-unsafe-output/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "../../outside" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "site-unsafe-output");
+      expect(site?.buildOutputs).toEqual([]);
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "invalid-build-output" }),
+      );
+    });
+  });
+
+  it("detect_sites does not count a bare, empty build-output directory as a detected build", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "workflow-empty-dist/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "workflow-empty-dist/dohc.json"),
+        JSON.stringify({ type: "workflow" }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      // No index.html inside dist/, no other website signal, and an
+      // explicit non-site type — workspace-core would refuse this
+      // candidate for the same reason.
+      expect(result.sites.map((site) => site.root)).not.toContain("workflow-empty-dist");
+    });
+  });
+
+  it("detect_sites does not treat a directory literally named index.html as a build artifact", async () => {
+    await withWorkspace(async (ctx) => {
+      // A directory, not a file, named index.html inside dist/ — stat()
+      // alone is truthy for both; only isFile() tells them apart.
+      await mkdir(join(ctx.root, "workflow-dir-index/dist/index.html"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "workflow-dir-index/dohc.json"),
+        JSON.stringify({ type: "workflow" }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      expect(result.sites.map((site) => site.root)).not.toContain("workflow-dir-index");
+    });
+  });
+
+  it("detect_sites requires a real web dependency or web-tool script token, not just any script", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "non-web-package"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "non-web-package/package.json"),
+        JSON.stringify({ name: "non-web-package", scripts: { build: "tsc" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      expect(result.sites.map((site) => site.root)).not.toContain("non-web-package");
+    });
+  });
+
+  it("detect_sites keeps a malformed dohc.json type visible with a diagnostic instead of silently dropping it", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "malformed-type"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "malformed-type/dohc.json"),
+        JSON.stringify({ type: 42 }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "malformed-type");
+      expect(site).toBeDefined();
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "invalid-type" }),
+      );
+    });
+  });
+
+  it("detect_sites honors a configured preview.entry over the bare index.html fallback", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "docs/public"), { recursive: true });
+      await writeFile(join(ctx.root, "docs/index.html"), "<h1>Fallback</h1>");
+      await writeFile(join(ctx.root, "docs/public/index.html"), "<h1>Configured entry</h1>");
+      await writeFile(
+        join(ctx.root, "docs/dohc.json"),
+        JSON.stringify({ type: "site", preview: { mode: "static", entry: "public/index.html" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "docs");
+      expect(site).toMatchObject({
+        root: "docs",
+        entry: "docs/public/index.html",
+        configuredPreviewMode: "static",
+      });
+
+      await expect(testSite(ctx, { siteRoot: "docs" })).resolves.toMatchObject({
+        ok: true,
+        checks: expect.arrayContaining([
+          expect.objectContaining({ name: "entry-file", ok: true, path: "docs/public/index.html" }),
+        ]),
+      });
+
+      await expect(previewSite(ctx, { siteRoot: "docs" })).resolves.toMatchObject({
+        ok: true,
+        modes: expect.arrayContaining([
+          expect.objectContaining({ mode: "static", entry: "docs/public/index.html" }),
+        ]),
+      });
+    });
+  });
+
+  it("detect_sites reports an invalid configured preview.entry and falls back to index.html", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "escape"), { recursive: true });
+      await writeFile(join(ctx.root, "escape/index.html"), "<h1>Fallback</h1>");
+      await writeFile(
+        join(ctx.root, "escape/dohc.json"),
+        JSON.stringify({ type: "site", preview: { entry: "../outside/index.html" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "escape");
+      expect(site).toMatchObject({
+        root: "escape",
+        entry: "escape/index.html",
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ code: "invalid-preview-entry", severity: "warning" }),
+        ]),
       });
     });
   });
@@ -1657,218 +2074,6 @@ describe("mcp tools operate on allowed paths", () => {
           expect.objectContaining({ mode: "build", output: "dist" }),
         ]),
       });
-    });
-  });
-
-  it("add_sdk wires @dohc/sdk into a normal website package", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo", title: "Todo" });
-      const result = await addSiteSdk(ctx, { siteRoot: "todo" });
-      expect(result).toMatchObject({
-        ok: true,
-        siteRoot: "todo",
-        packagePath: "todo/package.json",
-        dependency: "@dohc/sdk",
-      });
-      const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
-      expect(packageJson.dependencies).toMatchObject({
-        "@dohc/sdk": "file:vendor/dohc-sdk",
-      });
-      await expect(
-        readFile(join(ctx.root, "todo/vendor/dohc-sdk/dist/index.js"), "utf8"),
-      ).resolves.toContain("createDohcClient");
-      expect(result.ok ? result.usage : "").toContain('import { dohc } from "@dohc/sdk"');
-    });
-  });
-
-  it("add_sdk gives plain static sites a browser-resolvable vendored import", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "static-report"), { recursive: true });
-      await writeFile(
-        join(ctx.root, "static-report", "index.html"),
-        "<!doctype html><h1>Report</h1>\n",
-      );
-
-      const result = await addSiteSdk(ctx, { siteRoot: "static-report" });
-
-      expect(result).toMatchObject({
-        ok: true,
-        importMode: "vendored-browser-module",
-      });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-      await expect(
-        readFile(join(ctx.root, "static-report/vendor/dohc-sdk/dist/index.js"), "utf8"),
-      ).resolves.toContain("createDohcClient");
-    });
-  });
-
-  it("add_sdk treats configured sites without a bundler as browser-static", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "configured-report"), { recursive: true });
-      await writeFile(
-        join(ctx.root, "configured-report", "index.html"),
-        "<!doctype html><h1>Configured report</h1>\n",
-      );
-      await writeFile(
-        join(ctx.root, "configured-report", "dohc.json"),
-        `${JSON.stringify({ type: "site", title: "Configured report" }, null, 2)}\n`,
-      );
-
-      const result = await addSiteSdk(ctx, { siteRoot: "configured-report" });
-
-      expect(result).toMatchObject({
-        ok: true,
-        importMode: "vendored-browser-module",
-      });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-    });
-  });
-
-  it("add_sdk keeps configured static-server sites on browser-resolvable imports", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "configured-server"), { recursive: true });
-      await writeFile(join(ctx.root, "configured-server", "index.html"), "<h1>Report</h1>\n");
-      await writeFile(
-        join(ctx.root, "configured-server", "dohc.json"),
-        `${JSON.stringify({
-          type: "site",
-          title: "Configured server",
-          preview: { mode: "static", command: "python -m http.server" },
-        })}\n`,
-      );
-
-      const result = await addSiteSdk(ctx, { siteRoot: "configured-server" });
-
-      expect(result).toMatchObject({ ok: true, importMode: "vendored-browser-module" });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-    });
-  });
-
-  it("add_sdk keeps explicit dependency ranges browser-resolvable for static sites", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "static-explicit"), { recursive: true });
-      await writeFile(join(ctx.root, "static-explicit", "index.html"), "<h1>Static</h1>\n");
-
-      const result = await addSiteSdk(
-        { ...ctx, sdkDependencyRange: "^9.4.0" },
-        { siteRoot: "static-explicit" },
-      );
-
-      expect(result).toMatchObject({ ok: true, importMode: "vendored-browser-module" });
-      expect(result.ok ? result.usage : "").toContain(
-        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
-      );
-      const packageJson = JSON.parse(
-        await readFile(join(ctx.root, "static-explicit/package.json"), "utf8"),
-      );
-      expect(packageJson.dependencies).toMatchObject({ "@dohc/sdk": "^9.4.0" });
-      await expect(
-        readFile(join(ctx.root, "static-explicit/vendor/dohc-sdk/dist/index.js"), "utf8"),
-      ).resolves.toContain("createDohcClient");
-    });
-  });
-
-  it("add_sdk fails cleanly when a static site has no vendorable SDK source", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "static-no-source"), { recursive: true });
-      await writeFile(join(ctx.root, "static-no-source", "index.html"), "<h1>Static</h1>\n");
-
-      const result = await addSiteSdk(
-        { ...ctx, sdkPackageJsonPath: undefined, sdkDependencyRange: "^9.4.0" },
-        { siteRoot: "static-no-source" },
-      );
-
-      expect(result).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("browser-resolvable import"),
-      });
-      await expect(stat(join(ctx.root, "static-no-source/package.json"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    });
-  });
-
-  it.each(["missing", "unreadable"] as const)(
-    "add_sdk reports %s bundled SDK browser files without throwing",
-    async (fixture) => {
-      await withWorkspace(async (ctx) => {
-        const sdkDir = join(ctx.home, `sdk-${fixture}`);
-        await mkdir(join(sdkDir, "dist"), { recursive: true });
-        await writeFile(join(sdkDir, "package.json"), '{"version":"1.0.0"}\n');
-        await writeFile(join(sdkDir, "dist/index.d.ts"), "export {};\n");
-        if (fixture === "unreadable") {
-          await mkdir(join(sdkDir, "dist/index.js"));
-        }
-        await mkdir(join(ctx.root, "static-report"), { recursive: true });
-        await writeFile(join(ctx.root, "static-report/index.html"), "<h1>Report</h1>\n");
-
-        await expect(
-          addSiteSdk(
-            { ...ctx, sdkPackageJsonPath: join(sdkDir, "package.json") },
-            { siteRoot: "static-report" },
-          ),
-        ).resolves.toMatchObject({
-          ok: false,
-          reason: expect.stringMatching(/bundled @dohc\/sdk browser files|ENOENT|EISDIR/i),
-        });
-        await expect(
-          stat(join(ctx.root, "static-report/vendor/dohc-sdk")),
-        ).rejects.toMatchObject({ code: "ENOENT" });
-      });
-    },
-  );
-
-  it("add_sdk refreshes the SDK dependency range when package metadata changes", async () => {
-    await withWorkspace(async (ctx) => {
-      const sdkDir = join(ctx.home, "sdk-package");
-      const sdkPackageJsonPath = join(sdkDir, "package.json");
-      await mkdir(join(sdkDir, "dist"), { recursive: true });
-      await writeFile(join(sdkDir, "dist/index.js"), "export const version = 'test';\n");
-      await writeFile(join(sdkDir, "dist/index.d.ts"), "export declare const version: string;\n");
-      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "1.0.0" })}\n`);
-      const customCtx = { ...ctx, sdkPackageJsonPath };
-      await createSite(customCtx, { path: "todo", title: "Todo" });
-
-      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: true,
-      });
-      await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "2.0.0" })}\n`);
-      const bumped = new Date(Date.now() + 5000);
-      await utimes(sdkPackageJsonPath, bumped, bumped);
-
-      await expect(addSiteSdk(customCtx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: true,
-      });
-      const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
-      expect(packageJson.dependencies).toMatchObject({
-        "@dohc/sdk": "file:vendor/dohc-sdk",
-      });
-      const vendoredPackage = JSON.parse(
-        await readFile(join(ctx.root, "todo/vendor/dohc-sdk/package.json"), "utf8"),
-      );
-      expect(vendoredPackage.version).toBe("2.0.0");
-    });
-  });
-
-  it("add_sdk refuses to overwrite malformed package metadata", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, "todo"), { recursive: true });
-      await writeFile(join(ctx.root, "todo", "index.html"), "<h1>Todo</h1>");
-      await writeFile(join(ctx.root, "todo", "package.json"), "{ bad");
-
-      await expect(addSiteSdk(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        reason: expect.stringContaining("invalid package.json"),
-      });
-      await expect(readFile(join(ctx.root, "todo", "package.json"), "utf8")).resolves.toBe(
-        "{ bad",
-      );
     });
   });
 
@@ -2382,17 +2587,6 @@ describe("a refused recordability boundary leaves the filesystem alone", () => {
     });
   });
 
-  it("refuses the sdk add, and package.json is untouched", async () => {
-    await withBlockedMetadataDir(async (ctx) => {
-      await mkdir(join(ctx.root, "sites", "landing"), { recursive: true });
-      await writeFile(join(ctx.root, "sites", "landing", "index.html"), "<h1>hi</h1>");
-
-      expect(await addSiteSdk(ctx, { siteRoot: "sites/landing" })).toMatchObject({ ok: false, reason: BLOCKED });
-      await expect(
-        stat(join(ctx.root, "sites", "landing", "package.json")),
-      ).rejects.toThrow();
-    });
-  });
 });
 
 // #638. The reserved rule used to read the path as SPELLED, and containment
@@ -2615,7 +2809,6 @@ describe("a symlink cannot alias a reserved area", () => {
       for (const result of [
         await buildSite(ctx, { siteRoot: "mine/landing" }),
         await testSite(ctx, { siteRoot: "mine/landing" }),
-        await addSiteSdk(ctx, { siteRoot: "mine/landing" }),
       ]) {
         expect(result.ok).toBe(false);
         expect("reason" in result ? result.reason : "no refusal").toMatch(/mounted share/i);

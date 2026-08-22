@@ -928,13 +928,35 @@ describe("plugin panel main-process wiring", () => {
 
   it("excludes the reloading sender's own now-stale entry from the any-window check, so a reload of the last window still tears down its workspace (#779 round 20 finding 2)", () => {
     const reload = functionSource("async function prepareForRendererReload(");
-    const gateAt = reload.indexOf(
-      "isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)",
+    const GATE = "isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)";
+
+    // The site-preview stop needs the identical exclusion the plugin-
+    // workspace stop already has, for the identical reason: this sender's
+    // own entry is not cleared yet here either, so without it a reload of
+    // window A would count window A itself as "another window" showing the
+    // workspace — stopping window B's still-live site preview of that same
+    // workspace out from under it. Its gate+stop pair comes first in
+    // source order (it starts the Promise.all array).
+    const siteGateAt = reload.indexOf(GATE);
+    const siteStopAt = reload.indexOf(
+      "stopSitePreviewsForWorkspace(activeWorkspaceId)",
+      siteGateAt,
     );
-    const surfacesAt = reload.indexOf("stopPluginSurfacesForSender(senderId)");
-    const stopAt = reload.indexOf(
+    // MUTATION (reload of one window kills another window's site preview):
+    // an unconditional stopSitePreviewsForWorkspace call here — no gate at
+    // all — stops every window's preview of the workspace, not just this
+    // sender's own stale claim to it.
+    expect(siteGateAt).toBeGreaterThan(-1);
+    expect(siteStopAt).toBeGreaterThan(siteGateAt);
+
+    const surfacesAt = reload.indexOf(
+      "stopPluginSurfacesForSender(senderId)",
+      siteStopAt,
+    );
+    const pluginGateAt = reload.indexOf(GATE, surfacesAt);
+    const pluginStopAt = reload.indexOf(
       "stopPluginWorkspace(activeWorkspaceId)",
-      gateAt,
+      pluginGateAt,
     );
     // MUTATION (last window's reload never tears down its workspace): this
     // sender's own activeWorkspaceIdBySender entry is not cleared before
@@ -942,9 +964,9 @@ describe("plugin panel main-process wiring", () => {
     // "another window has this," so a solo window's own reload can never
     // reach full teardown, leaving a stale pipeline for the replacement
     // renderer to inherit instead of a fresh one.
-    expect(surfacesAt).toBeGreaterThan(-1);
-    expect(gateAt).toBeGreaterThan(-1);
-    expect(stopAt).toBeGreaterThan(gateAt);
+    expect(surfacesAt).toBeGreaterThan(siteStopAt);
+    expect(pluginGateAt).toBeGreaterThan(surfacesAt);
+    expect(pluginStopAt).toBeGreaterThan(pluginGateAt);
 
     const isOpen = functionSource("function isWorkspaceOpenInAnyWindow(");
     const excludeAt = isOpen.indexOf("if (senderId === excludeSenderId) continue;");

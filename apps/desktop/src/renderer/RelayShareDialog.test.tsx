@@ -33,7 +33,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -61,7 +61,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ versionId: "version-7", versionName: "review" }}
+        target={{ kind: "version", versionId: "version-7", versionName: "review" }}
         onClose={() => {}}
       />,
     );
@@ -84,7 +84,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -135,7 +135,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -148,11 +148,36 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ path: "docs/plan.md" }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
     expect(screen.queryByText(/read-only live view/)).toBeNull();
+  });
+
+  it("creates a multi-path site artifact share with a simple label", async () => {
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{
+          kind: "paths",
+          paths: ["index.html", "assets/logo.png"],
+          label: "Workspace Site",
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/Workspace Site/)).toBeTruthy();
+    await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
+    await user.click(screen.getByTestId("share-create"));
+    expect(bridgeMock.createRelayShare).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      recipientEmail: "friend@dohc.test",
+      access: "view",
+      paths: ["index.html", "assets/logo.png"],
+    });
   });
 
   it("shows the handler's honest error copy (secret refusal), stripped of IPC noise", async () => {
@@ -163,7 +188,7 @@ describe("RelayShareDialog", () => {
     );
     const user = userEvent.setup();
     render(
-      <RelayShareDialog workspaceId="ws-1" target={{ path: ".env" }} onClose={() => {}} />,
+      <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: [".env"] }} onClose={() => {}} />,
     );
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));

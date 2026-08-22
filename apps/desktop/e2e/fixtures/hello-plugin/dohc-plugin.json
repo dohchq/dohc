@@ -16,6 +16,9 @@
       "icon": "icon.svg"
     }
   ],
+  "webApps": [
+    { "id": "preview", "title": "Hello preview", "instanced": true }
+  ],
   "commands": [{ "id": "hello.write", "title": "Write hello note" }],
   "settings": [
     {

@@ -146,6 +146,15 @@ describe("resolveSpawnCommand", () => {
   });
 });
 
+// processDescendantsWin32 was consolidated into posixSpawn.ts's own
+// processDescendants (it took its process-table reader as an argument, so
+// the tree-walk arithmetic it wrapped was byte-identical to the POSIX
+// version — see posixSpawn.test.ts's own "processDescendants" suite, which
+// exercises the same arithmetic this block used to, and windowsSpawn.ts's
+// module comment for why the reader is the only genuinely platform-specific
+// part). This module now exports only readProcessTableWithPowershell, the
+// Windows-specific text source.
+
 // Real shim topology: the unit fakes elsewhere spawn process.execPath
 // directly, so the cmd.exe wrapper path (quoting round-trip, exit-code
 // propagation, tree kill) is only exercised here, with a genuine .cmd.

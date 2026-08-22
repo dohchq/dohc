@@ -146,6 +146,50 @@ switch (mode) {
     };
     break;
   }
+  case "instanced-static-web-app": {
+    const servers = new Map();
+    let pluginRoot = null;
+    handler = {
+      activate(ctx) {
+        pluginRoot = ctx.pluginRoot;
+      },
+      async startWebApp(_webAppId, instanceKey) {
+        const existing = servers.get(instanceKey);
+        if (existing) return { url: existing.url, title: `Preview ${instanceKey}` };
+
+        const { readFile } = await import("node:fs/promises");
+        const { createServer } = await import("node:http");
+        const { join } = await import("node:path");
+        const server = createServer(async (request, response) => {
+          const decodedPath = decodeURIComponent(
+            new URL(request.url ?? "/", "http://x").pathname,
+          );
+          const relativePath =
+            decodedPath === "/" ? "index.html" : decodedPath.replace(/^\/+/, "");
+          try {
+            response.end(
+              await readFile(join(pluginRoot, "snapshot", "preview", relativePath)),
+            );
+          } catch {
+            response.statusCode = 404;
+            response.end("Not found");
+          }
+        });
+        await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const { port } = server.address();
+        const url = `http://127.0.0.1:${port}/`;
+        servers.set(instanceKey, { server, url });
+        return { url, title: `Preview ${instanceKey}` };
+      },
+      async stopWebApp(_webAppId, instanceKey) {
+        const running = servers.get(instanceKey);
+        if (!running) return;
+        servers.delete(instanceKey);
+        await new Promise((resolve) => running.server.close(resolve));
+      },
+    };
+    break;
+  }
   case "web-app-hang":
     handler = {
       activate() {},

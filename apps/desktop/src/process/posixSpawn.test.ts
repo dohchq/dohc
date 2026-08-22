@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   killProcessTreePosix,
   parseProcessTable,
+  processDescendants,
   processTreePids,
   stopProcessTreePosix,
 } from "./posixSpawn";
@@ -35,6 +36,23 @@ describe("parseProcessTable", () => {
       tableEntry(1, 0),
       tableEntry(842, 1),
       tableEntry(1099, 842),
+    ]);
+  });
+
+  it("reads a row with no leading padding at all", () => {
+    // Every OTHER fixture line in this file happens to have leading
+    // whitespace — column alignment ps itself adds for narrower pids, not
+    // something this parser requires — so only a line with NONE can tell
+    // the leading `\s*` (zero or more) apart from a `\s+` (one or more)
+    // that would silently drop a row wide enough to need no padding at
+    // all (the shape a captured Windows process-table row happened to
+    // exercise, before that fixture was consolidated into this shared
+    // parser's own coverage).
+    const output = `${psRow(100, 1)}\n${psRow(200, 100)}\n`;
+
+    expect(parseProcessTable(output)).toEqual([
+      tableEntry(100, 1),
+      tableEntry(200, 100),
     ]);
   });
 
@@ -295,6 +313,52 @@ describe("killProcessTreePosix", () => {
         },
       }),
     ).resolves.toEqual([200, 100]);
+  });
+});
+
+// Platform-agnostic: processDescendants takes its process-table reader as
+// an argument, so this same arithmetic (parseProcessTable + processTreePids,
+// minus the root) is exercised once here for both the POSIX `ps` shape and
+// the Windows Get-CimInstance shape (windowsSpawn.ts's own
+// readProcessTableWithPowershell) — a fake reader proves the tree-walk
+// either way, with no need for a second, platform-named describe block.
+describe("processDescendants", () => {
+  it("returns every descendant, excluding the root itself", async () => {
+    await expect(
+      processDescendants(
+        100,
+        async () => [psRow(100, 1), psRow(200, 100), psRow(300, 200)].join("\n"),
+      ),
+    ).resolves.toEqual(expect.arrayContaining([200, 300]));
+    await expect(
+      processDescendants(
+        100,
+        async () => [psRow(100, 1), psRow(200, 100), psRow(300, 200)].join("\n"),
+      ).then((pids) => pids.includes(100)),
+    ).resolves.toBe(false);
+  });
+
+  it("returns an empty list when the process table cannot be read", async () => {
+    await expect(
+      processDescendants(100, () => Promise.reject(new Error("ps: not found"))),
+    ).resolves.toEqual([]);
+  });
+
+  it("returns an empty list for a root with no children", async () => {
+    await expect(
+      processDescendants(100, async () => psRow(100, 1)),
+    ).resolves.toEqual([]);
+  });
+
+  it("still finds a descendant once its own parent has already exited and it was reparented away from root", async () => {
+    // The scenario stopChild's capture exists for: root's child already
+    // exited and reparented grandchild to pid 1 — a plain root-rooted walk
+    // would miss it, but a PRIOR capture of the grandchild's own pid (as
+    // its own root) still finds it, which is why stopChild re-enumerates
+    // from each previously captured pid too, not just the original root.
+    await expect(
+      processDescendants(300, async () => [psRow(300, 1), psRow(400, 300)].join("\n")),
+    ).resolves.toEqual([400]);
   });
 });
 

@@ -62,6 +62,7 @@ import {
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
+import type { RelayShareTarget } from "./RelayShareDialog";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
@@ -180,6 +181,7 @@ import {
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
+  isSiteTabPath,
   isViewId,
   isVirtualTabPath,
   MAX_OPEN_TABS,
@@ -197,6 +199,7 @@ import {
   pluginDetailsTabPath,
   pluginPanelTabPath,
   pluginWebAppTabPath,
+  parseSiteTabPath,
   parseUiState,
   pruneMissingRestoredTabs,
   recordRecentFile,
@@ -686,6 +689,12 @@ function scheduleMarkdownEditorPreload(): () => void {
 }
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
+);
+const LazySitesView = lazy(() =>
+  import("./workbench/SitesView").then((mod) => ({ default: mod.SitesView })),
+);
+const LazySitePreviewPage = lazy(() =>
+  import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
 );
 const LazyPluginPanelPage = lazy(() =>
   import("./PluginPanelPage").then((mod) => ({ default: mod.PluginPanelPage })),
@@ -1350,6 +1359,24 @@ function PanelLoading({ label }: { label: string }) {
   );
 }
 
+function InvalidSitePathFallback({
+  activeTab,
+  onClose,
+}: {
+  activeTab: string | null;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    console.error("[desktop] invalid site tab path", {
+      activeTab,
+      detail: "active tab matched site tab format but groupSiteRoot parsed to null",
+    });
+    onClose();
+  }, [activeTab, onClose]);
+
+  return null;
+}
+
 type UnjournalableSharePath = Extract<
   RefreshSharedViewResult,
   { ok: true }
@@ -1488,12 +1515,8 @@ export function DesktopWorkspaceShell(props: {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [agentSetup, setAgentSetup] = useState<AgentSetupSummary | null>(null);
   const agentSetupRequestRef = useRef(0);
-  // Relay-share dialog target (PR 18): a path (file/folder) or a version.
-  const [shareTarget, setShareTarget] = useState<{
-    path?: string;
-    versionId?: string;
-    versionName?: string;
-  } | null>(null);
+  // Relay-share dialog target (PR 18): paths, or a version.
+  const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
   // The banner carries its own way out. An error that names a value the user
   // can see and gives no way to ask again leaves them with a stale reading and
@@ -2401,6 +2424,15 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
+
+  const refreshSites = useCallback(() => {
+    // refreshFiles's own settle bumps listingsSettled, which SitesView
+    // already keys its refetch off of (as filesSettledRevision) — nothing
+    // else needs to signal that refresh separately.
+    void refreshFiles().catch((error) =>
+      reportShellError("Could not refresh workspace files.", error),
+    );
+  }, [refreshFiles, reportShellError]);
 
   // Workspace-engine alpha (PR 0M-4/0M-5): versions surface, ENGINE history
   // source, and the linked Chats rail all key off this one per-workspace
@@ -5068,7 +5100,7 @@ export function DesktopWorkspaceShell(props: {
         shareView={shareView}
         onRefreshShareMounts={() => void refreshShareMounts(true)}
         onUnmountShare={(path) => void unmountShare(path)}
-        onShare={(path) => setShareTarget({ path })}
+        onShare={(path) => setShareTarget({ kind: "paths", paths: [path] })}
         onRefresh={() =>
           void refreshFiles().catch((error) =>
             reportShellError("Could not refresh workspace files.", error),
@@ -5446,6 +5478,17 @@ export function DesktopWorkspaceShell(props: {
                 >
                   <Maximize2 size={13} aria-hidden />
                 </button>
+              ) : wb.activeView === "sites" ? (
+                <button
+                  type="button"
+                  data-testid="sites-refresh"
+                  aria-label="Refresh sites"
+                  title="Refresh sites"
+                  onClick={refreshSites}
+                  className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
+                >
+                  <RefreshCw size={13} aria-hidden />
+                </button>
               ) : undefined
             }
           >
@@ -5468,6 +5511,14 @@ export function DesktopWorkspaceShell(props: {
                   onOpenChatThread={openGraphChatThread}
                   chatMentionsAvailable={captureAvailable}
                   variant="panel"
+                />
+              </Suspense>
+            ) : wb.activeView === "sites" ? (
+              <Suspense fallback={<PanelLoading label="sites" />}>
+                <LazySitesView
+                  workspaceId={workspaceId}
+                  filesSettledRevision={listingsSettled}
+                  onOpenPath={openPathWithHeading}
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (
@@ -5546,6 +5597,7 @@ export function DesktopWorkspaceShell(props: {
                     : {
                         onShareVersion: (version: { id: string; name: string }) =>
                           setShareTarget({
+                            kind: "version",
                             versionId: version.id,
                             versionName: version.name,
                           }),
@@ -5583,6 +5635,7 @@ export function DesktopWorkspaceShell(props: {
               const editorCallbacks = tab
                 ? callbacksForEditor(editorGroup.id, tab)
                 : null;
+              const groupSiteRoot = parseSiteTabPath(tabPath);
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
               const groupPluginDetails = parsePluginDetailsTabPath(tabPath);
@@ -5888,6 +5941,26 @@ export function DesktopWorkspaceShell(props: {
                   </button>
                 </div>
               )
+            ) : isSiteTabPath(tabPath) ? (
+              groupSiteRoot ? (
+                <Suspense fallback={<PanelLoading label="site" />}>
+                  <LazySitePreviewPage
+                    workspaceId={workspaceId}
+                    siteRoot={groupSiteRoot}
+                    sharedView={!!shareView}
+                    onShareSite={(target) =>
+                      setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
+                    }
+                  />
+                </Suspense>
+              ) : (
+                <InvalidSitePathFallback
+                  activeTab={tabPath}
+                  onClose={() => {
+                    if (tabPath) closeFileTab(editorGroup.id, tabPath);
+                  }}
+                />
+              )
             ) : tabPath && tab && editorCallbacks ? (
               <FileInspector
                 key={tabPath}
@@ -5927,7 +6000,7 @@ export function DesktopWorkspaceShell(props: {
                 }
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
-                  : { onSharePath: (path: string) => setShareTarget({ path }) })}
+                  : { onSharePath: (path: string) => setShareTarget({ kind: "paths", paths: [path] }) })}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">

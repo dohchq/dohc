@@ -12,6 +12,7 @@ import {
   CHATS_TAB_PATH,
   canonicalSingletonEditorTabPath,
   isPluginPanelTabPath,
+  isSiteTabPath,
   isSingletonEditorTabPath,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
@@ -154,6 +155,23 @@ function engineStoredText(label: string) {
     });
   });
 }
+
+const SITE_ROOT_STRING = PATH_STRING.superRefine((value, ctx) => {
+  if (
+    value.includes("\0") ||
+    value.includes("\\") ||
+    value.startsWith("/") ||
+    /^[A-Za-z]:/.test(value) ||
+    value
+      .split("/")
+      .some((segment) => segment === "" || segment === ".." || (segment === "." && value !== "."))
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "site root must be a safe workspace-relative path",
+    });
+  }
+});
 
 // Enums derive from the workspace-core tuples (single source of truth) so a
 // new kind/mode cannot make the type and the runtime validator disagree.
@@ -2088,6 +2106,196 @@ export const TryInVersionStateResult = z.object({
 });
 export type TryInVersionStateResult = z.infer<typeof TryInVersionStateResult>;
 
+const SiteDiagnostic = z.object({
+  path: PATH_STRING.optional(),
+  severity: z.enum(["warning", "error"]),
+  code: z.string().min(1).max(100),
+  message: z.string().max(10_000).optional(),
+});
+export type SiteDiagnostic = z.infer<typeof SiteDiagnostic>;
+
+const SiteScripts = z.object({
+  predev: z.string().optional(),
+  dev: z.string().optional(),
+  postdev: z.string().optional(),
+  prestart: z.string().optional(),
+  start: z.string().optional(),
+  poststart: z.string().optional(),
+  build: z.string().optional(),
+});
+export type SiteScripts = z.infer<typeof SiteScripts>;
+
+const SitePackageScripts = z.record(
+  z.string().min(1).max(200),
+  z.string().max(10_000),
+);
+
+const SiteSharePath = SITE_ROOT_STRING.refine((path) => path !== ".", {
+  message: "site share paths must name a file",
+});
+
+const SiteShareMountRoot = SITE_ROOT_STRING.refine((path) => path !== ".", {
+  message: "site share mount roots must name the mounted share",
+});
+
+const SiteShareManifest = z
+  .object({
+    entryPath: SiteSharePath,
+    assets: z.array(SiteSharePath).max(99),
+  })
+  .superRefine((manifest, ctx) => {
+    const paths = [manifest.entryPath, ...manifest.assets];
+    if (new Set(paths).size !== paths.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "site share manifest paths must be unique",
+      });
+    }
+  });
+
+const SiteShareManifestResult = z.union([
+  z.object({ ok: z.literal(true), manifest: SiteShareManifest }),
+  z.object({ ok: z.literal(false), reason: z.literal("no-runnable-artifact") }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("byte-budget"),
+    limitBytes: z.number().int().positive(),
+    observedBytes: z.number().int().positive(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("file-count"),
+    limitFiles: z.number().int().positive(),
+    observedFiles: z.number().int().positive(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("path-too-long"),
+    limitChars: z.number().int().positive(),
+    observedChars: z.number().int().positive(),
+    path: SiteSharePath,
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("unreadable"),
+    path: SiteSharePath,
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.literal("non-file-reference"),
+    path: SiteSharePath,
+  }),
+]);
+
+const SitePackageInfo = z
+  .object({
+    root: PATH_STRING,
+    title: z.string().min(1).max(200),
+    kind: z.enum(["static", "package", "configured"]),
+    confidence: z.enum(["high", "medium", "low"]),
+    entryPath: PATH_STRING.nullable(),
+    configPath: PATH_STRING.nullable(),
+    packagePath: PATH_STRING.nullable(),
+    packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
+    scripts: SitePackageScripts,
+    configuredScripts: SiteScripts,
+    configuredPreviewMode: z.enum(["static", "dev", "build"]).nullable(),
+    configuredBuildOutput: PATH_STRING.nullable(),
+    buildOutputs: z.array(PATH_STRING).max(100),
+    sourceFiles: z.array(PATH_STRING),
+    shareManifest: SiteShareManifestResult,
+    diagnostics: z.array(SiteDiagnostic).max(100),
+    authority: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("workspace") }),
+      z.object({ kind: z.literal("share"), mountRoot: SiteShareMountRoot }),
+    ]),
+  })
+  .superRefine((site, ctx) => {
+    if (
+      site.authority.kind === "share" &&
+      site.root !== site.authority.mountRoot &&
+      !site.root.startsWith(`${site.authority.mountRoot}/`)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "shared site roots must stay inside their authority mount root",
+        path: ["root"],
+      });
+    }
+    if (!site.shareManifest.ok) return;
+    const manifest = site.shareManifest.manifest;
+    const paths = [manifest.entryPath, ...manifest.assets];
+    for (const path of paths) {
+      if (!site.sourceFiles.includes(path)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "site share manifest paths must exist in sourceFiles",
+          path: ["shareManifest", "manifest"],
+        });
+        return;
+      }
+      if (site.root !== "." && !path.startsWith(`${site.root}/`)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "site share manifest paths must stay inside the site root",
+          path: ["shareManifest", "manifest"],
+        });
+        return;
+      }
+    }
+    if (!/\.html?$/i.test(manifest.entryPath)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "site share manifest entryPath must be HTML",
+        path: ["shareManifest", "manifest", "entryPath"],
+      });
+    }
+  });
+export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
+
+export const ListSitesPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListSitesPayload = z.infer<typeof ListSitesPayload>;
+
+export const ListSitesResult = z.object({
+  sites: z.array(SitePackageInfo),
+});
+export type ListSitesResult = z.infer<typeof ListSitesResult>;
+
+export const SitePreviewMode = z.enum(["static", "dev", "build"]);
+export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
+
+export const SitePackagePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  path: PATH_STRING,
+  // The mode the CALLER is actually previewing right now (a stored per-tab
+  // choice, or the renderer's own automatic pick) — share-what-you-
+  // previewed needs this to select the same artifact the preview serves,
+  // not just whatever dohc.json happens to pin. Omitted (or null) falls
+  // back to the dohc.json pin alone, matching every other caller (site
+  // listings, etc.) that has no single "current tab" to report.
+  effectivePreviewMode: SitePreviewMode.nullable().optional(),
+});
+export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
+
+export const SitePackageResult = SitePackageInfo.nullable();
+export type SitePackageResult = z.infer<typeof SitePackageResult>;
+
+export const StartSitePreviewPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+  mode: SitePreviewMode,
+});
+export type StartSitePreviewPayload = z.infer<typeof StartSitePreviewPayload>;
+
+const SiteLogEntry = z.object({
+  stream: z.enum(["stdout", "stderr", "system"]),
+  text: z.string().max(10_000),
+  at: z.number(),
+});
+export type SiteLogEntry = z.infer<typeof SiteLogEntry>;
+
 const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) => {
   let url: URL;
   try {
@@ -2111,6 +2319,48 @@ const LoopbackPreviewUrl = z.string().min(1).max(2048).superRefine((value, ctx) 
     });
   }
 });
+
+export const StartSitePreviewResult = z.object({
+  siteRoot: SITE_ROOT_STRING,
+  mode: SitePreviewMode,
+  url: LoopbackPreviewUrl,
+  logs: z.array(SiteLogEntry).max(500),
+  exited: z.boolean(),
+  build: z
+    .object({
+      ok: z.boolean(),
+      command: z.string(),
+      args: z.array(z.string()),
+      outputPath: z.string().nullable(),
+      exitCode: z.number().nullable(),
+    })
+    .optional(),
+});
+export type StartSitePreviewResult = z.infer<typeof StartSitePreviewResult>;
+
+export const GetSitePreviewLogsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+});
+export type GetSitePreviewLogsPayload = z.infer<
+  typeof GetSitePreviewLogsPayload
+>;
+
+export const GetSitePreviewLogsResult = z.object({
+  logs: z.array(SiteLogEntry).max(500),
+  exited: z.boolean(),
+});
+export type GetSitePreviewLogsResult = z.infer<
+  typeof GetSitePreviewLogsResult
+>;
+
+export const StopSitePreviewPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+});
+export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
+export const StopSitePreviewResult = z.void();
+export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
 const MAX_PLUGIN_ID_CHARS = 214;
 const MAX_PLUGIN_PANEL_ID_CHARS = 120;
@@ -4016,9 +4266,11 @@ export const WorkspaceUiState = z.object({
           message:
             tab === CHATS_TAB_PATH
               ? "Chats can be open in only one editor group."
-              : isPluginPanelTabPath(tab)
-                ? "A plugin panel can be open in only one editor group."
-                : "This tab can be open in only one editor group.",
+              : isSiteTabPath(tab)
+                ? "A site preview can be open in only one editor group."
+                : isPluginPanelTabPath(tab)
+                  ? "A plugin panel can be open in only one editor group."
+                  : "This tab can be open in only one editor group.",
         });
       } else {
         singletonOwners.add(identity);
@@ -4408,6 +4660,13 @@ export interface DohcDesktopBridge {
   importToDatabase(
     payload: ImportToDatabasePayload,
   ): Promise<ImportToDatabaseResult>;
+  listSites(payload: ListSitesPayload): Promise<ListSitesResult>;
+  getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
+  startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
+  getSitePreviewLogs(
+    payload: GetSitePreviewLogsPayload,
+  ): Promise<GetSitePreviewLogsResult>;
+  stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
   openPluginPanel(payload: OpenPluginPanelPayload): Promise<OpenPluginPanelResult>;
   onPluginPanelOpened(
     listener: (event: PluginPanelOpenedEvent) => void,

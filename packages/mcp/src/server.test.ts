@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createDohcMcpServer, parseArgs } from "./server";
 import type { ToolContext } from "./tools";
 
@@ -12,7 +12,6 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_move_path",
   "dohc_delete_path",
   "dohc_create_site",
-  "dohc_add_sdk",
   "dohc_import_data",
   "dohc_publish_site",
   "dohc_share",
@@ -155,43 +154,22 @@ describe("change-history tool descriptions (engine-only drift guard)", () => {
 });
 
 describe("parseArgs", () => {
-  it("trims explicit path and package arguments", () => {
+  it("trims explicit path arguments", () => {
     expect(
       parseArgs([
         "--workspace",
         " /tmp/workspace ",
         "--home",
         " /tmp/home ",
-        "--sdk-package-json",
-        " /tmp/sdk/package.json ",
-        "--sdk-dependency-range",
-        " ^0.1.0 ",
       ]),
     ).toMatchObject({
       root: "/tmp/workspace",
       home: "/tmp/home",
-      sdkPackageJsonPath: "/tmp/sdk/package.json",
-      sdkDependencyRange: "^0.1.0",
     });
   });
 
-  it("rejects blank explicit path and package arguments", () => {
+  it("rejects blank explicit path arguments", () => {
     expect(() => parseArgs(["--workspace", " "])).toThrow(/--workspace requires/);
     expect(() => parseArgs(["--home", " "])).toThrow(/--home requires/);
-    expect(() => parseArgs(["--sdk-package-json", " "])).toThrow(
-      /--sdk-package-json requires/,
-    );
-    expect(() => parseArgs(["--sdk-dependency-range", " "])).toThrow(
-      /--sdk-dependency-range requires/,
-    );
-  });
-
-  it("rejects present-but-blank SDK environment arguments", () => {
-    vi.stubEnv("DOHC_SDK_PACKAGE_JSON", " ");
-    try {
-      expect(() => parseArgs([])).toThrow(/DOHC_SDK_PACKAGE_JSON requires/);
-    } finally {
-      vi.unstubAllEnvs();
-    }
   });
 });

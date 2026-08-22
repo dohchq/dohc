@@ -11,6 +11,7 @@ export const VIEW_IDS = [
   "explorer",
   "search",
   "graph",
+  "sites",
   "history",
   "plugins",
 ] as const;
@@ -75,6 +76,7 @@ export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
 export const CHATS_TAB_PATH = "dohc://chats";
 export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
+export const SITE_TAB_PREFIX = "dohc://site/";
 export const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
 export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // One details page per plugin, keyed by the plugin id (version-compare
@@ -108,6 +110,10 @@ export function historyDiffTabPath(changeSetId: string, filePath: string): strin
   return `${HISTORY_DIFF_TAB_PREFIX}${encodeURIComponent(
     changeSetId,
   )}?file=${encodeURIComponent(filePath)}`;
+}
+
+export function siteTabPath(siteRoot: string): string {
+  return `${SITE_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
 }
 
 export function pluginPanelTabPath(pluginId: string, panelId: string): string {
@@ -180,6 +186,10 @@ export function isHistoryDiffTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(HISTORY_DIFF_TAB_PREFIX);
 }
 
+export function isSiteTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(SITE_TAB_PREFIX);
+}
+
 export function isPluginPanelTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(PLUGIN_PANEL_TAB_PREFIX);
 }
@@ -191,6 +201,7 @@ export function isPluginWebAppTabPath(path: string | null): boolean {
 export function isSingletonEditorTabPath(path: string | null): boolean {
   return (
     isChatsTabPath(path) ||
+    isSiteTabPath(path) ||
     isPluginPanelTabPath(path) ||
     isPluginWebAppTabPath(path)
   );
@@ -198,12 +209,24 @@ export function isSingletonEditorTabPath(path: string | null): boolean {
 
 export function canonicalSingletonEditorTabPath(path: string | null): string | null {
   if (isChatsTabPath(path)) return CHATS_TAB_PATH;
+  const siteRoot = parseSiteTabPath(path);
+  if (siteRoot !== null) return siteTabPath(siteRoot);
   const panel = parsePluginPanelTabPath(path);
   if (panel !== null) return pluginPanelTabPath(panel.pluginId, panel.panelId);
   const webApp = parsePluginWebAppTabPath(path);
   return webApp === null
     ? null
     : pluginWebAppTabPath(webApp.pluginId, webApp.webAppId, webApp.instanceKey);
+}
+
+export function parseSiteTabPath(path: string | null): string | null {
+  if (typeof path !== "string" || !isSiteTabPath(path)) return null;
+  try {
+    const siteRoot = decodeURIComponent(path.slice(SITE_TAB_PREFIX.length));
+    return siteRoot.length > 0 ? siteRoot : null;
+  } catch {
+    return null;
+  }
 }
 
 export function parsePluginPanelTabPath(
@@ -293,11 +316,10 @@ export function parseVersionCompareTabPath(path: string | null): string | null {
 
 /**
  * `dohc://` is reserved for tabs dohc renders itself. A persisted tab on that
- * scheme that no kind above recognizes is a tab from a REMOVED surface — a
- * `dohc://site/...` tab written before Sites became a plugin, for one. It is
- * not a workspace file and must never be restored as one: `dohc://site/blog`
- * would otherwise open as a plain path and show an editor for a file that
- * does not exist. Restore drops it instead.
+ * scheme that no kind above recognizes is a tab from a removed surface.
+ * It is not a workspace file and must never be restored as one. For example,
+ * `dohc://retired-dashboard/report` would otherwise open as a plain path and
+ * show an editor for a file that does not exist. Restore drops it instead.
  */
 export function isRemovedVirtualTabPath(path: string | null): boolean {
   return (
@@ -315,6 +337,7 @@ export function isVirtualTabPath(path: string | null): boolean {
     isHistoryDiffTabPath(path) ||
     isMomentDiffTabPath(path) ||
     isVersionCompareTabPath(path) ||
+    isSiteTabPath(path) ||
     isPluginPanelTabPath(path) ||
     isPluginWebAppTabPath(path) ||
     isPluginDetailsTabPath(path)

@@ -6,6 +6,7 @@ import {
   CHATS_TAB_PATH,
   pluginDetailsTabPath,
   pluginPanelTabPath,
+  siteTabPath,
 } from "./workbenchState";
 
 beforeEach(() => {
@@ -486,6 +487,7 @@ describe("EditorTabs overlay scrollbar", () => {
 
   it.each([
     ["Chats", CHATS_TAB_PATH],
+    ["a site preview", siteTabPath("client-portal")],
     ["a plugin panel", pluginPanelTabPath("hello-plugin", "main")],
   ])("disables Split Right when %s is the active tab", (_label, path) => {
     const onCreateGroupRight = vi.fn();

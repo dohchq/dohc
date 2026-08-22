@@ -18,7 +18,6 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   createWorkspaceDirectory,
-  addSiteSdk,
   listChannels,
   listFileChats,
   readChat,
@@ -51,30 +50,15 @@ import {
 export function parseArgs(argv: string[]): ToolContext {
   let root = nonEmptyArg(process.cwd(), "workspace root");
   let home = nonEmptyArg(process.env.HOME ?? process.cwd(), "home path");
-  let sdkPackageJsonPath = optionalNonEmptyArg(
-    process.env.DOHC_SDK_PACKAGE_JSON,
-    "DOHC_SDK_PACKAGE_JSON",
-  );
-  let sdkDependencyRange = optionalNonEmptyArg(
-    process.env.DOHC_SDK_DEPENDENCY_RANGE,
-    "DOHC_SDK_DEPENDENCY_RANGE",
-  );
   let shareAccess: ShareAccess | undefined;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workspace" && argv[i + 1]) root = nonEmptyArg(argv[++i], "--workspace");
     else if (argv[i] === "--home" && argv[i + 1]) home = nonEmptyArg(argv[++i], "--home");
     else if (argv[i] === "--share-access") shareAccess = shareAccessArg(argv[++i]);
-    else if (argv[i] === "--sdk-package-json" && argv[i + 1]) {
-      sdkPackageJsonPath = nonEmptyArg(argv[++i], "--sdk-package-json");
-    } else if (argv[i] === "--sdk-dependency-range" && argv[i + 1]) {
-      sdkDependencyRange = nonEmptyArg(argv[++i], "--sdk-dependency-range");
-    }
   }
   return {
     root,
     home,
-    ...(sdkPackageJsonPath ? { sdkPackageJsonPath } : {}),
-    ...(sdkDependencyRange ? { sdkDependencyRange } : {}),
     ...(shareAccess ? { shareAccess } : {}),
   };
 }
@@ -93,10 +77,6 @@ function shareAccessArg(value: string | undefined): ShareAccess {
   throw new Error(
     `--share-access must be one of ${SHARE_ACCESS_VALUES.join(", ")}. Received: ${received}.`,
   );
-}
-
-function optionalNonEmptyArg(value: string | undefined, name: string): string | undefined {
-  return value === undefined ? undefined : nonEmptyArg(value, name);
 }
 
 function text(value: unknown) {
@@ -344,18 +324,6 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       },
     },
     async (args) => text(await publishSite(ctx, args)),
-  );
-
-  registerWrite(
-    "dohc_add_sdk",
-    {
-      description:
-        "Install the bundled @dohc/sdk into a website package for workspace files, search, databases, navigation, and future dohc capabilities.",
-      inputSchema: {
-        siteRoot: z.string().min(1).max(4096),
-      },
-    },
-    async (args) => text(await addSiteSdk(ctx, args)),
   );
 
   registerWrite(

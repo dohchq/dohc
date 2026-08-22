@@ -1,4 +1,4 @@
-import { hasIgnoredSegment } from "@dohc/workspace-core";
+import { hasIgnoredSegment, isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, open, realpath } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
@@ -20,6 +20,7 @@ export interface StaticDirectoryPreview {
 const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".gif": "image/gif",
+  ".htm": "text/html; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".ico": "image/x-icon",
   ".jpeg": "image/jpeg",
@@ -45,13 +46,13 @@ const MIME_TYPES: Record<string, string> = {
 // residual named at the read site.
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
-function isInside(parent: string, child: string): boolean {
+export function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const rel = relative(parent, child);
   return rel.length > 0 && !isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(sep);
 }
 
-function assertContainedFilePath(path: string, label: string): void {
+export function assertContainedFilePath(path: string, label: string): void {
   if (
     path.includes("\0") ||
     path.includes("\\") ||
@@ -96,6 +97,7 @@ export async function startStaticDirectoryPreview(
     containmentRoot: string;
     entry: string;
     entryLabel: string;
+    forbidSharedWithMePaths?: boolean;
   },
 ): Promise<StaticDirectoryPreview> {
   const root = await realpath(rootPath);
@@ -116,6 +118,9 @@ export async function startStaticDirectoryPreview(
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       const decoded = decodeURIComponent(url.pathname);
       const relativePath = decoded === "/" ? entry : decoded.replace(/^\/+/, "");
+      const containmentSpelledPath = rootRelative
+        ? `${rootRelative}/${relativePath}`
+        : relativePath;
       if (
         relativePath.includes("\0") ||
         relativePath.split("/").some((segment) => segment === ".." || segment === ".")
@@ -124,7 +129,11 @@ export async function startStaticDirectoryPreview(
         response.end("Invalid path");
         return;
       }
-      if (hasIgnoredSegment(relativePath)) {
+      if (
+        hasIgnoredSegment(relativePath) ||
+        (options.forbidSharedWithMePaths &&
+          isSharedWithMePath(containmentSpelledPath))
+      ) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
         return;
@@ -150,6 +159,18 @@ export async function startStaticDirectoryPreview(
           })
         ).resolvedAbsolute;
       } catch {
+        response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Forbidden");
+        return;
+      }
+      const containmentRelative = relative(containmentRoot, realTarget).replaceAll(
+        "\\",
+        "/",
+      );
+      if (
+        options.forbidSharedWithMePaths &&
+        isSharedWithMePath(containmentRelative)
+      ) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
         return;

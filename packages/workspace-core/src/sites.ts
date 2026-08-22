@@ -1,16 +1,58 @@
-// The site vocabulary and detection helpers dohc's MCP tools use to
-// recognize package managers, web dependencies, and framework config files
-// when they build their own site detection on top of a workspace scan.
-
 export type SiteKind = "static" | "package" | "configured";
 export type SiteConfidence = "high" | "medium" | "low";
-type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
+export type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
 
 export interface SiteScripts {
+  predev?: string;
   dev?: string;
+  postdev?: string;
+  prestart?: string;
   start?: string;
+  poststart?: string;
   build?: string;
-  preview?: string;
+}
+
+export interface SitePackageDerivedFactsInput {
+  root: string;
+  configuredBuildOutput?: string | null;
+  buildOutputs: readonly string[];
+  sourceFiles: readonly string[];
+  scripts: SiteScripts;
+  configuredScripts: SiteScripts;
+}
+
+export function preferredBuildOutput(
+  site: Pick<SitePackageDerivedFactsInput, "configuredBuildOutput" | "buildOutputs">,
+): string | null {
+  return site.configuredBuildOutput ?? site.buildOutputs[0] ?? null;
+}
+
+export function presentBuildOutput(site: SitePackageDerivedFactsInput): string | null {
+  const preferred = preferredBuildOutput(site);
+  const outputs = [
+    ...(preferred ? [preferred] : []),
+    ...site.buildOutputs,
+  ];
+  for (const output of new Set(outputs)) {
+    const entry = site.root === "."
+      ? `${output}/index.html`
+      : `${site.root}/${output}/index.html`;
+    if (site.sourceFiles.includes(entry)) return output;
+  }
+  return null;
+}
+
+export function needsBuiltArtifact(site: SitePackageDerivedFactsInput): boolean {
+  return Boolean(
+    site.scripts.dev ||
+    site.scripts.start ||
+    site.scripts.build ||
+    site.configuredScripts.dev ||
+    site.configuredScripts.start ||
+    site.configuredScripts.build ||
+    site.configuredBuildOutput ||
+    site.buildOutputs.length > 0
+  );
 }
 
 export interface SiteDiagnostic {
@@ -28,9 +70,21 @@ export interface WorkspaceSite {
   entry?: string;
   packageManager?: SitePackageManager;
   scripts: SiteScripts;
+  configuredPreviewMode?: "static" | "dev" | "build";
+  configuredBuildOutput?: string;
   buildOutputs: string[];
   configPath?: string;
   diagnostics: SiteDiagnostic[];
+}
+
+export interface WorkspaceSiteSource {
+  path: string;
+  body?: string | null;
+  // Diagnostics the CALLER already knows about this source before discovery
+  // runs (e.g. desktop's own metadata-file size bound refusing to read the
+  // body at all) — merged into whichever site candidate this path's
+  // directory becomes, the same way a config parse diagnostic is.
+  diagnostics?: readonly SiteDiagnostic[];
 }
 
 export interface DohcSiteConfig {
@@ -47,6 +101,18 @@ export interface DohcSiteConfig {
   };
 }
 
+export interface ParsedDohcSiteConfig {
+  config?: DohcSiteConfig;
+  diagnostics: SiteDiagnostic[];
+  // The raw `type` string as written, kept even when it isn't "site" (and so
+  // isn't carried onto `config.type`, which stays a strict "site" | undefined
+  // literal for the invalid-type diagnostic path). A dohc.json can legitimately
+  // declare a type for a different dohc feature (e.g. "workflow") — that is
+  // not an invalid config, so this is tracked separately from the validation
+  // that flags a genuinely malformed type.
+  declaredType?: string;
+}
+
 export type PackageJson = {
   name?: unknown;
   packageManager?: unknown;
@@ -57,10 +123,44 @@ export type PackageJson = {
   optionalDependencies?: unknown;
 };
 
+type Candidate = {
+  root: string;
+  hasIndexHtml: boolean;
+  hasDohcConfig: boolean;
+  hasPackageJson: boolean;
+  hasWebPackageSignal: boolean;
+  hasFrameworkConfig: boolean;
+  hasBuildOutputSignal: boolean;
+  entry?: string;
+  packageJson?: PackageJson;
+  packageManager?: SitePackageManager;
+  dohcConfig?: DohcSiteConfig;
+  dohcConfigDeclaredType?: string;
+  dohcConfigPath?: string;
+  frameworkConfigPath?: string;
+  buildOutputs: Set<string>;
+  diagnostics: SiteDiagnostic[];
+};
+
+const PACKAGE_SCRIPT_KEYS = [
+  "predev",
+  "dev",
+  "postdev",
+  "prestart",
+  "start",
+  "poststart",
+  "build",
+] as const;
+const BUILD_OUTPUT_DIRS = ["dist", "build", "out"];
+// Matches the bridge contract's SitePackageInfo.title bound (z.string().max(200))
+// — a title over this length must never reach discoverSites' output, or the
+// whole listSites response fails to parse over one site's config value.
+const SITE_TITLE_MAX_LENGTH = 200;
+
 // Framework/package signals are intentionally limited to mainstream web stacks
 // with recognizable package dependencies or official CLI/build tooling. Refresh
 // this list periodically as npm usage and framework conventions move.
-const WEB_DEPENDENCIES: ReadonlySet<string> = new Set([
+export const WEB_DEPENDENCY_NAMES = [
   "@angular/cli",
   "@angular/core",
   "@astrojs/react",
@@ -89,7 +189,23 @@ const WEB_DEPENDENCIES: ReadonlySet<string> = new Set([
   "vite",
   "vue",
   "webpack",
-]);
+] as const;
+
+export const WEB_DEPENDENCIES: ReadonlySet<string> = new Set(WEB_DEPENDENCY_NAMES);
+
+const WEB_SCRIPT_TOKENS = [
+  "astro",
+  "gatsby",
+  "next",
+  "nuxt",
+  "parcel",
+  "react-scripts",
+  "remix",
+  "serve",
+  "svelte-kit",
+  "vite",
+  "webpack",
+];
 
 const CONFIG_PATTERNS = [
   /^app\.config\.(cjs|cts|js|mjs|mts|ts)$/,
@@ -101,20 +217,440 @@ const CONFIG_PATTERNS = [
   /^vinxi\.config\.(cjs|cts|js|mjs|mts|ts)$/,
 ];
 
-export function hasWebDependency(pkg: PackageJson | null | undefined): boolean {
-  if (!pkg) return false;
+const IGNORED_SITE_SEGMENTS = new Set([
+  ".bun",
+  ".cache",
+  ".dohc",
+  ".git",
+  ".npm",
+  ".parcel-cache",
+  ".pnpm-store",
+  ".turbo",
+  ".yarn",
+  "node_modules",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function diagnostic(
+  path: string,
+  severity: SiteDiagnostic["severity"],
+  code: string,
+  message: string,
+): SiteDiagnostic {
+  return { path, severity, code, message };
+}
+
+function normalizeWorkspacePath(path: string): string | null {
+  if (path.includes("\0")) return null;
+  const segments = path
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".");
+  const aliasSegments = segments.map(stripSiteIgnoredAliasSuffix);
+  if (aliasSegments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    return null;
+  }
+  const normalized = segments.join("/");
+  if (normalized === "") return null;
+  return normalized;
+}
+
+function parentPath(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? "" : path.slice(0, slash);
+}
+
+function fileName(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? path : path.slice(slash + 1);
+}
+
+function pathBasename(path: string): string {
+  return path === "" ? "" : path.split("/").at(-1) ?? path;
+}
+
+function sitePath(root: string, child: string): string {
+  return root === "" ? child : `${root}/${child}`;
+}
+
+function stripSiteIgnoredAliasSuffix(segment: string): string {
+  return segment.replace(/[. ]+$/, "");
+}
+
+function hasIgnoredSiteSegment(path: string): boolean {
+  const segments = path.replaceAll("\\", "/").toLowerCase().split("/");
+  if (stripSiteIgnoredAliasSuffix(segments[0] ?? "") === "plugins") {
+    return true;
+  }
+  return segments.some((segment, index) => {
+    const stripped = stripSiteIgnoredAliasSuffix(segment);
+    const nextStripped =
+      segments[index + 1] === undefined
+        ? undefined
+        : stripSiteIgnoredAliasSuffix(segments[index + 1]!);
+    if (IGNORED_SITE_SEGMENTS.has(stripped)) return true;
+    return stripped === ".next" && nextStripped === "cache";
+  });
+}
+
+function getCandidate(candidates: Map<string, Candidate>, root: string): Candidate {
+  const existing = candidates.get(root);
+  if (existing) return existing;
+  const candidate: Candidate = {
+    root,
+    hasIndexHtml: false,
+    hasDohcConfig: false,
+    hasPackageJson: false,
+    hasWebPackageSignal: false,
+    hasFrameworkConfig: false,
+    hasBuildOutputSignal: false,
+    buildOutputs: new Set(),
+    diagnostics: [],
+  };
+  candidates.set(root, candidate);
+  return candidate;
+}
+
+// Exported so MCP's own site detector can apply the SAME safe-relative-path
+// rule to a configured build.output — the two detectors reporting different
+// values for the identical dohc.json is a contract violation, not just an
+// inconsistency (round-15 finding 12).
+export function safeRelativeConfigPath(value: string): string | undefined {
+  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\")) {
+    return undefined;
+  }
+  const normalized = normalizeWorkspacePath(value);
+  return normalized ?? undefined;
+}
+
+function parsePreview(
+  value: unknown,
+  path: string,
+  diagnostics: SiteDiagnostic[],
+): DohcSiteConfig["preview"] | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    diagnostics.push(
+      diagnostic(path, "warning", "invalid-preview", "dohc.json preview must be an object."),
+    );
+    return undefined;
+  }
+
+  const preview: NonNullable<DohcSiteConfig["preview"]> = {};
+  if (value.mode !== undefined) {
+    if (value.mode === "static" || value.mode === "dev" || value.mode === "build") {
+      preview.mode = value.mode;
+    } else {
+      diagnostics.push(
+        diagnostic(
+          path,
+          "warning",
+          "invalid-preview-mode",
+          "dohc.json preview.mode must be static, dev, or build.",
+        ),
+      );
+    }
+  }
+  if (value.command !== undefined) {
+    if (typeof value.command === "string" && value.command.trim() !== "") {
+      preview.command = value.command;
+    } else {
+      diagnostics.push(
+        diagnostic(
+          path,
+          "warning",
+          "invalid-preview-command",
+          "dohc.json preview.command must be a non-empty string.",
+        ),
+      );
+    }
+  }
+  if (value.entry !== undefined) {
+    if (typeof value.entry === "string" && value.entry.trim() !== "") {
+      const normalized = safeRelativeConfigPath(value.entry);
+      if (normalized) {
+        preview.entry = normalized;
+      } else {
+        diagnostics.push(
+          diagnostic(
+            path,
+            "warning",
+            "invalid-preview-entry",
+            "dohc.json preview.entry must be a relative workspace path, not '.', './', or an empty path.",
+          ),
+        );
+      }
+    } else {
+      diagnostics.push(
+        diagnostic(
+          path,
+          "warning",
+          "invalid-preview-entry",
+          "dohc.json preview.entry must be a non-empty string.",
+        ),
+      );
+    }
+  }
+  if (
+    preview.command &&
+    (preview.mode === "static" || preview.mode === "build")
+  ) {
+    diagnostics.push(
+      diagnostic(
+        path,
+        "warning",
+        "unsupported-preview-command-mode",
+        "Configured preview commands run only in dev mode. Static and build previews use the site's entry file or build output.",
+      ),
+    );
+  }
+  return Object.keys(preview).length === 0 ? undefined : preview;
+}
+
+function parseBuild(
+  value: unknown,
+  path: string,
+  diagnostics: SiteDiagnostic[],
+): DohcSiteConfig["build"] | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    diagnostics.push(
+      diagnostic(path, "warning", "invalid-build", "dohc.json build must be an object."),
+    );
+    return undefined;
+  }
+
+  const build: NonNullable<DohcSiteConfig["build"]> = {};
+  if (value.command !== undefined) {
+    if (typeof value.command === "string" && value.command.trim() !== "") {
+      build.command = value.command;
+    } else {
+      diagnostics.push(
+        diagnostic(
+          path,
+          "warning",
+          "invalid-build-command",
+          "dohc.json build.command must be a non-empty string.",
+        ),
+      );
+    }
+  }
+  if (value.output !== undefined) {
+    if (typeof value.output === "string" && value.output.trim() !== "") {
+      const normalized = safeRelativeConfigPath(value.output);
+      if (normalized) {
+        build.output = normalized;
+      } else {
+        diagnostics.push(
+          diagnostic(
+            path,
+            "warning",
+            "invalid-build-output",
+            "dohc.json build.output must be a relative workspace path, not '.', './', or an empty path.",
+          ),
+        );
+      }
+    } else {
+      diagnostics.push(
+        diagnostic(
+          path,
+          "warning",
+          "invalid-build-output",
+          "dohc.json build.output must be a non-empty string.",
+        ),
+      );
+    }
+  }
+  return Object.keys(build).length === 0 ? undefined : build;
+}
+
+export function parseDohcSiteConfig(json: string, path = "dohc.json"): ParsedDohcSiteConfig {
+  const diagnostics: SiteDiagnostic[] = [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (error) {
+    diagnostics.push(
+      diagnostic(
+        path,
+        "error",
+        "invalid-json",
+        `dohc.json must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+    return { diagnostics };
+  }
+
+  if (!isRecord(parsed)) {
+    diagnostics.push(
+      diagnostic(path, "error", "invalid-config", "dohc.json must contain a JSON object."),
+    );
+    return { diagnostics };
+  }
+
+  const config: DohcSiteConfig = {};
+  let declaredType: string | undefined;
+  if (parsed.type !== undefined) {
+    if (parsed.type === "site") {
+      config.type = "site";
+      declaredType = "site";
+    } else if (typeof parsed.type === "string" && parsed.type.trim() !== "") {
+      // A non-"site" string names a different dohc feature (e.g. "workflow")
+      // and is a legitimate, well-formed value — not an invalid config.
+      // discoverSites decides inclusion/diagnostics for this case on its own
+      // independent-website-signal rule, not here.
+      declaredType = parsed.type;
+    } else {
+      diagnostics.push(
+        diagnostic(path, "warning", "invalid-type", 'dohc.json type should be "site".'),
+      );
+    }
+  }
+  if (parsed.title !== undefined) {
+    if (typeof parsed.title === "string" && parsed.title.trim() !== "") {
+      if (parsed.title.length > SITE_TITLE_MAX_LENGTH) {
+        diagnostics.push(
+          diagnostic(
+            path,
+            "warning",
+            "title-too-long",
+            `dohc.json title exceeds the ${SITE_TITLE_MAX_LENGTH}-character limit and was truncated.`,
+          ),
+        );
+        config.title = parsed.title.slice(0, SITE_TITLE_MAX_LENGTH);
+      } else {
+        config.title = parsed.title;
+      }
+    } else {
+      diagnostics.push(
+        diagnostic(path, "warning", "invalid-title", "dohc.json title must be a non-empty string."),
+      );
+    }
+  }
+
+  const preview = parsePreview(parsed.preview, path, diagnostics);
+  if (preview) config.preview = preview;
+  const build = parseBuild(parsed.build, path, diagnostics);
+  if (build) config.build = build;
+
+  return { config, diagnostics, declaredType };
+}
+
+function parsePackageJson(body: string, path: string): { json?: PackageJson; diagnostics: SiteDiagnostic[] } {
+  try {
+    const parsed = JSON.parse(body);
+    if (!isRecord(parsed)) {
+      return {
+        diagnostics: [
+          diagnostic(path, "error", "invalid-package-json", "package.json must contain a JSON object."),
+        ],
+      };
+    }
+    return { json: parsed, diagnostics: [] };
+  } catch (error) {
+    return {
+      diagnostics: [
+        diagnostic(
+          path,
+          "error",
+          "invalid-package-json",
+          `package.json must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      ],
+    };
+  }
+}
+
+function objectKeys(value: unknown): string[] {
+  return isRecord(value) ? Object.keys(value) : [];
+}
+
+function packageDependencyNames(pkg: PackageJson | null | undefined): Set<string> {
+  const names = new Set<string>();
+  if (!pkg) return names;
   for (const field of [
     pkg.dependencies,
     pkg.devDependencies,
     pkg.peerDependencies,
     pkg.optionalDependencies,
   ]) {
-    if (typeof field !== "object" || field === null || Array.isArray(field)) continue;
-    for (const name of Object.keys(field)) {
-      if (WEB_DEPENDENCIES.has(name)) return true;
-    }
+    for (const name of objectKeys(field)) names.add(name);
+  }
+  return names;
+}
+
+function packageScripts(pkg: PackageJson | null | undefined): Record<string, string> {
+  if (!pkg || !isRecord(pkg.scripts)) return {};
+  const scripts: Record<string, string> = {};
+  for (const [name, value] of Object.entries(pkg.scripts)) {
+    if (typeof value === "string") scripts[name] = value;
+  }
+  return scripts;
+}
+
+export function hasWebDependency(pkg: PackageJson | null | undefined): boolean {
+  for (const name of packageDependencyNames(pkg)) {
+    if (WEB_DEPENDENCIES.has(name)) return true;
   }
   return false;
+}
+
+const WEB_SCRIPT_BOUNDARY_CHARS = " \t\n\r:/@._-";
+
+function isWebScriptBoundary(char: string | undefined): boolean {
+  return char === undefined || WEB_SCRIPT_BOUNDARY_CHARS.includes(char);
+}
+
+function includesWebScriptToken(haystack: string, token: string): boolean {
+  let index = haystack.indexOf(token);
+  while (index !== -1) {
+    if (
+      isWebScriptBoundary(haystack[index - 1]) &&
+      isWebScriptBoundary(haystack[index + token.length])
+    ) {
+      return true;
+    }
+    index = haystack.indexOf(token, index + token.length);
+  }
+  return false;
+}
+
+// Exported so MCP's own site detector can apply the SAME "does this
+// package.json look like a web project" rule desktop's discoverSites
+// already does — testing only whether ANY script exists (rather than
+// whether one actually names a web dependency or tool) is a materially
+// looser test that disagrees with desktop's Sites view on the same input
+// (round-16 finding 9).
+export function hasWebScript(pkg: PackageJson | undefined): boolean {
+  const scripts = packageScripts(pkg);
+  return Object.entries(scripts).some(([name, value]) => {
+    const haystack = `${name} ${value}`.toLowerCase();
+    return WEB_SCRIPT_TOKENS.some((token) => includesWebScriptToken(haystack, token));
+  });
+}
+
+export function inferSiteScripts(
+  pkg?: PackageJson,
+  config?: DohcSiteConfig,
+): SiteScripts {
+  const scripts = packageScripts(pkg);
+  const inferred: SiteScripts = {};
+  for (const key of PACKAGE_SCRIPT_KEYS) {
+    const value = scripts[key];
+    if (typeof value === "string") inferred[key] = value;
+  }
+
+  if (config?.preview?.command) {
+    if (config.preview.mode !== "build" && config.preview.mode !== "static") {
+      inferred.dev = config.preview.command;
+    }
+  }
+  if (config?.build?.command) inferred.build = config.build.command;
+  return inferred;
 }
 
 function packageManagerFromString(value: unknown): SitePackageManager | undefined {
@@ -137,10 +673,275 @@ export function packageManagerFromFiles(
   return packageManagerFromString(pkg?.packageManager);
 }
 
+export function detectSitePackageManager(
+  names: ReadonlySet<string>,
+  pkg?: PackageJson,
+): SitePackageManager | undefined {
+  return packageManagerFromFiles(names, pkg);
+}
+
 function isFrameworkConfig(name: string): boolean {
   return CONFIG_PATTERNS.some((pattern) => pattern.test(name));
 }
 
 export function frameworkConfigName(names: ReadonlySet<string>): string | undefined {
   return [...names].find(isFrameworkConfig);
+}
+
+function titleFromRoot(root: string): string {
+  const basename = root === "" ? "workspace site" : root.split("/").at(-1) ?? root;
+  return basename
+    .replace(/^@/, "")
+    .replace(/[-_.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function packageTitle(pkg: PackageJson | undefined): string | undefined {
+  if (typeof pkg?.name !== "string" || pkg.name.trim() === "") return undefined;
+  const name = pkg.name.includes("/") ? pkg.name.split("/").at(-1) ?? pkg.name : pkg.name;
+  return titleFromRoot(name);
+}
+
+function siteKind(candidate: Candidate): SiteKind {
+  if (candidate.hasDohcConfig || candidate.hasFrameworkConfig) return "configured";
+  if (candidate.hasPackageJson && candidate.hasWebPackageSignal) return "package";
+  return "static";
+}
+
+function siteConfidence(candidate: Candidate): SiteConfidence {
+  if (candidate.dohcConfig?.type === "site") return "high";
+  if (candidate.hasIndexHtml || candidate.hasFrameworkConfig) return "high";
+  if (candidate.hasWebPackageSignal || candidate.hasBuildOutputSignal) return "medium";
+  return "low";
+}
+
+function hasIndependentWebsiteSignal(candidate: Candidate): boolean {
+  return (
+    candidate.hasIndexHtml ||
+    candidate.hasWebPackageSignal ||
+    candidate.hasFrameworkConfig ||
+    // Not hasBuildOutputSignal: that flag also turns on from the dohc.json's
+    // OWN configured build.output path, whether or not anything was ever
+    // built there. An explicitly non-site config's own claim can't be the
+    // independent signal that overrides its own type declaration — only a
+    // build output actually found on disk (candidate.buildOutputs) counts.
+    candidate.buildOutputs.size > 0
+  );
+}
+
+// A dohc.json whose `type` is present and not "site" declares the folder for
+// a different dohc feature, not a website — packages/mcp/src/tools.ts's
+// detectSiteAt applies the same rule and this mirrors it so both detectors
+// agree on the same input.
+function isExplicitNonSite(candidate: Candidate): boolean {
+  const type = candidate.dohcConfigDeclaredType;
+  return type !== undefined && type !== "site";
+}
+
+function shouldIncludeCandidate(candidate: Candidate): boolean {
+  if (candidate.hasDohcConfig && isExplicitNonSite(candidate)) {
+    return hasIndependentWebsiteSignal(candidate);
+  }
+  return (
+    candidate.hasDohcConfig ||
+    candidate.hasIndexHtml ||
+    candidate.hasWebPackageSignal ||
+    candidate.hasFrameworkConfig ||
+    candidate.hasBuildOutputSignal
+  );
+}
+
+function finalizeSite(candidate: Candidate): WorkspaceSite {
+  const config = candidate.dohcConfig;
+  const scripts = inferSiteScripts(candidate.packageJson, config);
+
+  const configPath = candidate.dohcConfigPath ?? candidate.frameworkConfigPath;
+  const entry = config?.preview?.entry ?? candidate.entry;
+  // config?.title is already bounded at config parse time (its own
+  // title-too-long diagnostic there), but a package.json name or a folder
+  // name can still be arbitrarily long and neither goes through that parse
+  // path — bound the title this site ACTUALLY carries, whichever source won.
+  const diagnostics = [...candidate.diagnostics];
+  const rawTitle = config?.title ?? packageTitle(candidate.packageJson) ?? titleFromRoot(candidate.root);
+  const title =
+    rawTitle.length > SITE_TITLE_MAX_LENGTH
+      ? (() => {
+          diagnostics.push(
+            diagnostic(
+              configPath ?? candidate.root,
+              "warning",
+              "title-too-long",
+              `Site title exceeds the ${SITE_TITLE_MAX_LENGTH}-character limit and was truncated.`,
+            ),
+          );
+          return rawTitle.slice(0, SITE_TITLE_MAX_LENGTH);
+        })()
+      : rawTitle;
+  return {
+    root: candidate.root,
+    title,
+    kind: siteKind(candidate),
+    confidence: siteConfidence(candidate),
+    ...(entry ? { entry } : {}),
+    ...(candidate.packageManager ? { packageManager: candidate.packageManager } : {}),
+    scripts,
+    ...(config?.preview?.mode
+      ? { configuredPreviewMode: config.preview.mode }
+      : {}),
+    ...(config?.build?.output ? { configuredBuildOutput: config.build.output } : {}),
+    buildOutputs: [...candidate.buildOutputs].sort(),
+    ...(configPath ? { configPath } : {}),
+    diagnostics,
+  };
+}
+
+function sourcePath(source: string | WorkspaceSiteSource): string {
+  return typeof source === "string" ? source : source.path;
+}
+
+function sourceBody(source: string | WorkspaceSiteSource): string | undefined {
+  if (typeof source === "string") return undefined;
+  return typeof source.body === "string" ? source.body : undefined;
+}
+
+export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]): WorkspaceSite[] {
+  const candidates = new Map<string, Candidate>();
+  const normalizedPaths: string[] = [];
+  const fileNamesByRoot = new Map<string, Set<string>>();
+  const normalizedSources: Array<{
+    path: string;
+    body?: string;
+    diagnostics?: readonly SiteDiagnostic[];
+  }> = [];
+
+  for (const source of sources) {
+    const path = normalizeWorkspacePath(sourcePath(source));
+    if (!path || hasIgnoredSiteSegment(path)) continue;
+    normalizedPaths.push(path);
+    const root = parentPath(path);
+    const names = fileNamesByRoot.get(root) ?? new Set<string>();
+    names.add(fileName(path));
+    fileNamesByRoot.set(root, names);
+    const body = sourceBody(source);
+    const diagnostics = typeof source === "string" ? undefined : source.diagnostics;
+    normalizedSources.push({
+      path,
+      ...(body !== undefined ? { body } : {}),
+      ...(diagnostics?.length ? { diagnostics } : {}),
+    });
+  }
+
+  for (const source of normalizedSources) {
+    const name = fileName(source.path);
+    const root = parentPath(source.path);
+    const candidate = getCandidate(candidates, root);
+    if (source.diagnostics?.length) candidate.diagnostics.push(...source.diagnostics);
+
+    if (name === "index.html") {
+      // Build output folders are artifacts of a parent site; do not promote
+      // their index.html files into separate site roots.
+      if (BUILD_OUTPUT_DIRS.includes(pathBasename(root))) continue;
+      candidate.hasIndexHtml = true;
+      candidate.entry = "index.html";
+      continue;
+    }
+
+    if (name === "dohc.json") {
+      candidate.hasDohcConfig = true;
+      candidate.dohcConfigPath = source.path;
+      if (source.body !== undefined) {
+        const parsed = parseDohcSiteConfig(source.body, source.path);
+        candidate.dohcConfig = parsed.config;
+        candidate.dohcConfigDeclaredType = parsed.declaredType;
+        candidate.diagnostics.push(...parsed.diagnostics);
+        if (parsed.config?.preview?.entry) candidate.entry = parsed.config.preview.entry;
+      }
+      continue;
+    }
+
+    if (name === "package.json") {
+      candidate.hasPackageJson = true;
+      if (source.body !== undefined) {
+        const parsed = parsePackageJson(source.body, source.path);
+        candidate.packageJson = parsed.json;
+        candidate.diagnostics.push(...parsed.diagnostics);
+        candidate.hasWebPackageSignal =
+          parsed.json !== undefined && (hasWebDependency(parsed.json) || hasWebScript(parsed.json));
+      }
+      continue;
+    }
+
+    if (isFrameworkConfig(name)) {
+      candidate.hasFrameworkConfig = true;
+      candidate.frameworkConfigPath ??= source.path;
+      continue;
+    }
+  }
+
+  // A configured site's OWN declared build.output can itself sit several
+  // directories deep and contain a conventional output-directory name —
+  // "public/dist" for a site at "portal", say. Without checking that
+  // FIRST, the generic "first conventional directory name in the path"
+  // scan below finds "dist" and promotes "portal/public" (an ordinary
+  // subdirectory, not a site of its own) into a spurious second candidate,
+  // instead of crediting the match to "portal" (its declared output) the
+  // way it would if build.output were a single, non-nested segment.
+  const configuredOutputArtifacts = new Map<string, { root: string; output: string }>();
+  for (const [root, candidate] of candidates) {
+    const output = candidate.dohcConfig?.build?.output;
+    if (!output) continue;
+    configuredOutputArtifacts.set(`${root === "" ? output : `${root}/${output}`}/index.html`, { root, output });
+  }
+
+  for (const path of normalizedPaths) {
+    const configuredOwner = configuredOutputArtifacts.get(path);
+    if (configuredOwner) {
+      const candidate = getCandidate(candidates, configuredOwner.root);
+      candidate.buildOutputs.add(configuredOwner.output);
+      candidate.hasBuildOutputSignal = true;
+      candidate.entry ??= `${configuredOwner.output}/index.html`;
+      continue;
+    }
+    const segments = path.split("/");
+    const index = segments.findIndex((segment) => BUILD_OUTPUT_DIRS.includes(segment));
+    if (index === -1 || index === segments.length - 1) continue;
+    const outputDir = segments[index];
+    const root = segments.slice(0, index).join("/");
+    const candidate = getCandidate(candidates, root);
+    if (segments.slice(index + 1).join("/") === "index.html") {
+      candidate.buildOutputs.add(outputDir);
+      candidate.hasBuildOutputSignal = true;
+      candidate.entry ??= `${outputDir}/index.html`;
+    }
+  }
+
+  for (const candidate of candidates.values()) {
+    candidate.packageManager = detectSitePackageManager(
+      fileNamesByRoot.get(candidate.root) ?? new Set<string>(),
+      candidate.packageJson,
+    );
+    if (candidate.dohcConfig?.build?.output) candidate.hasBuildOutputSignal = true;
+    if (
+      candidate.hasDohcConfig &&
+      isExplicitNonSite(candidate) &&
+      hasIndependentWebsiteSignal(candidate)
+    ) {
+      candidate.diagnostics.push(
+        diagnostic(
+          candidate.dohcConfigPath ??
+            (candidate.root === "." ? "dohc.json" : `${candidate.root}/dohc.json`),
+          "warning",
+          "unexpected_dohc_type",
+          'dohc.json has website signals but its type is not "site".',
+        ),
+      );
+    }
+  }
+
+  return [...candidates.values()]
+    .filter(shouldIncludeCandidate)
+    .map(finalizeSite)
+    .sort((a, b) => a.root.localeCompare(b.root));
 }
