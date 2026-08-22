@@ -362,7 +362,9 @@ import {
 import { buildMenuTemplate } from "./window/applicationMenu";
 import {
   createUserSettingsWriteQueue,
+  createGuestZoomApplier,
   createZoomMutation,
+  resolvePersistedZoomApplication,
 } from "./window/windowZoom";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
@@ -1636,9 +1638,17 @@ function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
     .catch(() => null);
   const applyPersistedZoom = () => {
     void persistedZoom.then((zoomLevel) => {
-      if (zoomLevel !== null && !window.isDestroyed()) {
-        knownZoomLevel = zoomLevel;
-        window.webContents.setZoomLevel(zoomLevel);
+      const application = resolvePersistedZoomApplication(
+        zoomLevel,
+        knownZoomLevel,
+      );
+      if (application === null) return;
+      if ("applyEverywhere" in application) {
+        // One path for hosts AND guests: a guest attached before the read
+        // resolved must not stay at 100% until the next zoom change.
+        applyZoomLevelToWindows(application.applyEverywhere);
+      } else if (!window.isDestroyed()) {
+        window.webContents.setZoomLevel(application.applyToWindow);
       }
     });
   };
@@ -1694,7 +1704,16 @@ function applyZoomLevelToWindows(zoomLevel: number): void {
   for (const window of workspaceWindows.allLive()) {
     window.webContents.setZoomLevel(zoomLevel);
   }
+  // Embedded plugin content follows the window zoom (#875): the person who
+  // zoomed because text was too small is usually working IN the panel. Only
+  // embedded guests — the same app opened by URL keeps the browser's zoom.
+  for (const record of pluginWebAppViews.all()) {
+    const guest = record.view.view.webContents;
+    if (!guest.isDestroyed()) guest.setZoomLevel(zoomLevel);
+  }
 }
+
+const bindGuestZoom = createGuestZoomApplier(() => knownZoomLevel);
 
 const enqueueUserSettingsWrite = createUserSettingsWriteQueue();
 const mutateWindowZoom = createZoomMutation({
@@ -7959,6 +7978,9 @@ function registerIpcHandlers(
                 view: { view, window: win },
               });
               if (displaced) destroyPluginWebAppViews([displaced]);
+              // Embedded plugin content follows the window zoom (#875);
+              // behavior pinned in windowZoom.test.ts.
+              bindGuestZoom(view.webContents);
             },
             onLoadFailure: () => {
               // The load error's message can embed the URL, credential

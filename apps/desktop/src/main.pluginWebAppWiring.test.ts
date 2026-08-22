@@ -124,6 +124,38 @@ describe("plugin web app main-process wiring", () => {
     expect(closePath).not.toContain("recoverConsumedWebAppCredential");
   });
 
+  it("embedded guests follow the window zoom (#875)", () => {
+    // The attach/load/level behavior is pinned in windowZoom.test.ts
+    // (createGuestZoomApplier drives a fake guest through attach, loads,
+    // level changes, and destruction). This file pins only what it owns:
+    // the attach callback binds the REAL guest's WebContents to the applier
+    // fed by knownZoomLevel.
+    const start = handler("startPluginWebApp");
+    const registerAt = start.indexOf("pluginWebAppViews.register({");
+    const bindAt = start.indexOf("bindGuestZoom(view.webContents);", registerAt);
+    expect(registerAt).toBeGreaterThan(-1);
+    expect(bindAt).toBeGreaterThan(registerAt);
+    expect(squeeze(mainSource)).toContain(
+      "constbindGuestZoom=createGuestZoomApplier(()=>knownZoomLevel);",
+    );
+
+    // On every zoom change: the window-wide apply reaches each live guest.
+    const apply = functionSource("function applyZoomLevelToWindows(");
+    expect(squeeze(apply)).toContain(
+      "for(constrecordofpluginWebAppViews.all()){",
+    );
+    expect(squeeze(apply)).toContain("guest.setZoomLevel(zoomLevel);");
+
+    // The launch read routes its first application through that same
+    // window-wide apply (behavior pinned in windowZoom.test.ts) — a
+    // host-only apply here would leave an early-attached guest at 100%.
+    const track = functionSource("function trackWorkspaceWindow(");
+    expect(squeeze(track)).toContain("resolvePersistedZoomApplication(");
+    expect(squeeze(track)).toContain(
+      "applyZoomLevelToWindows(application.applyEverywhere);",
+    );
+  });
+
   it("applies bounds only through the registry's sender-and-generation guard", () => {
     const bounds = handler("setPluginWebAppBounds");
     const authorizeAt = bounds.indexOf("pluginWebAppViews.authorizeBounds({");

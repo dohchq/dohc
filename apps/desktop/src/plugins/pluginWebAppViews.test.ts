@@ -195,6 +195,20 @@ describe("PluginWebAppViewRegistry across instances", () => {
   });
 });
 
+describe("PluginWebAppViewRegistry.all", () => {
+  it("lists every live record and reflects removals", () => {
+    const registry = new PluginWebAppViewRegistry<string>();
+    registry.register(record({ view: "a" }));
+    registry.register(record({ webAppId: "other", view: "b" }));
+    expect(registry.all().map((entry) => entry.view).sort()).toEqual(["a", "b"]);
+
+    registry.remove(record());
+    // A removed guest must drop out, or a window-level effect (zoom) would
+    // touch a destroyed view.
+    expect(registry.all().map((entry) => entry.view)).toEqual(["b"]);
+  });
+});
+
 describe("stopPluginWebAppGuests", () => {
   // MUTATION (an early throw skips destruction): a renderer dying between
   // notifying record 1 and record 2 must not leave every guest — including

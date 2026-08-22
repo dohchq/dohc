@@ -125,6 +125,12 @@ export class PluginWebAppViewRegistry<TView> {
     );
   }
 
+  /** Every live record, for window-level effects (zoom) that must reach
+   * each attached guest. */
+  all(): PluginWebAppViewRecord<TView>[] {
+    return [...this.views.values()];
+  }
+
   removeForSender(senderId: number): PluginWebAppViewRecord<TView>[] {
     return this.removeWhere((record) => record.senderId === senderId);
   }
