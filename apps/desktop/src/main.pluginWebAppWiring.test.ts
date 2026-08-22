@@ -196,7 +196,12 @@ describe("plugin web app main-process wiring", () => {
     // matching returns -1, and slice(start, -1) silently widens the section
     // to the rest of main.ts — where the call being looked for exists.
     const reload = functionSource("async function prepareForRendererReload(");
-    expect(reload).toContain(
+    expect(reload).toContain("stopPluginSurfacesForSender(senderId)");
+
+    const surfacesForSender = functionSource(
+      "async function stopPluginSurfacesForSender(",
+    );
+    expect(surfacesForSender).toContain(
       "destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));",
     );
 

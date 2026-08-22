@@ -3208,6 +3208,59 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("keeps a failed approved attempt's recovery intact through a watcher touch that changes nothing, and leaves Retry still working (round-20 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        // Approve new content, but the build behind it fails —
+        // recoveredManifests captures the still-running old build, and
+        // lastApprovedAttemptHash remembers this exact attempted content
+        // (the same hash Retry's own buildFromCurrentSource later accepts
+        // via alsoAcceptHash).
+        setup.failNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "attempted approval";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        // A watcher event touches the plugin's tree without changing its
+        // content — the exact same, still-unapproved attempted content
+        // that just failed. Awaited, not fire-and-forget: it settles once
+        // the reconcile below is queued (not once it has run), and the
+        // next two calls share its per-plugin FIFO queue — enqueuing
+        // after this await guarantees they land behind that reconcile,
+        // not racing ahead of it.
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin/src/index.ts",
+          operation: "update",
+        }]);
+
+        // Synchronizes with the watcher's own queued reconcile without
+        // itself changing anything: preflight shares the same per-plugin
+        // queue, so by the time it resolves, the reconcile above already
+        // has.
+        const preflight = await setup.pipeline.uninstallPreflight("example-plugin");
+        expect(preflight.ok).toBe(true);
+
+        // No hold: the recovery is untouched, and the old runtime the
+        // failed attempt left running is still running.
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        // Retry still works against the same attempted content — it would
+        // reject with "no-failed-build" had the watcher's own reconcile
+        // held this for approval instead.
+        const retried = await setup.pipeline.rebuild("example-plugin");
+        expect(retried.ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("keeps the running build's settings and validation after a pre-stop failure", async () => {
       const oldSettings: PluginSettingDeclaration[] = [{
         key: "greeting",

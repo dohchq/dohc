@@ -1265,13 +1265,19 @@ let preferredWorkspaceId: string | null = null;
 const activeWorkspaceIdBySender = new Map<number, string>();
 const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
 
-// True while some window still has this workspace open — the one answer
-// both pipeline creation (createOnlyWhile) and pipeline teardown below
-// share, so a switch or close in one window can never act on a workspace
-// another window still has open (#779 round 18 finding 2, round 19
-// finding 2).
-function isWorkspaceOpenInAnyWindow(workspaceId: string): boolean {
-  for (const activeId of activeWorkspaceIdBySender.values()) {
+// True while some OTHER window still has this workspace open — the one
+// answer pipeline creation (createOnlyWhile) and every pipeline teardown
+// below share, so a switch, close, or reload in one window can never act
+// on a workspace another window still has open (#779 round 18 finding 2,
+// round 19 finding 2, round 20 finding 2). excludeSenderId names the
+// caller's own entry, which a reload has not cleared yet and so would
+// otherwise always count as "another window."
+function isWorkspaceOpenInAnyWindow(
+  workspaceId: string,
+  excludeSenderId?: number,
+): boolean {
+  for (const [senderId, activeId] of activeWorkspaceIdBySender) {
+    if (senderId === excludeSenderId) continue;
     if (activeId === workspaceId) return true;
   }
   return false;
@@ -3154,6 +3160,34 @@ async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> 
   await Promise.all(stops);
 }
 
+async function stopPluginPanelsForSender(senderId: number): Promise<void> {
+  const stops: Promise<void>[] = [];
+  for (const panel of [...runningPluginPanels.values()]) {
+    if (panel.senderId !== senderId) continue;
+    stops.push(
+      stopPluginPanel(panel.workspaceId, panel.pluginId, panel.panelId).catch((error) => {
+        console.warn(
+          "[desktop] failed to stop plugin panel during sender cleanup",
+          error,
+        );
+      }),
+    );
+  }
+  await Promise.all(stops);
+}
+
+// Every main-owned resource this sender's own window opened — panels
+// (each stop also releases its preview registration) and web apps,
+// wherever their workspace is — cleared regardless of whether that
+// workspace's own pipeline stops too. A survivor sharing the workspace
+// still needs stopPluginHostIfUnclaimed to see this sender's own claims
+// gone, or its guest records outlive the window that opened them (#779
+// round 20 finding 1, finding 2).
+async function stopPluginSurfacesForSender(senderId: number): Promise<void> {
+  destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));
+  await stopPluginPanelsForSender(senderId);
+}
+
 // Stopping the shared host is the pipeline's job (stopPluginPipelineForWorkspace
 // disposes it via PluginPipeline.dispose() -> pluginHost.stopAll()); this only
 // stops the panels layered on top of it.
@@ -3565,13 +3599,20 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
   pluginPanelSdkAuthorities.revokeSender(senderId);
-  destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
     closeEngineYDocSessionsForSender(senderId),
     waitForPendingEngineYDocOpens(senderId),
-    activeWorkspaceId
+    // This sender's own panels and web apps are gone regardless of
+    // whether the workspace itself survives (#779 round 20 finding 1).
+    stopPluginSurfacesForSender(senderId),
+    // This sender's own entry has not been cleared yet, so it would
+    // otherwise always count as "another window" — excluded here so full
+    // teardown still runs when this reload was the last window on the
+    // workspace (#779 round 20 finding 2).
+    activeWorkspaceId &&
+      !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
       ? stopPluginWorkspace(activeWorkspaceId)
       : Promise.resolve(),
   ]);
@@ -7570,11 +7611,18 @@ function registerIpcHandlers(
         pluginPanelSdkAuthorities.revokeSender(senderId);
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
-        // This sender's own entry is already gone above, so a true result
-        // here means another window, not a stale read of this one.
-        if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
-          void stopPluginWorkspace(activeWorkspaceId);
-        }
+        // This sender's own panels and web apps are gone regardless of
+        // whether the workspace itself survives — a survivor sharing it
+        // still needs those claims gone, or its guest records outlive the
+        // window that opened them (#779 round 20 finding 1).
+        void stopPluginSurfacesForSender(senderId).then(() => {
+          // This sender's own entry is already gone above, so a true
+          // result here means another window, not a stale read of this
+          // one.
+          if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
+            return stopPluginWorkspace(activeWorkspaceId);
+          }
+        });
       });
     }
     // Set above, before this read: a true result here means another window

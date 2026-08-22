@@ -306,7 +306,7 @@ describe("plugin panel main-process wiring", () => {
     expect(host).toContain("onStatusChange:");
     expect(host).toContain("revokePluginPanelAuthoritiesForStatus(");
     expect(workspaceOpen).toContain("pluginPanelSdkAuthorities.revokeSender(senderId);");
-    expect(workspaceOpen).toContain("void stopPluginWorkspace(activeWorkspaceId);");
+    expect(workspaceOpen).toContain("return stopPluginWorkspace(activeWorkspaceId);");
     expect(workspaceOpen).toContain("await stopPluginWorkspace(previousWorkspaceId);");
     expect(willQuit).toContain("pluginPanelSdkAuthorities.revokeAll();");
     expect(willQuit).toContain("const pluginStop = stopAllPluginWorkspaces();");
@@ -651,12 +651,16 @@ describe("plugin panel main-process wiring", () => {
       switchAt,
     );
     const destroyedAt = open.indexOf('event.sender.once("destroyed"');
-    const destroyedGateAt = open.indexOf(
-      "if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {",
+    const destroyedSurfacesAt = open.indexOf(
+      "void stopPluginSurfacesForSender(senderId).then(() => {",
       destroyedAt,
     );
+    const destroyedGateAt = open.indexOf(
+      "if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {",
+      destroyedSurfacesAt,
+    );
     const destroyedStopAt = open.indexOf(
-      "void stopPluginWorkspace(activeWorkspaceId);",
+      "return stopPluginWorkspace(activeWorkspaceId);",
       destroyedGateAt,
     );
     // MUTATION (cross-window teardown): either gate missing lets one
@@ -666,7 +670,77 @@ describe("plugin panel main-process wiring", () => {
     expect(switchAt).toBeGreaterThan(-1);
     expect(switchStopAt).toBeGreaterThan(switchAt);
     expect(destroyedAt).toBeGreaterThan(-1);
-    expect(destroyedGateAt).toBeGreaterThan(destroyedAt);
+    // MUTATION (guest records outlive their window): a destroyed window
+    // whose workspace survives must still lose its own panels and web
+    // apps — revoking its SDK grants alone leaves those records alive
+    // indefinitely and starves stopPluginHostIfUnclaimed (#779 round 20
+    // finding 1).
+    expect(destroyedSurfacesAt).toBeGreaterThan(destroyedAt);
+    expect(destroyedGateAt).toBeGreaterThan(destroyedSurfacesAt);
     expect(destroyedStopAt).toBeGreaterThan(destroyedGateAt);
+  });
+
+  it("stops a departing window's own panels, not a survivor's sharing the same workspace (#779 round 20 finding 1)", () => {
+    const panelsForSender = functionSource(
+      "async function stopPluginPanelsForSender(",
+    );
+    const filterAt = panelsForSender.indexOf(
+      "if (panel.senderId !== senderId) continue;",
+    );
+    const stopCallAt = panelsForSender.indexOf(
+      "stopPluginPanel(panel.workspaceId, panel.pluginId, panel.panelId)",
+      filterAt,
+    );
+    // MUTATION (wrong window's panels stopped, or none at all): a filter
+    // on any field but senderId either tears down a surviving window's
+    // own panels on the same shared workspace, or never reaches this
+    // sender's own — either way a guest record outlives the window that
+    // opened it.
+    expect(filterAt).toBeGreaterThan(-1);
+    expect(stopCallAt).toBeGreaterThan(filterAt);
+
+    const surfacesForSender = functionSource(
+      "async function stopPluginSurfacesForSender(",
+    );
+    const webAppsAt = surfacesForSender.indexOf(
+      "destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));",
+    );
+    const panelsAt = surfacesForSender.indexOf(
+      "await stopPluginPanelsForSender(senderId);",
+      webAppsAt,
+    );
+    // MUTATION (one surface type left behind): a caller reaching only one
+    // of these still starves stopPluginHostIfUnclaimed of the other kind
+    // of claim this sender's own window left behind.
+    expect(webAppsAt).toBeGreaterThan(-1);
+    expect(panelsAt).toBeGreaterThan(webAppsAt);
+  });
+
+  it("excludes the reloading sender's own now-stale entry from the any-window check, so a reload of the last window still tears down its workspace (#779 round 20 finding 2)", () => {
+    const reload = functionSource("async function prepareForRendererReload(");
+    const gateAt = reload.indexOf(
+      "isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)",
+    );
+    const surfacesAt = reload.indexOf("stopPluginSurfacesForSender(senderId)");
+    const stopAt = reload.indexOf(
+      "stopPluginWorkspace(activeWorkspaceId)",
+      gateAt,
+    );
+    // MUTATION (last window's reload never tears down its workspace): this
+    // sender's own activeWorkspaceIdBySender entry is not cleared before
+    // this check runs — omitting the exclusion makes it always read as
+    // "another window has this," so a solo window's own reload can never
+    // reach full teardown, leaving a stale pipeline for the replacement
+    // renderer to inherit instead of a fresh one.
+    expect(surfacesAt).toBeGreaterThan(-1);
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(stopAt).toBeGreaterThan(gateAt);
+
+    const isOpen = functionSource("function isWorkspaceOpenInAnyWindow(");
+    const excludeAt = isOpen.indexOf("if (senderId === excludeSenderId) continue;");
+    // MUTATION (exclusion parameter ignored): a signature that accepts
+    // excludeSenderId but never uses it leaves the caller's own workaround
+    // above silently defeated.
+    expect(excludeAt).toBeGreaterThan(-1);
   });
 });

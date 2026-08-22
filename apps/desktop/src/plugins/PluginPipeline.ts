@@ -1569,9 +1569,26 @@ export class PluginPipeline {
     const priorDisabledReason = record.disabled === true
       ? this.statuses.get(pluginId)?.disabledReason ?? "user"
       : undefined;
+    // Captured before verifyApprovedSource's own snapshotOrThrow clears it
+    // to a busy "snapshotting" status — restored below if this reconcile
+    // turns out to be a no-op (#779 round 20 finding 3).
+    const priorStatus = this.statuses.get(pluginId);
     const verified = await this.verifyApprovedSource(candidate, record.approvedHash);
     if (verified.kind === "failed") return;
     if (verified.kind === "changed") {
+      // The plugin's own last approved attempt, not a fresh out-of-band
+      // change — buildFromCurrentSource's own retry path accepts this
+      // exact hash too (alsoAcceptHash), one shared rule. A watcher event
+      // that only touches metadata must not hold a still-running,
+      // still-recovering failed build for approval over content nothing
+      // actually changed.
+      if (
+        priorStatus &&
+        verified.sourceHash === this.lastApprovedAttemptHash.get(pluginId)
+      ) {
+        this.setStatus(candidate, priorStatus);
+        return;
+      }
       const doorHash = await this.doorApprovedHash(pluginId, record.approvedHash);
       if (doorHash === null || verified.sourceHash !== doorHash) {
         await this.holdForApproval(
