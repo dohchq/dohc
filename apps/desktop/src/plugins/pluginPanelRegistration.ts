@@ -1,9 +1,16 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
+import {
+  CLAIMS_DRAINING_ERROR_CODE,
+  PluginClaimsDrainingError,
+} from "./pluginCommandInvocation";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
-import type { PluginPipelineStatusEvent } from "./PluginPipeline";
+import type {
+  PluginPipelineEnsureStartedResult,
+  PluginPipelineStatusEvent,
+} from "./PluginPipeline";
 
 export interface PluginPanelRegistration {
   pluginRoot: string;
@@ -21,6 +28,21 @@ export interface PluginWebAppRegistration {
 export interface RegisteredPlugin {
   pluginRoot: string;
   manifest: DohcPluginManifest;
+}
+
+export interface PluginRegistrationSource {
+  pluginRegistration(pluginId: string): RegisteredPlugin | null;
+  hasUnrecoverableFailedReplacement(pluginId: string): boolean;
+}
+
+export function resolveRegisteredPlugin(
+  pluginId: string,
+  pipeline: PluginRegistrationSource | undefined,
+  remembered: ReadonlyMap<string, RegisteredPlugin> | undefined,
+): RegisteredPlugin | undefined {
+  return pipeline?.pluginRegistration(pluginId) ??
+    remembered?.get(pluginId) ??
+    undefined;
 }
 
 /**
@@ -67,12 +89,47 @@ export function pluginLifecycleKey(
 /** What `PluginPipeline.ensureStarted` reports back to a panel start. */
 export type PluginPanelHostStartResult =
   | { ok: true; startedHost: boolean }
-  | { ok: false; error: { message: string } };
+  | {
+    ok: false;
+    error: {
+      message: string;
+      /**
+       * The one pipeline failure a command's own claim can cause (see
+       * PluginPipeline's hasOutstandingCommandClaim, #779 round 25
+       * finding 3). Never reached by a panel or web app, which never
+       * claims. Typed to the one literal it can ever be, not open
+       * `string`, so a producer misspelling of CLAIMS_DRAINING_ERROR_CODE
+       * fails the type system instead of silently degrading this
+       * retryable refusal to a generic error (#779 round 27).
+       */
+      code?: typeof CLAIMS_DRAINING_ERROR_CODE;
+    };
+  };
 
 /**
- * Starts a plugin because a panel or a web app needs it, and records the
- * surface's claim on the host's lifetime. It returns when the plugin can
- * serve the surface's own start call, and throws the reason it cannot.
+ * Narrows a PluginPipeline action result's own open-ended error code down
+ * to the one literal startPluginForPanel's own ensureStarted result
+ * recognizes, dropping anything else — the same as no code at all.
+ */
+export function toPluginPanelHostStartResult(
+  result: PluginPipelineEnsureStartedResult,
+): PluginPanelHostStartResult {
+  if (result.ok) return result;
+  return {
+    ok: false,
+    error: {
+      message: result.error.message,
+      code: result.error.code === CLAIMS_DRAINING_ERROR_CODE
+        ? CLAIMS_DRAINING_ERROR_CODE
+        : undefined,
+    },
+  };
+}
+
+/**
+ * Starts a plugin because a caller needs it. Panel and web-app callers record
+ * a claim on the host's lifetime. Other callers can opt out when the host
+ * should live for the workspace instead.
  *
  * Returning on a spawned-but-still-activating host is what made a cold open
  * fail: the surface's next call reached the plugin before `activate()`
@@ -91,6 +148,15 @@ export async function startPluginForPanel(input: {
   panelStartedHosts: Set<string>;
   workspaceId: string;
   pluginId: string;
+  claim?: boolean;
+  /**
+   * Called once, only when this exact call performed the zero-to-running
+   * transition under claim: false — the on-demand-command counterpart to
+   * panelStartedHosts gaining an entry, for a caller that opted out of
+   * panel ownership but still needs to know it alone is why the host is
+   * running (round-9 finding 1).
+   */
+  onColdStartWithoutClaim?: () => void;
   /** The running host's activation, or undefined when no host is running. */
   hostActivation: () => Promise<void> | undefined;
   ensureStarted: () => Promise<PluginPanelHostStartResult>;
@@ -98,11 +164,22 @@ export async function startPluginForPanel(input: {
   const running = input.hostActivation();
   if (running) return running;
   const result = await input.ensureStarted();
-  if (!result.ok) throw new Error(result.error.message);
+  if (!result.ok) {
+    // See PluginPanelHostStartResult's own code field above (#779 round
+    // 25 finding 3).
+    if (result.error.code === CLAIMS_DRAINING_ERROR_CODE) {
+      throw new PluginClaimsDrainingError(input.pluginId);
+    }
+    throw new Error(result.error.message);
+  }
   if (result.startedHost) {
-    input.panelStartedHosts.add(
-      pluginLifecycleKey(input.workspaceId, input.pluginId),
-    );
+    if (input.claim !== false) {
+      input.panelStartedHosts.add(
+        pluginLifecycleKey(input.workspaceId, input.pluginId),
+      );
+    } else {
+      input.onColdStartWithoutClaim?.();
+    }
   }
   await input.hostActivation();
 }
@@ -184,6 +261,7 @@ async function loadValidatedPluginManifest(input: {
   workspaceRoot: string;
   pluginRoot: string;
   pluginId: string;
+  pluginRegistration?: PluginRegistrationSource;
 }): Promise<{ pluginRoot: string; manifest: DohcPluginManifest }> {
   const requestedRoot = workspaceRelativePluginRoot(
     input.workspaceRoot,
@@ -212,16 +290,31 @@ async function loadValidatedPluginManifest(input: {
     throw new Error(`Plugin root is not a directory: ${input.pluginRoot}.`);
   }
 
-  const read = await readPluginManifestFile(pluginRoot);
-  if (!read.ok) {
-    throw new Error(`Plugin manifest is invalid. ${read.diagnostics.join("; ")}`);
+  const registered = input.pluginRegistration?.pluginRegistration(input.pluginId);
+  let manifest = registered?.manifest;
+  if (!manifest) {
+    // A null registration can mean "unknown to this pipeline" (fine to read
+    // the manifest straight off disk) or "this plugin's replacement just
+    // failed and nothing could be recovered" (not fine — that raw manifest
+    // is the failed candidate's own, the exact thing the null was refusing
+    // to serve). Only the second one refuses here (#779 round 23 finding 1).
+    if (input.pluginRegistration?.hasUnrecoverableFailedReplacement(input.pluginId)) {
+      throw new Error(
+        `dohc could not recover plugin "${input.pluginId}"'s last working build to open this. Fix the plugin and retry.`,
+      );
+    }
+    const read = await readPluginManifestFile(pluginRoot);
+    if (!read.ok) {
+      throw new Error(`Plugin manifest is invalid. ${read.diagnostics.join("; ")}`);
+    }
+    manifest = read.manifest;
   }
-  if (read.manifest.name !== input.pluginId) {
+  if (manifest.name !== input.pluginId) {
     throw new Error(
-      `Plugin id "${input.pluginId}" does not match manifest name "${read.manifest.name}".`,
+      `Plugin id "${input.pluginId}" does not match manifest name "${manifest.name}".`,
     );
   }
-  return { pluginRoot, manifest: read.manifest };
+  return { pluginRoot, manifest };
 }
 
 export async function loadPluginPanelRegistration(input: {
@@ -229,6 +322,7 @@ export async function loadPluginPanelRegistration(input: {
   pluginRoot: string;
   pluginId: string;
   panelId: string;
+  pluginRegistration?: PluginRegistrationSource;
 }): Promise<PluginPanelRegistration> {
   const { pluginRoot, manifest } = await loadValidatedPluginManifest(input);
   const panel = manifest.panels?.find(
@@ -255,6 +349,7 @@ export async function loadPluginWebAppRegistration(input: {
   pluginRoot: string;
   pluginId: string;
   webAppId: string;
+  pluginRegistration?: PluginRegistrationSource;
 }): Promise<PluginWebAppRegistration> {
   const { pluginRoot, manifest } = await loadValidatedPluginManifest(input);
   const webApp = manifest.webApps?.find(

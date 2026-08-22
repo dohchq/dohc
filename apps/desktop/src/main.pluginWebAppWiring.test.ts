@@ -44,6 +44,9 @@ describe("plugin web app main-process wiring", () => {
     expect(startAt).toBeGreaterThan(lockAt);
     expect(open).toContain("withPluginHostLifecycleLock(");
     expect(open).toContain("assertPluginPanelRequestCurrent(isCurrent);");
+    expect(open).toContain(
+      "pluginRegistration: pluginPipelines.get(workspace.workspaceId),",
+    );
   });
 
   it("builds the guest only after readiness and both post-start rechecks", () => {
@@ -182,8 +185,14 @@ describe("plugin web app main-process wiring", () => {
     expect(unclaimed).toContain(
       "!pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&",
     );
+    expect(unclaimed).toContain("!activeCommandClaims.has(key) &&");
+    // A command's cold start (claim: false) never touches panelStartedHosts,
+    // so a surface-less command-started host relies on this fallback the
+    // same way a panel's own claim relies on panelStartedHosts.delete()
+    // (round-9 finding 1) — pinned behaviorally in
+    // pluginCommandHostClaims.test.ts and pluginPanelRegistration.test.ts.
     expect(unclaimed).toContain(
-      "panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))",
+      "(panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))",
     );
   });
 
@@ -192,9 +201,37 @@ describe("plugin web app main-process wiring", () => {
     // matching returns -1, and slice(start, -1) silently widens the section
     // to the rest of main.ts — where the call being looked for exists.
     const reload = functionSource("async function prepareForRendererReload(");
-    expect(reload).toContain(
-      "destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));",
+    expect(reload).toContain("stopPluginSurfacesForSender(senderId)");
+
+    const surfacesForSender = functionSource(
+      "async function stopPluginSurfacesForSender(",
     );
+    expect(surfacesForSender).toContain(
+      "const removedWebApps = pluginWebAppViews.removeForSender(senderId);",
+    );
+    expect(surfacesForSender).toContain(
+      "destroyPluginWebAppViews(removedWebApps);",
+    );
+    // MUTATION (a rejecting host stop skips panel cleanup): an uncaught
+    // rejection from any one host's own stopPluginHostIfUnclaimed call
+    // would reject the whole Promise.all and skip everything queued after
+    // it in this function, including stopPluginPanelsForSender below — a
+    // single web-app host that fails to stop must not leave every panel
+    // this sender opened uncleaned too (#779 round 25 finding 4).
+    const stopHostAt = surfacesForSender.indexOf(
+      "() => stopPluginHostIfUnclaimed(workspaceId, pluginId),",
+    );
+    const stopHostCatchAt = surfacesForSender.indexOf(
+      ".catch((error: unknown) => {",
+      stopHostAt,
+    );
+    const panelsForSenderAt = surfacesForSender.indexOf(
+      "await stopPluginPanelsForSender(senderId);",
+      stopHostCatchAt,
+    );
+    expect(stopHostAt).toBeGreaterThan(-1);
+    expect(stopHostCatchAt).toBeGreaterThan(stopHostAt);
+    expect(panelsForSenderAt).toBeGreaterThan(stopHostCatchAt);
 
     const stopWorkspace = functionSource("async function stopPluginWorkspace(");
     expect(stopWorkspace).toContain(
@@ -220,6 +257,72 @@ describe("plugin web app main-process wiring", () => {
     );
     expect(disableStopAt).toBeGreaterThan(disableAt);
     expect(disableCallAt).toBeGreaterThan(disableStopAt);
+  });
+
+  it("destroys a plugin's guest views after the old runtime stops", () => {
+    const rebuildAt = mainSource.indexOf("pluginAction(CHANNELS.rebuildPlugin,");
+    const rebuildEnd = mainSource.indexOf("\n\n  ipcMain.handle(", rebuildAt);
+    const rebuild = mainSource.slice(rebuildAt, rebuildEnd);
+
+    expect(rebuildAt).toBeGreaterThan(-1);
+    expect(rebuild).toContain("pipeline.rebuild(pluginId, {");
+    expect(rebuild).toContain("onOldRuntimeStopped: () =>");
+    expect(rebuild).toContain(
+      "stopPluginWebAppsForPlugin(workspaceId, pluginId)",
+    );
+    expect(rebuild).not.toContain(
+      "stopPluginWebAppsForPlugin(workspaceId, pluginId);\n    return pipeline.rebuild",
+    );
+  });
+
+  it("notifies each owner when plugin teardown destroys its guest view", () => {
+    const stop = functionSource("function stopPluginWebAppsForPlugin(");
+    const removeAt = stop.indexOf("pluginWebAppViews.removeForPlugin(");
+    const guestsAt = stop.indexOf("stopPluginWebAppGuests(", removeAt);
+    const resolveSenderAt = stop.indexOf(
+      "webContents.fromId(record.senderId)",
+      guestsAt,
+    );
+    const notifyAt = stop.indexOf("notifyPluginWebAppFailed(sender,", resolveSenderAt);
+    const destroyAt = stop.indexOf("destroyPluginWebAppViews,", notifyAt);
+
+    expect(removeAt).toBeGreaterThan(-1);
+    expect(guestsAt).toBeGreaterThan(removeAt);
+    expect(resolveSenderAt).toBeGreaterThan(guestsAt);
+    expect(notifyAt).toBeGreaterThan(resolveSenderAt);
+    expect(destroyAt).toBeGreaterThan(notifyAt);
+    expect(squeeze(stop)).toContain(
+      "notifyPluginWebAppFailed(sender,record.generation,{workspaceId:record.workspaceId,pluginId:record.pluginId,webAppId:record.webAppId,instanceKey:record.instanceKey,})",
+    );
+    // The isolation and always-destroy guarantees themselves are pinned
+    // behaviorally in pluginWebAppViews.test.ts, against the shared
+    // stopPluginWebAppGuests() this handler delegates to.
+  });
+
+  // round-13 finding 3 (CodeRabbit): WebContents ids recycle across a
+  // crash-reload, so a sender resolved by a stale id could otherwise
+  // deliver a dead guest's failure to whatever unrelated page now answers
+  // to that id — every other send in this file gates on the record's
+  // generation, and this one now does too.
+  it("refuses to notify a sender whose generation has moved on", () => {
+    const notify = functionSource("function notifyPluginWebAppFailed(");
+
+    expect(notify).toContain(
+      "sender.isDestroyed() || rendererGeneration(sender.id) !== generation",
+    );
+
+    // Both call sites pass a generation the record or the handler itself
+    // already carries, not a freshly re-derived one — the whole point is
+    // to compare against what the record was stamped with, not the
+    // sender's current generation (which would make the check vacuous).
+    const stop = functionSource("function stopPluginWebAppsForPlugin(");
+    expect(squeeze(stop)).toContain(
+      "notifyPluginWebAppFailed(sender,record.generation,",
+    );
+    const recover = mainSource.indexOf(
+      "notifyFailed: () => notifyPluginWebAppFailed(sender, generation, identity)",
+    );
+    expect(recover).toBeGreaterThan(-1);
   });
 
   it("clears the guest partition's storage after a successful uninstall", () => {

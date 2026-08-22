@@ -18,6 +18,7 @@ const bridgeMock = {
   disablePlugin: vi.fn(),
   enablePlugin: vi.fn(),
   approvePlugin: vi.fn(),
+  rebuildPlugin: vi.fn(),
   pluginUninstallPreflight: vi.fn(),
   pluginSizes: vi.fn(),
   openExternalUrl: vi.fn(),
@@ -66,8 +67,10 @@ function plugin(
     license: null,
     icon: null,
     settings: [],
+    commands: [],
     panels: [],
     webApps: [],
+    hasFailedReplacement: false,
     diagnostics: [],
     warnings: [],
     error: null,
@@ -608,6 +611,111 @@ describe("PluginDetailsPage", () => {
       workspaceId: "ws-1",
       pluginId: "stuck-plugin",
     });
+  });
+
+  it("offers a build retry for an established plugin whose rebuild failed", async () => {
+    const failed = plugin("failed-plugin", {
+      status: "failed",
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [failed] });
+    bridgeMock.rebuildPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("failed-plugin"),
+    });
+
+    renderPage("failed-plugin");
+
+    expect(screen.queryByTestId("plugin-install")).toBeNull();
+    expect(screen.queryByTestId("plugin-enable")).toBeNull();
+    expect(screen.queryByTestId("plugin-approve")).toBeNull();
+    expect(await screen.findByTestId("plugin-disable")).toBeTruthy();
+    const rebuildButton = await screen.findByTestId("plugin-rebuild");
+    expect(rebuildButton.textContent).toBe("Retry build");
+
+    await userEvent.click(rebuildButton);
+
+    expect(bridgeMock.rebuildPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "failed-plugin",
+    });
+  });
+
+  it("keeps offering a build retry after a crash-loop respawn hides status \"failed\" (round-8 finding 3)", async () => {
+    const respawned = plugin("respawned-plugin", {
+      status: "ready",
+      runtimeStatus: "ready",
+      hasFailedReplacement: true,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [respawned] });
+    bridgeMock.rebuildPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("respawned-plugin"),
+    });
+
+    renderPage("respawned-plugin");
+
+    const rebuildButton = await screen.findByTestId("plugin-rebuild");
+    expect(rebuildButton.textContent).toBe("Retry build");
+
+    await userEvent.click(rebuildButton);
+
+    expect(bridgeMock.rebuildPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "respawned-plugin",
+    });
+  });
+
+  it("offers Retry build, not Enable, for a crash-loop-disabled plugin with a failed replacement owed (round-10 finding 1)", async () => {
+    const disabled = plugin("disabled-plugin", {
+      status: "disabled",
+      disabledReason: "crash-loop",
+      runtimeStatus: null,
+      hasFailedReplacement: true,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [disabled] });
+    bridgeMock.rebuildPlugin.mockResolvedValue({
+      ok: true,
+      // The replacement succeeds: hasFailedReplacement clears and normal
+      // actions return.
+      plugin: plugin("disabled-plugin"),
+    });
+
+    renderPage("disabled-plugin");
+
+    // Awaited first: queryByTestId on an unsettled render is null
+    // regardless of canEnable, so asserting absence before the load
+    // resolves would prove nothing.
+    const rebuildButton = await screen.findByTestId("plugin-rebuild");
+    expect(rebuildButton.textContent).toBe("Retry build");
+    // Enable's own verify pass would hold this exact source for approval
+    // and, doing so, clear the recovery marker Retry needs — Retry build
+    // is the one honest action while a replacement is still owed.
+    expect(screen.queryByTestId("plugin-enable")).toBeNull();
+
+    await userEvent.click(rebuildButton);
+
+    expect(bridgeMock.rebuildPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "disabled-plugin",
+    });
+  });
+
+  it("offers Enable again once a crash-loop-disabled plugin has no failed replacement owed", async () => {
+    // The same disabled + crash-loop reason as above, but the replacement
+    // already succeeded (hasFailedReplacement cleared) — Enable's absence
+    // above was never permanent, only tied to the fact still being owed.
+    const recovered = plugin("recovered-plugin", {
+      status: "disabled",
+      disabledReason: "crash-loop",
+      runtimeStatus: null,
+      hasFailedReplacement: false,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [recovered] });
+
+    renderPage("recovered-plugin");
+
+    expect(await screen.findByTestId("plugin-enable")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-rebuild")).toBeNull();
   });
 
   it("offers only uninstall for an installed plugin whose manifest broke (#779 round 8 D2)", async () => {

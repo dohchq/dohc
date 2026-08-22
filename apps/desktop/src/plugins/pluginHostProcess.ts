@@ -186,7 +186,8 @@ transport.onRequest(PLUGIN_HOST_METHODS.invokeCommand, async (rawParams) => {
   if (!run) {
     throw new Error(`Command "${params.commandId}" is not registered.`);
   }
-  return run();
+  await run();
+  return null;
 });
 
 function requireDriver(driverId: string): PluginAgentDriver {

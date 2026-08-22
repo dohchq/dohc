@@ -64,26 +64,28 @@ describe("plugin panel SDK authority", () => {
     );
   });
 
-  it("revokes stale generations and inactive panels", () => {
+  it("revokes stale generations", () => {
     const generations = createPluginPanelSdkAuthorityRegistry();
     const staleGeneration = generations.register(owned);
     expect(() => authorize(generations, { generation: 3 })).toThrow(/stale/i);
     expect(staleGeneration.signal.aborted).toBe(true);
-
-    const panels = createPluginPanelSdkAuthorityRegistry();
-    const inactivePanel = panels.register(owned);
-    expect(() => authorize(panels, { panelRunning: false })).toThrow(/stale/i);
-    expect(inactivePanel.signal.aborted).toBe(true);
+    expect(() => authorize(generations)).toThrow(/active panel/i);
   });
 
-  it("revokes a tracked panel when its plugin has no live spawn", () => {
+  it("keeps a panel grant through a transiently stopped runtime", () => {
     const registry = createPluginPanelSdkAuthorityRegistry();
     const grant = registry.register(owned);
 
+    expect(authorize(registry)).toMatchObject({ spawnId: "spawn-live" });
+    expect(() => authorize(registry, { panelRunning: false })).toThrow(
+      "Plugin panel SDK authority is stale.",
+    );
+    expect(grant.signal.aborted).toBe(false);
     expect(() =>
       authorize(registry, { panelRunning: true, liveSpawnId: undefined }),
-    ).toThrow(/stale/i);
-    expect(grant.signal.aborted).toBe(true);
+    ).toThrow("Plugin panel SDK authority is stale.");
+    expect(grant.signal.aborted).toBe(false);
+    expect(authorize(registry)).toMatchObject({ spawnId: "spawn-live" });
   });
 
   it("revokes a panel, a renderer, and all remaining grants with abort", () => {
@@ -100,5 +102,31 @@ describe("plugin panel SDK authority", () => {
     const all = registry.register({ ...owned, panelId: "all" });
     registry.revokeAll();
     expect(all.signal.aborted).toBe(true);
+  });
+
+  it("aborts an in-flight brokered call at revocation, and lets the panel re-grant against a new runtime after (#779 round 18 finding 3)", () => {
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    registry.register(owned);
+    // A brokered request already authorized against the old runtime — its
+    // own signal, not the process dying, is what a caller awaits on.
+    const inFlight = authorize(registry, { liveSpawnId: "spawn-old" });
+    expect(inFlight.signal.aborted).toBe(false);
+
+    // A rebuild's stop boundary revokes this panel — main.ts's
+    // onOldRuntimeStopped — before the new runtime starts.
+    registry.revokePanel(owned.workspaceId, owned.pluginId, owned.panelId);
+    expect(inFlight.signal.aborted).toBe(true);
+    expect(() => authorize(registry, { liveSpawnId: "spawn-old" })).toThrow(
+      /active panel/i,
+    );
+
+    // The panel's own retry re-registers and authorizes clean against
+    // whatever the pipeline now reports live — the new runtime's spawn id,
+    // unaffected by the revoke above (round-5 authority-registry split).
+    const regranted = registry.register(owned);
+    expect(regranted.signal.aborted).toBe(false);
+    expect(authorize(registry, { liveSpawnId: "spawn-new" })).toMatchObject({
+      spawnId: "spawn-new",
+    });
   });
 });

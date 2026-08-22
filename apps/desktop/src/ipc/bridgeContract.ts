@@ -2168,6 +2168,46 @@ export const StartPluginPanelResult = z.discriminatedUnion("status", [
 ]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
 
+export const InvokePluginCommandPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  commandId: z.string().min(1).max(120),
+}).strict();
+export type InvokePluginCommandPayload = z.infer<
+  typeof InvokePluginCommandPayload
+>;
+
+export const InvokePluginCommandResult = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("ok") }).strict(),
+  z.object({
+    status: z.literal("plugin-not-found"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("plugin-not-running"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("command-not-declared"),
+    message: z.string(),
+  }).strict(),
+  z.object({
+    status: z.literal("command-failed"),
+    message: z.string(),
+  }).strict(),
+  // A rebuild's old-runtime stop is already draining this plugin's
+  // in-flight command claims — refused outright rather than queued, so
+  // that wait stays bounded by the claims it began with (round-10
+  // finding 2).
+  z.object({
+    status: z.literal("plugin-rebuilding"),
+    message: z.string(),
+  }).strict(),
+]);
+export type InvokePluginCommandResult = z.infer<
+  typeof InvokePluginCommandResult
+>;
+
 // Stopping names the running panel, which is keyed by workspace, plugin, and
 // panel alone. It carries no placement: a panel must stop wherever it runs.
 export const StopPluginPanelPayload = z.object({
@@ -2342,6 +2382,10 @@ export const PluginStatusRecord = z.object({
   /** What the plugin declares the user may set. Values travel separately —
    * they are per-workspace state, not part of the plugin's identity. */
   settings: z.array(PluginSettingDeclarationSchema).max(MAX_PLUGIN_SETTINGS),
+  /** True while a build has failed and its replacement is still owed, even
+   * through a runtime health change (crash, respawn) that would otherwise
+   * hide it — see PluginPipelinePluginStatus.hasFailedReplacement. */
+  hasFailedReplacement: z.boolean(),
   /** The plugin's declared panels. `placement` says where each one shows:
    * "editor" opens a tab, "view" gets a button in the activity bar. The
    * entry path never crosses — the renderer asks for a panel by id. */
@@ -2353,6 +2397,12 @@ export const PluginStatusRecord = z.object({
       icon: z.string().min(1).max(1024).nullable(),
     }).strict(),
   ).max(100),
+  commands: z.array(
+    z.object({
+      id: z.string().min(1).max(120),
+      title: z.string().min(1).max(120),
+    }).strict(),
+  ).max(200),
   webApps: z.array(
     z.object({
       id: z.string().min(1).max(120),
@@ -4262,6 +4312,9 @@ export interface DohcDesktopBridge {
     listener: (event: PluginPanelOpenedEvent) => void,
   ): () => void;
   startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
+  invokePluginCommand(
+    payload: InvokePluginCommandPayload,
+  ): Promise<InvokePluginCommandResult>;
   stopPluginPanel(payload: StopPluginPanelPayload): Promise<StopPluginPanelResult>;
   invokePluginPanelSdk(
     payload: InvokePluginPanelSdkPayload,
@@ -4286,6 +4339,7 @@ export interface DohcDesktopBridge {
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
+  rebuildPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   pluginUninstallPreflight(
     payload: PluginActionPayload,
   ): Promise<PluginUninstallPreflightResult>;

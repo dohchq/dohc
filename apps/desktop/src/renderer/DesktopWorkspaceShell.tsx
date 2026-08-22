@@ -110,6 +110,8 @@ import { rankQuickOpenPaths } from "./workbench/quick-open-rank";
 import { PluginsView } from "./workbench/PluginsView";
 import {
   pluginActivityViews,
+  pluginCommandEntries,
+  pluginCommandPaletteId,
   resolvePluginView,
 } from "./workbench/pluginActivityViews";
 import { usePluginCatalog } from "./workbench/pluginCatalog";
@@ -2101,6 +2103,17 @@ export function DesktopWorkspaceShell(props: {
         ? pluginActivityViews(pluginCatalogLoad.plugins)
         : [],
     [pluginCatalogLoad],
+  );
+  // A shared view can never write the workspace (assertWritableWorkspace
+  // refuses on the share's presence alone), so every plugin command
+  // invoked from one is a dead click regardless of which plugin or command
+  // it names — the palette offers none of them here (round-8 finding 2).
+  const pluginCommandItems = useMemo(
+    () =>
+      pluginCatalogLoad.status === "ready" && !props.workspace.shareView
+        ? pluginCommandEntries(pluginCatalogLoad.plugins)
+        : [],
+    [pluginCatalogLoad, props.workspace.shareView],
   );
   const selectedPluginView = parsePluginViewId(wb.activeView);
   const selectedPluginViewState =
@@ -4495,6 +4508,41 @@ export function DesktopWorkspaceShell(props: {
         label: `View: ${view.title}`,
         run: () => mutateWb((state) => setView(state, view.viewId)),
       })),
+      ...pluginCommandItems.map((entry) => ({
+        id: pluginCommandPaletteId(entry.pluginId, entry.commandId),
+        label: `${entry.pluginTitle}: ${entry.title}`,
+        run: () => {
+          // No staleness guard is needed: DesktopRoot's
+          // key={workspace.workspaceId} remounts this shell on a switch, so
+          // this callback cannot report into the next workspace.
+          void bridge()
+            .invokePluginCommand({
+              workspaceId,
+              pluginId: entry.pluginId,
+              commandId: entry.commandId,
+            })
+            .then((outcome) => {
+              if (outcome.status !== "ok") {
+                // reportShellError shows error.message and drops the
+                // fallback whenever the error carries one — a terse
+                // backend cause ("timeout") would otherwise displace the
+                // command's own name entirely. Composing the full
+                // sentence here, not relying on the fallback, keeps both
+                // regardless of which one reportShellError picks
+                // (round-10 finding 4).
+                const message =
+                  `Could not run plugin command "${entry.title}". ${outcome.message}`;
+                reportShellError(message, new Error(message));
+              }
+            })
+            .catch((error) => {
+              reportShellError(
+                `Could not run plugin command "${entry.title}".`,
+                error,
+              );
+            });
+        },
+      })),
       {
         id: "connect-cloud",
         label: "Connect dohc Cloud",
@@ -4558,6 +4606,7 @@ export function DesktopWorkspaceShell(props: {
     [
       activeDocumentPath,
       railPluginViews,
+      pluginCommandItems,
       createUntitledDrawing,
       openWorkspaceFolder,
       closeActiveTab,

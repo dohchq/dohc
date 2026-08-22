@@ -31,6 +31,7 @@ import {
   shell,
   Tray,
   utilityProcess,
+  webContents,
   WebContentsView,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -112,6 +113,8 @@ import {
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
+  InvokePluginCommandPayload,
+  InvokePluginCommandResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
   ListPluginsPayload,
@@ -621,6 +624,12 @@ import {
 } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import {
+  invokeRegisteredPluginCommand,
+  PluginClaimsDrainingError,
+} from "./plugins/pluginCommandInvocation";
+import { PluginCommandHostClaims } from "./plugins/pluginCommandHostClaims";
+import { awaitCommandClaimsDrainedWithDeadline } from "./plugins/pluginShared";
+import {
   PluginPipeline,
   type PluginPipelineStatusEvent,
 } from "./plugins/PluginPipeline";
@@ -659,7 +668,9 @@ import {
   loadPluginPanelRegistration,
   pluginLifecycleKey,
   rememberPluginRegistration,
+  resolveRegisteredPlugin,
   startPluginForPanel,
+  toPluginPanelHostStartResult,
   type RegisteredPlugin,
 } from "./plugins/pluginPanelRegistration";
 import {
@@ -677,6 +688,7 @@ import {
 } from "./plugins/pluginWebAppInstances";
 import {
   PluginWebAppViewRegistry,
+  stopPluginWebAppGuests,
   webAppInstanceKey,
   type PluginWebAppViewRecord,
 } from "./plugins/pluginWebAppViews";
@@ -1047,6 +1059,42 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       notifyPluginStatusChanged(workspace.workspaceId, event),
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
+    raiseCommandClaimsBarrier: (pluginId) => {
+      const key = pluginLifecycleKey(workspace.workspaceId, pluginId);
+      const lower = activeCommandClaims.raiseDrainBarrier(key);
+      return () => {
+        lower();
+        // Only when this barrier's own action actually stopped or
+        // replaced the runtime (onOldRuntimeStopBoundary flagged this
+        // key) — a no-op reconcile or a precondition failure that never
+        // reached that point must not eat a command's own cold-start
+        // marker, or nothing left stops the host it started until
+        // workspace close (#779 round 19 finding 3, round 26 note A).
+        if (activeCommandClaims.consumeRuntimeStop(key)) {
+          activeCommandClaims.consumeStartedHost(key);
+        }
+      };
+    },
+    onOldRuntimeStopBoundary: (pluginId) => {
+      activeCommandClaims.markRuntimeStopped(
+        pluginLifecycleKey(workspace.workspaceId, pluginId),
+      );
+    },
+    awaitCommandClaimsDrained: (pluginId) =>
+      awaitCommandClaimsDrainedWithDeadline(
+        pluginId,
+        activeCommandClaims.drain(
+          pluginLifecycleKey(workspace.workspaceId, pluginId),
+        ),
+      ),
+    resetCommandClaims: (pluginId) =>
+      activeCommandClaims.reset(
+        pluginLifecycleKey(workspace.workspaceId, pluginId),
+      ),
+    // See PluginPipeline's hasOutstandingCommandClaim doc (#779 round 25
+    // finding 3).
+    hasOutstandingCommandClaim: (pluginId) =>
+      activeCommandClaims.has(pluginLifecycleKey(workspace.workspaceId, pluginId)),
   });
   return pipeline;
 }
@@ -1062,6 +1110,7 @@ async function ensurePluginPipeline(
     create: () => createPluginPipeline(workspace),
     start: (pipeline) => pipeline.start(),
     dispose: (pipeline) => disposePluginPipeline(workspace.workspaceId, pipeline),
+    createOnlyWhile: () => isWorkspaceOpenInAnyWindow(workspace.workspaceId),
   });
 }
 
@@ -1235,6 +1284,30 @@ function nativeWorkspaceSummaries(): WorkspaceSummary[] {
 let preferredWorkspaceId: string | null = null;
 const activeWorkspaceIdBySender = new Map<number, string>();
 const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
+// Bumped once per openWorkspace call for a sender, before its own await —
+// a rapid A→B then A→C both read the same previousWorkspaceId and race to
+// finish, so only the call whose token is still current when it resumes
+// may write activeWorkspaceIdBySender/preferredWorkspaceId (#779 round 23
+// finding 2).
+const workspaceSwitchTokenBySender = new Map<number, number>();
+
+// True while some OTHER window still has this workspace open — the one
+// answer pipeline creation (createOnlyWhile) and every pipeline teardown
+// below share, so a switch, close, or reload in one window can never act
+// on a workspace another window still has open (#779 round 18 finding 2,
+// round 19 finding 2, round 20 finding 2). excludeSenderId names the
+// caller's own entry, which a reload has not cleared yet and so would
+// otherwise always count as "another window."
+function isWorkspaceOpenInAnyWindow(
+  workspaceId: string,
+  excludeSenderId?: number,
+): boolean {
+  for (const [senderId, activeId] of activeWorkspaceIdBySender) {
+    if (senderId === excludeSenderId) continue;
+    if (activeId === workspaceId) return true;
+  }
+  return false;
+}
 
 function prioritizePreferredWorkspace(
   workspaces: WorkspaceSummary[],
@@ -2772,6 +2845,78 @@ const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
+
+/**
+ * Registers a fresh SDK grant for one panel and wires its own file-watch
+ * subscription cleanup to the grant's own abort — the shape
+ * startPluginPanel uses to register a panel the first time, and
+ * reregisterPluginPanels below reuses to restore what a revoke removes
+ * (#779 round 21 finding 6).
+ */
+function registerPluginPanelGrant(input: {
+  senderId: number;
+  generation: number;
+  workspaceId: string;
+  pluginId: string;
+  panelId: string;
+}): ReturnType<typeof pluginPanelSdkAuthorities.register> {
+  const grant = pluginPanelSdkAuthorities.register(input);
+  grant.signal.addEventListener(
+    "abort",
+    () =>
+      pluginWorkspaceEventsByWorkspace
+        .get(input.workspaceId)
+        ?.disposeOwner({
+          kind: "panel",
+          workspaceId: input.workspaceId,
+          pluginId: input.pluginId,
+          panelId: input.panelId,
+        }),
+    { once: true },
+  );
+  return grant;
+}
+
+// Re-establishes a fresh grant for every one of this plugin's still-
+// mounted panels — called only where a stop replaces the runtime instead
+// of ending the plugin (rebuild), since a revoked grant's own
+// AbortController can never signal live again on its own.
+//
+// Each panel's own re-grant runs under that exact panel's start lock —
+// the same one stopPluginPanel holds while it deletes the panel from
+// runningPluginPanels. Without it, a panel closing mid-rebuild could have
+// this function re-register a fresh grant for it between the read here
+// and the locked delete over there, resurrecting a grant for a panel the
+// close already meant to end (#779 round 23 finding 4).
+async function reregisterPluginPanels(
+  workspaceId: string,
+  pluginId: string,
+): Promise<void> {
+  const matches = [...runningPluginPanels.entries()].filter(
+    ([, panel]) => panel.workspaceId === workspaceId && panel.pluginId === pluginId,
+  );
+  await Promise.all(matches.map(([key, panel]) =>
+    withPluginPanelStartLock(key, async () => {
+      // Re-read inside the lock and act on this exact record, not the one
+      // captured before it: a close that ran first already deleted this
+      // key (nothing left to re-grant), and a start that raced this
+      // rebuild's own wait for the lock already installed its own fresh
+      // record with its own live grant — re-registering the stale one
+      // captured before the lock would revoke that fresh grant right back
+      // out from under it, since register() always revokes whatever grant
+      // already exists for the same subject (#779 round 25 finding 1).
+      const current = runningPluginPanels.get(key);
+      if (current !== panel) return;
+      registerPluginPanelGrant({
+        senderId: current.senderId,
+        generation: current.generation,
+        workspaceId: current.workspaceId,
+        pluginId: current.pluginId,
+        panelId: current.panelId,
+      });
+    })
+  ));
+}
 // A plugin's host can be running because the workspace enabled it (install,
 // enable, approve — it should keep running with no panel open at all) or
 // because a panel's own cold start is the only reason it's alive. Only the
@@ -2780,6 +2925,9 @@ const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
 // zero-to-running transition; any workspace-level plugin action clears it,
 // handing ownership back to the workspace.
 const panelStartedHosts = new Set<string>();
+// Commands can overlap and can share a host with panels or web apps. Their
+// claims need separate reference counts so one command cannot release another.
+const activeCommandClaims = new PluginCommandHostClaims();
 
 function pluginPanelKey(
   workspaceId: string,
@@ -2839,16 +2987,43 @@ function destroyPluginWebAppViews(
 // Without it the page keeps a `ready` state over an empty frame and the user
 // sees a blank tab with nothing to act on. The event carries no failure text:
 // the load error can embed the start URL, credential fragment included.
+//
+// generation gates this the same way every other send in this file does
+// (round-13 finding 3): WebContents ids recycle across a crash-reload, so
+// a sender resolved by a stale id — or a captured reference whose renderer
+// has since reloaded — could otherwise deliver a dead guest's failure to
+// whatever unrelated page now answers to that id or generation.
 function notifyPluginWebAppFailed(
   sender: WebContents,
+  generation: number,
   event: PluginWebAppFailedEvent,
 ): void {
-  if (sender.isDestroyed()) return;
+  if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) return;
   sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
 }
 
 function stopPluginWebAppsForPlugin(workspaceId: string, pluginId: string): void {
-  destroyPluginWebAppViews(pluginWebAppViews.removeForPlugin(workspaceId, pluginId));
+  const records = pluginWebAppViews.removeForPlugin(workspaceId, pluginId);
+  stopPluginWebAppGuests(
+    records,
+    (record) => {
+      const sender = webContents.fromId(record.senderId);
+      if (sender) {
+        notifyPluginWebAppFailed(sender, record.generation, {
+          workspaceId: record.workspaceId,
+          pluginId: record.pluginId,
+          webAppId: record.webAppId,
+          instanceKey: record.instanceKey,
+        });
+      }
+    },
+    destroyPluginWebAppViews,
+    (_record, error) =>
+      console.warn(
+        `[desktop] failed to notify a plugin web app's owner for "${pluginId}"`,
+        error,
+      ),
+  );
 }
 
 const withPluginHostLifecycleLock = <T>(
@@ -2926,20 +3101,20 @@ function invokeWorkspacePluginSdk(input: {
   );
 }
 
-// A plugin this workspace can serve panels for. The registration map only
-// remembers plugins a tab opened, and a view in the activity bar opens no
-// tab, so the pipeline's own discovery — where the manifest actually lives —
-// answers for the rest. Approval is unaffected either way: ensurePluginStarted
-// still hash-verifies before it executes anything, and panels still serve from
-// the approved snapshot rather than from pluginRoot.
+// A plugin this workspace can serve panels for. The pipeline's current
+// discovery owns the manifest. The registration map is only a fallback for a
+// plugin the pipeline does not currently expose. Approval is unaffected:
+// ensurePluginStarted still hash-verifies before it executes anything, and
+// panels still serve from the approved snapshot rather than from pluginRoot.
 function registeredPlugin(
   workspaceId: string,
   pluginId: string,
 ): RegisteredPlugin | undefined {
-  const remembered = pluginRegistrations.get(workspaceId)?.get(pluginId);
-  if (remembered) return remembered;
-  return pluginPipelines.get(workspaceId)?.pluginRegistration(pluginId) ??
-    undefined;
+  return resolveRegisteredPlugin(
+    pluginId,
+    pluginPipelines.get(workspaceId),
+    pluginRegistrations.get(workspaceId),
+  );
 }
 
 // Panels serve from the approved, hash-verified snapshot — never from
@@ -2968,17 +3143,35 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
 // It returns when the plugin can serve the caller's next request — every
 // caller here makes one — which is when the host's activation settles, not
 // when its process exists (#798).
+/**
+ * A command's own recheck of the claim barrier it already gated on before
+ * it claimed, called with no `await` before the pipeline enqueue it guards
+ * (round-17 finding 2). Throws to refuse; a panel open never supplies one.
+ */
+type CommandClaimsRecheck = () => void;
+
 async function ensurePluginStarted(
   workspace: CreatedWorkspace,
   plugin: RegisteredPlugin,
+  options: {
+    claim?: boolean;
+    onColdStartWithoutClaim?: () => void;
+    recheckCommandClaims?: CommandClaimsRecheck;
+  } = {},
 ): Promise<PluginHost> {
   const pipeline = await ensurePluginPipeline(workspace);
   await startPluginForPanel({
     panelStartedHosts,
     workspaceId: workspace.workspaceId,
     pluginId: plugin.manifest.name,
+    claim: options.claim,
+    onColdStartWithoutClaim: options.onColdStartWithoutClaim,
     hostActivation: () => pipeline.host.activationOf(plugin.manifest.name),
-    ensureStarted: () => pipeline.ensureStarted(plugin.manifest.name),
+    ensureStarted: () => {
+      options.recheckCommandClaims?.();
+      return pipeline.ensureStarted(plugin.manifest.name)
+        .then(toPluginPanelHostStartResult);
+    },
   });
   return pipeline.host;
 }
@@ -3013,6 +3206,7 @@ async function stopPluginHostIfUnclaimed(
   workspaceId: string,
   pluginId: string,
 ): Promise<void> {
+  const key = pluginLifecycleKey(workspaceId, pluginId);
   const hasAnotherPanel = [...runningPluginPanels.values()].some(
     (candidate) =>
       candidate.workspaceId === workspaceId && candidate.pluginId === pluginId,
@@ -3023,10 +3217,20 @@ async function stopPluginHostIfUnclaimed(
     // with the host's spawn, so it holds the host open exactly like a
     // sibling panel does.
     !pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&
+    !activeCommandClaims.has(key) &&
+    // A rebuild owns this plugin's stop while its barrier is up — this
+    // stays clear of the on-demand markers below so a later, unclaimed
+    // release still finds them once the barrier falls.
+    !activeCommandClaims.isDraining(key) &&
     // Only stop the host if an on-demand open is the reason it's running at
     // all — an enabled, workspace-started plugin has no panel or tab to
-    // answer to (#779 round 4 finding 3).
-    panelStartedHosts.delete(pluginLifecycleKey(workspaceId, pluginId))
+    // answer to (#779 round 4 finding 3). A panel/web-app cold start and a
+    // command cold start are two disjoint claims on that same "on-demand"
+    // fact — commands never touch panelStartedHosts (claim: false), so a
+    // surface-less command's own on-demand marker is the only one that can
+    // ever consume here, and only once nothing else still needs the host
+    // (round-9 finding 1).
+    (panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))
   ) {
     // Stops the shared host directly rather than through the pipeline's
     // disable()/enable() actions — this is "nothing needs the process right
@@ -3118,6 +3322,63 @@ async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> 
     );
   }
   await Promise.all(stops);
+}
+
+async function stopPluginPanelsForSender(senderId: number): Promise<void> {
+  const stops: Promise<void>[] = [];
+  for (const panel of [...runningPluginPanels.values()]) {
+    if (panel.senderId !== senderId) continue;
+    stops.push(
+      stopPluginPanel(panel.workspaceId, panel.pluginId, panel.panelId).catch((error) => {
+        console.warn(
+          "[desktop] failed to stop plugin panel during sender cleanup",
+          error,
+        );
+      }),
+    );
+  }
+  await Promise.all(stops);
+}
+
+// Every main-owned resource this sender's own window opened — panels
+// (each stop also releases its preview registration) and web apps,
+// wherever their workspace is — cleared regardless of whether that
+// workspace's own pipeline stops too. A survivor sharing the workspace
+// still needs stopPluginHostIfUnclaimed to see this sender's own claims
+// gone, or its guest records outlive the window that opened them (#779
+// round 20 finding 1, finding 2).
+async function stopPluginSurfacesForSender(senderId: number): Promise<void> {
+  const removedWebApps = pluginWebAppViews.removeForSender(senderId);
+  destroyPluginWebAppViews(removedWebApps);
+  // Destroying the view alone leaves its host running for good — the
+  // normal single-webapp stop also checks whether anything else still
+  // claims that host; this sweep must too, once per distinct plugin the
+  // removed views belonged to (#779 round 21 finding 2).
+  const affected = new Map<string, { workspaceId: string; pluginId: string }>();
+  for (const record of removedWebApps) {
+    affected.set(
+      pluginLifecycleKey(record.workspaceId, record.pluginId),
+      record,
+    );
+  }
+  // Each stop's own rejection is caught right here, not left to reach
+  // Promise.all — an uncaught one there would reject the whole call and
+  // skip every stop still queued behind it, including the panel cleanup
+  // below (#779 round 25 finding 4).
+  await Promise.all(
+    [...affected.values()].map(({ workspaceId, pluginId }) =>
+      withPluginHostLifecycleLock(
+        pluginLifecycleKey(workspaceId, pluginId),
+        () => stopPluginHostIfUnclaimed(workspaceId, pluginId),
+      ).catch((error: unknown) => {
+        console.warn(
+          `[desktop] failed to stop an unclaimed plugin host during sender cleanup (${pluginId})`,
+          error,
+        );
+      }),
+    ),
+  );
+  await stopPluginPanelsForSender(senderId);
 }
 
 // Stopping the shared host is the pipeline's job (stopPluginPipelineForWorkspace
@@ -3531,13 +3792,19 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
   pluginPanelSdkAuthorities.revokeSender(senderId);
-  destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
     closeEngineYDocSessionsForSender(senderId),
     waitForPendingEngineYDocOpens(senderId),
-    activeWorkspaceId
+    // See stopPluginSurfacesForSender's own doc (#779 round 20 finding 1).
+    stopPluginSurfacesForSender(senderId),
+    // This sender's own entry has not been cleared yet, so it would
+    // otherwise always count as "another window" — excluded here so full
+    // teardown still runs when this reload was the last window on the
+    // workspace (#779 round 20 finding 2).
+    activeWorkspaceId &&
+      !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
       ? stopPluginWorkspace(activeWorkspaceId)
       : Promise.resolve(),
   ]);
@@ -6714,6 +6981,7 @@ function registerIpcHandlers(
           pluginRoot: input.pluginRoot,
           pluginId: input.pluginId,
           panelId: input.panelId,
+          pluginRegistration: pluginPipelines.get(workspace.workspaceId),
         }),
       isCurrent,
     );
@@ -6832,26 +7100,13 @@ function registerIpcHandlers(
           senderId: sender.id,
           generation,
         });
-        const grant = pluginPanelSdkAuthorities.register({
+        registerPluginPanelGrant({
           senderId: sender.id,
           generation,
           workspaceId: workspace.workspaceId,
           pluginId: input.pluginId,
           panelId: input.panelId,
         });
-        grant.signal.addEventListener(
-          "abort",
-          () =>
-            pluginWorkspaceEventsByWorkspace
-              .get(workspace.workspaceId)
-              ?.disposeOwner({
-                kind: "panel",
-                workspaceId: workspace.workspaceId,
-                pluginId: input.pluginId,
-                panelId: input.panelId,
-              }),
-          { once: true },
-        );
         return StartPluginPanelResult.parse({
           status: "ok",
           url: handle.url,
@@ -6859,6 +7114,96 @@ function registerIpcHandlers(
         });
       },
     );
+  });
+
+  ipcMain.handle(CHANNELS.invokePluginCommand, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = InvokePluginCommandPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
+    const isCurrent = () =>
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation &&
+      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
+    if (!isCurrent()) {
+      throw new Error(
+        "The plugin command request does not target the active workspace. Open the workspace and try again.",
+      );
+    }
+    await ensurePluginPipeline(workspace);
+    assertWritableWorkspace(workspace);
+    const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
+    if (!plugin) {
+      return InvokePluginCommandResult.parse({
+        status: "plugin-not-found",
+        message: `This workspace has no plugin "${input.pluginId}".`,
+      });
+    }
+    const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);
+    const assertCurrent = () => {
+      if (!isCurrent()) {
+        throw new Error(
+          "The plugin command request was cancelled because the renderer changed.",
+        );
+      }
+    };
+    // A rebuild or a workspace close is already draining this key's
+    // claims (round-10 finding 2; round-12 finding 2 for the workspace
+    // path) — joining now would extend a wait meant to be bounded by the
+    // claims that existed when it began, so this refuses instead. The
+    // status is named for the more common cause; the message stays
+    // accurate for both.
+    if (activeCommandClaims.isDraining(claimKey)) {
+      return InvokePluginCommandResult.parse({
+        status: "plugin-rebuilding",
+        message: `dohc is still working on plugin "${input.pluginId}". Try the command again in a moment.`,
+      });
+    }
+    activeCommandClaims.claim(claimKey);
+    try {
+      return InvokePluginCommandResult.parse(
+        await invokeRegisteredPluginCommand({
+          input,
+          plugin,
+          ensureStarted: async () => {
+            assertCurrent();
+            assertWritableWorkspace(workspace);
+            return withPluginHostLifecycleLock(
+              claimKey,
+              () => ensurePluginStarted(workspace, plugin, {
+                claim: false,
+                onColdStartWithoutClaim: () =>
+                  activeCommandClaims.markStartedHost(claimKey),
+                recheckCommandClaims: () => {
+                  if (activeCommandClaims.isDraining(claimKey)) {
+                    throw new PluginClaimsDrainingError(input.pluginId);
+                  }
+                },
+              }),
+            );
+          },
+          ensureCurrent: assertCurrent,
+        }),
+      );
+    } finally {
+      activeCommandClaims.release(claimKey);
+      // Best-effort: a `finally` that itself throws replaces whatever the
+      // `try` returned or threw, so a host-stop rejection here must never
+      // reach the renderer in place of a command result the invocation
+      // already earned (round-8 finding 4).
+      try {
+        await withPluginHostLifecycleLock(
+          claimKey,
+          () => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId),
+        );
+      } catch (error) {
+        console.warn(
+          `[desktop] failed to stop an unclaimed plugin host for "${input.pluginId}"`,
+          error,
+        );
+      }
+    }
   });
 
   ipcMain.handle(CHANNELS.stopPluginPanel, async (event, payload) => {
@@ -6985,6 +7330,7 @@ function registerIpcHandlers(
           pluginRoot: input.pluginRoot,
           pluginId: input.pluginId,
           webAppId: input.webAppId,
+          pluginRegistration: pluginPipelines.get(workspace.workspaceId),
         }),
       isCurrent,
     );
@@ -7113,7 +7459,7 @@ function registerIpcHandlers(
         // hold that section open waiting for the handler it runs inside.
         const recoverConsumedCredential = (): void => {
           void recoverConsumedWebAppCredential({
-            notifyFailed: () => notifyPluginWebAppFailed(sender, identity),
+            notifyFailed: () => notifyPluginWebAppFailed(sender, generation, identity),
             withTeardownLock: (teardown) =>
               withPluginWebAppStartLock(
                 pluginWebAppKey(
@@ -7318,11 +7664,15 @@ function registerIpcHandlers(
           await run(pipeline, input.pluginId, input.workspaceId),
         );
         if (result.ok) {
-          // install/enable/approve/disable/uninstall each decide this
+          // install/enable/approve/rebuild/disable/uninstall each decide this
           // plugin's running state on the workspace's own authority — an
           // earlier panel's cold start no longer owns whether closing it
-          // stops the host (#779 round 4 finding 3).
-          panelStartedHosts.delete(pluginLifecycleKey(input.workspaceId, input.pluginId));
+          // stops the host (#779 round 4 finding 3). A command's own
+          // on-demand marker is the same kind of stale claim once the
+          // workspace has spoken (round-9 finding 1).
+          const key = pluginLifecycleKey(input.workspaceId, input.pluginId);
+          panelStartedHosts.delete(key);
+          activeCommandClaims.consumeStartedHost(key);
         }
         return result;
       } catch (error) {
@@ -7346,6 +7696,27 @@ function registerIpcHandlers(
     pipeline.enable(pluginId));
   pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
     pipeline.approve(pluginId));
+  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId, workspaceId) =>
+    pipeline.rebuild(pluginId, {
+      // The old grant must not survive the runtime it was authorized
+      // against — disable/uninstall already revoke here, rebuild only tore
+      // down web apps (#779 round 18 finding 3). Unlike disable/uninstall,
+      // rebuild leaves the panel mounted with a new runtime still coming —
+      // an aborted grant can never signal live again on its own, so a
+      // still-mounted panel's next SDK call would otherwise fail forever
+      // instead of the round-5 split's own re-grant (#779 round 21
+      // finding 6).
+      onOldRuntimeStopped: () => {
+        revokePluginPanels(workspaceId, pluginId);
+        void reregisterPluginPanels(workspaceId, pluginId).catch((error: unknown) => {
+          console.warn(
+            `[desktop] failed to re-register plugin panels after a rebuild (plugin ${pluginId})`,
+            error,
+          );
+        });
+        stopPluginWebAppsForPlugin(workspaceId, pluginId);
+      },
+    }));
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);
@@ -7466,8 +7837,32 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     const senderId = event.sender.id;
     const previousWorkspaceId = activeWorkspaceIdBySender.get(senderId);
-    preferredWorkspaceId = workspace.workspaceId;
-    activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
+    // Claimed before the await below: a second rapid switch from this same
+    // sender bumps this past whatever call is already in flight, so this
+    // call can tell after its own await whether it is still the latest
+    // (#779 round 23 finding 2).
+    const switchToken = (workspaceSwitchTokenBySender.get(senderId) ?? 0) + 1;
+    workspaceSwitchTokenBySender.set(senderId, switchToken);
+    // Before the set below flips this sender's own entry: this window's
+    // own panels and web apps on the workspace it's leaving are gone
+    // regardless of whether that workspace survives the switch (#779
+    // round 21 finding 4). The generation bumps first — startPluginPanel
+    // and startPluginWebApp both re-check it right before they register,
+    // so an in-flight start from before the switch discards itself instead
+    // of registering into this sweep's blind spot after it already ran
+    // (#779 round 22 finding 3).
+    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+      advanceRendererGeneration(senderId);
+      await stopPluginSurfacesForSender(senderId);
+    }
+    // A→B then A→C both read previousWorkspaceId=A above and raced through
+    // the await — if B's call resumes after C's already assigned C, B's
+    // own assignment here must not overwrite it back (#779 round 23
+    // finding 2).
+    if (workspaceSwitchTokenBySender.get(senderId) === switchToken) {
+      preferredWorkspaceId = workspace.workspaceId;
+      activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
+    }
     if (!activeWorkspaceCleanupHooked.has(event.sender)) {
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
@@ -7475,12 +7870,44 @@ function registerIpcHandlers(
         pluginPanelSdkAuthorities.revokeSender(senderId);
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
-        if (activeWorkspaceId) {
-          void stopPluginWorkspace(activeWorkspaceId);
-        }
+        workspaceSwitchTokenBySender.delete(senderId);
+        // See stopPluginSurfacesForSender's own doc (#779 round 20 finding 1).
+        void (async () => {
+          try {
+            await stopPluginSurfacesForSender(senderId);
+          } catch (error) {
+            console.warn(
+              `[desktop] failed to clean up plugin surfaces for a destroyed window (sender ${senderId})`,
+              error,
+            );
+          } finally {
+            // Run whether or not the stop above succeeded: a rejection
+            // there must not also skip deciding whether this was the
+            // workspace's last open window, or the whole workspace leaks
+            // instead of just this sender's own claims (#779 round 23
+            // finding 3). This sender's own entry is already gone above,
+            // so a true result here means another window, not a stale
+            // read of this one.
+            if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
+              await stopPluginWorkspace(activeWorkspaceId).catch((error: unknown) => {
+                console.warn(
+                  `[desktop] failed to stop an orphaned plugin workspace after a destroyed window (sender ${senderId})`,
+                  error,
+                );
+              });
+            }
+          }
+        })();
       });
     }
-    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+    // Set above, before this read: a true result here means another window
+    // has it, not a stale read of this sender's own now-superseded entry
+    // (#779 round 19 finding 2).
+    if (
+      previousWorkspaceId &&
+      previousWorkspaceId !== workspace.workspaceId &&
+      !isWorkspaceOpenInAnyWindow(previousWorkspaceId)
+    ) {
       await stopPluginWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();

@@ -1,5 +1,5 @@
 import type { PluginStatusRecord } from "../../ipc/bridgeContract";
-import { canServeSurfaces } from "./pluginCatalog";
+import { canServeSurfaces, pluginTitle } from "./pluginCatalog";
 import { pluginViewId, type PluginViewId } from "./workbenchState";
 
 // Which plugin views the activity bar shows, and what the side panel does
@@ -14,6 +14,20 @@ export interface PluginActivityView {
   /** The panel's own icon, or null to fall back to the plugin's. */
   icon: string | null;
   plugin: PluginStatusRecord;
+}
+
+export interface PluginCommandEntry {
+  pluginId: string;
+  commandId: string;
+  title: string;
+  pluginTitle: string;
+}
+
+export function pluginCommandPaletteId(
+  pluginId: string,
+  commandId: string,
+): string {
+  return `plugin-command-${pluginId}\0${commandId}`;
 }
 
 /** Every view the rail shows, in plugin order, then manifest order. */
@@ -36,6 +50,33 @@ export function pluginActivityViews(
     }
   }
   return views;
+}
+
+export function pluginCommandEntries(
+  plugins: readonly PluginStatusRecord[],
+): PluginCommandEntry[] {
+  const entries: PluginCommandEntry[] = [];
+  for (const plugin of plugins) {
+    // canServeSurfaces only excludes a status that currently starts with
+    // "disabled" — a plugin the user disabled but that is mid-approve or
+    // mid-rebuild (still durably disabled) cycles through
+    // "installing"/"scanning"/"building"/"failed" without ever losing
+    // disabledReason "user", and every one of those statuses passes.
+    // Every command invocation against a durably disabled plugin fails
+    // with "plugin-disabled" regardless of that transient status, so the
+    // palette must never offer one while that reason still holds
+    // (round-10 finding 3).
+    if (!canServeSurfaces(plugin) || plugin.disabledReason === "user") continue;
+    for (const command of plugin.commands) {
+      entries.push({
+        pluginId: plugin.id,
+        commandId: command.id,
+        title: command.title,
+        pluginTitle: pluginTitle(plugin),
+      });
+    }
+  }
+  return entries;
 }
 
 /**
