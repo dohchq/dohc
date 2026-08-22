@@ -7504,7 +7504,18 @@ function registerIpcHandlers(
         result.plugin.approvedHash !== null &&
         (result.plugin.status === "disabled" ||
           result.plugin.status === "disabled-pending-repair");
-      if (result.ok || claimantStoppedBySettledResult) {
+      // Checked before the teardown decision, not only for the
+      // registration/partition gate below: input.pluginId can still be
+      // claimed by a completely different, still-installed plugin the
+      // same collision produced — the losing, never-installed side
+      // removed while the winning side keeps running under the identical
+      // id. That loser's own removal genuinely returns result.ok, with
+      // nothing of its own ever having run — revoking panels or stopping
+      // web apps by id alone on result.ok's say-so would then tear down
+      // the WINNER's own live surfaces for an action that never touched
+      // it (#779-offers round 24 finding 1).
+      const stillInstalledClaimant = pluginIdHasInstalledClaimant(pipeline, input.pluginId);
+      if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {
         revokePluginPanels(input.workspaceId, input.pluginId);
         stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
       }
@@ -7524,12 +7535,19 @@ function registerIpcHandlers(
       // skipping the clear on its account would leave the row that just
       // uninstalled with a stale partition and registration forever
       // (#779-offers round 16 finding 3, round 17 finding 1).
-      const idStillOwned = result.ok && pluginIdHasInstalledClaimant(pipeline, input.pluginId);
+      const idStillOwned = result.ok && stillInstalledClaimant;
+      // Also gated on directoryName, the standing trace-to-directory rule
+      // (#779-offers round 24 finding 4): forgetUninstalledPlugin only
+      // clears a registration that actually traces to THIS directory,
+      // so an id-losing loser's own removed event can never delete a
+      // still-installed winner's own registration and started-host claim
+      // under the same shared id.
       forgetUninstalledPlugin({
         registrations: pluginRegistrations,
         panelStartedHosts,
         workspaceId: input.workspaceId,
         pluginId: input.pluginId,
+        directoryName: input.directoryName,
         uninstalled: result.ok && !idStillOwned,
       });
       if (result.ok && !idStillOwned) {

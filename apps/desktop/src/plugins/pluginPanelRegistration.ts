@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
@@ -21,6 +21,13 @@ export interface PluginWebAppRegistration {
 export interface RegisteredPlugin {
   pluginRoot: string;
   manifest: DohcPluginManifest;
+  // Derived from pluginRoot, which loadPluginPanelRegistration/
+  // loadPluginWebAppRegistration always resolve from the plugin's actual
+  // discovered SOURCE root — never a built snapshot the way PluginHost's
+  // own directoryName had to stop deriving in round 20 finding 1. This id's
+  // own claim on this workspace is only ever THIS directory's to forget
+  // (#779-offers round 24 finding 4).
+  directoryName: string;
 }
 
 /**
@@ -50,6 +57,7 @@ export function rememberPluginRegistration(
   const remembered: RegisteredPlugin = {
     pluginRoot: registration.pluginRoot,
     manifest: registration.manifest,
+    directoryName: basename(registration.pluginRoot),
   };
   forWorkspace.set(registration.manifest.name, remembered);
   registrations.set(workspaceId, forWorkspace);
@@ -118,10 +126,23 @@ export function forgetUninstalledPlugin(input: {
   panelStartedHosts: Set<string>;
   workspaceId: string;
   pluginId: string;
+  directoryName: string;
   uninstalled: boolean;
 }): void {
   if (!input.uninstalled) return;
-  input.registrations.get(input.workspaceId)?.delete(input.pluginId);
+  const forWorkspace = input.registrations.get(input.workspaceId);
+  const registered = forWorkspace?.get(input.pluginId);
+  // The standing trace-to-directory rule: this id's registration and
+  // started-host claim are only ever the departed row's own to forget
+  // when they actually trace to the SAME directory. Two rows can share an
+  // id (a broken manifest's directory-derived fallback colliding with
+  // some other, unrelated plugin's real id) — an id-losing loser's own
+  // removal must never reach into a still-installed winner's live
+  // registration and host claim under that shared id (#779-offers round
+  // 24 finding 4). Nothing registered at all is trivially nothing to
+  // forget either way.
+  if (!registered || registered.directoryName !== input.directoryName) return;
+  forWorkspace?.delete(input.pluginId);
   input.panelStartedHosts.delete(
     pluginLifecycleKey(input.workspaceId, input.pluginId),
   );
@@ -147,6 +168,7 @@ export function forgetRemovedPlugin(input: {
     panelStartedHosts: input.panelStartedHosts,
     workspaceId: input.workspaceId,
     pluginId: input.event.pluginId,
+    directoryName: input.event.directoryName,
     uninstalled: true,
   });
 }

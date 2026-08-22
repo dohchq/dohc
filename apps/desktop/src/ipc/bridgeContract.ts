@@ -2575,10 +2575,15 @@ export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
     workspaceId: WORKSPACE_ID,
     plugin: PluginStatusRecord,
   }).strict(),
+  // directoryName is the departed row's own — never re-derived from
+  // whatever this id currently names, which a collision can leave
+  // pointing at an entirely different, still-installed row (#779-offers
+  // round 24 finding 4).
   z.object({
     kind: z.literal("removed"),
     workspaceId: WORKSPACE_ID,
     pluginId: PLUGIN_ID,
+    directoryName: z.string().min(1).max(255),
   }).strict(),
   // An invalid, never-installed candidate's arrival or departure names no
   // pluginId "changed"/"removed" could carry — this is the one honest fact

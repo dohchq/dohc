@@ -412,6 +412,7 @@ describe("plugin panel registration", () => {
     const registration: RegisteredPlugin = {
       pluginRoot: "plugins/hello-plugin",
       manifest: { version: 1, name: "hello-plugin", entry: "plugin.mjs" },
+      directoryName: "hello-plugin",
     };
     const registrations = new Map([
       ["workspace-1", new Map([["hello-plugin", registration]])],
@@ -426,6 +427,7 @@ describe("plugin panel registration", () => {
       panelStartedHosts,
       workspaceId: "workspace-1",
       pluginId: "hello-plugin",
+      directoryName: "hello-plugin",
       uninstalled: false,
     });
     expect(registrations.get("workspace-1")?.get("hello-plugin"))
@@ -437,9 +439,55 @@ describe("plugin panel registration", () => {
       panelStartedHosts,
       workspaceId: "workspace-1",
       pluginId: "hello-plugin",
+      directoryName: "hello-plugin",
       uninstalled: true,
     });
     expect(registrations.get("workspace-1")?.get("hello-plugin"))
+      .toBeUndefined();
+    expect(panelStartedHosts.size).toBe(0);
+  });
+
+  // #779-offers round 24 finding 4: an id-losing collision loser's own
+  // removal must never forget a still-installed winner's own registration
+  // under the same shared id — this id's registration is only ever the
+  // event's own directory's to forget.
+  it("never forgets a registration whose own directory differs from the removed event's", () => {
+    const registration: RegisteredPlugin = {
+      pluginRoot: "plugins/winner-dir",
+      manifest: { version: 1, name: "shared-id", entry: "plugin.mjs" },
+      directoryName: "winner-dir",
+    };
+    const registrations = new Map([
+      ["workspace-1", new Map([["shared-id", registration]])],
+    ]);
+    const panelStartedHosts = new Set([
+      pluginLifecycleKey("workspace-1", "shared-id"),
+    ]);
+
+    // The loser at a DIFFERENT directory left — not the winner this id's
+    // registration actually traces to.
+    forgetUninstalledPlugin({
+      registrations,
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "shared-id",
+      directoryName: "loser-dir",
+      uninstalled: true,
+    });
+    expect(registrations.get("workspace-1")?.get("shared-id"))
+      .toBe(registration);
+    expect(panelStartedHosts.size).toBe(1);
+
+    // The winner's OWN directory leaving is still forgotten normally.
+    forgetUninstalledPlugin({
+      registrations,
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "shared-id",
+      directoryName: "winner-dir",
+      uninstalled: true,
+    });
+    expect(registrations.get("workspace-1")?.get("shared-id"))
       .toBeUndefined();
     expect(panelStartedHosts.size).toBe(0);
   });
@@ -448,6 +496,7 @@ describe("plugin panel registration", () => {
     const registration: RegisteredPlugin = {
       pluginRoot: "plugins/hello-plugin",
       manifest: { version: 1, name: "hello-plugin", entry: "plugin.mjs" },
+      directoryName: "hello-plugin",
     };
     const registrations = new Map([
       ["workspace-1", new Map([["hello-plugin", registration]])],
@@ -548,7 +597,7 @@ describe("plugin panel registration", () => {
       registrations,
       panelStartedHosts,
       workspaceId: "workspace-1",
-      event: { kind: "removed", pluginId: "hello-plugin" },
+      event: { kind: "removed", pluginId: "hello-plugin", directoryName: "foo" },
     });
     expect(panelStartedHosts.size).toBe(0);
 

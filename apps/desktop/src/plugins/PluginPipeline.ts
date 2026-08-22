@@ -38,6 +38,7 @@ import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
   canonicalPluginSourceHash,
   EXCLUDED_SOURCE_NAMES,
+  hashPluginSourceFiles,
   isPluginRootArtifact,
   pluginIdToSafePath,
   pluginStateRoot,
@@ -134,7 +135,13 @@ export interface PluginPipelinePluginStatus extends PluginMetadata {
 
 export type PluginPipelineStatusEvent =
   | { kind: "changed"; plugin: PluginPipelinePluginStatus }
-  | { kind: "removed"; pluginId: string }
+  // directoryName is the departed row's own — never re-derived from
+  // whatever this id currently names, which a collision can leave
+  // pointing at an entirely different, still-installed row. Consumers
+  // that key their own state by id alone (main's panel/web app
+  // registrations) need it to apply the same trace-to-directory rule
+  // cleanup itself already does (#779-offers round 24 finding 4).
+  | { kind: "removed"; pluginId: string; directoryName: string }
   // An invalid, never-installed candidate (a broken manifest, or none at
   // all) never gets a status entry of its own (#779 round 8 D2's seeding
   // only fires for one that was already installed) — so its arrival or
@@ -719,10 +726,14 @@ export class PluginPipeline {
    */
   pluginRegistration(
     pluginId: string,
-  ): { pluginRoot: string; manifest: DohcPluginManifest } | null {
+  ): { pluginRoot: string; manifest: DohcPluginManifest; directoryName: string } | null {
     for (const candidate of this.discovery) {
       if (candidate.id !== pluginId || !candidate.manifest) continue;
-      return { pluginRoot: candidate.rootPath, manifest: candidate.manifest };
+      return {
+        pluginRoot: candidate.rootPath,
+        manifest: candidate.manifest,
+        directoryName: candidate.directoryName,
+      };
     }
     return null;
   }
@@ -1292,7 +1303,7 @@ export class PluginPipeline {
         this.discovery = this.discovery.filter((entry) =>
           resolve(entry.rootPath) !== resolve(candidate.rootPath)
         );
-        this.emit({ kind: "removed", pluginId });
+        this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
         return {
           ok: true,
           plugin: {
@@ -1360,20 +1371,42 @@ export class PluginPipeline {
           record.directoryName !== undefined &&
           record.directoryName !== candidate.directoryName
         ) {
-          const fromDirectoryName = record.directoryName;
-          const toDirectoryName = candidate.directoryName;
-          await this.operations.mutateRecord(
-            this.options.stateDir,
-            this.workspaceRoot,
-            candidate.id,
-            (existing) =>
-              existing ? { ...existing, directoryName: toDirectoryName } : existing,
-          );
-          await renamePluginSettingsEntry(
-            this.workspaceRoot,
-            fromDirectoryName,
-            toDirectoryName,
-          );
+          // Startup has no discovery history to prove this — unlike
+          // processWatcherBatch, which can tell a genuine rename apart from
+          // a coexisting duplicate promoted into a vacated id by checking
+          // whether the new directory is new to discovery this batch
+          // (#779-offers round 23 finding 1). A duplicate that coexisted
+          // the whole time dohc was closed, now the only remaining
+          // declarer of this manifest name because the original directory
+          // is simply gone, looks identical here: same id, a directoryName
+          // mismatch. Content is what a rename actually preserves and a
+          // coincidentally-same-named duplicate does not — adopt only when
+          // this candidate's own live source hashes to exactly what was
+          // approved under this id (#779-offers round 24 finding 2).
+          const liveDigest = await hashPluginSourceFiles(candidate.rootPath);
+          if (liveDigest.sourceHash === record.approvedHash) {
+            const fromDirectoryName = record.directoryName;
+            const toDirectoryName = candidate.directoryName;
+            await this.operations.mutateRecord(
+              this.options.stateDir,
+              this.workspaceRoot,
+              candidate.id,
+              (existing) =>
+                existing ? { ...existing, directoryName: toDirectoryName } : existing,
+            );
+            await renamePluginSettingsEntry(
+              this.workspaceRoot,
+              fromDirectoryName,
+              toDirectoryName,
+            );
+          }
+          // On mismatch: do not retarget or migrate. The record still
+          // names the missing original directory, and install's own
+          // recoverable/cleanup path already handles that; this candidate
+          // — a fresh, unrelated one from the record's point of view —
+          // still gets the reconciliation below, which verifies its own
+          // hash against this SAME approvedHash and correctly holds for
+          // approval on the mismatch rather than auto-trusting it.
         }
         this.enqueueSourceRefresh(candidate.id, () =>
           this.reconcileApprovedCandidate(candidate.id, true));
@@ -1707,19 +1740,23 @@ export class PluginPipeline {
     // An invalid candidate (a broken manifest, or none at all) that was
     // never installed gets no status entry and so no "changed"/"removed"
     // event of its own above — the only signal left honest enough to name
-    // is that discovery's invalid set itself moved, not which directory
-    // (#779-offers round 23 finding 3).
-    const invalidDirectoryNames = (candidates: readonly InstalledPluginRecord[]) =>
+    // is that discovery's invalid set itself moved. Fingerprinted by
+    // directoryName AND its diagnostics, not directoryName alone: one
+    // malformed manifest replaced by another, differently malformed one
+    // leaves the directory NAME set unchanged while the row's own
+    // diagnostics — what the Plugins view actually shows for it — did
+    // change (#779-offers round 24 finding 3).
+    const invalidFingerprints = (candidates: readonly InstalledPluginRecord[]) =>
       new Set(
         candidates
           .filter((candidate) => !candidate.valid || candidate.manifest === null)
-          .map((candidate) => candidate.directoryName),
+          .map((candidate) => `${candidate.directoryName}\0${candidate.diagnostics.join("\0")}`),
       );
-    const previousInvalid = invalidDirectoryNames(previous);
-    const nextInvalid = invalidDirectoryNames(next);
+    const previousInvalid = invalidFingerprints(previous);
+    const nextInvalid = invalidFingerprints(next);
     const invalidSetChanged =
       previousInvalid.size !== nextInvalid.size ||
-      [...previousInvalid].some((directoryName) => !nextInvalid.has(directoryName));
+      [...previousInvalid].some((fingerprint) => !nextInvalid.has(fingerprint));
     if (invalidSetChanged) this.emit({ kind: "discovery-changed" });
   }
 
@@ -1899,7 +1936,7 @@ export class PluginPipeline {
       this.uninstallConfirmations.delete(
         uninstallConfirmationKey(candidate.id, candidate.directoryName),
       );
-      this.emit({ kind: "removed", pluginId: candidate.id });
+      this.emit({ kind: "removed", pluginId: candidate.id, directoryName: candidate.directoryName });
     } catch (error) {
       const detail = pipelineError(
         "uninstall",
@@ -2580,7 +2617,7 @@ export class PluginPipeline {
       );
       this.statuses.delete(pluginId);
       this.doorWrittenDeltas.delete(pluginId);
-      this.emit({ kind: "removed", pluginId });
+      this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
       return {
         ok: true,
         plugin: {

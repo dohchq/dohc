@@ -563,7 +563,7 @@ describe("PluginDetailsPage", () => {
     // A genuine, unambiguous remove: the tab's own row leaves with nothing
     // else naming this id.
     act(() => {
-      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo" });
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo", directoryName: "old-folder" });
     });
     await waitFor(() =>
       expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
@@ -611,7 +611,7 @@ describe("PluginDetailsPage", () => {
     expect(await screen.findByText("Original")).toBeTruthy();
 
     act(() => {
-      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo" });
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo", directoryName: "old-folder" });
     });
     await waitFor(() =>
       expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
@@ -654,7 +654,7 @@ describe("PluginDetailsPage", () => {
     expect(await screen.findByText("Original")).toBeTruthy();
 
     act(() => {
-      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo" });
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo", directoryName: "old-folder" });
     });
     await waitFor(() =>
       expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),

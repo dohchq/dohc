@@ -274,7 +274,12 @@ describe("PluginsView", () => {
     await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
 
     act(() => {
-      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "codex" });
+      statusListener?.({
+        kind: "removed",
+        workspaceId: "ws-1",
+        pluginId: "codex",
+        directoryName: "codex",
+      });
     });
 
     expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
@@ -1145,6 +1150,7 @@ describe("PluginsView", () => {
         kind: "removed",
         workspaceId: "ws-1",
         pluginId: "going-plugin",
+        directoryName: "going-plugin",
       });
     });
 
@@ -1176,7 +1182,12 @@ describe("PluginsView", () => {
     expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
 
     act(() => {
-      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "codex" });
+      statusListener?.({
+        kind: "removed",
+        workspaceId: "ws-1",
+        pluginId: "codex",
+        directoryName: "codex-a",
+      });
     });
 
     // Ambiguous id: nothing is dropped locally, so the survivor — and, for
@@ -1218,7 +1229,12 @@ describe("PluginsView", () => {
     // The initial request is still in flight — loadRef has never held a
     // ready list, so ambiguity cannot be read off it either way.
     act(() => {
-      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "codex" });
+      statusListener?.({
+        kind: "removed",
+        workspaceId: "ws-1",
+        pluginId: "codex",
+        directoryName: "codex-a",
+      });
     });
 
     // What the in-flight request resolves to: a same-tick backend snapshot

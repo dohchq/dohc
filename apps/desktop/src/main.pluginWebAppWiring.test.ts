@@ -297,7 +297,7 @@ describe("plugin web app main-process wiring", () => {
       "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
     );
     const settledGuardAt = uninstall.indexOf(
-      "if (result.ok || claimantStoppedBySettledResult) {",
+      "if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {",
       uninstallCallAt,
     );
     const revokeAt = uninstall.indexOf(
@@ -337,7 +337,7 @@ describe("plugin web app main-process wiring", () => {
   it("revokes authority on a failed uninstall too, only once the settled status proves the process was actually stopped", () => {
     const uninstall = handler("uninstallPlugin");
     const settledGuardAt = uninstall.indexOf(
-      "if (result.ok || claimantStoppedBySettledResult) {",
+      "if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {",
     );
     const predicateAt = uninstall.indexOf(
       "const claimantStoppedBySettledResult =",
@@ -358,5 +358,30 @@ describe("plugin web app main-process wiring", () => {
     expect(squeeze(predicate)).toContain(
       'result.plugin.status==="disabled-pending-repair"',
     );
+  });
+
+  // #779-offers round 24 finding 1: removing an id-losing collision loser
+  // genuinely returns result.ok, with nothing of ITS own ever having run —
+  // the loser has no panel or web app authority of its own to revoke.
+  // result.ok alone is not proof this id's own claimant was stopped: a
+  // still-installed WINNER can survive under the identical id, and
+  // teardown by id alone would tear its live surfaces down for an action
+  // that never touched it.
+  it("never tears down a still-installed claimant's surfaces when the settled result names no stopped claimant", () => {
+    const uninstall = handler("uninstallPlugin");
+    const claimantAt = uninstall.indexOf(
+      "const stillInstalledClaimant = pluginIdHasInstalledClaimant(pipeline, input.pluginId);",
+    );
+    const settledGuardAt = uninstall.indexOf(
+      "if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {",
+      claimantAt,
+    );
+
+    // MUTATION (gate on result.ok/claimantStoppedBySettledResult alone,
+    // dropping !stillInstalledClaimant): removing the loser would then
+    // tear down the winner's still-live panel and web app views, even
+    // though nothing of the loser's own was ever running to revoke.
+    expect(claimantAt).toBeGreaterThan(-1);
+    expect(settledGuardAt).toBeGreaterThan(claimantAt);
   });
 });
