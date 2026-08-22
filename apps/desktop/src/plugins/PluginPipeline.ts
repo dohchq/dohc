@@ -12,6 +12,7 @@ import {
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import { buildPluginBundle } from "./pluginBuildRunner";
+import { CLAIMS_DRAINING_ERROR_CODE } from "./pluginCommandInvocation";
 import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
@@ -2661,7 +2662,7 @@ export class PluginPipeline {
       if (this.options.hasOutstandingCommandClaim?.(candidate.id)) {
         return this.failure(candidate.id, pipelineError(
           "runtime",
-          "claims-draining",
+          CLAIMS_DRAINING_ERROR_CODE,
           `dohc is still working on plugin "${candidate.id}". Try the command again in a moment.`,
         ));
       }

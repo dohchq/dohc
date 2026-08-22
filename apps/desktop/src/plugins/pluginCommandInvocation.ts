@@ -19,6 +19,15 @@ function errorMessage(error: unknown): string {
 }
 
 /**
+ * The one PluginPipeline error code a panel or web-app start recognizes
+ * (see PluginPanelHostStartResult in pluginPanelRegistration.ts) — a
+ * shared literal, not a raw string at each site, so a typo at either end
+ * fails the type system instead of silently degrading the retryable
+ * refusal to a generic error (#779 round 27).
+ */
+export const CLAIMS_DRAINING_ERROR_CODE = "claims-draining";
+
+/**
  * Thrown by an `ensureStarted` implementation that rechecked the command
  * claims barrier right at its own pipeline-enqueue point and found it
  * raised — a stopping action started queuing after this command's own

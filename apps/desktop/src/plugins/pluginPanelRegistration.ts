@@ -1,10 +1,16 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
-import { PluginClaimsDrainingError } from "./pluginCommandInvocation";
+import {
+  CLAIMS_DRAINING_ERROR_CODE,
+  PluginClaimsDrainingError,
+} from "./pluginCommandInvocation";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
-import type { PluginPipelineStatusEvent } from "./PluginPipeline";
+import type {
+  PluginPipelineEnsureStartedResult,
+  PluginPipelineStatusEvent,
+} from "./PluginPipeline";
 
 export interface PluginPanelRegistration {
   pluginRoot: string;
@@ -88,14 +94,37 @@ export type PluginPanelHostStartResult =
     error: {
       message: string;
       /**
-       * "claims-draining": the one pipeline failure a command's own claim
-       * can cause (see PluginPipeline's hasOutstandingCommandClaim, #779
-       * round 25 finding 3). Never reached by a panel or web app, which
-       * never claims.
+       * The one pipeline failure a command's own claim can cause (see
+       * PluginPipeline's hasOutstandingCommandClaim, #779 round 25
+       * finding 3). Never reached by a panel or web app, which never
+       * claims. Typed to the one literal it can ever be, not open
+       * `string`, so a producer misspelling of CLAIMS_DRAINING_ERROR_CODE
+       * fails the type system instead of silently degrading this
+       * retryable refusal to a generic error (#779 round 27).
        */
-      code?: string;
+      code?: typeof CLAIMS_DRAINING_ERROR_CODE;
     };
   };
+
+/**
+ * Narrows a PluginPipeline action result's own open-ended error code down
+ * to the one literal startPluginForPanel's own ensureStarted result
+ * recognizes, dropping anything else — the same as no code at all.
+ */
+export function toPluginPanelHostStartResult(
+  result: PluginPipelineEnsureStartedResult,
+): PluginPanelHostStartResult {
+  if (result.ok) return result;
+  return {
+    ok: false,
+    error: {
+      message: result.error.message,
+      code: result.error.code === CLAIMS_DRAINING_ERROR_CODE
+        ? CLAIMS_DRAINING_ERROR_CODE
+        : undefined,
+    },
+  };
+}
 
 /**
  * Starts a plugin because a caller needs it. Panel and web-app callers record
@@ -138,7 +167,7 @@ export async function startPluginForPanel(input: {
   if (!result.ok) {
     // See PluginPanelHostStartResult's own code field above (#779 round
     // 25 finding 3).
-    if (result.error.code === "claims-draining") {
+    if (result.error.code === CLAIMS_DRAINING_ERROR_CODE) {
       throw new PluginClaimsDrainingError(input.pluginId);
     }
     throw new Error(result.error.message);

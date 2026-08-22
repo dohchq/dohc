@@ -585,7 +585,7 @@ describe("plugin panel main-process wiring", () => {
       ensureStartedCallbackAt,
     );
     const pipelineEnsureStartedAt = ensureStartedFn.indexOf(
-      "return pipeline.ensureStarted(plugin.manifest.name);",
+      "return pipeline.ensureStarted(plugin.manifest.name)",
       recheckCallAt,
     );
     // MUTATION (TOCTOU stall): a recheck that runs anywhere but immediately
@@ -606,6 +606,15 @@ describe("plugin panel main-process wiring", () => {
       .slice(recheckCallAt + "options.recheckCommandClaims?.();".length, pipelineEnsureStartedAt)
       .trim();
     expect(betweenRecheckAndEnsure).toBe("");
+    // MUTATION (raw pipeline error code reaches the panel/web-app catch):
+    // narrows PluginPipeline's own open-ended error code down to the one
+    // literal the catch above recognizes before it ever reaches
+    // startPluginForPanel (#779 round 27).
+    const narrowedAt = ensureStartedFn.indexOf(
+      ".then(toPluginPanelHostStartResult);",
+      pipelineEnsureStartedAt,
+    );
+    expect(narrowedAt).toBeGreaterThan(pipelineEnsureStartedAt);
 
     const wireAt = invoke.indexOf(
       "recheckCommandClaims: () =>",

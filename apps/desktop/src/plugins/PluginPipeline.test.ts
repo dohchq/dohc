@@ -47,6 +47,7 @@ import {
 import {
   pluginLifecycleKey,
   startPluginForPanel,
+  toPluginPanelHostStartResult,
 } from "./pluginPanelRegistration";
 import { invokeRegisteredPluginCommand } from "./pluginCommandInvocation";
 import { PluginCommandHostClaims } from "./pluginCommandHostClaims";
@@ -4529,7 +4530,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         workspaceId: "workspace-1",
         pluginId: "example-plugin",
         hostActivation: () => host.activationOf("example-plugin"),
-        ensureStarted: () => pipeline.ensureStarted("example-plugin"),
+        ensureStarted: () =>
+          pipeline.ensureStarted("example-plugin").then(toPluginPanelHostStartResult),
       }).then(() => {
         opened = true;
       });

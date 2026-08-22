@@ -662,6 +662,7 @@ import {
   rememberPluginRegistration,
   resolveRegisteredPlugin,
   startPluginForPanel,
+  toPluginPanelHostStartResult,
   type RegisteredPlugin,
 } from "./plugins/pluginPanelRegistration";
 import {
@@ -3087,7 +3088,8 @@ async function ensurePluginStarted(
     hostActivation: () => pipeline.host.activationOf(plugin.manifest.name),
     ensureStarted: () => {
       options.recheckCommandClaims?.();
-      return pipeline.ensureStarted(plugin.manifest.name);
+      return pipeline.ensureStarted(plugin.manifest.name)
+        .then(toPluginPanelHostStartResult);
     },
   });
   return pipeline.host;

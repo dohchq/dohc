@@ -2,7 +2,10 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
-import { PluginClaimsDrainingError } from "./pluginCommandInvocation";
+import {
+  CLAIMS_DRAINING_ERROR_CODE,
+  PluginClaimsDrainingError,
+} from "./pluginCommandInvocation";
 import {
   forgetRemovedPlugin,
   forgetUninstalledPlugin,
@@ -13,6 +16,7 @@ import {
   rememberPluginRegistration,
   resolveRegisteredPlugin,
   startPluginForPanel,
+  toPluginPanelHostStartResult,
   type RegisteredPlugin,
 } from "./pluginPanelRegistration";
 
@@ -551,6 +555,51 @@ describe("plugin panel registration", () => {
 
     await expect(start).rejects.toBeInstanceOf(PluginClaimsDrainingError);
     expect(panelStartedHosts.size).toBe(0);
+  });
+
+  describe("toPluginPanelHostStartResult (#779 round 27)", () => {
+    // PluginPipelineEnsureStartedResult's own full shape carries fields this
+    // function never reads (plugin, stage) — only .ok and .error's own code
+    // and message. Cast rather than stub every unrelated required field.
+    function ensureStartedResult(input: unknown) {
+      return input as Parameters<typeof toPluginPanelHostStartResult>[0];
+    }
+
+    it("passes a started result through unchanged", () => {
+      expect(
+        toPluginPanelHostStartResult(
+          ensureStartedResult({ ok: true, startedHost: true }),
+        ),
+      ).toEqual({ ok: true, startedHost: true });
+    });
+
+    it("keeps the one code startPluginForPanel recognizes", () => {
+      expect(
+        toPluginPanelHostStartResult(
+          ensureStartedResult({
+            ok: false,
+            error: { stage: "runtime", code: CLAIMS_DRAINING_ERROR_CODE, message: "retry" },
+          }),
+        ),
+      ).toEqual({
+        ok: false,
+        error: { message: "retry", code: CLAIMS_DRAINING_ERROR_CODE },
+      });
+    });
+
+    it("drops any other pipeline error code to undefined — the same as no code at all, so a producer misspelling degrades honestly instead of matching by accident", () => {
+      expect(
+        toPluginPanelHostStartResult(
+          ensureStartedResult({
+            ok: false,
+            error: { stage: "runtime", code: "install-failed", message: "install failed" },
+          }),
+        ),
+      ).toEqual({
+        ok: false,
+        error: { message: "install failed", code: undefined },
+      });
+    });
   });
 
   it("waits for a host that is spawned but still activating (#798)", async () => {
