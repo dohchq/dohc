@@ -191,6 +191,15 @@ export interface PluginUninstallPreflightInput {
   /** The plugin's durable data directory (pluginStateRoot) — inventoried so
    * the uninstall warning can name what deleting it destroys. */
   stateRoot: string;
+  /**
+   * Other durable data directories cleanup will ALSO delete for this same
+   * plugin — a record's state and plugin data can be filed under an id
+   * different from the one discovery currently reports once its manifest
+   * breaks (#779-offers round 9 finding 3), and the confirmation this
+   * produces has to report that data too, not only stateRoot's own, or it
+   * understates what Remove deletes (#779-offers round 10 finding 1).
+   */
+  additionalStateRoots: string[];
   installedBaselineHash: string | undefined;
   /**
    * Whether this workspace's engine capture is running right now. It does not
@@ -493,6 +502,25 @@ export async function measurePluginDirectory(
 }
 
 /**
+ * One combined size for every state directory cleanup will touch — never
+ * called with more than one measurement site, so there is exactly one place
+ * that ever composes them, and no risk of a second call silently discarding
+ * the first (as re-invoking withStateData per directory would).
+ */
+function combineDirectorySizes(
+  sizes: readonly (PluginDirectorySize | null)[],
+): PluginDirectorySize | null {
+  const present = sizes.filter((size): size is PluginDirectorySize => size !== null);
+  if (present.length === 0) return null;
+  if (present.length === 1) return present[0];
+  return {
+    path: present.map((size) => size.path).join(", "),
+    fileCount: present.reduce((sum, size) => sum + size.fileCount, 0),
+    totalBytes: present.reduce((sum, size) => sum + size.totalBytes, 0),
+  };
+}
+
+/**
  * Folds the state-root inventory into the result. Plugin state is deleted by
  * every successful uninstall, is not part of the workspace, and is never
  * captured by the engine — so when it exists, the warning must name it as
@@ -524,9 +552,12 @@ function withStateData(
 export async function pluginUninstallPreflight(
   input: PluginUninstallPreflightInput,
 ): Promise<PluginUninstallPreflightResult> {
+  const stateSizes = await Promise.all(
+    [input.stateRoot, ...input.additionalStateRoots].map(measurePluginDirectory),
+  );
   return withStateData(
     await sourceUninstallPreflight(input),
-    await measurePluginDirectory(input.stateRoot),
+    combineDirectorySizes(stateSizes),
   );
 }
 

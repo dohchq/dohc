@@ -428,6 +428,55 @@ describe("PluginsView", () => {
     expect(addButton.textContent).toBe("Add");
   });
 
+  // The interleaving the round-8 pruneToKeys work only covered from the
+  // other direction (an error already recorded, then the offer leaves):
+  // here the offer leaves WHILE the refused response is still in flight.
+  // A stale response settling after that must not recreate a key
+  // loadOffers already pruned — there is no row left on screen to show it
+  // against.
+  it("does not resurrect a pruned offer error when a refused Add settles after the offer already left the list", async () => {
+    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
+    const addResult = deferred<{
+      ok: false;
+      error: { stage: "state"; code: string; message: string };
+    }>();
+    bridgeMock.addOfferedPlugin.mockReturnValue(addResult.promise);
+
+    renderList();
+    const addButton = await screen.findByTestId("plugin-offer-add");
+    await userEvent.click(addButton);
+    expect(addButton.textContent).toBe("Adding");
+
+    // The offer leaves the authoritative list WHILE Add is still in
+    // flight — added from another window, discovered under a renamed
+    // directory, whatever the reason.
+    bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [] });
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex", { directoryName: "my-codex" }),
+      });
+    });
+    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
+
+    // The refused response arrives after the row is already gone.
+    await act(async () => {
+      addResult.resolve({
+        ok: false,
+        error: {
+          stage: "state",
+          code: "pipeline-unavailable",
+          message: "plugins/codex already exists in this workspace.",
+        },
+      });
+      await addResult.promise;
+    });
+
+    expect(screen.queryByTestId("plugin-action-error")).toBeNull();
+    expect(screen.queryByTestId("plugin-offer-row")).toBeNull();
+  });
+
   it("shows a visible offers error with a working retry, without hiding installed plugins", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,

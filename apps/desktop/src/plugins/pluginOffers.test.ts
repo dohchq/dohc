@@ -38,6 +38,10 @@ const raceState = vi.hoisted(() => ({
   // competitor claiming the slot in the window this call's own reservation
   // just freed, which only exists once the free has actually happened.
   rmdirTrap: null as null | { path: string; run: () => Promise<void> },
+  // A one-shot simulated rename failure, unrelated to any race — a locked
+  // file, a full disk — keyed to the exact destination so only the
+  // intended publish call is affected.
+  renameFailureTrap: null as null | { path: string; code: string },
 }));
 
 vi.mock("node:fs/promises", async () => {
@@ -81,6 +85,17 @@ vi.mock("node:fs/promises", async () => {
         await trap.run();
       }
       return result;
+    },
+    rename: async (
+      source: Parameters<typeof actual.rename>[0],
+      destination: Parameters<typeof actual.rename>[1],
+    ) => {
+      const trap = raceState.renameFailureTrap;
+      if (trap && destination === trap.path) {
+        raceState.renameFailureTrap = null;
+        throw Object.assign(new Error(`simulated ${trap.code}`), { code: trap.code });
+      }
+      return actual.rename(source, destination);
     },
   };
 });
@@ -128,6 +143,7 @@ afterEach(async () => {
   raceState.lstatTrap = null;
   raceState.lstatCallCounts.clear();
   raceState.rmdirTrap = null;
+  raceState.renameFailureTrap = null;
   await Promise.all(
     roots.splice(0).map((root) =>
       rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
@@ -457,6 +473,66 @@ describe("addOfferedPlugin", () => {
       await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
+
+  // POSIX-only mechanism (Windows already frees its claim unconditionally
+  // before attempting the rename, so it has nothing to leak): a rename
+  // failure unrelated to any race — a locked file, a full disk — used to
+  // leave publishStaged's own mkdir() claim behind, still empty. Left
+  // there, it reads as "occupied" forever: every later offer listing and
+  // Add attempt sees a directory already at target and refuses, with
+  // nothing left to clean it up. Forces the POSIX branch on this Windows
+  // test host by stubbing process.platform, since the bug this pins is in
+  // this module's own control flow, not in any OS-specific rename
+  // semantics under test here.
+  it("[POSIX] removes its own leaked claim when the publish rename fails, so a retried Add still works", async () => {
+    const fixture = await createFixture();
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    raceState.renameFailureTrap = { path: target, code: "EACCES" };
+
+    // Forced only around the call under test: this dev host's real
+    // filesystem still enforces real Windows rename semantics regardless
+    // of what process.platform claims, so a retry that actually needs to
+    // publish runs under this host's TRUE platform below, exercising the
+    // already-correct branch for it — this call exists only to route
+    // THIS module's own control flow through the POSIX branch under test.
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    try {
+      await expect(
+        addOfferedPlugin({
+          builtinPluginsRoot: fixture.builtinPluginsRoot,
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
+
+    // The claim is gone, not stranded as a permanently "occupied" empty
+    // directory.
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+
+    // The offer is genuinely still available...
+    const offers = await listOfferedPlugins(
+      fixture.builtinPluginsRoot,
+      fixture.workspaceRoot,
+      NO_EXISTING_PLUGIN_IDS,
+    );
+    expect(offers.map((offer) => offer.directoryName)).toContain("codex");
+
+    // ...and a retried Add succeeds, using a fresh copy this time.
+    const added = await addOfferedPlugin({
+      builtinPluginsRoot: fixture.builtinPluginsRoot,
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+    });
+    expect(added.rootPath).toBe(target);
+    await expect(readFile(join(target, "dohc-plugin.json"), "utf8"))
+      .resolves.toContain('"name": "codex"');
+  });
 });
 
 describe("removeAddedOfferedPlugin", () => {

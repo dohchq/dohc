@@ -790,6 +790,17 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!preflight.ok) {
         throw new Error(`${preflight.error.stage}/${preflight.error.code}: ${preflight.error.message}`);
       }
+      // Round 10 finding 1: cleanup deletes state under BOTH identities, so
+      // the confirmation the user actually sees has to name that data
+      // before they confirm — not only the fallback id's own (empty) state.
+      expect(preflight.preflight.stateData).toMatchObject({ fileCount: 1 });
+      expect(preflight.preflight.stateData?.path).toContain(strandedStateRoot);
+      expect(
+        preflight.preflight.warning?.details.some((detail) =>
+          detail.includes("stored data")
+        ),
+      ).toBe(true);
+
       const removed = await pipeline.uninstall(row!.id, preflight.confirmationToken);
       expect(removed.ok).toBe(true);
 
@@ -3687,6 +3698,117 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
       if (!state.ok) throw new Error(state.warning);
       expect(state.state.plugins["example-plugin"]).toBeUndefined();
+      expect(pipeline.list()).toEqual([]);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Round 10 finding 2: the sourceless retry (this same pattern, but for a
+  // never-approved install whose manifest broke under a directory name
+  // different from its record's key) used to resolve cleanup by pluginId
+  // alone — the fallback id finishSourcelessUninstall's synthetic candidate
+  // carries, never the ORIGINAL id a persisted record survives under. The
+  // source delete from the first, partially-failed attempt already
+  // succeeded; only the record-by-directory join can still find the
+  // original id once discovery has nothing left to join by rootPath.
+  it("clears the originally-keyed state on a sourceless retry after a partial delete", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-sourceless-retry-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const pluginRoot = join(workspaceRoot, "plugins", "my-codex-copy");
+    await mkdir(join(pluginRoot, "src"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(pluginRoot, "src", "main.ts"), "export default {};\n");
+
+    await mutatePluginRecord(stateDir, workspaceRoot, "codex", () => ({
+      directoryName: "my-codex-copy",
+    }));
+    const dohcDir = pluginDataDir(stateDir, workspaceRoot);
+    const strandedStateRoot = pluginStateRoot(dohcDir, "codex");
+    await mkdir(strandedStateRoot, { recursive: true });
+    await writeFile(join(strandedStateRoot, "session.json"), "{}");
+
+    await writeFile(join(pluginRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
+
+    let pipeline: PluginPipeline;
+    let failCodexDataRemoval = false;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        removePath: async (path, options) => {
+          if (failCodexDataRemoval && String(path).startsWith(strandedStateRoot)) {
+            throw new Error("simulated data delete failure");
+          }
+          await rm(path, options);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const pluginId = pipeline.list()[0]!.id;
+      expect(pluginId).toBe("my-codex-copy");
+
+      failCodexDataRemoval = true;
+      const firstPreflight = await pipeline.uninstallPreflight(pluginId);
+      if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
+      const failed = await pipeline.uninstall(pluginId, firstPreflight.confirmationToken);
+      expect(failed.ok).toBe(false);
+
+      // The source is gone; the originally-keyed state and record survive
+      // this partial failure, exactly as the delete failure left them.
+      await expect(lstat(pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(strandedStateRoot)).resolves.toBeDefined();
+      const midState = await readPluginLocalState(stateDir, workspaceRoot);
+      if (!midState.ok) throw new Error(midState.warning);
+      expect(midState.state.plugins["codex"]).toBeDefined();
+
+      // The watcher observes the deleted root: discovery has no candidate
+      // left, and only the status row (and the record-by-directory join)
+      // still name this installation.
+      pipeline.handleWatcherEvents([{ path: "plugins/my-codex-copy", operation: "delete" }]);
+      await waitFor(
+        () => pipeline.list().length === 1,
+        "The watcher sweep never reconciled the deleted root.",
+      );
+
+      // The retry is the same action from the same row, and it finishes —
+      // clearing the ORIGINAL "codex" key's state and record too, not only
+      // pluginId's own (which never had anything under it to begin with).
+      failCodexDataRemoval = false;
+      const retryPreflight = await pipeline.uninstallPreflight(pluginId);
+      if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
+      const finished = await pipeline.uninstall(pluginId, retryPreflight.confirmationToken);
+      expect(finished.ok).toBe(true);
+
+      await expect(lstat(strandedStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      const finalState = await readPluginLocalState(stateDir, workspaceRoot);
+      if (!finalState.ok) throw new Error(finalState.warning);
+      expect(finalState.state.plugins["codex"]).toBeUndefined();
+      expect(finalState.state.plugins["my-codex-copy"]).toBeUndefined();
       expect(pipeline.list()).toEqual([]);
     } finally {
       await pipeline.dispose();

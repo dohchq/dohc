@@ -918,14 +918,29 @@ export class PluginPipeline {
   ): Promise<PluginPipelineUninstallPreflightResult> {
     return this.enqueueActionValue(pluginId, async () => {
       try {
-        const record = await this.localRecord(pluginId);
+        const state = await this.localState();
+        const record = state.plugins[pluginId];
         const pluginRoot = this.uninstallRootPath(pluginId, record);
         const sourcePresent = await this.sourceRootPresent(pluginRoot);
+        // The confirmation this produces has to report every identity
+        // cleanup will touch, not only pluginId's own — durable state
+        // filed under a record's ORIGINAL id (the same directoryName join
+        // round 9 finding 3 already resolves for the actual delete) must
+        // appear here too, or the dialog understates what Remove deletes
+        // (#779-offers round 10 finding 1). No discovery candidate at all
+        // (a sourceless retry) has nothing to join by directory here — its
+        // own delete path, not this display, is where round 10 finding 2
+        // resolves that case.
+        const candidate = this.uninstallableCandidate(pluginId, record);
+        const additionalStateRoots = candidate
+          ? this.additionalCleanupStateRoots(candidate, state)
+          : [];
         const preflight = await this.operations.uninstallPreflight({
           dohcDir: this.dohcDir,
           pluginId,
           pluginRoot,
           stateRoot: pluginStateRoot(this.dohcDir, pluginId),
+          additionalStateRoots,
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
@@ -974,7 +989,7 @@ export class PluginPipeline {
       const state = await this.localState();
       const record = state.plugins[pluginId];
       if (confirmation.pluginRoot === null) {
-        return this.finishSourcelessUninstall(pluginId);
+        return this.finishSourcelessUninstall(pluginId, state);
       }
       const candidate = this.requireUninstallableCandidate(pluginId, record);
       // State/artifacts might be filed under the id the record was
@@ -985,9 +1000,7 @@ export class PluginPipeline {
       // pluginId strands the other key's state and plugin data forever —
       // nothing else ever visits it again once the discovery entry for
       // this directory is gone (#779-offers round 9 finding 3).
-      const cleanupIds = new Set([pluginId]);
-      const installedIdentity = this.installedRecord(state, candidate);
-      if (installedIdentity) cleanupIds.add(installedIdentity.pluginId);
+      const cleanupIds = new Set([pluginId, ...this.additionalCleanupIds(candidate, state)]);
       if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
         return this.failure(
           pluginId,
@@ -1003,6 +1016,9 @@ export class PluginPipeline {
         pluginId,
         pluginRoot: candidate.rootPath,
         stateRoot: pluginStateRoot(this.dohcDir, pluginId),
+        // Only .liveHash is read below — this call's stateData/warning are
+        // discarded, so there is nothing for additional identities to add.
+        additionalStateRoots: [],
         installedBaselineHash: record?.installedBaselineHash,
         engineCaptureAvailable: this.engineCaptureAvailable(),
       });
@@ -1047,6 +1063,8 @@ export class PluginPipeline {
           pluginId,
           pluginRoot: candidate.rootPath,
           stateRoot: pluginStateRoot(this.dohcDir, pluginId),
+          // Same as currentPreflight above: only .liveHash is read.
+          additionalStateRoots: [],
           installedBaselineHash: record?.installedBaselineHash,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
@@ -1198,6 +1216,48 @@ export class PluginPipeline {
       }
     }
     return null;
+  }
+
+  /**
+   * Every id besides a candidate's own that cleanup should also touch — any
+   * record filed under a directoryName matching this candidate's, however
+   * many there are. Deliberately its own scan, not installedRecord's:
+   * installedRecord returns the FIRST match by id-then-directory, correct
+   * for seeding one status from one installation, but uninstall()'s own
+   * "mark disabled before delete" step (a crash-safety marker, run at the
+   * very start of every attempt) writes a bare record under the candidate's
+   * OWN id with no directoryName at all — installedRecord's byId branch
+   * would match that marker on a RETRY and stop there, never reaching the
+   * real record a partially-failed first attempt left behind under the
+   * ORIGINAL id. Every directoryName match still gets cleaned up regardless
+   * of how many there are. Shared by uninstallPreflight (what the
+   * confirmation reports), uninstall (what actually gets deleted), and
+   * finishSourcelessUninstall (the same join against a synthetic candidate
+   * once discovery has nothing left) so all three agree on the same
+   * identities (#779-offers round 9 finding 3, round 10 findings 1 and 2).
+   */
+  private additionalCleanupIds(
+    candidate: InstalledPluginRecord,
+    state: PluginLocalState,
+  ): string[] {
+    const ids: string[] = [];
+    for (const [id, record] of Object.entries(state.plugins)) {
+      if (id !== candidate.id && record.directoryName === candidate.directoryName) {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  /** additionalCleanupIds's state roots, keyed as uninstallPreflight's
+   * operations.uninstallPreflight input expects them. */
+  private additionalCleanupStateRoots(
+    candidate: InstalledPluginRecord,
+    state: PluginLocalState,
+  ): string[] {
+    return this.additionalCleanupIds(candidate, state).map((id) =>
+      pluginStateRoot(this.dohcDir, id)
+    );
   }
 
   /**
@@ -2128,9 +2188,19 @@ export class PluginPipeline {
    * user confirmed was that irreversible source delete, and it already
    * happened; what remains is what dohc itself built and recorded (#779
    * round 12 A2).
+   *
+   * Cleanup still has to resolve every identity the record carried, the
+   * same as uninstall()'s normal path: the earlier attempt could have
+   * deleted the source and the record under pluginId while leaving state
+   * and plugin data behind under the id the plugin was ORIGINALLY installed
+   * under, if that differs — the synthetic candidate's directoryName is the
+   * one identity survivable across that partial failure, since a record by
+   * directory outlives the source delete that stranded it (#779-offers
+   * round 10 finding 2).
    */
   private async finishSourcelessUninstall(
     pluginId: string,
+    state: PluginLocalState,
   ): Promise<PluginPipelineActionResult> {
     const status = this.statuses.get(pluginId);
     if (!status) return this.failure(pluginId, notDiscoveredError(pluginId));
@@ -2144,6 +2214,7 @@ export class PluginPipeline {
       valid: status.valid,
       supersededPluginId: null,
     };
+    const cleanupIds = new Set([pluginId, ...this.additionalCleanupIds(candidate, state)]);
     this.setStatus(candidate, {
       status: "uninstalling",
       disabledReason: "user",
@@ -2152,12 +2223,16 @@ export class PluginPipeline {
     });
     try {
       await this.options.pluginHost.stop(pluginId);
-      await this.removePluginData(pluginId);
-      await this.operations.mutateRecord(
-        this.options.stateDir,
-        this.workspaceRoot,
-        pluginId,
-        () => undefined,
+      await Promise.all([...cleanupIds].map((id) => this.removePluginData(id)));
+      await Promise.all(
+        [...cleanupIds].map((id) =>
+          this.operations.mutateRecord(
+            this.options.stateDir,
+            this.workspaceRoot,
+            id,
+            () => undefined,
+          )
+        ),
       );
       this.statuses.delete(pluginId);
       this.doorWrittenDeltas.delete(pluginId);

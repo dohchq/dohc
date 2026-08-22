@@ -377,6 +377,14 @@ export function usePluginCatalog(
   // newest event for each plugin and merge it over that list before painting.
   const statusRevision = useRef(0);
   const pendingStatusEvents = useRef(new Map<string, PendingStatusEvent>());
+  // The authoritative offered set as of the last successful loadOffers —
+  // read at Add's settle time, not captured in addOffer's own closure,
+  // which would still hold whatever was current when Add was CALLED. An
+  // offer can leave this list (added from elsewhere, its source deleted)
+  // while Add is still in flight; a REFUSED response settling after that
+  // must not recreate an error key loadOffers already pruned for an offer
+  // that no longer exists to show it against.
+  const offeredDirectoryNames = useRef<ReadonlySet<string>>(new Set());
 
   async function loadPlugins() {
     const requestToken = ++listRequestToken.current;
@@ -458,6 +466,7 @@ export function usePluginCatalog(
       // directoryName, whatever it recorded here is stale and must not
       // survive to be misread against whatever claims that identity next.
       const offeredNames = result.offers.map((offer) => offer.directoryName);
+      offeredDirectoryNames.current = new Set(offeredNames);
       setOfferErrors((current) => pruneToKeys(current, offeredNames));
       setOfferBusy((current) => pruneToKeys(current, offeredNames));
     } catch (error) {
@@ -489,6 +498,7 @@ export function usePluginCatalog(
     setOffersLoad({ status: "loading" });
     setOfferBusy({});
     setOfferErrors({});
+    offeredDirectoryNames.current = new Set();
     pendingStatusEvents.current.clear();
     statusRevision.current = 0;
     void loadPlugins();
@@ -781,7 +791,12 @@ export function usePluginCatalog(
         // never spends a render in neither the offered nor the installed
         // section.
         replacePluginUnlessSuperseded(result.plugin, revisionAtStart);
-      } else {
+      } else if (offeredDirectoryNames.current.has(directoryName)) {
+        // Bound to the offer's presence at settle time, not addOffer's own
+        // call-time closure: a refused response for an offer that already
+        // left the authoritative list (added elsewhere, its source gone)
+        // has no row left to show an error against, and setting one here
+        // would resurrect a key loadOffers already pruned.
         setOfferErrors((current) => ({
           ...current,
           [directoryName]: `dohc could not add ${title}. ${result.error.message}`,
@@ -789,11 +804,13 @@ export function usePluginCatalog(
       }
     } catch (error) {
       if (epoch !== workspaceEpoch.current) return;
-      const reason = error instanceof Error ? error.message : "Try again.";
-      setOfferErrors((current) => ({
-        ...current,
-        [directoryName]: `dohc could not add ${title}. ${reason}`,
-      }));
+      if (offeredDirectoryNames.current.has(directoryName)) {
+        const reason = error instanceof Error ? error.message : "Try again.";
+        setOfferErrors((current) => ({
+          ...current,
+          [directoryName]: `dohc could not add ${title}. ${reason}`,
+        }));
+      }
     } finally {
       if (epoch === workspaceEpoch.current) {
         setOfferBusy((current) => ({ ...current, [directoryName]: false }));

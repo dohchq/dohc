@@ -64,6 +64,7 @@ async function runPreflight(
     pluginId,
     pluginRoot: fixture.pluginRoot,
     stateRoot: pluginStateRoot(fixture.dohcDir, pluginId),
+    additionalStateRoots: [],
     installedBaselineHash,
     engineCaptureAvailable,
   });

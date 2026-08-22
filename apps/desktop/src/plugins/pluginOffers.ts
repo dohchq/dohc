@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, realpath, rmdir } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, realpath, rmdir } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
 import { readPluginManifestFile } from "./pluginManifest";
@@ -180,6 +180,34 @@ async function ensureContainedDirectory(
 }
 
 /**
+ * Removes `target` only after confirming it is still exactly the empty
+ * claim publishStaged's own mkdir() created — a real directory, not a
+ * symlink, and empty — never unconditionally. A verification failure
+ * (gone already, no longer empty, no longer a plain directory) means this
+ * call can no longer vouch for what is there, so it leaves it alone rather
+ * than delete something it cannot account for; the caller's own error
+ * still propagates either way, so a genuinely stray claim is at worst
+ * inert, never silently swallowed as success.
+ */
+async function removeOwnedEmptyClaim(target: string): Promise<void> {
+  let stats;
+  try {
+    stats = await lstat(target);
+  } catch {
+    return;
+  }
+  if (stats.isSymbolicLink() || !stats.isDirectory()) return;
+  let entries;
+  try {
+    entries = await readdir(target);
+  } catch {
+    return;
+  }
+  if (entries.length > 0) return;
+  await rmdir(target).catch(() => undefined);
+}
+
+/**
  * Publishes `staged` at `target`, refusing to silently replace anything
  * already there. A bare rename() cannot tell "nothing at target" from
  * "something raced this call here": POSIX rename() atomically REPLACES an
@@ -210,6 +238,14 @@ async function ensureContainedDirectory(
  *   EPERM, now because a real directory sits where an empty one was) —
  *   this reads as the claim having been lost, the same refusal as an
  *   outright EEXIST, never a silent clobber.
+ *
+ * On POSIX, a rename failure for any OTHER reason (disk full, a locked
+ * file) leaves this call's own mkdir() claim behind — still empty, never
+ * replaced. Left there, it reads as "occupied" forever: every later
+ * listOfferedPlugins call and Add attempt sees a directory already at
+ * target and refuses, with nothing left to clean it up. removeOwnedEmptyClaim
+ * removes it before this rethrows, verifying first that it is still exactly
+ * what this call created rather than removing it unconditionally.
  */
 async function publishStaged(staged: string, target: string): Promise<boolean> {
   try {
@@ -219,7 +255,12 @@ async function publishStaged(staged: string, target: string): Promise<boolean> {
     throw error;
   }
   if (process.platform !== "win32") {
-    await renameWithWindowsRetry(staged, target, (error) => error);
+    try {
+      await renameWithWindowsRetry(staged, target, (error) => error);
+    } catch (error) {
+      await removeOwnedEmptyClaim(target);
+      throw error;
+    }
     return true;
   }
   await rmdir(target);
