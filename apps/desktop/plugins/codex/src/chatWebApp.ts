@@ -225,6 +225,13 @@ export function createChatWebApp(
   // while this is true instead of overlapping it on the single active turn
   // both concrete drivers track.
   let turnActive = false;
+  // Set while a /message's prompt() call is still awaiting the driver's
+  // accept. A Stop landing in that window has no turn to interrupt yet --
+  // the driver holds no turn id until prompt() resolves, so its cancel()
+  // is a no-op and the turn would run on after a successful-looking Stop.
+  // Instead the stop is recorded here and honored the moment the prompt
+  // is accepted.
+  let pendingPrompt: { stopRequested: boolean } | null = null;
   let state: SessionStateEvent = { kind: "session-state", state: "closed" };
   // Each entry's own publish time -- a replay renders it, not the moment
   // the reconnecting client happened to receive it, so history stays in
@@ -449,6 +456,8 @@ export function createChatWebApp(
     };
     eventLog.push(reserved);
     trimLog();
+    const inFlight = { stopRequested: false };
+    pendingPrompt = inFlight;
     try {
       await live.prompt({ text: body.text });
     } catch (error) {
@@ -462,6 +471,8 @@ export function createChatWebApp(
       publish({ kind: "error", message, fatal: true });
       await Promise.resolve(live.dispose()).catch(() => undefined);
       throw requestError(500, message);
+    } finally {
+      if (pendingPrompt === inFlight) pendingPrompt = null;
     }
     // Published only now that the driver actually accepted it: a reconnect
     // must never replay a message that was never really sent, and the
@@ -479,6 +490,13 @@ export function createChatWebApp(
     }
     const encoded = frame(reserved.event, reserved.at);
     for (const client of clients) client.write(encoded);
+    // A Stop that arrived while the prompt was still awaiting acceptance:
+    // now that the driver holds the turn, the recorded intent becomes a
+    // real cancel. Best-effort like any cancel after Stop's own 204 -- a
+    // transport failure here must not fail the accepted /message.
+    if (inFlight.stopRequested) {
+      await Promise.resolve(live.cancel()).catch(() => undefined);
+    }
     writeEmpty(response, 202);
   }
 
@@ -514,6 +532,10 @@ export function createChatWebApp(
     // arrives; cancel() is a documented no-op on both concrete drivers
     // when nothing was running.
     settlePendingPermissions();
+    // A prompt still awaiting the driver's accept has no turn id yet, so
+    // the cancel() below cannot reach it. Record the stop so message()
+    // cancels the turn the moment it is accepted.
+    if (pendingPrompt) pendingPrompt.stopRequested = true;
     await live.cancel();
     writeEmpty(response, 204);
   }

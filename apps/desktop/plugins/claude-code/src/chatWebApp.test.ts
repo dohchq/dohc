@@ -534,6 +534,53 @@ describe("Claude Code chat web app", () => {
     await after.close();
   });
 
+  it("a Stop before the turn is accepted cancels it the moment it is accepted", async () => {
+    // In the window between /message reaching the driver and the driver
+    // accepting the prompt, no turn id exists yet -- Stop's cancel() is a
+    // documented no-op there, so without the recorded intent the turn
+    // would run on after a successful-looking Stop.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "Hello" }, token);
+    await entered.promise;
+    // Stop lands while the prompt is still awaiting acceptance: the
+    // driver-level cancel it issues now has no turn to reach.
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+
+    gate.resolve();
+    expect((await sendPromise).status).toBe(202);
+    // The acceptance honored the recorded stop: a second cancel reached
+    // the driver now that the turn exists to interrupt.
+    expect(fake.sessions[0]?.cancelCalls).toBe(2);
+    // Still the same live session -- a pre-acceptance Stop interrupts the
+    // turn, it never retires the session.
+    expect(fake.disposed).toEqual([]);
+  });
+
+  it("a Stop with no prompt in flight never dooms the next message's turn", async () => {
+    // The stop intent is scoped to the one prompt that was in flight when
+    // Stop arrived -- an idle Stop must not linger and cancel a turn the
+    // user asks for afterward.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "First" }, token);
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+
+    expect(await post(url, "message", { text: "Second" }, token)).toMatchObject({ status: 202 });
+    // Accepted cleanly: no cancel fired at this acceptance.
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+  });
+
   it("Stop cancels the current turn -- the session and its context stay alive, never a fresh one", async () => {
     // Per the product invariant (a reversible action needs a reverse path,
     // or the user has to be told before it runs): ending the whole session
