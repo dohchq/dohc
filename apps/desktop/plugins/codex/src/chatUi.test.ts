@@ -216,7 +216,22 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(textOf("#session-state")).toBe("Closed");
     const card = document.querySelector(".error-card");
     expect(card).not.toBeNull();
+    expect(card?.getAttribute("role")).toBe("alert");
     expect(card?.textContent).toContain("This session ended.");
+    expect(card?.textContent).toContain("Send a message to start a new session.");
+  });
+
+  it("announces a fatal failure as an alert carrying the explanation and next step", async () => {
+    // The live status region only ever speaks the state label ("Error");
+    // the alert role on the recovery card is what actually carries the
+    // failure text and the next step to a screen reader.
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, { kind: "error", message: "Codex exited unexpectedly.", fatal: true });
+    expect(textOf("#session-state")).toBe("Error");
+    const card = document.querySelector(".error-card");
+    expect(card).not.toBeNull();
+    expect(card?.getAttribute("role")).toBe("alert");
+    expect(card?.textContent).toContain("Codex exited unexpectedly.");
     expect(card?.textContent).toContain("Send a message to start a new session.");
   });
 
@@ -226,6 +241,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(textOf("#session-state")).toBe("Ready");
     const card = document.querySelector(".error-card");
     expect(card).not.toBeNull();
+    expect(card?.getAttribute("role")).toBe("alert");
     expect(card?.textContent).toContain("This response failed.");
   });
 

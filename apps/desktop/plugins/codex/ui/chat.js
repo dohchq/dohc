@@ -128,10 +128,14 @@ function setSessionState(state, reason, options = {}) {
 }
 
 // The session actually ended: sending a message means starting over.
+// role="alert" on these error cards is what a screen reader actually
+// hears: the status region above only ever speaks the state label
+// ("Error"), so without it the explanation and next step render silently.
 function recoveryCard(message) {
   hideEmptyState();
   const card = document.createElement("section");
   card.className = "error-card";
+  card.setAttribute("role", "alert");
   const heading = document.createElement("strong");
   heading.textContent = message;
   const next = document.createElement("p");
@@ -150,6 +154,7 @@ function failedTurnCard(message) {
   hideEmptyState();
   const card = document.createElement("section");
   card.className = "error-card";
+  card.setAttribute("role", "alert");
   const heading = document.createElement("strong");
   heading.textContent = message;
   const next = document.createElement("p");
@@ -164,6 +169,7 @@ function transientError(message) {
   hideEmptyState();
   const card = document.createElement("section");
   card.className = "error-card";
+  card.setAttribute("role", "alert");
   const text = document.createElement("p");
   text.textContent = message;
   card.append(text);
