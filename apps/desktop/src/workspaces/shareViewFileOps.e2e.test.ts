@@ -172,6 +172,34 @@ function storeFailingAt(
   }) as CaptureVersionedTextStore;
 }
 
+// The move RPC answers when the filesystem changed; the store row settles
+// through the capture pipeline afterwards, so an instant read can see BOTH
+// case-variants of one entry. Wait for the settled listing — a refused
+// rename never reaches it and times out red with the store's actual state.
+async function waitForStorePaths(
+  harnessed: Harness,
+  expected: string[],
+  message: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const paths = await storePaths(harnessed);
+    if (
+      paths.length === expected.length &&
+      paths.every((path, index) => path === expected[index])
+    ) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `${message}: the store holds [${paths.join(", ")}], ` +
+          `expected [${expected.join(", ")}]`,
+      );
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 async function storePaths(harnessed: Harness): Promise<string[]> {
   const main = await harnessed.store.ensureMainVersion({
     workspaceId: harnessed.workspaceId,
@@ -590,10 +618,11 @@ describe("share-view file operations through the real store", () => {
       });
 
       expect(path).toBe("docs/Note.md");
-      expect(
-        await storePaths(view),
+      await waitForStorePaths(
+        view,
+        ["docs/Note.md"],
         "MUTATION: an occupied-name check without the case carve-out refuses a rename that only changes case",
-      ).toEqual(["docs/Note.md"]);
+      );
       await expect(
         readFile(join(view.rootPath, "docs", "Note.md"), "utf8"),
       ).resolves.toBe("granter\n");
@@ -626,10 +655,11 @@ describe("share-view file operations through the real store", () => {
         toPath: "docs/plans",
       });
 
-      expect(await storePaths(view)).toEqual([
-        "docs/plans/one.md",
-        "docs/plans/two.md",
-      ]);
+      await waitForStorePaths(
+        view,
+        ["docs/plans/one.md", "docs/plans/two.md"],
+        "The case-only folder rename never settled in the store",
+      );
       // The cleanup that removes an emptied source folder must not run when
       // the source and the destination are the SAME folder: it would remove
       // the files this rename just put there.
