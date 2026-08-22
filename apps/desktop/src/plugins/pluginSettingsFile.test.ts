@@ -180,6 +180,7 @@ describe("savePluginSettings", () => {
     const values = await savePluginSettings(
       workspaceRoot,
       "hello-plugin",
+      "hello-plugin",
       DECLARED,
       { greeting: "Hei" },
     );
@@ -196,7 +197,7 @@ describe("savePluginSettings", () => {
   });
 
   it("round-trips every declared type", async () => {
-    await savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+    await savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
       greeting: "Hei",
       shout: true,
       repeat: 3,
@@ -214,7 +215,7 @@ describe("savePluginSettings", () => {
 
   it("refuses a key the plugin does not declare, and names it", async () => {
     await expect(
-      savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+      savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
         unknown: "value",
       }),
     ).rejects.toThrow(
@@ -231,7 +232,7 @@ describe("savePluginSettings", () => {
     "refuses %s with the wrong type and names the type it wanted",
     async (key, value, typeName) => {
       await expect(
-        savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+        savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
           [key]: value,
         }),
       ).rejects.toThrow(new RegExp(`must be a ${typeName}\\.$`));
@@ -240,7 +241,7 @@ describe("savePluginSettings", () => {
 
   it("refuses a string past the value cap, and names the cap", async () => {
     await expect(
-      savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+      savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
         greeting: "x".repeat(MAX_SETTING_VALUE_CHARS + 1),
       }),
     ).rejects.toThrow(
@@ -255,6 +256,7 @@ describe("savePluginSettings", () => {
     const values = await savePluginSettings(
       workspaceRoot,
       "hello-plugin",
+      "hello-plugin",
       DECLARED,
       { greeting: atCap },
     );
@@ -266,17 +268,17 @@ describe("savePluginSettings", () => {
 
   it("refuses a select answer that is not an option, and lists the options", async () => {
     await expect(
-      savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+      savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
         tone: "loud",
       }),
     ).rejects.toThrow('must be a one of "plain", "warm".');
   });
 
   it("leaves every other plugin's settings exactly as they were", async () => {
-    await savePluginSettings(workspaceRoot, "other-plugin", DECLARED, {
+    await savePluginSettings(workspaceRoot, "other-plugin", "other-plugin", DECLARED, {
       greeting: "Salut",
     });
-    await savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+    await savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
       greeting: "Hei",
     });
 
@@ -289,10 +291,10 @@ describe("savePluginSettings", () => {
     const otherWorkspace = await mkdtemp(join(tmpdir(), "dohc-plugin-settings-"));
     roots.push(otherWorkspace);
 
-    await savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+    await savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
       greeting: "Hei",
     });
-    await savePluginSettings(otherWorkspace, "hello-plugin", DECLARED, {
+    await savePluginSettings(otherWorkspace, "hello-plugin", "hello-plugin", DECLARED, {
       greeting: "Salut",
     });
 
@@ -308,13 +310,13 @@ describe("savePluginSettings", () => {
     // Without the write queue both saves read the same file and the second
     // write drops the first, while both controls report the value they set.
     await Promise.all([
-      savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+      savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
         greeting: "Hei",
       }),
-      savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+      savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
         repeat: 4,
       }),
-      savePluginSettings(workspaceRoot, "other-plugin", DECLARED, {
+      savePluginSettings(workspaceRoot, "other-plugin", "other-plugin", DECLARED, {
         tone: "warm",
       }),
     ]);
@@ -325,7 +327,7 @@ describe("savePluginSettings", () => {
   });
 
   it("writes the file as readable text a person can open", async () => {
-    await savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+    await savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
       greeting: "Hei",
     });
 
@@ -339,7 +341,7 @@ describe("savePluginSettings", () => {
   });
 
   it("leaves no temporary file behind", async () => {
-    await savePluginSettings(workspaceRoot, "hello-plugin", DECLARED, {
+    await savePluginSettings(workspaceRoot, "hello-plugin", "hello-plugin", DECLARED, {
       greeting: "Hei",
     });
 

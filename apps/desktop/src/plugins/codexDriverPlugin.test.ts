@@ -160,7 +160,7 @@ async function startCodexPlugin(
     target: "node22",
     logLevel: "silent",
   });
-  await host.start(pluginRoot, { ...manifest.manifest, entry: "bundle.mjs" });
+  await host.start(pluginRoot, "codex", { ...manifest.manifest, entry: "bundle.mjs" });
   await until(
     () => (host?.getStatus("codex") === "ready" ? true : undefined),
     `the codex plugin to activate (${host.getStderrLog("codex").join(" | ")})`,

@@ -38,6 +38,7 @@ import {
   SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
+  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
   PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT,
@@ -2600,6 +2601,18 @@ export const PluginPipelineError = z.object({
 }).strict();
 export type PluginPipelineError = z.infer<typeof PluginPipelineError>;
 
+const OFFERED_PLUGIN_DIRECTORY_NAME = z.enum(
+  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
+);
+
+export const OfferedPluginRecord = z.object({
+  directoryName: OFFERED_PLUGIN_DIRECTORY_NAME,
+  displayName: z.string().min(1).max(120).nullable(),
+  description: z.string().min(1).max(MAX_PLUGIN_DESCRIPTION_CHARS).nullable(),
+  publisher: z.string().min(1).max(MAX_PLUGIN_PUBLISHER_CHARS).nullable(),
+}).strict();
+export type OfferedPluginRecord = z.infer<typeof OfferedPluginRecord>;
+
 export const PluginStatusRecord = z.object({
   id: PLUGIN_ID,
   directoryName: z.string().min(1).max(255),
@@ -2673,12 +2686,35 @@ export const PluginActionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
 }).strict();
+
+// The directory a discovered (never-installed) row's own id can never
+// safely stand in for: that id is only ever a broken manifest's directory-
+// derived fallback, a plain string that can coincide with some OTHER,
+// unrelated plugin's real, valid manifest id. Preflight resolves the exact
+// directory the caller named, never trusting pluginId alone to disambiguate
+// which plugin that id actually means.
+export const PluginUninstallPreflightPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
+}).strict();
+export type PluginUninstallPreflightPayload = z.infer<
+  typeof PluginUninstallPreflightPayload
+>;
 export type PluginActionPayload = z.infer<typeof PluginActionPayload>;
 
 export const ListPluginsPayload = z.object({
   workspaceId: WORKSPACE_ID,
 }).strict();
 export type ListPluginsPayload = z.infer<typeof ListPluginsPayload>;
+
+// Same shape as ListPluginsPayload — aliased rather than duplicated.
+export const ListOfferedPluginsPayload = ListPluginsPayload;
+export type ListOfferedPluginsPayload = z.infer<typeof ListOfferedPluginsPayload>;
+
+export const AddOfferedPluginPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  directoryName: OFFERED_PLUGIN_DIRECTORY_NAME,
+}).strict();
+export type AddOfferedPluginPayload = z.infer<typeof AddOfferedPluginPayload>;
 
 // A plugin's settings values. Bounded by the same declaration count the
 // manifest allows, because a plugin can never have more settings than it
@@ -2692,9 +2728,19 @@ const PluginSettingsValues = z.record(
   `settings: at most ${MAX_PLUGIN_SETTINGS} values allowed`,
 );
 
+// directoryName, not pluginId alone, is what settles which row's answers a
+// call reads or writes: an id is only ever a broken manifest's directory-
+// derived fallback, which can coincide with some OTHER, unrelated plugin's
+// real id.
+export const GetPluginSettingsPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
+}).strict();
+export type GetPluginSettingsPayload = z.infer<typeof GetPluginSettingsPayload>;
+
 export const SetPluginSettingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
+  directoryName: z.string().min(1).max(255),
   values: PluginSettingsValues,
 }).strict();
 export type SetPluginSettingsPayload = z.infer<typeof SetPluginSettingsPayload>;
@@ -2713,6 +2759,18 @@ export const ListPluginsResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
 ]);
 export type ListPluginsResult = z.infer<typeof ListPluginsResult>;
+
+export const ListOfferedPluginsResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), offers: z.array(OfferedPluginRecord) }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type ListOfferedPluginsResult = z.infer<typeof ListOfferedPluginsResult>;
+
+export const AddOfferedPluginResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
+  z.object({ ok: z.literal(false), error: PluginPipelineError }).strict(),
+]);
+export type AddOfferedPluginResult = z.infer<typeof AddOfferedPluginResult>;
 
 export const PluginActionResult = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), plugin: PluginStatusRecord }).strict(),
@@ -2757,8 +2815,14 @@ export const PluginUninstallPreflightRecord = z.object({
     path: PATH_STRING,
     fileCount: z.number().int().nonnegative(),
     totalBytes: z.number().int().nonnegative(),
+    additionalLocations: z.number().int().nonnegative(),
   }).strict().nullable(),
   warning: PluginUninstallWarning.nullable(),
+  // The packaged built-in's own manifest displayName, read fresh for this
+  // directoryName — never this copy's own, which can be hand-edited or too
+  // broken to read. Null for anything that isn't a built-in driver
+  // directory: nothing packaged for Add to ever restore there.
+  packagedDisplayName: z.string().min(1).max(120).nullable(),
 }).strict();
 export type PluginUninstallPreflightRecord = z.infer<
   typeof PluginUninstallPreflightRecord
@@ -2791,7 +2855,21 @@ export const PluginSizesResult = z.discriminatedUnion("ok", [
 ]);
 export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
 
+// directoryName is what settles which row's bytes a call reports: an id is
+// only ever a broken manifest's directory-derived fallback, which can
+// coincide with some OTHER, unrelated plugin's real id.
+export const PluginSizesPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
+}).strict();
+export type PluginSizesPayload = z.infer<typeof PluginSizesPayload>;
+
+// directoryName is what confirmationToken alone cannot name apart: two rows
+// can share an id (a broken manifest's directory-derived fallback colliding
+// with some other, unrelated plugin's real id), and each row's own
+// preflight confirmation has to be resolved by the exact row it was issued
+// for, not whichever row this id happens to name second.
 export const UninstallPluginPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
   confirmationToken: z.uuid(),
 }).strict();
 export type UninstallPluginPayload = z.infer<typeof UninstallPluginPayload>;
@@ -2802,10 +2880,33 @@ export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
     workspaceId: WORKSPACE_ID,
     plugin: PluginStatusRecord,
   }).strict(),
+  // directoryName is the departed row's own — never re-derived from
+  // whatever this id currently names, which a collision can leave
+  // pointing at an entirely different, still-installed row.
   z.object({
     kind: z.literal("removed"),
     workspaceId: WORKSPACE_ID,
     pluginId: PLUGIN_ID,
+    directoryName: z.string().min(1).max(255),
+  }).strict(),
+  // An invalid, never-installed candidate's arrival or departure names no
+  // pluginId "changed"/"removed" could carry — this is the one honest fact
+  // discovery has to offer instead: something in this workspace's invalid
+  // candidates moved, so anything reading discovery (offers, the plugin
+  // list) should re-check.
+  z.object({
+    kind: z.literal("discovery-changed"),
+    workspaceId: WORKSPACE_ID,
+  }).strict(),
+  // Emitted only where the pipeline itself has proven a rename, never
+  // guessed from directoryName drift on a "changed" event — a renderer
+  // tab tracking one open row retargets on this fact directly.
+  z.object({
+    kind: z.literal("renamed"),
+    workspaceId: WORKSPACE_ID,
+    pluginId: PLUGIN_ID,
+    from: z.string().min(1).max(255),
+    to: z.string().min(1).max(255),
   }).strict(),
 ]);
 export type PluginStatusChangedEvent = z.infer<typeof PluginStatusChangedEvent>;
@@ -4594,17 +4695,21 @@ export interface DohcDesktopBridge {
     listener: (event: PluginWebAppFailedEvent) => void,
   ): () => void;
   listPlugins(payload: ListPluginsPayload): Promise<ListPluginsResult>;
+  listOfferedPlugins(
+    payload: ListOfferedPluginsPayload,
+  ): Promise<ListOfferedPluginsResult>;
+  addOfferedPlugin(payload: AddOfferedPluginPayload): Promise<AddOfferedPluginResult>;
   installPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   disablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   rebuildPlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   pluginUninstallPreflight(
-    payload: PluginActionPayload,
+    payload: PluginUninstallPreflightPayload,
   ): Promise<PluginUninstallPreflightResult>;
-  pluginSizes(payload: PluginActionPayload): Promise<PluginSizesResult>;
+  pluginSizes(payload: PluginSizesPayload): Promise<PluginSizesResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
-  getPluginSettings(payload: PluginActionPayload): Promise<PluginSettingsResult>;
+  getPluginSettings(payload: GetPluginSettingsPayload): Promise<PluginSettingsResult>;
   setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;

@@ -671,7 +671,7 @@ describe("plugin panel main-process wiring", () => {
     expect(createOnlyWhileCallAt).toBeGreaterThan(createOnlyWhileAt);
   });
 
-  it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {
+  it("revokes a plugin's panel authorities before disable takes its process (#779 round 12 A4)", () => {
     const disableAt = mainSource.indexOf(
       "pluginAction(CHANNELS.disablePlugin,",
     );
@@ -683,25 +683,47 @@ describe("plugin panel main-process wiring", () => {
       "return pipeline.disable(pluginId);",
       disableAt,
     );
-    const uninstall = handler("uninstallPlugin");
-    const uninstallRevokeAt = uninstall.indexOf(
-      "revokePluginPanels(input.workspaceId, input.pluginId);",
-    );
-    const uninstallCallAt = uninstall.indexOf(
-      "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
-    );
 
     // MUTATION (ordering): revoking after the pipeline call leaves an
     // already-queued panel write holding a live authority for the whole time
     // the pipeline spends stopping the process and deleting the source, which
     // is exactly the window the write completes in. What revocation does to
-    // an in-flight write is pinned by behavior in PluginHost.test.ts.
+    // an in-flight write is pinned by behavior in PluginHost.test.ts. disable
+    // takes no confirmation to validate first, so revoking ahead of its own
+    // call is safe — unlike uninstall, whose own ordering is pinned in
+    // main.pluginWebAppWiring.test.ts.
     expect(disableAt).toBeGreaterThan(-1);
     expect(disableRevokeAt).toBeGreaterThan(-1);
     expect(disableCallAt).toBeGreaterThan(disableRevokeAt);
-    expect(uninstallRevokeAt).toBeGreaterThan(-1);
-    expect(uninstallCallAt).toBeGreaterThan(uninstallRevokeAt);
+  });
 
+  it("revokes a plugin's panel authorities only once no installed claimant survives its own uninstall", () => {
+    const uninstall = handler("uninstallPlugin");
+    const uninstallCallAt = uninstall.indexOf(
+      "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
+    );
+    const stillInstalledClaimantAt = uninstall.indexOf(
+      "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
+      uninstallCallAt,
+    );
+    const uninstallRevokeAt = uninstall.indexOf(
+      "revokePluginPanels(input.workspaceId, input.pluginId);",
+      stillInstalledClaimantAt,
+    );
+
+    // MUTATION (revoke before the result, or unconditionally): a collision
+    // loser's own uninstall must never tear down panel authorities a
+    // still-installed winner sharing this id genuinely owns — revoking has
+    // to wait for both the pipeline's own result AND proof no installed
+    // claimant of this id survives. The gate's own predicate is pinned by
+    // name in main.pluginWebAppWiring.test.ts, and its partition-clear
+    // sibling is pinned end to end there too.
+    expect(uninstallCallAt).toBeGreaterThan(-1);
+    expect(stillInstalledClaimantAt).toBeGreaterThan(uninstallCallAt);
+    expect(uninstallRevokeAt).toBeGreaterThan(stillInstalledClaimantAt);
+  });
+
+  it("revokes a plugin's panel authorities before rebuild replaces its process", () => {
     // Rebuild replaces the runtime instead of stopping it for good, but the
     // old grant is still against a runtime that is gone by the time this
     // fires — it must not straddle into the replacement (#779 round 18

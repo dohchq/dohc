@@ -69,7 +69,7 @@ export type PluginUninstallFileStatus =
  * settled capture batch. An edit made seconds ago may never have been
  * recorded. Rather than promise recovery from a size check and a
  * capture-is-running flag, every file uninstall deletes and cannot verify
- * counts as unverified (#779 round 7 B2).
+ * counts as unverified.
  */
 const UNVERIFIED_DELETE_STATUSES = new Set<PluginUninstallFileStatus>([
   "modified",
@@ -108,9 +108,14 @@ export interface PluginUninstallWarning {
  * the details rail, about that same state root and the installed tree.
  */
 export interface PluginDirectorySize {
+  /** One real directory's own path — never a join of several. When this
+   * measurement folds in other state directories too (combineDirectorySizes),
+   * this is the first of them; additionalLocations names the rest by count,
+   * never by pasting their paths into this one field. */
   path: string;
   fileCount: number;
   totalBytes: number;
+  additionalLocations: number;
 }
 
 export interface PluginUninstallPreflightResult {
@@ -176,7 +181,7 @@ export function summarizeUninstallPreflight(
 
 export interface WritePluginBaselineManifestInput {
   /** The app's userData-resident plugin-data root (PluginPipeline's
-   * dohcDir), never a workspace-relative path (CERT779). */
+   * dohcDir), never a workspace-relative path. */
   dohcDir: string;
   pluginId: string;
   baselineDigest: PluginSourceDigest;
@@ -188,9 +193,24 @@ export interface PluginUninstallPreflightInput {
   dohcDir: string;
   pluginId: string;
   pluginRoot: string;
-  /** The plugin's durable data directory (pluginStateRoot) — inventoried so
-   * the uninstall warning can name what deleting it destroys. */
-  stateRoot: string;
+  /**
+   * The plugin's durable data directory (pluginStateRoot) — inventoried so
+   * the uninstall warning can name what deleting it destroys. Null when
+   * pluginId's own path resolves to data cleanup will never touch: an
+   * invalid, never-installed row's own fallback id can coincide with some
+   * OTHER, unrelated, installed plugin's real id, and that path is real
+   * DATA belonging entirely to that other installation — inventorying it
+   * here would threaten deleting it when cleanup already excludes it.
+   */
+  stateRoot: string | null;
+  /**
+   * Other durable data directories cleanup will ALSO delete for this same
+   * plugin — a record's state and plugin data can be filed under an id
+   * different from the one discovery currently reports once its manifest
+   * breaks, and the confirmation this produces has to report that data
+   * too, not only stateRoot's own, or it understates what Remove deletes.
+   */
+  additionalStateRoots: string[];
   installedBaselineHash: string | undefined;
   /**
    * Whether this workspace's engine capture is running right now. It does not
@@ -278,7 +298,7 @@ export async function writePluginBaselineManifest(
  * The persisted per-file baseline of the installed, approved source — or
  * null when it is missing or does not verify. PluginPipeline's door-write
  * predicate overlays door deltas on it, and a baseline it cannot prove
- * simply never auto-approves (#779 round 14 A1).
+ * simply never auto-approves.
  */
 export async function readPluginBaselineManifest(
   dohcDir: string,
@@ -405,8 +425,7 @@ function cannotVerifyResult(
 /**
  * The plugin's source folder is already deleted, so uninstall has nothing
  * irreversible left to warn about. This is what an uninstall that deleted the
- * source and then failed on the plugin data or the record leaves behind
- * (#779 round 12 A2).
+ * source and then failed on the plugin data or the record leaves behind.
  */
 function sourceAlreadyDeletedResult(
   input: PluginUninstallPreflightInput,
@@ -489,7 +508,29 @@ export async function measurePluginDirectory(
       }
     }
   }
-  return fileCount === 0 ? null : { path: root, fileCount, totalBytes };
+  return fileCount === 0 ? null : { path: root, fileCount, totalBytes, additionalLocations: 0 };
+}
+
+/**
+ * One combined size for every state directory cleanup will touch — never
+ * called with more than one measurement site, so there is exactly one place
+ * that ever composes them, and no risk of a second call silently discarding
+ * the first (as re-invoking withStateData per directory would). Never joins
+ * several real paths into one path-typed field: `path` stays the first
+ * directory's own, and every other one folded in here only ever adds to
+ * additionalLocations.
+ */
+function combineDirectorySizes(
+  sizes: readonly (PluginDirectorySize | null)[],
+): PluginDirectorySize | null {
+  const present = sizes.filter((size): size is PluginDirectorySize => size !== null);
+  if (present.length === 0) return null;
+  return {
+    path: present[0].path,
+    fileCount: present.reduce((sum, size) => sum + size.fileCount, 0),
+    totalBytes: present.reduce((sum, size) => sum + size.totalBytes, 0),
+    additionalLocations: present.length - 1,
+  };
 }
 
 /**
@@ -504,8 +545,11 @@ function withStateData(
   stateData: PluginDirectorySize | null,
 ): PluginUninstallPreflightResult {
   if (!stateData) return result;
+  const location = stateData.additionalLocations > 0
+    ? `${stateData.path} and ${stateData.additionalLocations} more ${plural(stateData.additionalLocations, "location")}`
+    : stateData.path;
   const details = [
-    `Uninstall also deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatSize(stateData.totalBytes)}) at ${stateData.path}.`,
+    `Uninstall also deletes this plugin's stored data: ${stateData.fileCount} ${plural(stateData.fileCount, "file")} (${formatSize(stateData.totalBytes)}) at ${location}.`,
     "That data is not in the workspace and history holds no copy. It cannot be restored.",
   ];
   const warning: PluginUninstallWarning = result.warning
@@ -524,9 +568,21 @@ function withStateData(
 export async function pluginUninstallPreflight(
   input: PluginUninstallPreflightInput,
 ): Promise<PluginUninstallPreflightResult> {
+  const stateRoots = input.stateRoot === null
+    ? input.additionalStateRoots
+    : [input.stateRoot, ...input.additionalStateRoots];
+  // Two different cleanup identities can resolve to the SAME physical
+  // state directory (pluginStateRoot is deterministic per id, and more
+  // than one id can genuinely trace to one directory) — measuring the
+  // same path twice would double the file count and byte total the
+  // warning reports. The raw path string is already the right identity:
+  // it is exactly what measurePluginDirectory resolves from, so two equal
+  // strings always describe the same directory.
+  const uniqueStateRoots = [...new Set(stateRoots)];
+  const stateSizes = await Promise.all(uniqueStateRoots.map(measurePluginDirectory));
   return withStateData(
     await sourceUninstallPreflight(input),
-    await measurePluginDirectory(input.stateRoot),
+    combineDirectorySizes(stateSizes),
   );
 }
 

@@ -63,9 +63,12 @@ export interface PluginHostOptions {
     signal: AbortSignal,
     emitEvent: (subscriptionId: string, event: string, data: unknown) => void,
   ) => Promise<unknown>;
-  /** This plugin's settings, resolved against its manifest, for activation. */
+  /** This plugin's settings, resolved against its manifest, for activation.
+   * Named by directoryName, never pluginId — settings are stored and looked
+   * up per directory, and a manifest's declared name can differ from the
+   * folder it was found in. */
   readPluginSettings?: (
-    pluginId: string,
+    directoryName: string,
   ) => Promise<Record<string, PluginSettingValue>>;
   /**
    * Offers this spawn's manifest-declared drivers to the workspace's driver
@@ -120,6 +123,12 @@ interface PluginSpawn {
 interface PluginRecord {
   pluginId: string;
   pluginRoot: string;
+  /** The discovered SOURCE directory's own name, passed explicitly into
+   * start() — never derived from pluginRoot, which production starts a
+   * plugin from as its BUILT root, not its source folder. The identity a
+   * manifest's own declared name cannot stand in for when it differs from
+   * the folder it was found in. */
+  directoryName: string;
   manifest: DohcPluginManifest;
   status: PluginRuntimeStatus;
   stderr: string[];
@@ -214,6 +223,13 @@ export class PluginHost {
 
   async start(
     pluginRoot: string,
+    // The discovered SOURCE directory's own name under plugins/ — never
+    // derived from pluginRoot. Production starts a plugin from its BUILT
+    // root (dohc's own .dohc/plugins/<safe-path> staging, not the source
+    // folder discovery found it at), so basename(pluginRoot) would read
+    // dohc's internal build-path segment instead of the actual directory a
+    // settings read or a sizes report needs to name.
+    directoryName: string,
     manifest: DohcPluginManifest,
   ): Promise<void> {
     // The manifest name is the plugin's identity — one identity, so state
@@ -244,6 +260,7 @@ export class PluginHost {
       const record: PluginRecord = {
         pluginId,
         pluginRoot,
+        directoryName,
         manifest,
         status: "starting",
         stderr: [],
@@ -483,14 +500,29 @@ export class PluginHost {
    * needs no telling — it reads the new values from its next activation. The
    * caller does not wait on this: a slow plugin must never hold up the save
    * the user already made.
+   *
+   * `directoryName` must match the running record's own — two directories
+   * can share a manifest id (a broken manifest's directory-derived fallback
+   * colliding with some other, unrelated plugin's real id), and only ONE of
+   * them can ever be the process actually running under this id at a time.
+   * Settings are saved per directory; telling whichever process happens to
+   * be running under the shared id, rather than the one the save was
+   * actually for, would hand it values it never asked for.
    */
   async notifySettingsChanged(
     pluginId: string,
+    directoryName: string,
     values: Record<string, PluginSettingValue>,
   ): Promise<void> {
     const record = this.plugins.get(pluginId);
     const spawn = record?.current;
-    if (!record || !spawn || !spawn.transport || !this.isLive(record, spawn)) {
+    if (
+      !record ||
+      record.directoryName !== directoryName ||
+      !spawn ||
+      !spawn.transport ||
+      !this.isLive(record, spawn)
+    ) {
       return;
     }
     await spawn.transport.request(PLUGIN_HOST_METHODS.settingsChanged, {
@@ -532,8 +564,8 @@ export class PluginHost {
     for (const record of this.plugins.values()) {
       if (record.current) {
         // endSpawn's promise is wired to the broker's disposeSpawn, which
-        // can reject (CodeRabbit #779 R13) — this call is fire-and-forget
-        // by design (bumpGeneration itself is synchronous), so an unhandled
+        // can reject — this call is fire-and-forget by design
+        // (bumpGeneration itself is synchronous), so an unhandled
         // teardown failure must be logged, not left to surface as an
         // unhandled rejection in the main process.
         void this.endSpawn(record, record.current).catch((error: unknown) => {
@@ -590,7 +622,8 @@ export class PluginHost {
       // awaited before the spawn, so it is covered by the activation deadline
       // like every other part of starting a plugin.
       const activation = (async () => {
-        const settings = await this.options.readPluginSettings?.(record.pluginId) ?? {};
+        const settings =
+          await this.options.readPluginSettings?.(record.directoryName) ?? {};
         return spawn.transport!.request<unknown>(
           PLUGIN_HOST_METHODS.activate,
           {
@@ -623,7 +656,7 @@ export class PluginHost {
   ): void {
     if (!this.isLive(record, spawn)) {
       // .finally() re-throws the original rejection, so this needs its own
-      // .catch() too (CodeRabbit #779 R13) — see bumpGeneration's comment.
+      // .catch() too — see bumpGeneration's comment.
       void this.endSpawn(record, spawn)
         .finally(() => spawn.transport?.dispose().catch(() => undefined))
         .catch((error: unknown) => {

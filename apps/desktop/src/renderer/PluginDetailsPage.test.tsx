@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   PluginStatusChangedEvent,
@@ -13,6 +14,8 @@ let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
 const bridgeMock = {
   listPlugins: vi.fn(),
+  listOfferedPlugins: vi.fn(),
+  addOfferedPlugin: vi.fn(),
   openPluginWebApp: vi.fn(),
   installPlugin: vi.fn(),
   disablePlugin: vi.fn(),
@@ -94,6 +97,7 @@ const cleanPreflight: PluginUninstallPreflightRecord = {
     notRecoverableFromHistory: 0,
   },
   warning: null,
+  packagedDisplayName: null,
 };
 
 function deferred<T>() {
@@ -112,9 +116,17 @@ function enoent(relativePath: string): Error {
   );
 }
 
-function renderPage(pluginId: string, workspaceId = "ws-1") {
+function renderPage(
+  pluginId: string,
+  workspaceId = "ws-1",
+  directoryName = pluginId,
+) {
   return render(
-    <PluginDetailsPage workspaceId={workspaceId} pluginId={pluginId} />,
+    <PluginDetailsPage
+      workspaceId={workspaceId}
+      pluginId={pluginId}
+      directoryName={directoryName}
+    />,
   );
 }
 
@@ -128,6 +140,7 @@ beforeEach(() => {
     };
   });
   bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [] });
+  bridgeMock.listOfferedPlugins.mockResolvedValue({ ok: true, offers: [] });
   bridgeMock.pluginUninstallPreflight.mockResolvedValue({
     ok: true,
     confirmationToken: "00000000-0000-4000-8000-000000000001",
@@ -159,7 +172,7 @@ describe("PluginDetailsPage", () => {
       plugins: [plugin("t3-code", { directoryName: "t3-code-src" })],
     });
 
-    renderPage("t3-code");
+    renderPage("t3-code", "ws-1", "t3-code-src");
 
     const page = await screen.findByTestId("plugin-details-page");
     expect(page.getAttribute("data-plugin-id")).toBe("t3-code");
@@ -184,7 +197,8 @@ describe("PluginDetailsPage", () => {
       <PluginDetailsPage
         workspaceId="ws-1"
         pluginId="hello-plugin"
-        onTitle={(pluginId, title) => titles.push([pluginId, title])}
+        directoryName="hello-plugin"
+        onTitle={(pluginId, _directoryName, title) => titles.push([pluginId, title])}
       />,
     );
 
@@ -203,7 +217,8 @@ describe("PluginDetailsPage", () => {
       <PluginDetailsPage
         workspaceId="ws-1"
         pluginId="hello-plugin"
-        onTitle={(_pluginId, title) => titles.push(title)}
+        directoryName="hello-plugin"
+        onTitle={(_pluginId, _directoryName, title) => titles.push(title)}
       />,
     );
 
@@ -225,7 +240,7 @@ describe("PluginDetailsPage", () => {
       ],
     });
 
-    renderPage("t3-code");
+    renderPage("t3-code", "ws-1", "t3-code-src");
 
     expect(await screen.findByRole("heading", { name: "T3 Code" })).toBeTruthy();
     expect(screen.getByTestId("plugin-description").textContent).toBe(
@@ -370,12 +385,533 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.pluginUninstallPreflight).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "uninstall-plugin",
+      directoryName: "uninstall-plugin",
     });
     expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "uninstall-plugin",
+      directoryName: "uninstall-plugin",
       confirmationToken: "00000000-0000-4000-8000-000000000001",
     });
+  });
+
+  // Round 16 finding 2: id alone can name two rows (a broken manifest's
+  // directory-derived fallback colliding with some other, unrelated
+  // plugin's real id). Once the tab's own exact row is removed, the id
+  // alone fallback used to find the one row still sharing the id and adopt
+  // it — a successful Remove would rebind an already-open tab onto a
+  // completely different, unrelated plugin's page instead of showing that
+  // it is gone.
+  it("shows removed, not the survivor, after Remove on a row whose id collides with another row", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
+        plugin("codex", { directoryName: "codex-b", displayName: "Codex B" }),
+      ],
+    });
+    bridgeMock.uninstallPlugin.mockResolvedValue({
+      ok: true,
+      plugin: plugin("codex", {
+        directoryName: "codex-a",
+        displayName: "Codex A",
+        status: "disabled",
+        disabledReason: "user",
+        runtimeStatus: null,
+      }),
+    });
+
+    renderPage("codex", "ws-1", "codex-a");
+    expect(await screen.findByText("Codex A")).toBeTruthy();
+
+    await userEvent.click(await screen.findByTestId("plugin-uninstall"));
+    await userEvent.click(await screen.findByTestId("plugin-uninstall-confirm"));
+    expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "codex",
+      directoryName: "codex-a",
+      confirmationToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    // codex-b survives (round 15's own scoped removal), but this tab
+    // opened for codex-a specifically and must never silently show a
+    // different plugin's page in its place.
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+    expect(screen.getByText("codex is not in this workspace.")).toBeTruthy();
+    expect(screen.queryByText("Codex B")).toBeNull();
+  });
+
+  // The details tab used to infer a rename from an id-only heuristic
+  // (a window, a collision history). It now follows the fact instead: the
+  // pipeline proves a rename and reports it as its own event kind, and the
+  // tab retargets on that fact directly.
+  it("follows a rename via the renamed event while the tab is open", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    renderPage("foo", "ws-1", "old-folder");
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    act(() => {
+      statusListener?.({
+        kind: "renamed",
+        workspaceId: "ws-1",
+        pluginId: "foo",
+        from: "old-folder",
+        to: "new-folder",
+      });
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "new-folder", displayName: "Renamed" }),
+      });
+    });
+
+    expect(await screen.findByText("Renamed")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
+
+    // A later, genuinely unrelated installation lands at the vacated
+    // old-folder, sharing the same id — a plain "changed" event, never a
+    // "renamed" one. Nothing proves this is the tracked row moving again,
+    // so it must reconcile against the authoritative list (the real shape
+    // both rows now take) rather than an id-match guess evicting the row
+    // this tab is tracking.
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("foo", { directoryName: "new-folder", displayName: "Renamed" }),
+        plugin("foo", { directoryName: "old-folder", displayName: "New Occupant" }),
+      ],
+    });
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "old-folder", displayName: "New Occupant" }),
+      });
+    });
+    await waitFor(() => expect(screen.getByText("Renamed")).toBeTruthy());
+    expect(screen.queryByText("New Occupant")).toBeNull();
+  });
+
+  it("closes the tab on a genuine removal", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    renderPage("foo", "ws-1", "old-folder");
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    act(() => {
+      statusListener?.({
+        kind: "removed",
+        workspaceId: "ws-1",
+        pluginId: "foo",
+        directoryName: "old-folder",
+      });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+  });
+
+  // A same-id row arriving through an ordinary "changed" event — never a
+  // "renamed" fact — must never be read as this tab's own row moving.
+  // There is no more heuristic left to (mis)fire; this proves it.
+  it("never follows a same-id row without an explicit renamed event", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    renderPage("foo", "ws-1", "old-folder");
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    act(() => {
+      statusListener?.({
+        kind: "removed",
+        workspaceId: "ws-1",
+        pluginId: "foo",
+        directoryName: "old-folder",
+      });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "elsewhere", displayName: "Unrelated Later" }),
+      });
+    });
+
+    expect(screen.getByTestId("plugin-details-missing")).toBeTruthy();
+    expect(screen.queryByText("Unrelated Later")).toBeNull();
+  });
+
+  // React can call a component's render body more than once for one
+  // eventual commit (StrictMode's double-invoke in development, or an
+  // interrupted concurrent render) — refs are never rolled back between
+  // those calls the way state is. The rename-tracking refs mutated during
+  // render must still land on the correct, single outcome.
+  it("follows a rename correctly under React's double-invoked renders", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    render(
+      <StrictMode>
+        <PluginDetailsPage workspaceId="ws-1" pluginId="foo" directoryName="old-folder" />
+      </StrictMode>,
+    );
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    act(() => {
+      statusListener?.({
+        kind: "renamed",
+        workspaceId: "ws-1",
+        pluginId: "foo",
+        from: "old-folder",
+        to: "new-folder",
+      });
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "new-folder", displayName: "Renamed" }),
+      });
+    });
+
+    expect(await screen.findByText("Renamed")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
+  });
+
+  it("offers Remove for a plugin that was added but never installed, and restores its offer on confirm", async () => {
+    // What Add's own result looks like: discovered, never approved.
+    // isInstalled (approvedHash !== null) is false, so Uninstall never
+    // shows — before this fix, undoing an add had no control at all.
+    const added = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [added] });
+    bridgeMock.uninstallPlugin.mockResolvedValue({ ok: true, plugin: added });
+    bridgeMock.pluginUninstallPreflight.mockResolvedValue({
+      ok: true,
+      confirmationToken: "00000000-0000-4000-8000-000000000001",
+      preflight: { ...cleanPreflight, packagedDisplayName: "Codex" },
+    });
+
+    renderPage("codex");
+
+    expect(screen.queryByTestId("plugin-uninstall")).toBeNull();
+    const removeButton = await screen.findByTestId("plugin-remove");
+    await userEvent.click(removeButton);
+
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(within(dialog).getByText("Remove codex?")).toBeTruthy();
+    // The true consequence, stated: this copy's own files are deleted, and
+    // Add restores dohc's packaged plugin — never a promise that Add
+    // restores whatever this specific copy held. Named "Codex" (the
+    // packaged manifest's own name), not derived from this copy's title.
+    expect(
+      within(dialog).getByText(
+        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged Codex plugin, not this copy.",
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).getByTestId("plugin-uninstall-confirm").textContent).toBe(
+      "Remove plugin",
+    );
+
+    await userEvent.click(within(dialog).getByTestId("plugin-uninstall-confirm"));
+
+    expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      pluginId: "codex",
+      directoryName: "codex",
+      confirmationToken: "00000000-0000-4000-8000-000000000001",
+    });
+    // The directory this page showed is gone.
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+    // confirmUninstall's own success path refreshes offers directly — it
+    // does not wait for the pipeline's "removed" status event to round-trip
+    // back through main first.
+    await waitFor(() =>
+      expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  // Round 17 finding 4: the dialog-closing check that protects a Remove
+  // confirmation from a stale "never installed" claim used to scope to id
+  // alone. Two rows can share an id (a broken manifest's directory-derived
+  // fallback colliding with some other, unrelated plugin's real id), and
+  // an UNRELATED row's own install completing must never close a
+  // completely different row's dialog for a transition that never
+  // happened to it.
+  it("keeps an open Remove dialog open when an unrelated, id-colliding row installs", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("widget", {
+          directoryName: "widget-a",
+          displayName: "Widget A",
+          status: "discovered",
+          runtimeStatus: null,
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+        }),
+        plugin("widget", {
+          directoryName: "widget-b",
+          displayName: "Widget B",
+          status: "discovered",
+          runtimeStatus: null,
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+        }),
+      ],
+    });
+
+    renderPage("widget", "ws-1", "widget-a");
+    const removeButton = await screen.findByTestId("plugin-remove");
+    await userEvent.click(removeButton);
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(within(dialog).getByText("Remove widget?")).toBeTruthy();
+
+    // widget-b's own, unrelated install completing — this tab's dialog is
+    // about widget-a and must not react to it.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("widget", {
+          directoryName: "widget-b",
+          displayName: "Widget B",
+          status: "ready",
+        }),
+      });
+    });
+
+    expect(screen.getByTestId("plugin-uninstall-dialog")).toBeTruthy();
+    expect(within(screen.getByTestId("plugin-uninstall-dialog")).getByText("Remove widget?"))
+      .toBeTruthy();
+  });
+
+  // A directoryName matching a built-in says nothing about what a copy's
+  // OWN manifest currently claims — it can be hand-edited, or too broken to
+  // read at all. The dialog must name the packaged plugin Add actually
+  // restores, never whatever title this specific copy happens to carry.
+  it("names the packaged plugin, not this copy's own display name, for a built-in directory", async () => {
+    const renamedCopy = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+      displayName: "Someone's Fork",
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [renamedCopy] });
+    // The preflight names the PACKAGED manifest's own displayName — never
+    // this copy's "Someone's Fork" — proving the dialog reads it from
+    // there, not from confirmation.plugin.
+    bridgeMock.pluginUninstallPreflight.mockResolvedValue({
+      ok: true,
+      confirmationToken: "00000000-0000-4000-8000-000000000001",
+      preflight: { ...cleanPreflight, packagedDisplayName: "Codex" },
+    });
+
+    renderPage("codex");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(
+      within(dialog).getByText(
+        "This deletes plugins/codex's files from this workspace. Add restores dohc's packaged Codex plugin, not this copy.",
+      ),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText(/Someone's Fork/)).toBeNull();
+  });
+
+  it("names the real consequence for a never-installed plugin that isn't a built-in offer", async () => {
+    // Same never-approved shape Add produces, but a directoryName no offer
+    // mechanism recognizes — a hand-authored or agent-created plugin sitting
+    // undiscovered, never Added.
+    const handAuthored = plugin("notes-widget", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [handAuthored] });
+
+    renderPage("notes-widget");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(within(dialog).getByText("Remove notes-widget?")).toBeTruthy();
+    expect(
+      within(dialog).getByText(
+        "This permanently deletes plugins/notes-widget from this workspace. dohc has no way to bring it back.",
+      ),
+    ).toBeTruthy();
+    // Never claims a recovery path that does not exist for this plugin.
+    expect(within(dialog).queryByText(/restores dohc's packaged/)).toBeNull();
+  });
+
+  it("closes the Remove confirmation instead of deleting under a stale claim once the plugin gets installed", async () => {
+    const added = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [added] });
+
+    renderPage("codex");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+    expect(await screen.findByTestId("plugin-uninstall-dialog")).toBeTruthy();
+
+    // Something else — another window, an install triggered elsewhere on
+    // this same plugin — installs it while the confirmation is still open.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex"), // default status "ready", approved
+      });
+    });
+
+    // The stale confirmation, and the token it carried, do not survive the
+    // transition — there is nothing left to confirm under a claim that
+    // stopped being true.
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+    expect(bridgeMock.uninstallPlugin).not.toHaveBeenCalled();
+  });
+
+  // The interleaving the test above cannot reach: the install lands WHILE
+  // the preflight request for Remove is still in flight, before
+  // confirmation exists for the event-driven clear (the test above) to act
+  // on. The preflight response must not install a dialog built from a
+  // snapshot that stopped being true before it ever arrived.
+  it("never opens the Remove confirmation when the plugin was installed while its preflight was in flight", async () => {
+    const added = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [added] });
+    const slowPreflight = deferred<{
+      ok: true;
+      confirmationToken: string;
+      preflight: PluginUninstallPreflightRecord;
+    }>();
+    bridgeMock.pluginUninstallPreflight.mockImplementation(() => slowPreflight.promise);
+
+    renderPage("codex");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+    // Nothing to show yet — the preflight request is still pending.
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+
+    // Installed elsewhere while Remove's own preflight was still in flight —
+    // confirmation is still null here, so the event-driven clear above has
+    // nothing to act on.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex"), // default status "ready", approved
+      });
+    });
+
+    await act(async () => {
+      slowPreflight.resolve({
+        ok: true,
+        confirmationToken: "00000000-0000-4000-8000-000000000001",
+        preflight: cleanPreflight,
+      });
+      await slowPreflight.promise;
+    });
+
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+    expect(bridgeMock.uninstallPlugin).not.toHaveBeenCalled();
+  });
+
+  // Round 18 finding 2: the same in-flight check above scoped to id alone —
+  // two rows can share an id (a broken manifest's directory-derived
+  // fallback colliding with some other, unrelated plugin's real id), and an
+  // UNRELATED, id-colliding row's own install completing must never refuse
+  // to open THIS row's Remove confirmation for a transition that never
+  // happened to it.
+  it("still opens the Remove confirmation when an unrelated, id-colliding row installs while preflight is in flight", async () => {
+    const removingRow = plugin("codex", {
+      directoryName: "codex-a",
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    const collidingRow = plugin("codex", {
+      directoryName: "codex-b",
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [removingRow, collidingRow],
+    });
+    const slowPreflight = deferred<{
+      ok: true;
+      confirmationToken: string;
+      preflight: PluginUninstallPreflightRecord;
+    }>();
+    bridgeMock.pluginUninstallPreflight.mockImplementation(() => slowPreflight.promise);
+
+    renderPage("codex", "ws-1", "codex-a");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+
+    // codex-b's own, unrelated install completing — this dialog is about
+    // codex-a and must not react to it.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex", { directoryName: "codex-b" }),
+      });
+    });
+
+    await act(async () => {
+      slowPreflight.resolve({
+        ok: true,
+        confirmationToken: "00000000-0000-4000-8000-000000000001",
+        preflight: cleanPreflight,
+      });
+      await slowPreflight.promise;
+    });
+
+    expect(screen.getByTestId("plugin-uninstall-dialog")).toBeTruthy();
   });
 
   // MUTATION (offer Open for a per-instance app too): this page has no
@@ -464,7 +1000,7 @@ describe("PluginDetailsPage", () => {
       webAppId: "app",
     });
     view.rerender(
-      <PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" directoryName="t3-code" />,
     );
 
     // MUTATION (leave openingWebApp alone across the switch): the stale
@@ -755,6 +1291,7 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.pluginUninstallPreflight).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "broken-plugin",
+      directoryName: "broken-plugin",
     });
   });
 
@@ -1063,29 +1600,32 @@ describe("PluginDetailsPage", () => {
         workspaceId === "ws-old" ? oldList.promise : newList.promise,
     );
 
+    // The open tab is the SAME (pluginId, directoryName) throughout — a
+    // workspace switch changes which workspace answers for it, never the
+    // row identity the tab itself was opened for.
     const view = renderPage("t3-code", "ws-old");
-    view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" />);
+    view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" directoryName="t3-code" />);
 
     await act(async () => {
       newList.resolve({
         ok: true,
-        plugins: [plugin("t3-code", { directoryName: "new-workspace-copy" })],
+        plugins: [plugin("t3-code", { displayName: "New Workspace Copy" })],
       });
       await newList.promise;
     });
-    expect(await screen.findByText("plugins/new-workspace-copy")).toBeTruthy();
+    expect(await screen.findByText("New Workspace Copy")).toBeTruthy();
 
     // The workspace the user left finally answers. Its plugin carries the
     // same id, so only the epoch guard keeps it off this page.
     await act(async () => {
       oldList.resolve({
         ok: true,
-        plugins: [plugin("t3-code", { directoryName: "old-workspace-copy" })],
+        plugins: [plugin("t3-code", { displayName: "Old Workspace Copy" })],
       });
       await oldList.promise;
     });
-    expect(screen.queryByText("plugins/old-workspace-copy")).toBeNull();
-    expect(screen.getByText("plugins/new-workspace-copy")).toBeTruthy();
+    expect(screen.queryByText("Old Workspace Copy")).toBeNull();
+    expect(screen.getByText("New Workspace Copy")).toBeTruthy();
   });
 
   it("surfaces the real reason and offers a retry when the plugin cannot load", async () => {
@@ -1124,7 +1664,7 @@ describe("PluginDetailsPage", () => {
         contentHash: HASH_A,
       });
 
-      renderPage("t3-code");
+      renderPage("t3-code", "ws-1", "t3-code-src");
 
       expect(await screen.findByTestId("plugin-readme")).toBeTruthy();
       // The folder names the file, never the plugin id: the two differ here.
@@ -1263,10 +1803,17 @@ describe("PluginDetailsPage", () => {
               }),
       );
 
-      renderPage("t3-code");
+      renderPage("t3-code", "ws-1", "old-folder");
       await screen.findByTestId("plugin-readme-loading");
 
       act(() => {
+        statusListener?.({
+          kind: "renamed",
+          workspaceId: "ws-1",
+          pluginId: "t3-code",
+          from: "old-folder",
+          to: "new-folder",
+        });
         statusListener?.({
           kind: "changed",
           workspaceId: "ws-1",
@@ -1311,7 +1858,7 @@ describe("PluginDetailsPage", () => {
 
       const view = renderPage("t3-code", "ws-old");
       await screen.findByTestId("plugin-details-page");
-      view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" />);
+      view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" directoryName="t3-code" />);
       expect(await screen.findByText("The new workspace README.")).toBeTruthy();
 
       await act(async () => {
@@ -1391,6 +1938,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
       });
       expect(screen.getByText("Greeting")).toBeTruthy();
       expect(screen.getByText("What the note says.")).toBeTruthy();
@@ -1411,6 +1959,44 @@ describe("PluginDetailsPage", () => {
       ).toBe("warm");
     });
 
+    // Round 18 finding 4: settings used to route by pluginId alone, and two
+    // rows can share an id (a broken manifest's directory-derived fallback
+    // colliding with some other, unrelated plugin's real id). Reading and
+    // saving must name the exact row this page is open on, never whichever
+    // row the id happened to resolve to.
+    it("reads and writes its own directory's settings, not an id-colliding row's", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [
+          plugin("codex", { directoryName: "codex-a", settings: declared }),
+          plugin("codex", { directoryName: "codex-b", settings: declared }),
+        ],
+      });
+      bridgeMock.getPluginSettings.mockResolvedValue({ ok: true, values: defaults });
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: true,
+        values: { ...defaults, shout: true },
+      });
+
+      render(
+        <PluginDetailsPage workspaceId="ws-1" pluginId="codex" directoryName="codex-a" />,
+      );
+      await screen.findByTestId("plugin-setting-input-greeting");
+      expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "codex",
+        directoryName: "codex-a",
+      });
+
+      await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "codex",
+        directoryName: "codex-a",
+        values: { shout: true },
+      });
+    });
+
     it("saves a switch the moment it changes and shows what was stored", async () => {
       withSettings();
       bridgeMock.setPluginSettings.mockResolvedValue({
@@ -1425,6 +2011,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { shout: true },
       });
       await waitFor(() =>
@@ -1451,6 +2038,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { tone: "warm" },
       });
     });
@@ -1477,6 +2065,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { greeting: "Hei" },
       });
     });
@@ -1498,6 +2087,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { repeat: 4 },
       });
     });
@@ -1535,6 +2125,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { greeting: "Hello" },
       });
     });
@@ -1588,18 +2179,19 @@ describe("PluginDetailsPage", () => {
       );
 
       const view = render(
-        <PluginDetailsPage workspaceId="ws-old" pluginId="hello-plugin" />,
+        <PluginDetailsPage workspaceId="ws-old" pluginId="hello-plugin" directoryName="hello-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Hello"));
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-new" pluginId="hello-plugin" />,
+        <PluginDetailsPage workspaceId="ws-new" pluginId="hello-plugin" directoryName="hello-plugin" />,
       );
 
       await waitFor(() => expect(greetingField().value).toBe("New"));
       expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-new",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
       });
     });
 
@@ -1623,11 +2215,12 @@ describe("PluginDetailsPage", () => {
         expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
           workspaceId: "ws-1",
           pluginId: "hello-plugin",
+          directoryName: "hello-plugin",
         })
       );
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Other"));
       expect(screen.getByTestId("plugin-settings")).toBe(section);
@@ -1661,7 +2254,7 @@ describe("PluginDetailsPage", () => {
       const section = screen.getByTestId("plugin-settings");
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Other"));
       expect(screen.getByTestId("plugin-settings")).toBe(section);
@@ -1699,7 +2292,7 @@ describe("PluginDetailsPage", () => {
       await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Other"));
 
@@ -1853,6 +2446,7 @@ describe("the details rail", () => {
     expect(bridgeMock.pluginSizes).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "t3-code",
+      directoryName: "t3-code",
     });
   });
 
@@ -1906,12 +2500,12 @@ describe("the details rail", () => {
     });
 
     const view = render(
-      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" directoryName="t3-code" />,
     );
     const rail = await screen.findByTestId("plugin-details-rail");
 
     view.rerender(
-      <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+      <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
     );
     await waitFor(() =>
       expect(railRow("plugin-rail-installed-size")!.textContent).toContain(
@@ -1952,18 +2546,19 @@ describe("the details rail", () => {
     });
 
     const view = render(
-      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" directoryName="t3-code" />,
     );
     await screen.findByTestId("plugin-details-rail");
 
     view.rerender(
-      <PluginDetailsPage workspaceId="ws-2" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-2" pluginId="t3-code" directoryName="t3-code" />,
     );
 
     await waitFor(() =>
       expect(bridgeMock.pluginSizes).toHaveBeenCalledWith({
         workspaceId: "ws-2",
         pluginId: "t3-code",
+        directoryName: "t3-code",
       })
     );
   });

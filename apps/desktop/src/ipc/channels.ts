@@ -131,6 +131,11 @@ export const PLUGIN_PIPELINE_ERROR_STAGES = [
   "uninstall",
 ] as const;
 
+export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = [
+  "codex",
+  "claude-code",
+] as const;
+
 // How many unrecoverable paths the uninstall preflight sends to the renderer.
 // The dialog lists this sample and says how many more there are; a plugin
 // tree can hold thousands, and the whole inventory stays in main.
@@ -672,6 +677,8 @@ export const CHANNELS = {
   stopPluginWebApp: "desktop:stop-plugin-web-app",
   pluginWebAppFailed: "desktop:plugin-web-app-failed",
   listPlugins: "desktop:list-plugins",
+  listOfferedPlugins: "desktop:list-offered-plugins",
+  addOfferedPlugin: "desktop:add-offered-plugin",
   installPlugin: "desktop:install-plugin",
   disablePlugin: "desktop:disable-plugin",
   enablePlugin: "desktop:enable-plugin",

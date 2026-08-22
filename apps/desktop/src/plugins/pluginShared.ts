@@ -3,8 +3,8 @@ import { isAbsolute, relative, sep } from "node:path";
 
 /**
  * Helpers every plugin pipeline module used to carry its own copy of.
- * One body each — a fix that lands here lands everywhere (#779 round 13 C1;
- * round 10 B5 had to be inherited file by file).
+ * One body each — a fix that lands here lands everywhere, instead of
+ * needing to be inherited file by file.
  */
 
 export function errorMessage(error: unknown): string {
@@ -77,8 +77,7 @@ export function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const pathFromParent = relative(parent, child);
   // The ".." has to be a whole segment. Testing the prefix alone rejected
-  // real contained names — a child under "..cache/" is inside the root
-  // (#779 round 10 B5).
+  // real contained names — a child under "..cache/" is inside the root.
   return (
     pathFromParent.length > 0 &&
     !isAbsolute(pathFromParent) &&
@@ -96,8 +95,8 @@ function isWindowsRenameLock(error: unknown): boolean {
 }
 
 /**
- * rename() that retries through Windows EPERM/EBUSY locks. When the rename
- * still fails, `wrapError` turns the cause into the caller's own error —
+ * Retries rename() through Windows EPERM/EBUSY locks. When it still fails,
+ * `wrapError` turns the cause into the caller's own error;
  * `lockedAfterRetries` is true when the target stayed locked through every
  * retry in WINDOWS_RENAME_RETRY_DELAYS_MS.
  */
@@ -108,8 +107,7 @@ export async function renameWithWindowsRetry(
 ): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await rename(source, destination);
-      return;
+      return await rename(source, destination);
     } catch (error) {
       const retryDelay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
       if (!isWindowsRenameLock(error) || retryDelay === undefined) {

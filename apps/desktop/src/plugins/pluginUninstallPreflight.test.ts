@@ -19,7 +19,7 @@ const pluginId = "hello-plugin";
 interface PreflightFixture {
   workspaceRoot: string;
   // Stands in for PluginPipeline's userData-resident dohcDir — never a
-  // workspace-relative path (CERT779).
+  // workspace-relative path.
   dohcDir: string;
   pluginRoot: string;
 }
@@ -64,6 +64,7 @@ async function runPreflight(
     pluginId,
     pluginRoot: fixture.pluginRoot,
     stateRoot: pluginStateRoot(fixture.dohcDir, pluginId),
+    additionalStateRoots: [],
     installedBaselineHash,
     engineCaptureAvailable,
   });
@@ -91,6 +92,7 @@ describe("plugin uninstall preflight", () => {
       path: stateRoot,
       fileCount: 2,
       totalBytes: 2048 + 3,
+      additionalLocations: 0,
     });
     expect(result.warning?.kind).toBe("plugin-state");
     expect(result.warning?.summary).toContain("2 files");
@@ -157,6 +159,83 @@ describe("plugin uninstall preflight", () => {
     const empty = await runPreflight(fixture, baseline);
     expect(empty.stateData).toBeNull();
     expect(empty.warning).toBeNull();
+  });
+
+  // A null stateRoot means the caller has already determined pluginId's own
+  // state path belongs to an unrelated installation (an id collision
+  // between a discovered row's fallback id and some OTHER, unrelated,
+  // installed plugin's real id) and must not be inventoried here — only
+  // additionalStateRoots, resolved separately by directory, may still
+  // apply.
+  it("skips the primary state root entirely when it is null, measuring only additionalStateRoots", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+
+    // Data at pluginId's own state path — must never appear in the result
+    // when stateRoot is null, even though it physically exists.
+    const ownStateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(ownStateRoot, { recursive: true });
+    await writeFile(join(ownStateRoot, "not-this-plugins.txt"), "belongs to someone else");
+
+    // Data under a genuinely different, correctly-scoped identity.
+    const otherStateRoot = pluginStateRoot(fixture.dohcDir, "other-plugin-id");
+    await mkdir(otherStateRoot, { recursive: true });
+    await writeFile(join(otherStateRoot, "session.json"), "{}");
+
+    const result = await pluginUninstallPreflight({
+      dohcDir: fixture.dohcDir,
+      pluginId,
+      pluginRoot: fixture.pluginRoot,
+      stateRoot: null,
+      additionalStateRoots: [otherStateRoot],
+      installedBaselineHash: baseline,
+      engineCaptureAvailable: true,
+    });
+
+    expect(result.stateData).toMatchObject({ path: otherStateRoot, fileCount: 1 });
+  });
+
+  // Two different cleanup identities can trace to the SAME physical state
+  // directory — pluginStateRoot is deterministic per id, and PluginPipeline
+  // callers can legitimately pass the same resolved root as both stateRoot
+  // and (via additionalCleanupIds) an entry in additionalStateRoots.
+  // Measuring it twice would double the file count and byte total the
+  // warning reports.
+  it("measures a state root shared by stateRoot and additionalStateRoots only once", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+
+    const sharedStateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(sharedStateRoot, { recursive: true });
+    await writeFile(join(sharedStateRoot, "session.json"), "{}");
+
+    const distinctStateRoot = pluginStateRoot(fixture.dohcDir, "other-plugin-id");
+    await mkdir(distinctStateRoot, { recursive: true });
+    await writeFile(join(distinctStateRoot, "cache.json"), "{}");
+
+    const result = await pluginUninstallPreflight({
+      dohcDir: fixture.dohcDir,
+      pluginId,
+      pluginRoot: fixture.pluginRoot,
+      stateRoot: sharedStateRoot,
+      // The same root as `stateRoot`, plus one genuinely distinct one.
+      additionalStateRoots: [sharedStateRoot, distinctStateRoot],
+      installedBaselineHash: baseline,
+      engineCaptureAvailable: true,
+    });
+
+    // MUTATION (measure every listed root, including duplicates): fileCount
+    // would read 3 (session.json counted twice, cache.json once) instead of
+    // the real, deduplicated total of 2.
+    expect(result.stateData).toMatchObject({ fileCount: 2 });
+    // MUTATION (join every combined directory's path with ", "): path
+    // would read "<sharedStateRoot>, <distinctStateRoot>" instead of one
+    // real, single directory with the second one only counted.
+    expect(result.stateData?.path === sharedStateRoot || result.stateData?.path === distinctStateRoot)
+      .toBe(true);
+    expect(result.stateData?.additionalLocations).toBe(1);
   });
 
   it("warns instead of reporting a clean tree when a symlink was dropped into the source", async () => {
@@ -350,7 +429,11 @@ describe("plugin uninstall preflight", () => {
     expect(summary.counts.notRecoverableFromHistory).toBe(25);
     // The bridge contract is the enforcing edge: an uncapped producer fails
     // here instead of shipping an unbounded array to the renderer.
-    expect(() => PluginUninstallPreflightRecord.parse(summary)).not.toThrow();
+    // packagedDisplayName is merged in one layer up (main.ts, from the
+    // packaged manifest) — never part of what this module produces.
+    expect(() =>
+      PluginUninstallPreflightRecord.parse({ ...summary, packagedDisplayName: null }),
+    ).not.toThrow();
     expect(Object.keys(summary)).not.toContain("files");
   });
 

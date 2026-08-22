@@ -31,6 +31,8 @@ import type {
 } from "./ipc/bridgeContract";
 import {
   ListPluginsResult,
+  ListOfferedPluginsResult,
+  AddOfferedPluginResult,
   InvokePluginCommandResult,
   OpenPluginPanelResult,
   OpenPluginWebAppResult,
@@ -247,6 +249,14 @@ const bridge: DohcDesktopBridge = {
   },
   listPlugins: async (payload) =>
     ListPluginsResult.parse(await ipcRenderer.invoke(CHANNELS.listPlugins, payload)),
+  listOfferedPlugins: async (payload) =>
+    ListOfferedPluginsResult.parse(
+      await ipcRenderer.invoke(CHANNELS.listOfferedPlugins, payload),
+    ),
+  addOfferedPlugin: async (payload) =>
+    AddOfferedPluginResult.parse(
+      await ipcRenderer.invoke(CHANNELS.addOfferedPlugin, payload),
+    ),
   installPlugin: async (payload) =>
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.installPlugin, payload)),
   disablePlugin: async (payload) =>

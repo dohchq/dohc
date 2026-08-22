@@ -37,7 +37,7 @@ function fileName(path: string, label?: string): string {
     return label ?? webApp?.instanceKey ?? webApp?.webAppId ?? "Plugin app";
   }
   if (isPluginDetailsTabPath(path)) {
-    return label ?? parsePluginDetailsTabPath(path) ?? "Plugin";
+    return label ?? parsePluginDetailsTabPath(path)?.pluginId ?? "Plugin";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -64,8 +64,8 @@ function tabTitle(path: string, label?: string): string {
   // A plugin's details tab and its app tab can sit side by side under the
   // same name, so the tooltip is what tells them apart.
   if (isPluginDetailsTabPath(path)) {
-    const pluginId = parsePluginDetailsTabPath(path);
-    return pluginId ? `Plugin details: ${pluginId}` : "Plugin details";
+    const details = parsePluginDetailsTabPath(path);
+    return details ? `Plugin details: ${details.pluginId}` : "Plugin details";
   }
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);

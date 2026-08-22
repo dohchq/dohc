@@ -43,6 +43,7 @@ import type {
   WithdrawShareChangesResult,
   McpConfigResult,
   PluginPanelOpenedEvent,
+  PluginStatusChangedEvent,
   PluginStatusRecord,
   PluginWebAppOpenedEvent,
   ReadWorkspaceTextPayload,
@@ -1373,7 +1374,7 @@ describe("plugin activity-bar views", () => {
 });
 
 describe("plugin details tabs", () => {
-  const detailsPath = pluginDetailsTabPath("t3-code");
+  const detailsPath = pluginDetailsTabPath("t3-code", "t3-code");
 
   function withPlugins(
     bridge: ReturnType<typeof makeBridge>,
@@ -1435,6 +1436,61 @@ describe("plugin details tabs", () => {
     );
   });
 
+  // A discovered row's id is only ever a broken manifest's directory-
+  // derived fallback, which can coincide with some OTHER, unrelated
+  // plugin's real id — two rows sharing one id string is a real, reachable
+  // state, not a hypothetical. Before carrying directoryName through
+  // open-details and the tab path, clicking the second-sorting row always
+  // reopened whichever row `.find((entry) => entry.id === pluginId)` hit
+  // first.
+  it("opens the exact row clicked, not the first one sharing its id, when two rows collide", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const rowFields = {
+      rootPath: "/workspace/plugins/x",
+      valid: true,
+      status: "ready" as const,
+      disabledReason: null,
+      runtimeStatus: "ready" as const,
+      sourceHash: "a".repeat(64),
+      approvedHash: "a".repeat(64),
+      installedBaselineHash: "a".repeat(64),
+      description: null,
+      publisher: null,
+      pluginVersion: null,
+      repository: null,
+      issues: null,
+      license: null,
+      icon: null,
+      settings: [],
+      panels: [],
+      webApps: [],
+      commands: [],
+      hasFailedReplacement: false,
+      diagnostics: [],
+      warnings: [],
+      error: null,
+    };
+    bridge.listPlugins = vi.fn(async () => ({
+      ok: true as const,
+      plugins: [
+        { ...rowFields, id: "codex", directoryName: "codex-a", displayName: "Codex A" },
+        { ...rowFields, id: "codex", directoryName: "codex-b", displayName: "Codex B" },
+      ] as PluginStatusRecord[],
+    }));
+    renderShell(bridge);
+
+    await userEvent.click(await screen.findByTestId("activity-plugins"));
+    const rows = await screen.findAllByTestId("plugin-row");
+    expect(rows).toHaveLength(2);
+    const rowB = rows.find((row) => within(row).queryByText("Codex B"));
+    if (!rowB) throw new Error("Codex B row not found among the rendered rows.");
+    await userEvent.click(within(rowB).getByTestId("plugin-open-details"));
+
+    const page = await screen.findByTestId("plugin-details-page");
+    expect(page.getAttribute("data-directory-name")).toBe("codex-b");
+    expect(within(page).getByText("Codex B")).toBeTruthy();
+  });
+
   it("restores a plugin's details tab and mounts its page", async () => {
     const bridge = withPlugins(
       makeBridge(Promise.resolve(storedStateWithTabs([detailsPath], detailsPath))),
@@ -1468,6 +1524,110 @@ describe("plugin details tabs", () => {
     ).toBeTruthy();
     // The id still separates this tab from the plugin's app tab.
     expect(tab.title).toBe("Plugin details: t3-code");
+  });
+
+  // A tab that follows a rename only tracked that in memory. A tab switch
+  // remounts the page, whose tracking reseeds from the tab's OWN virtual
+  // path — still the original, now-vacated directory, if nothing ever
+  // retargets that path. This pins the fix end to end: the tab's own path
+  // itself must move, so a remount reads the directory the plugin actually
+  // renamed to.
+  it("stays on the renamed plugin after switching tabs away and back", async () => {
+    const bridge = withPlugins(makeBridge(Promise.resolve(
+      storedStateWithTabs([detailsPath, "dohc://graph"], detailsPath),
+    )));
+    // Every subscriber, not the last one to subscribe: usePluginCatalog
+    // mounts once per surface that shows a plugin, and this shell can have
+    // more than one open at a time — a single tracked listener would only
+    // ever reach whichever happened to subscribe most recently.
+    const statusListeners = new Set<(event: PluginStatusChangedEvent) => void>();
+    bridge.onPluginStatusChanged = vi.fn(
+      (listener: (event: PluginStatusChangedEvent) => void) => {
+        statusListeners.add(listener);
+        return () => {
+          statusListeners.delete(listener);
+        };
+      },
+    ) as unknown as typeof bridge.onPluginStatusChanged;
+    const dispatchPluginStatusChanged = (event: PluginStatusChangedEvent) => {
+      for (const listener of statusListeners) listener(event);
+    };
+    renderShell(bridge);
+
+    const page = await screen.findByTestId("plugin-details-page");
+    expect(page.getAttribute("data-directory-name")).toBe("t3-code");
+
+    // The rename: same id, new directoryName, nothing left at the old one.
+    // Reported both live (the event a mounted page hears) and as the
+    // catalog's own new ground truth (what a FRESH fetch — the remount
+    // below triggers one — reads back): a real rescan would settle to
+    // exactly this, not just notify of it.
+    const renamedRow = {
+      id: "t3-code",
+      directoryName: "t3-code-renamed",
+      rootPath: "/workspace/plugins/t3-code-renamed",
+      valid: true,
+      status: "ready",
+      disabledReason: null,
+      runtimeStatus: "ready",
+      sourceHash: "a".repeat(64),
+      approvedHash: "a".repeat(64),
+      installedBaselineHash: "a".repeat(64),
+      displayName: null,
+      description: null,
+      publisher: null,
+      pluginVersion: null,
+      repository: null,
+      issues: null,
+      license: null,
+      icon: null,
+      settings: [],
+      panels: [],
+      webApps: [],
+      commands: [],
+      hasFailedReplacement: false,
+      diagnostics: [],
+      warnings: [],
+      error: null,
+    } satisfies PluginStatusRecord;
+    bridge.listPlugins = vi.fn(async () => ({ ok: true as const, plugins: [renamedRow] }));
+    act(() => {
+      dispatchPluginStatusChanged({
+        kind: "renamed",
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "t3-code",
+        from: "t3-code",
+        to: "t3-code-renamed",
+      });
+      dispatchPluginStatusChanged({
+        kind: "changed",
+        workspaceId: WORKSPACE.workspaceId,
+        plugin: renamedRow,
+      });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-page").getAttribute("data-directory-name"))
+        .toBe("t3-code-renamed"),
+    );
+
+    // The tab's own path retargeted: the renamed path's tab now exists, and
+    // the original, now-vacated one is gone.
+    const renamedPath = pluginDetailsTabPath("t3-code", "t3-code-renamed");
+    await screen.findByTestId(`tab-${renamedPath}`);
+    expect(screen.queryByTestId(`tab-${detailsPath}`)).toBeNull();
+
+    // Switch away — unmounts the details page — then back.
+    await userEvent.click(await screen.findByTestId("tab-dohc://graph"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("plugin-details-page")).toBeNull(),
+    );
+    await userEvent.click(await screen.findByTestId(`tab-${renamedPath}`));
+
+    // Remounted from the tab's own (retargeted) path, not from stale, in-
+    // memory tracking a fresh mount never had — still the renamed plugin.
+    const remounted = await screen.findByTestId("plugin-details-page");
+    expect(remounted.getAttribute("data-directory-name")).toBe("t3-code-renamed");
+    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
   });
 });
 

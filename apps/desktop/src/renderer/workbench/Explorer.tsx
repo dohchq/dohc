@@ -199,7 +199,7 @@ export function editorTitle(path: string): string {
     return `Plugin: ${parsePluginWebAppTabPath(path)?.webAppId ?? "app"}`;
   }
   if (isPluginDetailsTabPath(path)) {
-    return `Plugin: ${parsePluginDetailsTabPath(path) ?? "details"}`;
+    return `Plugin: ${parsePluginDetailsTabPath(path)?.pluginId ?? "details"}`;
   }
   if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";

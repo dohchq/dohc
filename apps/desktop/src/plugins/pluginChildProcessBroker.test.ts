@@ -829,7 +829,7 @@ describe("PluginChildProcessBroker", () => {
 
     try {
       const pluginRoot = join(fixture.root, "plugins", "plugin-a");
-      await host.start(pluginRoot, {
+      await host.start(pluginRoot, "plugin-a", {
         version: 1,
         name: "plugin-a",
         entry: "server.mjs",

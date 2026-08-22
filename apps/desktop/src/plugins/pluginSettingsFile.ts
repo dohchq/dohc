@@ -9,14 +9,21 @@ import {
 } from "./pluginManifestSchema";
 
 // A plugin's settings are the user's answers, so they live in the workspace as
-// text — one file beside the workspace's own settings, keyed by plugin id:
+// text — one file beside the workspace's own settings, keyed by directoryName:
 //
 //   .dohc/plugin-settings.local.json
-//   { "t3-code": { "port": 4317 } }
+//   { "t3-code-src": { "port": 4317 } }
+//
+// Keyed by directoryName, not plugin id: an id is only ever a broken
+// manifest's directory-derived fallback, which can coincide with some OTHER,
+// unrelated plugin's real id — two rows sharing an id would otherwise share
+// one entry here too, each silently overwriting and reading the other's
+// answers. directoryName is the one identity a broken manifest cannot take
+// away, and every discovered entry carries exactly one.
 //
 // One file rather than one per plugin, because that is what the reader wants
 // open when they ask what this workspace has been told: every answer on one
-// page. Plugin CODE and its build output stay out of the workspace (CERT779);
+// page. Plugin CODE and its build output stay out of the workspace;
 // this is data the user typed, and the manifest's declarations decide what any
 // of it means. A value the manifest does not declare is dropped on read, so a
 // file edited by hand — or arriving over sync — can only ever set a setting
@@ -54,13 +61,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function readStoredSettings(body: unknown): StoredPluginSettings {
   if (!isRecord(body)) return {};
   const stored: StoredPluginSettings = {};
-  for (const [pluginId, values] of Object.entries(body)) {
+  for (const [directoryName, values] of Object.entries(body)) {
     if (!isRecord(values)) continue;
     const kept: Record<string, PluginSettingValue> = {};
     for (const [key, value] of Object.entries(values)) {
       if (isSettingValue(value)) kept[key] = value;
     }
-    stored[pluginId] = kept;
+    stored[directoryName] = kept;
   }
   return stored;
 }
@@ -169,11 +176,15 @@ function queueWrite<T>(workspaceRoot: string, run: () => Promise<T>): Promise<T>
  * patch is validated against the plugin's declarations before anything is
  * written, so the file can only ever hold values the manifest allows: an
  * undeclared key or a value of the wrong type is refused, not stored and
- * quietly ignored later. Other plugins' entries are read and written back
- * untouched.
+ * quietly ignored later. Other rows' entries are read and written back
+ * untouched — keyed by directoryName, so a row that shares an id with an
+ * unrelated plugin still gets its own entry rather than sharing one.
+ * `pluginId` names the plugin only in the error messages below; the file
+ * itself never reads or writes under it.
  */
 export function savePluginSettings(
   workspaceRoot: string,
+  directoryName: string,
   pluginId: string,
   declared: readonly PluginSettingDeclaration[],
   patch: Readonly<Record<string, unknown>>,
@@ -194,7 +205,7 @@ export function savePluginSettings(
     }
 
     const stored = await readPluginSettingsFile(workspaceRoot);
-    const merged = { ...stored[pluginId], ...patch } as Record<
+    const merged = { ...stored[directoryName], ...patch } as Record<
       string,
       PluginSettingValue
     >;
@@ -203,9 +214,38 @@ export function savePluginSettings(
     const values = resolvePluginSettings(declared, merged);
     await writePluginSettingsFile(workspaceRoot, {
       ...stored,
-      [pluginId]: values,
+      [directoryName]: values,
     });
     return values;
+  });
+}
+
+/**
+ * Moves one plugin's stored answers from its old directoryName key to its
+ * new one, in place. Settings are keyed by directoryName, so a genuine
+ * rename — the same plugin id, relocated to a new directory — leaves its
+ * entry filed under a key nothing reads anymore: silently reset to
+ * defaults, not actually lost, until this runs. Called only where the
+ * pipeline itself has proven the rename (the same id reappearing under a
+ * new directoryName within one watcher batch); no caller here has to
+ * re-derive that proof. A no-op when there is nothing stored under the old
+ * key, or the names are the same.
+ */
+export function renamePluginSettingsEntry(
+  workspaceRoot: string,
+  fromDirectoryName: string,
+  toDirectoryName: string,
+): Promise<void> {
+  if (fromDirectoryName === toDirectoryName) return Promise.resolve();
+  return queueWrite(workspaceRoot, async () => {
+    const stored = await readPluginSettingsFile(workspaceRoot);
+    const entry = stored[fromDirectoryName];
+    if (entry === undefined) return;
+    const { [fromDirectoryName]: _moved, ...rest } = stored;
+    await writePluginSettingsFile(workspaceRoot, {
+      ...rest,
+      [toDirectoryName]: entry,
+    });
   });
 }
 

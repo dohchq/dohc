@@ -689,7 +689,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
   if (!manifest.ok) throw new Error(manifest.diagnostics.join("; "));
   // "watch-workspace" mode registers these three commands, not the
   // `hello.write` the on-disk manifest declares for the default mode.
-  await host.start(helloPluginRoot, {
+  await host.start(helloPluginRoot, "hello-plugin", {
     ...manifest.manifest,
     commands: [
       { id: "watch.received", title: "watch.received" },

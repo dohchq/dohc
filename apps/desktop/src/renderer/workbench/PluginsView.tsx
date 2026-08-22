@@ -1,6 +1,9 @@
 import { AlertTriangle, Blocks, Search } from "lucide-react";
-import { useMemo, useState } from "react";
-import type { PluginStatusRecord } from "../../ipc/bridgeContract";
+import { useMemo, useState, type ReactNode } from "react";
+import type {
+  OfferedPluginRecord,
+  PluginStatusRecord,
+} from "../../ipc/bridgeContract";
 import { EmptyState, SectionLabel } from "../ui/controls";
 import { PluginIcon } from "./PluginIcon";
 import {
@@ -36,11 +39,16 @@ const retryButton =
 export function PluginsView(props: {
   workspaceId: string;
   /** The plugin whose details tab is the active editor tab, so the list can
-   * carry the same selected read-out the explorer gives the open file. */
+   * carry the same selected read-out the explorer gives the open file.
+   * Directory, not only id: a discovered row's id can coincide with some
+   * OTHER, unrelated plugin's real id, so id alone cannot tell two rows
+   * apart. */
   activePluginId: string | null;
-  onOpenDetails: (pluginId: string) => void;
+  activePluginDirectoryName: string | null;
+  onOpenDetails: (pluginId: string, directoryName: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
+  const offersLoad = catalog.offersLoad;
   const [filter, setFilter] = useState("");
 
   const plugins = catalog.load.status === "ready" ? catalog.load.plugins : [];
@@ -50,14 +58,20 @@ export function PluginsView(props: {
   );
   const installedPlugins = matched.filter(isInstalled);
   const candidatePlugins = matched.filter((plugin) => !isInstalled(plugin));
+  const offersReady = offersLoad.status === "ready" ? offersLoad.offers : [];
+  const offers = useMemo(
+    () => offersReady.filter((offer) => matchesFilter(offer, filter)),
+    [offersReady, filter],
+  );
 
   function renderRow(plugin: PluginStatusRecord) {
     const busyAction = catalog.busy[plugin.id];
     const disabled = busyAction !== undefined || isPipelineBusy(plugin);
-    const selected = props.activePluginId === plugin.id;
+    const selected = props.activePluginId === plugin.id &&
+      props.activePluginDirectoryName === plugin.directoryName;
     const error = catalog.errors[plugin.id];
     return (
-      <li key={plugin.id} className="list-none">
+      <li key={plugin.directoryName} className="list-none">
         {/* The row's two controls are siblings, never nested: the name area
             opens the details tab and Install acts in place. Nesting them
             would need a click to be swallowed on its way out. */}
@@ -73,7 +87,7 @@ export function PluginsView(props: {
             type="button"
             data-testid="plugin-open-details"
             aria-current={selected ? "page" : undefined}
-            onClick={() => props.onOpenDetails(plugin.id)}
+            onClick={() => props.onOpenDetails(plugin.id, plugin.directoryName)}
             className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ink/30"
           >
             <PluginIcon
@@ -160,6 +174,77 @@ export function PluginsView(props: {
     );
   }
 
+  function renderOfferRow(offer: OfferedPluginRecord) {
+    const busy = catalog.offerBusy[offer.directoryName] === true;
+    const error = catalog.offerErrors[offer.directoryName];
+    return (
+      <li key={offer.directoryName} className="list-none">
+        <div
+          data-testid="plugin-offer-row"
+          data-plugin-directory={offer.directoryName}
+          className="flex items-center gap-1 rounded-md pr-1.5"
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-2.5 px-1.5 py-1.5">
+            <span className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-md border border-line bg-bg text-subtle">
+              <Blocks size={15} strokeWidth={1.9} aria-hidden />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px] font-medium text-ink">
+                {offer.displayName ?? offer.directoryName}
+              </span>
+              {offer.description ? (
+                <span className="mt-0.5 block truncate text-[11px] text-muted">
+                  {offer.description}
+                </span>
+              ) : null}
+              {offer.publisher ? (
+                <span className="mt-0.5 block truncate text-[11px] text-subtle">
+                  {offer.publisher}
+                </span>
+              ) : null}
+            </span>
+          </div>
+          <button
+            type="button"
+            data-testid="plugin-offer-add"
+            disabled={busy}
+            onClick={() => catalog.addOffer(offer)}
+            className={installButton}
+          >
+            {actionLabel("add", busy)}
+          </button>
+        </div>
+        {error ? (
+          <p
+            data-testid="plugin-action-error"
+            role="alert"
+            className="m-0 px-1.5 pb-1 text-[11px] text-danger"
+          >
+            {error}
+          </p>
+        ) : null}
+      </li>
+    );
+  }
+
+  const sections: { testId: string; label: string; rows: ReactNode[] }[] = [
+    {
+      testId: "plugins-section-installed",
+      label: "Installed",
+      rows: installedPlugins.map(renderRow),
+    },
+    {
+      testId: "plugins-section-available",
+      label: "Available in this workspace",
+      rows: candidatePlugins.map(renderRow),
+    },
+    {
+      testId: "plugins-section-offered",
+      label: "Built in",
+      rows: offers.map(renderOfferRow),
+    },
+  ].filter((section) => section.rows.length > 0);
+
   return (
     <div data-testid="plugins-view" className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 border-b border-line px-2 py-2">
@@ -196,43 +281,53 @@ export function PluginsView(props: {
             Retry
           </button>
         </div>
-      ) : plugins.length === 0 ? (
+      ) : plugins.length === 0 && offersLoad.status === "loading" ? (
+        // A workspace with no plugins of its own still waits on the offers
+        // fetch: painting "No plugins yet" here would flash and then get
+        // replaced the instant the built-in rows arrive.
+        <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
+          Loading plugins…
+        </div>
+      ) : plugins.length === 0 && offersReady.length === 0 && offersLoad.status !== "error" ? (
         <div data-testid="plugins-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
-            icon={<Blocks size={22} aria-hidden className="text-line" />}
             title="No plugins yet"
             hint="Ask your agent to add a plugin folder under plugins/."
           />
         </div>
-      ) : matched.length === 0 ? (
+      ) : matched.length === 0 && offers.length === 0 && offersLoad.status !== "error" ? (
         <div data-testid="plugins-filter-empty" className="flex min-h-0 flex-1 flex-col">
           <EmptyState
-            icon={<Blocks size={22} aria-hidden className="text-line" />}
             title={`No plugins match "${filter.trim()}"`}
             hint="Try a shorter search."
           />
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-1 py-2">
-          {installedPlugins.length > 0 ? (
-            <section data-testid="plugins-section-installed">
-              <SectionLabel className="block px-2 pb-1">Installed</SectionLabel>
-              <ul className="m-0 flex list-none flex-col p-0">
-                {installedPlugins.map(renderRow)}
-              </ul>
-            </section>
-          ) : null}
-          {candidatePlugins.length > 0 ? (
+          {sections.map((section, index) => (
             <section
-              data-testid="plugins-section-available"
-              className={installedPlugins.length > 0 ? "mt-4" : undefined}
+              key={section.testId}
+              data-testid={section.testId}
+              className={index > 0 ? "mt-4" : undefined}
             >
-              <SectionLabel className="block px-2 pb-1">
-                Available in this workspace
-              </SectionLabel>
-              <ul className="m-0 flex list-none flex-col p-0">
-                {candidatePlugins.map(renderRow)}
-              </ul>
+              <SectionLabel className="block px-2 pb-1">{section.label}</SectionLabel>
+              <ul className="m-0 flex list-none flex-col p-0">{section.rows}</ul>
+            </section>
+          ))}
+          {offersLoad.status === "error" ? (
+            <section
+              data-testid="plugins-offers-error"
+              className={sections.length > 0 ? "mt-4" : undefined}
+            >
+              <SectionLabel className="block px-2 pb-1">Built in</SectionLabel>
+              <div className="flex flex-col items-start gap-2 px-2 py-1.5">
+                <p role="alert" className="m-0 text-[11px] text-danger">
+                  {offersLoad.message}
+                </p>
+                <button type="button" onClick={catalog.reload} className={retryButton}>
+                  Retry
+                </button>
+              </div>
             </section>
           ) : null}
         </div>

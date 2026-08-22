@@ -3,6 +3,7 @@ import {
   isSharedWithMePath,
   normalizeAbsolutePath,
   preferredBuildOutput,
+  type WatcherEvent,
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
@@ -118,6 +119,10 @@ import {
   InvokePluginCommandResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
+  ListOfferedPluginsPayload,
+  ListOfferedPluginsResult,
+  AddOfferedPluginPayload,
+  AddOfferedPluginResult,
   ListSitesPayload,
   ListSitesResult,
   GetSitePreviewLogsPayload,
@@ -129,11 +134,14 @@ import {
   StopSitePreviewPayload,
   ListPluginsPayload,
   PluginSettingsResult,
+  GetPluginSettingsPayload,
   SetPluginSettingsPayload,
   ListPluginsResult,
   PluginActionPayload,
   PluginActionResult,
   PluginSizesResult,
+  PluginSizesPayload,
+  PluginUninstallPreflightPayload,
   PluginUninstallPreflightResult,
   UninstallPluginPayload,
   PluginPanelSdkEvent,
@@ -303,6 +311,7 @@ import {
   UpdateStateEvent,
 } from "./ipc/bridgeContract";
 import {
+  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   CHANNELS,
   SEARCH_EVENT_MAX_ENTRIES,
   type EngineYDocSaveStateName,
@@ -683,6 +692,12 @@ import {
 } from "./plugins/pluginAgentDrivers";
 import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
+import {
+  addOfferedPlugin,
+  listOfferedPlugins,
+  removeAddedOfferedPlugin,
+} from "./plugins/pluginOffers";
+import { readPluginManifestFile } from "./plugins/pluginManifest";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
 import {
@@ -920,20 +935,53 @@ const sitePreviewStarts = createSitePreviewStartRegistry();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
+// app.getAppPath() is unreliable here: when Electron is launched with a
+// direct script path (as the e2e harness does, and as a plain built binary
+// is), it resolves to the launched script's own directory (dist/main) rather
+// than the package root, with no upward package.json search — it silently
+// pointed pnpm resolution at dist/main/resources and broke every plugin
+// install (#777's e2e caught this). import.meta.dirname is the currently
+// executing module's own directory (dist/main at runtime, exactly like
+// createPluginPipeline's sibling plugin-host.js resolution below), so two
+// levels up reaches apps/desktop deterministically regardless of how
+// Electron was launched. Both dev-mode resolvers below walk from here, so
+// this one call site is the only place that encodes that layout.
+function desktopPackageRootInDev(): string {
+  return join(import.meta.dirname, "..", "..");
+}
+
 function pluginResourcesBasePath(): string {
-  // app.getAppPath() is unreliable here: when Electron is launched with a
-  // direct script path (as the e2e harness does, and as a plain built binary
-  // is), it resolves to the launched script's own directory (dist/main)
-  // rather than the package root, with no upward package.json search — it
-  // silently pointed pnpm resolution at dist/main/resources and broke every
-  // plugin install (#777's e2e caught this). import.meta.dirname is the
-  // currently executing module's own directory (dist/main at runtime,
-  // exactly like createPluginPipeline's sibling plugin-host.js resolution
-  // below), so two levels up reaches apps/desktop deterministically
-  // regardless of how Electron was launched.
   return app.isPackaged
     ? process.resourcesPath
-    : join(import.meta.dirname, "..", "..", "resources");
+    : join(desktopPackageRootInDev(), "resources");
+}
+
+function builtinPluginsRoot(): string {
+  // Packaged plugin sources live in extraResources as a plain directory,
+  // staged from the repo's checked-in apps/desktop/plugins (electron-builder.yml).
+  return app.isPackaged
+    ? join(process.resourcesPath, "builtin-plugins")
+    : join(desktopPackageRootInDev(), "plugins");
+}
+
+/**
+ * The packaged built-in's own manifest name — displayName if it declared
+ * one, its manifest name otherwise — read fresh, never a workspace copy's,
+ * which can be hand-edited or too broken to read. Null means ONLY "this
+ * directoryName is not a built-in dohc ships", never "a built-in with
+ * nothing to call itself": every readable built-in manifest has a name,
+ * even without a displayName. Still null if the packaged manifest itself
+ * cannot be read (a broken dohc install the uninstall dialog's wording is
+ * not the place to surface).
+ */
+async function packagedBuiltinDisplayName(directoryName: string): Promise<string | null> {
+  if (
+    !(BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES as readonly string[]).includes(directoryName)
+  ) {
+    return null;
+  }
+  const manifest = await readPluginManifestFile(join(builtinPluginsRoot(), directoryName));
+  return manifest.ok ? manifest.manifest.displayName ?? manifest.manifest.name : null;
 }
 
 function notifyPluginStatusChanged(
@@ -942,7 +990,7 @@ function notifyPluginStatusChanged(
 ): void {
   // A removed identity releases its panel registration and any panel claim
   // on its host — before the schema guard below, which only protects the
-  // renderer send (#779 round 14 A5).
+  // renderer send.
   forgetRemovedPlugin({
     registrations: pluginRegistrations,
     panelStartedHosts,
@@ -951,7 +999,7 @@ function notifyPluginStatusChanged(
   });
   // Emitted from a queueMicrotask with no catch above it, so a payload that
   // fails the IPC schema is dropped and logged — it must never become an
-  // uncaught main-process exception (#779 round 13 A2).
+  // uncaught main-process exception.
   const payload = PluginStatusChangedEvent.safeParse({ workspaceId, ...event });
   if (!payload.success) {
     console.error(
@@ -1065,9 +1113,11 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         params,
       }),
     // The plugin gets its settings with its activation, so it never starts
-    // without them and never has to ask.
-    readPluginSettings: async (pluginId) =>
-      (await pipeline?.getPluginSettings(pluginId)) ?? {},
+    // without them and never has to ask. Named by directoryName — settings
+    // are stored per directory, and a manifest's declared name can differ
+    // from the folder it was found in.
+    readPluginSettings: async (directoryName) =>
+      (await pipeline?.getPluginSettings(directoryName)) ?? {},
     onDriversRegistered: (pluginId, spawnId, drivers) =>
       pluginDrivers.register(pluginId, spawnId, drivers),
     onDriverEvent: (pluginId, spawnId, params) =>
@@ -3128,8 +3178,8 @@ async function reregisterPluginPanels(
 // A plugin's host can be running because the workspace enabled it (install,
 // enable, approve — it should keep running with no panel open at all) or
 // because a panel's own cold start is the only reason it's alive. Only the
-// latter is this key's to stop when its last panel closes (#779 round 4
-// finding 3). ensurePluginStarted adds a key only when IT causes the
+// latter is this key's to stop when its last panel closes.
+// ensurePluginStarted adds a key only when IT causes the
 // zero-to-running transition; any workspace-level plugin action clears it,
 // handing ownership back to the workspace.
 const panelStartedHosts = new Set<string>();
@@ -3325,11 +3375,28 @@ function registeredPlugin(
   );
 }
 
+// Never re-derived from a path — an in-workspace symlink can resolve
+// pluginRoot to a final segment that differs from the pipeline's own
+// discovered directoryName, silently breaking the trace-to-directory rule
+// every consumer of a registration relies on. The pipeline's own discovery
+// is the one source of truth; nothing here is worth guessing when it
+// disagrees, so a pluginId it does not currently discover rejects outright.
+function requireDiscoveredDirectoryName(
+  pipeline: PluginPipeline,
+  pluginId: string,
+): string {
+  const directoryName = pipeline.pluginRegistration(pluginId)?.directoryName;
+  if (directoryName === undefined) {
+    throw new Error(`Plugin "${pluginId}" is not currently discovered in this workspace.`);
+  }
+  return directoryName;
+}
+
 // Panels serve from the approved, hash-verified snapshot — never from
 // plugin.pluginRoot (live, unverified workspace-folder source) — matching
-// ensurePluginStarted's own hash-verify-before-execute gate (CERT779: a
-// panel is code from this plugin as much as its process is, and the plan
-// doc's userData-residency rule applies the same way).
+// ensurePluginStarted's own hash-verify-before-execute gate: a panel is
+// code from this plugin as much as its process is, and the userData-
+// residency rule applies the same way.
 function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): string {
   return join(
     pluginDataDir(stateDir(), workspace.rootPath),
@@ -3432,12 +3499,11 @@ async function stopPluginHostIfUnclaimed(
     !activeCommandClaims.isDraining(key) &&
     // Only stop the host if an on-demand open is the reason it's running at
     // all — an enabled, workspace-started plugin has no panel or tab to
-    // answer to (#779 round 4 finding 3). A panel/web-app cold start and a
-    // command cold start are two disjoint claims on that same "on-demand"
-    // fact — commands never touch panelStartedHosts (claim: false), so a
-    // surface-less command's own on-demand marker is the only one that can
-    // ever consume here, and only once nothing else still needs the host
-    // (round-9 finding 1).
+    // answer to. A panel/web-app cold start and a command cold start are
+    // two disjoint claims on that same "on-demand" fact — commands never
+    // touch panelStartedHosts (claim: false), so a surface-less command's
+    // own on-demand marker is the only one that can ever consume here, and
+    // only once nothing else still needs the host.
     (panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))
   ) {
     // Stops the shared host directly rather than through the pipeline's
@@ -7357,10 +7423,14 @@ function registerIpcHandlers(
       isCurrent,
     );
     assertWritableWorkspace(workspace);
+    const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
     const plugin = rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,
-      registration,
+      {
+        ...registration,
+        directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
+      },
     );
     await withPluginPanelStartLock(
       pluginPanelKey(workspace.workspaceId, input.pluginId, input.panelId),
@@ -7706,10 +7776,14 @@ function registerIpcHandlers(
       isCurrent,
     );
     assertWritableWorkspace(workspace);
+    const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
     const plugin = rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,
-      registration,
+      {
+        ...registration,
+        directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
+      },
     );
     // The open's shape must match the id it names before a tab appears for
     // it: a keyless open of a per-instance app would otherwise reach start
@@ -7976,14 +8050,15 @@ function registerIpcHandlers(
   async function activePluginPipelineFor(
     event: IpcMainInvokeEvent,
     workspaceId: string,
-  ): Promise<PluginPipeline> {
+  ) {
     const workspace = requireWorkspace(workspaceId);
     if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
       throw new Error(
         "The plugin request does not target the active workspace. Open the workspace and try again.",
       );
     }
-    return ensurePluginPipeline(workspace);
+    const pipeline = await ensurePluginPipeline(workspace);
+    return { pipeline, workspace };
   }
 
   function pluginIpcError(error: unknown) {
@@ -7998,17 +8073,121 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListPluginsPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return ListPluginsResult.parse({ ok: true, plugins: pipeline.list() });
     } catch (error) {
       return ListPluginsResult.parse({ ok: false, error: pluginIpcError(error) });
     }
   });
 
+  ipcMain.handle(CHANNELS.listOfferedPlugins, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListOfferedPluginsPayload.parse(payload);
+    try {
+      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
+      // Redundant with ensurePluginPipeline's own check (activePluginPipelineFor
+      // already refuses a shared view before a pipeline exists to list from),
+      // but stated directly here too: the boundary a shared view's Plugins
+      // panel depends on must stay visible at the call site itself, not only
+      // three functions deep in pipeline lifecycle plumbing.
+      assertWritableWorkspace(workspace);
+      const existingPluginIds = new Set(pipeline.list().map((plugin) => plugin.id));
+      const offers = await listOfferedPlugins(
+        builtinPluginsRoot(),
+        workspace.rootPath,
+        existingPluginIds,
+      );
+      return ListOfferedPluginsResult.parse({ ok: true, offers });
+    } catch (error) {
+      return ListOfferedPluginsResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+      });
+    }
+  });
+
+  ipcMain.handle(CHANNELS.addOfferedPlugin, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = AddOfferedPluginPayload.parse(payload);
+    try {
+      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
+      // See listOfferedPlugins above: redundant with ensurePluginPipeline's
+      // own check, stated directly here because this handler copies files
+      // into the workspace and that write boundary must be legible on its
+      // own, not inferred from a pipeline-lifecycle helper three calls away.
+      assertWritableWorkspace(workspace);
+      // pipeline.list() only reflects discovery's LAST scan, which can be
+      // stale: a plugin created on disk by anything other than this handler
+      // (an agent, a second client) may not have reached it yet if the
+      // workspace's own file watcher hasn't settled its batch. Sampling IDs
+      // from a stale list let a not-yet-discovered directory's id through,
+      // so this forces the same rescan handleWatcherEvents already uses
+      // after the copy — but here, before existingPluginIds is sampled and
+      // before anything is copied.
+      await pipeline.handleWatcherEvents([
+        { operation: "update", path: "plugins" },
+      ]);
+      // Sampled fresh, not reused from any earlier listOfferedPlugins call —
+      // a plugin can be discovered under a different directory between an
+      // offer showing and this request landing.
+      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
+      const added = await addOfferedPlugin({
+        builtinPluginsRoot: builtinPluginsRoot(),
+        workspaceRoot: workspace.rootPath,
+        directoryName: input.directoryName,
+        existingPluginIds,
+      });
+      const rediscoveryEvent: WatcherEvent = {
+        operation: "create",
+        path: `plugins/${input.directoryName}`,
+      };
+      await pipeline.handleWatcherEvents([rediscoveryEvent]);
+      const plugin = pipeline.list().find(
+        (entry) => entry.directoryName === input.directoryName,
+      );
+      // A directory claiming the same manifest id can appear WHILE this
+      // request is copying — discovery's own duplicate-id handling then
+      // degrades ONE side of that collision, and it must not read as a
+      // successful add on EITHER side: !plugin.valid catches this add
+      // having lost, and findDirectorySupersededBy catches it having WON
+      // (its own record stays valid, but some other directory's discovery
+      // entry now carries a structured marker naming this one as the id it
+      // lost) — read from discovery directly, never from list()'s
+      // wire-shaped status or a scan over diagnostic prose.
+      const displaced = pipeline.findDirectorySupersededBy(input.directoryName);
+      if (!plugin || !plugin.valid || displaced) {
+        // handleWatcherEvents logs and swallows a rescan failure rather than
+        // throwing, so a transient fs error that left `plugin` missing must
+        // not silently strand the copy while this handler still reports a
+        // refusal — a retry would then find "already exists" for a plugin
+        // the user was just told never appeared. Same cleanup either way:
+        // remove what this request wrote and let the rescan hand the id
+        // back to whichever side (if any) was already there first.
+        await removeAddedOfferedPlugin({
+          workspaceRoot: workspace.rootPath,
+          directoryName: input.directoryName,
+          identity: added.identity,
+          contentHash: added.contentHash,
+        });
+        await pipeline.handleWatcherEvents([rediscoveryEvent]);
+        throw new Error(
+          plugin
+            ? `Another plugin already claims the id "${input.directoryName}" in this workspace.`
+            : `plugins/${input.directoryName} did not appear after it was added.`,
+        );
+      }
+      return AddOfferedPluginResult.parse({ ok: true, plugin });
+    } catch (error) {
+      return AddOfferedPluginResult.parse({
+        ok: false,
+        error: pluginIpcError(error),
+      });
+    }
+  });
+
   // Ends every panel's authority over a plugin before an action that takes
   // its process away. A panel SDK call already in flight carries its own
-  // abort signal, so stopping the process is not what cancels it (#779 round
-  // 12 A4).
+  // abort signal, so stopping the process is not what cancels it.
   const revokePluginPanels = (workspaceId: string, pluginId: string): void => {
     revokePluginPanelAuthorities({
       workspaceId,
@@ -8030,7 +8209,7 @@ function registerIpcHandlers(
       assertTrustedSender(event);
       const input = PluginActionPayload.parse(payload);
       try {
-        const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+        const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
         const result = PluginActionResult.parse(
           await run(pipeline, input.pluginId, input.workspaceId),
         );
@@ -8038,9 +8217,8 @@ function registerIpcHandlers(
           // install/enable/approve/rebuild/disable/uninstall each decide this
           // plugin's running state on the workspace's own authority — an
           // earlier panel's cold start no longer owns whether closing it
-          // stops the host (#779 round 4 finding 3). A command's own
-          // on-demand marker is the same kind of stale claim once the
-          // workspace has spoken (round-9 finding 1).
+          // stops the host. A command's own on-demand marker is the same
+          // kind of stale claim once the workspace has spoken.
           const key = pluginLifecycleKey(input.workspaceId, input.pluginId);
           panelStartedHosts.delete(key);
           activeCommandClaims.consumeStartedHost(key);
@@ -8091,12 +8269,18 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PluginActionPayload.parse(payload);
+    const input = PluginUninstallPreflightPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
-      return PluginUninstallPreflightResult.parse(
-        await pipeline.uninstallPreflight(input.pluginId),
-      );
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
+      const result = await pipeline.uninstallPreflight(input.pluginId, input.directoryName);
+      if (!result.ok) return PluginUninstallPreflightResult.parse(result);
+      return PluginUninstallPreflightResult.parse({
+        ...result,
+        preflight: {
+          ...result.preflight,
+          packagedDisplayName: await packagedBuiltinDisplayName(input.directoryName),
+        },
+      });
     } catch (error) {
       return PluginUninstallPreflightResult.parse({
         ok: false,
@@ -8107,12 +8291,12 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.pluginSizes, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PluginActionPayload.parse(payload);
+    const input = PluginSizesPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSizesResult.parse({
         ok: true,
-        sizes: await pipeline.sizes(input.pluginId),
+        sizes: await pipeline.sizes(input.directoryName, input.pluginId),
       });
     } catch (error) {
       return PluginSizesResult.parse({
@@ -8124,12 +8308,12 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.getPluginSettings, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PluginActionPayload.parse(payload);
+    const input = GetPluginSettingsPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
-        values: await pipeline.getPluginSettings(input.pluginId),
+        values: await pipeline.getPluginSettings(input.directoryName),
       });
     } catch (error) {
       return PluginSettingsResult.parse({
@@ -8143,10 +8327,14 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = SetPluginSettingsPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
+      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
-        values: await pipeline.setPluginSettings(input.pluginId, input.values),
+        values: await pipeline.setPluginSettings(
+          input.directoryName,
+          input.pluginId,
+          input.values,
+        ),
       });
     } catch (error) {
       return PluginSettingsResult.parse({
@@ -8156,31 +8344,77 @@ function registerIpcHandlers(
     }
   });
 
+  // Whether `pluginId` is claimed, right now, by a genuinely INSTALLED row
+  // (approvedHash set) — never merely present. A collision's losing,
+  // never-approved side can sit in pipeline.list() under the exact same id
+  // as the winning, installed side; only the installed side ever registers
+  // a panel, opens a web app, or owns a guest partition, so it is the only
+  // one this id's ID-keyed main-process state can ever legitimately belong
+  // to.
+  const pluginIdHasInstalledClaimant = (
+    pipeline: PluginPipeline,
+    pluginId: string,
+  ): boolean =>
+    pipeline.list().some((entry) => entry.id === pluginId && entry.approvedHash !== null);
+
   ipcMain.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
     assertTrustedSender(event);
     const input = UninstallPluginPayload.parse(payload);
     try {
-      const pipeline = await activePluginPipelineFor(event, input.workspaceId);
-      // Uninstall stops the plugin's process on its way to deleting the
-      // source, so no panel authority over it survives the attempt whether
-      // or not the delete succeeds (#779 round 12 A4).
-      revokePluginPanels(input.workspaceId, input.pluginId);
-      stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
+      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
       const result = PluginActionResult.parse(
-        await pipeline.uninstall(input.pluginId, input.confirmationToken),
+        await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),
       );
+      // Teardown below must key on THIS id's own claimant having genuinely
+      // stopped — never on result.ok alone, and never eagerly before
+      // uninstall validates the confirmation. A stale dialog or expired
+      // token fails before uninstall ever calls pluginHost.stop(); tearing
+      // surfaces down ahead of that, or on a collision loser's own
+      // trivially-true result.ok, would destroy a still-running claimant's
+      // panel and web app views for an action that never touched it.
+      // claimantStoppedBySettledResult covers a FAILURE that still stopped
+      // the process (delete-failed, or confirmation-stale caught after
+      // stop() ran): both explicitly mark the row disabled or
+      // disabled-pending-repair, merged onto its own pre-existing status —
+      // which is why this also reads correctly for a collision's
+      // SURVIVING claimant, not only the row that actually left.
+      const claimantStoppedBySettledResult =
+        result.plugin !== null &&
+        result.plugin.approvedHash !== null &&
+        (result.plugin.status === "disabled" ||
+          result.plugin.status === "disabled-pending-repair");
+      // input.pluginId can still be claimed by a completely different,
+      // still-installed plugin a collision produced: the losing,
+      // never-installed side removed while the winning side keeps running
+      // under the identical id, with nothing of its own ever having run.
+      const stillInstalledClaimant = pluginIdHasInstalledClaimant(pipeline, input.pluginId);
+      if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {
+        revokePluginPanels(input.workspaceId, input.pluginId);
+        stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
+      }
+      // Registration and the guest partition below are keyed by id alone,
+      // with no directoryName to disambiguate by, so clearing them
+      // unconditionally would reach into a surviving claimant's own live
+      // registration and session rather than the row that actually left.
+      const removedLastClaimant = result.ok && !stillInstalledClaimant;
+      // Also gated on directoryName, the standing trace-to-directory rule:
+      // forgetUninstalledPlugin only clears a registration that actually
+      // traces to THIS directory, so an id-losing loser's own removed
+      // event can never delete a still-installed winner's own
+      // registration and started-host claim under the same shared id.
       forgetUninstalledPlugin({
         registrations: pluginRegistrations,
         panelStartedHosts,
         workspaceId: input.workspaceId,
         pluginId: input.pluginId,
-        uninstalled: result.ok,
+        directoryName: input.directoryName,
+        uninstalled: removedLastClaimant,
       });
-      if (result.ok) {
+      if (removedLastClaimant) {
         // The guest partition holds the web app's session cookies — plugin
         // state as much as its data directory. A reinstall starts unpaired.
         await clearPluginWebAppPartition({
-          workspaceRoot: requireWorkspace(input.workspaceId).rootPath,
+          workspaceRoot: workspace.rootPath,
           pluginId: input.pluginId,
           hardenedPartitions: hardenedGuestPartitions,
           fromPartition: (partition) => session.fromPartition(partition),
@@ -8301,13 +8535,13 @@ function registerIpcHandlers(
     // handler already started stopping this workspace's plugins (the
     // previousWorkspaceId branch above). Warming this workspace's pipeline
     // anyway would start it right back up for a workspace this sender no
-    // longer has open (#779 round 4 finding 1).
+    // longer has open.
     const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;
     if (stillActive && !sharedViewOf(workspace.workspaceId)) {
       // A plugin-pipeline start failure must not fail the whole handler —
       // the workspace itself already opened. listPlugins and friends
       // separately convert a failed ensurePluginPipeline into a structured
-      // pluginIpcError (CodeRabbit #779 R6); this is best-effort warmup.
+      // pluginIpcError; this is best-effort warmup.
       await ensurePluginPipeline(workspace).catch((error: unknown) => {
         console.error(
           `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,

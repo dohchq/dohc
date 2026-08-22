@@ -259,6 +259,25 @@ describe("plugin web app main-process wiring", () => {
     expect(disableCallAt).toBeGreaterThan(disableStopAt);
   });
 
+  // The predicate itself, pinned once by name so every gate that reuses it
+  // is pinned by construction: presence in pipeline.list() alone is not
+  // ownership — a collision's never-installed, losing side can sit under
+  // the exact same id as the row that actually owns a panel, a web app, or
+  // a partition.
+  it("requires an actual installed claimant, not merely a row present under the id", () => {
+    const predicateAt = mainSource.indexOf("const pluginIdHasInstalledClaimant = (");
+    const predicateEnd = mainSource.indexOf("\n\n", predicateAt);
+    const predicate = mainSource.slice(predicateAt, predicateEnd);
+
+    // MUTATION (drop the approvedHash check): a never-installed collision
+    // loser reads as an "owner" too, and every gate built on this predicate
+    // then wrongly treats it as one.
+    expect(predicateAt).toBeGreaterThan(-1);
+    expect(squeeze(predicate)).toContain(
+      "entry.id===pluginId&&entry.approvedHash!==null",
+    );
+  });
+
   it("destroys a plugin's guest views after the old runtime stops", () => {
     const rebuildAt = mainSource.indexOf("pluginAction(CHANNELS.rebuildPlugin,");
     const rebuildEnd = mainSource.indexOf("\n\n  ipcMain.handle(", rebuildAt);
@@ -325,23 +344,151 @@ describe("plugin web app main-process wiring", () => {
     expect(recover).toBeGreaterThan(-1);
   });
 
-  it("clears the guest partition's storage after a successful uninstall", () => {
+  it("clears the guest partition's storage after a successful uninstall, only once no installed claimant survives", () => {
     const uninstall = handler("uninstallPlugin");
-    const stopViewsAt = uninstall.indexOf(
-      "stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);",
-    );
     const uninstallCallAt = uninstall.indexOf(
-      "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
+      "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
     );
-    const guardAt = uninstall.indexOf("if (result.ok) {", uninstallCallAt);
+    const stillInstalledClaimantAt = uninstall.indexOf(
+      "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
+      uninstallCallAt,
+    );
+    const guardAt = uninstall.indexOf(
+      "if (removedLastClaimant) {",
+      stillInstalledClaimantAt,
+    );
     const clearAt = uninstall.indexOf("clearPluginWebAppPartition({", guardAt);
 
     // MUTATION (session credential): without the clear, a reinstalled plugin
     // inherits the previous installation's authenticated session cookies.
     // What the clear targets is pinned in pluginWebAppGuest.test.ts.
-    expect(stopViewsAt).toBeGreaterThan(-1);
-    expect(uninstallCallAt).toBeGreaterThan(stopViewsAt);
-    expect(guardAt).toBeGreaterThan(uninstallCallAt);
+    expect(uninstallCallAt).toBeGreaterThan(-1);
+    // MUTATION (drop stillInstalledClaimant, or use presence alone):
+    // input.pluginId can still be OWNED by a completely different,
+    // still-installed plugin a duplicate-id collision produced — the
+    // losing side removed, the winning side left running under the
+    // identical id. Without this check, an unconditional clear would
+    // reach into that surviving plugin's own live session.
+    expect(stillInstalledClaimantAt).toBeGreaterThan(uninstallCallAt);
+    expect(guardAt).toBeGreaterThan(stillInstalledClaimantAt);
     expect(clearAt).toBeGreaterThan(guardAt);
+  });
+
+  it("gates the registration forget the same way it gates the partition clear", () => {
+    const uninstall = handler("uninstallPlugin");
+    const stillInstalledClaimantAt = uninstall.indexOf(
+      "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
+    );
+    const forgetAt = uninstall.indexOf("forgetUninstalledPlugin({", stillInstalledClaimantAt);
+    const forgetCall = uninstall.slice(forgetAt, uninstall.indexOf("});", forgetAt));
+
+    // MUTATION (uninstalled: result.ok, dropping !stillInstalledClaimant):
+    // the same collision that must not clear a survivor's partition must
+    // not forget its registration either — both are keyed by id alone.
+    expect(stillInstalledClaimantAt).toBeGreaterThan(-1);
+    expect(forgetAt).toBeGreaterThan(stillInstalledClaimantAt);
+    expect(squeeze(forgetCall)).toContain("uninstalled:removedLastClaimant,");
+  });
+
+  // #779-offers round 17 finding 2, tightened round 23 finding 2: revoking
+  // a panel or stopping a web app before the pipeline even validates
+  // confirmationToken reaches into whatever row is currently running under
+  // this id — a stale dialog or an expired token fails before
+  // pipeline.uninstall ever calls pluginHost.stop(), and teardown ahead of
+  // that would destroy a still-running plugin's surfaces for an action
+  // that never touched it. There is exactly one teardown site, entirely
+  // after the settled result.
+  it("defers all panel and web app teardown until after pipeline.uninstall settles", () => {
+    const uninstall = handler("uninstallPlugin");
+    const uninstallCallAt = uninstall.indexOf(
+      "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
+    );
+    const settledGuardAt = uninstall.indexOf(
+      "if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {",
+      uninstallCallAt,
+    );
+    const revokeAt = uninstall.indexOf(
+      "revokePluginPanels(input.workspaceId, input.pluginId);",
+      settledGuardAt,
+    );
+    const stopAt = uninstall.indexOf(
+      "stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);",
+      revokeAt,
+    );
+
+    // MUTATION (revoke/stop before the settled guard, or before
+    // uninstallCallAt at all): a stale dialog or expired token would then
+    // have its surfaces torn down before pipeline.uninstall ever proves
+    // this attempt actually reached pluginHost.stop().
+    expect(uninstallCallAt).toBeGreaterThan(-1);
+    expect(settledGuardAt).toBeGreaterThan(uninstallCallAt);
+    expect(revokeAt).toBeGreaterThan(settledGuardAt);
+    expect(stopAt).toBeGreaterThan(revokeAt);
+    // No earlier, unconditional revoke/stop pair exists before the call at
+    // all — the only occurrences are the ones just found, after settling.
+    expect(uninstall.indexOf("revokePluginPanels(input.workspaceId, input.pluginId);"))
+      .toBe(revokeAt);
+    expect(uninstall.indexOf("stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);"))
+      .toBe(stopAt);
+  });
+
+  // #779-offers round 18 finding 1, tightened round 23 finding 2: a FAILED
+  // uninstall can still have stopped the installed claimant's process
+  // before the failure that followed — the preflight-stale-after-stop and
+  // delete-failed paths both mark the row disabled or disabled-pending-
+  // repair only AFTER pluginHost.stop() already ran, so its main-process
+  // surfaces are just as dead as a successful removal's would be. An
+  // earlier failure (caught before the pipeline ever touches the process)
+  // never reaches that status, and the claimant is still genuinely
+  // running. A full SUCCESS proves it too, on its own (result.ok).
+  it("revokes authority on a failed uninstall too, only once the settled status proves the process was actually stopped", () => {
+    const uninstall = handler("uninstallPlugin");
+    const settledGuardAt = uninstall.indexOf(
+      "if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {",
+    );
+    const predicateAt = uninstall.indexOf(
+      "const claimantStoppedBySettledResult =",
+    );
+    const predicate = uninstall.slice(
+      predicateAt,
+      uninstall.indexOf(";", uninstall.indexOf("disabled-pending-repair", predicateAt)) + 1,
+    );
+
+    // MUTATION (gate on result.ok alone, dropping the status check): a
+    // failure caught before the process was ever stopped would then ALSO
+    // revoke a still-genuinely-running claimant's authority.
+    expect(predicateAt).toBeGreaterThan(-1);
+    expect(settledGuardAt).toBeGreaterThan(predicateAt);
+    expect(squeeze(predicate)).toContain("result.plugin!==null");
+    expect(squeeze(predicate)).toContain("result.plugin.approvedHash!==null");
+    expect(squeeze(predicate)).toContain('result.plugin.status==="disabled"');
+    expect(squeeze(predicate)).toContain(
+      'result.plugin.status==="disabled-pending-repair"',
+    );
+  });
+
+  // #779-offers round 24 finding 1: removing an id-losing collision loser
+  // genuinely returns result.ok, with nothing of ITS own ever having run —
+  // the loser has no panel or web app authority of its own to revoke.
+  // result.ok alone is not proof this id's own claimant was stopped: a
+  // still-installed WINNER can survive under the identical id, and
+  // teardown by id alone would tear its live surfaces down for an action
+  // that never touched it.
+  it("never tears down a still-installed claimant's surfaces when the settled result names no stopped claimant", () => {
+    const uninstall = handler("uninstallPlugin");
+    const claimantAt = uninstall.indexOf(
+      "const stillInstalledClaimant = pluginIdHasInstalledClaimant(pipeline, input.pluginId);",
+    );
+    const settledGuardAt = uninstall.indexOf(
+      "if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {",
+      claimantAt,
+    );
+
+    // MUTATION (gate on result.ok/claimantStoppedBySettledResult alone,
+    // dropping !stillInstalledClaimant): removing the loser would then
+    // tear down the winner's still-live panel and web app views, even
+    // though nothing of the loser's own was ever running to revoke.
+    expect(claimantAt).toBeGreaterThan(-1);
+    expect(settledGuardAt).toBeGreaterThan(claimantAt);
   });
 });

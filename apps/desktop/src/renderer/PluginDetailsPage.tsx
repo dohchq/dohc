@@ -24,6 +24,7 @@ import {
   canEnable,
   canInstall,
   canOpenWebApps,
+  canRemove,
   openableWebApps,
   canRebuild,
   canRetryInstall,
@@ -34,6 +35,7 @@ import {
   statusTone,
   usePluginCatalog,
   webAppKey,
+  type PluginRenamedFact,
 } from "./workbench/pluginCatalog";
 
 // One plugin's page, opened as an editor tab from the plugins list. VS Code's
@@ -79,6 +81,23 @@ function isMissingFileError(error: unknown): boolean {
 
 function readmePath(directoryName: string): string {
   return `plugins/${directoryName}/README.md`;
+}
+
+// A tab opened for one exact row (id alone can name two unrelated rows).
+// Following a rename used to be a heuristic — id-only matching, guarded by
+// a window and a collision history, guessing that a same-id arrival was the
+// tab's own row moving. It now follows the fact instead: catalog.renamed
+// fires only where the pipeline has itself PROVEN a rename, and this tab
+// retargets on that fact directly (see the component body below) rather
+// than inferring one from the list's own shape.
+function findTabPlugin(
+  plugins: PluginStatusRecord[],
+  pluginId: string,
+  directoryName: string,
+): PluginStatusRecord | null {
+  return plugins.find(
+    (entry) => entry.id === pluginId && entry.directoryName === directoryName,
+  ) ?? null;
 }
 
 function useReadme(workspaceId: string, directoryName: string): ReadmeState {
@@ -199,6 +218,12 @@ function PluginSettingsSection(props: {
       .getPluginSettings({
         workspaceId: props.workspaceId,
         pluginId: plugin.id,
+        // The exact row this section is about, never pluginId alone — two
+        // rows can share an id (a broken manifest's directory-derived
+        // fallback colliding with some other, unrelated plugin's real id),
+        // and settings answer only ever what one directory declared and
+        // stored.
+        directoryName: plugin.directoryName,
       })
       .then((result) => {
         if (request !== requestToken.current) return;
@@ -212,7 +237,7 @@ function PluginSettingsSection(props: {
     return () => {
       requestToken.current += 1;
     };
-  }, [props.workspaceId, plugin.id, declaredCount]);
+  }, [props.workspaceId, plugin.id, plugin.directoryName, declaredCount]);
 
   const commit = (key: string, value: PluginSettingValue) => {
     // Shown at once so a control never feels stuck, then replaced by whatever
@@ -223,6 +248,7 @@ function PluginSettingsSection(props: {
       .setPluginSettings({
         workspaceId: props.workspaceId,
         pluginId: plugin.id,
+        directoryName: plugin.directoryName,
         values: { [key]: value },
       })
       .then((result) => {
@@ -410,7 +436,11 @@ type SizesState =
  * the rows simply do not appear — a size dohc could not read is not a size
  * worth printing, and this rail has nothing the reader must act on.
  */
-function usePluginSizes(workspaceId: string, pluginId: string): SizesState {
+function usePluginSizes(
+  workspaceId: string,
+  pluginId: string,
+  directoryName: string,
+): SizesState {
   const [state, setState] = useState<SizesState>({ status: "loading" });
   // The same guard the README and the settings section use: the effect
   // re-runs for every workspace or plugin and its cleanup raises the token,
@@ -422,7 +452,13 @@ function usePluginSizes(workspaceId: string, pluginId: string): SizesState {
     const request = ++requestToken.current;
     setState({ status: "loading" });
     void bridge()
-      .pluginSizes({ workspaceId, pluginId })
+      // The exact row this rail is about, never pluginId alone — two rows
+      // can share an id (a broken manifest's directory-derived fallback
+      // colliding with some other, unrelated plugin's real id), and dohc's
+      // own build and state storage answers only ever what THIS id
+      // actually built and ran, which the pipeline refuses to report for a
+      // directory it does not belong to.
+      .pluginSizes({ workspaceId, pluginId, directoryName })
       .then((result) => {
         if (request !== requestToken.current) return;
         setState(
@@ -438,7 +474,7 @@ function usePluginSizes(workspaceId: string, pluginId: string): SizesState {
     return () => {
       requestToken.current += 1;
     };
-  }, [workspaceId, pluginId]);
+  }, [workspaceId, pluginId, directoryName]);
 
   return state;
 }
@@ -508,7 +544,7 @@ function PluginDetailsRail(props: {
   plugin: PluginStatusRecord;
 }) {
   const { plugin } = props;
-  const sizes = usePluginSizes(props.workspaceId, plugin.id);
+  const sizes = usePluginSizes(props.workspaceId, plugin.id, plugin.directoryName);
 
   const installation: RailRow[] = [
     {
@@ -596,16 +632,77 @@ function PluginDetailsRail(props: {
 export function PluginDetailsPage(props: {
   workspaceId: string;
   pluginId: string;
+  /** The exact row this tab opened for. A discovered row's id is only ever
+   * a broken manifest's directory-derived fallback, which can coincide
+   * with some OTHER, unrelated plugin's real id — matching by id alone
+   * found whichever row sorted first, never the second-sorting one a user
+   * actually clicked. */
+  directoryName: string;
   /** Reports what this plugin calls itself, so its tab can carry the name the
    * user installed instead of the raw plugin id. This page is the only surface
    * that reads the plugin's manifest, the same way the web app page is the
    * only one that hears its app's title. */
-  onTitle?: (pluginId: string, title: string) => void;
+  onTitle?: (pluginId: string, directoryName: string, title: string) => void;
+  /** Reports a rename this page followed by id, so the tab's own virtual
+   * path can retarget to it — otherwise only this page's in-memory tracking
+   * knows, and a remount (a tab switch away and back) reseeds from the
+   * tab's original, now-vacated directory. */
+  onDirectoryRenamed?: (
+    pluginId: string,
+    fromDirectoryName: string,
+    toDirectoryName: string,
+  ) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
+  // The directoryName this tab is CURRENTLY following. Starts at
+  // props.directoryName, the tab's own opened identity, and moves only when
+  // catalog.renamed proves this exact row moved — never guessed from the
+  // list's own shape.
+  const trackedDirectoryNameRef = useRef(props.directoryName);
+  // A rename this render just detected, queued for the effect below to
+  // report to onDirectoryRenamed — reporting it directly here would call a
+  // parent setter mid-render. Cleared alongside the tracking above on a
+  // genuinely new tab, so a previous tab's own in-flight rename can never
+  // reach a DIFFERENT tab this instance goes on to show.
+  const pendingRenameRef = useRef<{ from: string; to: string } | null>(null);
+  // The catalog.renamed object this tab has already applied (or ruled out).
+  // catalog.renamed is a fresh object per rename but is NOT cleared once
+  // consumed, so without this, a component instance reused for a brand new
+  // tab (same pluginId and directoryName as a plugin renamed a while ago)
+  // would re-apply a stale fact that has nothing to do with this tab.
+  // Baselined to whatever fact already exists on identity change, below —
+  // only a rename that happens WHILE this tab is open is ever this tab's.
+  const lastHandledRenameRef = useRef<PluginRenamedFact | null>(null);
+  // Whose identity trackedDirectoryNameRef/pendingRenameRef/
+  // lastHandledRenameRef currently belong to — a tab is one virtual path
+  // per (pluginId, directoryName) pair, so this component ordinarily never
+  // sees that pair change under it, but nothing enforces a remount on
+  // identity change.
+  const identityRef = useRef<{ pluginId: string; directoryName: string } | null>(null);
+  if (
+    identityRef.current?.pluginId !== props.pluginId ||
+    identityRef.current?.directoryName !== props.directoryName
+  ) {
+    identityRef.current = { pluginId: props.pluginId, directoryName: props.directoryName };
+    trackedDirectoryNameRef.current = props.directoryName;
+    pendingRenameRef.current = null;
+    lastHandledRenameRef.current = catalog.renamed;
+  }
+  if (
+    catalog.renamed !== lastHandledRenameRef.current &&
+    catalog.renamed !== null &&
+    catalog.renamed.pluginId === props.pluginId &&
+    catalog.renamed.from === trackedDirectoryNameRef.current
+  ) {
+    pendingRenameRef.current = { from: catalog.renamed.from, to: catalog.renamed.to };
+    trackedDirectoryNameRef.current = catalog.renamed.to;
+  }
+  if (catalog.renamed !== lastHandledRenameRef.current) {
+    lastHandledRenameRef.current = catalog.renamed;
+  }
   const plugin =
     catalog.load.status === "ready"
-      ? (catalog.load.plugins.find((entry) => entry.id === props.pluginId) ?? null)
+      ? findTabPlugin(catalog.load.plugins, props.pluginId, trackedDirectoryNameRef.current)
       : null;
 
   // Held in a ref so a new callback identity never re-reports, and written
@@ -617,8 +714,24 @@ export function PluginDetailsPage(props: {
   });
   const title = plugin ? pluginTitle(plugin) : null;
   useEffect(() => {
-    if (title !== null) onTitleRef.current?.(props.pluginId, title);
-  }, [props.pluginId, title]);
+    if (title !== null) onTitleRef.current?.(props.pluginId, props.directoryName, title);
+  }, [props.pluginId, props.directoryName, title]);
+
+  // Same ref-and-effect shape as onTitle above, for the same reason: reports
+  // a rename outward without calling a parent setter mid-render. Runs every
+  // commit (no deps) — pendingRenameRef itself is the guard, consumed and
+  // cleared the first time this fires after the render that queued it, so a
+  // later re-render with nothing new queued reports nothing again.
+  const onDirectoryRenamedRef = useRef(props.onDirectoryRenamed);
+  useEffect(() => {
+    onDirectoryRenamedRef.current = props.onDirectoryRenamed;
+  });
+  useEffect(() => {
+    const pending = pendingRenameRef.current;
+    if (!pending) return;
+    pendingRenameRef.current = null;
+    onDirectoryRenamedRef.current?.(props.pluginId, pending.from, pending.to);
+  });
 
   if (catalog.load.status === "loading") {
     return (
@@ -666,6 +779,7 @@ export function PluginDetailsPage(props: {
     <div
       data-testid="plugin-details-page"
       data-plugin-id={plugin.id}
+      data-directory-name={plugin.directoryName}
       className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg"
     >
       {/* The rail sits beside the content on a wide window and drops below it
@@ -847,6 +961,21 @@ function PluginDetailsHeader(props: {
             {actionLabel("preflight", busyAction === "preflight")}
           </button>
         ) : null}
+        {canRemove(plugin) ? (
+          // Same confirm flow Uninstall opens (this plugin was never
+          // approved, so isInstalled's Uninstall button never shows here) —
+          // only the wording differs, since nothing installed is being
+          // undone, only a copy that was never installed being deleted.
+          <button
+            type="button"
+            data-testid="plugin-remove"
+            disabled={disabled}
+            onClick={() => catalog.prepareUninstall(plugin)}
+            className={dangerButton}
+          >
+            {busyAction === "preflight" ? "Checking" : "Remove"}
+          </button>
+        ) : null}
       </div>
 
       {actionError ? (
@@ -933,6 +1062,22 @@ function PluginUninstallDialog(props: {
   if (!confirmation) return null;
   const uninstalling = catalog.busy[confirmation.plugin.id] === "uninstall";
   const warning = confirmation.preflight.warning;
+  // The same dialog and the same bridge call either way: this plugin was
+  // either running (Uninstall) or never approved (Remove) — the wording
+  // states which one is true instead of calling a never-installed copy
+  // "uninstalled".
+  const installed = isInstalled(confirmation.plugin);
+  // A directoryName matching a built-in only means Add can offer this slot
+  // again — it says nothing about what's actually IN the folder right now.
+  // A user or an agent can put anything at plugins/codex; Add always
+  // restores dohc's own packaged source, never whatever this specific copy
+  // held. Anything else has no such path at all, and dohc's own delete here
+  // is permanent either way (PluginPipeline.uninstall removes the source
+  // directly, no trash) — the copy below says exactly that, never more.
+  // The preflight this confirmation came from already read the packaged
+  // manifest itself (never this copy's, which can be hand-edited or too
+  // broken to read) — a non-null name here IS the built-in-offer fact.
+  const packagedDisplayName = confirmation.preflight.packagedDisplayName;
 
   return (
     <Overlay
@@ -952,10 +1097,16 @@ function PluginUninstallDialog(props: {
             id="plugin-uninstall-title"
             className="m-0 text-sm font-semibold text-ink"
           >
-            {`Uninstall ${confirmation.plugin.id}?`}
+            {installed
+              ? `Uninstall ${confirmation.plugin.id}?`
+              : `Remove ${confirmation.plugin.id}?`}
           </h2>
           <p className="m-0 mt-2 text-xs text-muted">
-            This removes the plugin source and build files from this workspace.
+            {installed
+              ? "This removes the plugin source and build files from this workspace."
+              : packagedDisplayName !== null
+                ? `This deletes plugins/${confirmation.plugin.directoryName}'s files from this workspace. Add restores dohc's packaged ${packagedDisplayName} plugin, not this copy.`
+                : `This permanently deletes plugins/${confirmation.plugin.directoryName} from this workspace. dohc has no way to bring it back.`}
           </p>
           {warning ? (
             <div
@@ -1021,7 +1172,11 @@ function PluginUninstallDialog(props: {
             onClick={catalog.confirmUninstall}
             className="rounded-lg bg-danger px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
           >
-            {actionLabel("uninstall", uninstalling)}
+            {installed
+              ? actionLabel("uninstall", uninstalling)
+              : uninstalling
+                ? "Removing"
+                : "Remove plugin"}
           </button>
         </div>
       </div>
