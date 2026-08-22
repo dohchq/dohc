@@ -534,8 +534,25 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("next", ["-H", "mysite.local"]),
     ).toThrow(/loopback/);
+    // A bare "--host" (no value at all — the last token, or immediately
+    // followed by another flag) is UNVERIFIABLE, not a known bind to "all
+    // interfaces" — that claim asserted something this scanner never
+    // actually observed. The message must name the flag instead.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("vite", ["--host"]),
+    ).toThrow(/"--host" without a value/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("next", ["-h"]),
+    ).toThrow(/"-h" without a value/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--host", "--port", "3000"]),
+    ).toThrow(/"--host" without a value/);
+    // A genuinely empty INLINE value ("--host=") is different — the author
+    // explicitly wrote an empty string, which a real tool commonly treats
+    // as binding all interfaces, so "all interfaces" is still the accurate
+    // claim there, unlike the unverifiable "no value at all" case above.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("vite", ["--host="]),
     ).toThrow(/all interfaces/);
     expect(() =>
       assertLoopbackOnlyDevServerCommand("vite", [

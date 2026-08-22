@@ -28,6 +28,23 @@ describe("parseProcessTable", () => {
     ]);
   });
 
+  it("reads a row with no leading padding at all", () => {
+    // Every OTHER fixture line in this file happens to have leading
+    // whitespace — column alignment ps itself adds for narrower pids, not
+    // something this parser requires — so only a line with NONE can tell
+    // the leading `\s*` (zero or more) apart from a `\s+` (one or more)
+    // that would silently drop a row wide enough to need no padding at
+    // all (the shape a captured Windows process-table row happened to
+    // exercise, before that fixture was consolidated into this shared
+    // parser's own coverage).
+    const output = "100 1\n200 100\n";
+
+    expect(parseProcessTable(output)).toEqual([
+      { pid: 100, ppid: 1 },
+      { pid: 200, ppid: 100 },
+    ]);
+  });
+
   it("ignores lines it cannot read rather than failing the sweep", () => {
     const output = [
       "  842     1",

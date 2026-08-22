@@ -46,13 +46,24 @@ describe("site preview main-process wiring", () => {
     expect(handler).toContain("await stopSitePreviewForRequest(");
   });
 
-  it("stopSitePreviewForRequest aborts a pending start for the same site before it stops", async () => {
+  it("stopSitePreviewForRequest aborts a pending start for the same site before it takes the lock", async () => {
     const starts = createSitePreviewStartRegistry();
     const previews = createSitePreviewLifecycle({ allowOrigin: () => () => undefined });
     const pending = starts.begin(7, "workspace-1", "site");
     expect(pending.controller.signal.aborted).toBe(false);
 
-    await stopSitePreviewForRequest({
+    let releaseFirst: () => void = () => undefined;
+    const firstHold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    // Occupy the lock for "workspace-1"/"site" first, so
+    // stopSitePreviewForRequest's own withStartLock call is genuinely
+    // queued behind it — an abort that only ran INSIDE the lock callback
+    // would still (eventually) leave this true, so an uncontended call
+    // can't tell the two apart. Checking before the lock releases can.
+    const holding = previews.withStartLock("workspace-1", "site", () => firstHold);
+
+    const stopPromise = stopSitePreviewForRequest({
       getActiveWorkspaceId: () => "workspace-1",
       workspaceId: "workspace-1",
       siteRoot: "site",
@@ -60,7 +71,31 @@ describe("site preview main-process wiring", () => {
       previews,
     });
 
+    // The abort must already have happened — it runs synchronously before
+    // stopSitePreviewForRequest's first await — even though the lock it's
+    // queued behind is still held.
     expect(pending.controller.signal.aborted).toBe(true);
+
+    releaseFirst();
+    await holding;
+    await stopPromise;
+  });
+
+  it("stopSitePreviewForRequest names the concrete action a stale request should retry", async () => {
+    // A generic "try again" doesn't say what "again" even means for a stop
+    // request — the message must say to STOP the preview again, not just
+    // reopen the workspace and hope.
+    await expect(
+      stopSitePreviewForRequest({
+        getActiveWorkspaceId: () => "workspace-2",
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        starts: createSitePreviewStartRegistry(),
+        previews: createSitePreviewLifecycle({ allowOrigin: () => () => undefined }),
+      }),
+    ).rejects.toThrow(
+      "The site preview stop request does not target the active workspace. Open the workspace and stop the preview again.",
+    );
   });
 
   it("stopSitePreviewForRequest rechecks the active workspace after queueing behind another operation for the same site", async () => {
@@ -162,9 +197,20 @@ describe("site preview main-process wiring", () => {
     // cannot be imported directly under Vitest, so this only pins that
     // each handler routes its actual read through that function rather
     // than reimplementing the guard inline.
-    for (const channel of ["listSites", "getSitePackage"]) {
+    for (const [channel, readCall] of [
+      ["listSites", "listSitePackages(workspace.rootPath)"],
+      ["getSitePackage", "getSitePackage(workspace.rootPath, input.path,"],
+    ] as const) {
       const handler = handlerSource(channel);
-      expect(handler).toContain("await withActiveWorkspaceForSiteRead(");
+      const guardAt = handler.indexOf("await withActiveWorkspaceForSiteRead(");
+      const readAt = handler.indexOf(readCall);
+      expect(guardAt).toBeGreaterThanOrEqual(0);
+      // The read call must sit textually INSIDE withActiveWorkspaceForSiteRead's
+      // own arguments (its deferred callback), not hoisted out and merely
+      // referenced — that's what actually defers the read until after the
+      // guard runs, not just the presence of the guard's name somewhere in
+      // the handler.
+      expect(readAt).toBeGreaterThan(guardAt);
     }
   });
 

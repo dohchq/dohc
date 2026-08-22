@@ -638,6 +638,7 @@ import {
   createSitePreviewStartRegistry,
   stopSitePreviewForRequest,
   withActiveWorkspaceForSiteRead,
+  withKeyedStartLock,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
 import {
@@ -887,7 +888,6 @@ function assertSitePreviewMode(
 
 const sitePreviews = createSitePreviewLifecycle({
   allowOrigin: allowLoopbackFrameOrigin,
-  withKeyedStartLock,
 });
 const pluginPipelines = new Map<string, PluginPipeline>();
 const pluginPipelineDisposals = new Map<string, Promise<void>>();
@@ -1146,28 +1146,6 @@ function rendererGeneration(senderId: number): number {
 
 function advanceRendererGeneration(senderId: number): void {
   rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
-}
-
-async function withKeyedStartLock<T>(
-  locks: Map<string, Promise<void>>,
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = locks.get(key) ?? Promise.resolve();
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.catch(() => undefined).then(() => current);
-  locks.set(key, queued);
-
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (locks.get(key) === queued) locks.delete(key);
-  }
 }
 
 async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {

@@ -10,7 +10,12 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 // and addresses it.
 
 export type RelayShareTarget =
-  | { kind: "paths"; paths: string[]; label?: string }
+  // At least one path — every real construction site passes one already
+  // (a single clicked path, or a site's own non-empty share manifest); the
+  // type itself now says so instead of leaving an empty array a caller
+  // could still construct but that this dialog's own subject/payload logic
+  // already assumes never happens.
+  | { kind: "paths"; paths: [string, ...string[]]; label?: string }
   | { kind: "version"; versionId: string; versionName?: string };
 
 function errorMessage(cause: unknown): string {

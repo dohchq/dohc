@@ -362,7 +362,12 @@ describe("site preview lifecycle", () => {
     // is genuinely queued behind it rather than running immediately.
     const holding = previews.withStartLock("workspace-1", "site", () => firstHold);
     const queuedStop = previews.withStartLock("workspace-1", "site", async () => {
-      assertActiveWorkspaceForSite(activeWorkspaceId, "workspace-1", "Site preview stop request");
+      assertActiveWorkspaceForSite(
+        activeWorkspaceId,
+        "workspace-1",
+        "site preview stop request",
+        "stop the preview again",
+      );
       await stop();
     });
 

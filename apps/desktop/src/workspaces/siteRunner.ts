@@ -52,7 +52,7 @@ export interface BuildSiteResult {
 
 export type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
 
-const MAX_LOG_ENTRIES = 500;
+export const MAX_LOG_ENTRIES = 500;
 const MAX_LOG_TEXT_CHARS = 10_000;
 const LOG_TRUNCATION_MARKER = "...[truncated]";
 const BUILD_TIMEOUT_MS = 120000;
@@ -66,11 +66,9 @@ const DESCENDANT_CAPTURE_INTERVAL_MS = 5000;
 // The will-quit teardown's own budget must cover this site-preview stop
 // path's worst case (SIGTERM, then this grace, then the SIGKILL
 // round-trip) or an unref'd preview process can survive with no kill
-// signal ever sent. Computed HERE, not duplicated as
-// an independent literal in main.ts — a hard-coded, independently-drifting
-// duplicate is exactly how the two fell out of sync before. Never shorter
-// than the ORIGINAL 3 s budget the other, unrelated teardown tasks in
-// main.ts's will-quit handler were sized against.
+// signal ever sent. Computed HERE, not duplicated as an independent
+// literal in main.ts — a hard-coded, independently-drifting duplicate is
+// exactly how the two fell out of sync before.
 export const WILL_QUIT_BUDGET_MS = BUILD_HARD_KILL_GRACE_MS + 1000;
 const DEV_URL_RE =
   /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|[\s.)"'`,\]>])/i;
@@ -419,17 +417,34 @@ export function splitShellStatements(commandLine: string): string[] {
   return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0);
 }
 
-function explicitHostBinds(args: string[]): string[] {
-  const hosts: string[] = [];
+interface HostBindCandidate {
+  value: string;
+  // Set to the flag token ONLY when this candidate's value could not be
+  // determined at all — the flag was the command's last token, or
+  // immediately followed by what looks like another flag rather than a
+  // value. Distinct from a genuinely empty INLINE value ("--host="), which
+  // really does tell a real tool to bind however it treats an empty string
+  // (commonly: all interfaces) — an unverifiable candidate must say it
+  // could not verify the binding, not claim a specific one this scanner
+  // never actually observed.
+  unverifiableFlag?: string;
+}
+
+function explicitHostBinds(args: string[]): HostBindCandidate[] {
+  const hosts: HostBindCandidate[] = [];
   for (let index = 0; index < args.length; index += 1) {
     const match = HOST_BIND_FLAG_PATTERN.exec(args[index]!);
     if (!match) continue;
     if (match[1] !== undefined) {
-      hosts.push(match[1]);
+      hosts.push({ value: match[1] });
       continue;
     }
     const next = args[index + 1];
-    hosts.push(next && !next.startsWith("-") ? next : "");
+    if (next && !next.startsWith("-")) {
+      hosts.push({ value: next });
+    } else {
+      hosts.push({ value: "", unverifiableFlag: args[index]! });
+    }
   }
   return hosts;
 }
@@ -663,16 +678,30 @@ function isEnvStyleWrapper(commandName: string | undefined): boolean {
 
 function assertDirectHostBinds(command: string, args: string[]): void {
   const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
-  const hosts = [
+  // Env/env-style assignments (HOST=, --host=) always carry a determinate
+  // value, even an empty one — there is no "flag with no value" case for
+  // them the way a separate-token flag has, so they map straight onto
+  // HostBindCandidate with no unverifiableFlag.
+  const hosts: HostBindCandidate[] = [
     ...explicitHostBinds(args),
-    ...explicitHostEnvironmentAssignments([command, ...args], false).hosts,
+    ...explicitHostEnvironmentAssignments([command, ...args], false).hosts.map((value) => ({ value })),
     // env/cross-env each set every leading assignment before running the
     // wrapped command, so the SAME assignments matter here too, just one
     // token later since the wrapper's own name isn't one — and env's own
     // OPTIONs (cross-env has none) may precede them.
-    ...(isEnvStyleWrapper(commandName) ? explicitHostEnvironmentAssignments(args, true).hosts : []),
+    ...(isEnvStyleWrapper(commandName)
+      ? explicitHostEnvironmentAssignments(args, true).hosts.map((value) => ({ value }))
+      : []),
   ];
-  for (const host of hosts) {
+  for (const { value: host, unverifiableFlag } of hosts) {
+    if (unverifiableFlag) {
+      throw new Error(
+        `Site dev server command uses "${unverifiableFlag}" without a value dohc can read, so its loopback-only host binding cannot be verified: ${[
+          command,
+          ...args,
+        ].join(" ")}`,
+      );
+    }
     if (host !== "" && isLoopbackHostname(host)) continue;
     const displayHost = host === "" ? "all interfaces" : host;
     throw new Error(

@@ -128,7 +128,7 @@ function preferredMode(
 }
 
 export interface SiteShareTarget {
-  paths: string[];
+  paths: [string, ...string[]];
   label: string;
 }
 

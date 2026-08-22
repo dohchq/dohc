@@ -1,7 +1,8 @@
-import type {
-  SiteLogEntry,
-  SiteProcessHandle,
-  StaticSitePreview,
+import {
+  MAX_LOG_ENTRIES,
+  type SiteLogEntry,
+  type SiteProcessHandle,
+  type StaticSitePreview,
 } from "./siteRunner";
 
 export type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
@@ -9,16 +10,22 @@ export type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 // requireWorkspace alone only proves a workspaceId is REGISTERED somewhere
 // in this app instance, not that it's the one THIS sender's own window is
 // currently showing — every site-preview and sites-read IPC handler needs
-// the same active-workspace guard, naming what it was trying to do so the
-// message stays specific to the request that actually failed.
+// the same active-workspace guard, naming what it was trying to do (subject)
+// and what the user should do about it (action) so the message stays
+// specific to the request that actually failed instead of a generic "try
+// again" that doesn't say what "again" even means for a stop request. Both
+// interpolations share one register — plain, lowercase noun phrases that
+// read naturally mid-sentence ("The sites request does not target...", not
+// "The Sites request...").
 export function assertActiveWorkspaceForSite(
   activeWorkspaceId: string | undefined,
   workspaceId: string,
   subject: string,
+  action = "try again",
 ): void {
   if (activeWorkspaceId === workspaceId) return;
   throw new Error(
-    `The ${subject} does not target the active workspace. Open the workspace and try again.`,
+    `The ${subject} does not target the active workspace. Open the workspace and ${action}.`,
   );
 }
 
@@ -40,9 +47,9 @@ export async function withActiveWorkspaceForSiteRead<T>(
   return read();
 }
 
-// One less than siteRunner's own MAX_LOG_ENTRIES (500) — see the comment
-// where this is used.
-const EXITED_LOG_ENTRY_BUDGET = 499;
+// One less than siteRunner's own MAX_LOG_ENTRIES — see the comment where
+// this is used.
+const EXITED_LOG_ENTRY_BUDGET = MAX_LOG_ENTRIES - 1;
 
 export function createSitePreviewStartRegistry() {
   type PendingStart = {
@@ -101,10 +108,10 @@ export function createSitePreviewStartRegistry() {
 
 // The queued-lock algorithm itself is app-wide — main.ts reuses the exact
 // same shape for plugin panel/web-app/host-lifecycle locks too, each with
-// its own Map — so it's injected here rather than duplicated. Defaults to
-// this private equivalent so a caller that doesn't care about locking
-// (most tests) doesn't need to supply one.
-async function defaultWithKeyedStartLock<T>(
+// its own Map — so it's exported from here as the ONE implementation
+// instead of main.ts keeping a second, independently-drifting copy just to
+// serve those other maps.
+export async function withKeyedStartLock<T>(
   locks: Map<string, Promise<void>>,
   key: string,
   operation: () => Promise<T>,
@@ -128,13 +135,7 @@ async function defaultWithKeyedStartLock<T>(
 
 export function createSitePreviewLifecycle(input: {
   allowOrigin: (url: string) => () => void;
-  withKeyedStartLock?: <T>(
-    locks: Map<string, Promise<void>>,
-    key: string,
-    operation: () => Promise<T>,
-  ) => Promise<T>;
 }) {
-  const withKeyedStartLock = input.withKeyedStartLock ?? defaultWithKeyedStartLock;
   // Own start-lock map, keyed by the same previewKey() every other method
   // here already uses — the key format now has exactly one home instead of
   // main.ts keeping a second copy just to build the same string.
@@ -329,7 +330,8 @@ export async function stopSitePreviewForRequest(input: {
   assertActiveWorkspaceForSite(
     input.getActiveWorkspaceId(),
     input.workspaceId,
-    "Site preview stop request",
+    "site preview stop request",
+    "stop the preview again",
   );
   // Aborting the pending start BEFORE taking the lock matters: a start
   // still in flight when the lock is acquired would otherwise finish,
@@ -340,7 +342,8 @@ export async function stopSitePreviewForRequest(input: {
     assertActiveWorkspaceForSite(
       input.getActiveWorkspaceId(),
       input.workspaceId,
-      "Site preview stop request",
+      "site preview stop request",
+      "stop the preview again",
     );
     await input.previews.stop(input.workspaceId, input.siteRoot);
   });
