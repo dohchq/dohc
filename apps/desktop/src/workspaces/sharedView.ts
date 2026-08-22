@@ -866,17 +866,21 @@ async function writeCollisionRecordUnlocked(
 }
 
 // Called while already holding the collision-record lock. Quarantines a
-// corrupt record and starts fresh rather than guessing which paths were
-// excluded. A lost record cannot be reconstructed. What happens to a
-// previously protected path next depends on the share's access level, and
-// neither outcome is silent. For a view or comment share, the next capture
-// repairs every diverged tracked path unconditionally. The projection is
-// canonical for non-edit shares, as #862 established, so this overwrites a
-// previously protected local file with the granter's version by design. For
-// an edit share, the next capture adopts a diverged tracked path as the
-// recipient's edit. The bytes stay on disk, but the next Send changes can
-// propose content the recipient did not mean to share unless they review it
-// out first.
+// corrupt or stale record and starts fresh rather than guessing which paths
+// were excluded. A lost record cannot be reconstructed. Guessing at each
+// path's status here would be irreversible before the recipient could see it
+// happen, so the capture pass that discovers the quarantine makes no
+// mutations at all. See the early return keyed on
+// `collisionRecordQuarantined` in `captureSharedViewLocalDivergence`. The
+// refresh completes and the caller shows a notice. What happens to a
+// previously protected path begins with the next capture, after the user has
+// been told. For a view or comment share, that capture repairs every diverged
+// tracked path unconditionally. The projection is canonical for non-edit
+// shares, as #862 established, so this overwrites a previously protected local
+// file with the granter's version by design. For an edit share, that capture
+// instead adopts a diverged tracked path as the recipient's edit. The bytes
+// stay on disk, but the next Send changes can propose content the recipient
+// did not mean to share unless they review it out first.
 async function readCollisionRecordLocked(
   rootDir: string,
   shareId: string,
@@ -1044,11 +1048,23 @@ export async function captureSharedViewLocalDivergence(
   const collisionRecordedPaths = await readCollisionRecordPaths(rootDir, shareId, () => {
     collisionRecordQuarantined = true;
   });
+  if (collisionRecordQuarantined) {
+    // A quarantined record cannot identify which paths it protected. Do no
+    // mutations in this pass so the caller can show the notice before the
+    // next capture applies the share's ordinary rules.
+    return {
+      capturedPaths: 0,
+      repairedPaths: 0,
+      unjournalablePaths: [],
+      collisionRecordQuarantined: true,
+    };
+  }
   const trackedPathSet = new Set(tracked.map((entry) => entry.path));
 
   let capturedPaths = 0;
   let repairedPaths = 0;
   const unjournalablePaths: UnjournalablePath[] = [];
+  const resolvedCollisionPaths: string[] = [];
   const visitedPendingPaths = new Set<string>();
 
   const diskMatchesSnapshot = (
@@ -1192,7 +1208,7 @@ export async function captureSharedViewLocalDivergence(
       }
       if (result.kind === "repaired") {
         repairedPaths += 1;
-        await clearCollisionRecordPaths(rootDir, shareId, [entry.path]);
+        resolvedCollisionPaths.push(entry.path);
       } else if (result.kind === "unjournalable") {
         unjournalablePaths.push(result.path);
       }
@@ -1606,10 +1622,14 @@ export async function captureSharedViewLocalDivergence(
     }
     if (result.kind === "repaired") {
       repairedPaths += 1;
-      await clearCollisionRecordPaths(rootDir, shareId, [path]);
+      resolvedCollisionPaths.push(path);
     } else {
       unjournalablePaths.push(result.path);
     }
+  }
+
+  if (resolvedCollisionPaths.length > 0) {
+    await clearCollisionRecordPaths(rootDir, shareId, resolvedCollisionPaths);
   }
 
   return {

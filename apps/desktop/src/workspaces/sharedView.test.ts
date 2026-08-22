@@ -61,6 +61,7 @@ import { createTestScratch } from "./testTemp";
 let readdirCalls: string[] = [];
 let observeRealpath: ((path: string) => void) | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
+let collisionRecordRenameTargets: string[] = [];
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -81,6 +82,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       oldPath: Parameters<typeof actual.rename>[0],
       newPath: Parameters<typeof actual.rename>[1],
     ) => {
+      if (/[\\/]share-collision-record\.json$/.test(String(newPath))) {
+        collisionRecordRenameTargets.push(String(newPath));
+      }
       const failure = failRenameToPathOnce;
       if (failure !== null && String(newPath) === failure.path) {
         failRenameToPathOnce = null;
@@ -150,10 +154,12 @@ beforeEach(() => {
   harnesses = [];
   observeRealpath = null;
   failRenameToPathOnce = null;
+  collisionRecordRenameTargets = [];
 });
 
 afterEach(async () => {
   failRenameToPathOnce = null;
+  collisionRecordRenameTargets = [];
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -2524,6 +2530,47 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("clears all resolved collision paths with one record publish", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const paths = ["docs/one.md", "docs/two.md", "docs/three.md"];
+    const unresolvedPath = "docs/unresolved.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    for (const path of paths) relay.addWrite(path, `granter ${path}`);
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, unresolvedPath), "recipient data", "utf8");
+    await recordCollisionPaths(rootDir, SHARE_ID, [...paths, unresolvedPath]);
+    await Promise.all(paths.map((path) => rm(join(rootDir, path))));
+
+    const store = harness.openStore(target);
+    try {
+      collisionRecordRenameTargets = [];
+      await expect(
+        captureSharedViewLocalDivergence(rootDir, WORKSPACE, store, true, SHARE_ID),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 3,
+        unjournalablePaths: [
+          { path: unresolvedPath, reason: "local-collision" },
+        ],
+      });
+      expect(collisionRecordRenameTargets).toEqual([
+        join(rootDir, ".dohc", "share-collision-record.json"),
+      ]);
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(
+        new Set([unresolvedPath]),
+      );
+    } finally {
+      await store.close();
+    }
+  });
+
   it("keeps a collision record when the store loses the tracked path", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -2778,7 +2825,69 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("repairs a view-share path after quarantining its collision record", async () => {
+  it("does no capture work until after reporting a quarantined collision record", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/view-quarantined-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter file");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), "recipient data", "utf8");
+    await writeFile(
+      join(rootDir, ".dohc", "share-collision-record.json"),
+      "not json",
+      "utf8",
+    );
+
+    const store = harness.openStore(target);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const firstCapture = await captureSharedViewLocalDivergence(
+        rootDir,
+        WORKSPACE,
+        store,
+        false,
+        SHARE_ID,
+      );
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+      expect(firstCapture).toEqual({
+        capturedPaths: 0,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+        collisionRecordQuarantined: true,
+      });
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          false,
+          SHARE_ID,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+        collisionRecordQuarantined: false,
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
+      await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
+      expect(errorLog).toHaveBeenCalledWith(
+        expect.stringContaining("ordinary capture rules"),
+      );
+    } finally {
+      errorLog.mockRestore();
+      await store.close();
+    }
+  });
+
+  it("reports a quarantined collision record before repairing a view-share path", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -2826,9 +2935,28 @@ describe("shared view refresh", () => {
           ended: false,
         }),
       ).resolves.toMatchObject({
-        status: "updated",
+        status: "unchanged",
         unjournalablePaths: [],
         collisionRecordQuarantined: true,
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
+
+      await expect(
+        refreshStandaloneShareViewOnceWithPull({
+          rootDir,
+          workspaceId: WORKSPACE,
+          relay: harness.relay,
+          shareId: SHARE_ID,
+          store,
+          pull: harness.pullFor(target),
+          pinnedSelector: { ...PINNED_SELECTOR, access: "view" },
+          recordRefusals: async () => undefined,
+          ended: false,
+        }),
+      ).resolves.toMatchObject({
+        status: "updated",
+        unjournalablePaths: [],
+        collisionRecordQuarantined: false,
       });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("granter file");
       await expect(readCollisionRecordPaths(rootDir, SHARE_ID)).resolves.toEqual(new Set());
