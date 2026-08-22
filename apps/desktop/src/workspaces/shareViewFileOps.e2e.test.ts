@@ -174,30 +174,20 @@ function storeFailingAt(
 
 // The move RPC answers when the filesystem changed; the store row settles
 // through the capture pipeline afterwards, so an instant read can see BOTH
-// case-variants of one entry. Wait for the settled listing — a refused
-// rename never reaches it and times out red with the store's actual state.
-async function waitForStorePaths(
+// case-variants of one entry. Poll for the settled listing — a refused
+// rename never reaches it and fails showing the store's actual state.
+function waitForStorePaths(
   harnessed: Harness,
   expected: string[],
   message: string,
 ): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  for (;;) {
-    const paths = await storePaths(harnessed);
-    if (
-      paths.length === expected.length &&
-      paths.every((path, index) => path === expected[index])
-    ) {
-      return;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `${message}: the store holds [${paths.join(", ")}], ` +
-          `expected [${expected.join(", ")}]`,
-      );
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
+  return expect
+    .poll(() => storePaths(harnessed), {
+      timeout: 30_000,
+      interval: 25,
+      message,
+    })
+    .toEqual(expected);
 }
 
 async function storePaths(harnessed: Harness): Promise<string[]> {
