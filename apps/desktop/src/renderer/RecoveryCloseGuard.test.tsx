@@ -1089,6 +1089,10 @@ describe("main.tsx composition", () => {
     } finally {
       consoleError.mockRestore();
     }
+    // main.tsx renders outside act, and the crash screen's DOM lands one
+    // commit before the guard's passive effect adds its beforeunload
+    // listener — flush the pending effects before dispatching (#787).
+    await act(async () => {});
 
     const event = new Event("beforeunload", { cancelable: true });
     act(() => {
