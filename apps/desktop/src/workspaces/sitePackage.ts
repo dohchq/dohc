@@ -448,6 +448,17 @@ const PRELOAD_AS_DESTINATIONS = new Set([
   "webidentity", "worker", "xslt",
 ]);
 
+// The bounded CSP classes (see blockedCspClasses) a validated preload
+// destination maps onto — only the destinations this scan already
+// distinguishes elsewhere; any other valid destination (font, audio,
+// document, worker, ...) is outside the bounded set and left unclassified.
+const PRELOAD_AS_DESTINATION_CSP_CLASS: Readonly<Record<string, CspClass>> = {
+  image: "img",
+  script: "script",
+  style: "style",
+  fetch: "connect",
+};
+
 function isResourceConsumingLinkRel(relValue: string | undefined, asValue: string | undefined): boolean {
   if (!relValue) return false;
   const hasValidAs = !!asValue && PRELOAD_AS_DESTINATIONS.has(asValue.trim().toLowerCase());
@@ -1611,18 +1622,22 @@ function jsReferencesFromCode(
   // and re-opening BEFORE sending discards the prior configuration (only
   // the LAST open() before send() is ever actually requested). walkAst is
   // a single PRE-ORDER pass over the source text's own shape, not runtime
-  // order — send() can appear (and be visited) textually BEFORE the open()
-  // it actually follows at runtime, e.g. a function declared first but
-  // called after a later open() statement. Recording the MOST RECENTLY
-  // VISITED open() target per receiver (overwriting, not accumulating —
-  // straight-line code visits opens in the same order it runs them, so the
-  // last one visited is the one a real send() would actually use) and
-  // every receiver that ever calls send(), then joining the two AFTER the
-  // walk finishes, keeps the join independent of which one the walk
-  // happens to reach first while never widening the share to an open()
-  // target a re-open has since superseded.
+  // order. Straight-line code (`open(a); send(); open(b);`) visits opens
+  // and sends in the SAME order it runs them — the correct target for a
+  // given send() is whichever open() was MOST RECENTLY VISITED before it,
+  // not the receiver's LAST open() anywhere in the file (a later re-open
+  // with no send after it must not retroactively steal an earlier send's
+  // target). But a function DECLARED before a later open() and CALLED
+  // after it (round 18's finding) visits send() before any open() has
+  // been seen for that receiver AT ALL — walk order proves nothing there.
+  // Each send() captures whatever open target is CURRENTLY on record for
+  // its receiver at that point in the walk; a capture that comes up empty
+  // (no open seen yet) falls back, after the whole walk finishes, to
+  // whatever the receiver's open target ended up being — the same
+  // order-independent join round 18 established, used only for the case
+  // walk order can't resolve on its own.
   const xhrOpenTargets = new Map<string, { value: string | undefined; scriptRelative: boolean }>();
-  const xhrSendReceivers = new Set<string>();
+  const xhrSendCaptures: Array<{ name: string; target: { value: string | undefined; scriptRelative: boolean } | undefined }> = [];
   const references: BrowserTextReference[] = [];
   const addReference = (
     value: string | undefined,
@@ -1758,10 +1773,12 @@ function jsReferencesFromCode(
             object.type === "Identifier" &&
             provenXhrNames.has(astString(object, "name") ?? "")
           ) {
-            // send() is what actually issues the request — record that this
-            // receiver sends at all; its open() target is joined in after
-            // the walk (see xhrOpenTargets above).
-            xhrSendReceivers.add(astString(object, "name") ?? "");
+            // send() is what actually issues the request — capture
+            // whichever open target is on record for this receiver RIGHT
+            // NOW (see xhrOpenTargets above), not whatever it ends up
+            // being by the end of the walk.
+            const name = astString(object, "name") ?? "";
+            xhrSendCaptures.push({ name, target: xhrOpenTargets.get(name) });
           }
         }
         break;
@@ -1786,8 +1803,12 @@ function jsReferencesFromCode(
   // url resolves against the document, the same as fetch() — for every
   // receiver that ever calls send(), regardless of the walk's source
   // order relative to its open() call(s).
-  for (const receiverName of xhrSendReceivers) {
-    const opened = xhrOpenTargets.get(receiverName);
+  for (const capture of xhrSendCaptures) {
+    // A capture that came up empty means no open() had been visited yet
+    // for this receiver AT THAT POINT in the walk — walk order can't
+    // resolve it (the round-18 case), so fall back to the receiver's
+    // fully-resolved open target now that the whole walk has finished.
+    const opened = capture.target ?? xhrOpenTargets.get(capture.name);
     if (opened) addReference(opened.value, !opened.scriptRelative, false, undefined, "connect");
   }
   return references;
@@ -1972,13 +1993,20 @@ function htmlReferencesFromDocument(
       // text content is code or CSS, never markup, so it's collected
       // separately below and neither recurses into its (raw-text) children.
       const styleAttribute = attrs.get("style");
-      if (styleAttribute) cssTexts.push(styleAttribute);
+      // A block CSP blocks from EXECUTING/APPLYING at all never runs, so
+      // scanning its text for dependencies is wrong regardless of what
+      // class those dependencies would themselves carry — script-src
+      // 'none' blocking a <script> means a fetch() inside it never fires,
+      // even though connect-src (the fetch's OWN class) might allow it.
+      if (styleAttribute && !blockedSoFar.has("style")) cssTexts.push(styleAttribute);
       for (const attribute of node.attrs) {
         // Inline on* handlers hold real JS the browser executes, same as a
         // <script> body — parse5 already decoded any entity in the value —
         // but they compile with function-body grammar, so they're parsed
         // separately (jsReferencesFromEventHandler), not joined into jsTexts.
-        if (/^on[a-z]+$/i.test(attribute.name)) handlerTexts.push(attribute.value);
+        if (/^on[a-z]+$/i.test(attribute.name) && !blockedSoFar.has("script")) {
+          handlerTexts.push(attribute.value);
+        }
       }
       // A browser parses `srcdoc` as a nested HTML document; nothing else
       // in this file walks into its markup, so it never contributes
@@ -2062,6 +2090,14 @@ function htmlReferencesFromDocument(
         // is never fetched — src only fires a request for a classic or
         // module script.
         if (attributeName === "src" && tagName === "script" && !isExecutableScriptType(attrs)) continue;
+        // Electron's Chromium always supports module scripts, so a classic
+        // script marked nomodule is skipped — never fetched.
+        if (
+          attributeName === "src" &&
+          tagName === "script" &&
+          attrs.has("nomodule") &&
+          scriptKind === "classic"
+        ) continue;
         if (
           attributeName === "href" &&
           tagName === "link" &&
@@ -2102,6 +2138,14 @@ function htmlReferencesFromDocument(
           attributeName === "href" &&
           tagName === "link" &&
           ICON_LINK_REL_TOKENS.some((token) => (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes(token));
+        // A validated rel="preload" as="..." destination carries its OWN
+        // CSP class the same way a real request from that destination
+        // would — isResourceConsumingLinkRel already proved `as` names a
+        // real destination before this reference is even reached.
+        const preloadCspClass: CspClass | undefined =
+          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("preload")
+            ? PRELOAD_AS_DESTINATION_CSP_CLASS[(attrs.get("as") ?? "").trim().toLowerCase()]
+            : undefined;
         const cspClass: CspClass | undefined =
           (attributeName === "src" && tagName === "script") || isModulePreload
             ? "script"
@@ -2113,7 +2157,7 @@ function htmlReferencesFromDocument(
                   (attributeName === "src" && tagName === "input") ||
                   (attributeName === "href" && (tagName === "image" || tagName === "use"))
                 ? "img"
-                : undefined;
+                : preloadCspClass;
         if (attributeName !== "srcset") {
           pushAttributeReference({
             value: attribute.value,
@@ -2137,13 +2181,22 @@ function htmlReferencesFromDocument(
       if (tagName === "script") {
         if (attrs.get("type")?.toLowerCase() === "importmap") {
           importMapTexts.push(html5TextContent(node));
-        } else if (isExecutableScriptElement(attrs)) {
+        } else if (
+          isExecutableScriptElement(attrs) &&
+          // Electron's Chromium always supports module scripts, so a
+          // classic script marked nomodule is SKIPPED — never fetched or
+          // executed — the same way an unsupported browser would be
+          // expected to run it instead. A type="module" script ignores
+          // nomodule per spec (nonsensical combination either way).
+          !(attrs.has("nomodule") && scriptKind === "classic") &&
+          !blockedSoFar.has("script")
+        ) {
           (scriptKind === "module" ? moduleJsTexts : classicJsTexts).push(html5TextContent(node));
         }
         return;
       }
       if (tagName === "style") {
-        cssTexts.push(html5TextContent(node));
+        if (!blockedSoFar.has("style")) cssTexts.push(html5TextContent(node));
         return;
       }
     }
@@ -2248,15 +2301,24 @@ function referencesFromNonHtmlFile(
 async function shareManifestForSite(
   rootPath: string,
   site: Omit<SitePackageInfo, "shareManifest">,
+  // The mode a specific tab is actually previewing right now — a user's
+  // stored per-tab choice, or the renderer's own automatic pick, both of
+  // which main.ts otherwise has no visibility into. Falls back to the
+  // dohc.json pin (site.configuredPreviewMode) when not given, e.g. for
+  // listSitePackages' batch computation, which has no single "current tab"
+  // to ask.
+  effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SiteShareManifestResult> {
-  // Share-what-you-previewed: an explicitly configured static preview must
-  // select the SAME artifact the static preview serves — the site's own
-  // configured entry — not a build output left over from an earlier build.
-  // Only when preview isn't pinned to "static" does a present build output
-  // take priority (Build-mode preview/share). The shared-view rule in
+  // Share-what-you-previewed: a site actually being previewed as static —
+  // whether pinned by dohc.json or chosen for THIS tab — must select the
+  // SAME artifact the static preview serves — the site's own configured
+  // entry — not a build output left over from an earlier build. Only when
+  // the effective mode isn't "static" does a present build output take
+  // priority (Build-mode preview/share). The shared-view rule in
   // staticPreviewTargetForSite (a recipient always gets a present build
   // output) is a separate concern for the RECEIVING side and is unaffected.
-  const preferConfiguredStaticEntry = site.configuredPreviewMode === "static";
+  const mode = effectiveMode ?? site.configuredPreviewMode;
+  const preferConfiguredStaticEntry = mode === "static";
   const output = preferConfiguredStaticEntry ? null : presentBuildOutput(site);
   let artifactRoot: string | null = null;
   let entryPath: string | null = null;
@@ -2419,7 +2481,12 @@ async function shareManifestForSite(
       importMap: inheritedImportMap,
       blockedCspClasses: inheritedBlockedCspClasses,
     } = queue.shift()!;
-    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${appliesAsStylesheet}::${isManifest}::${documentDestination}::${importMapKey(inheritedImportMap)}`;
+    // Two same-directory documents reaching the SAME external file under
+    // DIFFERENT CSPs (one blocking a class the other allows) need two
+    // independent scans — the same reasoning importMapKey/scriptKind/etc.
+    // already carry, extended to CSP state.
+    const blockedCspClassesKeyPart = [...inheritedBlockedCspClasses].sort().join(",");
+    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${appliesAsStylesheet}::${isManifest}::${documentDestination}::${blockedCspClassesKeyPart}::${importMapKey(inheritedImportMap)}`;
     const isSvgDocument = documentDestination && /\.svg$/i.test(current);
     if (
       scanned.has(scanKey) ||
@@ -2529,7 +2596,11 @@ async function shareManifestForSite(
             isManifest: reference.isManifest ?? false,
             documentDestination: reference.documentDestination === true,
             importMap: documentImportMap,
-            blockedCspClasses: documentBlockedCspClasses,
+            // A Worker/SharedWorker/service worker has its own policy
+            // context, entirely separate from the document that created
+            // it — the creator's own CSP does not apply to what the
+            // worker itself fetches, so it must not carry forward.
+            blockedCspClasses: reference.entersOwnContext ? new Set() : documentBlockedCspClasses,
           });
         }
       }
@@ -2841,14 +2912,23 @@ export async function getSitePackage(
   rootPath: string,
   anyPath: string,
   knownSites?: SitePackageInfo[],
+  // See shareManifestForSite: overrides the matched site's own
+  // shareManifest to select the artifact THIS specific request's caller
+  // is actually previewing, instead of listSitePackages' batch
+  // (dohc.json-pin-only) computation. Scoped to just the one matched
+  // site — listSitePackages' own batch result for every OTHER site, and
+  // for callers that pass no mode, is unaffected.
+  effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SitePackageInfo | null> {
   const root = denormalizeRoot(anyPath);
   const sites = knownSites ?? await listSitePackages(rootPath);
-  return (
+  const matched =
     sites
       .filter((site) => anyPath === site.root || root === site.root || isUnder(site.root, anyPath))
-      .sort((a, b) => b.root.length - a.root.length)[0] ?? null
-  );
+      .sort((a, b) => b.root.length - a.root.length)[0] ?? null;
+  if (!matched || effectiveMode === undefined) return matched;
+  const { shareManifest: _staleShareManifest, ...packageInfo } = matched;
+  return { ...matched, shareManifest: await shareManifestForSite(rootPath, packageInfo, effectiveMode) };
 }
 
 /**

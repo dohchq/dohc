@@ -2261,17 +2261,24 @@ export const ListSitesResult = z.object({
 });
 export type ListSitesResult = z.infer<typeof ListSitesResult>;
 
+export const SitePreviewMode = z.enum(["static", "dev", "build"]);
+export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
+
 export const SitePackagePayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
+  // The mode the CALLER is actually previewing right now (a stored per-tab
+  // choice, or the renderer's own automatic pick) — share-what-you-
+  // previewed needs this to select the same artifact the preview serves,
+  // not just whatever dohc.json happens to pin. Omitted (or null) falls
+  // back to the dohc.json pin alone, matching every other caller (site
+  // listings, etc.) that has no single "current tab" to report.
+  effectivePreviewMode: SitePreviewMode.nullable().optional(),
 });
 export type SitePackagePayload = z.infer<typeof SitePackagePayload>;
 
 export const SitePackageResult = SitePackageInfo.nullable();
 export type SitePackageResult = z.infer<typeof SitePackageResult>;
-
-export const SitePreviewMode = z.enum(["static", "dev", "build"]);
-export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
 
 export const StartSitePreviewPayload = z.object({
   workspaceId: WORKSPACE_ID,

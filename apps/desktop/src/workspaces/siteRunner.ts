@@ -620,9 +620,14 @@ export async function startSiteDevServer(input: {
           }
         },
         stop: () =>
-          stopChild(child, () => capturedDescendants, () => {
-            stopped = true;
-          }),
+          stopChild(
+            child,
+            () => capturedDescendants,
+            () => {
+              stopped = true;
+            },
+            () => pendingCapture,
+          ),
       });
     }
 
@@ -749,7 +754,16 @@ export async function detectBuildOutput(siteRoot: string, configured?: string): 
     const realOutput = await realpath(absolute);
     if (!isInside(realSiteRoot, realOutput)) return null;
     const info = await stat(absolute);
-    if (info.isDirectory()) return absolute;
+    if (!info.isDirectory()) continue;
+    // A build command that exits 0 having created only an EMPTY output
+    // directory hasn't actually produced a servable site — the preview
+    // path serves <output>/index.html next and fails after buildSite
+    // already reported ok: true. Requiring a real, readable index.html
+    // file here (not a directory literally named "index.html") is the
+    // same check the preview server and share manifest scan both need
+    // to succeed anyway.
+    const indexInfo = await stat(join(absolute, "index.html")).catch(() => null);
+    if (indexInfo?.isFile()) return absolute;
   }
   return null;
 }
@@ -777,6 +791,38 @@ export async function buildSite(input: {
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
 
+  // A build command that backgrounds a helper or server (a watcher, a
+  // local verification server) and lets its own shell wrapper exit
+  // successfully once the configured output is written leaves that
+  // descendant running — same reasoning, same POSIX-only mechanism, as
+  // startSiteDevServer's own capture. A build normally runs and exits on
+  // its own quickly, so this poll rarely needs more than its immediate
+  // and ready-adjacent snapshots, but the interval still covers a longer
+  // one.
+  const capturedDescendantSet = new Set<number>();
+  let capturedDescendants: number[] = [];
+  let pendingCapture: Promise<void> = Promise.resolve();
+  const captureDescendantsOnce = (pid: number): Promise<void> => {
+    const capture = processDescendantsPosix(pid).then((pids) => {
+      for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
+      for (const capturedPid of capturedDescendantSet) {
+        if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
+      }
+      capturedDescendants = [...capturedDescendantSet];
+    });
+    pendingCapture = capture;
+    return capture;
+  };
+  const descendantCaptureTimer =
+    process.platform !== "win32" && child.pid !== undefined
+      ? setInterval(() => captureDescendantsOnce(child.pid!), DESCENDANT_CAPTURE_INTERVAL_MS)
+      : undefined;
+  if (process.platform !== "win32" && child.pid !== undefined) captureDescendantsOnce(child.pid);
+  descendantCaptureTimer?.unref?.();
+  child.once("exit", () => {
+    if (descendantCaptureTimer) clearInterval(descendantCaptureTimer);
+  });
+
   const exitCode = await new Promise<number | null>((resolve) => {
     let settled = false;
     let timedOut = false;
@@ -792,7 +838,7 @@ export async function buildSite(input: {
     function abortBuild() {
       if (settled) return;
       pushLog(logs, "system", "Build cancelled.");
-      void stopChild(child).then(() => finish(null));
+      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).then(() => finish(null));
     }
 
     timer = setTimeout(() => {
@@ -800,7 +846,7 @@ export async function buildSite(input: {
       pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
       // stopChild sequences the Windows tree kill BEFORE the wrapper signal
       // and resolves once the child exits (or the kill grace lapses).
-      void stopChild(child).then(() => finish(null));
+      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).then(() => finish(null));
     }, timeoutMs);
     if (input.signal?.aborted) abortBuild();
     else input.signal?.addEventListener("abort", abortBuild, { once: true });
@@ -813,7 +859,12 @@ export async function buildSite(input: {
     child.once("exit", (code) => {
       // A timed-out build reports exitCode null regardless of how the kill
       // is delivered (taskkill termination surfaces as a plain exit code).
-      finish(timedOut ? null : code);
+      // The wrapper itself has already exited here — stopChild's own guard
+      // (and its await of pendingCapture) makes this a no-op unless a
+      // descendant was actually captured while the wrapper was alive.
+      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).then(() =>
+        finish(timedOut ? null : code),
+      );
     });
   });
 

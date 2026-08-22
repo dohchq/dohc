@@ -6860,7 +6860,7 @@ function registerIpcHandlers(
     const input = SitePackagePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     return SitePackageResult.parse(
-      await getSitePackage(workspace.rootPath, input.path),
+      await getSitePackage(workspace.rootPath, input.path, undefined, input.effectivePreviewMode),
     );
   });
 

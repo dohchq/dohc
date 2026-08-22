@@ -888,6 +888,45 @@ describe("buildSite", () => {
     expect(await readFile(join(root, "site", "dist", "index.html"), "utf8")).toBe("built");
   });
 
+  it.runIf(process.platform !== "win32")(
+    "stops a descendant a successful build wrapper backgrounds and leaves behind",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
+      const result = await buildSite({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: "sh",
+        args: [
+          "-c",
+          // Backgrounds a helper, writes the configured output, and exits
+          // successfully — the exact "completed wrapper leaves processes
+          // behind" scenario this pin proves gets torn down. A brief real
+          // delay (well under buildSite's own descendant-poll interval)
+          // keeps this realistic — the descendant tree walk itself takes
+          // real wall-clock time, so a wrapper that exits in literally
+          // zero time is an unfixable race no synchronous snapshot can
+          // win (the same residual round 17/#857 accepted).
+          "sleep 500 & echo CHILD:$! ; mkdir -p dist && echo built > dist/index.html; sleep 0.1",
+        ],
+        timeoutMs: 10000,
+      });
+      expect(result.ok).toBe(true);
+      const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
+      const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
+      expect(descendantPid).toBeGreaterThan(0);
+
+      try {
+        expect(await waitForProcessDeath(descendantPid)).toBe(true);
+      } finally {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // The fixed teardown already removed it.
+        }
+      }
+    },
+  );
+
   it("reports failed builds without stale output", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     const result = await buildSite({
@@ -948,11 +987,16 @@ describe("buildSite", () => {
 
   it("detects configured and conventional build outputs", async () => {
     await mkdir(join(root, "site", "custom"), { recursive: true });
+    await writeFile(join(root, "site", "custom", "index.html"), "<h1>Custom</h1>");
     expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(join(root, "site", "custom"));
     await mkdir(join(root, "outside"), { recursive: true });
     expect(await detectBuildOutput(join(root, "site"), "../outside")).toBeNull();
     expect(await detectBuildOutput(join(root, "site"))).toBeNull();
     await mkdir(join(root, "site", "out"), { recursive: true });
+    // A directory alone isn't a servable build output — nothing was
+    // actually built there yet.
+    expect(await detectBuildOutput(join(root, "site"))).toBeNull();
+    await writeFile(join(root, "site", "out", "index.html"), "<h1>Out</h1>");
     expect(await detectBuildOutput(join(root, "site"))).toBe(join(root, "site", "out"));
     expect(existsSync(join(root, "site", "out"))).toBe(true);
   });

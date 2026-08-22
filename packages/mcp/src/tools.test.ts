@@ -1562,6 +1562,26 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites sets entry for a real build at a nested configured output, not just the conventional names", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "nested-output/public/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "nested-output/public/dist/index.html"),
+        "<h1>Built</h1>",
+      );
+      await writeFile(
+        join(ctx.root, "nested-output/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "nested-output");
+      expect(site?.entry).toBe("nested-output/public/dist/index.html");
+    });
+  });
+
   it("detect_sites flags an invalid preview.mode the same way workspace-core's shared validator would", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "bad-preview-mode"), { recursive: true });

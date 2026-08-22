@@ -3121,4 +3121,246 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("csp-document-order/early.js");
     expect(manifestOf(site)?.assets).not.toContain("csp-document-order/late.js");
   });
+
+  // ---- round-20 review pins ----
+
+  it("does not scan an inline script's own dependencies when script-src blocks it entirely", async () => {
+    await mkdir(join(root, "csp-inline-script-blocked"), { recursive: true });
+    await writeFile(
+      join(root, "csp-inline-script-blocked", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'; connect-src \'self\'">',
+        '<script>fetch("private.json");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-inline-script-blocked", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-inline-script-blocked",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("csp-inline-script-blocked/private.json");
+  });
+
+  it("does not scan an inline style block's own dependencies when style-src blocks it entirely", async () => {
+    await mkdir(root + "/csp-inline-style-blocked", { recursive: true });
+    await writeFile(
+      join(root, "csp-inline-style-blocked", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="style-src \'none\'; img-src \'self\'">',
+        '<style>div { background: url("private.png"); }</style>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-inline-style-blocked", "private.png"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-inline-style-blocked",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("csp-inline-style-blocked/private.png");
+  });
+
+  it("pairs an XHR send with the open target active at that point, not the last open anywhere", async () => {
+    await mkdir(join(root, "xhr-send-then-reopen"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-send-then-reopen", "index.html"),
+      [
+        "<script>",
+        "var xhr = new XMLHttpRequest();",
+        'xhr.open("GET", "public.json");',
+        "xhr.send();",
+        'xhr.open("GET", "private.json");',
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-send-then-reopen", "public.json"), "public");
+    await writeFile(join(root, "xhr-send-then-reopen", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-send-then-reopen",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("xhr-send-then-reopen/public.json");
+    expect(manifestOf(site)?.assets).not.toContain("xhr-send-then-reopen/private.json");
+  });
+
+  it("still resolves an XHR send() visited before its open() due to a hoisted function declaration", async () => {
+    await mkdir(join(root, "xhr-hoisted-send"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-hoisted-send", "index.html"),
+      [
+        "<script>",
+        "var xhr = new XMLHttpRequest();",
+        "function issue() { xhr.send(); }",
+        'xhr.open("GET", "data.json");',
+        "issue();",
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-hoisted-send", "data.json"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-hoisted-send",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("xhr-hoisted-send/data.json");
+  });
+
+  it("classifies a preload as=image target under img-src", async () => {
+    await mkdir(root + "/csp-preload-image", { recursive: true });
+    await writeFile(
+      join(root, "csp-preload-image", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'">',
+        '<link rel="preload" as="image" href="private.png">',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-preload-image", "private.png"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-preload-image",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("csp-preload-image/private.png");
+  });
+
+  it("resets the inherited document CSP for an external worker's own policy context", async () => {
+    await mkdir(root + "/csp-worker-reset", { recursive: true });
+    await writeFile(
+      join(root, "csp-worker-reset", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="connect-src \'none\'; worker-src \'self\'">',
+        '<script>new Worker("worker.js");</script>',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "csp-worker-reset", "worker.js"),
+      'fetch("data.json");',
+    );
+    await writeFile(join(root, "csp-worker-reset", "data.json"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-worker-reset",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("csp-worker-reset/data.json");
+  });
+
+  it("skips a nomodule script's src on this module-capable runtime", async () => {
+    await mkdir(root + "/nomodule-skipped", { recursive: true });
+    await writeFile(
+      join(root, "nomodule-skipped", "index.html"),
+      '<script nomodule src="private.js"></script>',
+    );
+    await writeFile(join(root, "nomodule-skipped", "private.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "nomodule-skipped",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("nomodule-skipped/private.js");
+  });
+
+  it("skips a nomodule inline script's own dependencies on this module-capable runtime", async () => {
+    await mkdir(root + "/nomodule-inline-skipped", { recursive: true });
+    await writeFile(
+      join(root, "nomodule-inline-skipped", "index.html"),
+      '<script nomodule>fetch("private.json");</script>',
+    );
+    await writeFile(join(root, "nomodule-inline-skipped", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "nomodule-inline-skipped",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("nomodule-inline-skipped/private.json");
+  });
+
+  it("still approves a classic script with no nomodule attribute", async () => {
+    await mkdir(root + "/module-attr-present", { recursive: true });
+    await writeFile(
+      join(root, "module-attr-present", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(join(root, "module-attr-present", "app.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "module-attr-present",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("module-attr-present/app.js");
+  });
+
+  it("scans the same external stylesheet independently for two documents under different CSPs", async () => {
+    await mkdir(join(root, "csp-dedup-key"), { recursive: true });
+    await writeFile(
+      join(root, "csp-dedup-key", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'">',
+        '<link rel="stylesheet" href="style.css">',
+        '<iframe src="page2.html"></iframe>',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "csp-dedup-key", "page2.html"),
+      '<link rel="stylesheet" href="style.css">',
+    );
+    await writeFile(
+      join(root, "csp-dedup-key", "style.css"),
+      'body { background: url("shared.png"); }',
+    );
+    await writeFile(join(root, "csp-dedup-key", "shared.png"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-dedup-key",
+    );
+
+    // page2.html has no CSP of its own, so its own scan of style.css must
+    // still approve shared.png even though index.html's img-src 'none'
+    // scan of the SAME file (same path, same directory) filtered it out.
+    expect(manifestOf(site)?.assets).toContain("csp-dedup-key/shared.png");
+  });
+
+  it("shares the source entry for a static site with a leftover build-output directory, when previewed as static", async () => {
+    await mkdir(join(root, "stale-dist", "dist"), { recursive: true });
+    await writeFile(join(root, "stale-dist", "index.html"), "<h1>Source</h1>");
+    // A leftover build from an earlier session — buildOutputs still
+    // detects it, but the site is genuinely static and IS being
+    // previewed as static right now.
+    await writeFile(join(root, "stale-dist", "dist", "index.html"), "<h1>Stale build</h1>");
+
+    const noOverride = await getSitePackage(root, "stale-dist");
+    expect(noOverride?.shareManifest.ok).toBe(true);
+    if (noOverride?.shareManifest.ok) {
+      expect(noOverride.shareManifest.manifest.entryPath).toBe("stale-dist/dist/index.html");
+    }
+
+    const withStaticMode = await getSitePackage(root, "stale-dist", undefined, "static");
+    expect(withStaticMode?.shareManifest.ok).toBe(true);
+    if (withStaticMode?.shareManifest.ok) {
+      expect(withStaticMode.shareManifest.manifest.entryPath).toBe("stale-dist/index.html");
+    }
+  });
+
+  it("shares the source entry for a package site with no config pin, when the user manually selected static", async () => {
+    await mkdir(join(root, "manual-static", "dist"), { recursive: true });
+    await writeFile(join(root, "manual-static", "index.html"), "<h1>Source</h1>");
+    await writeFile(join(root, "manual-static", "dist", "index.html"), "<h1>Built</h1>");
+    await writeFile(
+      join(root, "manual-static", "package.json"),
+      JSON.stringify({ scripts: { dev: "vite", build: "vite build" } }),
+    );
+
+    const withoutMode = await getSitePackage(root, "manual-static");
+    expect(withoutMode?.shareManifest.ok).toBe(true);
+    if (withoutMode?.shareManifest.ok) {
+      expect(withoutMode.shareManifest.manifest.entryPath).toBe("manual-static/dist/index.html");
+    }
+
+    const withManualStatic = await getSitePackage(root, "manual-static", undefined, "static");
+    expect(withManualStatic?.shareManifest.ok).toBe(true);
+    if (withManualStatic?.shareManifest.ok) {
+      expect(withManualStatic.shareManifest.manifest.entryPath).toBe("manual-static/index.html");
+    }
+  });
 });

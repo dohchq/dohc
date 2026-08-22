@@ -1990,6 +1990,18 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
       message: "dohc.json build.output must be a relative workspace path, not '.', './', or an empty path.",
     });
   }
+  // The conventional-names loop above only ever checks "dist"/"build"/
+  // "out" — a CONFIGURED output can be nested or custom-named
+  // ("public/dist"), so it needs its own verification. Without this, a
+  // site with a real built artifact at a configured (non-conventional)
+  // path is returned with no entry at all, and test_site fails
+  // entry-or-script even though the build genuinely succeeded.
+  if (builtEntry === undefined && configuredBuildOutput) {
+    const configuredIndexInfo = await stat(join(absolute, configuredBuildOutput, "index.html")).catch(() => null);
+    if (configuredIndexInfo?.isFile()) {
+      builtEntry = relativeJoin(relativeJoin(root, configuredBuildOutput), "index.html");
+    }
+  }
   const buildOutputs = [configuredBuildOutput, ...detectedBuildOutputs].filter(
     (output): output is string => typeof output === "string" && output.length > 0,
   );

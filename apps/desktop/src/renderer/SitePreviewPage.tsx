@@ -316,9 +316,14 @@ export function SitePreviewPage(props: {
       requestContext === siteContextRef.current;
     try {
       let latest = site;
+      // Share-what-you-previewed: this tab's own current mode — a stored
+      // per-tab choice or the automatic pick, either way something main.ts
+      // has no other way to see — decides which artifact (source entry vs.
+      // a build output) the share manifest selects.
       const fresh = await bridge().getSitePackage({
         workspaceId: props.workspaceId,
         path: props.siteRoot,
+        effectivePreviewMode: preview?.mode ?? runningMode ?? null,
       });
       if (!isCurrent()) return;
       // getSitePackage intentionally returns the deepest CONTAINING site for
@@ -345,9 +350,12 @@ export function SitePreviewPage(props: {
         }
         const built = await start("build");
         if (!built || !isCurrent()) return;
+        // This branch just built specifically to get a shareable
+        // artifact — "build" is the mode that artifact was produced for.
         const refreshedAfterBuild = await bridge().getSitePackage({
           workspaceId: props.workspaceId,
           path: props.siteRoot,
+          effectivePreviewMode: "build",
         });
         if (!isCurrent()) return;
         if (refreshedAfterBuild && refreshedAfterBuild.root !== props.siteRoot) {
