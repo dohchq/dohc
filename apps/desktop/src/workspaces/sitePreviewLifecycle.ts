@@ -16,6 +16,22 @@ export function assertActiveWorkspaceForSitePreviewStop(
   );
 }
 
+// requireWorkspace alone only proves a workspaceId is REGISTERED somewhere
+// in this app instance, not that it's the one THIS sender's own window is
+// currently showing — reading another workspace's site paths, titles,
+// diagnostics, or full package-script bodies needs the same active-
+// workspace guard startSitePreview/getSitePreviewLogs/stop already apply,
+// just for a request that reads instead of starts or stops one.
+export function assertActiveWorkspaceForSiteRead(
+  activeWorkspaceId: string | undefined,
+  workspaceId: string,
+): void {
+  if (activeWorkspaceId === workspaceId) return;
+  throw new Error(
+    "The sites request does not target the active workspace. Open the workspace and try again.",
+  );
+}
+
 function previewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
 }
@@ -191,10 +207,16 @@ export function createSitePreviewLifecycle(input: {
     ): Promise<void> {
       const key = previewKey(workspaceId, siteRoot);
       const active = activePreviews.get(key);
-      if (
-        expected &&
-        (active?.state !== "running" || active.handle !== expected)
-      ) return;
+      // Match on handle identity ALONE — requiring state === "running" too
+      // made this silently no-op for every exited record whenever a
+      // caller pinned the handle it read from previewsForWorkspace()
+      // (stopSitePreviewsForWorkspace does exactly that on every workspace
+      // switch), even though previewsForWorkspace's own doc comment
+      // above says stop() still needs to reach those. An exited record's
+      // wrapper is already gone, but handle.stop() (stopChild) still
+      // needs to run to reach a descendant it captured while the wrapper
+      // was alive.
+      if (expected && active?.handle !== expected) return;
       activePreviews.delete(key);
       if (!active) return;
       // An "exited" record's own wrapper process is already gone, but

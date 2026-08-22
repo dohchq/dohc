@@ -407,6 +407,35 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
       index += 1;
       continue;
     }
+    // "declare -x HOST=0.0.0.0"/"typeset -x ..."/"local -x ..." export
+    // the assignment to child processes exactly the same as a bare
+    // "export" does — but PLAIN declare/typeset/local (no -x) creates a
+    // shell-local variable a child process never sees, so treating it as
+    // exported would refuse a script that never actually rebinds
+    // anything. These builtins take only SHORT options (no long forms),
+    // combinable in one token ("-rx") or given separately ("-r -x") —
+    // scan every "-"-prefixed option token immediately after the keyword
+    // for an "x" before deciding.
+    if (!isEnvWrapper && (token === "declare" || token === "typeset" || token === "local")) {
+      index += 1;
+      let exported = false;
+      while (index < tokens.length && /^-[A-Za-z]+$/.test(tokens[index]!)) {
+        if (tokens[index]!.includes("x")) exported = true;
+        index += 1;
+      }
+      const next = tokens[index];
+      const nextAssignment = next ? ENV_ASSIGNMENT_PATTERN.exec(next) : null;
+      if (exported && nextAssignment) {
+        const [, name, value] = nextAssignment;
+        if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+      }
+      // Either way this specific NAME=VALUE (if present) is fully
+      // handled here — skip past it so the loop's own bare-assignment
+      // branch above doesn't re-examine it and, for the non-exported
+      // case, wrongly record it as a real host source.
+      if (nextAssignment) index += 1;
+      continue;
+    }
     // Outside an `env` wrapper the leading run is only ever assignments
     // (`HOST=0.0.0.0 vite`) — the first non-assignment token is the real
     // command, and there are no env OPTIONs to classify here.
@@ -589,6 +618,13 @@ export async function startSiteDevServer(input: {
   // Test-only override for the descendant-poll cadence — production always
   // gets DESCENDANT_CAPTURE_INTERVAL_MS.
   descendantCaptureIntervalMs?: number;
+  // Test-only override for the descendant reader itself — lets a test
+  // construct a DETERMINISTIC race between two overlapping captures (an
+  // earlier one that resolves SLOW, a later one that resolves FAST) via
+  // controlled promises, instead of depending on real ps/PowerShell
+  // subprocess timing. Production always gets the real, platform-
+  // dispatched processDescendants.
+  descendantsReader?: (pid: number) => Promise<number[]>;
 }): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
@@ -628,21 +664,33 @@ export async function startSiteDevServer(input: {
   // set to only pids that are actually still worth being able to reach.
   const capturedDescendantSet = new Set<number>();
   let capturedDescendants: number[] = [];
-  // The latest in-flight capture, so a caller that needs the FRESHEST
+  // Every capture CURRENTLY in flight, so a caller that needs the FRESHEST
   // possible snapshot (stopChild, once the wrapper has already exited) can
-  // await it instead of racing its own async ps read.
-  let pendingCapture: Promise<void> = Promise.resolve();
+  // await ALL of them instead of racing its own async ps read. A single
+  // "latest" promise isn't enough: an interval tick that started SLOW and
+  // one that started later but finishes FAST would otherwise have the fast
+  // one overwrite it, so stopChild awaits only the fast one, decides the
+  // set is empty, and returns — the slow one's own descendant then lands
+  // too late to be reached at all.
+  const inFlightCaptures = new Set<Promise<void>>();
+  const readDescendants = input.descendantsReader ?? processDescendants;
   const captureDescendantsOnce = (pid: number): Promise<void> => {
-    const capture = processDescendants(pid).then((pids) => {
+    const capture = readDescendants(pid).then((pids) => {
       for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
       for (const capturedPid of capturedDescendantSet) {
         if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
       }
       capturedDescendants = [...capturedDescendantSet];
     });
-    pendingCapture = capture;
+    inFlightCaptures.add(capture);
+    void capture.finally(() => inFlightCaptures.delete(capture));
     return capture;
   };
+  // Snapshots inFlightCaptures at CALL time — evaluated fresh each time a
+  // caller needs it, so it always awaits whatever is actually still
+  // outstanding at that instant, not whichever capture happened to start
+  // (or finish) last.
+  const awaitAllCaptures = (): Promise<void> => Promise.all([...inFlightCaptures]).then(() => undefined);
   const descendantCaptureTimer =
     child.pid !== undefined
       ? setInterval(
@@ -678,7 +726,7 @@ export async function startSiteDevServer(input: {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).finally(() => {
+      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).finally(() => {
         reject(new Error("Site dev server start was cancelled."));
       });
     }
@@ -693,7 +741,7 @@ export async function startSiteDevServer(input: {
       // site dir. stopChild also sequences the Windows tree kill BEFORE the
       // wrapper signal; signalling first would let the taskkill race a dead
       // wrapper pid and orphan the real dev server.
-      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).finally(() => {
+      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).finally(() => {
         reject(
           new Error(
             `Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
@@ -743,7 +791,7 @@ export async function startSiteDevServer(input: {
             () => {
               stopped = true;
             },
-            () => pendingCapture,
+            () => awaitAllCaptures(),
           ),
       });
     }
@@ -891,7 +939,19 @@ export async function detectBuildOutput(siteRoot: string, configured?: string): 
     // preview server and share manifest scan both need to succeed anyway.
     const indexPath = join(absolute, "index.html");
     const indexInfo = await stat(indexPath).catch(() => null);
-    if (indexInfo?.isFile() && (await pathExists(indexPath))) return absolute;
+    if (!indexInfo?.isFile() || !(await pathExists(indexPath))) continue;
+    // stat() follows symlinks — a readable index.html that's actually a
+    // symlink to a file OUTSIDE the output directory (still inside the
+    // site, just not inside `dist`) passes every check above, but the
+    // static preview server's own per-request containment check
+    // (staticDirectoryPreview.ts, isInside(root, realTarget)) resolves
+    // the SAME entry's real path and rejects it for escaping the served
+    // root — buildSite would report ok: true for an artifact the preview
+    // then serves as a 403/blank page. Require the entry's own real path
+    // to stay inside the output directory's real path too.
+    const realIndexPath = await realpath(indexPath).catch(() => null);
+    if (!realIndexPath || !isInside(realOutput, realIndexPath)) continue;
+    return absolute;
   }
   return null;
 }
@@ -929,7 +989,9 @@ export async function buildSite(input: {
   // one.
   const capturedDescendantSet = new Set<number>();
   let capturedDescendants: number[] = [];
-  let pendingCapture: Promise<void> = Promise.resolve();
+  // See startSiteDevServer's own inFlightCaptures for why this tracks
+  // every capture CURRENTLY outstanding instead of only the latest one.
+  const inFlightCaptures = new Set<Promise<void>>();
   const captureDescendantsOnce = (pid: number): Promise<void> => {
     const capture = processDescendants(pid).then((pids) => {
       for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
@@ -938,9 +1000,11 @@ export async function buildSite(input: {
       }
       capturedDescendants = [...capturedDescendantSet];
     });
-    pendingCapture = capture;
+    inFlightCaptures.add(capture);
+    void capture.finally(() => inFlightCaptures.delete(capture));
     return capture;
   };
+  const awaitAllCaptures = (): Promise<void> => Promise.all([...inFlightCaptures]).then(() => undefined);
   const descendantCaptureTimer =
     child.pid !== undefined
       ? setInterval(() => captureDescendantsOnce(child.pid!), DESCENDANT_CAPTURE_INTERVAL_MS)
@@ -966,7 +1030,7 @@ export async function buildSite(input: {
     function abortBuild() {
       if (settled) return;
       pushLog(logs, "system", "Build cancelled.");
-      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).then(() => finish(null));
+      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).then(() => finish(null));
     }
 
     timer = setTimeout(() => {
@@ -974,7 +1038,7 @@ export async function buildSite(input: {
       pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
       // stopChild sequences the Windows tree kill BEFORE the wrapper signal
       // and resolves once the child exits (or the kill grace lapses).
-      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).then(() => finish(null));
+      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).then(() => finish(null));
     }, timeoutMs);
     if (input.signal?.aborted) abortBuild();
     else input.signal?.addEventListener("abort", abortBuild, { once: true });
@@ -988,9 +1052,10 @@ export async function buildSite(input: {
       // A timed-out build reports exitCode null regardless of how the kill
       // is delivered (taskkill termination surfaces as a plain exit code).
       // The wrapper itself has already exited here — stopChild's own guard
-      // (and its await of pendingCapture) makes this a no-op unless a
-      // descendant was actually captured while the wrapper was alive.
-      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).then(() =>
+      // (and its awaiting every in-flight capture) makes this a no-op
+      // unless a descendant was actually captured while the wrapper was
+      // alive.
+      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).then(() =>
         finish(timedOut ? null : code),
       );
     });

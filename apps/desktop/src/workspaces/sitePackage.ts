@@ -369,27 +369,44 @@ function parseCspDirectives(content: string): Map<string, string[]> {
 }
 
 /** The CSP classes a document's meta policies rule out entirely (an
- * effective source list of exactly 'none'). Every collected policy is
- * evaluated and the results unioned — under CSP's own intersection
- * semantics, ANY policy saying 'none' for a class truly blocks it,
- * regardless of what a different policy on the same document allows. */
+ * effective source list of exactly 'none' OR EMPTY). Every collected policy
+ * is evaluated and the results unioned — under CSP's own intersection
+ * semantics, ANY policy saying 'none' (or nothing at all) for a class truly
+ * blocks it, regardless of what a different policy on the same document
+ * allows. A directive present with no source expressions at all
+ * (`<meta ... content="img-src">`, parseCspDirectives leaves it `[]`) is as
+ * unambiguous a block as an explicit 'none' — a real browser permits
+ * NOTHING for a class whose list has zero sources, the same as 'none'. */
 function blockedCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<CspClass> {
   const blocked = new Set<CspClass>();
   for (const content of cspPolicyContents) {
     const directives = parseCspDirectives(content);
     for (const cspClass of Object.keys(CSP_DIRECTIVE_FOR_CLASS) as CspClass[]) {
       const sourceList = directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
-      if (sourceList?.length === 1 && sourceList[0]?.toLowerCase() === "'none'") blocked.add(cspClass);
+      if (!sourceList) continue;
+      if (sourceList.length === 0 || (sourceList.length === 1 && sourceList[0]?.toLowerCase() === "'none'")) {
+        blocked.add(cspClass);
+      }
     }
   }
   return blocked;
 }
 
-// CSP nonce values are meant to be unguessable tokens — two nonces that
+// CSP's own grammar for a nonce-source's value is base64-value = 1*(ALPHA /
+// DIGIT / "+" / "/" / "-" / "_") *2("=") — a token outside that charset
+// ('nonce-!!!') is syntactically invalid and Chromium drops it entirely,
+// the same way an unrecognized keyword is dropped, rather than treating it
+// as a wildcard nonce any script's own (equally malformed) nonce attribute
+// could satisfy. The keyword prefix itself still matches case-insensitively
+// ('NONCE-' is as valid as 'nonce-'); only the VALUE portion is grammar-
+// checked here.
+const NONCE_SOURCE_PATTERN = /^'nonce-([A-Za-z0-9+/_-]+={0,2})'$/i;
+
+// CSP nonce VALUES are meant to be unguessable tokens — two nonces that
 // differ only in case are NOT the same one, so unlike the keyword prefix
-// this checks, the value itself must compare case-SENSITIVELY.
+// above, the value itself must compare case-SENSITIVELY.
 function nonceSourceMatches(sourceList: readonly string[], nonce: string): boolean {
-  return sourceList.some((token) => /^'nonce-.+'$/i.test(token) && token.slice(7, -1) === nonce);
+  return sourceList.some((token) => NONCE_SOURCE_PATTERN.exec(token)?.[1] === nonce);
 }
 
 const HASH_SOURCE_PATTERN = /^'sha(256|384|512)-([A-Za-z0-9+/]+=*)'$/i;
@@ -442,12 +459,21 @@ function isInlineBlockPermitted(
 ): boolean {
   for (const content of cspPolicyContents) {
     const directives = parseCspDirectives(content);
-    const sourceList = directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
+    // Chromium picks the MOST specific directive that's actually present —
+    // script-src-elem for a <script> element, script-src-attr for an on*
+    // handler (style-src-elem/style-src-attr the same way for style) —
+    // before falling back to the generic script-src/style-src, and only
+    // THEN to default-src. Consulting script-src/style-src directly here
+    // would miss a policy that locks inline execution down further at the
+    // element/attribute level while leaving the generic directive open
+    // (`script-src 'unsafe-inline'; script-src-attr 'none'`).
+    const specificDirective = `${CSP_DIRECTIVE_FOR_CLASS[cspClass]}-${isAttribute ? "attr" : "elem"}`;
+    const sourceList =
+      directives.get(specificDirective) ?? directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
     if (!sourceList) continue;
-    const hasNonceOrHashSource = sourceList.some((token) => {
-      const lower = token.toLowerCase();
-      return lower.startsWith("'nonce-") || /^'sha(256|384|512)-/.test(lower);
-    });
+    const hasNonceOrHashSource = sourceList.some(
+      (token) => NONCE_SOURCE_PATTERN.test(token) || HASH_SOURCE_PATTERN.test(token),
+    );
     const permittedByNonce = !isAttribute && nonce !== undefined && nonceSourceMatches(sourceList, nonce);
     const permittedByHash =
       (!isAttribute || sourceList.some((token) => token.toLowerCase() === "'unsafe-hashes'")) &&
@@ -580,7 +606,13 @@ function htmlBaseDirectoryFromDocument(
 ): HtmlBaseResolution {
   // parse5 already decoded any HTML character reference in the href value —
   // only the URL-level percent-encoding below is still this function's job.
-  const rawHref = firstBaseHref(document);
+  // Trimmed BEFORE any classification: leading whitespace (" https://evil")
+  // would otherwise fail both the "//" network-path check and
+  // URI_SCHEME_PATTERN's anchored match below, letting an external URL
+  // fall through and resolve as an ordinary local directory instead —
+  // exactly the same way a browser's own URL parser strips leading/
+  // trailing C0-control-or-space bytes before doing anything else with it.
+  const rawHref = firstBaseHref(document)?.trim();
   if (!rawHref || rawHref.startsWith("#")) return { kind: "none" };
   // Same browser-URL-parser backslash normalization as
   // resolveArtifactRelativePath, applied BEFORE the external-base check —
@@ -759,6 +791,17 @@ export interface BrowserTextReference {
   // resolved map, so a module script reached before a later <script
   // type="importmap"> still scans without one, matching a real browser.
   importMap?: ImportMapResolution;
+  // A srcdoc pseudo-document is its OWN document with its OWN <meta CSP>
+  // policies, entirely separate from the embedding document's — a
+  // reference this srcdoc's own scan discovered (see htmlReferencesFromDocument's
+  // srcdoc handling) carries THAT document's own blockedCspClasses forward,
+  // so a further file it points to (an external <script src>) is filtered
+  // by the policy that actually governs the srcdoc's realm, not by
+  // whatever the embedding document's own policy happens to allow.
+  // Unset — and the queue falls back to the embedding document's own
+  // state, unchanged from before — for every reference NOT sourced from a
+  // srcdoc scan.
+  blockedCspClasses?: ReadonlySet<CspClass>;
 }
 
 type CspClass = "img" | "script" | "style" | "connect" | "worker";
@@ -1356,13 +1399,22 @@ function collectInsertedIdentifierNames(
   return inserted;
 }
 
+// img/video/audio start loading their resource the instant the relevant
+// property is SET — the classic `new Image(); img.src = url` preload idiom
+// relies on exactly this, and it never inserts the element anywhere. Every
+// other tag URL_ATTRIBUTE_ELEMENTS tracks (script, link, iframe, embed,
+// object, input, source, ...) needs a real browser to actually CONNECT the
+// element to the document before it fetches or executes anything for it.
+const URL_FETCH_WITHOUT_INSERTION_TAGS = new Set(["img", "video", "audio"]);
+
 /** Whether `object.property = lit` or `object.setAttribute("property", lit)`
  * is a proven, resource-consuming (tag, property) pair — reuses
  * URL_ATTRIBUTE_ELEMENTS, the SAME allowlist markup attributes already go
  * through, so a DOM element's real tag is held to the identical rule.
  * Also requires proof the element was actually INSERTED somewhere in the
- * document — an unattached `document.createElement("script")` never
- * connects to anything, and assigning its src is inert until it does. */
+ * document for every tag that genuinely needs it — an unattached
+ * `document.createElement("script")` never connects to anything, and
+ * assigning its src is inert until it does. */
 function isProvenUrlReceiver(
   object: unknown,
   propertyName: string,
@@ -1374,10 +1426,20 @@ function isProvenUrlReceiver(
   if (tag === undefined || tag === "unknown" || !(URL_ATTRIBUTE_ELEMENTS[propertyName]?.has(tag) ?? false)) {
     return false;
   }
-  // document.body/document.head are ALWAYS already in the document — only
-  // an identifier-bound element (document.createElement(...) or a chain
-  // resolving to one) needs its OWN insertion proven.
-  if (!isAstNode(object) || object.type !== "Identifier") return true;
+  if (URL_FETCH_WITHOUT_INSERTION_TAGS.has(tag)) return true;
+  // document.body/document.head are ALWAYS already in the document — a
+  // MemberExpression is the only shape domProducingTag ever returns "body"/
+  // "head" for, so this can't also match a fresh document.createElement(...)
+  // chain.
+  if (isAstNode(object) && object.type === "MemberExpression") return true;
+  // An identifier-bound element (document.createElement(...) assigned to a
+  // variable, or a chain resolving to one) needs its OWN insertion proven.
+  // A FRESH document.createElement(...) chain that was never bound to a
+  // variable at all (object.type !== "Identifier" here) has no way to be
+  // traced to a later insertion call either — unprovable, so it's declined
+  // the same as an identifier that fails the insertion check, not treated
+  // as automatically proven.
+  if (!isAstNode(object) || object.type !== "Identifier") return false;
   const name = astString(object, "name");
   return !!name && insertedIdentifierNames.has(name);
 }
@@ -1454,11 +1516,22 @@ interface ImportMapResolution extends ResolvedSpecifierMap {
 // urlLikeImports, OR externalUrlLikeKeys — never more than one of those
 // three for the same key) keeps its original value; a later map only
 // ever fills in a key nothing has claimed yet.
-function mergeSpecifierMaps(existing: ResolvedSpecifierMap, next: ResolvedSpecifierMap): ResolvedSpecifierMap {
+function mergeSpecifierMaps(
+  existing: ResolvedSpecifierMap,
+  next: ResolvedSpecifierMap,
+  lockedKeys: ReadonlySet<string>,
+): ResolvedSpecifierMap {
   const imports = new Map(existing.imports);
   const urlLikeImports = new Map(existing.urlLikeImports);
   const externalUrlLikeKeys = new Set(existing.externalUrlLikeKeys);
-  const claimed = (key: string) => imports.has(key) || urlLikeImports.has(key) || externalUrlLikeKeys.has(key);
+  // A key an EARLIER map already claims keeps its value; a key an earlier
+  // MODULE already resolved (lockedKeys — see lockedModuleSpecifierKeys)
+  // is just as unavailable to a later map, even one introducing it for
+  // the very first time — a real browser's already-resolved specifier
+  // stays fixed to its original target regardless of which reason came
+  // first.
+  const claimed = (key: string) =>
+    imports.has(key) || urlLikeImports.has(key) || externalUrlLikeKeys.has(key) || lockedKeys.has(key);
   for (const [key, value] of next.imports) if (!claimed(key)) imports.set(key, value);
   for (const [key, value] of next.urlLikeImports) if (!claimed(key)) urlLikeImports.set(key, value);
   for (const key of next.externalUrlLikeKeys) if (!claimed(key)) externalUrlLikeKeys.add(key);
@@ -1467,14 +1540,26 @@ function mergeSpecifierMaps(existing: ResolvedSpecifierMap, next: ResolvedSpecif
 
 // Scopes merge the same way, per prefix: a scope only the later map
 // declares is added wholesale; a scope BOTH declare merges its own
-// specifier map with the same earlier-wins rule.
-function mergeImportMapResolutions(existing: ImportMapResolution, next: ImportMapResolution): ImportMapResolution {
+// specifier map with the same earlier-wins-or-locked rule.
+function mergeImportMapResolutions(
+  existing: ImportMapResolution,
+  next: ImportMapResolution,
+  lockedKeys: ReadonlySet<string>,
+): ImportMapResolution {
+  const emptySpecifierMap: ResolvedSpecifierMap = {
+    imports: new Map(),
+    urlLikeImports: new Map(),
+    externalUrlLikeKeys: new Set(),
+  };
   const scopes = new Map(existing.scopes);
   for (const [prefix, nextScope] of next.scopes) {
-    const existingScope = scopes.get(prefix);
-    scopes.set(prefix, existingScope ? mergeSpecifierMaps(existingScope, nextScope) : nextScope);
+    const existingScope = scopes.get(prefix) ?? emptySpecifierMap;
+    // A brand-new scope prefix still needs its OWN keys checked against
+    // lockedKeys — a scope this map never had before is not exempt from
+    // "a key an earlier module already resolved stays fixed."
+    scopes.set(prefix, mergeSpecifierMaps(existingScope, nextScope, lockedKeys));
   }
-  return { ...mergeSpecifierMaps(existing, next), scopes };
+  return { ...mergeSpecifierMaps(existing, next, lockedKeys), scopes };
 }
 
 function isBareModuleSpecifier(specifier: string): boolean {
@@ -1531,6 +1616,74 @@ function matchingScopes(
     .map(([, scope]) => scope);
 }
 
+// The key an import map entry (or the "resolved module set" locking a
+// specifier against a later remap — see lockedModuleSpecifierKeys) would
+// use for this specifier: a bare specifier's own text, or a URL-like one's
+// normalized, artifact-root-relative "/"-prefixed form — the same
+// normalization the spec applies to a URL-like map KEY before matching it,
+// applied here to a REFERRING specifier so the two compare equal.
+function moduleSpecifierKey(
+  specifier: string,
+  fromPath: string,
+  ownBase: HtmlBaseResolution,
+  artifactRoot: string,
+): string {
+  if (isBareModuleSpecifier(specifier)) return specifier;
+  const normalized = resolveArtifactRelativePath(specifier, fromPath, artifactRoot, ownBase);
+  const normalizedRelative = normalized ? pathRelativeToArtifact(artifactRoot, normalized) : null;
+  return normalizedRelative === null ? specifier : `/${normalizedRelative}`;
+}
+
+// A real browser's module map permanently remembers a specifier's
+// resolution the FIRST time any earlier module resolves it (whether via an
+// import map or a URL-like specifier's own natural relative target) — a
+// LATER <script type="importmap"> cannot retroactively remap that same
+// specifier for anything reached afterward either, even a brand-new key no
+// EARLIER map ever claimed. mergeImportMapResolutions' own "earlier map's
+// key wins" rule only covers two import maps declaring the same key; this
+// closes the other half by returning every specifier key an earlier BLOCK
+// already resolved, so a later map's new entry for that same key can be
+// dropped too. A cheap, EAGER, resolution-only pre-scan — reuses the exact
+// same AST node types and resolution rule jsReferencesFromCode's own
+// deferred pass applies, just to the "was this specifier resolved" question
+// alone, not full reference collection.
+function lockedModuleSpecifierKeys(
+  code: string,
+  scriptKind: ScriptKind,
+  fromPath: string,
+  ownBase: HtmlBaseResolution,
+  artifactRoot: string,
+  importMap: ImportMapResolution | undefined,
+): string[] {
+  const program = parseJavaScript(code, scriptKind);
+  if (!program) return [];
+  const keys: string[] = [];
+  walkAst(program, (node) => {
+    if (
+      node.type !== "ImportDeclaration" &&
+      node.type !== "ExportNamedDeclaration" &&
+      node.type !== "ExportAllDeclaration" &&
+      node.type !== "ImportExpression"
+    ) {
+      return;
+    }
+    const specifier = stringLiteralValue(astChild(node, "source"))?.trim();
+    if (!specifier) return;
+    // A path-like specifier always resolves to SOMETHING — its own natural
+    // relative target, an explicit remap, or an external URL this scanner
+    // can't reach locally — every one of those outcomes is a REAL
+    // resolution that locks it. A bare specifier has no natural
+    // resolution at all: it locks only when an import map actually maps
+    // it: an unmapped bare specifier fails to resolve, so nothing was
+    // fetched and nothing locks.
+    const locks =
+      !isBareModuleSpecifier(specifier) ||
+      resolveModuleSpecifier(specifier, importMap, fromPath, ownBase, artifactRoot) !== undefined;
+    if (locks) keys.push(moduleSpecifierKey(specifier, fromPath, ownBase, artifactRoot));
+  });
+  return keys;
+}
+
 function resolveModuleSpecifier(
   specifier: string,
   importMap: ImportMapResolution | undefined,
@@ -1546,10 +1699,7 @@ function resolveModuleSpecifier(
     // that normalized form against the map's (already-normalized) keys —
     // an exact key OR the longest "prefix/" key it starts with. Unmatched,
     // it resolves to itself — same as before this lookup existed.
-    const normalized = resolveArtifactRelativePath(specifier, fromPath, artifactRoot, ownBase);
-    const normalizedRelative = normalized ? pathRelativeToArtifact(artifactRoot, normalized) : null;
-    if (normalizedRelative === null) return specifier;
-    const normalizedKey = `/${normalizedRelative}`;
+    const normalizedKey = moduleSpecifierKey(specifier, fromPath, ownBase, artifactRoot);
     for (const scope of scopes) {
       if (scope.externalUrlLikeKeys.has(normalizedKey)) return undefined;
       const resolved = resolveAgainstImportMapEntries(normalizedKey, scope.urlLikeImports);
@@ -1920,7 +2070,16 @@ function jsReferencesFromCode(
             const { value, scriptRelative } = consumedValue(args[0]);
             addReference(value, !scriptRelative, false, undefined, "connect");
           } else if (propertyName === "setAttribute" && args.length >= 2) {
-            const attributeName = stringLiteralValue(args[0]);
+            // HTML attribute names are case-INSENSITIVE — a real
+            // setAttribute("SRC", ...) call sets the same "src" attribute
+            // as setAttribute("src", ...) — but URL_ATTRIBUTE_ELEMENTS is
+            // keyed lowercase, so an uppercase/mixed-case literal here
+            // would otherwise miss the lookup entirely and the reference
+            // never gets recorded. A DIRECT property assignment
+            // (`img.SRC = ...`, the OTHER addUrlAttributeReference call
+            // site below) stays case-sensitive — that's real JS property
+            // access, not an HTML attribute name.
+            const attributeName = stringLiteralValue(args[0])?.toLowerCase();
             if (attributeName) addUrlAttributeReference(object, attributeName, args[1]);
           } else if (
             propertyName === "open" &&
@@ -2148,6 +2307,11 @@ function htmlReferencesFromDocument(
   // order, as each is parsed — grown via mergeImportMapResolutions
   // (earlier-key-wins) each time visit() reaches one, never replaced.
   let activeImportMap: ImportMapResolution | undefined;
+  // Every module specifier an EARLIER classic/module/handler block already
+  // resolved (see lockedModuleSpecifierKeys) — grown as each block is
+  // collected, consulted by mergeImportMapResolutions so a LATER import map
+  // can't retroactively remap a specifier a real browser already locked in.
+  let lockedSpecifierKeys = new Set<string>();
   const nestedReferences: BrowserTextReference[] = [];
   const cspPolicyContents: string[] = [];
   const formIds = collectFormIds(document);
@@ -2213,6 +2377,19 @@ function htmlReferencesFromDocument(
           /^on[a-z]+$/i.test(attribute.name) &&
           isInlineBlockPermitted(cspPolicyContentsSoFar, "script", undefined, attribute.value, true)
         ) {
+          // A handler compiles as a function BODY (jsReferencesFromEventHandler
+          // wraps it the same way before parsing) — a bare `return`, valid
+          // only inside a function, would otherwise fail to parse here.
+          for (const key of lockedModuleSpecifierKeys(
+            `function __dohc_handler__(event) {\n${attribute.value}\n}`,
+            "classic",
+            documentPath,
+            documentBase,
+            artifactRoot,
+            activeImportMap,
+          )) {
+            lockedSpecifierKeys.add(key);
+          }
           handlerTexts.push({ text: attribute.value, blocked: blockedSoFar, importMap: activeImportMap });
         }
       }
@@ -2248,13 +2425,28 @@ function htmlReferencesFromDocument(
           // "/", or the next resolution pass joins artifactRoot onto itself.
           const artifactRelative = resolvedPath ? pathRelativeToArtifact(artifactRoot, resolvedPath) : null;
           if (artifactRelative !== null) {
-            pushNestedReference({ ...reference, value: `/${artifactRelative}`, documentRelative: false });
+            pushNestedReference({
+              ...reference,
+              value: `/${artifactRelative}`,
+              documentRelative: false,
+              // The srcdoc's OWN CSP state — not the embedding document's
+              // — governs anything THIS reference's own target points to.
+              blockedCspClasses: nestedResult.blockedCspClasses,
+            });
           }
         }
       }
       if (tagName === "meta" && attrs.get("http-equiv")?.toLowerCase() === "refresh") {
         const refreshTarget = metaRefreshTarget(attrs.get("content") ?? "");
-        if (refreshTarget) pushAttributeReference({ value: refreshTarget, documentRelative: true });
+        // A meta-refresh is a real NAVIGATION — the browser loads the
+        // target as a full document, the same as following an <a href>,
+        // not merely fetching its bytes. Without documentDestination, the
+        // queue treats it as an opaque leaf asset instead of parsing it
+        // for its OWN stylesheets/scripts/images, so a refreshed page's
+        // dependencies never make it into the share manifest.
+        if (refreshTarget) {
+          pushAttributeReference({ value: refreshTarget, documentRelative: true, documentDestination: true });
+        }
       }
       if (tagName === "meta" && attrs.get("http-equiv")?.toLowerCase() === "content-security-policy") {
         const policyContent = attrs.get("content");
@@ -2391,12 +2583,19 @@ function htmlReferencesFromDocument(
         if (attrs.get("type")?.toLowerCase() === "importmap") {
           // Merges into whatever's active so far — see
           // mergeImportMapResolutions — and takes effect (for the merged
-          // keys a strictly EARLIER map hadn't already claimed) from THIS
-          // point in document order onward.
+          // keys a strictly EARLIER map hadn't already claimed, and that
+          // lockedSpecifierKeys doesn't already lock) from THIS point in
+          // document order onward. Routed through the merge even for the
+          // very FIRST map — a module reached before ANY import map still
+          // locks its own natural resolution against this one too.
           const rawImportMap = parseImportMap(html5TextContent(node));
           if (rawImportMap) {
             const resolved = resolveImportMapAddresses(rawImportMap, documentPath, documentBase, artifactRoot);
-            activeImportMap = activeImportMap ? mergeImportMapResolutions(activeImportMap, resolved) : resolved;
+            activeImportMap = mergeImportMapResolutions(
+              activeImportMap ?? { imports: new Map(), urlLikeImports: new Map(), externalUrlLikeKeys: new Set(), scopes: new Map() },
+              resolved,
+              lockedSpecifierKeys,
+            );
           }
         } else if (
           isExecutableScriptElement(attrs) &&
@@ -2411,6 +2610,16 @@ function htmlReferencesFromDocument(
           // isAttribute: false — a <script> element carries its OWN nonce
           // attribute, unlike a style=""/on* attribute.
           if (isInlineBlockPermitted(cspPolicyContentsSoFar, "script", attrs.get("nonce"), scriptText, false)) {
+            for (const key of lockedModuleSpecifierKeys(
+              scriptText,
+              scriptKind,
+              documentPath,
+              documentBase,
+              artifactRoot,
+              activeImportMap,
+            )) {
+              lockedSpecifierKeys.add(key);
+            }
             (scriptKind === "module" ? moduleJsTexts : classicJsTexts).push({
               text: scriptText,
               blocked: blockedSoFar,
@@ -2837,8 +3046,16 @@ async function shareManifestForSite(
             // A Worker/SharedWorker/service worker has its own policy
             // context, entirely separate from the document that created
             // it — the creator's own CSP does not apply to what the
-            // worker itself fetches, so it must not carry forward.
-            blockedCspClasses: reference.entersOwnContext ? new Set() : documentBlockedCspClasses,
+            // worker itself fetches, so it must not carry forward (this
+            // wins outright, ahead of the srcdoc case below). A reference
+            // sourced from a srcdoc's OWN scan (reference.blockedCspClasses,
+            // set only there) carries THAT document's policy instead of
+            // the embedding document's own — every other reference kind
+            // falls back to documentBlockedCspClasses, unchanged from
+            // before this field existed.
+            blockedCspClasses: reference.entersOwnContext
+              ? new Set()
+              : (reference.blockedCspClasses ?? documentBlockedCspClasses),
           });
         }
       }

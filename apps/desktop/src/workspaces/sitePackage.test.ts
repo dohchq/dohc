@@ -3709,4 +3709,258 @@ describe("listSitePackages", () => {
       "css-import-not-double-matched/theme.css",
     );
   });
+
+  it("locks a specifier to its first resolution across the document, so a later import map cannot remap it", async () => {
+    await mkdir(join(root, "locked-specifier-keys"), { recursive: true });
+    await writeFile(
+      join(root, "locked-specifier-keys", "index.html"),
+      [
+        // "./dep.js" resolves NATURALLY here — no import map is active yet,
+        // so a real browser's module map already remembers this specifier's
+        // target before the importmap tag below is even parsed.
+        '<script type="module">import "./dep.js";</script>',
+        // Tries to remap the ALREADY-resolved specifier — a real browser
+        // ignores this for anything reached from this point on too.
+        '<script type="importmap">{"imports": {"./dep.js": "./private.js"}}</script>',
+        // Reaches "./dep.js" again — must resolve the SAME way as the
+        // first script, not pick up the new remap.
+        '<script type="module">import "./dep.js";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "locked-specifier-keys", "dep.js"), "export {};");
+    await writeFile(join(root, "locked-specifier-keys", "private.js"), "private file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "locked-specifier-keys",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("locked-specifier-keys/dep.js");
+    expect(manifestOf(site)?.assets).not.toContain("locked-specifier-keys/private.js");
+  });
+
+  it("rejects a syntactically invalid nonce-source token even when it textually matches an equally malformed nonce attribute", async () => {
+    await mkdir(join(root, "csp-nonce-invalid"), { recursive: true });
+    await writeFile(
+      join(root, "csp-nonce-invalid", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'nonce-!!!\'; connect-src \'self\'">',
+        '<script nonce="!!!">fetch("private.json");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-nonce-invalid", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-nonce-invalid",
+    );
+
+    // '!!!' is not valid CSP base64-value grammar — a real browser drops the
+    // whole nonce-source token as syntactically invalid rather than treating
+    // it as a wildcard any equally malformed nonce attribute could satisfy.
+    expect(manifestOf(site)?.assets).not.toContain("csp-nonce-invalid/private.json");
+  });
+
+  it("treats a CSP directive present with no source expressions as blocking, the same as an explicit 'none'", async () => {
+    await mkdir(join(root, "csp-empty-source-list"), { recursive: true });
+    await writeFile(
+      join(root, "csp-empty-source-list", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="img-src">',
+        '<img src="private.png">',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-empty-source-list", "private.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-empty-source-list",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("csp-empty-source-list/private.png");
+  });
+
+  it("honors the more specific script-src-attr directive over a permissive generic script-src", async () => {
+    await mkdir(join(root, "csp-attr-directive"), { recursive: true });
+    await writeFile(
+      join(root, "csp-attr-directive", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; script-src-attr \'none\'; connect-src \'self\'">',
+        "<button onclick='fetch(\"private.json\")'>go</button>",
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-attr-directive", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-attr-directive",
+    );
+
+    // script-src alone would permit the inline handler via 'unsafe-inline',
+    // but the more specific script-src-attr 'none' locks down attribute-
+    // sourced script content and must win.
+    expect(manifestOf(site)?.assets).not.toContain("csp-attr-directive/private.json");
+  });
+
+  it("still permits an inline script element via script-src's own unsafe-inline when no script-src-elem/-attr override is present", async () => {
+    await mkdir(join(root, "csp-elem-fallback"), { recursive: true });
+    await writeFile(
+      join(root, "csp-elem-fallback", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; connect-src \'self\'">',
+        '<script>fetch("public.json");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-elem-fallback", "public.json"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-elem-fallback",
+    );
+
+    // An inline SCRIPT ELEMENT is governed by script-src-elem, which falls
+    // back to script-src when absent — the fallback chain must still work.
+    expect(manifestOf(site)?.assets).toContain("csp-elem-fallback/public.json");
+  });
+
+  it("applies a srcdoc's own CSP to what it references, not the outer (unrestricted) document's policy", async () => {
+    await mkdir(join(root, "srcdoc-own-csp"), { recursive: true });
+    await writeFile(
+      join(root, "srcdoc-own-csp", "index.html"),
+      "<iframe srcdoc=\"<meta http-equiv=&quot;Content-Security-Policy&quot; content=&quot;connect-src 'none'&quot;><script src=&quot;app.js&quot;></script>\"></iframe>",
+    );
+    await writeFile(join(root, "srcdoc-own-csp", "app.js"), 'fetch("private.json");');
+    await writeFile(join(root, "srcdoc-own-csp", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "srcdoc-own-csp",
+    );
+
+    // app.js itself is a real, permitted reference from the srcdoc...
+    expect(manifestOf(site)?.assets).toContain("srcdoc-own-csp/app.js");
+    // ...but its own fetch() is filtered by the SRCDOC's connect-src
+    // 'none', not the (unrestricted) outer document's policy.
+    expect(manifestOf(site)?.assets).not.toContain("srcdoc-own-csp/private.json");
+  });
+
+  it("normalizes an uppercase setAttribute attribute name before the URL-attribute lookup", async () => {
+    await mkdir(join(root, "setattribute-case"), { recursive: true });
+    await writeFile(
+      join(root, "setattribute-case", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "setattribute-case", "app.js"),
+      [
+        'const img = document.createElement("img");',
+        'img.setAttribute("SRC", "asset.png");',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "setattribute-case", "asset.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "setattribute-case",
+    );
+
+    // HTML attribute names are case-insensitive — setAttribute("SRC", ...)
+    // sets the same "src" attribute as setAttribute("src", ...), and img
+    // fetches on property assignment alone (URL_FETCH_WITHOUT_INSERTION_TAGS),
+    // no insertion proof required.
+    expect(manifestOf(site)?.assets).toContain("setattribute-case/asset.png");
+  });
+
+  it("parses a meta-refresh target as a real document destination, discovering its own stylesheet dependencies", async () => {
+    await mkdir(join(root, "meta-refresh-document"), { recursive: true });
+    await writeFile(
+      join(root, "meta-refresh-document", "index.html"),
+      '<meta http-equiv="refresh" content="0; url=page2.html">',
+    );
+    await writeFile(
+      join(root, "meta-refresh-document", "page2.html"),
+      '<link rel="stylesheet" href="style.css">',
+    );
+    await writeFile(join(root, "meta-refresh-document", "style.css"), "body {}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "meta-refresh-document",
+    );
+
+    // style.css only gets discovered if page2.html is actually PARSED as a
+    // document (documentDestination: true), not just approved as an opaque
+    // leaf asset.
+    expect(manifestOf(site)?.assets).toContain("meta-refresh-document/page2.html");
+    expect(manifestOf(site)?.assets).toContain("meta-refresh-document/style.css");
+  });
+
+  it("treats an unattached img element's src assignment as proven, without requiring insertion proof", async () => {
+    await mkdir(join(root, "img-src-without-insertion"), { recursive: true });
+    await writeFile(
+      join(root, "img-src-without-insertion", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "img-src-without-insertion", "app.js"),
+      [
+        'const img = document.createElement("img");',
+        'img.src = "public.png";',
+        // Never appended/inserted anywhere — img/video/audio start loading
+        // the instant the property is set, the classic preload idiom.
+      ].join("\n"),
+    );
+    await writeFile(join(root, "img-src-without-insertion", "public.png"), "image");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "img-src-without-insertion",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("img-src-without-insertion/public.png");
+  });
+
+  it("declines a fresh, unbound document.createElement(\"script\") chain's src assignment as unprovable", async () => {
+    await mkdir(join(root, "unbound-script-chain"), { recursive: true });
+    await writeFile(
+      join(root, "unbound-script-chain", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "unbound-script-chain", "app.js"),
+      // A bare chain, never bound to any variable, never inserted — there
+      // is no way to trace whether its result was ever attached anywhere.
+      'document.createElement("script").src = "private.js";',
+    );
+    await writeFile(join(root, "unbound-script-chain", "private.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "unbound-script-chain",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("unbound-script-chain/private.js");
+  });
+
+  it("trims a <base href> before classifying it, so leading whitespace cannot hide an external base as a local directory", async () => {
+    // Leading whitespace before "//evil.example/" would otherwise fail
+    // BOTH the "//" network-path check and the anchored URI_SCHEME_PATTERN
+    // match, letting the href fall through to local-directory resolution —
+    // joining the untrimmed, still-space-prefixed href onto the document's
+    // own directory instead of recognizing it as external. Stage a real
+    // file at exactly that bogus, would-be-resolved local path: only the
+    // untrimmed (buggy) code path can ever find it.
+    await mkdir(join(root, "base-trim-external", " ", "evil.example"), { recursive: true });
+    await writeFile(
+      join(root, "base-trim-external", "index.html"),
+      [
+        '<base href=" //evil.example/">',
+        '<script src="app.js"></script>',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "base-trim-external", " ", "evil.example", "app.js"),
+      "leaked via bogus local base",
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "base-trim-external",
+    );
+
+    // A correctly trimmed, correctly external base resolves NO relative
+    // reference locally at all — the bogus path is never even considered.
+    expect(manifestOf(site)?.assets).not.toContain(
+      "base-trim-external/ /evil.example/app.js",
+    );
+  });
 });

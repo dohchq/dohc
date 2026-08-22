@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -593,6 +594,26 @@ describe("package manager helpers", () => {
     ).toThrow(/loopback/);
   });
 
+  it("rejects an exported declare/typeset/local HOST assignment, but not a plain (non-exported) one", () => {
+    // declare -x/typeset -x/local -x export the assignment to child
+    // processes exactly the same as a bare "export" — combined short
+    // options ("-rx") count too.
+    for (const command of ["declare", "typeset", "local"]) {
+      expect(() =>
+        assertLoopbackOnlyDevServerCommand(command, ["-x", "HOST=0.0.0.0", "vite"]),
+      ).toThrow(/loopback/);
+      expect(() =>
+        assertLoopbackOnlyDevServerCommand(command, ["-rx", "HOST=0.0.0.0", "vite"]),
+      ).toThrow(/loopback/);
+      // A PLAIN declare/typeset/local (no -x) creates a shell-local
+      // variable a child process never sees — vite itself never inherits
+      // this HOST, so it must not be refused.
+      expect(() =>
+        assertLoopbackOnlyDevServerCommand(command, ["HOST=0.0.0.0", "vite"]),
+      ).not.toThrow();
+    }
+  });
+
   it("rejects a HOST/HOSTNAME assignment passed through the env wrapper", () => {
     // GNU env's documented form: env [NAME=VALUE]... [COMMAND [ARG]...] —
     // env itself is not an assignment, so the direct-assignment scan alone
@@ -784,6 +805,75 @@ describe("startSiteDevServer", () => {
           process.kill(descendantPid, "SIGKILL");
         } catch {
           // The fixed teardown already removed it.
+        }
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "waits for every in-flight descendant capture, not just the most recently started one",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
+
+      // A REAL, independent throwaway process this test controls
+      // directly — simulates "a descendant only the SLOW capture will
+      // ever reveal."
+      const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+        stdio: "ignore",
+      });
+      descendant.unref();
+      const descendantPid = descendant.pid;
+      expect(descendantPid).toBeGreaterThan(0);
+
+      let slowResolve!: (pids: number[]) => void;
+      const slow = new Promise<number[]>((resolve) => {
+        slowResolve = resolve;
+      });
+      let callCount = 0;
+      const descendantsReader = async (): Promise<number[]> => {
+        callCount += 1;
+        // The FIRST call — the immediate, post-spawn snapshot — is the
+        // SLOW one: it won't resolve until the test explicitly releases
+        // it, well after later, faster calls have already come and
+        // gone. Every call after it resolves immediately with nothing,
+        // the "later capture that finishes first" half of the race.
+        if (callCount === 1) return slow;
+        return [];
+      };
+
+      try {
+        const handle = await startSiteDevServer({
+          workspaceRoot: root,
+          siteRoot: "site",
+          command: "sh",
+          args: ["-c", "sleep 0.05; echo 'Local: http://127.0.0.1:43298'"],
+          readyTimeoutMs: 5000,
+          descendantCaptureIntervalMs: 10,
+          descendantsReader,
+        });
+
+        // Wait for the wrapper to exit on its own — the "already
+        // exited" path stopChild's own guard short-circuits on, exactly
+        // the one this fix targets. By now several FAST interval ticks
+        // (calls #2+) have already fired and resolved empty while call
+        // #1 is still pending.
+        await new Promise<void>((resolve) => handle.onExit(resolve));
+        expect(callCount).toBeGreaterThan(1);
+
+        const stopped = handle.stop();
+        // Release the slow capture's result only AFTER stop() has
+        // begun — proving stopChild actually WAITS for it instead of
+        // deciding the set is empty from an already-resolved, more-
+        // recently-started call.
+        slowResolve([descendantPid!]);
+        await stopped;
+        expect(await waitForProcessDeath(descendantPid!)).toBe(true);
+      } finally {
+        try {
+          process.kill(descendantPid!, "SIGKILL");
+        } catch {
+          // Already dead — either the fixed teardown reached it, or it
+          // never needed killing.
         }
       }
     },
@@ -1169,7 +1259,11 @@ describe("buildSite", () => {
   // chmod's read bit is only meaningfully enforced by POSIX filesystems —
   // on Windows it toggles the read-only (write) attribute and never denies
   // a read, so this scenario has no faithful equivalent there.
-  it.runIf(process.platform !== "win32")(
+  // Root bypasses the read-permission bit entirely (standard POSIX
+  // semantics), so chmod 0o000 doesn't deny it a read — the scenario
+  // cannot be staged under a root-run suite (Docker-based CI commonly
+  // runs as root).
+  it.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
     "does not report a build output whose index.html exists but cannot be read",
     async () => {
       await mkdir(join(root, "site", "dist"), { recursive: true });
@@ -1183,4 +1277,24 @@ describe("buildSite", () => {
       }
     },
   );
+
+  it("does not report a build output whose index.html symlinks outside the output directory", async () => {
+    // Readable, stat()-follows-symlinks-so-isFile()-passes, and it's still
+    // inside the SITE overall — every earlier check in detectBuildOutput
+    // passes. But the static preview server's own per-request containment
+    // check (staticDirectoryPreview.ts) resolves the SAME entry's real
+    // path and requires it stay inside the OUTPUT directory specifically,
+    // not just the site — buildSite would otherwise report ok: true for
+    // an artifact the preview then serves as a 403/blank page.
+    await mkdir(join(root, "site", "dist"), { recursive: true });
+    await mkdir(join(root, "site", "secret"), { recursive: true });
+    await writeFile(join(root, "site", "secret", "real.html"), "<h1>Escaped</h1>");
+    await symlink(
+      join(root, "site", "secret", "real.html"),
+      join(root, "site", "dist", "index.html"),
+      "file",
+    );
+
+    expect(await detectBuildOutput(join(root, "site"))).toBeNull();
+  });
 });

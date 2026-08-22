@@ -634,6 +634,7 @@ import {
 } from "./workspaces/siteRunner";
 import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
+  assertActiveWorkspaceForSiteRead,
   assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
   createSitePreviewStartRegistry,
@@ -6859,11 +6860,7 @@ function registerIpcHandlers(
     // site paths, titles, diagnostics, and dependency manifests just by
     // naming its id, the same gap startSitePreview/getSitePreviewLogs
     // below already guard against.
-    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
-      throw new Error(
-        "The sites request does not target the active workspace. Open the workspace and try again.",
-      );
-    }
+    assertActiveWorkspaceForSiteRead(activeWorkspaceIdBySender.get(event.sender.id), workspace.workspaceId);
     return ListSitesResult.parse({ sites: await listSitePackages(workspace.rootPath) });
   });
 
@@ -6874,11 +6871,7 @@ function registerIpcHandlers(
     // Same active-workspace check as listSites just above — without it, a
     // stale or compromised renderer can read another workspace's full
     // package-script bodies and share manifest by naming its id.
-    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
-      throw new Error(
-        "The sites request does not target the active workspace. Open the workspace and try again.",
-      );
-    }
+    assertActiveWorkspaceForSiteRead(activeWorkspaceIdBySender.get(event.sender.id), workspace.workspaceId);
     return SitePackageResult.parse(
       await getSitePackage(workspace.rootPath, input.path, undefined, input.effectivePreviewMode),
     );

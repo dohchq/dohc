@@ -295,6 +295,29 @@ describe("site preview lifecycle", () => {
     expect(server.handle.stop).toHaveBeenCalledTimes(1);
   });
 
+  it("stop() reaches an exited record when the caller pins its own handle, the way a workspace switch does", async () => {
+    // stopSitePreviewsForWorkspace (main.ts) calls stop(workspaceId,
+    // siteRoot, handle) for EVERY entry previewsForWorkspace returns —
+    // including exited ones, per that list's own doc comment — pinning
+    // the handle it just read to guard against a newer preview replacing
+    // it mid-iteration. The guard here previously matched on handle
+    // identity AND state === "running" together, so it silently no-oped
+    // for every exited record whenever a caller pinned the handle this
+    // way, even though handle.stop() (stopChild) still needs to run to
+    // reach a descendant captured while the wrapper was alive.
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const server = fakeProcessHandle("http://127.0.0.1:4177/");
+    previews.remember("workspace-1", "site", server.handle);
+    server.exit();
+
+    await previews.stop("workspace-1", "site", server.handle);
+
+    expect(server.handle.stop).toHaveBeenCalledTimes(1);
+    expect(previews.previewsForWorkspace("workspace-1")).toEqual([]);
+  });
+
   it("includes an exited record in previewsForWorkspace so workspace close still reaches it", () => {
     const previews = createSitePreviewLifecycle({
       allowOrigin: allowLoopbackFrameOrigin,

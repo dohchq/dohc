@@ -1634,6 +1634,25 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites does not give an empty dohc.json high confidence, matching workspace-core's own detector", async () => {
+    await withWorkspace(async (ctx) => {
+      // {} parses cleanly (configPath set, no error diagnostic) but
+      // declares no type at all — workspace-core's siteConfidence only
+      // returns "high" for a config reason when it explicitly declares
+      // type: "site"; a valid-but-empty config isn't itself a
+      // high-confidence website signal. Both detectors have to agree on
+      // the SAME dohc.json.
+      await mkdir(join(ctx.root, "empty-config"), { recursive: true });
+      await writeFile(join(ctx.root, "empty-config/dohc.json"), JSON.stringify({}));
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "empty-config");
+      expect(site?.confidence).not.toBe("high");
+    });
+  });
+
   it("detect_sites returns repairable diagnostics for invalid dohc.json", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "broken"), { recursive: true });

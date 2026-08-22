@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { assertActiveWorkspaceForSiteRead } from "./workspaces/sitePreviewLifecycle";
 import { getSitePackage, requireExactSiteRoot } from "./workspaces/sitePackage";
 import { createTestScratch } from "./workspaces/testTemp";
 
@@ -88,22 +89,24 @@ describe("site preview main-process wiring", () => {
     );
   });
 
-  it("wires listSites and getSitePackage to require the active workspace, the same as startSitePreview", () => {
+  it("wires listSites and getSitePackage to call assertActiveWorkspaceForSiteRead before reading", () => {
     // requireWorkspace alone only proves workspaceId names a workspace
     // REGISTERED somewhere in this app instance — not that it's the one
     // THIS sender's own window is currently showing. Without the active-
     // workspace check, a stale or compromised renderer could read another
     // workspace's site paths, titles, diagnostics, and full package-script
-    // bodies just by naming its id — main.ts cannot be imported directly
-    // under Vitest, so this checks the handler's own source text for the
-    // guard, the established pattern this file already uses above.
+    // bodies just by naming its id. main.ts cannot be imported directly
+    // under Vitest, so wiring ORDER is checked against its source text —
+    // the established pattern this file already uses above — but the
+    // guard's own authorized/unauthorized behavior is proven directly
+    // below by importing and calling the real, shared function instead of
+    // reimplementing it inline here (a rename, reformat, or extraction
+    // that keeps calling the same helper leaves this test correct; only
+    // main.ts routing around the call would break it).
     for (const channel of ["listSites", "getSitePackage"]) {
       const handler = handlerSource(channel);
       const workspaceAt = handler.indexOf("const workspace = requireWorkspace(");
-      const guardAt = handler.indexOf(
-        "activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId",
-        workspaceAt,
-      );
+      const guardAt = handler.indexOf("assertActiveWorkspaceForSiteRead(", workspaceAt);
       const readAt = handler.indexOf(
         channel === "listSites" ? "await listSitePackages(" : "await getSitePackage(",
         workspaceAt,
@@ -112,5 +115,15 @@ describe("site preview main-process wiring", () => {
       expect(guardAt).toBeGreaterThan(workspaceAt);
       expect(readAt).toBeGreaterThan(guardAt);
     }
+  });
+
+  it("assertActiveWorkspaceForSiteRead permits a matching sender and rejects a mismatched one", () => {
+    expect(() => assertActiveWorkspaceForSiteRead("workspace-1", "workspace-1")).not.toThrow();
+    expect(() => assertActiveWorkspaceForSiteRead("workspace-2", "workspace-1")).toThrow(
+      /active workspace/i,
+    );
+    expect(() => assertActiveWorkspaceForSiteRead(undefined, "workspace-1")).toThrow(
+      /active workspace/i,
+    );
   });
 });

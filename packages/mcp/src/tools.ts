@@ -2057,8 +2057,13 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   // index.html file — the desktop Sites view and MCP's detect_sites must
   // describe the same project the same way.
   const kind: SiteKind = configPath || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
+  // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
+  // counts toward HIGH confidence when it explicitly DECLARES type: "site"
+  // — a valid-but-empty config ({}) or one for another dohc feature isn't
+  // itself a high-confidence website signal, even though it parsed
+  // cleanly. The two detectors have to agree on the SAME dohc.json.
   const confidence: SiteConfidence =
-    configPath && diagnostics.every((diagnostic) => diagnostic.severity !== "error")
+    validType === "site"
       ? "high"
       : hasIndex || frameworkConfig
         ? "high"
