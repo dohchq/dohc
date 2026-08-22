@@ -3261,6 +3261,65 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("never resurrects a superseded hold's own status for different content that only happens to hash the same as a much earlier failed attempt (round-21 finding 3, A-fail then B-hold then back-to-A)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // A fails to build — lastApprovedAttemptHash remembers A's hash,
+        // the old runtime stays up under recovery.
+        setup.failNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "content A";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approvedA = await setup.pipeline.approve("example-plugin");
+        expect(approvedA.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+
+        // Edited to B — genuinely different content, so the watcher's own
+        // reconcile finds no hash it recognizes and holds for approval,
+        // stopping the old runtime for real. That stop is where the
+        // recovery genuinely ends: A's own attempt hash must not survive
+        // it.
+        await writeFile(setup.entryPath, [
+          'export const marker = "content B";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin/src/index.ts",
+          operation: "update",
+        }]);
+        await setup.pipeline.uninstallPreflight("example-plugin");
+        const heldForB = setup.pipeline.list()[0];
+        expect(heldForB?.status).toBe("disabled-pending-approval");
+        const bSourceHash = heldForB?.sourceHash;
+        expect(bSourceHash).toBeDefined();
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+
+        // Edited back to A — its content hash matches what step one's own
+        // failed attempt recorded, but that recovery is long gone: this
+        // must evaluate A on its own, not resurrect B's exact status
+        // object (which would misreport A's own live content as B's).
+        await writeFile(setup.entryPath, [
+          'export const marker = "content A";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin/src/index.ts",
+          operation: "update",
+        }]);
+        await setup.pipeline.uninstallPreflight("example-plugin");
+        const afterReturnToA = setup.pipeline.list()[0];
+        expect(afterReturnToA?.status).toBe("disabled-pending-approval");
+        expect(afterReturnToA?.sourceHash).not.toBe(bSourceHash);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("keeps the running build's settings and validation after a pre-stop failure", async () => {
       const oldSettings: PluginSettingDeclaration[] = [{
         key: "greeting",
@@ -3477,6 +3536,43 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             setup.pipeline.list()[0]?.hasFailedReplacement === false,
           "Plugin did not clear its failed-replacement fact after the retried build.",
         );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps Retry available through a crash-loop respawn even when the generated manifest cannot be read (round-21 finding 5)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        // captureRecoveredManifest reads this file to populate the
+        // palette's own recovery cache — corrupted here so that read
+        // fails, the way an interrupted publish or a permissions error
+        // would leave it.
+        const liveRoot = join(pluginsDataRoot(setup.fixture), "example-plugin");
+        await writeFile(
+          join(liveRoot, "dohc-plugin.generated.json"),
+          "not valid json",
+        );
+
+        await setup.failEstablishedBuild();
+        // The palette has nothing to show — recoveredManifests never
+        // populated, since the manifest above could not be parsed — but
+        // Retry's own fact must not depend on that.
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(false);
+
+        // A crash-loop respawn between the failure and the fix — the
+        // host's own health reporting, not a rebuild — flips status back
+        // to "ready" even though the replacement this failure owes was
+        // never built (mirrors round-8 finding 3's own respawn).
+        setup.pipeline.noteRuntimeStatus("example-plugin", "crashed");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "starting");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+
+        // Retry must still be offered — an unreadable manifest cost the
+        // palette its preview, not the user their own way back.
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+        expect(rebuilt.ok).toBe(true);
       } finally {
         await setup.pipeline.dispose();
       }

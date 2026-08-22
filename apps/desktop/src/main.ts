@@ -2746,6 +2746,62 @@ const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
+
+/**
+ * Registers a fresh SDK grant for one panel and wires its own file-watch
+ * subscription cleanup to the grant's own abort — the shape
+ * startPluginPanel uses to register a panel the first time, and
+ * reregisterPluginPanels below reuses to restore what a revoke removes
+ * (#779 round 21 finding 6).
+ */
+function registerPluginPanelGrant(input: {
+  senderId: number;
+  generation: number;
+  workspaceId: string;
+  pluginId: string;
+  panelId: string;
+}): ReturnType<typeof pluginPanelSdkAuthorities.register> {
+  const grant = pluginPanelSdkAuthorities.register(input);
+  grant.signal.addEventListener(
+    "abort",
+    () =>
+      pluginWorkspaceEventsByWorkspace
+        .get(input.workspaceId)
+        ?.disposeOwner({
+          kind: "panel",
+          workspaceId: input.workspaceId,
+          pluginId: input.pluginId,
+          panelId: input.panelId,
+        }),
+    { once: true },
+  );
+  return grant;
+}
+
+// Re-establishes a fresh grant for every panel this plugin still has
+// mounted, right after its old one is revoked by a stop that replaces the
+// runtime instead of ending the plugin for good — disable/uninstall never
+// call this; there is no new runtime left for a fresh grant to eventually
+// serve. authorize() already tolerates a live grant through a transient
+// stop on its own, re-checking the host's own current state on every
+// call (proved by pluginPanelSdkAuthority.test.ts's own "transiently
+// stopped runtime" case) — this restores what a full revoke removes that
+// a transient stop never does: a grant at all, since an aborted
+// AbortController can never signal live again.
+function reregisterPluginPanels(workspaceId: string, pluginId: string): void {
+  for (const panel of runningPluginPanels.values()) {
+    if (panel.workspaceId !== workspaceId || panel.pluginId !== pluginId) {
+      continue;
+    }
+    registerPluginPanelGrant({
+      senderId: panel.senderId,
+      generation: panel.generation,
+      workspaceId: panel.workspaceId,
+      pluginId: panel.pluginId,
+      panelId: panel.panelId,
+    });
+  }
+}
 // A plugin's host can be running because the workspace enabled it (install,
 // enable, approve — it should keep running with no panel open at all) or
 // because a panel's own cold start is the only reason it's alive. Only the
@@ -3184,7 +3240,27 @@ async function stopPluginPanelsForSender(senderId: number): Promise<void> {
 // gone, or its guest records outlive the window that opened them (#779
 // round 20 finding 1, finding 2).
 async function stopPluginSurfacesForSender(senderId: number): Promise<void> {
-  destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));
+  const removedWebApps = pluginWebAppViews.removeForSender(senderId);
+  destroyPluginWebAppViews(removedWebApps);
+  // Destroying the view alone leaves its host running for good — the
+  // normal single-webapp stop also checks whether anything else still
+  // claims that host; this sweep must too, once per distinct plugin the
+  // removed views belonged to (#779 round 21 finding 2).
+  const affected = new Map<string, { workspaceId: string; pluginId: string }>();
+  for (const record of removedWebApps) {
+    affected.set(
+      pluginLifecycleKey(record.workspaceId, record.pluginId),
+      record,
+    );
+  }
+  await Promise.all(
+    [...affected.values()].map(({ workspaceId, pluginId }) =>
+      withPluginHostLifecycleLock(
+        pluginLifecycleKey(workspaceId, pluginId),
+        () => stopPluginHostIfUnclaimed(workspaceId, pluginId),
+      ),
+    ),
+  );
   await stopPluginPanelsForSender(senderId);
 }
 
@@ -6870,26 +6946,13 @@ function registerIpcHandlers(
           senderId: sender.id,
           generation,
         });
-        const grant = pluginPanelSdkAuthorities.register({
+        registerPluginPanelGrant({
           senderId: sender.id,
           generation,
           workspaceId: workspace.workspaceId,
           pluginId: input.pluginId,
           panelId: input.panelId,
         });
-        grant.signal.addEventListener(
-          "abort",
-          () =>
-            pluginWorkspaceEventsByWorkspace
-              .get(workspace.workspaceId)
-              ?.disposeOwner({
-                kind: "panel",
-                workspaceId: workspace.workspaceId,
-                pluginId: input.pluginId,
-                panelId: input.panelId,
-              }),
-          { once: true },
-        );
         return StartPluginPanelResult.parse({
           status: "ok",
           url: handle.url,
@@ -7475,10 +7538,15 @@ function registerIpcHandlers(
     pipeline.rebuild(pluginId, {
       // The old grant must not survive the runtime it was authorized
       // against — disable/uninstall already revoke here, rebuild only tore
-      // down web apps (#779 round 18 finding 3). A later SDK call still
-      // re-grants against the new runtime regardless (round-5 split).
+      // down web apps (#779 round 18 finding 3). Unlike disable/uninstall,
+      // rebuild leaves the panel mounted with a new runtime still coming —
+      // an aborted grant can never signal live again on its own, so a
+      // still-mounted panel's next SDK call would otherwise fail forever
+      // instead of the round-5 split's own re-grant (#779 round 21
+      // finding 6).
       onOldRuntimeStopped: () => {
         revokePluginPanels(workspaceId, pluginId);
+        reregisterPluginPanels(workspaceId, pluginId);
         stopPluginWebAppsForPlugin(workspaceId, pluginId);
       },
     }));
@@ -7602,6 +7670,13 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     const senderId = event.sender.id;
     const previousWorkspaceId = activeWorkspaceIdBySender.get(senderId);
+    // Before the set below flips this sender's own entry: this window's
+    // own panels and web apps on the workspace it's leaving are gone
+    // regardless of whether that workspace survives the switch (#779
+    // round 21 finding 4).
+    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+      await stopPluginSurfacesForSender(senderId);
+    }
     preferredWorkspaceId = workspace.workspaceId;
     activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
     if (!activeWorkspaceCleanupHooked.has(event.sender)) {

@@ -202,7 +202,10 @@ describe("plugin web app main-process wiring", () => {
       "async function stopPluginSurfacesForSender(",
     );
     expect(surfacesForSender).toContain(
-      "destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));",
+      "const removedWebApps = pluginWebAppViews.removeForSender(senderId);",
+    );
+    expect(surfacesForSender).toContain(
+      "destroyPluginWebAppViews(removedWebApps);",
     );
 
     const stopWorkspace = functionSource("async function stopPluginWorkspace(");

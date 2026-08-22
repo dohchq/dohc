@@ -98,15 +98,19 @@ describe("plugin panel main-process wiring", () => {
     const serveAt = start.indexOf("startStaticDirectoryPreview(dirname(entryPath)");
     const allowAt = start.indexOf("allowLoopbackFrameOrigin(handle.url)");
     const rememberAt = start.indexOf("runningPluginPanels.set(key");
-    const grantAt = start.indexOf("pluginPanelSdkAuthorities.register({");
-    const disposeAt = start.indexOf(".disposeOwner({", grantAt);
+    const grantAt = start.indexOf("registerPluginPanelGrant({");
 
     expect(serveAt).toBeGreaterThan(-1);
     expect(allowAt).toBeGreaterThan(serveAt);
     expect(rememberAt).toBeGreaterThan(allowAt);
     expect(grantAt).toBeGreaterThan(rememberAt);
-    expect(disposeAt).toBeGreaterThan(grantAt);
-    expect(start).toContain("grant.signal.addEventListener(");
+
+    const grantFn = functionSource("function registerPluginPanelGrant(");
+    const registerAt = grantFn.indexOf("pluginPanelSdkAuthorities.register(input)");
+    const disposeAt = grantFn.indexOf(".disposeOwner({", registerAt);
+    expect(registerAt).toBeGreaterThan(-1);
+    expect(disposeAt).toBeGreaterThan(registerAt);
+    expect(grantFn).toContain("grant.signal.addEventListener(");
     expect(start).toContain("startPluginPanelWithLock(");
     expect(start).toContain("withPluginHostLifecycleLock,");
     expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
@@ -625,9 +629,13 @@ describe("plugin panel main-process wiring", () => {
       "revokePluginPanels(workspaceId, pluginId);",
       rebuildAt,
     );
+    const rebuildReregisterAt = mainSource.indexOf(
+      "reregisterPluginPanels(workspaceId, pluginId);",
+      rebuildRevokeAt,
+    );
     const rebuildStopWebAppsAt = mainSource.indexOf(
       "stopPluginWebAppsForPlugin(workspaceId, pluginId);",
-      rebuildRevokeAt,
+      rebuildReregisterAt,
     );
     // MUTATION (grant straddles the replacement): rebuild without this
     // wire-up leaves a panel's grant against the old runtime live through
@@ -638,7 +646,29 @@ describe("plugin panel main-process wiring", () => {
     // split), pinned behaviorally in pluginPanelSdkAuthority.test.ts.
     expect(rebuildAt).toBeGreaterThan(-1);
     expect(rebuildRevokeAt).toBeGreaterThan(rebuildAt);
-    expect(rebuildStopWebAppsAt).toBeGreaterThan(rebuildRevokeAt);
+    // MUTATION (mounted panel never re-grants): a still-mounted panel
+    // never calls startPluginPanel again on its own, so a revoke with no
+    // fresh registration after it leaves every later SDK call from that
+    // panel failing forever, not just through the runtime swap itself
+    // (#779 round 21 finding 6).
+    expect(rebuildReregisterAt).toBeGreaterThan(rebuildRevokeAt);
+    expect(rebuildStopWebAppsAt).toBeGreaterThan(rebuildReregisterAt);
+
+    const reregisterFn = functionSource(
+      "function reregisterPluginPanels(",
+    );
+    const reregisterFilterAt = reregisterFn.indexOf(
+      "if (panel.workspaceId !== workspaceId || panel.pluginId !== pluginId) {",
+    );
+    const registerCallAt = reregisterFn.indexOf(
+      "registerPluginPanelGrant({",
+      reregisterFilterAt,
+    );
+    // MUTATION (wrong panel re-granted, or none at all): a filter on
+    // anything but this exact plugin's own mounted panels either grants
+    // a panel that was never revoked, or never restores the one that was.
+    expect(reregisterFilterAt).toBeGreaterThan(-1);
+    expect(registerCallAt).toBeGreaterThan(reregisterFilterAt);
   });
 
   it("never tears down a workspace's plugins while another window still has it open (#779 round 19 finding 2)", () => {
@@ -703,12 +733,26 @@ describe("plugin panel main-process wiring", () => {
       "async function stopPluginSurfacesForSender(",
     );
     const webAppsAt = surfacesForSender.indexOf(
-      "destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));",
+      "const removedWebApps = pluginWebAppViews.removeForSender(senderId);",
+    );
+    const destroyAt = surfacesForSender.indexOf(
+      "destroyPluginWebAppViews(removedWebApps);",
+      webAppsAt,
+    );
+    const unclaimedAt = surfacesForSender.indexOf(
+      "stopPluginHostIfUnclaimed(workspaceId, pluginId)",
+      destroyAt,
     );
     const panelsAt = surfacesForSender.indexOf(
       "await stopPluginPanelsForSender(senderId);",
-      webAppsAt,
+      unclaimedAt,
     );
+    // MUTATION (host claim leak): destroying a sender's own web app view
+    // without also checking whether anything else still claims that host
+    // leaves a cold-started process running forever once the window that
+    // started it is gone (#779 round 21 finding 2).
+    expect(destroyAt).toBeGreaterThan(webAppsAt);
+    expect(unclaimedAt).toBeGreaterThan(destroyAt);
     // MUTATION (one surface type left behind): a caller reaching only one
     // of these still starves stopPluginHostIfUnclaimed of the other kind
     // of claim this sender's own window left behind.
@@ -742,5 +786,33 @@ describe("plugin panel main-process wiring", () => {
     // excludeSenderId but never uses it leaves the caller's own workaround
     // above silently defeated.
     expect(excludeAt).toBeGreaterThan(-1);
+  });
+
+  it("cleans the switching window's own surfaces on the workspace it is leaving, before it stops counting as open there (#779 round 21 finding 4)", () => {
+    const open = handler("openWorkspace");
+    const previousAt = open.indexOf(
+      "const previousWorkspaceId = activeWorkspaceIdBySender.get(senderId);",
+    );
+    const switchSurfacesAt = open.indexOf(
+      "if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {",
+      previousAt,
+    );
+    const switchSurfacesCallAt = open.indexOf(
+      "await stopPluginSurfacesForSender(senderId);",
+      switchSurfacesAt,
+    );
+    const setAt = open.indexOf(
+      "activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);",
+      switchSurfacesCallAt,
+    );
+    // MUTATION (switch leaves guest records behind): calling this after
+    // the set above — or not at all — either refuses to see this sender
+    // as having just left the previous workspace, or never cleans its own
+    // panels and web apps there at all. Either way a survivor sharing
+    // that workspace inherits claims this window never released.
+    expect(previousAt).toBeGreaterThan(-1);
+    expect(switchSurfacesAt).toBeGreaterThan(previousAt);
+    expect(switchSurfacesCallAt).toBeGreaterThan(switchSurfacesAt);
+    expect(setAt).toBeGreaterThan(switchSurfacesCallAt);
   });
 });

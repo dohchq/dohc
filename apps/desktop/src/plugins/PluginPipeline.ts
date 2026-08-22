@@ -520,6 +520,13 @@ export class PluginPipeline {
   private readonly operations: PluginPipelineOperations;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
   private recoveredManifests = new Map<string, DohcPluginManifest>();
+  // The fact a build failed with an old runtime still standing in for it —
+  // set whenever captureRecoveredManifest runs, whether or not the
+  // generated manifest it also tries to cache into recoveredManifests
+  // turns out to be readable. hasRecoverableFailure is Retry's own
+  // precondition; recoveredManifests alone is only what the palette has to
+  // show for it (#779 round 21 finding 5).
+  private failedReplacements = new Set<string>();
   private lastApprovedAttemptHash = new Map<string, string>();
   private readonly queues = new Map<string, PluginJobQueue>();
   private readonly uninstallConfirmations = new Map<string, UninstallConfirmation>();
@@ -910,15 +917,11 @@ export class PluginPipeline {
     return this.withCommandClaimsBarrier(pluginId, () =>
       this.enqueueAction(pluginId, async () => {
         const candidate = this.requireValidCandidate(pluginId);
-        const state = this.statuses.get(pluginId);
         // A crash-loop respawn between the failure and this call flips
-        // runtimeStatus — and with it status, via noteRuntimeStatus — back to
-        // whatever the still-running old build reports, even though the
-        // replacement it never built is still owed. recoveredManifests is
-        // the fact that survives that respawn (round-8 finding 3): a build
-        // with no old runtime to preserve never populates it, so status
-        // "failed" alone still covers that case.
-        if (state?.status !== "failed" && !this.recoveredManifests.has(pluginId)) {
+        // status back to whatever the still-running old build reports;
+        // hasRecoverableFailure is the fact that survives it (round-8
+        // finding 3, round-21 finding 1).
+        if (!this.hasRecoverableFailure(pluginId)) {
           return this.failure(
             pluginId,
             pipelineError(
@@ -1578,12 +1581,14 @@ export class PluginPipeline {
     if (verified.kind === "changed") {
       // The plugin's own last approved attempt, not a fresh out-of-band
       // change — buildFromCurrentSource's own retry path accepts this
-      // exact hash too (alsoAcceptHash), one shared rule. A watcher event
-      // that only touches metadata must not hold a still-running,
-      // still-recovering failed build for approval over content nothing
-      // actually changed.
+      // exact hash too (alsoAcceptHash), one shared rule. Gated on
+      // hasRecoverableFailure, the same fact Retry itself requires: once a
+      // later hold genuinely ends this recovery, a stale attempt hash must
+      // not resurrect it for content that only happens to match again
+      // (#779 round 21 finding 3).
       if (
         priorStatus &&
+        this.hasRecoverableFailure(pluginId) &&
         verified.sourceHash === this.lastApprovedAttemptHash.get(pluginId)
       ) {
         this.setStatus(candidate, priorStatus);
@@ -1730,7 +1735,13 @@ export class PluginPipeline {
     } finally {
       lowerBarrier?.();
     }
+    // The old runtime a recovery would have preserved is genuinely gone
+    // now, whatever reason stopped it — the recovery this key stood for
+    // ends here too, or a stale attempt hash could resurrect it later for
+    // content that only happens to match again (#779 round 21 finding 3).
     this.recoveredManifests.delete(pluginId);
+    this.failedReplacements.delete(pluginId);
+    this.lastApprovedAttemptHash.delete(pluginId);
     // The stop already happened — mark it before running its consequences,
     // so a throwing notification can never look like the stop never occurred.
     markStopped?.();
@@ -1997,6 +2008,7 @@ export class PluginPipeline {
       }
 
       this.recoveredManifests.delete(candidate.id);
+      this.failedReplacements.delete(candidate.id);
       return this.success(this.setStatus(candidate, {
         status: input.startRuntime ? "starting" : "disabled",
         disabledReason: input.disabledReasonAfterBuild,
@@ -2172,8 +2184,13 @@ export class PluginPipeline {
    * failure just meant not to trust. Shared by every failure path that can
    * land with an old runtime still serving — one entry point missing this
    * call is how round-8 finding 1 escaped runFullBuild's own version of it.
+   *
+   * Marks failedReplacements before attempting the read: an unreadable or
+   * missing generated manifest must not cost Retry its own availability,
+   * only the palette's manifest to show (#779 round 21 finding 5).
    */
   private async captureRecoveredManifest(pluginId: string): Promise<void> {
+    this.failedReplacements.add(pluginId);
     try {
       const manifestPath = join(
         this.liveRoot(pluginId),
@@ -2195,6 +2212,13 @@ export class PluginPipeline {
       // The existing candidate-manifest fallback remains the best available
       // answer when the live manifest cannot be read.
     }
+  }
+
+  /** Retry's own precondition: a failed build with an old runtime still
+   * standing in for it, whether or not its manifest could be cached. */
+  private hasRecoverableFailure(pluginId: string): boolean {
+    return this.statuses.get(pluginId)?.status === "failed" ||
+      this.failedReplacements.has(pluginId);
   }
 
   private async snapshotOrThrow(
