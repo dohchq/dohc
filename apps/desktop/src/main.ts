@@ -4010,7 +4010,13 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
-    activeWorkspaceId
+    // Same exclusion as stopPluginWorkspace below, for the same reason: this
+    // sender's own entry has not been cleared yet, so without excluding it
+    // here a reload of window A would count window A itself as "another
+    // window" still showing the workspace — stopping window B's still-live
+    // site preview of that same workspace out from under it.
+    activeWorkspaceId &&
+      !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
       ? stopSitePreviewsForWorkspace(activeWorkspaceId)
       : Promise.resolve(),
     closeEngineYDocSessionsForSender(senderId),
