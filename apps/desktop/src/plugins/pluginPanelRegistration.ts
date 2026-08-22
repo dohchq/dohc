@@ -25,6 +25,7 @@ export interface RegisteredPlugin {
 
 export interface PluginRegistrationSource {
   pluginRegistration(pluginId: string): RegisteredPlugin | null;
+  hasUnrecoverableFailedReplacement(pluginId: string): boolean;
 }
 
 export function resolveRegisteredPlugin(
@@ -243,6 +244,16 @@ async function loadValidatedPluginManifest(input: {
   const registered = input.pluginRegistration?.pluginRegistration(input.pluginId);
   let manifest = registered?.manifest;
   if (!manifest) {
+    // A null registration can mean "unknown to this pipeline" (fine to read
+    // the manifest straight off disk) or "this plugin's replacement just
+    // failed and nothing could be recovered" (not fine — that raw manifest
+    // is the failed candidate's own, the exact thing the null was refusing
+    // to serve). Only the second one refuses here (#779 round 23 finding 1).
+    if (input.pluginRegistration?.hasUnrecoverableFailedReplacement(input.pluginId)) {
+      throw new Error(
+        `dohc could not recover plugin "${input.pluginId}"'s last working build to open this. Fix the plugin and retry.`,
+      );
+    }
     const read = await readPluginManifestFile(pluginRoot);
     if (!read.ok) {
       throw new Error(`Plugin manifest is invalid. ${read.diagnostics.join("; ")}`);

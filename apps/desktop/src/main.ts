@@ -1264,6 +1264,12 @@ function nativeWorkspaceSummaries(): WorkspaceSummary[] {
 let preferredWorkspaceId: string | null = null;
 const activeWorkspaceIdBySender = new Map<number, string>();
 const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
+// Bumped once per openWorkspace call for a sender, before its own await —
+// a rapid A→B then A→C both read the same previousWorkspaceId and race to
+// finish, so only the call whose token is still current when it resumes
+// may write activeWorkspaceIdBySender/preferredWorkspaceId (#779 round 23
+// finding 2).
+const workspaceSwitchTokenBySender = new Map<number, number>();
 
 // True while some OTHER window still has this workspace open — the one
 // answer pipeline creation (createOnlyWhile) and every pipeline teardown
@@ -2782,19 +2788,34 @@ function registerPluginPanelGrant(input: {
 // mounted panels — called only where a stop replaces the runtime instead
 // of ending the plugin (rebuild), since a revoked grant's own
 // AbortController can never signal live again on its own.
-function reregisterPluginPanels(workspaceId: string, pluginId: string): void {
-  for (const panel of runningPluginPanels.values()) {
-    if (panel.workspaceId !== workspaceId || panel.pluginId !== pluginId) {
-      continue;
-    }
-    registerPluginPanelGrant({
-      senderId: panel.senderId,
-      generation: panel.generation,
-      workspaceId: panel.workspaceId,
-      pluginId: panel.pluginId,
-      panelId: panel.panelId,
-    });
-  }
+//
+// Each panel's own re-grant runs under that exact panel's start lock —
+// the same one stopPluginPanel holds while it deletes the panel from
+// runningPluginPanels. Without it, a panel closing mid-rebuild could have
+// this function re-register a fresh grant for it between the read here
+// and the locked delete over there, resurrecting a grant for a panel the
+// close already meant to end (#779 round 23 finding 4).
+async function reregisterPluginPanels(
+  workspaceId: string,
+  pluginId: string,
+): Promise<void> {
+  const matches = [...runningPluginPanels.entries()].filter(
+    ([, panel]) => panel.workspaceId === workspaceId && panel.pluginId === pluginId,
+  );
+  await Promise.all(matches.map(([key, panel]) =>
+    withPluginPanelStartLock(key, async () => {
+      // Re-read inside the lock: a close that ran first already deleted
+      // this key, and there is nothing left here to re-grant.
+      if (!runningPluginPanels.has(key)) return;
+      registerPluginPanelGrant({
+        senderId: panel.senderId,
+        generation: panel.generation,
+        workspaceId: panel.workspaceId,
+        pluginId: panel.pluginId,
+        panelId: panel.panelId,
+      });
+    })
+  ));
 }
 // A plugin's host can be running because the workspace enabled it (install,
 // enable, approve — it should keep running with no panel open at all) or
@@ -7540,7 +7561,12 @@ function registerIpcHandlers(
       // finding 6).
       onOldRuntimeStopped: () => {
         revokePluginPanels(workspaceId, pluginId);
-        reregisterPluginPanels(workspaceId, pluginId);
+        void reregisterPluginPanels(workspaceId, pluginId).catch((error: unknown) => {
+          console.warn(
+            `[desktop] failed to re-register plugin panels after a rebuild (plugin ${pluginId})`,
+            error,
+          );
+        });
         stopPluginWebAppsForPlugin(workspaceId, pluginId);
       },
     }));
@@ -7664,6 +7690,12 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     const senderId = event.sender.id;
     const previousWorkspaceId = activeWorkspaceIdBySender.get(senderId);
+    // Claimed before the await below: a second rapid switch from this same
+    // sender bumps this past whatever call is already in flight, so this
+    // call can tell after its own await whether it is still the latest
+    // (#779 round 23 finding 2).
+    const switchToken = (workspaceSwitchTokenBySender.get(senderId) ?? 0) + 1;
+    workspaceSwitchTokenBySender.set(senderId, switchToken);
     // Before the set below flips this sender's own entry: this window's
     // own panels and web apps on the workspace it's leaving are gone
     // regardless of whether that workspace survives the switch (#779
@@ -7676,8 +7708,14 @@ function registerIpcHandlers(
       advanceRendererGeneration(senderId);
       await stopPluginSurfacesForSender(senderId);
     }
-    preferredWorkspaceId = workspace.workspaceId;
-    activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
+    // A→B then A→C both read previousWorkspaceId=A above and raced through
+    // the await — if B's call resumes after C's already assigned C, B's
+    // own assignment here must not overwrite it back (#779 round 23
+    // finding 2).
+    if (workspaceSwitchTokenBySender.get(senderId) === switchToken) {
+      preferredWorkspaceId = workspace.workspaceId;
+      activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
+    }
     if (!activeWorkspaceCleanupHooked.has(event.sender)) {
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
@@ -7685,23 +7723,37 @@ function registerIpcHandlers(
         pluginPanelSdkAuthorities.revokeSender(senderId);
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
+        workspaceSwitchTokenBySender.delete(senderId);
         // This sender's own panels and web apps are gone regardless of
         // whether the workspace itself survives — a survivor sharing it
         // still needs those claims gone, or its guest records outlive the
         // window that opened them (#779 round 20 finding 1).
-        void stopPluginSurfacesForSender(senderId).then(() => {
-          // This sender's own entry is already gone above, so a true
-          // result here means another window, not a stale read of this
-          // one.
-          if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
-            return stopPluginWorkspace(activeWorkspaceId);
+        void (async () => {
+          try {
+            await stopPluginSurfacesForSender(senderId);
+          } catch (error) {
+            console.warn(
+              `[desktop] failed to clean up plugin surfaces for a destroyed window (sender ${senderId})`,
+              error,
+            );
+          } finally {
+            // Run whether or not the stop above succeeded: a rejection
+            // there must not also skip deciding whether this was the
+            // workspace's last open window, or the whole workspace leaks
+            // instead of just this sender's own claims (#779 round 23
+            // finding 3). This sender's own entry is already gone above,
+            // so a true result here means another window, not a stale
+            // read of this one.
+            if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
+              await stopPluginWorkspace(activeWorkspaceId).catch((error: unknown) => {
+                console.warn(
+                  `[desktop] failed to stop an orphaned plugin workspace after a destroyed window (sender ${senderId})`,
+                  error,
+                );
+              });
+            }
           }
-        }).catch((error: unknown) => {
-          console.warn(
-            `[desktop] failed to clean up plugin surfaces for a destroyed window (sender ${senderId})`,
-            error,
-          );
-        });
+        })();
       });
     }
     // Set above, before this read: a true result here means another window

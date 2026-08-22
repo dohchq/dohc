@@ -181,6 +181,11 @@ describe("bootstrap window gate", () => {
       "}).catch((error: unknown) => {",
       whenReadyAt,
     );
+    // A -1 start here would let indexOf search from position 0 instead,
+    // so a mutation that removed or renamed the bootstrap chain itself
+    // could still find some unrelated catch elsewhere and pass (#779
+    // round 24 finding 1).
+    expect(whenReadyAt).toBeGreaterThan(-1);
     expect(catchAt).toBeGreaterThan(whenReadyAt);
     // A throw after the daemon started leaves the gate shut forever, so the
     // continuation must not fail silently.

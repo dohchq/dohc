@@ -310,7 +310,9 @@ describe("plugin panel main-process wiring", () => {
     expect(host).toContain("onStatusChange:");
     expect(host).toContain("revokePluginPanelAuthoritiesForStatus(");
     expect(workspaceOpen).toContain("pluginPanelSdkAuthorities.revokeSender(senderId);");
-    expect(workspaceOpen).toContain("return stopPluginWorkspace(activeWorkspaceId);");
+    expect(workspaceOpen).toContain(
+      "await stopPluginWorkspace(activeWorkspaceId).catch((error: unknown) => {",
+    );
     expect(workspaceOpen).toContain("await stopPluginWorkspace(previousWorkspaceId);");
     expect(willQuit).toContain("pluginPanelSdkAuthorities.revokeAll();");
     expect(willQuit).toContain("const pluginStop = stopAllPluginWorkspaces();");
@@ -670,7 +672,7 @@ describe("plugin panel main-process wiring", () => {
       "revokePluginPanels(workspaceId, pluginId);",
     );
     const rebuildReregisterAt = rebuildBody.indexOf(
-      "reregisterPluginPanels(workspaceId, pluginId);",
+      "void reregisterPluginPanels(workspaceId, pluginId).catch(",
       rebuildRevokeAt,
     );
     const rebuildStopWebAppsAt = rebuildBody.indexOf(
@@ -696,20 +698,37 @@ describe("plugin panel main-process wiring", () => {
     expect(rebuildStopWebAppsAt).toBeGreaterThan(rebuildReregisterAt);
 
     const reregisterFn = functionSource(
-      "function reregisterPluginPanels(",
+      "async function reregisterPluginPanels(",
     );
     const reregisterFilterAt = reregisterFn.indexOf(
-      "if (panel.workspaceId !== workspaceId || panel.pluginId !== pluginId) {",
+      "([, panel]) => panel.workspaceId === workspaceId && panel.pluginId === pluginId,",
+    );
+    const reregisterLockAt = reregisterFn.indexOf(
+      "withPluginPanelStartLock(key, async () => {",
+      reregisterFilterAt,
+    );
+    const reregisterRecheckAt = reregisterFn.indexOf(
+      "if (!runningPluginPanels.has(key)) return;",
+      reregisterLockAt,
     );
     const registerCallAt = reregisterFn.indexOf(
       "registerPluginPanelGrant({",
-      reregisterFilterAt,
+      reregisterRecheckAt,
     );
     // MUTATION (wrong panel re-granted, or none at all): a filter on
     // anything but this exact plugin's own mounted panels either grants
     // a panel that was never revoked, or never restores the one that was.
     expect(reregisterFilterAt).toBeGreaterThan(-1);
-    expect(registerCallAt).toBeGreaterThan(reregisterFilterAt);
+    // MUTATION (rebuild resurrects a closing panel): registering outside
+    // this exact panel's own start lock lets a re-grant land between a
+    // concurrent close's read and its own locked delete from
+    // runningPluginPanels — the same lock stopPluginPanel holds while it
+    // deletes that entry. Without it, or without the re-read after
+    // acquiring it, this can hand a fresh grant to a panel a close already
+    // meant to end (#779 round 23 finding 4).
+    expect(reregisterLockAt).toBeGreaterThan(reregisterFilterAt);
+    expect(reregisterRecheckAt).toBeGreaterThan(reregisterLockAt);
+    expect(registerCallAt).toBeGreaterThan(reregisterRecheckAt);
   });
 
   it("never tears down a workspace's plugins while another window still has it open (#779 round 19 finding 2)", () => {
@@ -722,21 +741,20 @@ describe("plugin panel main-process wiring", () => {
       switchAt,
     );
     const destroyedAt = open.indexOf('event.sender.once("destroyed"');
+    const destroyedTryAt = open.indexOf("try {", destroyedAt);
     const destroyedSurfacesAt = open.indexOf(
-      "void stopPluginSurfacesForSender(senderId).then(() => {",
-      destroyedAt,
+      "await stopPluginSurfacesForSender(senderId);",
+      destroyedTryAt,
     );
+    const destroyedCatchAt = open.indexOf("} catch (error) {", destroyedSurfacesAt);
+    const destroyedFinallyAt = open.indexOf("} finally {", destroyedCatchAt);
     const destroyedGateAt = open.indexOf(
       "if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {",
-      destroyedSurfacesAt,
+      destroyedFinallyAt,
     );
     const destroyedStopAt = open.indexOf(
-      "return stopPluginWorkspace(activeWorkspaceId);",
+      "await stopPluginWorkspace(activeWorkspaceId).catch((error: unknown) => {",
       destroyedGateAt,
-    );
-    const destroyedCatchAt = open.indexOf(
-      "}).catch((error: unknown) => {",
-      destroyedStopAt,
     );
     // MUTATION (cross-window teardown): either gate missing lets one
     // window's switch or close stop a workspace a second window still has
@@ -750,14 +768,21 @@ describe("plugin panel main-process wiring", () => {
     // apps — revoking its SDK grants alone leaves those records alive
     // indefinitely and starves stopPluginHostIfUnclaimed (#779 round 20
     // finding 1).
-    expect(destroyedSurfacesAt).toBeGreaterThan(destroyedAt);
-    expect(destroyedGateAt).toBeGreaterThan(destroyedSurfacesAt);
+    expect(destroyedTryAt).toBeGreaterThan(destroyedAt);
+    expect(destroyedSurfacesAt).toBeGreaterThan(destroyedTryAt);
+    // MUTATION (unhandled rejection): a stop that rejects with no catch
+    // here surfaces as an unhandled promise rejection instead of a logged
+    // warning (#779 round 22 finding 9).
+    expect(destroyedCatchAt).toBeGreaterThan(destroyedSurfacesAt);
+    // MUTATION (a rejecting stop skips the last-window teardown): the
+    // workspace-teardown decision runs in this finally, not only after a
+    // successful stop above — a stop that throws must not also skip
+    // deciding whether this was the workspace's last open window, or the
+    // whole workspace leaks instead of just this sender's own claims
+    // (#779 round 23 finding 3).
+    expect(destroyedFinallyAt).toBeGreaterThan(destroyedCatchAt);
+    expect(destroyedGateAt).toBeGreaterThan(destroyedFinallyAt);
     expect(destroyedStopAt).toBeGreaterThan(destroyedGateAt);
-    // MUTATION (unhandled rejection): this chain is detached with `void`,
-    // so a rejection from either stage without a catch here surfaces as an
-    // unhandled promise rejection instead of a logged warning (#779 round
-    // 22 finding 9).
-    expect(destroyedCatchAt).toBeGreaterThan(destroyedStopAt);
   });
 
   it("stops a departing window's own panels, not a survivor's sharing the same workspace (#779 round 20 finding 1)", () => {
@@ -843,9 +868,13 @@ describe("plugin panel main-process wiring", () => {
     const previousAt = open.indexOf(
       "const previousWorkspaceId = activeWorkspaceIdBySender.get(senderId);",
     );
+    const tokenClaimAt = open.indexOf(
+      "workspaceSwitchTokenBySender.set(senderId, switchToken);",
+      previousAt,
+    );
     const switchSurfacesAt = open.indexOf(
       "if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {",
-      previousAt,
+      tokenClaimAt,
     );
     const generationBumpAt = open.indexOf(
       "advanceRendererGeneration(senderId);",
@@ -855,9 +884,13 @@ describe("plugin panel main-process wiring", () => {
       "await stopPluginSurfacesForSender(senderId);",
       generationBumpAt,
     );
+    const tokenGuardAt = open.indexOf(
+      "if (workspaceSwitchTokenBySender.get(senderId) === switchToken) {",
+      switchSurfacesCallAt,
+    );
     const setAt = open.indexOf(
       "activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);",
-      switchSurfacesCallAt,
+      tokenGuardAt,
     );
     // MUTATION (switch leaves guest records behind): calling this after
     // the set above — or not at all — either refuses to see this sender
@@ -865,7 +898,14 @@ describe("plugin panel main-process wiring", () => {
     // panels and web apps there at all. Either way a survivor sharing
     // that workspace inherits claims this window never released.
     expect(previousAt).toBeGreaterThan(-1);
-    expect(switchSurfacesAt).toBeGreaterThan(previousAt);
+    // MUTATION (rapid switch overwrite): claimed after reading
+    // previousWorkspaceId but before the await below — a second rapid
+    // switch from this sender then bumps past it, so if this call resumes
+    // after that one already finished, the guard below stops it from
+    // overwriting the newer assignment with its own now-stale one (#779
+    // round 23 finding 2).
+    expect(tokenClaimAt).toBeGreaterThan(previousAt);
+    expect(switchSurfacesAt).toBeGreaterThan(tokenClaimAt);
     // MUTATION (in-flight start slips past the sweep): startPluginPanel
     // and startPluginWebApp both re-check the sender's own generation
     // right before they register — bumping it after the sweep instead of
@@ -873,6 +913,11 @@ describe("plugin panel main-process wiring", () => {
     // sweep's own blind spot once it finishes (#779 round 22 finding 3).
     expect(generationBumpAt).toBeGreaterThan(switchSurfacesAt);
     expect(switchSurfacesCallAt).toBeGreaterThan(generationBumpAt);
-    expect(setAt).toBeGreaterThan(switchSurfacesCallAt);
+    // MUTATION (rapid switch overwrite, continued): the assignment itself
+    // must be gated on the same token, not just claimed earlier — an
+    // unguarded set() here is exactly what a resumed, now-stale call would
+    // use to clobber a newer switch's own already-current assignment.
+    expect(tokenGuardAt).toBeGreaterThan(switchSurfacesCallAt);
+    expect(setAt).toBeGreaterThan(tokenGuardAt);
   });
 });

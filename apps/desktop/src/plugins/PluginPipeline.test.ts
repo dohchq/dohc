@@ -3138,6 +3138,32 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("reports no live runtime, not the pre-build status it captured before this attempt started, once the old runtime actually stopped and publish then failed (#779 round 24 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        // publish() rejects only once the build itself has already
+        // succeeded — runFullBuild stops the old runtime before either
+        // publish, so this failure lands after that stop already ran.
+        setup.failNextBuildPublish();
+        await writeFile(setup.entryPath, [
+          'export const marker = "attempted after the old runtime stopped";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+        // The stale pre-build "ready" this attempt captured before it ever
+        // touched anything must not be reported here — nothing is actually
+        // running now.
+        expect(setup.pipeline.list()[0]?.runtimeStatus).toBeNull();
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("keeps the running build's commands after a verify-pass failure (round-8 finding 1)", async () => {
       // The twin of "keeps the running build's commands after a pre-stop
       // failure" above, reached through reconcileApprovedCandidate's
@@ -3609,6 +3635,29 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
         const retried = await setup.pipeline.rebuild("example-plugin");
         expect(retried.ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("publishes the manifest a build actually installed and started, not discovery's own stale candidate, when the source changed again after discovery scanned it (#779 round 23 finding 5)", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        // No handleWatcherEvents call: requireValidCandidate's own
+        // discovery cache still reads oldCommands. approve()'s own
+        // snapshot reads this file directly off disk at build time and
+        // picks up newCommands regardless — that snapshot's manifest, not
+        // discovery's stale copy, is what actually got installed, scanned,
+        // built and started.
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(true);
+        expect(setup.pipeline.list()[0]?.commands).toEqual(newCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
       } finally {
         await setup.pipeline.dispose();
       }

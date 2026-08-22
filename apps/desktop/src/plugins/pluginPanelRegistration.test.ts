@@ -167,6 +167,7 @@ describe("plugin panel registration", () => {
     };
     const pluginRegistration = {
       pluginRegistration: () => recovered,
+      hasUnrecoverableFailedReplacement: () => false,
     };
 
     await expect(loadPluginPanelRegistration({
@@ -196,6 +197,39 @@ describe("plugin panel registration", () => {
       webAppId: "old-app",
       pluginRegistration,
     })).rejects.toThrow(/Invalid asset path|escapes the workspace/);
+  });
+
+  it("refuses to open a panel or web app from the failed candidate's own manifest when nothing could be recovered (#779 round 23 finding 1)", async () => {
+    const workspace = await scratch("dohc-plugin-panel-workspace-");
+    const pluginRoot = join(workspace, "plugins", "hello-plugin");
+    // The on-disk manifest here is the failed, never-approved candidate's
+    // own — reachable only because loadValidatedPluginManifest's raw-read
+    // fallback would otherwise happily read it once pluginRegistration()
+    // itself refuses with null.
+    await writePlugin(pluginRoot);
+    const pluginRegistration = {
+      pluginRegistration: () => null,
+      hasUnrecoverableFailedReplacement: () => true,
+    };
+
+    await expect(loadPluginPanelRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      panelId: "main",
+      pluginRegistration,
+    })).rejects.toThrow(
+      /could not recover plugin "hello-plugin"'s last working build/,
+    );
+    await expect(loadPluginWebAppRegistration({
+      workspaceRoot: workspace,
+      pluginRoot,
+      pluginId: "hello-plugin",
+      webAppId: "app",
+      pluginRegistration,
+    })).rejects.toThrow(
+      /could not recover plugin "hello-plugin"'s last working build/,
+    );
   });
 
   it("refuses a plugin root outside the workspace", async () => {
@@ -341,6 +375,7 @@ describe("plugin panel registration", () => {
     };
     const pipeline = {
       pluginRegistration: () => currentRegistration,
+      hasUnrecoverableFailedReplacement: () => false,
     };
     const remembered = new Map([["hello-plugin", oldRegistration]]);
 

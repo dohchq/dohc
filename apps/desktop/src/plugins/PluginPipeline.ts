@@ -737,6 +737,20 @@ export class PluginPipeline {
   }
 
   /**
+   * True exactly when pluginRegistration() above just refused to serve this
+   * plugin because its replacement failed with nothing recoverable — not
+   * when the plugin is simply unknown to this pipeline. A caller reading a
+   * null registration back needs this distinction: falling back to its own
+   * last-known-good record is right for "unknown," but reading the failed
+   * candidate's own raw manifest straight off disk instead is exactly what
+   * pluginRegistration()'s own refusal was for (#779 round 23 finding 1).
+   */
+  hasUnrecoverableFailedReplacement(pluginId: string): boolean {
+    return this.failedReplacements.has(pluginId) &&
+      !this.recoveredManifests.has(pluginId);
+  }
+
+  /**
    * Resolves an absolute workspace path to the id of the discovered plugin
    * whose root contains it, or null when no plugin owns that path. Lets a
    * door-attributed write (main.ts's writeAuthoredText) tell this pipeline
@@ -2025,6 +2039,17 @@ export class PluginPipeline {
 
       this.recoveredManifests.delete(candidate.id);
       this.failedReplacements.delete(candidate.id);
+      // Discovery's own cached candidate for this id can be stale by now —
+      // a source edit made again right after discovery's last scan (but
+      // before this exact snapshot was taken) still lands in the snapshot,
+      // just not in that cache. Refreshed here so pluginRegistration()
+      // (and anything else that reads this.discovery) is accurate right
+      // away instead of only after the next watcher rescan happens to run.
+      // A later rescan still wins normally, the same as any other edit
+      // (#779 round 23 finding 5).
+      this.discovery = this.discovery.map((entry) =>
+        entry.id === candidate.id ? { ...entry, manifest } : entry
+      );
       return this.success(this.setStatus(candidate, {
         status: input.startRuntime ? "starting" : "disabled",
         disabledReason: input.disabledReasonAfterBuild,
@@ -2034,12 +2059,20 @@ export class PluginPipeline {
         installedBaselineHash: snapshot.sourceHash,
         warnings,
         error: null,
-      }));
+      }, manifest));
     } catch (error) {
       await unpublishedSource?.discard().catch(() => undefined);
       const detail = error instanceof PipelineFailure
         ? error.detail
         : pipelineError("runtime", "pipeline-failed", errorMessage(error));
+      // oldRuntime was read before this attempt touched anything. When
+      // oldRuntimeStopped is also true, this attempt genuinely stopped it
+      // before publish or start then failed — oldRuntime's own pre-build
+      // status would otherwise claim a runtime that is now gone. Reading
+      // the host directly reports what is actually running at the moment
+      // of failure instead (#779 round 24 finding 2).
+      const currentRuntimeStatus =
+        this.options.pluginHost.getStatus(candidate.id) ?? null;
       if (input.freshInstall && oldRuntime === null) {
         await this.operations.mutateRecord(
           this.options.stateDir,
@@ -2067,7 +2100,7 @@ export class PluginPipeline {
         }
         this.setStatus(candidate, {
           status: "failed",
-          runtimeStatus: oldRuntime,
+          runtimeStatus: currentRuntimeStatus,
           sourceHash,
           error: detail,
           // The recovery cache above can still come back empty (an
@@ -2680,6 +2713,14 @@ export class PluginPipeline {
   private setStatus(
     candidate: InstalledPluginRecord,
     patch: Partial<PluginPipelinePluginStatus>,
+    // The manifest a build actually installed, scanned and built, when this
+    // call reports on one. Discovery's own candidate.manifest can be stale
+    // by then — a plugin's own on-disk manifest can change again after
+    // discovery scanned it but before this exact snapshot was taken and
+    // built, and only that snapshot's manifest is what is now running.
+    // Left undefined, every derivation below falls back to
+    // candidate.manifest exactly as it always has (#779 round 23 finding 5).
+    builtManifest?: DohcPluginManifest,
   ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
     // A failed replacement with no recovered manifest must not treat its
@@ -2688,7 +2729,16 @@ export class PluginPipeline {
     // every derivation below back to the prior status's own contributions
     // instead (#779 round 22 finding 5).
     const authoritativeManifest = this.recoveredManifests.get(candidate.id) ??
-      (this.failedReplacements.has(candidate.id) ? null : candidate.manifest);
+      (this.failedReplacements.has(candidate.id)
+        ? null
+        : (builtManifest ?? candidate.manifest));
+    // Only the manifest content this call reports on should prefer
+    // builtManifest — directoryName/rootPath/valid below stay tied to the
+    // real discovery candidate, which is what identifies the plugin on
+    // disk, not what it built.
+    const metadataSource: InstalledPluginRecord = builtManifest
+      ? { ...candidate, manifest: builtManifest }
+      : candidate;
     const next: PluginPipelinePluginStatus = {
       ...current,
       ...patch,
@@ -2709,7 +2759,7 @@ export class PluginPipeline {
       // synthetic candidate (failure()'s fallback, a sourceless uninstall),
       // which has no manifest to read. The status keeps the name and icon it
       // already carried rather than losing them mid-action.
-      ...(candidate.manifest ? manifestMetadata(candidate) : {}),
+      ...(metadataSource.manifest ? manifestMetadata(metadataSource) : {}),
       settings: authoritativeManifest
         ? manifestSettings(authoritativeManifest)
         : current.settings,
