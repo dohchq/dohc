@@ -239,7 +239,7 @@ describe("plugin web app main-process wiring", () => {
   it("clears the guest partition's storage after a successful uninstall, only once no installed claimant survives", () => {
     const uninstall = handler("uninstallPlugin");
     const uninstallCallAt = uninstall.indexOf(
-      "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
+      "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
     );
     const idStillOwnedAt = uninstall.indexOf(
       "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
@@ -302,7 +302,7 @@ describe("plugin web app main-process wiring", () => {
       firstRevokeAt,
     );
     const uninstallCallAt = uninstall.indexOf(
-      "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
+      "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
       firstStopAt,
     );
     const settledGuardAt = uninstall.indexOf(

@@ -2557,7 +2557,14 @@ export const PluginSizesPayload = PluginActionPayload.extend({
 }).strict();
 export type PluginSizesPayload = z.infer<typeof PluginSizesPayload>;
 
+// directoryName is what confirmationToken alone cannot name apart: two rows
+// can share an id (a broken manifest's directory-derived fallback colliding
+// with some other, unrelated plugin's real id), and each row's own
+// preflight confirmation has to be resolved by the exact row it was issued
+// for, not whichever row this id happens to name second (#779-offers round
+// 22 finding 4).
 export const UninstallPluginPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
   confirmationToken: z.uuid(),
 }).strict();
 export type UninstallPluginPayload = z.infer<typeof UninstallPluginPayload>;

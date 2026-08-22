@@ -30,6 +30,7 @@ import type {
 } from "./pluginManifestSchema";
 import {
   readPluginSettingsFile,
+  renamePluginSettingsEntry,
   resolvePluginSettings,
   savePluginSettings,
 } from "./pluginSettingsFile";
@@ -456,6 +457,18 @@ function pluginTreeEvent(event: WatcherEvent): boolean {
 
 function candidateKey(candidate: InstalledPluginRecord): string {
   return `${candidate.id}\0${resolve(candidate.rootPath)}`;
+}
+
+// Two rows can share an id (a broken manifest's directory-derived fallback
+// colliding with some other, unrelated plugin's real id), each with its
+// own open uninstall confirmation dialog. Keying uninstallConfirmations by
+// pluginId alone let a SECOND row's preflight silently overwrite the
+// FIRST's still-open confirmation — confirming the first dialog would
+// either fail on a token that no longer matches, or worse, go on to
+// resolve and delete whatever row the SECOND preflight actually named
+// (#779-offers round 22 finding 4).
+function uninstallConfirmationKey(pluginId: string, directoryName: string): string {
+  return `${pluginId}\0${directoryName}`;
 }
 
 export class PluginPipeline {
@@ -1024,7 +1037,7 @@ export class PluginPipeline {
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
         const confirmationToken = randomUUID();
-        this.uninstallConfirmations.set(pluginId, {
+        this.uninstallConfirmations.set(uninstallConfirmationKey(pluginId, directoryName), {
           token: confirmationToken,
           pluginRoot: sourcePresent ? resolve(pluginRoot) : null,
           liveHash: preflight.liveHash,
@@ -1050,11 +1063,13 @@ export class PluginPipeline {
 
   uninstall(
     pluginId: string,
+    directoryName: string,
     confirmationToken: string,
   ): Promise<PluginPipelineActionResult> {
     return this.enqueueAction(pluginId, async () => {
-      const confirmation = this.uninstallConfirmations.get(pluginId);
-      this.uninstallConfirmations.delete(pluginId);
+      const confirmationKey = uninstallConfirmationKey(pluginId, directoryName);
+      const confirmation = this.uninstallConfirmations.get(confirmationKey);
+      this.uninstallConfirmations.delete(confirmationKey);
       if (!confirmation || confirmation.token !== confirmationToken) {
         return this.failure(
           pluginId,
@@ -1551,6 +1566,12 @@ export class PluginPipeline {
     const replaced = new Set<string>();
     const departing: InstalledPluginRecord[] = [];
     const replacements: InstalledPluginRecord[] = [];
+    // The new directoryName a departing id's OWN settings entry should
+    // move to — set only when this exact id reappears, within this same
+    // batch, under a different directory: the one case the pipeline can
+    // prove is a rename rather than an unrelated departure and a
+    // coincidental later arrival (#779-offers round 22 finding 1).
+    const renamedDirectory = new Map<string, string>();
 
     for (const oldCandidate of previousValid) {
       const sameId = nextById.get(oldCandidate.id);
@@ -1576,6 +1597,9 @@ export class PluginPipeline {
       }
 
       departing.push(oldCandidate);
+      if (sameId && sameId.directoryName !== oldCandidate.directoryName) {
+        renamedDirectory.set(oldCandidate.id, sameId.directoryName);
+      }
       const replacement = sameRoot ?? sameId;
       if (
         replacement?.valid &&
@@ -1601,7 +1625,7 @@ export class PluginPipeline {
     // record and host status under that same id).
     for (const oldCandidate of departing) {
       await this.enqueueActionValue(oldCandidate.id, () =>
-        this.removeOldIdentity(oldCandidate));
+        this.removeOldIdentity(oldCandidate, renamedDirectory.get(oldCandidate.id)));
     }
     // The old identity's approval never carries to the replacement
     // (CERT779 A4): a manifest-name change or root swap is a new identity,
@@ -1779,7 +1803,10 @@ export class PluginPipeline {
     });
   }
 
-  private async removeOldIdentity(candidate: InstalledPluginRecord): Promise<void> {
+  private async removeOldIdentity(
+    candidate: InstalledPluginRecord,
+    renamedToDirectoryName?: string,
+  ): Promise<void> {
     try {
       await this.options.pluginHost.stop(candidate.id);
       await this.operations.mutateRecord(
@@ -1788,11 +1815,24 @@ export class PluginPipeline {
         candidate.id,
         () => undefined,
       );
+      // Only ever set for the one case processWatcherBatch can itself
+      // prove is a rename — this exact id reappearing, in this same
+      // batch, under a different directory — not a guess this method
+      // makes on its own (#779-offers round 22 finding 1).
+      if (renamedToDirectoryName !== undefined) {
+        await renamePluginSettingsEntry(
+          this.workspaceRoot,
+          candidate.directoryName,
+          renamedToDirectoryName,
+        );
+      }
       await this.removePluginData(candidate.id);
       this.statuses.delete(candidate.id);
       this.doorWrittenDeltas.delete(candidate.id);
       this.sourceChangedDuringInstall.delete(candidate.id);
-      this.uninstallConfirmations.delete(candidate.id);
+      this.uninstallConfirmations.delete(
+        uninstallConfirmationKey(candidate.id, candidate.directoryName),
+      );
       this.emit({ kind: "removed", pluginId: candidate.id });
     } catch (error) {
       const detail = pipelineError(

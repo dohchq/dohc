@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   PluginStatusChangedEvent,
@@ -385,6 +386,7 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "uninstall-plugin",
+      directoryName: "uninstall-plugin",
       confirmationToken: "00000000-0000-4000-8000-000000000001",
     });
   });
@@ -423,6 +425,7 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "codex",
+      directoryName: "codex-a",
       confirmationToken: "00000000-0000-4000-8000-000000000001",
     });
 
@@ -541,13 +544,14 @@ describe("PluginDetailsPage", () => {
     expect(screen.queryByText("New Occupant")).toBeNull();
   });
 
-  // Round 21 finding 1: a rename has temporal continuity — the id-only
-  // fallback's candidate appears in the SAME transition where the tab's
-  // own exact row vanishes. A same-id row that only lands in some LATER,
-  // separate refresh — after the tab has already shown "removed" for at
-  // least one render in between — is an unrelated plugin that happened to
-  // install under that id afterward, never a rename target.
-  it("stays on removed when a same-id plugin is added later, elsewhere, after a genuine remove", async () => {
+  // Round 21 finding 1, reconciled round 22 finding 3: a real watcher
+  // rename's delete and create can land as two separate listing
+  // transitions rather than one, so the id-only fallback allows a same-id
+  // arrival in the render immediately after the removal too (the next two
+  // tests). Beyond that one render of slack, a same-id row is an unrelated
+  // plugin that happened to install under that id afterward, never a
+  // rename target.
+  it("stays on removed when a same-id plugin is added later, elsewhere, well after a genuine remove", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
       plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
@@ -565,9 +569,19 @@ describe("PluginDetailsPage", () => {
       expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
     );
 
+    // An unrelated transition — nothing to do with "foo" — carries the tab
+    // past the one render of slack a genuine two-transition rename gets.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("bar", { directoryName: "bar-dir", displayName: "Bar" }),
+      });
+    });
+
     // A separate, LATER install lands under the same id at a different
-    // directory — a distinct transition from the remove above, not the
-    // same update renaming the original row.
+    // directory — well beyond the window, not the next transition after
+    // the remove above.
     act(() => {
       statusListener?.({
         kind: "changed",
@@ -578,6 +592,84 @@ describe("PluginDetailsPage", () => {
 
     expect(screen.getByTestId("plugin-details-missing")).toBeTruthy();
     expect(screen.queryByText("Unrelated Later")).toBeNull();
+  });
+
+  // Round 22 finding 3: a directory watcher does not always coalesce a
+  // rename's delete and create into one listing transition — the pipeline
+  // itself can only prove a rename within one batch (PluginPipeline.ts's
+  // processWatcherBatch), so a split-batch rename reaches the renderer as
+  // "removed" now, then a plain "changed" add one render later. This must
+  // still be followed: it is the ordinary shape a real rename takes, not
+  // an edge case.
+  it("follows a genuine rename that reaches the renderer as removed, then added one render later", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    renderPage("foo", "ws-1", "old-folder");
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    act(() => {
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo" });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+
+    // The other half of the same rename, one transition later — not a
+    // stranger arriving afterward.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "new-folder", displayName: "Renamed" }),
+      });
+    });
+
+    expect(await screen.findByText("Renamed")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
+  });
+
+  // Round 22 finding 2: React can call a component's render body more than
+  // once for one eventual commit (StrictMode's double-invoke in
+  // development, or an interrupted concurrent render) — refs are never
+  // rolled back between those calls the way state is. Advancing
+  // rendersSinceExactRef during render, rather than in a post-commit
+  // effect, would let the FIRST call for the "removed" transition count it
+  // once, and a SECOND call for that very same transition count it again
+  // — the window closing one render early and wrongly rejecting the
+  // genuine two-transition rename finding 3 exists to allow.
+  it("still follows a genuine two-transition rename under React's double-invoked renders", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    render(
+      <StrictMode>
+        <PluginDetailsPage workspaceId="ws-1" pluginId="foo" directoryName="old-folder" />
+      </StrictMode>,
+    );
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    act(() => {
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo" });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "new-folder", displayName: "Renamed" }),
+      });
+    });
+
+    expect(await screen.findByText("Renamed")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
   });
 
   it("offers Remove for a plugin that was added but never installed, and restores its offer on confirm", async () => {
@@ -620,6 +712,7 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "codex",
+      directoryName: "codex",
       confirmationToken: "00000000-0000-4000-8000-000000000001",
     });
     // The directory this page showed is gone.

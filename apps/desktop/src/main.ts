@@ -7492,7 +7492,7 @@ function registerIpcHandlers(
         stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
       }
       const result = PluginActionResult.parse(
-        await pipeline.uninstall(input.pluginId, input.confirmationToken),
+        await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),
       );
       // Settled: whether the row confirmationToken actually named WAS this
       // id's installed claimant, now decided for certain instead of

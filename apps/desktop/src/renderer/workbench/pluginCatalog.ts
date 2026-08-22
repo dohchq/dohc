@@ -817,6 +817,7 @@ export function usePluginCatalog(
       const result = await bridge().uninstallPlugin({
         workspaceId,
         pluginId,
+        directoryName: currentConfirmation.plugin.directoryName,
         confirmationToken: currentConfirmation.confirmationToken,
       });
       if (epoch !== workspaceEpoch.current) return;

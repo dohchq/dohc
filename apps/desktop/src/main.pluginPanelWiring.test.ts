@@ -340,7 +340,7 @@ describe("plugin panel main-process wiring", () => {
       "revokePluginPanels(input.workspaceId, input.pluginId);",
     );
     const uninstallCallAt = uninstall.indexOf(
-      "await pipeline.uninstall(input.pluginId, input.confirmationToken),",
+      "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
     );
 
     // MUTATION (ordering): revoking after the pipeline call leaves an

@@ -221,6 +221,36 @@ export function savePluginSettings(
   });
 }
 
+/**
+ * Moves one plugin's stored answers from its old directoryName key to its
+ * new one, in place. Settings are keyed by directoryName (#779-offers round
+ * 18 finding 4), so a genuine rename — the same plugin id, relocated to a
+ * new directory — leaves its entry filed under a key nothing reads anymore:
+ * silently reset to defaults, not actually lost, until this runs. Called
+ * only where the pipeline itself has proven the rename (the same id
+ * reappearing under a new directoryName within one watcher batch); no
+ * caller here has to re-derive that proof. A no-op when there is nothing
+ * stored under the old key, or the names are the same (#779-offers round
+ * 22 finding 1).
+ */
+export function renamePluginSettingsEntry(
+  workspaceRoot: string,
+  fromDirectoryName: string,
+  toDirectoryName: string,
+): Promise<void> {
+  if (fromDirectoryName === toDirectoryName) return Promise.resolve();
+  return queueWrite(workspaceRoot, async () => {
+    const stored = await readPluginSettingsFile(workspaceRoot);
+    const entry = stored[fromDirectoryName];
+    if (entry === undefined) return;
+    const { [fromDirectoryName]: _moved, ...rest } = stored;
+    await writePluginSettingsFile(workspaceRoot, {
+      ...rest,
+      [toDirectoryName]: entry,
+    });
+  });
+}
+
 function settingTypeName(setting: PluginSettingDeclaration): string {
   switch (setting.type) {
     case "select":
