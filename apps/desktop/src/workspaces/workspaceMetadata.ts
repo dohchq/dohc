@@ -36,6 +36,9 @@ export async function resolveWorkspaceMetadataDir(rootPath: string): Promise<str
   }
   // Belt and braces: with the root resolved and .dohc a real directory the
   // resolved dir IS the joined path; anything else means an escape.
+  // Deliberately NOT security/pathContainment's isInside: that predicate
+  // counts the root itself as inside, and a .dohc that resolves TO the root
+  // must stay refused. This wants "unchanged, or a proper descendant".
   const realDir = await realpath(dir);
   if (realDir !== dir && !realDir.startsWith(realRoot + sep)) {
     throw new Error(outsideWorkspaceRefusal(DOHC_METADATA_GUARD));

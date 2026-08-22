@@ -24,6 +24,7 @@ import {
   clearPendingMaterializationPaths,
   clearPullInFlightMarker,
   readPendingMaterializationPaths,
+  resolvedShareViewTarget,
   SharePinInvalidError,
   materializeSharedViewPaths,
   readCollisionRecordPaths,
@@ -5526,5 +5527,19 @@ describe("shareViewIdentitySelector", () => {
       versionId: null,
       access: "comment",
     });
+  });
+});
+
+describe("containment of '..'-prefixed names", () => {
+  it("resolves a shared-view target under a directory whose NAME starts with '..'", async () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this target is refused as an escape — "..cache"
+    // is a real contained name, not traversal.
+    const root = await createTestScratch("dohc-shared-view-dotdot-");
+    await mkdir(join(root, "..cache"), { recursive: true });
+    await writeFile(join(root, "..cache", "x.md"), "cached");
+    await expect(resolvedShareViewTarget(root, "..cache/x.md")).resolves.toBe(
+      join(root, "..cache", "x.md"),
+    );
   });
 });

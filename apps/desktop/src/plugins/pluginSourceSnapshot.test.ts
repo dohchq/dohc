@@ -951,3 +951,21 @@ describe("plugin timeout limits sit beyond measured healthy work", () => {
     );
   });
 });
+
+describe("containment of '..'-prefixed names", () => {
+  it("snapshots a source file under a directory whose NAME starts with '..'", async () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this contained entry is refused as unsafe —
+    // "..cache" is a real contained name, not traversal.
+    const fixture = await createPluginFixture();
+    await mkdir(join(fixture.pluginRoot, "..cache"));
+    await writeFile(join(fixture.pluginRoot, "..cache", "extra.ts"), "export const x = 1;\n");
+
+    requireSuccess(await runSnapshot(fixture));
+
+    await expect(readFile(
+      join(liveSnapshotRoot(fixture), "..cache", "extra.ts"),
+      "utf8",
+    )).resolves.toBe("export const x = 1;\n");
+  });
+});

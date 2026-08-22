@@ -1392,6 +1392,14 @@ describe("buildSite", () => {
     await mkdir(join(root, "site", "custom"), { recursive: true });
     await writeFile(join(root, "site", "custom", "index.html"), "<h1>Custom</h1>");
     expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(join(root, "site", "custom"));
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this contained output is refused — "..cache" is
+    // a real contained name, not traversal.
+    await mkdir(join(root, "site", "..cache"), { recursive: true });
+    await writeFile(join(root, "site", "..cache", "index.html"), "<h1>Cache-built</h1>");
+    expect(await detectBuildOutput(join(root, "site"), "..cache")).toBe(
+      join(root, "site", "..cache"),
+    );
     await mkdir(join(root, "outside"), { recursive: true });
     expect(await detectBuildOutput(join(root, "site"), "../outside")).toBeNull();
     expect(await detectBuildOutput(join(root, "site"))).toBeNull();

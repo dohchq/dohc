@@ -60,7 +60,8 @@ import {
   writePluginBaselineManifest,
   type PluginUninstallPreflightSummary,
 } from "./pluginUninstallPreflight";
-import { errorMessage, isInside } from "./pluginShared";
+import { isInside } from "../security/pathContainment";
+import { errorMessage } from "./pluginShared";
 
 export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
 

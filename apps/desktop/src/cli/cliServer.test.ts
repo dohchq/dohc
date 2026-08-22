@@ -34,6 +34,7 @@ import {
   cliThreadId,
   disposeCliServerRuntime,
   handleCliRequestLine,
+  resolveCliWorkspace,
   restoreCliServerRuntime,
   startCliServer,
   type CliRegistryWorkspace,
@@ -3255,5 +3256,27 @@ describe("CLI socket server", () => {
     expect((await stat(server!.socketPath)).mode & 0o777).toBe(0o600);
     expect(calls.openWorkspace).toBe(0);
     expect(errors).toEqual([]);
+  });
+});
+
+describe("resolveCliWorkspace", () => {
+  it("resolves a cwd under a '..'-prefixed directory NAME inside the root", () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this cwd stops resolving — "..cache" is a real
+    // contained name, not traversal.
+    const workspace: CliRegistryWorkspace = {
+      workspaceId: "ws-1",
+      rootPath: join(process.cwd(), "cli-root"),
+    };
+    const cwd = join(workspace.rootPath, "..cache", "deep");
+    expect(resolveCliWorkspace(cwd, [workspace])).toBe(workspace);
+  });
+
+  it("does not resolve a sibling that only shares the root as a name prefix", () => {
+    const workspace: CliRegistryWorkspace = {
+      workspaceId: "ws-1",
+      rootPath: join(process.cwd(), "cli-root"),
+    };
+    expect(resolveCliWorkspace(`${workspace.rootPath}-sibling`, [workspace])).toBeNull();
   });
 });

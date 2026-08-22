@@ -163,3 +163,21 @@ describe("applyDatabaseEdit", () => {
     expect(reopened.tables.find((t) => t.name === "transactions")?.rows).toHaveLength(1);
   });
 });
+
+describe("containment of '..'-prefixed names", () => {
+  it("materializes a database under a directory whose NAME starts with '..'", async () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this import is refused as an escape — "..cache"
+    // is a real contained name, not traversal.
+    const result = await importToDatabase(
+      root,
+      "imports/wallet.csv",
+      "..cache/wallet.sqlite",
+      "transactions",
+    );
+    expect(result.rowCount).toBe(2);
+
+    const snapshot = await readDatabaseSnapshot(root, "..cache/wallet.sqlite");
+    expect(snapshot.tables.find((t) => t.name === "transactions")?.rows).toHaveLength(2);
+  });
+});

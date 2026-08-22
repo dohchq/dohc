@@ -1060,3 +1060,14 @@ describe("import surfaces a vanished source instead of skipping it", () => {
     }
   });
 });
+
+describe("containment of '..'-prefixed names", () => {
+  it("creates a file under a directory whose NAME starts with '..'", async () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this create is refused as an escape — "..cache"
+    // is a real contained name, not traversal.
+    const path = await createFile(root, "..cache/today.md", "cached text");
+    expect(path).toBe("..cache/today.md");
+    expect(await readFile(join(root, "..cache", "today.md"), "utf8")).toBe("cached text");
+  });
+});

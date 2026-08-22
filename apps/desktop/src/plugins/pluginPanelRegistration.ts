@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
+import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import {
   CLAIMS_DRAINING_ERROR_CODE,
@@ -270,15 +271,11 @@ function workspaceRelativePluginRoot(
   pluginRoot: string,
 ): string {
   if (!isAbsolute(pluginRoot)) return pluginRoot;
-  const resolved = relative(workspaceRoot, pluginRoot);
-  if (resolved.length === 0) return ".";
-  if (
-    isAbsolute(resolved) ||
-    resolved === ".." ||
-    resolved.startsWith(`..${sep}`)
-  ) {
+  if (!isInside(workspaceRoot, pluginRoot)) {
     throw new Error(`Plugin root escapes the workspace: ${pluginRoot}.`);
   }
+  const resolved = relative(workspaceRoot, pluginRoot);
+  if (resolved.length === 0) return ".";
   return resolved.replaceAll("\\", "/");
 }
 

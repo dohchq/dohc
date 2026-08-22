@@ -50,7 +50,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import {
-  isAbsolute,
   join,
   relative,
   resolve,
@@ -58,6 +57,7 @@ import {
 } from "node:path";
 import { Worker } from "node:worker_threads";
 import { z } from "zod";
+import { isInside } from "../security/pathContainment";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
 export const CLI_TOKEN_FILE = "dohc-cli-token";
@@ -251,12 +251,6 @@ const requireModule = createRequire(import.meta.url);
 
 function nodeSqlite(): SqliteModule {
   return requireModule("node:sqlite") as SqliteModule;
-}
-
-function isInside(parent: string, child: string): boolean {
-  const rel = relative(parent, child);
-  return rel === "" ||
-    (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
 export function resolveCliWorkspace(

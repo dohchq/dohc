@@ -376,6 +376,20 @@ describe("buildPluginBundle", () => {
     await expectNoStaging(fixture.liveRoot);
   });
 
+  it("accepts an entry under a '..'-prefixed directory NAME inside the snapshot", async () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this contained entry is refused as invalid-entry —
+    // "..cache" is a real contained name, not traversal.
+    const fixture = await createBuildFixture({
+      entry: "..cache/index.ts",
+      entrySource: 'export const marker = "dot-dot-run";\nexport default { marker };\n',
+    });
+
+    const success = requireSuccess(await buildPluginBundle(fixture.input));
+    await success.publish();
+    expect(await readFile(success.bundlePath, "utf8")).toContain("dot-dot-run");
+  });
+
   it("refuses a source root that belongs to another plugin (CERT779J B3.1)", async () => {
     const fixture = await createBuildFixture();
     const neighbourRoot = join(

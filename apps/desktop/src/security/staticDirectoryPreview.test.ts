@@ -241,3 +241,46 @@ describe("startStaticDirectoryPreview", () => {
     }
   });
 });
+
+describe("containment of '..'-prefixed names", () => {
+  // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+  // "..-prefix" test and both of these go red — "..cache" is a real
+  // contained name, not traversal.
+  it("serves a root whose own directory NAME starts with '..'", async () => {
+    const containment = join(root, "plugin");
+    const served = join(containment, "..cache");
+    await mkdir(served, { recursive: true });
+    await writeFile(join(served, "index.html"), "<h1>Dot-dot name</h1>");
+
+    const preview = await startStaticDirectoryPreview(served, {
+      containmentRoot: containment,
+      entry: "index.html",
+      entryLabel: "panel entry",
+    });
+    try {
+      await expect(fetch(preview.url).then((r) => r.text())).resolves.toContain(
+        "Dot-dot name",
+      );
+    } finally {
+      await preview.stop();
+    }
+  });
+
+  it("serves a file inside a '..'-prefixed subdirectory of the root", async () => {
+    const served = join(root, "site");
+    await mkdir(join(served, "..cache"), { recursive: true });
+    await writeFile(join(served, "index.html"), "<h1>ok</h1>");
+    await writeFile(join(served, "..cache", "data.txt"), "cached");
+
+    const preview = await startStaticDirectoryPreview(served, {
+      containmentRoot: served,
+      entry: "index.html",
+      entryLabel: "site entry",
+    });
+    try {
+      await expect(rawRequestStatus(preview.url, "/..cache/data.txt")).resolves.toBe(200);
+    } finally {
+      await preview.stop();
+    }
+  });
+});

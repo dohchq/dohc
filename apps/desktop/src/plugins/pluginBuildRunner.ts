@@ -20,10 +20,10 @@ import {
   DohcPluginManifest as DohcPluginManifestSchema,
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
+import { isInside } from "../security/pathContainment";
 import {
   delay,
   errorMessage,
-  isInside,
   removeStaging,
   renameWithWindowsRetry,
   WINDOWS_RENAME_RETRY_DELAYS_MS,

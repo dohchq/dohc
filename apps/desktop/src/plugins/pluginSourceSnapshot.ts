@@ -18,9 +18,9 @@ import {
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
 import { workspaceStateKey } from "./pluginLocalState";
+import { isInside } from "../security/pathContainment";
 import {
   errorMessage,
-  isInside,
   lexicalCompare,
   removeStaging,
   renameWithWindowsRetry,

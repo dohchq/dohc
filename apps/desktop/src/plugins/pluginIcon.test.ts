@@ -28,6 +28,19 @@ describe("verifyPluginIcon", () => {
     });
   });
 
+  it("accepts an icon under a '..'-prefixed directory NAME inside the root", async () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this contained icon is refused as an escape —
+    // "..cache" is a real contained name, not traversal.
+    await mkdir(join(pluginRoot, "..cache"));
+    await writeFile(join(pluginRoot, "..cache", "icon.png"), "png bytes");
+
+    expect(await verifyPluginIcon(pluginRoot, "..cache/icon.png")).toEqual({
+      icon: "..cache/icon.png",
+      diagnostic: null,
+    });
+  });
+
   it("refuses an icon that is not there, and names the path", async () => {
     const result = await verifyPluginIcon(pluginRoot, "icon.png");
 

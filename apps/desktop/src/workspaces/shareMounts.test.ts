@@ -264,6 +264,12 @@ describe("mount labels", () => {
     expect(mountRootFor(host, "alex")).toBe(
       join(host, SHARED_WITH_ME_FOLDER, "alex"),
     );
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this label is refused as an escape — "..cache"
+    // is a real contained name, not traversal.
+    expect(mountRootFor(host, "..cache")).toBe(
+      join(host, SHARED_WITH_ME_FOLDER, "..cache"),
+    );
   });
 });
 

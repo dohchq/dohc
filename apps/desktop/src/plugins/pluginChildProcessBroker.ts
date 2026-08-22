@@ -10,7 +10,8 @@ import {
 } from "@dohc/sdk/node";
 import { killProcessTreePosix } from "../process/posixSpawn";
 import { resolveSpawnCommand } from "../process/windowsSpawn";
-import { errorMessage, isInside } from "./pluginShared";
+import { isInside } from "../security/pathContainment";
+import { errorMessage } from "./pluginShared";
 import { pluginIdToSafePath } from "./pluginSourceSnapshot";
 import { PLUGIN_PROCESS_LOG_LIMIT } from "./pluginHostProtocol";
 

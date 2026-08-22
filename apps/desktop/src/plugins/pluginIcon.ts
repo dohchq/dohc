@@ -1,6 +1,7 @@
 import { lstat, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
-import { errorMessage, isInside } from "./pluginShared";
+import { isInside } from "../security/pathContainment";
+import { errorMessage } from "./pluginShared";
 
 // A plugin icon is decoration. dohc advertises one only after it has checked
 // the file is really there, really a file, and really small — so the renderer

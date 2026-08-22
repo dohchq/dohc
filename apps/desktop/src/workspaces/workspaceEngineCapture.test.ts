@@ -2934,6 +2934,16 @@ describe("createDefaultDiskWriter symlink containment", () => {
     expect(await readFile(join(root, "a", "b", "c.md"), "utf8")).toBe("nested\n");
   });
 
+  it("writes into a directory whose NAME starts with '..'", async () => {
+    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
+    // "..-prefix" test and this write is refused as an escape — "..cache"
+    // is a real contained name, not traversal.
+    const root = await tempRoot();
+    const writer = createDefaultDiskWriter(root);
+    await writer.writeTextFile(join(root, "..cache", "c.md"), "cached\n");
+    expect(await readFile(join(root, "..cache", "c.md"), "utf8")).toBe("cached\n");
+  });
+
   it("deleting a symlink leaf removes the link, not its target", async () => {
     const root = await tempRoot();
     const outside = await tempRoot();

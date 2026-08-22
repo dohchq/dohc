@@ -41,7 +41,7 @@ import {
 import * as Y from "yjs";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -353,6 +353,7 @@ import {
   createWorkspaceWindowRegistry,
 } from "./quitGuard";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
+import { isInside } from "./security/pathContainment";
 import {
   applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
@@ -1271,7 +1272,8 @@ async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> 
 
 function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
   const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
-  if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
+  // Strict on purpose: the workspace root itself is not a build output.
+  if (rel === "" || !isInside(workspaceRoot, absolutePath)) {
     throw new Error(`Build output escaped the workspace: ${absolutePath}`);
   }
   return rel;
@@ -4436,18 +4438,7 @@ function approveRoot(rootPath: string): void {
 
 function isApprovedRoot(normalized: string): boolean {
   for (const approved of approvedRoots) {
-    if (normalized === approved) return true;
-    const rel = relative(approved, normalized);
-    // On Windows, relative() across drives returns an absolute path
-    // (C:\ws -> D:\evil gives "D:\evil"), which is NOT a descendant.
-    if (
-      rel.length > 0 &&
-      !isAbsolute(rel) &&
-      !rel.startsWith("..") &&
-      !rel.startsWith(sep)
-    ) {
-      return true;
-    }
+    if (isInside(approved, normalized)) return true;
   }
   return false;
 }
