@@ -3,7 +3,7 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { killProcessTreePosix } from "../process/posixSpawn";
+import { killProcessTreePosix, processDescendantsPosix } from "../process/posixSpawn";
 import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
 import {
@@ -52,6 +52,12 @@ const MAX_LOG_TEXT_CHARS = 10_000;
 const LOG_TRUNCATION_MARKER = "...[truncated]";
 const BUILD_TIMEOUT_MS = 120000;
 export const BUILD_HARD_KILL_GRACE_MS = 5000;
+// How often a running dev server's descendant tree is polled (POSIX only)
+// so stopChild can still reach a backgrounded descendant after its wrapper
+// has already exited. Frequent enough that a typical preview session (left
+// open for minutes) gets several captures; infrequent enough to keep the
+// idle cost of an open preview negligible.
+const DESCENDANT_CAPTURE_INTERVAL_MS = 5000;
 // The will-quit teardown's own budget must cover this site-preview stop
 // path's worst case (SIGTERM, then this grace, then the SIGKILL
 // round-trip) or an unref'd preview process can survive with no kill
@@ -256,13 +262,57 @@ function explicitHostBinds(args: string[]): string[] {
 // assignment at all (the real command).
 const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 
-function explicitHostEnvironmentAssignments(tokens: string[]): string[] {
+// GNU env's documented form is `env [OPTION]... [NAME=VALUE]... [COMMAND
+// [ARG]...]` — its OPTIONs can precede the assignments this scanner is
+// looking for (`env -i HOST=0.0.0.0 vite`, `env -u FOO HOST=0.0.0.0 vite`).
+// Each recognized option is skipped, along with the value token it takes,
+// so the scan can still reach a HOST/HOSTNAME assignment that follows it.
+const ENV_OPTIONS_WITHOUT_VALUE = new Set(["-i", "--ignore-environment", "-0", "--null", "-v", "--debug"]);
+const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]);
+
+function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: boolean): string[] {
   const hosts: string[] = [];
-  for (const token of tokens) {
-    const match = ENV_ASSIGNMENT_PATTERN.exec(token);
-    if (!match) break;
-    const [, name, value] = match;
-    if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    const assignment = ENV_ASSIGNMENT_PATTERN.exec(token);
+    if (assignment) {
+      const [, name, value] = assignment;
+      if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+      index += 1;
+      continue;
+    }
+    // Outside an `env` wrapper the leading run is only ever assignments
+    // (`HOST=0.0.0.0 vite`) — the first non-assignment token is the real
+    // command, and there are no env OPTIONs to classify here.
+    if (!isEnvWrapper) break;
+    // env(1): a bare "-" has the same effect as -i (start with an empty
+    // environment) and takes no value.
+    if (token === "-") {
+      index += 1;
+      continue;
+    }
+    const longOptionName = token.startsWith("--") && token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+    if (ENV_OPTIONS_WITHOUT_VALUE.has(longOptionName)) {
+      index += 1;
+      continue;
+    }
+    if (ENV_OPTIONS_WITH_VALUE.has(longOptionName)) {
+      // "--unset=NAME" carries its value in the same token; "-u NAME" and
+      // "--unset NAME" need the next token consumed too.
+      index += token.includes("=") ? 1 : 2;
+      continue;
+    }
+    // A token that isn't "-"-prefixed is the wrapped command itself — the
+    // leading run of options and assignments is over.
+    if (!token.startsWith("-")) break;
+    // Anything else "-"-prefixed is an env option this scanner does not
+    // recognize. We cannot prove what environment — and therefore what
+    // host binding — the wrapped command receives, so refuse rather than
+    // silently skip past it.
+    throw new Error(
+      `Site dev server command uses an unrecognized "env" option, so its loopback-only host binding cannot be verified: ${token}`,
+    );
   }
   return hosts;
 }
@@ -271,12 +321,11 @@ function assertDirectHostBinds(command: string, args: string[]): void {
   const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   const hosts = [
     ...explicitHostBinds(args),
-    ...explicitHostEnvironmentAssignments([command, ...args]),
-    // GNU env's documented form is `env [OPTION]... [NAME=VALUE]...
-    // [COMMAND [ARG]...]` — env itself sets each assignment before running
-    // the wrapped command, so the SAME assignments matter here too, just
-    // one token later since "env" itself isn't one.
-    ...(commandName === "env" ? explicitHostEnvironmentAssignments(args) : []),
+    ...explicitHostEnvironmentAssignments([command, ...args], false),
+    // env itself sets each assignment before running the wrapped command,
+    // so the SAME assignments matter here too, just one token later since
+    // "env" itself isn't one — and env's own OPTIONs may precede them.
+    ...(commandName === "env" ? explicitHostEnvironmentAssignments(args, true) : []),
   ];
   for (const host of hosts) {
     if (host !== "" && isLoopbackHostname(host)) continue;
@@ -382,6 +431,9 @@ export async function startSiteDevServer(input: {
   env?: NodeJS.ProcessEnv;
   readyTimeoutMs?: number;
   signal?: AbortSignal;
+  // Test-only override for the descendant-poll cadence — production always
+  // gets DESCENDANT_CAPTURE_INTERVAL_MS.
+  descendantCaptureIntervalMs?: number;
 }): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
@@ -399,6 +451,27 @@ export async function startSiteDevServer(input: {
   });
   child.unref();
 
+  // A dev server session can run for a long time after its wrapper exits
+  // (see stopChild's comment on the backgrounded-wrapper case) — poll the
+  // live tree on POSIX while the wrapper is confirmed still running so a
+  // descendant it later backgrounds stays reachable by pid even once the
+  // wrapper itself is gone and reparenting has moved it out of the
+  // wrapper's own subtree. Best-effort: a descendant forked and orphaned
+  // between two polls is still missed, the same residual #857 accepted.
+  let capturedDescendants: number[] = [];
+  const descendantCaptureTimer =
+    process.platform !== "win32" && child.pid !== undefined
+      ? setInterval(() => {
+          void processDescendantsPosix(child.pid!).then((pids) => {
+            capturedDescendants = pids;
+          });
+        }, input.descendantCaptureIntervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS)
+      : undefined;
+  descendantCaptureTimer?.unref?.();
+  child.once("exit", () => {
+    if (descendantCaptureTimer) clearInterval(descendantCaptureTimer);
+  });
+
   let resolved = false;
   let stopped = false;
   let stdoutCarry = "";
@@ -414,7 +487,7 @@ export async function startSiteDevServer(input: {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void stopChild(child).finally(() => {
+      void stopChild(child, () => capturedDescendants).finally(() => {
         reject(new Error("Site dev server start was cancelled."));
       });
     }
@@ -429,7 +502,7 @@ export async function startSiteDevServer(input: {
       // site dir. stopChild also sequences the Windows tree kill BEFORE the
       // wrapper signal; signalling first would let the taskkill race a dead
       // wrapper pid and orphan the real dev server.
-      void stopChild(child).finally(() => {
+      void stopChild(child, () => capturedDescendants).finally(() => {
         reject(
           new Error(
             `Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
@@ -464,9 +537,10 @@ export async function startSiteDevServer(input: {
             child.once("exit", listener);
           }
         },
-        stop: () => stopChild(child, () => {
-          stopped = true;
-        }),
+        stop: () =>
+          stopChild(child, () => capturedDescendants, () => {
+            stopped = true;
+          }),
       });
     }
 
@@ -495,12 +569,26 @@ export async function startSiteDevServer(input: {
 
 async function stopChild(
   child: ChildProcess,
+  capturedDescendants: () => readonly number[] = () => [],
   beforeKill?: () => void,
 ): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  const alreadyExited = child.exitCode !== null || child.signalCode !== null;
+  // A wrapper that backgrounds the real dev server and exits right after
+  // printing its URL (e.g. `node server.js & echo http://127.0.0.1:3000`)
+  // leaves `child` exited long before stop() is ever called, with the real
+  // server still running as an orphan. On win32, killChildTreeWin32's own
+  // taskkill /T needs the wrapper's pid to still be a live process to walk
+  // its tree from — a dead pid gives it nothing to reach either way, and
+  // that gap is unchanged here (same scope #857 drew: "Win32 unchanged").
+  // On POSIX, capturedDescendants (see startSiteDevServer's periodic poll)
+  // carries pids enumerated WHILE the wrapper was still alive, so they stay
+  // reachable directly even after the wrapper's own exit reparents them
+  // away from its pid in the process table — proceed using those even
+  // though the wrapper itself is already gone.
+  if (alreadyExited && capturedDescendants().length === 0) return;
   beforeKill?.();
   if (process.platform === "win32") {
-    await killChildTreeWin32(child);
+    if (!alreadyExited) await killChildTreeWin32(child);
     if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGTERM");
     await new Promise<void>((resolve) => {
@@ -518,16 +606,15 @@ async function stopChild(
 
   const pid = child.pid;
   if (pid === undefined) {
-    child.kill("SIGTERM");
+    if (!alreadyExited) child.kill("SIGTERM");
     return;
   }
-  const exited =
-    child.exitCode !== null || child.signalCode !== null
-      ? Promise.resolve()
-      : new Promise<void>((resolve) => child.once("exit", () => resolve()));
-  let captured: number[] = [];
+  const exited = alreadyExited
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  let captured: number[] = [...capturedDescendants()];
   try {
-    captured = await killProcessTreePosix(pid, "SIGTERM");
+    captured = await killProcessTreePosix(pid, "SIGTERM", { alsoSignal: captured });
   } catch {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   }

@@ -551,6 +551,14 @@ export interface BrowserTextReference {
   // <script src> with module-only syntax is a syntax error in a REAL
   // browser — parsing with the wrong grammar would accept it anyway.
   scriptKind?: ScriptKind;
+  // True for a <link rel="stylesheet"> href, and for every reference
+  // cssReferences() itself produces (its url()/@import targets are read out
+  // of text a browser is already applying as CSS, the same way a nested
+  // @import target is itself an applied stylesheet). A .css file reached
+  // ONLY via fetch()/an asset-style attribute never sets this — the browser
+  // fetches its bytes but never parses or applies them as a stylesheet, so
+  // its own url()/@import text is never read as CSS either.
+  appliesAsStylesheet?: boolean;
 }
 
 // CSS still isn't parsed with a real parser (out of this round's scope) —
@@ -587,13 +595,35 @@ function blankCssStrings(cssText: string): string {
 // BEFORE blankCssStrings runs: a candidate string isn't preceded by url(
 // or @import, so blanking would otherwise erase it as an ordinary,
 // resource-free CSS string.
-const CSS_IMAGE_SET_PATTERN = /(?:-webkit-)?image-set\(([^)]*)\)/gi;
+const CSS_IMAGE_SET_OPEN_PATTERN = /(?:-webkit-)?image-set\(/gi;
 const CSS_IMAGE_SET_CANDIDATE_PATTERN = /"([^"]{1,2048})"|'([^']{1,2048})'/g;
+
+/** Every image-set(...) call's FULL, balanced body — a candidate list like
+ * `url("one.png") 1x, "two.png" 2x` can itself contain a nested url(...)
+ * call with its OWN closing paren before image-set's own, so a single
+ * non-greedy "stop at the first )" regex truncates the body early and
+ * silently drops every candidate after that nested call. This walks the
+ * text manually to track paren depth instead. */
+function imageSetBodies(cssText: string): string[] {
+  const bodies: string[] = [];
+  for (const open of cssText.matchAll(CSS_IMAGE_SET_OPEN_PATTERN)) {
+    const start = (open.index ?? 0) + open[0].length;
+    let depth = 1;
+    let index = start;
+    while (index < cssText.length && depth > 0) {
+      if (cssText[index] === "(") depth++;
+      else if (cssText[index] === ")") depth--;
+      index++;
+    }
+    if (depth === 0) bodies.push(cssText.slice(start, index - 1));
+  }
+  return bodies;
+}
 
 function imageSetStringCandidates(cssText: string): string[] {
   const values: string[] = [];
-  for (const match of cssText.matchAll(CSS_IMAGE_SET_PATTERN)) {
-    for (const candidate of (match[1] ?? "").matchAll(CSS_IMAGE_SET_CANDIDATE_PATTERN)) {
+  for (const body of imageSetBodies(cssText)) {
+    for (const candidate of body.matchAll(CSS_IMAGE_SET_CANDIDATE_PATTERN)) {
       const value = (candidate[1] ?? candidate[2])?.trim();
       if (value) values.push(value);
     }
@@ -607,16 +637,16 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
   );
   const references: BrowserTextReference[] = [];
   for (const value of imageSetStringCandidates(withoutComments)) {
-    references.push({ value, documentRelative: false });
+    references.push({ value, documentRelative: false, appliesAsStylesheet: true });
   }
   const cssText = blankCssStrings(withoutComments);
   for (const match of cssText.matchAll(CSS_URL_PATTERN)) {
     const value = (match[1] ?? match[2] ?? match[3])?.trim();
-    if (value) references.push({ value, documentRelative: false });
+    if (value) references.push({ value, documentRelative: false, appliesAsStylesheet: true });
   }
   for (const match of cssText.matchAll(CSS_IMPORT_PATTERN)) {
     const value = match[1]?.trim();
-    if (value) references.push({ value, documentRelative: false });
+    if (value) references.push({ value, documentRelative: false, appliesAsStylesheet: true });
   }
   return references;
 }
@@ -1043,7 +1073,7 @@ function parseJavaScript(code: string, scriptKind: ScriptKind): AstNode | null {
 // is not a relative filesystem path at all (module resolution throws on
 // one), so it must not fall through to naive local-path joining the way a
 // literal relative/absolute specifier does.
-interface ImportMapResolution {
+interface ResolvedSpecifierMap {
   imports: ReadonlyMap<string, string>;
   // A relative/root-relative import-map KEY ("./lib.js") is itself a
   // URL-like specifier, not a bare one — the spec normalizes it against the
@@ -1052,15 +1082,26 @@ interface ImportMapResolution {
   // normalized form. Keyed by the same artifact-root-absolute ("/"-prefixed)
   // convention resolveImportMapAddresses already uses for values.
   urlLikeImports: ReadonlyMap<string, string>;
+  // A URL-like key whose address resolves to something this scanner can't
+  // reach locally (most commonly an external URL) is still a REAL mapping
+  // the browser follows — not an absent one. Recorded so
+  // resolveModuleSpecifier can treat it as a TERMINAL resolution (mint
+  // nothing) instead of falling through and treating the specifier as an
+  // unmapped local path, which would wrongly approve a colliding local
+  // file the browser never actually requests.
+  externalUrlLikeKeys: ReadonlySet<string>;
+}
+
+interface ImportMapResolution extends ResolvedSpecifierMap {
   // `scopes` remaps specifiers only for modules whose OWN resolved path
-  // falls under a given prefix — keyed by that prefix, normalized the same
-  // "/"-prefixed way as a urlLikeImports key. The spec picks the LONGEST
-  // matching scope for the importing script's own path first, and only
-  // falls back to the top-level maps above when no scope matches (or the
-  // matching one doesn't map the specifier either) — this heuristic
-  // scanner tries exactly the ONE longest-matching scope, not every
-  // matching scope in descending specificity, before falling back.
-  scopes: ReadonlyMap<string, { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> }>;
+  // falls under a given prefix — keyed by that prefix (with its trailing
+  // "/" preserved, so a boundary like "/feature/" can never also match
+  // "/feature-other/..."), normalized the same "/"-prefixed way as a
+  // urlLikeImports key. The spec tries EVERY matching scope, longest
+  // prefix first, before falling back to the top-level maps above — a
+  // parent scope still applies when the most specific matching scope
+  // doesn't map the specifier either.
+  scopes: ReadonlyMap<string, ResolvedSpecifierMap>;
 }
 
 function isBareModuleSpecifier(specifier: string): boolean {
@@ -1098,24 +1139,23 @@ function resolveAgainstImportMapEntries(
 /** The LONGEST scope whose prefix is an ancestor of the IMPORTING script's
  * own resolved path — the same longest-prefix-wins rule as everything
  * else here, applied to the importer's location instead of the specifier. */
-function matchingScope(
+/** Every scope whose prefix is an ancestor of the IMPORTING script's own
+ * resolved path, longest prefix FIRST — the spec tries each matching scope
+ * in turn (most specific first) and only moves on when the current one
+ * doesn't map the specifier either, so a PARENT scope still applies when
+ * the closest matching scope doesn't have an entry. */
+function matchingScopes(
   importMap: ImportMapResolution,
   fromPath: string,
   artifactRoot: string,
-): { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> } | undefined {
+): ResolvedSpecifierMap[] {
   const importerRelative = pathRelativeToArtifact(artifactRoot, fromPath);
-  if (importerRelative === null) return undefined;
+  if (importerRelative === null) return [];
   const importerKey = `/${importerRelative}`;
-  let bestScopeKey: string | undefined;
-  let bestScope: { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> } | undefined;
-  for (const [scopeKey, scope] of importMap.scopes) {
-    if (!importerKey.startsWith(scopeKey)) continue;
-    if (!bestScopeKey || scopeKey.length > bestScopeKey.length) {
-      bestScopeKey = scopeKey;
-      bestScope = scope;
-    }
-  }
-  return bestScope;
+  return [...importMap.scopes]
+    .filter(([scopeKey]) => importerKey.startsWith(scopeKey))
+    .sort(([a], [b]) => b.length - a.length)
+    .map(([, scope]) => scope);
 }
 
 function resolveModuleSpecifier(
@@ -1126,7 +1166,7 @@ function resolveModuleSpecifier(
   artifactRoot: string,
 ): string | undefined {
   if (!importMap) return isBareModuleSpecifier(specifier) ? undefined : specifier;
-  const scope = matchingScope(importMap, fromPath, artifactRoot);
+  const scopes = matchingScopes(importMap, fromPath, artifactRoot);
   if (!isBareModuleSpecifier(specifier)) {
     // A URL-like specifier still passes through the import map: the spec
     // normalizes it against the IMPORTING script's own base and matches
@@ -1137,16 +1177,19 @@ function resolveModuleSpecifier(
     const normalizedRelative = normalized ? pathRelativeToArtifact(artifactRoot, normalized) : null;
     if (normalizedRelative === null) return specifier;
     const normalizedKey = `/${normalizedRelative}`;
-    return (
-      (scope && resolveAgainstImportMapEntries(normalizedKey, scope.urlLikeImports)) ??
-      resolveAgainstImportMapEntries(normalizedKey, importMap.urlLikeImports) ??
-      specifier
-    );
+    for (const scope of scopes) {
+      if (scope.externalUrlLikeKeys.has(normalizedKey)) return undefined;
+      const resolved = resolveAgainstImportMapEntries(normalizedKey, scope.urlLikeImports);
+      if (resolved !== undefined) return resolved;
+    }
+    if (importMap.externalUrlLikeKeys.has(normalizedKey)) return undefined;
+    return resolveAgainstImportMapEntries(normalizedKey, importMap.urlLikeImports) ?? specifier;
   }
-  return (
-    (scope && resolveAgainstImportMapEntries(specifier, scope.imports)) ??
-    resolveAgainstImportMapEntries(specifier, importMap.imports)
-  );
+  for (const scope of scopes) {
+    const resolved = resolveAgainstImportMapEntries(specifier, scope.imports);
+    if (resolved !== undefined) return resolved;
+  }
+  return resolveAgainstImportMapEntries(specifier, importMap.imports);
 }
 
 function rawSpecifierMap(value: unknown): Map<string, string> {
@@ -1172,13 +1215,13 @@ function parseImportMap(text: string): ImportMapResolution | undefined {
   // Raw, pre-normalization form — each scope's own key AND its specifier
   // map both go through the same resolution resolveImportMapAddresses
   // already applies to the top-level maps, before this is used anywhere.
-  const scopes = new Map<string, { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> }>();
+  const scopes = new Map<string, ResolvedSpecifierMap>();
   if (scopesField && typeof scopesField === "object" && !Array.isArray(scopesField)) {
     for (const [scopeKey, scopeValue] of Object.entries(scopesField as Record<string, unknown>)) {
-      scopes.set(scopeKey, { imports: rawSpecifierMap(scopeValue), urlLikeImports: new Map() });
+      scopes.set(scopeKey, { imports: rawSpecifierMap(scopeValue), urlLikeImports: new Map(), externalUrlLikeKeys: new Set() });
     }
   }
-  return { imports, urlLikeImports: new Map(), scopes };
+  return { imports, urlLikeImports: new Map(), externalUrlLikeKeys: new Set(), scopes };
 }
 
 // Finding 8's stance: `new URL(lit, import.meta.url)` alone only
@@ -1346,6 +1389,12 @@ function jsReferencesFromCode(
   const provenDomTags = collectDomProducingTags(program, shadowedGlobals);
   const urlLiteralNames = collectUrlLiteralNames(program, shadowedGlobals);
   const provenXhrNames = collectXhrInstanceNames(program, shadowedGlobals);
+  // XMLHttpRequest.open(method, url, ...) only initializes a request — no
+  // network request happens until .send() is subsequently called on the
+  // SAME instance. This records each proven receiver's most recent open()
+  // target so it can be emitted (and only emitted) when that receiver's
+  // send() call is reached.
+  const xhrOpenTargets = new Map<string, { value: string | undefined; scriptRelative: boolean }>();
   const references: BrowserTextReference[] = [];
   const addReference = (
     value: string | undefined,
@@ -1428,7 +1477,11 @@ function jsReferencesFromCode(
           if (calleeName === "fetch") {
             const { value, scriptRelative } = consumedValue(args[0]);
             addReference(value, !scriptRelative);
-          } else if (calleeName === "importScripts" && context === "worker") {
+          } else if (calleeName === "importScripts" && context === "worker" && scriptKind === "classic") {
+            // importScripts() only exists on a classic worker's global scope. A
+            // module worker or module service worker has no such global — the
+            // call throws before any network request is made, so a module
+            // worker's importScripts(...) arguments are never fetched.
             for (const argument of args) addReference(stringLiteralValue(argument), false, false, "classic");
           }
         } else if (callee.type === "MemberExpression") {
@@ -1463,10 +1516,19 @@ function jsReferencesFromCode(
             object.type === "Identifier" &&
             provenXhrNames.has(astString(object, "name") ?? "")
           ) {
-            // XMLHttpRequest.open(method, url, ...) resolves url against the
-            // document, the same as fetch().
-            const { value, scriptRelative } = consumedValue(args[1]);
-            addReference(value, !scriptRelative);
+            // Record the target rather than minting a reference — open()
+            // alone never fetches (see xhrOpenTargets above).
+            xhrOpenTargets.set(astString(object, "name") ?? "", consumedValue(args[1]));
+          } else if (
+            propertyName === "send" &&
+            isAstNode(object) &&
+            object.type === "Identifier" &&
+            provenXhrNames.has(astString(object, "name") ?? "")
+          ) {
+            // send() is what actually issues the request. url resolves
+            // against the document, the same as fetch().
+            const opened = xhrOpenTargets.get(astString(object, "name") ?? "");
+            if (opened) addReference(opened.value, !opened.scriptRelative);
           }
         }
         break;
@@ -1539,9 +1601,15 @@ function resolveSpecifierMap(
   documentPath: string,
   documentBase: HtmlBaseResolution,
   artifactRoot: string,
-): { imports: Map<string, string>; urlLikeImports: Map<string, string> } {
+): ResolvedSpecifierMap {
   const resolved = new Map<string, string>();
   const resolvedUrlLike = new Map<string, string>();
+  const externalUrlLikeKeys = new Set<string>();
+  const normalizedKeyOf = (key: string): string | null => {
+    const normalizedKey = resolveArtifactRelativePath(key, documentPath, artifactRoot, documentBase);
+    const normalizedKeyRelative = normalizedKey ? pathRelativeToArtifact(artifactRoot, normalizedKey) : null;
+    return normalizedKeyRelative === null ? null : `/${normalizedKeyRelative}`;
+  };
   for (const [key, rawAddress] of rawMap) {
     const candidate = resolveArtifactRelativePath(rawAddress, documentPath, artifactRoot, documentBase);
     // candidate is already artifact-relative (it includes artifactRoot's own
@@ -1550,20 +1618,30 @@ function resolveSpecifierMap(
     // prefix on the next pass — strip it first or a nested artifactRoot
     // gets joined onto itself.
     const artifactRelative = candidate ? pathRelativeToArtifact(artifactRoot, candidate) : null;
-    if (artifactRelative === null) continue;
+    const isBare = isBareModuleSpecifier(key);
+    if (artifactRelative === null) {
+      // The address resolves to something this scanner can't reach
+      // locally (an external URL is the common case) — the mapping is
+      // still real; a URL-like key must be recorded as a TERMINAL
+      // resolution, not silently dropped as if unmapped.
+      if (!isBare) {
+        const normalizedKey = normalizedKeyOf(key);
+        if (normalizedKey !== null) externalUrlLikeKeys.add(normalizedKey);
+      }
+      continue;
+    }
     const resolvedValue = `/${artifactRelative}`;
-    if (isBareModuleSpecifier(key)) {
+    if (isBare) {
       resolved.set(key, resolvedValue);
       continue;
     }
     // A relative/root-relative key normalizes the same way its address
     // does, against THIS document's own base — an importer's specifier is
     // matched against this normalized form, not the raw key text.
-    const normalizedKey = resolveArtifactRelativePath(key, documentPath, artifactRoot, documentBase);
-    const normalizedKeyRelative = normalizedKey ? pathRelativeToArtifact(artifactRoot, normalizedKey) : null;
-    if (normalizedKeyRelative !== null) resolvedUrlLike.set(`/${normalizedKeyRelative}`, resolvedValue);
+    const normalizedKey = normalizedKeyOf(key);
+    if (normalizedKey !== null) resolvedUrlLike.set(normalizedKey, resolvedValue);
   }
-  return { imports: resolved, urlLikeImports: resolvedUrlLike };
+  return { imports: resolved, urlLikeImports: resolvedUrlLike, externalUrlLikeKeys };
 }
 
 function resolveImportMapAddresses(
@@ -1572,13 +1650,20 @@ function resolveImportMapAddresses(
   documentBase: HtmlBaseResolution,
   artifactRoot: string,
 ): ImportMapResolution {
-  const { imports, urlLikeImports } = resolveSpecifierMap(importMap.imports, documentPath, documentBase, artifactRoot);
-  const scopes = new Map<string, { imports: ReadonlyMap<string, string>; urlLikeImports: ReadonlyMap<string, string> }>();
+  const { imports, urlLikeImports, externalUrlLikeKeys } = resolveSpecifierMap(
+    importMap.imports,
+    documentPath,
+    documentBase,
+    artifactRoot,
+  );
+  const scopes = new Map<string, ResolvedSpecifierMap>();
   for (const [scopeKey, scopeMap] of importMap.scopes) {
     // A scope's own key is itself a URL-like prefix — normalized against
     // the declaring document's base the exact same way a urlLikeImports
     // key is, so it can be compared against an importer's OWN normalized
-    // path later.
+    // path later. resolveArtifactRelativePath preserves a trailing "/" (a
+    // scope key is written that way to mark a directory boundary), so
+    // "/feature/" can never also match an importer under "/feature-other/".
     const normalizedScopeKey = resolveArtifactRelativePath(scopeKey, documentPath, artifactRoot, documentBase);
     const normalizedScopeRelative = normalizedScopeKey ? pathRelativeToArtifact(artifactRoot, normalizedScopeKey) : null;
     if (normalizedScopeRelative === null) continue;
@@ -1587,7 +1672,7 @@ function resolveImportMapAddresses(
       resolveSpecifierMap(scopeMap.imports, documentPath, documentBase, artifactRoot),
     );
   }
-  return { imports, urlLikeImports, scopes };
+  return { imports, urlLikeImports, externalUrlLikeKeys, scopes };
 }
 
 function htmlReferencesFromDocument(
@@ -1677,6 +1762,10 @@ function htmlReferencesFromDocument(
           parentTagName !== "audio" &&
           parentTagName !== "video"
         ) continue;
+        // The complementary case: <source srcset> only has meaning under
+        // <picture> — an <audio>/<video> child's srcset is inert, the same
+        // way its OWN src is inert under <picture>.
+        if (attributeName === "srcset" && tagName === "source" && parentTagName !== "picture") continue;
         // With `srcdoc` present, the browser never fetches an iframe's own
         // `src` at all — srcdoc wins outright, it isn't a fallback.
         if (attributeName === "src" && tagName === "iframe" && srcdoc !== undefined) continue;
@@ -1699,11 +1788,17 @@ function htmlReferencesFromDocument(
         // reference has to name it directly.
         const isModulePreload =
           attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("modulepreload");
+        // A <link rel="stylesheet"> href is the one LINK_REL_RESOURCE_TOKENS
+        // case the browser actually parses and applies as CSS — icon,
+        // manifest, prefetch, and modulepreload targets are all just fetched.
+        const isStylesheet =
+          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("stylesheet");
         if (attributeName !== "srcset") {
           attributeReferences.push({
             value: attribute.value,
             documentRelative: true,
             isManifest,
+            appliesAsStylesheet: isStylesheet,
             ...(attributeName === "src" && tagName === "script" ? { scriptKind } : {}),
             ...(isModulePreload ? { scriptKind: "module" as const } : {}),
           });
@@ -1772,6 +1867,7 @@ function referencesFromNonHtmlFile(
   executesAsCode: boolean,
   isManifest: boolean,
   importMap: ImportMapResolution | undefined,
+  appliesAsStylesheet: boolean,
 ): BrowserTextReference[] {
   // A file reached through a <link rel="manifest"> is a web app manifest to
   // the browser regardless of its own extension — a plain "manifest.json"
@@ -1782,7 +1878,14 @@ function referencesFromNonHtmlFile(
     // rule CSS's url()/@import already follow. Not document-relative.
     return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: false }));
   }
-  if (/\.css$/i.test(sourcePath)) return cssReferences(text);
+  if (/\.css$/i.test(sourcePath)) {
+    // Bytes the browser only ever FETCHES (fetch(), an asset-style URL
+    // attribute pointing at a ".css" path) are never applied as a
+    // stylesheet, so the browser never reads its url()/@import text either
+    // — the file still shares as an asset, it just contributes no further
+    // references, the same reasoning executesAsCode applies to JS below.
+    return appliesAsStylesheet ? cssReferences(text) : [];
+  }
   if (/\.(?:js|mjs)$/i.test(sourcePath)) {
     // Bytes the browser only ever FETCHES (fetch(), an asset-style URL
     // attribute) are never executed, so their text is never parsed as code
@@ -1861,16 +1964,28 @@ async function shareManifestForSite(
   // claimed.
   const importMapKey = (importMap: ImportMapResolution | undefined): string => {
     if (!importMap) return "none";
-    // ONE structural serialization of BOTH maps together, not delimiter-
+    // ONE structural serialization of every map together, not delimiter-
     // joined text — `=`, `,`, and `|` are all legal in a resolved path or
     // import-map key, so two DIFFERENT maps (e.g. one entry "a=/b,c=/d" vs.
     // two entries "a"->"/b" and "c"->"/d") could otherwise fingerprint
     // identically and collide in the scan key, silently dropping the
-    // second document's own scan. A single JSON.stringify call over both
-    // sorted entry lists has no delimiter of its own to collide on.
+    // second document's own scan. A single JSON.stringify call over
+    // everything sorted has no delimiter of its own to collide on.
     const sortedEntries = (map: ReadonlyMap<string, string>) =>
       [...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return JSON.stringify([sortedEntries(importMap.imports), sortedEntries(importMap.urlLikeImports)]);
+    const specifierMapKey = (map: ResolvedSpecifierMap) => [
+      sortedEntries(map.imports),
+      sortedEntries(map.urlLikeImports),
+      [...map.externalUrlLikeKeys].sort(),
+    ];
+    // scopes change module resolution exactly as much as the top-level
+    // maps do — two documents with identical top-level maps but different
+    // scoped mappings must not fingerprint identically, or the second
+    // document's own scan gets deduped away.
+    const sortedScopes = [...importMap.scopes]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([scopeKey, scope]) => [scopeKey, specifierMapKey(scope)]);
+    return JSON.stringify([specifierMapKey(importMap), sortedScopes]);
   };
   // Every file is scanned with its own referring document's base — an
   // external .js/.mjs file has no <base> of its own, but a reference the
@@ -1905,6 +2020,12 @@ async function shareManifestForSite(
     // reached both ways (once via fetch, once via <script src>) needs both
     // scans, not one "using up" the path for the other.
     executesAsCode: boolean;
+    // Whether the browser APPLIES this target as a stylesheet (a <link
+    // rel="stylesheet"> href, or a nested @import reached from an already-
+    // applied stylesheet) as opposed to only fetching its bytes (fetch(),
+    // or an asset-style URL attribute that happens to point at a ".css"
+    // path). Same reasoning, and same dedupe-key role, as executesAsCode.
+    appliesAsStylesheet: boolean;
     isManifest: boolean;
     importMap: ImportMapResolution | undefined;
   }> = [
@@ -1914,6 +2035,7 @@ async function shareManifestForSite(
       context: "document",
       scriptKind: "classic",
       executesAsCode: true,
+      appliesAsStylesheet: true,
       isManifest: false,
       importMap: undefined,
     },
@@ -1926,10 +2048,11 @@ async function shareManifestForSite(
       context,
       scriptKind,
       executesAsCode,
+      appliesAsStylesheet,
       isManifest,
       importMap: inheritedImportMap,
     } = queue.shift()!;
-    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${isManifest}::${importMapKey(inheritedImportMap)}`;
+    const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${appliesAsStylesheet}::${isManifest}::${importMapKey(inheritedImportMap)}`;
     if (
       scanned.has(scanKey) ||
       (!isManifest && !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current))
@@ -1983,6 +2106,7 @@ async function shareManifestForSite(
             executesAsCode,
             isManifest,
             inheritedImportMap,
+            appliesAsStylesheet,
           );
       const documentImportMap = htmlResult ? htmlResult.importMap : inheritedImportMap;
       for (const reference of references) {
@@ -2009,6 +2133,7 @@ async function shareManifestForSite(
             context: propagatedContext,
             scriptKind: reference.scriptKind ?? "classic",
             executesAsCode: reference.scriptKind !== undefined || reference.entersOwnContext === true,
+            appliesAsStylesheet: reference.appliesAsStylesheet === true,
             isManifest: reference.isManifest ?? false,
             importMap: documentImportMap,
           });

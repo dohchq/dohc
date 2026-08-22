@@ -1199,13 +1199,10 @@ const withSitePreviewStartLock = <T>(key: string, operation: () => Promise<T>) =
   withKeyedStartLock(sitePreviewStartLocks, key, operation);
 
 function stopSitePreviewsForQuit(): Promise<void> {
-  // Called once, from the will-quit teardown — the first moment a quit can no
-  // longer be cancelled (#579 review, r19). It used to run at
-  // before-quit AND on electron-updater's before-quit-for-update, both of
-  // which happen BEFORE the renderer's beforeunload can veto the exit. A user
-  // who clicked "Go back" to keep working got their site previews stopped anyway. Idempotent regardless.
-  // Awaited by the caller so quit cannot outrun a preview process's own
-  // hard-kill path — bounded by the will-quit handler's existing 3 s race.
+  // Runs once, from the will-quit teardown — the first moment a quit can no
+  // longer be cancelled. Idempotent. The caller awaits it inside
+  // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
+  // hard-kill path.
   return sitePreviews.stopAll();
 }
 

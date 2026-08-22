@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   killProcessTreePosix,
   parseProcessTable,
+  processDescendantsPosix,
   processTreePids,
 } from "./posixSpawn";
 
@@ -196,6 +197,46 @@ describe("killProcessTreePosix", () => {
         },
       }),
     ).resolves.toEqual([200, 100]);
+  });
+});
+
+describe("processDescendantsPosix", () => {
+  it("returns every descendant, excluding the root itself", async () => {
+    await expect(
+      processDescendantsPosix(
+        100,
+        async () => "  100     1\n  200   100\n  300   200\n",
+      ),
+    ).resolves.toEqual(expect.arrayContaining([200, 300]));
+    await expect(
+      processDescendantsPosix(
+        100,
+        async () => "  100     1\n  200   100\n  300   200\n",
+      ).then((pids) => pids.includes(100)),
+    ).resolves.toBe(false);
+  });
+
+  it("returns an empty list when the process table cannot be read", async () => {
+    await expect(
+      processDescendantsPosix(100, () => Promise.reject(new Error("ps: not found"))),
+    ).resolves.toEqual([]);
+  });
+
+  it("returns an empty list for a root with no children", async () => {
+    await expect(
+      processDescendantsPosix(100, async () => "  100     1\n"),
+    ).resolves.toEqual([]);
+  });
+
+  it("still finds a descendant once its own parent has already exited and it was reparented away from root", async () => {
+    // The scenario stopChild's capture exists for: root's child already
+    // exited and reparented grandchild to pid 1 — a plain root-rooted walk
+    // would miss it, but a PRIOR capture of the grandchild's own pid (as
+    // its own root) still finds it, which is why stopChild re-enumerates
+    // from each previously captured pid too, not just the original root.
+    await expect(
+      processDescendantsPosix(300, async () => "  300     1\n  400   300\n"),
+    ).resolves.toEqual([400]);
   });
 });
 

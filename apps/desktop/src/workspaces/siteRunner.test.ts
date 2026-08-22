@@ -468,6 +468,30 @@ describe("package manager helpers", () => {
       assertLoopbackOnlyDevServerCommand("env", ["NODE_ENV=production", "vite"]),
     ).not.toThrow();
   });
+
+  it("rejects a HOST assignment behind env's own leading OPTIONs, and refuses an unrecognized one", () => {
+    // GNU env's documented form is `env [OPTION]... [NAME=VALUE]...
+    // [COMMAND [ARG]...]` — its OPTIONs (-i, -u NAME, ...) can precede the
+    // assignments, and the scan must recognize and skip them to still reach
+    // a HOST= that follows.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["-i", "HOST=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["--ignore-environment", "HOST=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["-u", "FOO", "HOST=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["-i", "HOST=127.0.0.1", "vite"]),
+    ).not.toThrow();
+    // An option this scanner does not recognize refuses outright rather
+    // than silently skipping past it and missing an assignment beyond it.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["--made-up-option", "HOST=0.0.0.0", "vite"]),
+    ).toThrow(/env/);
+  });
 });
 
 describe("startSiteDevServer", () => {
@@ -488,6 +512,51 @@ describe("startSiteDevServer", () => {
       const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
       const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
       expect(descendantPid).toBeGreaterThan(0);
+
+      try {
+        await handle.stop();
+        expect(() => process.kill(descendantPid, 0)).toThrow();
+      } finally {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // The fixed teardown already removed it.
+        }
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "stops a descendant that survives after the wrapper itself has already exited",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
+      // No `wait` — the shell prints the ready URL and its background
+      // child's pid, then exits immediately, well before stop() is ever
+      // called. The descendant keeps running as an orphan unless it was
+      // captured while the wrapper was still alive.
+      const handle = await startSiteDevServer({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: "sh",
+        args: [
+          "-c",
+          // The trailing sleep keeps the wrapper alive long enough (with a
+          // 20ms poll interval, comfortably many ticks) for the descendant
+          // poll to capture the backgrounded pid at least once BEFORE the
+          // wrapper exits on its own — the exact condition this pin proves,
+          // not an arbitrary wait for stop() to happen to run late enough.
+          "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43212'; sleep 0.3",
+        ],
+        readyTimeoutMs: 5000,
+        descendantCaptureIntervalMs: 20,
+      });
+      const childLog = handle.logs().find((entry) => entry.text.includes("CHILD:"));
+      const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
+      expect(descendantPid).toBeGreaterThan(0);
+
+      // Wait for the wrapper to have actually exited on its own before
+      // calling stop() — the scenario this pin exercises.
+      await new Promise<void>((resolve) => handle.onExit(resolve));
 
       try {
         await handle.stop();

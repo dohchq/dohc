@@ -2057,10 +2057,23 @@ export async function detectSites(
 
   const maxDepth = Math.min(12, Math.max(0, Math.floor(args.maxDepth ?? 5)));
   const sites: WorkspaceSite[] = [];
+  // A directory an already-visited ancestor reported as ITS OWN build
+  // output (conventional dist/build/out, or an explicitly configured
+  // build.output path, single- or multi-segment) is that site's artifact,
+  // not an independent site — matches workspace-core's discoverSites,
+  // which never promotes a build output's own index.html into a separate
+  // site root. The walk visits a parent before its children, so a site's
+  // buildOutputs are always known before recursion reaches them.
+  const knownBuildOutputPaths = new Set<string>();
   async function walk(absolute: string, root: string, depth: number): Promise<void> {
     if (isIgnoredSitePath(root)) return;
-    const site = await detectSiteAt(ctx, absolute, root);
-    if (site) sites.push(site);
+    if (!knownBuildOutputPaths.has(root)) {
+      const site = await detectSiteAt(ctx, absolute, root);
+      if (site) {
+        sites.push(site);
+        for (const output of site.buildOutputs) knownBuildOutputPaths.add(relativeJoin(root, output));
+      }
+    }
     if (depth >= maxDepth) return;
 
     let dirents;

@@ -71,6 +71,27 @@ export interface KillProcessTreePosixOptions {
   alsoSignal?: readonly number[];
 }
 
+/**
+ * Every descendant of `rootPid`, enumerated but not signalled — for a
+ * caller that wants to keep a rolling snapshot of a still-running tree
+ * (siteRunner's stopChild) so a descendant is still reachable by pid even
+ * after the process it was captured under has since exited and been
+ * reparented away from `rootPid` in the process table. Excludes `rootPid`
+ * itself. An unreadable process table degrades to an empty list, the same
+ * way killProcessTreePosix degrades to signalling only its known pids.
+ */
+export async function processDescendantsPosix(
+  rootPid: number,
+  readProcessTable: () => Promise<string> = readProcessTableWithPs,
+): Promise<number[]> {
+  try {
+    const table = parseProcessTable(await readProcessTable());
+    return processTreePids(table, rootPid).filter((pid) => pid !== rootPid);
+  } catch {
+    return [];
+  }
+}
+
 function readProcessTableWithPs(): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile("ps", ["-A", "-o", "pid=,ppid="], (error, stdout) => {

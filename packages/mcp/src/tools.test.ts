@@ -1660,12 +1660,15 @@ describe("mcp tools operate on allowed paths", () => {
       expect(result).toMatchObject({ ok: true });
       if (!result.ok) return;
       const roots = result.sites.map((site) => site.root);
-      // The recursive walk also finds "workflow-real-build/dist" as its
-      // own bare-index.html site — real, unrelated to this fixture's own
-      // point (a claimed-but-unbuilt output vs. a real one at the SAME
-      // root), so this only asserts what that point actually is.
       expect(roots).toContain("workflow-real-build");
       expect(roots).not.toContain("workflow-claims-build");
+      // "workflow-real-build/dist" is workflow-real-build's OWN build
+      // output, not an independent site — matches workspace-core's
+      // discoverSites, which never promotes a build output's own
+      // index.html into a separate site root.
+      expect(roots).not.toContain("workflow-real-build/dist");
+      const builtSite = result.sites.find((site) => site.root === "workflow-real-build");
+      expect(builtSite?.buildOutputs).toContain("dist");
     });
   });
 

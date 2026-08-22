@@ -2496,4 +2496,250 @@ describe("listSitePackages", () => {
     const site = await getSitePackage(root, "clients/acme/site/src/App.tsx");
     expect(site?.root).toBe("clients/acme/site");
   });
+
+  // ---- round-17 review pins ----
+
+  it("does not fire a <source srcset> outside a <picture> parent", async () => {
+    await mkdir(join(root, "source-srcset-guard"), { recursive: true });
+    await writeFile(
+      join(root, "source-srcset-guard", "index.html"),
+      '<video><source srcset="inert.png"></video>',
+    );
+    await writeFile(join(root, "source-srcset-guard", "inert.png"), "private");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "source-srcset-guard",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("source-srcset-guard/inert.png");
+  });
+
+  it("treats an import-map target resolving to an external URL as a terminal resolution, not a fall-through", async () => {
+    await mkdir(join(root, "import-map-external"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-external", "index.html"),
+      [
+        '<script type="importmap">{"imports": {"./module.js": "https://cdn.example/app.js"}}</script>',
+        '<script type="module">import "./module.js";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-external", "module.js"), "private local file");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-external",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("import-map-external/module.js");
+  });
+
+  it("keeps a scoped import map's own mapping reachable independently of the top-level map", async () => {
+    await mkdir(join(root, "import-map-scope", "feature"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-scope", "index.html"),
+      [
+        '<script type="importmap">',
+        JSON.stringify({
+          imports: { lib: "./from-top.js" },
+          scopes: { "./feature/": { lib: "./from-scope.js" } },
+        }),
+        "</script>",
+        '<script type="module">import "./feature/mod.js";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-scope", "from-top.js"), "export {};");
+    await writeFile(join(root, "import-map-scope", "from-scope.js"), "export {};");
+    await writeFile(
+      join(root, "import-map-scope", "feature", "mod.js"),
+      'import "lib";',
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-scope",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-scope/from-scope.js");
+  });
+
+  it("scans a shared script under each document's own scoped import map, not a cached result from the first", async () => {
+    // Two documents reach the SAME relative script with the SAME top-level
+    // import map but DIFFERENT scoped mappings for the module it imports —
+    // if the scan-queue's dedupe fingerprint ignored scopes, the second
+    // document's scan would be skipped as "already scanned", silently
+    // dropping its own scope's dependency.
+    await mkdir(join(root, "import-map-scope-fingerprint", "shared"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-scope-fingerprint", "index.html"),
+      [
+        '<script type="importmap">',
+        JSON.stringify({ scopes: { "./shared/": { lib: "./from-a.js" } } }),
+        "</script>",
+        '<script type="module">import "./shared/loader.js";</script>',
+        '<iframe src="page2.html"></iframe>',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "import-map-scope-fingerprint", "page2.html"),
+      [
+        '<script type="importmap">',
+        JSON.stringify({ scopes: { "./shared/": { lib: "./from-b.js" } } }),
+        "</script>",
+        '<script type="module">import "./shared/loader.js";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-scope-fingerprint", "shared", "loader.js"), 'import "lib";');
+    await writeFile(join(root, "import-map-scope-fingerprint", "from-a.js"), "export {};");
+    await writeFile(join(root, "import-map-scope-fingerprint", "from-b.js"), "export {};");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-scope-fingerprint",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-scope-fingerprint/from-a.js");
+    expect(manifestOf(site)?.assets).toContain("import-map-scope-fingerprint/from-b.js");
+  });
+
+  it("falls back to a parent scope when a deeper scope does not map the specifier", async () => {
+    await mkdir(join(root, "import-map-parent-scope", "feature", "deep"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-parent-scope", "index.html"),
+      [
+        '<script type="importmap">',
+        JSON.stringify({
+          scopes: {
+            "./feature/": { lib: "./from-feature.js" },
+            "./feature/deep/": {},
+          },
+        }),
+        "</script>",
+        '<script type="module">import "./feature/deep/mod.js";</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-parent-scope", "from-feature.js"), "export {};");
+    await writeFile(
+      join(root, "import-map-parent-scope", "feature", "deep", "mod.js"),
+      'import "lib";',
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-parent-scope",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-parent-scope/from-feature.js");
+  });
+
+  it("reads every image-set() candidate even when an earlier candidate has its own nested url()", async () => {
+    await mkdir(join(root, "image-set-nested-url"), { recursive: true });
+    await writeFile(
+      join(root, "image-set-nested-url", "index.html"),
+      '<style>div { background: image-set(url("one.png") 1x, "two.png" 2x); }</style>',
+    );
+    await writeFile(join(root, "image-set-nested-url", "one.png"), "one");
+    await writeFile(join(root, "image-set-nested-url", "two.png"), "two");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "image-set-nested-url",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("image-set-nested-url/one.png");
+    expect(manifestOf(site)?.assets).toContain("image-set-nested-url/two.png");
+  });
+
+  it("excludes an importScripts() call from a module worker", async () => {
+    await mkdir(join(root, "module-worker-import-scripts"), { recursive: true });
+    await writeFile(
+      join(root, "module-worker-import-scripts", "index.html"),
+      '<script type="module">new Worker("worker.js", { type: "module" });</script>',
+    );
+    await writeFile(
+      join(root, "module-worker-import-scripts", "worker.js"),
+      'importScripts("private.js");',
+    );
+    await writeFile(join(root, "module-worker-import-scripts", "private.js"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "module-worker-import-scripts",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("module-worker-import-scripts/private.js");
+  });
+
+  it("does not count an XMLHttpRequest target until send() is called", async () => {
+    await mkdir(join(root, "xhr-open-without-send"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-open-without-send", "index.html"),
+      [
+        "<script>",
+        "var xhr = new XMLHttpRequest();",
+        'xhr.open("GET", "never-sent.json");',
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-open-without-send", "never-sent.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-open-without-send",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("xhr-open-without-send/never-sent.json");
+  });
+
+  it("counts an XMLHttpRequest target once send() is called on the same instance", async () => {
+    await mkdir(join(root, "xhr-open-and-send"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-open-and-send", "index.html"),
+      [
+        "<script>",
+        "var xhr = new XMLHttpRequest();",
+        'xhr.open("GET", "sent.json");',
+        "xhr.send();",
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-open-and-send", "sent.json"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-open-and-send",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("xhr-open-and-send/sent.json");
+  });
+
+  it("does not parse a fetch-only .css file's url()s as an applied stylesheet", async () => {
+    await mkdir(join(root, "css-fetch-only"), { recursive: true });
+    await writeFile(
+      join(root, "css-fetch-only", "index.html"),
+      '<script>fetch("data.css");</script>',
+    );
+    await writeFile(
+      join(root, "css-fetch-only", "data.css"),
+      'body { background: url("never-applied.png"); }',
+    );
+    await writeFile(join(root, "css-fetch-only", "never-applied.png"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "css-fetch-only",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("css-fetch-only/data.css");
+    expect(manifestOf(site)?.assets).not.toContain("css-fetch-only/never-applied.png");
+  });
+
+  it("still parses a <link rel=stylesheet>'s url()s as an applied stylesheet", async () => {
+    await mkdir(join(root, "css-applied-stylesheet"), { recursive: true });
+    await writeFile(
+      join(root, "css-applied-stylesheet", "index.html"),
+      '<link rel="stylesheet" href="applied.css">',
+    );
+    await writeFile(
+      join(root, "css-applied-stylesheet", "applied.css"),
+      'body { background: url("applied.png"); }',
+    );
+    await writeFile(join(root, "css-applied-stylesheet", "applied.png"), "public");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "css-applied-stylesheet",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("css-applied-stylesheet/applied.png");
+  });
 });
