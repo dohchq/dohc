@@ -465,20 +465,57 @@ const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
 // unrecognized option is refused below.
 const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 
-// Sibling prefix wrappers to env(1): each runs an ARBITRARY command it's
-// given, the same "smuggle a shell past validation" risk env had before its
-// own fix — but unlike env, none of these are grouped by a single, already-
-// implemented option grammar. `nohup` takes no options of its own at all;
-// `nice`'s (`-n <adjustment>`, or a bare `-<adjustment>`) and `stdbuf`'s
-// (`-i`/`-o`/`-e <size>`) both take prefix-attached, value-carrying options
-// before the wrapped command, and reimplementing each utility's own option
-// grammar here — the same reimplementation risk ENV_OPTIONS_UNVERIFIABLE
-// already declines for env's own -S/--split-string — isn't proportionate
-// for what's otherwise a rare wrapper shape. Refused outright instead: the
-// same "cannot statically verify, so don't approve" stance this file
-// already takes throughout, rather than silently trusting an unexamined
-// wrapped command's own loopback binding.
-const PASSTHROUGH_WRAPPER_COMMAND_NAMES = new Set(["nice", "nohup", "stdbuf"]);
+// Prefix wrappers this file refuses outright rather than trying to verify.
+// There is no allowlist anywhere in this validator — every command not
+// refused here still has its own args scanned by assertDirectHostBinds and,
+// if it nests a shell or an env-style wrapper, recursed into below. This is
+// the REFUSE set: commands that run an ARBITRARY wrapped command (the same
+// "smuggle a shell past validation" risk env(1) had before its own fix) but
+// that this file cannot soundly verify, for one of two reasons:
+//
+// - `nice`, `stdbuf`, `timeout`, `sudo`, `doas` each have their own
+//   prefix-attached, value-carrying option grammar (`nice -n <adjustment>`,
+//   `stdbuf -i/-o/-e <size>`, `timeout -s/-k <duration>`, `sudo -u/-g
+//   <user>`, ...) that would need reimplementing here to find where their
+//   own options end and the wrapped command begins — the same
+//   reimplementation risk ENV_OPTIONS_UNVERIFIABLE already declines for
+//   env's own -S/--split-string. `nohup` and `setsid` take next to no
+//   options of their own, but are grouped here rather than singled out:
+//   nothing about "this wrapper happens to have a small grammar" changes
+//   the risk it exists to smuggle a shell past validation.
+// - `cross-env-shell` joins its own remaining args back into ONE shell
+//   command string with a plain space join before handing it to a shell —
+//   unlike env's `sh -c "already one token"`, where the author quoted the
+//   whole body as a single argument this file's own tokenizer received
+//   intact, cross-env-shell's body is SYNTHESIZED from args this file
+//   already split apart, and re-joining them with a bare space cannot
+//   soundly reconstruct whatever quoting the author originally wrote (an
+//   arg that itself contained a space arrives here as one token; rejoining
+//   loses the boundary that made it one arg instead of two). Recursing into
+//   it as a shell body the way env-wrapped shells are below would be
+//   verifying a DIFFERENT string than what cross-env-shell will actually
+//   run — refused instead.
+// - `env-cmd`, `dotenv` both load their environment assignments from a
+//   CONFIG FILE (an .env file, an env-cmd config) this validator never
+//   reads — there is no command-line token to scan a HOST/HOSTNAME
+//   assignment out of at all, so nothing here can prove what environment
+//   the wrapped command receives.
+//
+// Refused outright: the same "cannot statically verify, so don't approve"
+// stance this file already takes throughout, rather than silently trusting
+// an unexamined wrapped command's own loopback binding.
+const PASSTHROUGH_WRAPPER_COMMAND_NAMES = new Set([
+  "nice",
+  "nohup",
+  "stdbuf",
+  "timeout",
+  "setsid",
+  "sudo",
+  "doas",
+  "cross-env-shell",
+  "env-cmd",
+  "dotenv",
+]);
 
 // `hosts` is every HOST/HOSTNAME value this scan found; `consumedThrough` is
 // how far into `tokens` it got before stopping — for an env(1) wrapper,
@@ -612,15 +649,28 @@ function explicitHostEnvironmentAssignments(
   return { hosts, consumedThrough: index };
 }
 
+// cross-env's documented form is `cross-env [NAME=VALUE]... COMMAND
+// [ARG]...` — no OPTIONs of its own, just the same leading-assignments-then-
+// command shape env(1) has. explicitHostEnvironmentAssignments's env-wrapper
+// scan already treats an unrecognized "-"-prefixed token as an unverifiable
+// option and refuses rather than skip it (see ENV_OPTIONS_UNVERIFIABLE and
+// the "unrecognized env option" throw below) — cross-env has no such tokens
+// in its own grammar, so reusing the identical scan is exactly as sound for
+// it as it is for env, with no extra cases to add.
+function isEnvStyleWrapper(commandName: string | undefined): boolean {
+  return commandName === "env" || commandName === "cross-env";
+}
+
 function assertDirectHostBinds(command: string, args: string[]): void {
   const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   const hosts = [
     ...explicitHostBinds(args),
     ...explicitHostEnvironmentAssignments([command, ...args], false).hosts,
-    // env itself sets each assignment before running the wrapped command,
-    // so the SAME assignments matter here too, just one token later since
-    // "env" itself isn't one — and env's own OPTIONs may precede them.
-    ...(commandName === "env" ? explicitHostEnvironmentAssignments(args, true).hosts : []),
+    // env/cross-env each set every leading assignment before running the
+    // wrapped command, so the SAME assignments matter here too, just one
+    // token later since the wrapper's own name isn't one — and env's own
+    // OPTIONs (cross-env has none) may precede them.
+    ...(isEnvStyleWrapper(commandName) ? explicitHostEnvironmentAssignments(args, true).hosts : []),
   ];
   for (const host of hosts) {
     if (host !== "" && isLoopbackHostname(host)) continue;
@@ -653,19 +703,20 @@ function nestedShellCommand(command: string, args: string[]): string | null {
   return flagIndex >= 0 ? args[flagIndex + 1] ?? null : null;
 }
 
-// What env(1) actually runs, once its own OPTIONs and NAME=VALUE
-// assignments are consumed — `env sh -c 'HOST=0.0.0.0 vite'` looks like a
-// completely unrecognized command to nestedShellCommand, which only ever
-// switches on the command it's GIVEN ("env" here), never on what that
-// command goes on to run. Without this, a shell (or any further wrapper)
-// env wraps is never validated at all: assertDirectHostBinds only checks
-// env's OWN leading assignments, and nestedShellCommand's plain name
-// switch has nothing named "env" in it. explicitHostEnvironmentAssignments
-// already walks past every OPTION/assignment env(1) accepts to find
-// exactly this boundary; consumedThrough IS the wrapped command's index.
+// What env(1) (or cross-env, same shape) actually runs, once its own
+// OPTIONs and NAME=VALUE assignments are consumed — `env sh -c 'HOST=0.0.0.0
+// vite'` looks like a completely unrecognized command to nestedShellCommand,
+// which only ever switches on the command it's GIVEN ("env" here), never on
+// what that command goes on to run. Without this, a shell (or any further
+// wrapper) env/cross-env wraps is never validated at all: assertDirectHostBinds
+// only checks the wrapper's OWN leading assignments, and nestedShellCommand's
+// plain name switch has nothing named "env" or "cross-env" in it.
+// explicitHostEnvironmentAssignments already walks past every OPTION/
+// assignment either wrapper accepts to find exactly this boundary;
+// consumedThrough IS the wrapped command's index.
 function envWrappedCommand(command: string, args: string[]): { command: string; args: string[] } | null {
   const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
-  if (commandName !== "env") return null;
+  if (!isEnvStyleWrapper(commandName)) return null;
   const { consumedThrough } = explicitHostEnvironmentAssignments(args, true);
   const wrapped = args[consumedThrough];
   if (wrapped === undefined) return null;

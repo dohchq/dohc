@@ -729,22 +729,63 @@ describe("package manager helpers", () => {
     ).not.toThrow();
   });
 
-  it("refuses nice/nohup/stdbuf outright — passthrough wrappers this scanner cannot statically re-parse", () => {
-    // Unlike env, none of these share a single, already-implemented option
-    // grammar (nice/stdbuf take their OWN prefix-attached, value-carrying
-    // options before the wrapped command; nohup takes none). Reimplementing
-    // each utility's own option grammar isn't proportionate for a rare
-    // wrapper shape — refused outright instead, even for an OTHERWISE safe
-    // wrapped command, the same "cannot statically verify" stance this file
-    // already takes elsewhere (env -S, an unrecognized env option, ...).
-    for (const wrapper of ["nice", "nohup", "stdbuf"]) {
+  it("validates cross-env's leading assignments the same way env's are validated", () => {
+    // cross-env's documented form (`cross-env [NAME=VALUE]... COMMAND
+    // [ARG]...`) is the identical leading-assignments-then-command shape
+    // env(1) has — it was never in nestedShellCommand's or
+    // assertDirectHostBinds's env-only checks, so a HOST rebind through it
+    // passed validation entirely.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("cross-env", ["HOST=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    // A non-host assignment must still be accepted — cross-env's own
+    // recursion doesn't turn into a blanket refusal.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("cross-env", ["FOO=bar", "vite"]),
+    ).not.toThrow();
+    // Reaches a shell cross-env wraps too, the same as env sh -c does.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("cross-env", ["sh", "-c", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/loopback/);
+  });
+
+  it("refuses passthrough wrappers outright — commands this scanner cannot statically re-parse", () => {
+    // nice/stdbuf/timeout/sudo/doas each have their OWN prefix-attached,
+    // value-carrying option grammar; nohup/setsid take next to none, but
+    // are refused for the same reason — none of them share env's single,
+    // already-implemented option grammar, and reimplementing each
+    // utility's own isn't proportionate for a rare wrapper shape.
+    for (const wrapper of ["nice", "nohup", "stdbuf", "timeout", "setsid", "sudo", "doas"]) {
       expect(() =>
         assertLoopbackOnlyDevServerCommand(wrapper, ["sh", "-c", "HOST=0.0.0.0 vite"]),
-      ).toThrow(/nice|nohup|stdbuf/);
+      ).toThrow(new RegExp(wrapper));
       expect(() =>
         assertLoopbackOnlyDevServerCommand(wrapper, ["vite", "--host", "127.0.0.1"]),
-      ).toThrow(/nice|nohup|stdbuf/);
+      ).toThrow(new RegExp(wrapper));
     }
+    // timeout's own first operand is a duration, not part of the wrapped
+    // command line at all — refused before ever reaching that far.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("timeout", ["300", "sh", "-c", "HOST=0.0.0.0 vite"]),
+    ).toThrow(/timeout/);
+    // cross-env-shell re-joins its own remaining args into one shell string
+    // with a plain space join before handing it to a shell — unlike env's
+    // sh -c "already one token", that join cannot soundly reconstruct
+    // whatever quoting the author originally wrote, so it's refused rather
+    // than recursed into as a shell body.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("cross-env-shell", ["HOST=0.0.0.0", "vite"]),
+    ).toThrow(/cross-env-shell/);
+    // env-cmd and dotenv both load their assignments from a CONFIG FILE
+    // this validator never reads — there is no command-line token to scan
+    // a HOST/HOSTNAME assignment out of, so both are refused outright
+    // regardless of what (if anything) their own args contain.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env-cmd", ["vite"]),
+    ).toThrow(/env-cmd/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("dotenv", ["--", "vite"]),
+    ).toThrow(/dotenv/);
   });
 
   it("refuses env -S/--split-string instead of silently skipping its embedded assignment", () => {
