@@ -1251,6 +1251,27 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("json-manifest/icon.png");
   });
 
+  it("parses an external module script with surrounding whitespace in its type as a module, not classic", async () => {
+    await mkdir(join(root, "module-type-whitespace"), { recursive: true });
+    await writeFile(
+      join(root, "module-type-whitespace", "index.html"),
+      '<script type=" module " src="app.js"></script>',
+    );
+    // A static import is only valid MODULE grammar — parsed as classic
+    // (the pre-fix, un-trimmed comparison's default), it's a syntax
+    // error, the file fails to parse at all, and dep.js is never
+    // discovered.
+    await writeFile(join(root, "module-type-whitespace", "app.js"), 'import "./dep.js";');
+    await writeFile(join(root, "module-type-whitespace", "dep.js"), "export {};");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "module-type-whitespace",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("module-type-whitespace/app.js");
+    expect(manifestOf(site)?.assets).toContain("module-type-whitespace/dep.js");
+  });
+
   it("resolves a bare module specifier through an active import map, and excludes an unmapped one", async () => {
     await mkdir(join(root, "import-map"), { recursive: true });
     await writeFile(
@@ -3137,6 +3158,32 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("inserted-script/loaded.js");
   });
 
+  it("approves a script's src once inserted via document.documentElement, the same as document.body", async () => {
+    await mkdir(join(root, "inserted-via-document-element"), { recursive: true });
+    await writeFile(
+      join(root, "inserted-via-document-element", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "inserted-via-document-element", "app.js"),
+      [
+        'const script = document.createElement("script");',
+        // document.documentElement (<html>) is exactly as always-attached
+        // as document.body/document.head — a real browser connects and
+        // fetches this the same way it would via document.body.
+        "document.documentElement.appendChild(script);",
+        'script.src = "loaded.js";',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "inserted-via-document-element", "loaded.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "inserted-via-document-element",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("inserted-via-document-element/loaded.js");
+  });
+
   it("applies the document's CSP to an external stylesheet's own url() references", async () => {
     await mkdir(join(root, "csp-external-stylesheet"), { recursive: true });
     await writeFile(
@@ -3885,6 +3932,54 @@ describe("listSitePackages", () => {
     // leaf asset.
     expect(manifestOf(site)?.assets).toContain("meta-refresh-document/page2.html");
     expect(manifestOf(site)?.assets).toContain("meta-refresh-document/style.css");
+  });
+
+  it("parses a form's action target as a real document destination, discovering its own stylesheet dependencies", async () => {
+    await mkdir(join(root, "form-action-document"), { recursive: true });
+    await writeFile(
+      join(root, "form-action-document", "index.html"),
+      '<form action="page2.html"><button type="submit">Go</button></form>',
+    );
+    await writeFile(
+      join(root, "form-action-document", "page2.html"),
+      '<link rel="stylesheet" href="style.css">',
+    );
+    await writeFile(join(root, "form-action-document", "style.css"), "body {}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "form-action-document",
+    );
+
+    // Submitting the form is a real navigation, GET or POST alike —
+    // style.css only gets discovered if page2.html is actually PARSED as
+    // a document, not just approved as an opaque leaf asset.
+    expect(manifestOf(site)?.assets).toContain("form-action-document/page2.html");
+    expect(manifestOf(site)?.assets).toContain("form-action-document/style.css");
+  });
+
+  it("parses a submit control's formaction override as a real document destination", async () => {
+    await mkdir(join(root, "formaction-document"), { recursive: true });
+    await writeFile(
+      join(root, "formaction-document", "index.html"),
+      [
+        '<form action="fallback.html">',
+        '<button type="submit" formaction="page2.html">Go</button>',
+        "</form>",
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "formaction-document", "page2.html"),
+      '<link rel="stylesheet" href="style.css">',
+    );
+    await writeFile(join(root, "formaction-document", "style.css"), "body {}");
+    await writeFile(join(root, "formaction-document", "fallback.html"), "<h1>Fallback</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "formaction-document",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("formaction-document/page2.html");
+    expect(manifestOf(site)?.assets).toContain("formaction-document/style.css");
   });
 
   it("treats an unattached img element's src assignment as proven, without requiring insertion proof", async () => {

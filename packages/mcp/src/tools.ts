@@ -2062,12 +2062,18 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
   // itself a high-confidence website signal, even though it parsed
   // cleanly. The two detectors have to agree on the SAME dohc.json.
+  // Mirrors workspace-core's own siteConfidence exactly, including its
+  // medium branch: hasWebPackageSignal || hasBuildOutputSignal. A folder
+  // detected ONLY because a real build output exists (dist/index.html,
+  // say, with no package.json signal at all) still needs medium, not low
+  // — omitting uniqueBuildOutputs here left the two detectors disagreeing
+  // on exactly that input despite this branch's own parity comment.
   const confidence: SiteConfidence =
     validType === "site"
       ? "high"
       : hasIndex || frameworkConfig
         ? "high"
-        : hasPackageSignal
+        : hasPackageSignal || uniqueBuildOutputs.length > 0
           ? "medium"
           : "low";
   const configuredTitle = typeof config?.title === "string" && config.title.trim() ? config.title : undefined;

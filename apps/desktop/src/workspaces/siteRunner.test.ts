@@ -614,6 +614,36 @@ describe("package manager helpers", () => {
     }
   });
 
+  it("scans every operand export/declare/typeset/local takes, not just the first", () => {
+    // Bash's own `help export` documents `export [-fn] [name[=value] ...]`
+    // — an ARBITRARY number of operands, never a separate command to run
+    // at all (the same is true of declare/typeset/local). "KEEP" here is
+    // a bare operand (exports an already-set variable, nothing new to
+    // check) — stopping the scan there instead of continuing PAST it
+    // would miss the HOST assignment that follows.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("export", ["KEEP", "HOST=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    // Multiple assignment operands are all checked, not just the first.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("export", ["NODE_ENV=production", "HOST=0.0.0.0"]),
+    ).toThrow(/loopback/);
+    // A NON-exported declare/typeset/local's SECOND operand must not be
+    // wrongly treated as a real (unconditional) host assignment either —
+    // stopping the declare-specific handling after only the FIRST
+    // operand let the outer loop's own bare-assignment branch re-examine
+    // the second one fresh, with no memory that it was never exported.
+    for (const command of ["declare", "typeset", "local"]) {
+      expect(() =>
+        assertLoopbackOnlyDevServerCommand(command, ["FOO=1", "HOST=0.0.0.0"]),
+      ).not.toThrow();
+      // The exported form must still catch a LATER operand too.
+      expect(() =>
+        assertLoopbackOnlyDevServerCommand(command, ["-x", "FOO=1", "HOST=0.0.0.0"]),
+      ).toThrow(/loopback/);
+    }
+  });
+
   it("rejects a HOST/HOSTNAME assignment passed through the env wrapper", () => {
     // GNU env's documented form: env [NAME=VALUE]... [COMMAND [ARG]...] —
     // env itself is not an assignment, so the direct-assignment scan alone

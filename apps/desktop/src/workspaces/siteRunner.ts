@@ -400,11 +400,26 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
     // splitShellStatements) persists an assignment into the CURRENT
     // shell's environment, the same way a bare prefix assignment sets one
     // for the NEXT command — either way, a HOST/HOSTNAME value it sets
-    // reaches this statement's own dev server command, so the scan must
-    // see past the keyword to the assignment itself, the same way it
-    // already sees past `env`'s own OPTIONs below.
+    // reaches this statement's own dev server command. export's own
+    // grammar (`export [-fn] [name[=value] ...]`, per bash's own `help
+    // export`) takes an ARBITRARY NUMBER of operands — it never runs a
+    // following command at all, so EVERY remaining token in this
+    // statement belongs to it. `export KEEP HOST=0.0.0.0` validly
+    // exports both — stopping at the first bare name ("KEEP") and
+    // treating the REST as a separate command would miss HOST entirely.
+    // A bare operand (no "=") just exports an already-set variable —
+    // nothing new to check — but the scan must keep going past it to
+    // reach a LATER operand's own assignment.
     if (!isEnvWrapper && token === "export") {
       index += 1;
+      while (index < tokens.length) {
+        const operandAssignment = ENV_ASSIGNMENT_PATTERN.exec(tokens[index]!);
+        if (operandAssignment) {
+          const [, name, value] = operandAssignment;
+          if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+        }
+        index += 1;
+      }
       continue;
     }
     // "declare -x HOST=0.0.0.0"/"typeset -x ..."/"local -x ..." export
@@ -415,7 +430,10 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
     // anything. These builtins take only SHORT options (no long forms),
     // combinable in one token ("-rx") or given separately ("-r -x") —
     // scan every "-"-prefixed option token immediately after the keyword
-    // for an "x" before deciding.
+    // for an "x" before deciding. Like export, they never run a
+    // following command either — declare/typeset/local ALSO take an
+    // arbitrary number of name[=value] operands, so every remaining
+    // token belongs to them too.
     if (!isEnvWrapper && (token === "declare" || token === "typeset" || token === "local")) {
       index += 1;
       let exported = false;
@@ -423,17 +441,14 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
         if (tokens[index]!.includes("x")) exported = true;
         index += 1;
       }
-      const next = tokens[index];
-      const nextAssignment = next ? ENV_ASSIGNMENT_PATTERN.exec(next) : null;
-      if (exported && nextAssignment) {
-        const [, name, value] = nextAssignment;
-        if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+      while (index < tokens.length) {
+        const operandAssignment = ENV_ASSIGNMENT_PATTERN.exec(tokens[index]!);
+        if (exported && operandAssignment) {
+          const [, name, value] = operandAssignment;
+          if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+        }
+        index += 1;
       }
-      // Either way this specific NAME=VALUE (if present) is fully
-      // handled here — skip past it so the loop's own bare-assignment
-      // branch above doesn't re-examine it and, for the non-exported
-      // case, wrongly record it as a real host source.
-      if (nextAssignment) index += 1;
       continue;
     }
     // Outside an `env` wrapper the leading run is only ever assignments

@@ -1224,7 +1224,12 @@ function domProducingTag(
       property.type !== "Identifier"
     ) return undefined;
     const name = astString(property, "name");
-    return name === "body" || name === "head" ? name : undefined;
+    // document.documentElement (the <html> root) is exactly as always-
+    // attached as document.body/document.head — an insertion proof check
+    // that only recognizes body/head rejects
+    // document.documentElement.appendChild(script), so a real, connected
+    // (and therefore actually fetched) script gets declined as unproven.
+    return name === "body" || name === "head" || name === "documentElement" ? name : undefined;
   }
   if (node.type === "Identifier") {
     return provenTags.get(astString(node, "name") ?? "");
@@ -2459,7 +2464,16 @@ function htmlReferencesFromDocument(
           cspPolicyContentsSoFar = [...cspPolicyContentsSoFar, policyContent];
         }
       }
-      const scriptKind: ScriptKind = attrs.get("type")?.toLowerCase() === "module" ? "module" : "classic";
+      // Trimmed the same way isExecutableScriptType's own "module" keyword
+      // check is — `type=" module "` is still the exact module keyword to
+      // a real browser (only an ADDITIONAL, non-whitespace suffix like
+      // "module;foo" makes it a data block instead). Without the trim
+      // here, a module script's own src (or inline body) still gets
+      // pushed as executable, but with the WRONG grammar attached —
+      // classic instead of module — so a real static import/export in it
+      // fails to parse as a syntax error and its dependencies are
+      // silently dropped from the shared artifact.
+      const scriptKind: ScriptKind = attrs.get("type")?.trim().toLowerCase() === "module" ? "module" : "classic";
       for (const attribute of node.attrs) {
         const attributeName = attribute.name;
         if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
@@ -2524,11 +2538,18 @@ function htmlReferencesFromDocument(
         // <area href> NAVIGATE the browser there — an SVG or HTML page
         // reached either way is itself parsed for its own references, the
         // same way a real browser resolves them once it's the active
-        // document. <img src>/CSS url() never do this.
+        // document. <img src>/CSS url() never do this. A form's own
+        // action (or a submit control's formaction override) is ALSO a
+        // real navigation — the browser loads and parses whatever page
+        // the submission response is, GET or POST alike — so a local
+        // target page's own scripts/styles/images belong in the manifest
+        // the same way an <a href> target's do, not as an opaque asset.
         const isDocumentDestination =
           (attributeName === "data" && tagName === "object") ||
           (attributeName === "src" && (tagName === "embed" || tagName === "iframe")) ||
-          (attributeName === "href" && (tagName === "a" || tagName === "area"));
+          (attributeName === "href" && (tagName === "a" || tagName === "area")) ||
+          (attributeName === "action" && tagName === "form") ||
+          (attributeName === "formaction" && (tagName === "button" || tagName === "input"));
         // The bounded CSP classes (see blockedCspClasses): icon-family
         // rel tokens, <img>/<video poster>/image-input src, and SVG
         // <image>/<use> href are all img-src; everything else this

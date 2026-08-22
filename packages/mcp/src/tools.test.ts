@@ -1634,6 +1634,24 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites gives medium confidence to a folder detected only from a real build output", async () => {
+    await withWorkspace(async (ctx) => {
+      // No dohc.json, no package.json, no root-level index.html — the
+      // ONLY website signal at all is the real, conventional build
+      // output. workspace-core's own siteConfidence returns "medium" for
+      // exactly this (hasBuildOutputSignal), not "low" — the two
+      // detectors have to agree on the same input.
+      await mkdir(join(ctx.root, "build-only/dist"), { recursive: true });
+      await writeFile(join(ctx.root, "build-only/dist/index.html"), "<h1>Built</h1>");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "build-only");
+      expect(site?.confidence).toBe("medium");
+    });
+  });
+
   it("detect_sites does not give an empty dohc.json high confidence, matching workspace-core's own detector", async () => {
     await withWorkspace(async (ctx) => {
       // {} parses cleanly (configPath set, no error diagnostic) but
