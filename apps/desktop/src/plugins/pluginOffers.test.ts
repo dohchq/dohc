@@ -38,10 +38,13 @@ const raceState = vi.hoisted(() => ({
   // competitor claiming the slot in the window this call's own reservation
   // just freed, which only exists once the free has actually happened.
   rmdirTrap: null as null | { path: string; run: () => Promise<void> },
-  // Makes the rmdir CALL ITSELF reject, one-shot — a transient antivirus
-  // hold on the just-created empty directory is the one seen in practice,
-  // never a completed rmdir something else then races into.
-  rmdirRejectionTrap: null as null | { path: string; code: string },
+  // Makes the rmdir CALL ITSELF reject — a transient antivirus hold on the
+  // just-created empty directory is the one seen in practice, never a
+  // completed rmdir something else then races into. One-shot by default
+  // (the hold clears by the very next attempt); `persist: true` keeps
+  // rejecting every call for the path, for pinning what happens once the
+  // bounded retry itself exhausts.
+  rmdirRejectionTrap: null as null | { path: string; code: string; persist?: boolean },
   // A one-shot simulated rename failure, unrelated to any race — a locked
   // file, a full disk — keyed to the exact destination so only the
   // intended publish call is affected. `run`, when set, fires right before
@@ -104,7 +107,7 @@ vi.mock("node:fs/promises", async () => {
     ) => {
       const rejection = raceState.rmdirRejectionTrap;
       if (rejection && path === rejection.path) {
-        raceState.rmdirRejectionTrap = null;
+        if (!rejection.persist) raceState.rmdirRejectionTrap = null;
         throw Object.assign(new Error(`simulated ${rejection.code}`), { code: rejection.code });
       }
       const result = await actual.rmdir(path, options);
@@ -702,6 +705,63 @@ describe("addOfferedPlugin", () => {
     });
     expect(added.rootPath).toBe(target);
   });
+
+  // Round 18 finding 3: removeOwnedEmptyClaim's own final rmdir used to be
+  // a single, unretried attempt — a transient Windows lock rejecting it
+  // once, even though it would have cleared on the very next try, still
+  // stranded the claim forever. It now gets the same bounded retry
+  // publishStaged's own rmdir already has.
+  it("removes the claim once a transient rmdir rejection clears within the retry budget", async () => {
+    const fixture = await createFixture();
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    raceState.zeroIdentityTrap = { path: target };
+    // One-shot: the very next rmdir attempt (the retry) hits the real,
+    // genuinely empty directory and succeeds.
+    raceState.rmdirRejectionTrap = { path: target, code: "EBUSY" };
+
+    await expect(
+      addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    // Removed, not stranded: the retry inside removeOwnedEmptyClaim's own
+    // rmdir absorbed the transient rejection.
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 10_000);
+
+  // The other half of the same fix: once the retry budget itself exhausts,
+  // this must refuse loudly — naming the leftover path — rather than
+  // silently swallow the failure and leave a claim nothing will ever clean
+  // up, permanently reading as "occupied" to every later offer listing and
+  // Add attempt.
+  it("refuses with a named error pointing at the leftover claim when the retry budget exhausts", async () => {
+    const fixture = await createFixture();
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    raceState.zeroIdentityTrap = { path: target };
+    raceState.rmdirRejectionTrap = { path: target, code: "EBUSY", persist: true };
+
+    await expect(
+      addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof OfferedPluginAddError &&
+        error.message.includes(target) &&
+        error.message.includes("manually"),
+    );
+
+    // Honest, not silently swallowed: the claim really is still there,
+    // named in the error a caller (or a person) can act on.
+    await expect(lstat(target)).resolves.toBeDefined();
+  }, 10_000);
 });
 
 describe("removeAddedOfferedPlugin", () => {

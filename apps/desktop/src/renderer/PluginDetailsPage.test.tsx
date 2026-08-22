@@ -733,6 +733,66 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.uninstallPlugin).not.toHaveBeenCalled();
   });
 
+  // Round 18 finding 2: the same in-flight check above scoped to id alone —
+  // two rows can share an id (a broken manifest's directory-derived
+  // fallback colliding with some other, unrelated plugin's real id), and an
+  // UNRELATED, id-colliding row's own install completing must never refuse
+  // to open THIS row's Remove confirmation for a transition that never
+  // happened to it.
+  it("still opens the Remove confirmation when an unrelated, id-colliding row installs while preflight is in flight", async () => {
+    const removingRow = plugin("codex", {
+      directoryName: "codex-a",
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    const collidingRow = plugin("codex", {
+      directoryName: "codex-b",
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [removingRow, collidingRow],
+    });
+    const slowPreflight = deferred<{
+      ok: true;
+      confirmationToken: string;
+      preflight: PluginUninstallPreflightRecord;
+    }>();
+    bridgeMock.pluginUninstallPreflight.mockImplementation(() => slowPreflight.promise);
+
+    renderPage("codex", "ws-1", "codex-a");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+
+    // codex-b's own, unrelated install completing — this dialog is about
+    // codex-a and must not react to it.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex", { directoryName: "codex-b" }),
+      });
+    });
+
+    await act(async () => {
+      slowPreflight.resolve({
+        ok: true,
+        confirmationToken: "00000000-0000-4000-8000-000000000001",
+        preflight: cleanPreflight,
+      });
+      await slowPreflight.promise;
+    });
+
+    expect(screen.getByTestId("plugin-uninstall-dialog")).toBeTruthy();
+  });
+
   // MUTATION (offer Open for a per-instance app too): this page has no
   // instance to name, so the open would be refused — and a user would be
   // handed a button that never works. The plugin's own panel opens these.
@@ -1645,6 +1705,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
       });
       expect(screen.getByText("Greeting")).toBeTruthy();
       expect(screen.getByText("What the note says.")).toBeTruthy();
@@ -1665,6 +1726,44 @@ describe("PluginDetailsPage", () => {
       ).toBe("warm");
     });
 
+    // Round 18 finding 4: settings used to route by pluginId alone, and two
+    // rows can share an id (a broken manifest's directory-derived fallback
+    // colliding with some other, unrelated plugin's real id). Reading and
+    // saving must name the exact row this page is open on, never whichever
+    // row the id happened to resolve to.
+    it("reads and writes its own directory's settings, not an id-colliding row's", async () => {
+      bridgeMock.listPlugins.mockResolvedValue({
+        ok: true,
+        plugins: [
+          plugin("codex", { directoryName: "codex-a", settings: declared }),
+          plugin("codex", { directoryName: "codex-b", settings: declared }),
+        ],
+      });
+      bridgeMock.getPluginSettings.mockResolvedValue({ ok: true, values: defaults });
+      bridgeMock.setPluginSettings.mockResolvedValue({
+        ok: true,
+        values: { ...defaults, shout: true },
+      });
+
+      render(
+        <PluginDetailsPage workspaceId="ws-1" pluginId="codex" directoryName="codex-a" />,
+      );
+      await screen.findByTestId("plugin-setting-input-greeting");
+      expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "codex",
+        directoryName: "codex-a",
+      });
+
+      await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
+      expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        pluginId: "codex",
+        directoryName: "codex-a",
+        values: { shout: true },
+      });
+    });
+
     it("saves a switch the moment it changes and shows what was stored", async () => {
       withSettings();
       bridgeMock.setPluginSettings.mockResolvedValue({
@@ -1679,6 +1778,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { shout: true },
       });
       await waitFor(() =>
@@ -1705,6 +1805,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { tone: "warm" },
       });
     });
@@ -1731,6 +1832,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { greeting: "Hei" },
       });
     });
@@ -1752,6 +1854,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { repeat: 4 },
       });
     });
@@ -1789,6 +1892,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.setPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-1",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
         values: { greeting: "Hello" },
       });
     });
@@ -1854,6 +1958,7 @@ describe("PluginDetailsPage", () => {
       expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
         workspaceId: "ws-new",
         pluginId: "hello-plugin",
+        directoryName: "hello-plugin",
       });
     });
 
@@ -1877,6 +1982,7 @@ describe("PluginDetailsPage", () => {
         expect(bridgeMock.getPluginSettings).toHaveBeenCalledWith({
           workspaceId: "ws-1",
           pluginId: "hello-plugin",
+          directoryName: "hello-plugin",
         })
       );
 

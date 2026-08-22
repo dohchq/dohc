@@ -512,16 +512,20 @@ export class PluginPipeline {
   }
 
   /**
-   * What this plugin declares the user may set. Refusing an unknown plugin is
-   * what keeps one plugin's settings out of another's reach: every settings
-   * call names a plugin, and only a plugin this workspace discovered has
-   * declarations to answer with.
+   * What this plugin declares the user may set. Refusing an unknown
+   * directory is what keeps one plugin's settings out of another's reach:
+   * every settings call names a directory, and only one this workspace
+   * discovered has declarations to answer with. Resolved by directoryName,
+   * never id — an id is only ever a broken manifest's directory-derived
+   * fallback, which can coincide with some OTHER, unrelated plugin's real
+   * id, and one directory is always exactly one discovery entry
+   * (#779-offers round 18 finding 4).
    */
-  private declaredSettings(pluginId: string): PluginSettingDeclaration[] {
-    const status = this.statuses.get(pluginId);
-    if (status) return status.settings;
-    const candidate = this.discovery.find((entry) => entry.id === pluginId);
-    if (!candidate) throw new Error(`Unknown plugin: ${pluginId}`);
+  private declaredSettings(directoryName: string): PluginSettingDeclaration[] {
+    const candidate = this.discovery.find(
+      (entry) => entry.directoryName === directoryName,
+    );
+    if (!candidate) throw new Error(`Unknown plugin directory: ${directoryName}`);
     return manifestSettings(candidate.manifest);
   }
 
@@ -548,23 +552,32 @@ export class PluginPipeline {
     };
   }
 
-  /** This plugin's settings: its declared defaults under the stored answers. */
+  /** This plugin's settings: its declared defaults under the stored answers,
+   * for the exact directory a caller selected — never id alone, which two
+   * rows can share (#779-offers round 18 finding 4). */
   async getPluginSettings(
-    pluginId: string,
+    directoryName: string,
   ): Promise<Record<string, PluginSettingValue>> {
-    const declared = this.declaredSettings(pluginId);
+    const declared = this.declaredSettings(directoryName);
     const stored = await readPluginSettingsFile(this.workspaceRoot);
-    return resolvePluginSettings(declared, stored[pluginId]);
+    return resolvePluginSettings(declared, stored[directoryName]);
   }
 
-  /** Records the user's answers and tells the plugin, if it is running. */
+  /** Records the user's answers, for the exact directory a caller selected,
+   * and tells the plugin, if it is running. `pluginId` names the process to
+   * notify — pluginHost tracks running instances by id, never directoryName
+   * — and appears in an error message; the stored answers themselves are
+   * always read and written under directoryName (#779-offers round 18
+   * finding 4). */
   async setPluginSettings(
+    directoryName: string,
     pluginId: string,
     patch: Readonly<Record<string, unknown>>,
   ): Promise<Record<string, PluginSettingValue>> {
-    const declared = this.declaredSettings(pluginId);
+    const declared = this.declaredSettings(directoryName);
     const values = await savePluginSettings(
       this.workspaceRoot,
+      directoryName,
       pluginId,
       declared,
       patch,

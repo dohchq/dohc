@@ -9,10 +9,18 @@ import {
 } from "./pluginManifestSchema";
 
 // A plugin's settings are the user's answers, so they live in the workspace as
-// text — one file beside the workspace's own settings, keyed by plugin id:
+// text — one file beside the workspace's own settings, keyed by directoryName:
 //
 //   .dohc/plugin-settings.local.json
-//   { "t3-code": { "port": 4317 } }
+//   { "t3-code-src": { "port": 4317 } }
+//
+// Keyed by directoryName, not plugin id: an id is only ever a broken
+// manifest's directory-derived fallback, which can coincide with some OTHER,
+// unrelated plugin's real id — two rows sharing an id would otherwise share
+// one entry here too, each silently overwriting and reading the other's
+// answers. directoryName is the one identity a broken manifest cannot take
+// away, and every discovered entry carries exactly one (#779-offers round 18
+// finding 4).
 //
 // One file rather than one per plugin, because that is what the reader wants
 // open when they ask what this workspace has been told: every answer on one
@@ -54,13 +62,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function readStoredSettings(body: unknown): StoredPluginSettings {
   if (!isRecord(body)) return {};
   const stored: StoredPluginSettings = {};
-  for (const [pluginId, values] of Object.entries(body)) {
+  for (const [directoryName, values] of Object.entries(body)) {
     if (!isRecord(values)) continue;
     const kept: Record<string, PluginSettingValue> = {};
     for (const [key, value] of Object.entries(values)) {
       if (isSettingValue(value)) kept[key] = value;
     }
-    stored[pluginId] = kept;
+    stored[directoryName] = kept;
   }
   return stored;
 }
@@ -169,11 +177,15 @@ function queueWrite<T>(workspaceRoot: string, run: () => Promise<T>): Promise<T>
  * patch is validated against the plugin's declarations before anything is
  * written, so the file can only ever hold values the manifest allows: an
  * undeclared key or a value of the wrong type is refused, not stored and
- * quietly ignored later. Other plugins' entries are read and written back
- * untouched.
+ * quietly ignored later. Other rows' entries are read and written back
+ * untouched — keyed by directoryName, so a row that shares an id with an
+ * unrelated plugin still gets its own entry rather than sharing one
+ * (#779-offers round 18 finding 4). `pluginId` names the plugin only in the
+ * error messages below; the file itself never reads or writes under it.
  */
 export function savePluginSettings(
   workspaceRoot: string,
+  directoryName: string,
   pluginId: string,
   declared: readonly PluginSettingDeclaration[],
   patch: Readonly<Record<string, unknown>>,
@@ -194,7 +206,7 @@ export function savePluginSettings(
     }
 
     const stored = await readPluginSettingsFile(workspaceRoot);
-    const merged = { ...stored[pluginId], ...patch } as Record<
+    const merged = { ...stored[directoryName], ...patch } as Record<
       string,
       PluginSettingValue
     >;
@@ -203,7 +215,7 @@ export function savePluginSettings(
     const values = resolvePluginSettings(declared, merged);
     await writePluginSettingsFile(workspaceRoot, {
       ...stored,
-      [pluginId]: values,
+      [directoryName]: values,
     });
     return values;
   });

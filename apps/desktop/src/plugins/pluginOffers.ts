@@ -8,6 +8,7 @@ import {
   isInside,
   removeStaging,
   renameWithWindowsRetry,
+  rmdirWithWindowsRetry,
 } from "./pluginShared";
 import { EXCLUDED_SOURCE_NAMES, hashPluginSourceFiles } from "./pluginSourceSnapshot";
 
@@ -199,6 +200,16 @@ async function ensureContainedDirectory(
  * a directory, is empty" checks below are what this call still has to lean
  * on in that case, weaker than a dev+ino match but still real evidence,
  * never a blind delete.
+ *
+ * Once every check above has passed, this is no longer "can this call
+ * vouch for what is there" — it can, definitively — so a delete that still
+ * fails here is not evidence to walk away from quietly. A transient
+ * Windows lock (an antivirus hold on the claim, the same one publishStaged
+ * itself now retries through) gets the identical bounded retry; only once
+ * that retry exhausts does this throw a named refusal naming the leftover
+ * path, rather than leave a permanently "occupied" claim for every later
+ * listOfferedPlugins call and Add attempt to silently trip over
+ * (#779-offers round 18 finding 3).
  */
 async function removeOwnedEmptyClaim(
   target: string,
@@ -225,7 +236,11 @@ async function removeOwnedEmptyClaim(
   // worst case is deleting a competitor's just-created EMPTY directory in
   // a microsecond window, never real content, and their own Add simply
   // refuses and can retry.
-  await rmdir(target).catch(() => undefined);
+  await rmdirWithWindowsRetry(target, (error) =>
+    new OfferedPluginAddError(
+      `A claim at ${target} could not be removed after a publish failure; ` +
+        `remove it manually before retrying. ${errorMessage(error)}`,
+    ));
 }
 
 /**

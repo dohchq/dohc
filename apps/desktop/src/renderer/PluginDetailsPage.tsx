@@ -233,6 +233,12 @@ function PluginSettingsSection(props: {
       .getPluginSettings({
         workspaceId: props.workspaceId,
         pluginId: plugin.id,
+        // The exact row this section is about, never pluginId alone — two
+        // rows can share an id (a broken manifest's directory-derived
+        // fallback colliding with some other, unrelated plugin's real id),
+        // and settings answer only ever what one directory declared and
+        // stored (#779-offers round 18 finding 4).
+        directoryName: plugin.directoryName,
       })
       .then((result) => {
         if (request !== requestToken.current) return;
@@ -246,7 +252,7 @@ function PluginSettingsSection(props: {
     return () => {
       requestToken.current += 1;
     };
-  }, [props.workspaceId, plugin.id, declaredCount]);
+  }, [props.workspaceId, plugin.id, plugin.directoryName, declaredCount]);
 
   const commit = (key: string, value: PluginSettingValue) => {
     // Shown at once so a control never feels stuck, then replaced by whatever
@@ -257,6 +263,7 @@ function PluginSettingsSection(props: {
       .setPluginSettings({
         workspaceId: props.workspaceId,
         pluginId: plugin.id,
+        directoryName: plugin.directoryName,
         values: { [key]: value },
       })
       .then((result) => {

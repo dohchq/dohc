@@ -5936,7 +5936,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     try {
       await pipeline.start();
 
-      const values = await pipeline.setPluginSettings("example-plugin", {
+      const values = await pipeline.setPluginSettings("example-plugin", "example-plugin", {
         greeting: "Hei",
       });
 
@@ -5946,6 +5946,82 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(told).toHaveBeenCalledWith("example-plugin", values);
       // Saved, not only announced.
       expect(await pipeline.getPluginSettings("example-plugin")).toEqual(values);
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  // Round 18 finding 4: settings used to route by id alone, and two
+  // directories can share an id (a duplicate manifest name — discovery's
+  // own tie-break degrades one side, but both still carry the same id).
+  // Reading and saving must name the exact directory a caller selected,
+  // never whichever row that id happens to resolve to first.
+  it("keeps two id-colliding directories' settings apart", async () => {
+    const fixture = await createPluginWorkspace();
+    const settingsManifest = {
+      version: 1,
+      name: "example-plugin",
+      entry: "src/index.ts",
+      settings: [
+        {
+          key: "greeting",
+          type: "string",
+          label: "Greeting",
+          default: "Hello",
+        },
+      ],
+    };
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify(settingsManifest, null, 2)}\n`,
+    );
+
+    // A second directory declaring the SAME manifest name — a genuine id
+    // collision, not a broken-manifest fallback.
+    const otherRoot = join(fixture.workspaceRoot, "plugins", "z-example-plugin");
+    await mkdir(join(otherRoot, "src"), { recursive: true });
+    await writeFile(
+      join(otherRoot, "dohc-plugin.json"),
+      `${JSON.stringify(settingsManifest, null, 2)}\n`,
+    );
+    await writeFile(join(otherRoot, "src", "index.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+
+      const saved = await pipeline.setPluginSettings("example-plugin", "example-plugin", {
+        greeting: "Hei",
+      });
+      expect(saved).toEqual({ greeting: "Hei" });
+
+      // The exact directory just saved to reads back its own answer.
+      expect(await pipeline.getPluginSettings("example-plugin")).toEqual({
+        greeting: "Hei",
+      });
+      // The id-colliding OTHER directory is untouched — still its own
+      // manifest's default, never the answer just written under the
+      // shared id.
+      expect(await pipeline.getPluginSettings("z-example-plugin")).toEqual({
+        greeting: "Hello",
+      });
     } finally {
       await pipeline.dispose();
     }

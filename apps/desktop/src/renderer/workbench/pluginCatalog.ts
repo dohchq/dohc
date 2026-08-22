@@ -770,11 +770,21 @@ export function usePluginCatalog(
       // this response ever arrived. The live status listener already
       // applied the newer event to the row itself, so the row already
       // shows the truth — nothing further to do here but not proceed.
+      //
+      // pendingStatusEvents is keyed by id alone, and two rows can share
+      // one (a broken manifest's directory-derived fallback colliding with
+      // some other, unrelated plugin's real id) — an unrelated, ALREADY-
+      // installed survivor's own event reporting isInstalled would
+      // otherwise read as proof THIS row (still never installed) also
+      // transitioned, and refuse to show its Remove dialog for a change
+      // that never happened to it. directoryName is what the map's key
+      // cannot tell apart on its own (#779-offers round 18 finding 2).
       const newer = pendingStatusEvents.current.get(plugin.id);
       const staleInstall =
         newer &&
         newer.revision > revisionAtStart &&
         newer.event.kind === "changed" &&
+        newer.event.plugin.directoryName === plugin.directoryName &&
         !isInstalled(plugin) &&
         isInstalled(newer.event.plugin);
       if (staleInstall) return;

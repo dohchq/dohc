@@ -2427,9 +2427,19 @@ const PluginSettingsValues = z.record(
   `settings: at most ${MAX_PLUGIN_SETTINGS} values allowed`,
 );
 
+// directoryName, not pluginId alone, is what settles which row's answers a
+// call reads or writes: an id is only ever a broken manifest's directory-
+// derived fallback, which can coincide with some OTHER, unrelated plugin's
+// real id (#779-offers round 18 finding 4).
+export const GetPluginSettingsPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
+}).strict();
+export type GetPluginSettingsPayload = z.infer<typeof GetPluginSettingsPayload>;
+
 export const SetPluginSettingsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
+  directoryName: z.string().min(1).max(255),
   values: PluginSettingsValues,
 }).strict();
 export type SetPluginSettingsPayload = z.infer<typeof SetPluginSettingsPayload>;
@@ -4317,7 +4327,7 @@ export interface DohcDesktopBridge {
   ): Promise<PluginUninstallPreflightResult>;
   pluginSizes(payload: PluginActionPayload): Promise<PluginSizesResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
-  getPluginSettings(payload: PluginActionPayload): Promise<PluginSettingsResult>;
+  getPluginSettings(payload: GetPluginSettingsPayload): Promise<PluginSettingsResult>;
   setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;

@@ -306,7 +306,7 @@ describe("plugin web app main-process wiring", () => {
       firstStopAt,
     );
     const settledGuardAt = uninstall.indexOf(
-      "if (collisionAtStart && result.ok && result.plugin.approvedHash !== null) {",
+      "if (collisionAtStart && claimantStoppedBySettledResult) {",
       uninstallCallAt,
     );
     const secondRevokeAt = uninstall.indexOf(
@@ -334,5 +334,39 @@ describe("plugin web app main-process wiring", () => {
     expect(settledGuardAt).toBeGreaterThan(uninstallCallAt);
     expect(secondRevokeAt).toBeGreaterThan(settledGuardAt);
     expect(secondStopAt).toBeGreaterThan(secondRevokeAt);
+  });
+
+  // #779-offers round 18 finding 1: a FAILED uninstall can still have
+  // stopped the installed claimant's process before the failure that
+  // followed — the preflight-stale-after-stop and delete-failed paths both
+  // mark the row disabled or disabled-pending-repair only AFTER
+  // pluginHost.stop() already ran, so its main-process surfaces are just as
+  // dead as a successful removal's would be. An earlier failure (caught
+  // before the pipeline ever touches the process) never reaches that
+  // status, and the claimant is still genuinely running.
+  it("revokes a collision's authority on a failed uninstall too, only once the settled status proves the process was actually stopped", () => {
+    const uninstall = handler("uninstallPlugin");
+    const settledGuardAt = uninstall.indexOf(
+      "if (collisionAtStart && claimantStoppedBySettledResult) {",
+    );
+    const predicateAt = uninstall.indexOf(
+      "const claimantStoppedBySettledResult =",
+    );
+    const predicate = uninstall.slice(
+      predicateAt,
+      uninstall.indexOf(";", uninstall.indexOf("disabled-pending-repair", predicateAt)) + 1,
+    );
+
+    // MUTATION (gate on result.ok alone, dropping the status check): a
+    // failure caught before the process was ever stopped would then ALSO
+    // revoke a still-genuinely-running claimant's authority.
+    expect(predicateAt).toBeGreaterThan(-1);
+    expect(settledGuardAt).toBeGreaterThan(predicateAt);
+    expect(squeeze(predicate)).toContain("result.plugin!==null");
+    expect(squeeze(predicate)).toContain("result.plugin.approvedHash!==null");
+    expect(squeeze(predicate)).toContain('result.plugin.status==="disabled"');
+    expect(squeeze(predicate)).toContain(
+      'result.plugin.status==="disabled-pending-repair"',
+    );
   });
 });

@@ -121,6 +121,7 @@ import {
   AddOfferedPluginResult,
   ListPluginsPayload,
   PluginSettingsResult,
+  GetPluginSettingsPayload,
   SetPluginSettingsPayload,
   ListPluginsResult,
   PluginActionPayload,
@@ -7416,12 +7417,12 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.getPluginSettings, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PluginActionPayload.parse(payload);
+    const input = GetPluginSettingsPayload.parse(payload);
     try {
       const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
-        values: await pipeline.getPluginSettings(input.pluginId),
+        values: await pipeline.getPluginSettings(input.directoryName),
       });
     } catch (error) {
       return PluginSettingsResult.parse({
@@ -7438,7 +7439,11 @@ function registerIpcHandlers(
       const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
-        values: await pipeline.setPluginSettings(input.pluginId, input.values),
+        values: await pipeline.setPluginSettings(
+          input.directoryName,
+          input.pluginId,
+          input.values,
+        ),
       });
     } catch (error) {
       return PluginSettingsResult.parse({
@@ -7486,11 +7491,27 @@ function registerIpcHandlers(
       const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.confirmationToken),
       );
-      if (collisionAtStart && result.ok && result.plugin.approvedHash !== null) {
-        // Settled: the row confirmationToken actually named WAS this id's
-        // installed claimant, now gone — its authority is this action's to
-        // revoke after all, the same as the unambiguous path already did
-        // before the pipeline ever ran.
+      // Settled: whether the row confirmationToken actually named WAS this
+      // id's installed claimant, now decided for certain instead of
+      // guessed up front. A SUCCESSFUL removal always reflects it
+      // (result.plugin.status is "disabled" the instant uninstall()
+      // returns ok). A FAILED one can too: the preflight-stale-after-stop
+      // and delete-failed paths both explicitly mark the row disabled or
+      // disabled-pending-repair only AFTER pluginHost.stop() already ran —
+      // its process is just as dead as a successful removal's would be,
+      // and leaving main's surfaces pointed at it would be stale, not
+      // safe. An EARLIER failure (a stale confirmation caught before the
+      // pipeline ever touches the process) never reaches that stop, and
+      // the status this action reads back is whatever it already was —
+      // never one of those two — so the claimant is still genuinely
+      // running and its surfaces correctly stay untouched (#779-offers
+      // round 18 finding 1).
+      const claimantStoppedBySettledResult =
+        result.plugin !== null &&
+        result.plugin.approvedHash !== null &&
+        (result.plugin.status === "disabled" ||
+          result.plugin.status === "disabled-pending-repair");
+      if (collisionAtStart && claimantStoppedBySettledResult) {
         revokePluginPanels(input.workspaceId, input.pluginId);
         stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
       }
