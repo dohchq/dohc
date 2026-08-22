@@ -362,6 +362,7 @@ import {
 import { buildMenuTemplate } from "./window/applicationMenu";
 import {
   createUserSettingsWriteQueue,
+  createGuestZoomApplier,
   createZoomMutation,
   resolvePersistedZoomApplication,
 } from "./window/windowZoom";
@@ -1711,6 +1712,8 @@ function applyZoomLevelToWindows(zoomLevel: number): void {
     if (!guest.isDestroyed()) guest.setZoomLevel(zoomLevel);
   }
 }
+
+const bindGuestZoom = createGuestZoomApplier(() => knownZoomLevel);
 
 const enqueueUserSettingsWrite = createUserSettingsWriteQueue();
 const mutateWindowZoom = createZoomMutation({
@@ -7975,17 +7978,9 @@ function registerIpcHandlers(
                 view: { view, window: win },
               });
               if (displaced) destroyPluginWebAppViews([displaced]);
-              // Embedded plugin content follows the window zoom (#875).
-              // Chromium scopes zoom per origin, so the level is re-applied
-              // on every load — a level set before the first navigation
-              // would not survive it.
-              const applyGuestZoom = () => {
-                if (knownZoomLevel !== null && !view.webContents.isDestroyed()) {
-                  view.webContents.setZoomLevel(knownZoomLevel);
-                }
-              };
-              applyGuestZoom();
-              view.webContents.on("did-finish-load", applyGuestZoom);
+              // Embedded plugin content follows the window zoom (#875);
+              // behavior pinned in windowZoom.test.ts.
+              bindGuestZoom(view.webContents);
             },
             onLoadFailure: () => {
               // The load error's message can embed the URL, credential

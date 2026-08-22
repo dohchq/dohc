@@ -27,6 +27,35 @@ export function resolvePersistedZoomApplication(
   return null;
 }
 
+/** The three things guest zoom needs from a WebContents — no more, so the
+ * behavior tests drive the real logic instead of a true-by-construction fake. */
+export interface GuestZoomTarget {
+  isDestroyed(): boolean;
+  setZoomLevel(level: number): void;
+  on(event: "did-finish-load", handler: () => void): void;
+}
+
+/**
+ * Binds one embedded guest to the window zoom: the current level applies at
+ * attach and re-applies on every load — Chromium scopes zoom per origin, so a
+ * level set before the first navigation would not survive it. Reads the level
+ * at APPLY time, so a zoom change while the guest is still loading wins.
+ */
+export function createGuestZoomApplier(
+  getLevel: () => number | null,
+): (guest: GuestZoomTarget) => void {
+  return (guest) => {
+    const apply = () => {
+      const level = getLevel();
+      if (level !== null && !guest.isDestroyed()) {
+        guest.setZoomLevel(level);
+      }
+    };
+    apply();
+    guest.on("did-finish-load", apply);
+  };
+}
+
 export type UserSettingsWriteQueue = <T>(
   task: () => Promise<T>,
 ) => Promise<T>;

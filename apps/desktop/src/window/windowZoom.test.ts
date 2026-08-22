@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
+  createGuestZoomApplier,
   createUserSettingsWriteQueue,
   createZoomMutation,
   nextZoomLevel,
@@ -66,6 +67,63 @@ describe("resolvePersistedZoomApplication", () => {
 
   it("with nothing known and nothing persisted there is nothing to apply", () => {
     expect(resolvePersistedZoomApplication(null, null)).toBeNull();
+  });
+});
+
+describe("createGuestZoomApplier", () => {
+  function fakeGuest() {
+    const calls: number[] = [];
+    let destroyed = false;
+    let loadHandler: (() => void) | undefined;
+    return {
+      guest: {
+        isDestroyed: () => destroyed,
+        setZoomLevel: (level: number) => calls.push(level),
+        on: (_event: "did-finish-load", handler: () => void) => {
+          loadHandler = handler;
+        },
+      },
+      calls,
+      destroy: () => {
+        destroyed = true;
+      },
+      finishLoad: () => loadHandler?.(),
+    };
+  }
+
+  it("applies the current level at attach and again on every load", () => {
+    let level: number | null = 2;
+    const bind = createGuestZoomApplier(() => level);
+    const { guest, calls, finishLoad } = fakeGuest();
+    bind(guest);
+    expect(calls).toEqual([2]);
+    // Chromium scopes zoom per origin: the first navigation must re-apply.
+    finishLoad();
+    expect(calls).toEqual([2, 2]);
+    // A zoom change while the guest is still loading wins at load time.
+    level = 3;
+    finishLoad();
+    expect(calls).toEqual([2, 2, 3]);
+  });
+
+  it("a guest attached before the first level is known applies nothing yet, then takes the load-time level", () => {
+    let level: number | null = null;
+    const bind = createGuestZoomApplier(() => level);
+    const { guest, calls, finishLoad } = fakeGuest();
+    bind(guest);
+    expect(calls).toEqual([]);
+    level = 1;
+    finishLoad();
+    expect(calls).toEqual([1]);
+  });
+
+  it("never touches a destroyed guest", () => {
+    const bind = createGuestZoomApplier(() => 2);
+    const { guest, calls, destroy, finishLoad } = fakeGuest();
+    destroy();
+    bind(guest);
+    finishLoad();
+    expect(calls).toEqual([]);
   });
 });
 

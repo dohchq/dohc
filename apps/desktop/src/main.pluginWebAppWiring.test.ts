@@ -125,19 +125,19 @@ describe("plugin web app main-process wiring", () => {
   });
 
   it("embedded guests follow the window zoom (#875)", () => {
-    // At attach: the current level applies immediately and re-applies on
-    // every load — Chromium scopes zoom per origin, so a level set before
-    // the first navigation would not survive it.
+    // The attach/load/level behavior is pinned in windowZoom.test.ts
+    // (createGuestZoomApplier drives a fake guest through attach, loads,
+    // level changes, and destruction). This file pins only what it owns:
+    // the attach callback binds the REAL guest's WebContents to the applier
+    // fed by knownZoomLevel.
     const start = handler("startPluginWebApp");
     const registerAt = start.indexOf("pluginWebAppViews.register({");
-    const applyAt = start.indexOf("applyGuestZoom();", registerAt);
-    const reapplyAt = start.indexOf(
-      'view.webContents.on("did-finish-load", applyGuestZoom);',
-      applyAt,
-    );
+    const bindAt = start.indexOf("bindGuestZoom(view.webContents);", registerAt);
     expect(registerAt).toBeGreaterThan(-1);
-    expect(applyAt).toBeGreaterThan(registerAt);
-    expect(reapplyAt).toBeGreaterThan(applyAt);
+    expect(bindAt).toBeGreaterThan(registerAt);
+    expect(squeeze(mainSource)).toContain(
+      "constbindGuestZoom=createGuestZoomApplier(()=>knownZoomLevel);",
+    );
 
     // On every zoom change: the window-wide apply reaches each live guest.
     const apply = functionSource("function applyZoomLevelToWindows(");
