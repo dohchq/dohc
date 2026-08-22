@@ -61,8 +61,17 @@ function hideEmptyState() {
   emptyState.hidden = true;
 }
 
+// Batched to one real scroll per frame: reading scrollHeight forces
+// layout, and a streamed reply calls this once per delta -- per-call
+// scrolling made long answers quadratic in layout work.
+let scrollScheduled = false;
 function scrollToLatest() {
-  transcript.scrollTop = transcript.scrollHeight;
+  if (scrollScheduled) return;
+  scrollScheduled = true;
+  requestAnimationFrame(() => {
+    scrollScheduled = false;
+    transcript.scrollTop = transcript.scrollHeight;
+  });
 }
 
 // The transcript itself carries no aria-live: a streamed reply fires one
@@ -189,7 +198,10 @@ function renderText(event) {
     ));
     textItems.set(key, body);
   }
-  body.textContent += event.text;
+  // Appends a new text node: `textContent +=` re-serialized and replaced
+  // the whole accumulated reply on every delta, which is quadratic over a
+  // long answer.
+  body.append(event.text);
   scrollToLatest();
 }
 

@@ -256,6 +256,44 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(status?.textContent).toBe("Failed");
   });
 
+  it("renders a streamed reply's fragments in order, each stream in its own card", async () => {
+    const { eventSource } = await loadChatModule();
+    let full = "";
+    for (let index = 0; index < 40; index += 1) {
+      const text = "word" + index + " ";
+      full += text;
+      sendEvent(eventSource, { kind: "text-delta", itemId: "i1", stream: "assistant", text });
+    }
+    expect(textOf(".message.agent:not(.reasoning) .message-body")).toBe(full);
+    // The reasoning stream renders separately, not appended into the reply.
+    sendEvent(eventSource, { kind: "text-delta", itemId: "i1", stream: "reasoning", text: "thinking" });
+    expect(textOf(".message.reasoning .message-body")).toBe("thinking");
+    expect(textOf(".message.agent:not(.reasoning) .message-body")).toBe(full);
+  });
+
+  it("batches transcript scrolling to one layout read per frame while a reply streams", async () => {
+    // Reading scrollHeight forces layout; doing it once per delta made a
+    // long streamed answer quadratic. The scroll is batched through
+    // requestAnimationFrame instead.
+    const { eventSource } = await loadChatModule();
+    const transcriptElement = document.querySelector("#transcript");
+    if (!transcriptElement) throw new Error("The transcript is missing.");
+    let layoutReads = 0;
+    Object.defineProperty(transcriptElement, "scrollHeight", {
+      configurable: true,
+      get: () => {
+        layoutReads += 1;
+        return 1000;
+      },
+    });
+    for (let index = 0; index < 50; index += 1) {
+      sendEvent(eventSource, { kind: "text-delta", itemId: "i1", stream: "assistant", text: "x" });
+    }
+    expect(layoutReads).toBe(0);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    expect(layoutReads).toBe(1);
+  });
+
   it("keeps a pending message's card recoverable across a reconnect that races its request", async () => {
     const { eventSource } = await loadChatModule();
     let capturedBody: string | undefined;
