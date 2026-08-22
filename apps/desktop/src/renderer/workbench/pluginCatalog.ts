@@ -61,11 +61,29 @@ type PendingStatusEvent = {
   event: PluginStatusChangedEvent;
 };
 
+// Replaces the row this update is about — its own directoryName, always —
+// and, when this id names exactly one OTHER row, that row too: a rename
+// reports the same id under a new directoryName with no way to name which
+// directoryName it moved FROM, so the only row an id-only removal could
+// ever legitimately mean is the one it is currently unambiguous with. An id
+// shared by two OR MORE rows at once is a genuine collision (a broken
+// manifest's directory-derived fallback colliding with some other,
+// unrelated plugin's real id): removing every row sharing the id would
+// drop the survivor right along with whichever one this update is actually
+// about (#779-offers round 17 finding 4 — needed for the dialog-scoping fix
+// to mean anything, since a collision's own "changed" events would
+// otherwise erase the OTHER row from the list before its dialog ever gets
+// the chance to matter).
 function upsertPlugin(
   plugins: readonly PluginStatusRecord[],
   plugin: PluginStatusRecord,
 ): PluginStatusRecord[] {
-  const next = plugins.filter((entry) => entry.id !== plugin.id);
+  const matchingId = plugins.filter((entry) => entry.id === plugin.id);
+  const next = plugins.filter((entry) => {
+    if (entry.directoryName === plugin.directoryName) return false;
+    if (entry.id === plugin.id && matchingId.length === 1) return false;
+    return true;
+  });
   next.push(plugin);
   return next.sort(
     (left, right) =>
@@ -593,9 +611,18 @@ export function usePluginCatalog(
         // running installation under a claim that stopped being true.
         // Dropping the confirmation both closes the dialog and discards its
         // token — the one thing that must not survive this transition.
+        //
+        // Scoped to the exact (id, directoryName) pair the dialog is about,
+        // not id alone — two rows can share an id (a broken manifest's
+        // directory-derived fallback colliding with some other, unrelated
+        // plugin's real id), and an unrelated installed row's OWN status
+        // event reporting isInstalled would otherwise close a completely
+        // different row's dialog for a transition that never happened to it
+        // (#779-offers round 17 finding 4).
         setConfirmation((current) =>
           current &&
           current.plugin.id === event.plugin.id &&
+          current.plugin.directoryName === event.plugin.directoryName &&
           !isInstalled(current.plugin) &&
           isInstalled(event.plugin)
             ? null

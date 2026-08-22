@@ -650,6 +650,28 @@ export function PluginDetailsPage(props: {
   // gone, findTabPlugin can no longer tell a pre-existing collision from a
   // rename target by looking at the current list alone.
   const knownCollisionsRef = useRef<Set<string>>(new Set());
+  // Whose evidence knownCollisionsRef currently holds. A tab is one virtual
+  // path per (pluginId, directoryName) pair, so this component ordinarily
+  // never sees that pair change under it — but nothing enforces a remount
+  // on identity change, and stale evidence from a PREVIOUS tab's pair would
+  // otherwise reject a later, genuinely legitimate rename this new tab's
+  // own pair never actually collided with. Cleared during render, not an
+  // effect, so the very first render for a new pair already reads an empty
+  // set — never one render of stale history (#779-offers round 17
+  // finding 3).
+  const knownCollisionsOwnerRef = useRef<{ pluginId: string; directoryName: string } | null>(
+    null,
+  );
+  if (
+    knownCollisionsOwnerRef.current?.pluginId !== props.pluginId ||
+    knownCollisionsOwnerRef.current?.directoryName !== props.directoryName
+  ) {
+    knownCollisionsRef.current = new Set();
+    knownCollisionsOwnerRef.current = {
+      pluginId: props.pluginId,
+      directoryName: props.directoryName,
+    };
+  }
   useEffect(() => {
     if (catalog.load.status !== "ready") return;
     const exact = catalog.load.plugins.some(

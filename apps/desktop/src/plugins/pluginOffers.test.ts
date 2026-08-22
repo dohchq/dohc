@@ -38,6 +38,10 @@ const raceState = vi.hoisted(() => ({
   // competitor claiming the slot in the window this call's own reservation
   // just freed, which only exists once the free has actually happened.
   rmdirTrap: null as null | { path: string; run: () => Promise<void> },
+  // Makes the rmdir CALL ITSELF reject, one-shot — a transient antivirus
+  // hold on the just-created empty directory is the one seen in practice,
+  // never a completed rmdir something else then races into.
+  rmdirRejectionTrap: null as null | { path: string; code: string },
   // A one-shot simulated rename failure, unrelated to any race — a locked
   // file, a full disk — keyed to the exact destination so only the
   // intended publish call is affected. `run`, when set, fires right before
@@ -98,6 +102,11 @@ vi.mock("node:fs/promises", async () => {
       path: Parameters<typeof actual.rmdir>[0],
       options?: Parameters<typeof actual.rmdir>[1],
     ) => {
+      const rejection = raceState.rmdirRejectionTrap;
+      if (rejection && path === rejection.path) {
+        raceState.rmdirRejectionTrap = null;
+        throw Object.assign(new Error(`simulated ${rejection.code}`), { code: rejection.code });
+      }
       const result = await actual.rmdir(path, options);
       const trap = raceState.rmdirTrap;
       if (trap && path === trap.path) {
@@ -164,6 +173,7 @@ afterEach(async () => {
   raceState.lstatTrap = null;
   raceState.lstatCallCounts.clear();
   raceState.rmdirTrap = null;
+  raceState.rmdirRejectionTrap = null;
   raceState.renameFailureTrap = null;
   raceState.zeroIdentityTrap = null;
   await Promise.all(
@@ -493,6 +503,54 @@ describe("addOfferedPlugin", () => {
       // by this call's own rename.
       await expect(readFile(join(target, "raced.txt"), "utf8")).resolves.toBe("raced");
       await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  // Round 17 finding 5, Windows-only: the rmdir that frees publishStaged's
+  // own mkdir() claim before the rename was unguarded — a rejection there
+  // (a transient antivirus hold on the just-created empty directory is the
+  // one seen in practice) used to propagate straight out with the claim
+  // still standing and nothing left to clean it up. Every later offer
+  // listing and Add attempt would then see target already occupied and
+  // refuse it forever, not only until the hold clears.
+  it.runIf(process.platform === "win32")(
+    "[Windows] refuses without stranding the claim when freeing it for the rename is rejected",
+    async () => {
+      const fixture = await createFixture();
+      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      raceState.rmdirRejectionTrap = { path: target, code: "EBUSY" };
+
+      await expect(
+        addOfferedPlugin({
+          builtinPluginsRoot: fixture.builtinPluginsRoot,
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+      // The claim is gone, not stranded as a permanently "occupied" empty
+      // directory.
+      await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+
+      // The offer is genuinely still available, and a retried Add — the
+      // hold having cleared — succeeds with a fresh copy.
+      const offers = await listOfferedPlugins(
+        fixture.builtinPluginsRoot,
+        fixture.workspaceRoot,
+        NO_EXISTING_PLUGIN_IDS,
+      );
+      expect(offers.map((offer) => offer.directoryName)).toContain("codex");
+
+      const added = await addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+      });
+      expect(added.rootPath).toBe(target);
+      await expect(readFile(join(target, "dohc-plugin.json"), "utf8"))
+        .resolves.toContain('"name": "codex"');
     },
   );
 

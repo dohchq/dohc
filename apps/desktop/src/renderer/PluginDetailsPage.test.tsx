@@ -436,6 +436,57 @@ describe("PluginDetailsPage", () => {
     expect(screen.queryByText("Codex B")).toBeNull();
   });
 
+  // Round 17 finding 3: the collision history findTabPlugin's fallback
+  // leans on is recorded per component instance, not per tab — nothing
+  // forces a remount when the (pluginId, directoryName) pair a mount
+  // reads changes under it. Stale evidence from a PREVIOUS tab's pair must
+  // never reject a LATER tab's own, genuinely legitimate rename.
+  it("does not let a previous tab's collision history reject a later tab's own legitimate rename", async () => {
+    // One fetch for the whole test: usePluginCatalog only refetches on a
+    // workspaceId change, so switching tabs within the same workspace
+    // reuses whatever this call already returned — exactly the persistent-
+    // catalog-instance shape the bug depends on.
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
+        // A genuine collision for THIS tab's own pair — correctly recorded
+        // into knownCollisions while this tab is mounted. The bug is that
+        // knownCollisions is a bare set of directoryName strings with no id
+        // of its own, so this entry can outlive the tab that earned it and
+        // block an unrelated id's fallback later, purely by name.
+        plugin("codex", { directoryName: "shared-target", displayName: "Codex Other" }),
+        plugin("second", { directoryName: "second-old", displayName: "Second" }),
+      ],
+    });
+
+    const view = renderPage("codex", "ws-1", "codex-a");
+    expect(await screen.findByText("Codex A")).toBeTruthy();
+
+    // A different tab, a different pair — same component instance, no
+    // remount forced by the test (rerender is exactly the shape a
+    // persistent tab component would take across a virtual-path change
+    // with no key change).
+    view.rerender(
+      <PluginDetailsPage workspaceId="ws-1" pluginId="second" directoryName="second-old" />,
+    );
+    expect(await screen.findByText("Second")).toBeTruthy();
+
+    // This new tab's OWN row renames to the directoryName the FIRST tab's
+    // history happened to record — a coincidence a fresh tab must be free
+    // to follow.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("second", { directoryName: "shared-target", displayName: "Second" }),
+      });
+    });
+
+    expect(await screen.findByText("plugins/shared-target")).toBeTruthy();
+    expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
+  });
+
   it("offers Remove for a plugin that was added but never installed, and restores its offer on confirm", async () => {
     // What Add's own result looks like: discovered, never approved.
     // isInstalled (approvedHash !== null) is false, so Uninstall never
@@ -488,6 +539,63 @@ describe("PluginDetailsPage", () => {
     await waitFor(() =>
       expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2),
     );
+  });
+
+  // Round 17 finding 4: the dialog-closing check that protects a Remove
+  // confirmation from a stale "never installed" claim used to scope to id
+  // alone. Two rows can share an id (a broken manifest's directory-derived
+  // fallback colliding with some other, unrelated plugin's real id), and
+  // an UNRELATED row's own install completing must never close a
+  // completely different row's dialog for a transition that never
+  // happened to it.
+  it("keeps an open Remove dialog open when an unrelated, id-colliding row installs", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("widget", {
+          directoryName: "widget-a",
+          displayName: "Widget A",
+          status: "discovered",
+          runtimeStatus: null,
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+        }),
+        plugin("widget", {
+          directoryName: "widget-b",
+          displayName: "Widget B",
+          status: "discovered",
+          runtimeStatus: null,
+          sourceHash: null,
+          approvedHash: null,
+          installedBaselineHash: null,
+        }),
+      ],
+    });
+
+    renderPage("widget", "ws-1", "widget-a");
+    const removeButton = await screen.findByTestId("plugin-remove");
+    await userEvent.click(removeButton);
+    const dialog = await screen.findByTestId("plugin-uninstall-dialog");
+    expect(within(dialog).getByText("Remove widget?")).toBeTruthy();
+
+    // widget-b's own, unrelated install completing — this tab's dialog is
+    // about widget-a and must not react to it.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("widget", {
+          directoryName: "widget-b",
+          displayName: "Widget B",
+          status: "ready",
+        }),
+      });
+    });
+
+    expect(screen.getByTestId("plugin-uninstall-dialog")).toBeTruthy();
+    expect(within(screen.getByTestId("plugin-uninstall-dialog")).getByText("Remove widget?"))
+      .toBeTruthy();
   });
 
   // A directoryName matching a built-in says nothing about what a copy's

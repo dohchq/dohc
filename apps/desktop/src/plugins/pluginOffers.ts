@@ -304,7 +304,20 @@ async function publishStaged(staged: string, target: string): Promise<boolean> {
     }
     return true;
   }
-  await rmdir(target);
+  // Guarded the same way every other failure point past the claim already
+  // is: an unfreed rmdir failure here — a transient antivirus hold on the
+  // just-created empty directory is the one seen in practice — used to
+  // propagate straight past this function with the mkdir() claim still
+  // standing and nothing left to clean it up. Every later listOfferedPlugins
+  // call and Add attempt would then see target already occupied and refuse
+  // it forever, not only until the hold clears (#779-offers round 17
+  // finding 5).
+  try {
+    await rmdir(target);
+  } catch (error) {
+    await removeOwnedEmptyClaim(target, claimIdentity);
+    throw error;
+  }
   try {
     await renameWithWindowsRetry(staged, target, (error) => error);
   } catch (error) {

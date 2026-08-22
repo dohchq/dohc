@@ -7448,6 +7448,19 @@ function registerIpcHandlers(
     }
   });
 
+  // Whether `pluginId` is claimed, right now, by a genuinely INSTALLED row
+  // (approvedHash set) — never merely present. A collision's losing,
+  // never-approved side can sit in pipeline.list() under the exact same id
+  // as the winning, installed side; only the installed side ever registers
+  // a panel, opens a web app, or owns a guest partition, so it is the only
+  // one this id's ID-keyed main-process state can ever legitimately belong
+  // to (#779-offers round 17 findings 1 and 2).
+  const pluginIdHasInstalledClaimant = (
+    pipeline: PluginPipeline,
+    pluginId: string,
+  ): boolean =>
+    pipeline.list().some((entry) => entry.id === pluginId && entry.approvedHash !== null);
+
   ipcMain.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
     assertTrustedSender(event);
     const input = UninstallPluginPayload.parse(payload);
@@ -7455,12 +7468,32 @@ function registerIpcHandlers(
       const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
       // Uninstall stops the plugin's process on its way to deleting the
       // source, so no panel authority over it survives the attempt whether
-      // or not the delete succeeds (#779 round 12 A4).
-      revokePluginPanels(input.workspaceId, input.pluginId);
-      stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
+      // or not the delete succeeds (#779 round 12 A4) — but only when this
+      // id names a single row. A collision's invalid, never-installed side
+      // has no panel or web app of its own to revoke, and the SAME id's
+      // installed side is a completely different row this action was never
+      // asked to touch: revoking pre-emptively here, before the pipeline
+      // even resolves which row confirmationToken actually names, would
+      // reach into that survivor's live authority (#779-offers round 17
+      // finding 2). Ambiguous here defers to the settled outcome below,
+      // once it is known for certain which row actually left.
+      const collisionAtStart =
+        pipeline.list().filter((entry) => entry.id === input.pluginId).length > 1;
+      if (!collisionAtStart) {
+        revokePluginPanels(input.workspaceId, input.pluginId);
+        stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
+      }
       const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.confirmationToken),
       );
+      if (collisionAtStart && result.ok && result.plugin.approvedHash !== null) {
+        // Settled: the row confirmationToken actually named WAS this id's
+        // installed claimant, now gone — its authority is this action's to
+        // revoke after all, the same as the unambiguous path already did
+        // before the pipeline ever ran.
+        revokePluginPanels(input.workspaceId, input.pluginId);
+        stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
+      }
       // The pipeline's own cleanup already scopes file and record deletion
       // to identities that trace to the removed directory (#779-offers
       // round 14 finding 5/6) — but input.pluginId can still be claimed by
@@ -7470,18 +7503,22 @@ function registerIpcHandlers(
       // Registration and guest-partition state below are keyed by id
       // alone, with no directoryName to disambiguate by, so clearing them
       // unconditionally would reach into that surviving plugin's own live
-      // registration and session rather than the row that actually left
-      // (#779-offers round 16 finding 3).
-      const idStillClaimed =
-        result.ok && pipeline.list().some((entry) => entry.id === input.pluginId);
+      // registration and session rather than the row that actually left.
+      // Presence alone is not enough either: the surviving claimant must
+      // actually OWN this id — a never-installed collision loser left
+      // sitting under the same id owns nothing here to protect, and
+      // skipping the clear on its account would leave the row that just
+      // uninstalled with a stale partition and registration forever
+      // (#779-offers round 16 finding 3, round 17 finding 1).
+      const idStillOwned = result.ok && pluginIdHasInstalledClaimant(pipeline, input.pluginId);
       forgetUninstalledPlugin({
         registrations: pluginRegistrations,
         panelStartedHosts,
         workspaceId: input.workspaceId,
         pluginId: input.pluginId,
-        uninstalled: result.ok && !idStillClaimed,
+        uninstalled: result.ok && !idStillOwned,
       });
-      if (result.ok && !idStillClaimed) {
+      if (result.ok && !idStillOwned) {
         // The guest partition holds the web app's session cookies — plugin
         // state as much as its data directory. A reinstall starts unpaired.
         await clearPluginWebAppPartition({
