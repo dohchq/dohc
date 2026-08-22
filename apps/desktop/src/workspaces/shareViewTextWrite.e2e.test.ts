@@ -37,6 +37,7 @@ import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 // journal rather than the return value.
 
 const engine = requireEngineBinaryOrSkip();
+const SHARE_ID = "share-e2e";
 
 const requireModule = createRequire(import.meta.url);
 
@@ -239,9 +240,11 @@ describe("share-view text writes through the real store", () => {
           view.workspaceId,
           view.store,
           true,
+          SHARE_ID,
         ),
       ).resolves.toEqual({
         capturedPaths: 0,
+        collisionRecordQuarantined: false,
         repairedPaths: 1,
         unjournalablePaths: [],
       });

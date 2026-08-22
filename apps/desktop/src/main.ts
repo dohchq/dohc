@@ -6086,6 +6086,7 @@ function registerIpcHandlers(
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
             recordRefusals: input.recordRefusals,
+            recordCollisions: input.recordCollisions,
           }),
       });
       if (!outcome.ok) throw new Error(outcome.errorMessage);
@@ -6207,6 +6208,7 @@ function registerIpcHandlers(
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
             recordRefusals: input.recordRefusals,
+            recordCollisions: input.recordCollisions,
           }),
       });
     } catch (error) {
