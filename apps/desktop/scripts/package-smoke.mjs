@@ -31,10 +31,12 @@ check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
   "bundled dohc chat CLI exists",
 );
-check(
-  existsSync(join(desktopDir, "resources/cli-bin/dohc-mcp")),
-  "bundled dohc-mcp server exists",
-);
+for (const file of ["dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
+  check(
+    existsSync(join(desktopDir, `resources/cli-bin/${file}`)),
+    `bundled dohc-mcp launcher part exists: ${file}`,
+  );
+}
 const engineBinary = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
 check(
   existsSync(join(desktopDir, "resources/workspace-engine", engineBinary)),
@@ -102,7 +104,7 @@ if (config) {
   // resolveDohcMcpCommand points packaged chat session configs at these two
   // files by absolute path -- a filter that omits them ships sessions with
   // no dohc MCP tools.
-  for (const launcher of ["dohc", "dohc.cmd", "dohc-mcp", "dohc-mcp.cmd"]) {
+  for (const launcher of ["dohc", "dohc.cmd", "dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
     check(
       cliBinResource?.filter?.includes(launcher) === true,
       `cli-bin extraResource ships ${launcher}`,
