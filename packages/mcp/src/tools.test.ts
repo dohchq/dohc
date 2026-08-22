@@ -1582,6 +1582,36 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("detect_sites prefers a real configured build output over a real conventional one", async () => {
+    await withWorkspace(async (ctx) => {
+      // Both a conventional "dist" AND a configured, nested "public/dist"
+      // hold a real index.html — the conventional loop runs first and would
+      // claim builtEntry before the configured check ever gets a chance to
+      // run, unless that check is unconditional (not gated on builtEntry
+      // still being undefined). workspace-core's preferredBuildOutput/
+      // presentBuildOutput (packages/workspace-core/src/sites.ts) give the
+      // configured artifact priority whenever both are real, so a stale
+      // "dist" left over from an earlier build must not win here either.
+      await mkdir(join(ctx.root, "dual-output/dist"), { recursive: true });
+      await writeFile(join(ctx.root, "dual-output/dist/index.html"), "<h1>Stale</h1>");
+      await mkdir(join(ctx.root, "dual-output/public/dist"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "dual-output/public/dist/index.html"),
+        "<h1>Configured</h1>",
+      );
+      await writeFile(
+        join(ctx.root, "dual-output/dohc.json"),
+        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "dual-output");
+      expect(site?.entry).toBe("dual-output/public/dist/index.html");
+    });
+  });
+
   it("detect_sites flags an invalid preview.mode the same way workspace-core's shared validator would", async () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "bad-preview-mode"), { recursive: true });

@@ -381,7 +381,7 @@ export function SitePreviewPage(props: {
         setActionError(error instanceof Error ? error.message : "Could not prepare this site for sharing.");
       }
     }
-  }, [props.onShareSite, props.siteRoot, props.workspaceId, siteContext, start]);
+  }, [preview, props.onShareSite, props.siteRoot, props.workspaceId, runningMode, siteContext, start]);
 
   const refreshPreviewLogs = useCallback(async () => {
     if (

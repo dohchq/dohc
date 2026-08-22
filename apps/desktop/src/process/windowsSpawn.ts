@@ -7,6 +7,7 @@
 import { execFile, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
+import { parseProcessTable, processTreePids } from "./posixSpawn";
 
 // Quote a token for a cmd.exe /s /c command line. EVERY token is quoted:
 // cmd.exe does not interpret its metacharacters (& | < > ^ and parentheses)
@@ -126,4 +127,56 @@ export function killProcessTreeWin32(
       (error) => resolve(!error),
     );
   });
+}
+
+// taskkill /PID <wrapper> /T walks the LIVE process tree from a still-running
+// wrapper pid — it has nothing to walk once that wrapper has already exited,
+// the same gap posixSpawn.ts's module comment describes for "-pid" process
+// groups. siteRunner's stopChild needs a snapshot taken WHILE the wrapper was
+// still alive, captured periodically the same way processDescendantsPosix
+// lets POSIX reach a backgrounded descendant after its own wrapper exits and
+// gets reparented away in the process table.
+//
+// Win32_Process (via CIM) is used rather than `wmic` — Windows 11 24H2
+// removed wmic.exe by default — or `tasklist`, whose plain-text table has no
+// machine-stable delimiter; Get-CimInstance is available from the Windows
+// PowerShell 5.1 that ships on every supported Windows host, no pwsh (7)
+// install required. Its output is reduced to the same "pid ppid" shape
+// posixSpawn's parseProcessTable already parses, so the tree-walk itself
+// (processTreePids) stays a single, platform-agnostic implementation.
+function readProcessTableWithPowershell(): Promise<string> {
+  return new Promise((resolveOutput, reject) => {
+    execFile(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+      ],
+      { windowsHide: true },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolveOutput(stdout);
+      },
+    );
+  });
+}
+
+/**
+ * The Windows sibling of posixSpawn.ts's processDescendantsPosix: every
+ * transitive child of `rootPid`, enumerated but not signalled, for a caller
+ * keeping a rolling snapshot of a still-running tree. Excludes `rootPid`
+ * itself. An unreadable process table degrades to an empty list.
+ */
+export async function processDescendantsWin32(
+  rootPid: number,
+  readProcessTable: () => Promise<string> = readProcessTableWithPowershell,
+): Promise<number[]> {
+  try {
+    const table = parseProcessTable(await readProcessTable());
+    return processTreePids(table, rootPid).filter((pid) => pid !== rootPid);
+  } catch {
+    return [];
+  }
 }

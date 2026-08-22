@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
+import { killChildTreeWin32, processDescendantsWin32, resolveSpawnCommand } from "./windowsSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 
 // Teardown retries rmdir against asynchronously-released Windows handles, so the
@@ -143,6 +143,38 @@ describe("resolveSpawnCommand", () => {
     expect(seen).toEqual(["C:\\site\\node_modules\\.bin\\vite.CMD"]);
     expect(resolved.command).toBe("cmd.exe");
     expect(resolved.args[3]).toBe('""C:\\site\\node_modules\\.bin\\vite.CMD" "dev""');
+  });
+});
+
+// The real Win32_Process table cannot be read on a non-Windows host, so the
+// tree-walk arithmetic is proven here against an injected fake — the same
+// approach posixSpawn.test.ts takes for processDescendantsPosix. The
+// function takes its process-table reader as an argument, so it needs no
+// `process.platform` gate to be exercised on any host.
+describe("processDescendantsWin32", () => {
+  it("returns every descendant, excluding the root itself", async () => {
+    await expect(
+      processDescendantsWin32(
+        100,
+        async () => "100 1\n200 100\n300 200\n",
+      ),
+    ).resolves.toEqual(expect.arrayContaining([200, 300]));
+    await expect(
+      processDescendantsWin32(
+        100,
+        async () => "100 1\n200 100\n300 200\n",
+      ).then((pids) => pids.includes(100)),
+    ).resolves.toBe(false);
+  });
+
+  it("returns an empty list when the process table cannot be read", async () => {
+    await expect(
+      processDescendantsWin32(100, () => Promise.reject(new Error("powershell: not found"))),
+    ).resolves.toEqual([]);
+  });
+
+  it("returns an empty list for a root with no children", async () => {
+    await expect(processDescendantsWin32(100, async () => "100 1\n")).resolves.toEqual([]);
   });
 });
 

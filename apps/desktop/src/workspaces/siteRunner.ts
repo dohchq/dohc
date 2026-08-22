@@ -4,7 +4,12 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { killProcessTreePosix, processDescendantsPosix } from "../process/posixSpawn";
-import { killChildTreeWin32, resolveSpawnCommand } from "../process/windowsSpawn";
+import {
+  killChildTreeWin32,
+  killProcessTreeWin32,
+  processDescendantsWin32,
+  resolveSpawnCommand,
+} from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   assertContainedFilePath,
@@ -127,6 +132,15 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+// The periodic descendant capture below runs on every platform: a wrapper
+// that backgrounds its real server or build helper and exits leaves an
+// orphan behind on Windows exactly as it does on POSIX, and taskkill /T
+// needs a live root pid to walk — a snapshot taken while the wrapper was
+// still running is the only way to reach it once that wrapper is gone.
+function processDescendants(pid: number): Promise<number[]> {
+  return process.platform === "win32" ? processDescendantsWin32(pid) : processDescendantsPosix(pid);
+}
+
 function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: string): void {
   const at = Date.now();
   for (const chunk of text.split(/\r?\n/)) {
@@ -244,6 +258,67 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
   return { command, args };
 }
 
+// splitCommandLine's contract is "the ONE command the real shell will run"
+// — it has no concept of a shell's own STATEMENT separators, so a raw body
+// with an unquoted `;`, `&&`, `||`, `&`, `|`, or newline tokenizes as if the
+// whole thing were a single command. `export HOST=0.0.0.0; vite` would
+// glue "HOST=0.0.0.0;" onto the args of a command named "export" — the
+// loopback check below never reaches "vite", the command a real shell
+// actually runs second, so a HOST rebind hidden behind an earlier,
+// unrelated statement (`true && HOST=0.0.0.0 vite`) would go unvalidated.
+// A genuinely benign compound body (backgrounding a helper with `&`,
+// chaining with `;` — dohc's own test fixtures do exactly this to prove
+// descendant teardown) must keep working, so refusing every compound body
+// outright is too coarse; splitting it into the statements a real shell
+// would run and validating each ONE independently checks exactly what
+// actually executes, without reimplementing full shell grammar (quoting
+// and escaping still use splitCommandLine's own rules, applied per split
+// segment) or over-refusing ordinary usage.
+export function splitShellStatements(commandLine: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+  let escaped = false;
+  const backslashEscapes = process.platform !== "win32";
+  const chars = [...commandLine];
+
+  for (let index = 0; index < chars.length; index += 1) {
+    const char = chars[index]!;
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (backslashEscapes && char === "\\") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ";" || char === "\n" || char === "&" || char === "|") {
+      // "&&"/"||" are one two-character operator, not two separate ones —
+      // consume the repeated character too so it isn't re-scanned as the
+      // start of its own (empty) statement.
+      if (chars[index + 1] === char) index += 1;
+      statements.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  statements.push(current);
+  return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0);
+}
+
 function explicitHostBinds(args: string[]): string[] {
   const hosts: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -301,6 +376,17 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
     if (assignment) {
       const [, name, value] = assignment;
       if (name && /^host(name)?$/i.test(name)) hosts.push(value ?? "");
+      index += 1;
+      continue;
+    }
+    // "export HOST=0.0.0.0" (its own split shell statement — see
+    // splitShellStatements) persists an assignment into the CURRENT
+    // shell's environment, the same way a bare prefix assignment sets one
+    // for the NEXT command — either way, a HOST/HOSTNAME value it sets
+    // reaches this statement's own dev server command, so the scan must
+    // see past the keyword to the assignment itself, the same way it
+    // already sees past `env`'s own OPTIONs below.
+    if (!isEnvWrapper && token === "export") {
       index += 1;
       continue;
     }
@@ -409,22 +495,30 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
       " shell levels.",
     );
   }
-  let parsed: ReturnType<typeof splitCommandLine>;
-  try {
-    parsed = splitCommandLine(nested);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      "Site dev server command could not statically validate the nested shell command " +
-      "for the loopback-only constraint: " +
-      reason,
+  // The nested body is itself a real shell command line — `sh -c 'true &&
+  // HOST=0.0.0.0 vite'` genuinely runs two statements, not one — so it
+  // gets the same statement-by-statement treatment as a package script
+  // body (see packageManagerValidatedScriptCommand) before each is parsed
+  // and validated (recursively, in case a split statement is itself
+  // another shell wrapper).
+  for (const statement of splitShellStatements(nested)) {
+    let parsed: ReturnType<typeof splitCommandLine>;
+    try {
+      parsed = splitCommandLine(statement);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        "Site dev server command could not statically validate the nested shell command " +
+        "for the loopback-only constraint: " +
+        reason,
+      );
+    }
+    assertLoopbackOnlyDevServerCommandAtDepth(
+      parsed.command,
+      parsed.args,
+      shellDepth + 1,
     );
   }
-  assertLoopbackOnlyDevServerCommandAtDepth(
-    parsed.command,
-    parsed.args,
-    shellDepth + 1,
-  );
 }
 
 export function assertLoopbackOnlyDevServerCommand(command: string, args: string[]): void {
@@ -442,8 +536,14 @@ export function packageManagerValidatedScriptCommand(
   // version, so validating Yarn hooks keeps Classic sites safe.
   for (const body of [scriptBody, lifecycle.pre, lifecycle.post]) {
     if (!body) continue;
-    const visibleCommand = splitCommandLine(body);
-    assertLoopbackOnlyDevServerCommand(visibleCommand.command, visibleCommand.args);
+    // npm/pnpm/Yarn/Bun run this body through a REAL shell — a compound
+    // one (`export HOST=0.0.0.0; vite`, `true && HOST=0.0.0.0 vite`)
+    // genuinely executes as several statements, so each gets validated on
+    // its own instead of only the first.
+    for (const statement of splitShellStatements(body)) {
+      const visibleCommand = splitCommandLine(statement);
+      assertLoopbackOnlyDevServerCommand(visibleCommand.command, visibleCommand.args);
+    }
   }
   const packageCommand = packageManagerCommand(manager, script);
   assertLoopbackOnlyDevServerCommand(packageCommand.command, packageCommand.args);
@@ -516,7 +616,7 @@ export async function startSiteDevServer(input: {
   // await it instead of racing its own async ps read.
   let pendingCapture: Promise<void> = Promise.resolve();
   const captureDescendantsOnce = (pid: number): Promise<void> => {
-    const capture = processDescendantsPosix(pid).then((pids) => {
+    const capture = processDescendants(pid).then((pids) => {
       for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
       for (const capturedPid of capturedDescendantSet) {
         if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
@@ -527,7 +627,7 @@ export async function startSiteDevServer(input: {
     return capture;
   };
   const descendantCaptureTimer =
-    process.platform !== "win32" && child.pid !== undefined
+    child.pid !== undefined
       ? setInterval(
           () => captureDescendantsOnce(child.pid!),
           input.descendantCaptureIntervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS,
@@ -540,7 +640,7 @@ export async function startSiteDevServer(input: {
   // since spawn() returning is not proof the shell has executed anything
   // yet; maybeResolve (below) takes a second, more reliable one once the
   // wrapper's own ready output proves it already ran everything before it.
-  if (process.platform !== "win32" && child.pid !== undefined) captureDescendantsOnce(child.pid);
+  if (child.pid !== undefined) captureDescendantsOnce(child.pid);
   descendantCaptureTimer?.unref?.();
   child.once("exit", () => {
     if (descendantCaptureTimer) clearInterval(descendantCaptureTimer);
@@ -605,7 +705,7 @@ export async function startSiteDevServer(input: {
       // printing that line (backgrounding included) has already run, so
       // this is a far more reliable synchronization point for a second
       // snapshot than an arbitrary short delay would be.
-      if (process.platform !== "win32" && child.pid !== undefined) captureDescendantsOnce(child.pid);
+      if (child.pid !== undefined) captureDescendantsOnce(child.pid);
       resolve({
         url,
         command: input.command,
@@ -664,15 +764,15 @@ async function stopChild(
   // A wrapper that backgrounds the real dev server and exits right after
   // printing its URL (e.g. `node server.js & echo http://127.0.0.1:3000`)
   // leaves `child` exited long before stop() is ever called, with the real
-  // server still running as an orphan. On win32, killChildTreeWin32's own
-  // taskkill /T needs the wrapper's pid to still be a live process to walk
-  // its tree from — a dead pid gives it nothing to reach either way, and
-  // that gap is unchanged here (same scope #857 drew: "Win32 unchanged").
-  // On POSIX, capturedDescendants (see startSiteDevServer's periodic poll)
-  // carries pids enumerated WHILE the wrapper was still alive, so they stay
-  // reachable directly even after the wrapper's own exit reparents them
-  // away from its pid in the process table — proceed using those even
-  // though the wrapper itself is already gone.
+  // server still running as an orphan. taskkill /PID <wrapper> /T (and its
+  // POSIX process-group equivalent) needs the wrapper's pid to still be a
+  // live process to walk its tree from — a dead pid gives it nothing to
+  // reach either way, on EITHER platform. capturedDescendants (see
+  // startSiteDevServer's/buildSite's periodic poll, platform-dispatched via
+  // processDescendants) carries pids enumerated WHILE the wrapper was still
+  // alive, so they stay reachable directly by pid even after the wrapper's
+  // own exit reparents them away from its pid in the process table —
+  // proceed using those even though the wrapper itself is already gone.
   //
   // captureDescendantsOnce is itself fire-and-forget from its OWN callers
   // (an async `ps` read a caller doesn't block startup or readiness on) —
@@ -688,7 +788,17 @@ async function stopChild(
   if (alreadyExited && capturedDescendants().length === 0) return;
   beforeKill?.();
   if (process.platform === "win32") {
-    if (!alreadyExited) await killChildTreeWin32(child);
+    if (!alreadyExited) {
+      await killChildTreeWin32(child);
+    } else {
+      // The wrapper is already gone, so taskkill /PID <wrapper> /T has
+      // nothing live left to walk from — reach every descendant this
+      // session's periodic poll captured directly by pid instead, the same
+      // fallback POSIX takes below via capturedDescendants.
+      for (const descendantPid of capturedDescendants()) {
+        await killProcessTreeWin32(descendantPid, () => false);
+      }
+    }
     if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGTERM");
     await new Promise<void>((resolve) => {
@@ -759,11 +869,12 @@ export async function detectBuildOutput(siteRoot: string, configured?: string): 
     // directory hasn't actually produced a servable site — the preview
     // path serves <output>/index.html next and fails after buildSite
     // already reported ok: true. Requiring a real, readable index.html
-    // file here (not a directory literally named "index.html") is the
-    // same check the preview server and share manifest scan both need
-    // to succeed anyway.
-    const indexInfo = await stat(join(absolute, "index.html")).catch(() => null);
-    if (indexInfo?.isFile()) return absolute;
+    // file here (not a directory literally named "index.html", and not
+    // one whose permissions or ACLs deny reads) is the same check the
+    // preview server and share manifest scan both need to succeed anyway.
+    const indexPath = join(absolute, "index.html");
+    const indexInfo = await stat(indexPath).catch(() => null);
+    if (indexInfo?.isFile() && (await pathExists(indexPath))) return absolute;
   }
   return null;
 }
@@ -803,7 +914,7 @@ export async function buildSite(input: {
   let capturedDescendants: number[] = [];
   let pendingCapture: Promise<void> = Promise.resolve();
   const captureDescendantsOnce = (pid: number): Promise<void> => {
-    const capture = processDescendantsPosix(pid).then((pids) => {
+    const capture = processDescendants(pid).then((pids) => {
       for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
       for (const capturedPid of capturedDescendantSet) {
         if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
@@ -814,10 +925,10 @@ export async function buildSite(input: {
     return capture;
   };
   const descendantCaptureTimer =
-    process.platform !== "win32" && child.pid !== undefined
+    child.pid !== undefined
       ? setInterval(() => captureDescendantsOnce(child.pid!), DESCENDANT_CAPTURE_INTERVAL_MS)
       : undefined;
-  if (process.platform !== "win32" && child.pid !== undefined) captureDescendantsOnce(child.pid);
+  if (child.pid !== undefined) captureDescendantsOnce(child.pid);
   descendantCaptureTimer?.unref?.();
   child.once("exit", () => {
     if (descendantCaptureTimer) clearInterval(descendantCaptureTimer);

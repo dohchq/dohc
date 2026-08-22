@@ -1272,6 +1272,35 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("import-map/unmapped");
   });
 
+  it("does not apply an import map to a module script referenced earlier in document order", async () => {
+    // "app.js" is referenced by src BEFORE the importmap tag — a real
+    // browser has already started fetching it under NO import map by the
+    // time the later <script type="importmap"> is even parsed, so "x"
+    // inside app.js must stay unmapped: nothing imports public.js in this
+    // document, so it must not appear in the manifest at all. (Filtering
+    // against the document's FINAL resolved map instead would wrongly
+    // resolve app.js's "x" to public.js and pull it in.)
+    await mkdir(join(root, "import-map-order"), { recursive: true });
+    await writeFile(
+      join(root, "import-map-order", "index.html"),
+      [
+        '<script type="module" src="app.js"></script>',
+        '<script type="importmap">{"imports": {"x": "./public.js"}}</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "import-map-order", "app.js"), 'import "x";');
+    await writeFile(join(root, "import-map-order", "public.js"), "export {};");
+    await writeFile(join(root, "import-map-order", "x"), "private file literally named x");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "import-map-order",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("import-map-order/app.js");
+    expect(manifestOf(site)?.assets).not.toContain("import-map-order/public.js");
+    expect(manifestOf(site)?.assets).not.toContain("import-map-order/x");
+  });
+
   it("resolves a relative import-map key by matching the importer's normalized specifier, not just bare ones", async () => {
     await mkdir(join(root, "import-map-key"), { recursive: true });
     await writeFile(
@@ -3362,5 +3391,123 @@ describe("listSitePackages", () => {
     if (withManualStatic?.shareManifest.ok) {
       expect(withManualStatic.shareManifest.manifest.entryPath).toBe("manual-static/index.html");
     }
+  });
+
+  // ---- round-21 review pins ----
+
+  it("declines an XHR send when its receiver opens two distinct targets and walk order can't disambiguate it", async () => {
+    await mkdir(join(root, "xhr-ambiguous-open"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-ambiguous-open", "index.html"),
+      [
+        "<script>",
+        "var xhr = new XMLHttpRequest();",
+        "function issue() { xhr.send(); }",
+        'xhr.open("GET", "public.json");',
+        "issue();",
+        'xhr.open("GET", "private.json");',
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-ambiguous-open", "public.json"), "public");
+    await writeFile(join(root, "xhr-ambiguous-open", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "xhr-ambiguous-open",
+    );
+
+    // The hoisted send() runs before either open() textually, and the
+    // receiver opens two DIFFERENT targets elsewhere in the file — no
+    // walk-order bookkeeping proves which one this send() actually paired
+    // with at runtime, so neither is approved.
+    expect(manifestOf(site)?.assets).not.toContain("xhr-ambiguous-open/public.json");
+    expect(manifestOf(site)?.assets).not.toContain("xhr-ambiguous-open/private.json");
+  });
+
+  it("does not scan an inline script's own dependencies when CSP permits external scripts but not inline execution", async () => {
+    await mkdir(join(root, "csp-inline-script-not-unsafe-inline"), { recursive: true });
+    await writeFile(
+      join(root, "csp-inline-script-not-unsafe-inline", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'self\'; connect-src \'self\'">',
+        '<script>fetch("private.json");</script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-inline-script-not-unsafe-inline", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-inline-script-not-unsafe-inline",
+    );
+
+    // script-src 'self' permits an EXTERNAL same-origin script file, but a
+    // real browser still blocks this INLINE script from executing at all
+    // (no 'unsafe-inline'/nonce/hash) — its fetch() never fires.
+    expect(manifestOf(site)?.assets).not.toContain(
+      "csp-inline-script-not-unsafe-inline/private.json",
+    );
+  });
+
+  it("keeps a reference an inline script already requested before a later meta CSP blocks its class", async () => {
+    await mkdir(join(root, "csp-inline-block-order"), { recursive: true });
+    await writeFile(
+      join(root, "csp-inline-block-order", "index.html"),
+      [
+        '<script>fetch("needed.json");</script>',
+        '<meta http-equiv="Content-Security-Policy" content="connect-src \'none\'">',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-inline-block-order", "needed.json"), "data");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-inline-block-order",
+    );
+
+    // The script block ran and started its fetch BEFORE the later meta
+    // tag's connect-src 'none' took effect — filtering it against the
+    // document's FINAL CSP state would wrongly remove it.
+    expect(manifestOf(site)?.assets).toContain("csp-inline-block-order/needed.json");
+  });
+
+  it("classifies a preload as=worker target under worker-src", async () => {
+    await mkdir(join(root, "csp-preload-worker"), { recursive: true });
+    await writeFile(
+      join(root, "csp-preload-worker", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="worker-src \'none\'">',
+        '<link rel="preload" as="worker" href="private.js">',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-preload-worker", "private.js"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-preload-worker",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("csp-preload-worker/private.js");
+  });
+
+  it("classifies an unquoted @import url() target as a stylesheet, not the generic CSS url() default", async () => {
+    await mkdir(join(root, "css-import-unquoted"), { recursive: true });
+    await writeFile(
+      join(root, "css-import-unquoted", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'; style-src \'self\'">',
+        '<link rel="stylesheet" href="style.css">',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "css-import-unquoted", "style.css"),
+      "@import url(theme.css);",
+    );
+    await writeFile(join(root, "css-import-unquoted", "theme.css"), "body {}");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "css-import-unquoted",
+    );
+
+    // theme.css must be classified "style" (permitted by style-src 'self')
+    // rather than falling through to CSS_URL_PATTERN's generic "img"
+    // classification, which img-src 'none' would wrongly block.
+    expect(manifestOf(site)?.assets).toContain("css-import-unquoted/theme.css");
   });
 });

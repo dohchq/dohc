@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -26,6 +26,7 @@ import {
   packageManagerCommand,
   packageManagerValidatedScriptCommand,
   splitCommandLine,
+  splitShellStatements,
   startSiteDevServer,
   startStaticSitePreview,
   WILL_QUIT_BUDGET_MS,
@@ -397,6 +398,90 @@ describe("package manager helpers", () => {
         args: ["C:\\ws\\build.mjs"],
       });
     }
+  });
+
+  it("splits a shell body into the statements a real shell would run, not just whitespace-separated tokens", () => {
+    expect(splitShellStatements("export HOST=0.0.0.0; vite")).toEqual([
+      "export HOST=0.0.0.0",
+      "vite",
+    ]);
+    expect(splitShellStatements("true && HOST=0.0.0.0 vite")).toEqual([
+      "true",
+      "HOST=0.0.0.0 vite",
+    ]);
+    expect(splitShellStatements("vite || curl http://evil")).toEqual([
+      "vite",
+      "curl http://evil",
+    ]);
+    expect(splitShellStatements("sleep 500 & echo done")).toEqual([
+      "sleep 500",
+      "echo done",
+    ]);
+    expect(splitShellStatements("vite | tee log")).toEqual(["vite", "tee log"]);
+    expect(splitShellStatements("vite\nrm -rf /")).toEqual(["vite", "rm -rf /"]);
+    // The same character, quoted, is an ordinary literal argument byte, not
+    // a statement separator — over-splitting it would break a legitimate
+    // single-statement command.
+    expect(splitShellStatements('vite --define "X=1;2"')).toEqual([
+      'vite --define "X=1;2"',
+    ]);
+  });
+
+  it("validates every statement a package script's shell body actually runs, not just its first token", () => {
+    // `export HOST=0.0.0.0; vite` runs as TWO statements under npm/pnpm's
+    // own shell — the export must still be caught even though it isn't the
+    // package script's first (and only recognized) command.
+    expect(() =>
+      packageManagerValidatedScriptCommand("pnpm", "dev", "export HOST=0.0.0.0; vite"),
+    ).toThrow(/loopback/);
+    // A HOST rebind hidden behind an earlier, unrelated statement must be
+    // caught too — not just one glued directly onto the body's first word.
+    expect(() =>
+      packageManagerValidatedScriptCommand("pnpm", "dev", "true && HOST=0.0.0.0 vite"),
+    ).toThrow(/loopback/);
+    // A genuinely benign compound body (backgrounding a helper, chaining
+    // unrelated commands, no HOST binding anywhere) must keep working —
+    // refusing every compound shape outright would break real dev-server
+    // wrapper scripts like this one.
+    expect(() =>
+      packageManagerValidatedScriptCommand(
+        "pnpm",
+        "dev",
+        "sleep 1 & echo CHILD:$!; vite --host 127.0.0.1",
+      ),
+    ).not.toThrow();
+  });
+
+  it("validates every statement of a compound body hidden inside a nested shell wrapper", () => {
+    // The compound structure lives INSIDE sh's own quoted body here, not at
+    // the package script's top level — a distinct code path
+    // (assertLoopbackOnlyDevServerCommandAtDepth's nested-shell handling)
+    // from the plain package-script-body case above. An unrelated leading
+    // statement ("true", not "export") hides the rebind behind an
+    // ordinary "&&" — nothing about the assignment ITSELF (no glued-on
+    // operator character, no "export" keyword) helps catch it; only
+    // actually splitting the nested body into its own statements does.
+    expect(() =>
+      packageManagerValidatedScriptCommand(
+        "pnpm",
+        "dev",
+        "sh -c 'true && HOST=0.0.0.0 vite'",
+      ),
+    ).toThrow(/loopback/);
+    expect(() =>
+      packageManagerValidatedScriptCommand(
+        "pnpm",
+        "dev",
+        "sh -c 'export HOST=0.0.0.0; vite'",
+      ),
+    ).toThrow(/loopback/);
+    expect(() =>
+      packageManagerValidatedScriptCommand(
+        "pnpm",
+        "dev",
+        "sh -c 'sleep 1 & vite --host 127.0.0.1'",
+      ),
+    ).not.toThrow();
   });
 
   it("rejects dev server commands that explicitly bind outside loopback", () => {
@@ -927,6 +1012,54 @@ describe("buildSite", () => {
     },
   );
 
+  it.runIf(process.platform === "win32")(
+    "stops a descendant a successful build wrapper backgrounds and leaves behind (win32)",
+    async () => {
+      // Windows has no POSIX fork/reparent-to-init: a process Start-Process
+      // launches independently of any job object keeps running, untouched,
+      // once its own creator (the powershell.exe wrapper `child` here) has
+      // already exited — taskkill /PID <dead wrapper> /T then has nothing
+      // live to walk from, exactly the gap stopChild's win32 branch closes
+      // by reaching each periodically-captured descendant pid directly.
+      await mkdir(join(root, "site"), { recursive: true });
+      const script = [
+        "$psExe = Join-Path $PSHOME 'powershell.exe'",
+        "$proc = Start-Process -FilePath $psExe -ArgumentList " +
+          "'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' " +
+          "-PassThru -WindowStyle Hidden",
+        "Write-Output ('CHILD:' + $proc.Id)",
+        // Keeps the wrapper alive long enough for the immediate post-spawn
+        // descendant snapshot (a second powershell.exe round trip reading
+        // Win32_Process) to land before this wrapper exits on its own —
+        // buildSite has no descendant-poll-interval override, so that
+        // immediate snapshot is the only capture this scenario can rely on.
+        "Start-Sleep -Milliseconds 2000",
+      ].join("; ");
+      const result = await buildSite({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: "powershell.exe",
+        args: ["-NoProfile", "-NonInteractive", "-Command", script],
+        timeoutMs: 15000,
+      });
+      expect(result.exitCode).toBe(0);
+      const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
+      const descendantPid = Number(/CHILD:(\d+)/.exec(childLog?.text ?? "")?.[1]);
+      expect(descendantPid).toBeGreaterThan(0);
+
+      try {
+        expect(await waitForProcessDeath(descendantPid, 5000)).toBe(true);
+      } finally {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // The fixed teardown already removed it.
+        }
+      }
+    },
+    20_000,
+  );
+
   it("reports failed builds without stale output", async () => {
     await mkdir(join(root, "site"), { recursive: true });
     const result = await buildSite({
@@ -1000,4 +1133,22 @@ describe("buildSite", () => {
     expect(await detectBuildOutput(join(root, "site"))).toBe(join(root, "site", "out"));
     expect(existsSync(join(root, "site", "out"))).toBe(true);
   });
+
+  // chmod's read bit is only meaningfully enforced by POSIX filesystems —
+  // on Windows it toggles the read-only (write) attribute and never denies
+  // a read, so this scenario has no faithful equivalent there.
+  it.runIf(process.platform !== "win32")(
+    "does not report a build output whose index.html exists but cannot be read",
+    async () => {
+      await mkdir(join(root, "site", "dist"), { recursive: true });
+      const indexPath = join(root, "site", "dist", "index.html");
+      await writeFile(indexPath, "<h1>Built</h1>");
+      await chmod(indexPath, 0o000);
+      try {
+        expect(await detectBuildOutput(join(root, "site"))).toBeNull();
+      } finally {
+        await chmod(indexPath, 0o600);
+      }
+    },
+  );
 });

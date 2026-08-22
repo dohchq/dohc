@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   GetSitePreviewLogsResult,
   SitePackageInfo,
+  SitePackagePayload,
   StartSitePreviewResult,
 } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -48,7 +49,7 @@ const workspaceSettingsResult = {
 };
 
 const bridgeMock = {
-  getSitePackage: vi.fn(async (): Promise<SitePackageInfo | null> => site),
+  getSitePackage: vi.fn(async (_payload: SitePackagePayload): Promise<SitePackageInfo | null> => site),
   getWorkspaceSettings: vi.fn(async () => workspaceSettingsResult),
   startSitePreview: vi.fn(async (): Promise<StartSitePreviewResult> => ({
     siteRoot: "report",
@@ -371,6 +372,31 @@ describe("SitePreviewPage", () => {
       paths: ["report/index.html"],
       label: "Report",
     });
+  });
+
+  it("shares the mode actually running, not whatever prepareShare's callback closed over before auto-start", async () => {
+    const onShareSite = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SitePreviewPage
+        workspaceId="ws-sites"
+        siteRoot="report"
+        onShareSite={onShareSite}
+      />,
+    );
+
+    // By the time the frame appears, auto-start has already set preview to
+    // the "static" mode startSitePreview's mock reports. If prepareShare's
+    // useCallback is missing preview/runningMode from its deps, its
+    // memoized closure still reads them as they were at MOUNT — both
+    // null — so the refetch below asks for effectivePreviewMode: null
+    // instead of the mode that's actually running.
+    await screen.findByTestId("site-preview-frame");
+    await user.click(screen.getByTestId("site-preview-share"));
+
+    expect(onShareSite).toHaveBeenCalled();
+    const refetchCall = bridgeMock.getSitePackage.mock.calls.at(-1)?.[0];
+    expect(refetchCall).toMatchObject({ effectivePreviewMode: "static" });
   });
 
   it("refreshes the site manifest before preparing a share", async () => {

@@ -384,6 +384,34 @@ function blockedCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<Cs
   return blocked;
 }
 
+/** Whether a class's INLINE content (a <script> body, a <style> body/
+ * style="" attribute, an on* handler) is permitted to run at all — a
+ * SEPARATE question from whether EXTERNAL resources of that class are
+ * allowed. `script-src 'self'` (or any source list at all) blocks inline
+ * script/style UNLESS 'unsafe-inline' or a nonce-/hash-source is also
+ * present — unlike blockedCspClasses' external-resource check, 'self'
+ * alone is enough to block here; only 'unsafe-inline'/nonce/hash keep it
+ * permitted. This scanner can't verify a SPECIFIC nonce/hash matches a
+ * given element, so any nonce-/hash- token is treated as permitting
+ * (avoiding a false exclusion for the common nonce-based CSP pattern) —
+ * bounded to script/style, the only two classes inline content ever is. */
+function blockedInlineCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<CspClass> {
+  const blocked = new Set<CspClass>();
+  for (const content of cspPolicyContents) {
+    const directives = parseCspDirectives(content);
+    for (const cspClass of ["script", "style"] as const) {
+      const sourceList = directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
+      if (!sourceList) continue;
+      const permitsInline = sourceList.some((token) => {
+        const lower = token.toLowerCase();
+        return lower === "'unsafe-inline'" || lower.startsWith("'nonce-") || /^'sha(256|384|512)-/.test(lower);
+      });
+      if (!permitsInline) blocked.add(cspClass);
+    }
+  }
+  return blocked;
+}
+
 // Which elements a URL-bearing attribute actually fires a request from, per
 // the HTML spec — the same list every attribute-reference consumer below
 // shares, so a `<div data="...">` (data means nothing there) can't mint one.
@@ -451,12 +479,14 @@ const PRELOAD_AS_DESTINATIONS = new Set([
 // The bounded CSP classes (see blockedCspClasses) a validated preload
 // destination maps onto — only the destinations this scan already
 // distinguishes elsewhere; any other valid destination (font, audio,
-// document, worker, ...) is outside the bounded set and left unclassified.
+// document, ...) is outside the bounded set and left unclassified.
 const PRELOAD_AS_DESTINATION_CSP_CLASS: Readonly<Record<string, CspClass>> = {
   image: "img",
   script: "script",
   style: "style",
   fetch: "connect",
+  worker: "worker",
+  sharedworker: "worker",
 };
 
 function isResourceConsumingLinkRel(relValue: string | undefined, asValue: string | undefined): boolean {
@@ -672,6 +702,16 @@ export interface BrowserTextReference {
   // bounded set (navigation, form-action, manifest-src, frame-src, ...) —
   // those are never filtered by CSP here, regardless of policy.
   cspClass?: CspClass;
+  // The import map that was ACTIVE when this <script src>/modulepreload
+  // reference was reached in document order — set only where scriptKind is
+  // (an inline block's own importMap field does the equivalent job for
+  // inline script text; this is that same capture for an EXTERNAL script
+  // reference). Unset for every other reference kind, which never resolves
+  // bare specifiers against an import map at all. The queue that turns this
+  // reference into a scan target uses this INSTEAD of the document's final
+  // resolved map, so a module script reached before a later <script
+  // type="importmap"> still scans without one, matching a real browser.
+  importMap?: ImportMapResolution;
 }
 
 type CspClass = "img" | "script" | "style" | "connect" | "worker";
@@ -694,7 +734,14 @@ const CSS_COMMENT_PATTERN = /\/\*[\s\S]*?(?:\*\/|$)/g;
 const CSS_STRING_PATTERN = /"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'/g;
 const CSS_URL_PATTERN =
   /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi;
-const CSS_IMPORT_PATTERN = /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi;
+// @import's target is either a bare quoted string OR a url() call — and
+// url()'s own argument, same as everywhere else url() appears, can be
+// unquoted CSS syntax (`@import url(theme.css)` is as valid as
+// `@import url("theme.css")` or `@import "theme.css"`). Without the
+// unquoted alternative, CSS_URL_PATTERN's own generic (and looser) match
+// on the SAME text would classify it img-src instead of style-src.
+const CSS_IMPORT_PATTERN =
+  /@import\s+(?:url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)|"([^"]{1,2048})"|'([^']{1,2048})')/gi;
 // A bare url() destination depends on the CSS property it sits in —
 // img-src for most (background-image, list-style-image, ...), but
 // font-src for an @font-face block's own src. A font-face body never
@@ -806,7 +853,7 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
     });
   }
   for (const match of cssText.matchAll(CSS_IMPORT_PATTERN)) {
-    const value = match[1]?.trim();
+    const value = (match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5])?.trim();
     // @import pulls in a whole further STYLESHEET — style-src, not img-src.
     if (value) references.push({ value, documentRelative: false, appliesAsStylesheet: true, cspClass: "style" });
   }
@@ -1627,16 +1674,22 @@ function jsReferencesFromCode(
   // given send() is whichever open() was MOST RECENTLY VISITED before it,
   // not the receiver's LAST open() anywhere in the file (a later re-open
   // with no send after it must not retroactively steal an earlier send's
-  // target). But a function DECLARED before a later open() and CALLED
-  // after it (round 18's finding) visits send() before any open() has
-  // been seen for that receiver AT ALL — walk order proves nothing there.
-  // Each send() captures whatever open target is CURRENTLY on record for
-  // its receiver at that point in the walk; a capture that comes up empty
-  // (no open seen yet) falls back, after the whole walk finishes, to
-  // whatever the receiver's open target ended up being — the same
-  // order-independent join round 18 established, used only for the case
-  // walk order can't resolve on its own.
+  // target). Each send() captures whatever open target is CURRENTLY on
+  // record for its receiver at that point in the walk.
+  //
+  // A capture that comes up empty means no open() had been visited yet
+  // for that receiver AT THAT POINT — e.g. a function DECLARED before a
+  // later open() and CALLED after it (round 18's finding): walk order
+  // proves nothing there. Falling back to the receiver's fully-resolved
+  // open target is only SOUND when that receiver only ever opens ONE
+  // distinct target in the whole file — with two or more distinct opens
+  // (`function issue(){ xhr.send() } xhr.open(a); issue(); xhr.open(b);`,
+  // round 21's finding), no amount of walk-order bookkeeping proves which
+  // one this particular unresolved send() paired with at runtime, so it's
+  // declined rather than guessed — approving the wrong file, or omitting
+  // the right one, are both worse than a conservative miss here.
   const xhrOpenTargets = new Map<string, { value: string | undefined; scriptRelative: boolean }>();
+  const xhrDistinctOpenTargets = new Map<string, Set<string>>();
   const xhrSendCaptures: Array<{ name: string; target: { value: string | undefined; scriptRelative: boolean } | undefined }> = [];
   const references: BrowserTextReference[] = [];
   const addReference = (
@@ -1647,7 +1700,23 @@ function jsReferencesFromCode(
     cspClass?: CspClass,
   ) => {
     const trimmed = value?.trim();
-    if (trimmed) references.push({ value: trimmed, documentRelative, entersOwnContext, scriptKind: referenceScriptKind, cspClass });
+    // Every reference this scan discovers is part of the SAME module graph
+    // this code itself was reached through — its OWN `importMap` parameter
+    // (a per-push-time snapshot for an inline block, or an inherited one
+    // for an already-queued file) is the resolution context a real browser
+    // would keep using for anything reachable from here, not whatever
+    // import map the document happens to have by the time this reference's
+    // OWN target is later scanned.
+    if (trimmed) {
+      references.push({
+        value: trimmed,
+        documentRelative,
+        entersOwnContext,
+        scriptKind: referenceScriptKind,
+        cspClass,
+        importMap,
+      });
+    }
   };
   // import/export/dynamic-import specifiers are MODULE specifiers, subject
   // to import-map resolution — an unmapped bare specifier ("lib") is not a
@@ -1766,7 +1835,12 @@ function jsReferencesFromCode(
             // any earlier recorded target for this receiver: a re-open
             // discards the prior configuration for real, so only the most
             // recently visited one stays a candidate.
-            xhrOpenTargets.set(astString(object, "name") ?? "", consumedValue(args[1]));
+            const openName = astString(object, "name") ?? "";
+            const target = consumedValue(args[1]);
+            xhrOpenTargets.set(openName, target);
+            const distinct = xhrDistinctOpenTargets.get(openName) ?? new Set<string>();
+            distinct.add(`${target.scriptRelative}:${target.value ?? ""}`);
+            xhrDistinctOpenTargets.set(openName, distinct);
           } else if (
             propertyName === "send" &&
             isAstNode(object) &&
@@ -1806,9 +1880,13 @@ function jsReferencesFromCode(
   for (const capture of xhrSendCaptures) {
     // A capture that came up empty means no open() had been visited yet
     // for this receiver AT THAT POINT in the walk — walk order can't
-    // resolve it (the round-18 case), so fall back to the receiver's
-    // fully-resolved open target now that the whole walk has finished.
-    const opened = capture.target ?? xhrOpenTargets.get(capture.name);
+    // resolve it (the round-18 case). Falling back to the receiver's
+    // fully-resolved open target is only sound when it's the ONLY
+    // distinct target that receiver ever opens — with two or more, no
+    // walk-order bookkeeping proves which one this send() paired with at
+    // runtime (round 21's finding), so it's declined rather than guessed.
+    const unambiguous = (xhrDistinctOpenTargets.get(capture.name)?.size ?? 0) <= 1;
+    const opened = capture.target ?? (unambiguous ? xhrOpenTargets.get(capture.name) : undefined);
     if (opened) addReference(opened.value, !opened.scriptRelative, false, undefined, "connect");
   }
   return references;
@@ -1952,11 +2030,24 @@ function htmlReferencesFromDocument(
   artifactRoot: string,
 ): HtmlDocumentReferences {
   const attributeReferences: BrowserTextReference[] = [];
-  const cssTexts: string[] = [];
-  const classicJsTexts: string[] = [];
-  const moduleJsTexts: string[] = [];
-  const handlerTexts: string[] = [];
-  const importMapTexts: string[] = [];
+  // Each block carries the blockedSoFar SNAPSHOT captured at the moment it
+  // was collected — a real browser starts running/applying a block (and
+  // whatever it goes on to request) the instant it's parsed, so a LATER
+  // meta CSP must not retroactively remove a dependency the block's OWN
+  // execution already requested before that policy took effect.
+  const cssTexts: Array<{ text: string; blocked: ReadonlySet<CspClass> }> = [];
+  // JS/handler blocks ALSO carry the import map that was ACTIVE at the
+  // moment they were collected — a module graph that already started
+  // before a later <script type="importmap"> doesn't retroactively pick
+  // it up either (a real browser only ever resolves specifiers against
+  // whichever map was already parsed when that graph began).
+  const classicJsTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
+  const moduleJsTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
+  const handlerTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
+  // Only the FIRST import map counts per the HTML standard, and it takes
+  // effect the instant it's parsed — set once, on the first <script
+  // type="importmap"> visit() reaches, never again after.
+  let activeImportMap: ImportMapResolution | undefined;
   const nestedReferences: BrowserTextReference[] = [];
   const cspPolicyContents: string[] = [];
   const formIds = collectFormIds(document);
@@ -1975,6 +2066,12 @@ function htmlReferencesFromDocument(
   // has it in <head>, before any meaningful inline block) is captured by
   // applying the FINAL state to all of those collectively.
   let blockedSoFar: ReadonlySet<CspClass> = new Set();
+  // A SEPARATE running state for whether inline script/style content is
+  // even permitted to RUN at all (see blockedInlineCspClasses) — 'self'
+  // blocks inline execution but does NOT make blockedSoFar's external-
+  // resource check treat the class as blocked, so gating inline
+  // collection on blockedSoFar alone missed this class of block entirely.
+  let inlineBlockedSoFar: ReadonlySet<CspClass> = new Set();
   const pushAttributeReference = (reference: BrowserTextReference): void => {
     if (reference.cspClass && blockedSoFar.has(reference.cspClass)) return;
     attributeReferences.push(reference);
@@ -1998,14 +2095,16 @@ function htmlReferencesFromDocument(
       // class those dependencies would themselves carry — script-src
       // 'none' blocking a <script> means a fetch() inside it never fires,
       // even though connect-src (the fetch's OWN class) might allow it.
-      if (styleAttribute && !blockedSoFar.has("style")) cssTexts.push(styleAttribute);
+      if (styleAttribute && !inlineBlockedSoFar.has("style")) {
+        cssTexts.push({ text: styleAttribute, blocked: blockedSoFar });
+      }
       for (const attribute of node.attrs) {
         // Inline on* handlers hold real JS the browser executes, same as a
         // <script> body — parse5 already decoded any entity in the value —
         // but they compile with function-body grammar, so they're parsed
         // separately (jsReferencesFromEventHandler), not joined into jsTexts.
-        if (/^on[a-z]+$/i.test(attribute.name) && !blockedSoFar.has("script")) {
-          handlerTexts.push(attribute.value);
+        if (/^on[a-z]+$/i.test(attribute.name) && !inlineBlockedSoFar.has("script")) {
+          handlerTexts.push({ text: attribute.value, blocked: blockedSoFar, importMap: activeImportMap });
         }
       }
       // A browser parses `srcdoc` as a nested HTML document; nothing else
@@ -2056,6 +2155,7 @@ function htmlReferencesFromDocument(
           // the running state rather than replacing it, the same
           // union-of-all-policies reasoning blockedCspClasses itself uses.
           blockedSoFar = new Set([...blockedSoFar, ...blockedCspClasses([policyContent])]);
+          inlineBlockedSoFar = new Set([...inlineBlockedSoFar, ...blockedInlineCspClasses([policyContent])]);
         }
       }
       const scriptKind: ScriptKind = attrs.get("type")?.toLowerCase() === "module" ? "module" : "classic";
@@ -2166,8 +2266,8 @@ function htmlReferencesFromDocument(
             appliesAsStylesheet: isStylesheet,
             documentDestination: isDocumentDestination,
             cspClass,
-            ...(attributeName === "src" && tagName === "script" ? { scriptKind } : {}),
-            ...(isModulePreload ? { scriptKind: "module" as const } : {}),
+            ...(attributeName === "src" && tagName === "script" ? { scriptKind, importMap: activeImportMap } : {}),
+            ...(isModulePreload ? { scriptKind: "module" as const, importMap: activeImportMap } : {}),
           });
           continue;
         }
@@ -2180,7 +2280,14 @@ function htmlReferencesFromDocument(
       }
       if (tagName === "script") {
         if (attrs.get("type")?.toLowerCase() === "importmap") {
-          importMapTexts.push(html5TextContent(node));
+          // Only the FIRST import map counts, and it's active from THIS
+          // point in document order onward.
+          if (activeImportMap === undefined) {
+            const rawImportMap = parseImportMap(html5TextContent(node));
+            if (rawImportMap) {
+              activeImportMap = resolveImportMapAddresses(rawImportMap, documentPath, documentBase, artifactRoot);
+            }
+          }
         } else if (
           isExecutableScriptElement(attrs) &&
           // Electron's Chromium always supports module scripts, so a
@@ -2189,14 +2296,20 @@ function htmlReferencesFromDocument(
           // expected to run it instead. A type="module" script ignores
           // nomodule per spec (nonsensical combination either way).
           !(attrs.has("nomodule") && scriptKind === "classic") &&
-          !blockedSoFar.has("script")
+          !inlineBlockedSoFar.has("script")
         ) {
-          (scriptKind === "module" ? moduleJsTexts : classicJsTexts).push(html5TextContent(node));
+          (scriptKind === "module" ? moduleJsTexts : classicJsTexts).push({
+            text: html5TextContent(node),
+            blocked: blockedSoFar,
+            importMap: activeImportMap,
+          });
         }
         return;
       }
       if (tagName === "style") {
-        if (!blockedSoFar.has("style")) cssTexts.push(html5TextContent(node));
+        if (!inlineBlockedSoFar.has("style")) {
+          cssTexts.push({ text: html5TextContent(node), blocked: blockedSoFar });
+        }
         return;
       }
     }
@@ -2206,49 +2319,49 @@ function htmlReferencesFromDocument(
   };
   visit(document);
 
-  // Only the FIRST import map counts per the HTML standard; a document
-  // never inherits one from anywhere else. Its addresses resolve against
-  // THIS document's own base right away, before any importer uses them.
-  const rawImportMap = importMapTexts[0] !== undefined ? parseImportMap(importMapTexts[0]) : undefined;
-  const importMap = rawImportMap
-    ? resolveImportMapAddresses(rawImportMap, documentPath, documentBase, artifactRoot)
-    : undefined;
-
   // A resource a document's own declared CSP rules out entirely is one a
   // real browser never requests — approving it into the share manifest
-  // anyway would disclose a file the policy excludes. attributeReferences/
-  // nestedReferences are ALREADY filtered — pushAttributeReference/
-  // pushNestedReference applied the running blockedSoFar state at the
-  // point each was collected, so an early reference ahead of the meta tag
-  // that would otherwise block it stays approved, matching document
-  // order. CSS/JS/handler text is only turned into references AFTER the
-  // walk finishes, so the FINAL (whole-document) state is the closest
-  // approximation available for those — see blockedSoFar's own comment
-  // above for why per-block precision isn't worth chasing there.
+  // anyway would disclose a file the policy excludes. Every source below
+  // (attributeReferences/nestedReferences via pushAttributeReference/
+  // pushNestedReference, and each css/js/handler BLOCK's own captured
+  // `blocked` snapshot) is filtered against the CSP state that was
+  // actually in effect at the moment IT was collected — a reference or
+  // block reached before a later meta CSP stays approved, matching
+  // document order; blockedClasses (the FINAL, whole-document state) is
+  // used only as what this document hands FORWARD to files it references.
   const blockedClasses = blockedCspClasses(cspPolicyContents);
+  const filterByBlock = <T extends BrowserTextReference>(refs: T[], blocked: ReadonlySet<CspClass>): T[] =>
+    blocked.size === 0 ? refs : refs.filter((reference) => !reference.cspClass || !blocked.has(reference.cspClass));
   const deferredReferences = [
-    ...cssReferences(cssTexts.join("\n")),
+    ...cssTexts.flatMap(({ text, blocked }) => filterByBlock(cssReferences(text), blocked)),
     // Each <script> element parses on its OWN — the same way a browser runs
     // each script tag independently — so a syntax error in one script never
     // discards a later, syntactically valid script's own references.
-    ...classicJsTexts.flatMap((text) =>
-      jsReferencesFromCode(text, "classic", context, documentPath, documentBase, artifactRoot, importMap),
+    // Each block resolves bare specifiers against the import map that was
+    // ACTIVE when Chromium reached it, not the document's final one — a
+    // module graph that started before a later <script type="importmap">
+    // never sees that map.
+    ...classicJsTexts.flatMap(({ text, blocked, importMap: blockImportMap }) =>
+      filterByBlock(
+        jsReferencesFromCode(text, "classic", context, documentPath, documentBase, artifactRoot, blockImportMap),
+        blocked,
+      ),
     ),
-    ...moduleJsTexts.flatMap((text) =>
-      jsReferencesFromCode(text, "module", context, documentPath, documentBase, artifactRoot, importMap),
+    ...moduleJsTexts.flatMap(({ text, blocked, importMap: blockImportMap }) =>
+      filterByBlock(
+        jsReferencesFromCode(text, "module", context, documentPath, documentBase, artifactRoot, blockImportMap),
+        blocked,
+      ),
     ),
-    ...handlerTexts.flatMap((handler) =>
-      jsReferencesFromEventHandler(handler, context, documentPath, documentBase, artifactRoot, importMap),
+    ...handlerTexts.flatMap(({ text, blocked, importMap: blockImportMap }) =>
+      filterByBlock(
+        jsReferencesFromEventHandler(text, context, documentPath, documentBase, artifactRoot, blockImportMap),
+        blocked,
+      ),
     ),
   ];
-  const references = [
-    ...attributeReferences,
-    ...nestedReferences,
-    ...(blockedClasses.size === 0
-      ? deferredReferences
-      : deferredReferences.filter((reference) => !reference.cspClass || !blockedClasses.has(reference.cspClass))),
-  ];
-  return { references, importMap, blockedCspClasses: blockedClasses };
+  const references = [...attributeReferences, ...nestedReferences, ...deferredReferences];
+  return { references, importMap: activeImportMap, blockedCspClasses: blockedClasses };
 }
 
 /** Every reference in a non-HTML file — HTML is scanned from its already-
@@ -2595,7 +2708,17 @@ async function shareManifestForSite(
             appliesAsStylesheet: reference.appliesAsStylesheet === true,
             isManifest: reference.isManifest ?? false,
             documentDestination: reference.documentDestination === true,
-            importMap: documentImportMap,
+            // A reference that resolves as code (scriptKind set — an
+            // external <script src>/modulepreload, a Worker/importScripts
+            // target, or a module specifier jsReferencesFromCode already
+            // resolved) carries its OWN importMap, captured at push time to
+            // whatever was active in document order right then — undefined
+            // there is a deliberate "no map was active yet", not "unknown",
+            // so it must NOT fall back to the document's final resolved
+            // map. Every other reference kind never resolves anything
+            // against an import map downstream, so documentImportMap (an
+            // unused value for those) keeps prior behavior for them.
+            importMap: reference.scriptKind !== undefined ? reference.importMap : documentImportMap,
             // A Worker/SharedWorker/service worker has its own policy
             // context, entirely separate from the document that created
             // it — the creator's own CSP does not apply to what the

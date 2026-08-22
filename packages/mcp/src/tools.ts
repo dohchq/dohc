@@ -1992,11 +1992,16 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   }
   // The conventional-names loop above only ever checks "dist"/"build"/
   // "out" — a CONFIGURED output can be nested or custom-named
-  // ("public/dist"), so it needs its own verification. Without this, a
-  // site with a real built artifact at a configured (non-conventional)
-  // path is returned with no entry at all, and test_site fails
-  // entry-or-script even though the build genuinely succeeded.
-  if (builtEntry === undefined && configuredBuildOutput) {
+  // ("public/dist"), so it needs its own verification, independent of
+  // whether a conventional one was ALSO found. workspace-core's
+  // preferredBuildOutput/presentBuildOutput (packages/workspace-core/src/
+  // sites.ts) give a real configured artifact priority over a real
+  // conventional one whenever both exist — this has to agree, or an agent
+  // building through the configured output sees MCP still reporting (and
+  // test_site/build_site acting on) a stale conventional artifact left
+  // over from an earlier build. So this check is unconditional, and its
+  // result OVERRIDES whatever the conventional loop already set.
+  if (configuredBuildOutput) {
     const configuredIndexInfo = await stat(join(absolute, configuredBuildOutput, "index.html")).catch(() => null);
     if (configuredIndexInfo?.isFile()) {
       builtEntry = relativeJoin(relativeJoin(root, configuredBuildOutput), "index.html");
