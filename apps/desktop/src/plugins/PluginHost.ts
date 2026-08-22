@@ -66,7 +66,7 @@ export interface PluginHostOptions {
   /** This plugin's settings, resolved against its manifest, for activation.
    * Named by directoryName, never pluginId — settings are stored and looked
    * up per directory, and a manifest's declared name can differ from the
-   * folder it was found in (#779-offers round 19 finding 1). */
+   * folder it was found in. */
   readPluginSettings?: (
     directoryName: string,
   ) => Promise<Record<string, PluginSettingValue>>;
@@ -127,8 +127,7 @@ interface PluginRecord {
    * start() — never derived from pluginRoot, which production starts a
    * plugin from as its BUILT root, not its source folder. The identity a
    * manifest's own declared name cannot stand in for when it differs from
-   * the folder it was found in (#779-offers round 19 finding 1/2, round 20
-   * finding 1). */
+   * the folder it was found in. */
   directoryName: string;
   manifest: DohcPluginManifest;
   status: PluginRuntimeStatus;
@@ -233,8 +232,7 @@ export class PluginHost {
     // root (dohc's own .dohc/plugins/<safe-path> staging, not the source
     // folder discovery found it at), so basename(pluginRoot) would read
     // dohc's internal build-path segment instead of the actual directory a
-    // settings read or a sizes report needs to name (#779-offers round 20
-    // finding 1).
+    // settings read or a sizes report needs to name.
     directoryName: string,
     manifest: DohcPluginManifest,
   ): Promise<void> {
@@ -511,10 +509,9 @@ export class PluginHost {
    * can share a manifest id (a broken manifest's directory-derived fallback
    * colliding with some other, unrelated plugin's real id), and only ONE of
    * them can ever be the process actually running under this id at a time.
-   * Settings are saved per directory (round 18 finding 4); telling
-   * whichever process happens to be running under the shared id, rather
-   * than the one the save was actually for, would hand it values it never
-   * asked for (#779-offers round 19 finding 2).
+   * Settings are saved per directory; telling whichever process happens to
+   * be running under the shared id, rather than the one the save was
+   * actually for, would hand it values it never asked for.
    */
   async notifySettingsChanged(
     pluginId: string,
@@ -571,8 +568,8 @@ export class PluginHost {
     for (const record of this.plugins.values()) {
       if (record.current) {
         // endSpawn's promise is wired to the broker's disposeSpawn, which
-        // can reject (CodeRabbit #779 R13) — this call is fire-and-forget
-        // by design (bumpGeneration itself is synchronous), so an unhandled
+        // can reject — this call is fire-and-forget by design
+        // (bumpGeneration itself is synchronous), so an unhandled
         // teardown failure must be logged, not left to surface as an
         // unhandled rejection in the main process.
         void this.endSpawn(record, record.current).catch((error: unknown) => {
@@ -663,7 +660,7 @@ export class PluginHost {
   ): void {
     if (!this.isLive(record, spawn)) {
       // .finally() re-throws the original rejection, so this needs its own
-      // .catch() too (CodeRabbit #779 R13) — see bumpGeneration's comment.
+      // .catch() too — see bumpGeneration's comment.
       void this.endSpawn(record, spawn)
         .finally(() => spawn.transport?.dispose().catch(() => undefined))
         .catch((error: unknown) => {

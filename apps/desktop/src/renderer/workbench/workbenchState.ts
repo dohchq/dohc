@@ -134,11 +134,10 @@ export function pluginWebAppTabPath(
  * Both id and directory, the same shape pluginPanelTabPath already carries:
  * a row's own id is not unique on its own — a discovered, never-installed
  * row's id is only ever a broken manifest's directory-derived fallback,
- * which can coincide with some OTHER, unrelated plugin's real id (#779-
- * offers round 11 finding 3's own collision). Keying the tab by id alone
- * collapsed two different rows into one tab and made the second-sorting
- * one unreachable — its own click always reopened the first one's tab
- * instead (#779-offers round 14).
+ * which can coincide with some OTHER, unrelated plugin's real id. Keying
+ * the tab by id alone collapsed two different rows into one tab and made
+ * the second-sorting one unreachable — its own click always reopened the
+ * first one's tab instead.
  */
 export function pluginDetailsTabPath(pluginId: string, directoryName: string): string {
   return `${PLUGIN_DETAILS_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(directoryName)}`;

@@ -221,7 +221,7 @@ describe("plugin web app main-process wiring", () => {
   // is pinned by construction: presence in pipeline.list() alone is not
   // ownership — a collision's never-installed, losing side can sit under
   // the exact same id as the row that actually owns a panel, a web app, or
-  // a partition (#779-offers round 17 finding 1).
+  // a partition.
   it("requires an actual installed claimant, not merely a row present under the id", () => {
     const predicateAt = mainSource.indexOf("const pluginIdHasInstalledClaimant = (");
     const predicateEnd = mainSource.indexOf("\n\n", predicateAt);
@@ -241,13 +241,13 @@ describe("plugin web app main-process wiring", () => {
     const uninstallCallAt = uninstall.indexOf(
       "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
     );
-    const idStillOwnedAt = uninstall.indexOf(
+    const stillInstalledClaimantAt = uninstall.indexOf(
       "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
       uninstallCallAt,
     );
     const guardAt = uninstall.indexOf(
-      "if (result.ok && !idStillOwned) {",
-      idStillOwnedAt,
+      "if (removedLastClaimant) {",
+      stillInstalledClaimantAt,
     );
     const clearAt = uninstall.indexOf("clearPluginWebAppPartition({", guardAt);
 
@@ -255,32 +255,31 @@ describe("plugin web app main-process wiring", () => {
     // inherits the previous installation's authenticated session cookies.
     // What the clear targets is pinned in pluginWebAppGuest.test.ts.
     expect(uninstallCallAt).toBeGreaterThan(-1);
-    // MUTATION (drop idStillOwned, or use presence alone): input.pluginId
-    // can still be OWNED by a completely different, still-installed plugin
-    // a duplicate-id collision produced — the losing side removed, the
-    // winning side left running under the identical id. Without this
-    // check, an unconditional clear would reach into that surviving
-    // plugin's own live session (#779-offers round 16 finding 3, round 17
-    // finding 1).
-    expect(idStillOwnedAt).toBeGreaterThan(uninstallCallAt);
-    expect(guardAt).toBeGreaterThan(idStillOwnedAt);
+    // MUTATION (drop stillInstalledClaimant, or use presence alone):
+    // input.pluginId can still be OWNED by a completely different,
+    // still-installed plugin a duplicate-id collision produced — the
+    // losing side removed, the winning side left running under the
+    // identical id. Without this check, an unconditional clear would
+    // reach into that surviving plugin's own live session.
+    expect(stillInstalledClaimantAt).toBeGreaterThan(uninstallCallAt);
+    expect(guardAt).toBeGreaterThan(stillInstalledClaimantAt);
     expect(clearAt).toBeGreaterThan(guardAt);
   });
 
   it("gates the registration forget the same way it gates the partition clear", () => {
     const uninstall = handler("uninstallPlugin");
-    const idStillOwnedAt = uninstall.indexOf(
+    const stillInstalledClaimantAt = uninstall.indexOf(
       "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
     );
-    const forgetAt = uninstall.indexOf("forgetUninstalledPlugin({", idStillOwnedAt);
+    const forgetAt = uninstall.indexOf("forgetUninstalledPlugin({", stillInstalledClaimantAt);
     const forgetCall = uninstall.slice(forgetAt, uninstall.indexOf("});", forgetAt));
 
-    // MUTATION (uninstalled: result.ok, dropping !idStillOwned): the same
-    // collision that must not clear a survivor's partition must not forget
-    // its registration either — both are keyed by id alone.
-    expect(idStillOwnedAt).toBeGreaterThan(-1);
-    expect(forgetAt).toBeGreaterThan(idStillOwnedAt);
-    expect(squeeze(forgetCall)).toContain("uninstalled:result.ok&&!idStillOwned,");
+    // MUTATION (uninstalled: result.ok, dropping !stillInstalledClaimant):
+    // the same collision that must not clear a survivor's partition must
+    // not forget its registration either — both are keyed by id alone.
+    expect(stillInstalledClaimantAt).toBeGreaterThan(-1);
+    expect(forgetAt).toBeGreaterThan(stillInstalledClaimantAt);
+    expect(squeeze(forgetCall)).toContain("uninstalled:removedLastClaimant,");
   });
 
   // #779-offers round 17 finding 2, tightened round 23 finding 2: revoking

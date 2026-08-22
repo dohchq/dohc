@@ -4,15 +4,6 @@ import { workspaceWriteRefusal } from "./workspaces/shareWriteGate";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
-// Same technique as main.chatSecurity.test.ts's handlerSource(): a static
-// scan over the handler's own source text. ensurePluginPipeline already
-// calls assertWritableWorkspace before a pipeline exists (a shared view can
-// never get one to read or write through), so this boundary already holds
-// at runtime — this test instead pins that each handler STATES the gate
-// directly, the way every other workspace-mutating handler in this file
-// does, so an auditor (human or grep) never has to trust an indirect call
-// three functions away, and a future refactor of the pipeline-lifecycle
-// helper can't silently drop the check for these two handlers alone.
 function handlerSource(channel: string): string {
   const marker = `CHANNELS.${channel},`;
   const markerAt = mainSource.indexOf(marker);
@@ -22,8 +13,16 @@ function handlerSource(channel: string): string {
   return mainSource.slice(start, next < 0 ? undefined : next);
 }
 
+// main.ts exports nothing, so its own listOfferedPlugins/addOfferedPlugin
+// handlers cannot be invoked directly here — this instead proves both
+// halves of the same boundary: the source scan pins that each handler
+// STATES assertWritableWorkspace(workspace) before any pipeline read or
+// filesystem write, and the real, unmocked workspaceWriteRefusal it calls
+// genuinely refuses a shared view shaped exactly as one carries it (and
+// admits an ordinary workspace) — the same real decision function, not a
+// mock of it.
 describe("main-process offer-plugin authorization", () => {
-  it("gates both offer handlers on the workspace write boundary, directly and before any read or write", () => {
+  it("gates both offer handlers on the workspace write boundary, which genuinely refuses a shared view", () => {
     for (const channel of ["listOfferedPlugins", "addOfferedPlugin"]) {
       const handler = handlerSource(channel);
       const gateAt = handler.indexOf("assertWritableWorkspace(workspace);");
@@ -46,18 +45,7 @@ describe("main-process offer-plugin authorization", () => {
         ).toBeLessThan(addOfferedPluginCallAt);
       }
     }
-  });
 
-  // The source-order pin above proves each handler STATES
-  // assertWritableWorkspace(workspace) before any read or write.
-  // assertWritableWorkspace is itself one line over workspaceWriteRefusal
-  // (shareWriteGate.ts's own doc comment), so this runs THAT real,
-  // unmocked decision against a shared view shaped exactly as a share-view
-  // workspace's registry entry actually carries it — the runtime half of
-  // the proof a source scan alone cannot give: not only does the call
-  // appear in the right place, but calling it for a shared view genuinely
-  // refuses, worded the way the handler's caller will see it.
-  it("refuses a shared view at the exact gate both offer handlers state (runtime, not only source)", () => {
     const refusal = workspaceWriteRefusal({
       shareId: "share-1",
       granterEmail: "owner@example.com",

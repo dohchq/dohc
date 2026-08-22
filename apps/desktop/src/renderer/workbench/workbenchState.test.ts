@@ -721,7 +721,7 @@ describe("tabs", () => {
       "dohc://plugin-details/%ZZ",
       "dohc://plugin-detail/t3-code",
       // The old single-segment form: no directory, so the id alone can no
-      // longer disambiguate a collision (#779-offers round 14).
+      // longer disambiguate a collision.
       "dohc://plugin-details/t3-code",
       "dohc://plugin-details/t3-code/",
       "dohc://plugin-details/t3-code/extra/segment",

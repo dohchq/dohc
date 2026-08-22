@@ -105,7 +105,7 @@ describe("discoverInstalledPlugins", () => {
     // no two records ever report one id (#779 round 14 A4). It carries the
     // lost id structurally too, not only in its diagnostics text — a
     // caller that needs to detect this collision reads that field, never
-    // scans diagnostic prose (#779-offers round 8 finding 5).
+    // scans diagnostic prose.
     expect(records[1]).toMatchObject({
       id: "zeta",
       rootPath: zetaRoot,

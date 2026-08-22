@@ -343,7 +343,7 @@ describe("plugin panel main-process wiring", () => {
     // an in-flight write is pinned by behavior in PluginHost.test.ts. disable
     // takes no confirmation to validate first, so revoking ahead of its own
     // call is safe — unlike uninstall, whose own ordering is pinned in
-    // main.pluginWebAppWiring.test.ts (#779-offers round 23 finding 2).
+    // main.pluginWebAppWiring.test.ts.
     expect(disableAt).toBeGreaterThan(-1);
     expect(disableRevokeAt).toBeGreaterThan(-1);
     expect(disableCallAt).toBeGreaterThan(disableRevokeAt);

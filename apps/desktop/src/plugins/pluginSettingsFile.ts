@@ -19,12 +19,11 @@ import {
 // unrelated plugin's real id — two rows sharing an id would otherwise share
 // one entry here too, each silently overwriting and reading the other's
 // answers. directoryName is the one identity a broken manifest cannot take
-// away, and every discovered entry carries exactly one (#779-offers round 18
-// finding 4).
+// away, and every discovered entry carries exactly one.
 //
 // One file rather than one per plugin, because that is what the reader wants
 // open when they ask what this workspace has been told: every answer on one
-// page. Plugin CODE and its build output stay out of the workspace (CERT779);
+// page. Plugin CODE and its build output stay out of the workspace;
 // this is data the user typed, and the manifest's declarations decide what any
 // of it means. A value the manifest does not declare is dropped on read, so a
 // file edited by hand — or arriving over sync — can only ever set a setting
@@ -179,9 +178,9 @@ function queueWrite<T>(workspaceRoot: string, run: () => Promise<T>): Promise<T>
  * undeclared key or a value of the wrong type is refused, not stored and
  * quietly ignored later. Other rows' entries are read and written back
  * untouched — keyed by directoryName, so a row that shares an id with an
- * unrelated plugin still gets its own entry rather than sharing one
- * (#779-offers round 18 finding 4). `pluginId` names the plugin only in the
- * error messages below; the file itself never reads or writes under it.
+ * unrelated plugin still gets its own entry rather than sharing one.
+ * `pluginId` names the plugin only in the error messages below; the file
+ * itself never reads or writes under it.
  */
 export function savePluginSettings(
   workspaceRoot: string,
@@ -223,15 +222,14 @@ export function savePluginSettings(
 
 /**
  * Moves one plugin's stored answers from its old directoryName key to its
- * new one, in place. Settings are keyed by directoryName (#779-offers round
- * 18 finding 4), so a genuine rename — the same plugin id, relocated to a
- * new directory — leaves its entry filed under a key nothing reads anymore:
- * silently reset to defaults, not actually lost, until this runs. Called
- * only where the pipeline itself has proven the rename (the same id
- * reappearing under a new directoryName within one watcher batch); no
- * caller here has to re-derive that proof. A no-op when there is nothing
- * stored under the old key, or the names are the same (#779-offers round
- * 22 finding 1).
+ * new one, in place. Settings are keyed by directoryName, so a genuine
+ * rename — the same plugin id, relocated to a new directory — leaves its
+ * entry filed under a key nothing reads anymore: silently reset to
+ * defaults, not actually lost, until this runs. Called only where the
+ * pipeline itself has proven the rename (the same id reappearing under a
+ * new directoryName within one watcher batch); no caller here has to
+ * re-derive that proof. A no-op when there is nothing stored under the old
+ * key, or the names are the same.
  */
 export function renamePluginSettingsEntry(
   workspaceRoot: string,

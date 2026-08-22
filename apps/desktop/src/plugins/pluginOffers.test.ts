@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -12,15 +13,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
-  BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES,
-} from "../ipc/channels";
+import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
 import { discoverInstalledPlugins } from "./pluginDiscovery";
 import {
   OfferedPluginAddError,
   addOfferedPlugin,
-  findDisplacedByAdd,
   listOfferedPlugins,
   removeAddedOfferedPlugin,
 } from "./pluginOffers";
@@ -34,23 +31,23 @@ const raceState = vi.hoisted(() => ({
   mkdirTrap: null as null | { path: string; run: () => Promise<void> },
   lstatTrap: null as null | { path: string; afterCall: number; run: () => Promise<void> },
   lstatCallCounts: new Map<string, number>(),
-  // Fires AFTER the real rmdir completes, not before: this models a
-  // competitor claiming the slot in the window this call's own reservation
-  // just freed, which only exists once the free has actually happened.
-  rmdirTrap: null as null | { path: string; run: () => Promise<void> },
-  // Makes the rmdir CALL ITSELF reject — a transient antivirus hold on the
-  // just-created empty directory is the one seen in practice, never a
-  // completed rmdir something else then races into. One-shot by default
-  // (the hold clears by the very next attempt); `persist: true` keeps
-  // rejecting every call for the path, for pinning what happens once the
-  // bounded retry itself exhausts.
-  rmdirRejectionTrap: null as null | { path: string; code: string; persist?: boolean },
-  // A one-shot simulated rename failure, unrelated to any race — a locked
-  // file, a full disk — keyed to the exact destination so only the
-  // intended publish call is affected. `run`, when set, fires right before
-  // the synthetic throw — used to replace whatever sits at the destination
-  // in the same window a real race would.
-  renameFailureTrap: null as null | { path: string; code: string; run?: () => Promise<void> },
+  // Fires right before the real rename is attempted: this models a
+  // competitor claiming the slot in the window between this call staging
+  // its copy and its own rename landing.
+  renameRaceTrap: null as null | { path: string; run: () => Promise<void> },
+  // A simulated rename failure, unrelated to any race — a locked file, a
+  // full disk — keyed to the exact destination so only the intended
+  // publish call is affected. `run`, when set, fires right before the
+  // synthetic throw — used to replace whatever sits at the destination in
+  // the same window a real race would. One-shot by default; `persist:
+  // true` keeps rejecting every call for the path, for pinning what
+  // happens once a bounded retry exhausts.
+  renameFailureTrap: null as null | {
+    path: string;
+    code: string;
+    run?: () => Promise<void>;
+    persist?: boolean;
+  },
   // Simulates a filesystem that reports no real device/inode identity for
   // one specific bigint lstat — some network shares and virtual
   // filesystems do this. Fires once; every other lstat call, bigint or
@@ -101,30 +98,18 @@ vi.mock("node:fs/promises", async () => {
       }
       return stats;
     },
-    rmdir: async (
-      path: Parameters<typeof actual.rmdir>[0],
-      options?: Parameters<typeof actual.rmdir>[1],
-    ) => {
-      const rejection = raceState.rmdirRejectionTrap;
-      if (rejection && path === rejection.path) {
-        if (!rejection.persist) raceState.rmdirRejectionTrap = null;
-        throw Object.assign(new Error(`simulated ${rejection.code}`), { code: rejection.code });
-      }
-      const result = await actual.rmdir(path, options);
-      const trap = raceState.rmdirTrap;
-      if (trap && path === trap.path) {
-        raceState.rmdirTrap = null;
-        await trap.run();
-      }
-      return result;
-    },
     rename: async (
       source: Parameters<typeof actual.rename>[0],
       destination: Parameters<typeof actual.rename>[1],
     ) => {
+      const race = raceState.renameRaceTrap;
+      if (race && destination === race.path) {
+        raceState.renameRaceTrap = null;
+        await race.run();
+      }
       const trap = raceState.renameFailureTrap;
       if (trap && destination === trap.path) {
-        raceState.renameFailureTrap = null;
+        if (!trap.persist) raceState.renameFailureTrap = null;
         if (trap.run) await trap.run();
         throw Object.assign(new Error(`simulated ${trap.code}`), { code: trap.code });
       }
@@ -175,8 +160,7 @@ afterEach(async () => {
   raceState.mkdirTrap = null;
   raceState.lstatTrap = null;
   raceState.lstatCallCounts.clear();
-  raceState.rmdirTrap = null;
-  raceState.rmdirRejectionTrap = null;
+  raceState.renameRaceTrap = null;
   raceState.renameFailureTrap = null;
   raceState.zeroIdentityTrap = null;
   await Promise.all(
@@ -267,6 +251,33 @@ describe("listOfferedPlugins", () => {
     ]);
   });
 
+  // Suppression reads the packaged manifest's OWN declared name, not the
+  // directoryName BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES iterates by — the
+  // two coincide for every real shipped built-in (pinned above), but the
+  // suppression check itself must not silently depend on that coincidence.
+  it("suppresses a built-in by its packaged manifest's declared name, not its directory", async () => {
+    const fixture = await createFixture();
+    await writeFile(
+      join(fixture.builtinPluginsRoot, "codex", "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "renamed-id",
+        displayName: "codex driver",
+        entry: "src/main.ts",
+      }, null, 2)}\n`,
+    );
+
+    await expect(
+      listOfferedPlugins(
+        fixture.builtinPluginsRoot,
+        fixture.workspaceRoot,
+        new Set(["renamed-id"]),
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({ directoryName: "claude-code" }),
+    ]);
+  });
+
   // A built-in ships with dohc itself — its manifest is never optional the
   // way a hand-authored plugin's is. Silently omitting a broken one read as
   // "nothing to offer," indistinguishable from a workspace that already has
@@ -285,6 +296,25 @@ describe("listOfferedPlugins", () => {
         NO_EXISTING_PLUGIN_IDS,
       ),
     ).rejects.toThrow(/codex/);
+  });
+
+  // listOfferedPlugins suppresses by manifest id, and
+  // findDirectorySupersededBy is asked about a plugin id too — but
+  // addOfferedPlugin's own caller in main.ts hands it a built-in's
+  // directoryName, trusting the two to name the same thing for a shipped
+  // built-in. Nothing else pins that trust; a packaged manifest whose name
+  // drifted from its own directory would silently break both.
+  it("declares a manifest name matching its own packaged directory, for every built-in driver", async () => {
+    for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
+      const manifestPath = new URL(
+        `../../plugins/${directoryName}/dohc-plugin.json`,
+        import.meta.url,
+      );
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        name?: string;
+      };
+      expect(manifest.name).toBe(directoryName);
+    }
   });
 });
 
@@ -437,51 +467,66 @@ describe("addOfferedPlugin", () => {
     await expect(readdir(outside)).resolves.toEqual([]);
   });
 
-  // The early existence check at the top of addOfferedPlugin only catches a
-  // target that already existed before the copy started. A concurrent
-  // creator landing DURING the copy — the actual race this guards — has to
-  // be caught by the publish step itself, right where it claims target.
-  it("refuses without clobbering a target directory created after the copy started", async () => {
-    const fixture = await createFixture();
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
-    raceState.mkdirTrap = {
-      path: target,
-      run: async () => {
-        await mkdir(target, { recursive: true });
-        await writeFile(join(target, "concurrent.txt"), "raced");
-      },
-    };
-
-    await expect(
-      addOfferedPlugin({
-        builtinPluginsRoot: fixture.builtinPluginsRoot,
-        workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
-        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
-      }),
-    ).rejects.toSatisfy(
-      (error: unknown) =>
-        error instanceof OfferedPluginAddError &&
-        error.message.includes("plugins/codex"),
-    );
-
-    // The concurrently created directory survived, untouched by this call.
-    await expect(readFile(join(target, "concurrent.txt"), "utf8")).resolves.toBe("raced");
-    await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  // Windows-only: rename() there refuses to land on ANY existing directory,
-  // so publishStaged frees its own mkdir() claim with rmdir() before the
-  // rename — reopening a window a concurrent creator could land in. The
-  // rename that follows must fail loud when that happens (a real directory
-  // now sits where the freed claim was) rather than silently replace it —
-  // this pin only means something on the platform that takes this branch.
-  it.runIf(process.platform === "win32")(
-    "[Windows] refuses without clobbering when a competitor claims the slot the instant the reservation is freed",
+  // Nothing checks target's existence before the copy starts — a
+  // concurrent creator landing DURING the copy has to be caught by the
+  // publish step itself, right where it claims target. POSIX-only: this
+  // races the mkdir() claim specifically; the Windows equivalent races the
+  // rename() below instead, since only POSIX claims via mkdir().
+  it.runIf(process.platform !== "win32")(
+    "refuses without clobbering a target directory created after the copy started",
     async () => {
       const fixture = await createFixture();
       const target = join(fixture.workspaceRoot, "plugins", "codex");
-      raceState.rmdirTrap = {
+      raceState.mkdirTrap = {
+        path: target,
+        run: async () => {
+          await mkdir(target, { recursive: true });
+          await writeFile(join(target, "concurrent.txt"), "raced");
+        },
+      };
+
+      await expect(
+        addOfferedPlugin({
+          builtinPluginsRoot: fixture.builtinPluginsRoot,
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+        }),
+      ).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof OfferedPluginAddError &&
+          error.message.includes("plugins/codex"),
+      );
+
+      // The concurrently created directory survived, untouched by this call.
+      await expect(readFile(join(target, "concurrent.txt"), "utf8")).resolves.toBe("raced");
+      await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  // The empirical claim publishStaged's Windows path relies on: rename()
+  // there refuses to land on ANY existing directory, even an empty one —
+  // that alone is the no-clobber property, with no separate claim step
+  // needed the way POSIX needs mkdir()'s atomic fail-on-exist.
+  it.runIf(process.platform === "win32")(
+    "[Windows probe] rename() onto an existing empty directory fails EPERM",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "dohc-plugin-offers-probe-"));
+      roots.push(root);
+      const source = join(root, "source");
+      const target = join(root, "target");
+      await mkdir(source);
+      await mkdir(target);
+      await expect(rename(source, target)).rejects.toMatchObject({ code: "EPERM" });
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "[Windows] refuses without clobbering a competitor that claims the slot mid-copy",
+    async () => {
+      const fixture = await createFixture();
+      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      raceState.renameRaceTrap = {
         path: target,
         run: async () => {
           await mkdir(target, { recursive: true });
@@ -509,19 +554,16 @@ describe("addOfferedPlugin", () => {
     },
   );
 
-  // Round 17 finding 5, Windows-only: the rmdir that frees publishStaged's
-  // own mkdir() claim before the rename was unguarded — a rejection there
-  // (a transient antivirus hold on the just-created empty directory is the
-  // one seen in practice) used to propagate straight out with the claim
-  // still standing and nothing left to clean it up. Every later offer
-  // listing and Add attempt would then see target already occupied and
-  // refuse it forever, not only until the hold clears.
+  // A transient hold (an antivirus scan, an indexer) can keep rename()
+  // EPERM-ing through the whole bounded retry with nothing ever really at
+  // target — EPERM alone cannot tell that apart from a genuine occupant.
+  // This must name the lock, never misreport it as an existing plugin.
   it.runIf(process.platform === "win32")(
-    "[Windows] refuses without stranding the claim when freeing it for the rename is rejected",
+    "[Windows] names the lock, not a false 'already exists', when EPERM outlives every retry with nothing at target",
     async () => {
       const fixture = await createFixture();
       const target = join(fixture.workspaceRoot, "plugins", "codex");
-      raceState.rmdirRejectionTrap = { path: target, code: "EBUSY" };
+      raceState.renameFailureTrap = { path: target, code: "EPERM", persist: true };
 
       await expect(
         addOfferedPlugin({
@@ -530,31 +572,15 @@ describe("addOfferedPlugin", () => {
           directoryName: "codex",
           existingPluginIds: NO_EXISTING_PLUGIN_IDS,
         }),
-      ).rejects.toBeInstanceOf(OfferedPluginAddError);
-
-      // The claim is gone, not stranded as a permanently "occupied" empty
-      // directory.
-      await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
-
-      // The offer is genuinely still available, and a retried Add — the
-      // hold having cleared — succeeds with a fresh copy.
-      const offers = await listOfferedPlugins(
-        fixture.builtinPluginsRoot,
-        fixture.workspaceRoot,
-        NO_EXISTING_PLUGIN_IDS,
+      ).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof OfferedPluginAddError &&
+          error.message.includes("locked") &&
+          !error.message.includes("already exists"),
       );
-      expect(offers.map((offer) => offer.directoryName)).toContain("codex");
-
-      const added = await addOfferedPlugin({
-        builtinPluginsRoot: fixture.builtinPluginsRoot,
-        workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
-        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
-      });
-      expect(added.rootPath).toBe(target);
-      await expect(readFile(join(target, "dohc-plugin.json"), "utf8"))
-        .resolves.toContain('"name": "codex"');
+      await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
     },
+    10_000,
   );
 
   // POSIX-only mechanism (Windows already frees its claim unconditionally
@@ -670,24 +696,31 @@ describe("addOfferedPlugin", () => {
     expect(offers.map((offer) => offer.directoryName)).not.toContain("codex");
   });
 
-  // Round 14: dev/ino can read as 0 on some Windows filesystems and network
-  // shares — an unverifiable identity, not proof of anything. Trusting it
-  // anyway would make targetIdentity's whole purpose vacuous: a zeroed
-  // "captured" identity would match any OTHER zeroed identity later, the
-  // opposite of what dev+ino comparison exists to catch.
+  // dev/ino can read as 0 on some Windows filesystems and network shares —
+  // an unverifiable identity, not proof of anything. Trusting it anyway
+  // would make targetIdentity's whole purpose vacuous: a zeroed "captured"
+  // identity would match any OTHER zeroed identity later, the opposite of
+  // what dev+ino comparison exists to catch. POSIX-only: targetIdentity is
+  // only ever read for the mkdir() claim, which only POSIX takes.
   it("refuses to publish when the claim's own identity cannot be verified (zeroed dev/ino)", async () => {
     const fixture = await createFixture();
     const target = join(fixture.workspaceRoot, "plugins", "codex");
     raceState.zeroIdentityTrap = { path: target };
 
-    await expect(
-      addOfferedPlugin({
-        builtinPluginsRoot: fixture.builtinPluginsRoot,
-        workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
-        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
-      }),
-    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    try {
+      await expect(
+        addOfferedPlugin({
+          builtinPluginsRoot: fixture.builtinPluginsRoot,
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
 
     // The claim this call's own mkdir() made is cleaned up rather than
     // leaked as a permanently "occupied" empty directory — its identity
@@ -705,63 +738,6 @@ describe("addOfferedPlugin", () => {
     });
     expect(added.rootPath).toBe(target);
   });
-
-  // Round 18 finding 3: removeOwnedEmptyClaim's own final rmdir used to be
-  // a single, unretried attempt — a transient Windows lock rejecting it
-  // once, even though it would have cleared on the very next try, still
-  // stranded the claim forever. It now gets the same bounded retry
-  // publishStaged's own rmdir already has.
-  it("removes the claim once a transient rmdir rejection clears within the retry budget", async () => {
-    const fixture = await createFixture();
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
-    raceState.zeroIdentityTrap = { path: target };
-    // One-shot: the very next rmdir attempt (the retry) hits the real,
-    // genuinely empty directory and succeeds.
-    raceState.rmdirRejectionTrap = { path: target, code: "EBUSY" };
-
-    await expect(
-      addOfferedPlugin({
-        builtinPluginsRoot: fixture.builtinPluginsRoot,
-        workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
-        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
-      }),
-    ).rejects.toBeInstanceOf(OfferedPluginAddError);
-
-    // Removed, not stranded: the retry inside removeOwnedEmptyClaim's own
-    // rmdir absorbed the transient rejection.
-    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
-  }, 10_000);
-
-  // The other half of the same fix: once the retry budget itself exhausts,
-  // this must refuse loudly — naming the leftover path — rather than
-  // silently swallow the failure and leave a claim nothing will ever clean
-  // up, permanently reading as "occupied" to every later offer listing and
-  // Add attempt.
-  it("refuses with a named error pointing at the leftover claim when the retry budget exhausts", async () => {
-    const fixture = await createFixture();
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
-    raceState.zeroIdentityTrap = { path: target };
-    raceState.rmdirRejectionTrap = { path: target, code: "EBUSY", persist: true };
-
-    await expect(
-      addOfferedPlugin({
-        builtinPluginsRoot: fixture.builtinPluginsRoot,
-        workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
-        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
-      }),
-    ).rejects.toSatisfy(
-      (error: unknown) =>
-        error instanceof OfferedPluginAddError &&
-        error.message.includes(target) &&
-        error.message.includes("manually"),
-    );
-
-    // Honest, not silently swallowed: the claim really is still there,
-    // named in the error a caller (or a person) can act on.
-    await expect(lstat(target)).resolves.toBeDefined();
-  }, 10_000);
 });
 
 describe("removeAddedOfferedPlugin", () => {
@@ -942,47 +918,52 @@ describe("removeAddedOfferedPlugin", () => {
   // passing and the restore's own reservation. That must land on the same
   // "strand it, don't clobber" outcome, not a silent overwrite of whatever
   // now sits there.
-  it("strands the mismatched copy in staging when the restore finds the slot reoccupied", async () => {
-    const fixture = await createFixture();
-    const added = await addOfferedPlugin({
-      builtinPluginsRoot: fixture.builtinPluginsRoot,
-      workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
-      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
-    });
-
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
-    await rm(target, { recursive: true, force: true });
-    await mkdir(target, { recursive: true });
-    await writeFile(join(target, "keep.txt"), "keep");
-
-    raceState.mkdirTrap = {
-      path: target,
-      run: async () => {
-        await mkdir(target, { recursive: true });
-        await writeFile(join(target, "raced.txt"), "raced");
-      },
-    };
-
-    await expect(
-      removeAddedOfferedPlugin({
+  // POSIX-only: races the restore's own mkdir() claim specifically, the
+  // same reason the equivalent add-path race test is POSIX-only.
+  it.runIf(process.platform !== "win32")(
+    "strands the mismatched copy in staging when the restore finds the slot reoccupied",
+    async () => {
+      const fixture = await createFixture();
+      const added = await addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
-        identity: added.identity,
-        contentHash: added.contentHash,
-      }),
-    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+      });
 
-    // The concurrently recreated target survived, untouched.
-    await expect(readFile(join(target, "raced.txt"), "utf8")).resolves.toBe("raced");
-    // The mismatched copy this call had staged is stranded, not lost.
-    const stagingParent = join(fixture.workspaceRoot, ".dohc", "plugin-offer-staging");
-    const entries = await readdir(stagingParent);
-    expect(entries).toHaveLength(1);
-    await expect(
-      readFile(join(stagingParent, entries[0], "keep.txt"), "utf8"),
-    ).resolves.toBe("keep");
-  });
+      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      await rm(target, { recursive: true, force: true });
+      await mkdir(target, { recursive: true });
+      await writeFile(join(target, "keep.txt"), "keep");
+
+      raceState.mkdirTrap = {
+        path: target,
+        run: async () => {
+          await mkdir(target, { recursive: true });
+          await writeFile(join(target, "raced.txt"), "raced");
+        },
+      };
+
+      await expect(
+        removeAddedOfferedPlugin({
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          identity: added.identity,
+          contentHash: added.contentHash,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+      // The concurrently recreated target survived, untouched.
+      await expect(readFile(join(target, "raced.txt"), "utf8")).resolves.toBe("raced");
+      // The mismatched copy this call had staged is stranded, not lost.
+      const stagingParent = join(fixture.workspaceRoot, ".dohc", "plugin-offer-staging");
+      const entries = await readdir(stagingParent);
+      expect(entries).toHaveLength(1);
+      await expect(
+        readFile(join(stagingParent, entries[0], "keep.txt"), "utf8"),
+      ).resolves.toBe("keep");
+    },
+  );
 
   // Round 15 finding 3: identity alone answers "is this the same directory
   // entry", never "does it still hold what this request put there" — a
@@ -1042,57 +1023,5 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(
       lstat(join(fixture.workspaceRoot, "plugins", "codex")),
     ).rejects.toMatchObject({ code: "ENOENT" });
-  });
-});
-
-describe("findDisplacedByAdd", () => {
-  it("finds the record that lost its shared id to this directory", () => {
-    const codex = { directoryName: "codex", supersededPluginId: null };
-    const loser = { directoryName: "my-codex", supersededPluginId: "codex" };
-
-    expect(findDisplacedByAdd([codex, loser], "codex")).toBe(loser);
-  });
-
-  // The old mechanism scanned every OTHER record's diagnostics text for the
-  // substring `duplicate plugin id "codex"`. That text is bounded and
-  // re-worded for display, not a stable machine-checked signal — a record
-  // whose diagnostics merely CONTAIN a similar-looking phrase for a reason
-  // that has nothing to do with this add must never read as a collision.
-  it("ignores an unrelated diagnostic that merely contains the same phrase", () => {
-    const codex = { directoryName: "codex", supersededPluginId: null };
-    const unrelated = {
-      directoryName: "some-other-plugin",
-      supersededPluginId: null,
-      diagnostics: [
-        // Coincidental prose (a nested-manifest path, an author's own
-        // description field) that happens to spell the exact phrase the
-        // old substring scan matched on — this record never actually lost
-        // any collision, so supersededPluginId stays null.
-        'nested manifest ignored at plugins/some-other-plugin/duplicate plugin id "codex": also declared at /elsewhere/dohc-plugin.json',
-      ],
-    };
-
-    expect(findDisplacedByAdd([codex, unrelated], "codex")).toBeUndefined();
-  });
-});
-
-describe("BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES", () => {
-  // PluginDetailsPage's Remove dialog names the packaged plugin from this
-  // constant rather than a workspace copy's own (possibly edited or broken)
-  // manifest — so this constant itself must not silently drift from what
-  // the packaged manifest actually declares.
-  it("matches each built-in driver's own packaged displayName", async () => {
-    for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
-      const manifestPath = new URL(
-        `../../plugins/${directoryName}/dohc-plugin.json`,
-        import.meta.url,
-      );
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-        displayName?: string;
-      };
-      expect(BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES[directoryName]).toBe(
-        manifest.displayName,
-      );
-    }
   });
 });

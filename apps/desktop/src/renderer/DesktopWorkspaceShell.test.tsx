@@ -1341,7 +1341,7 @@ describe("plugin details tabs", () => {
   // state, not a hypothetical. Before carrying directoryName through
   // open-details and the tab path, clicking the second-sorting row always
   // reopened whichever row `.find((entry) => entry.id === pluginId)` hit
-  // first (#779-offers round 14 finding 1).
+  // first.
   it("opens the exact row clicked, not the first one sharing its id, when two rows collide", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const rowFields = {
@@ -1423,13 +1423,12 @@ describe("plugin details tabs", () => {
     expect(tab.title).toBe("Plugin details: t3-code");
   });
 
-  // Round 20 finding 2: a tab that follows a rename (the id-only fallback,
-  // since a discovered row's id alone can never disambiguate two rows) only
-  // tracked that in memory. A tab switch remounts the page, whose tracking
-  // reseeds from the tab's OWN virtual path — still the original, now-
-  // vacated directory, if nothing ever retargets that path. This pins the
-  // fix end to end: the tab's own path itself must move, so a remount
-  // reads the directory the plugin actually renamed to.
+  // A tab that follows a rename only tracked that in memory. A tab switch
+  // remounts the page, whose tracking reseeds from the tab's OWN virtual
+  // path — still the original, now-vacated directory, if nothing ever
+  // retargets that path. This pins the fix end to end: the tab's own path
+  // itself must move, so a remount reads the directory the plugin actually
+  // renamed to.
   it("stays on the renamed plugin after switching tabs away and back", async () => {
     const bridge = withPlugins(makeBridge(Promise.resolve(
       storedStateWithTabs([detailsPath, "dohc://graph"], detailsPath),
@@ -1488,6 +1487,13 @@ describe("plugin details tabs", () => {
     } satisfies PluginStatusRecord;
     bridge.listPlugins = vi.fn(async () => ({ ok: true as const, plugins: [renamedRow] }));
     act(() => {
+      dispatchPluginStatusChanged({
+        kind: "renamed",
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "t3-code",
+        from: "t3-code",
+        to: "t3-code-renamed",
+      });
       dispatchPluginStatusChanged({
         kind: "changed",
         workspaceId: WORKSPACE.workspaceId,

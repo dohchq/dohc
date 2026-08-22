@@ -58,10 +58,12 @@ export type PluginUninstallConfirmation = {
 
 type PendingStatusEvent = {
   revision: number;
-  // Never "discovery-changed": that kind names no pluginId and is handled,
-  // and returned from, before a pending event is ever recorded here
-  // (#779-offers round 23 finding 3).
-  event: Exclude<PluginStatusChangedEvent, { kind: "discovery-changed" }>;
+  // Never "discovery-changed" or "renamed": both are handled, and returned
+  // from, before a pending event is ever recorded here — "discovery-changed"
+  // names no pluginId at all, and "renamed" carries its own deterministic
+  // merge (move the row) that applyStatusEvents's upsert/remove shapes
+  // don't fit.
+  event: Exclude<PluginStatusChangedEvent, { kind: "discovery-changed" | "renamed" }>;
 };
 
 // Replaces the row this update is about — its own directoryName, always —
@@ -73,10 +75,9 @@ type PendingStatusEvent = {
 // manifest's directory-derived fallback colliding with some other,
 // unrelated plugin's real id): removing every row sharing the id would
 // drop the survivor right along with whichever one this update is actually
-// about (#779-offers round 17 finding 4 — needed for the dialog-scoping fix
-// to mean anything, since a collision's own "changed" events would
-// otherwise erase the OTHER row from the list before its dialog ever gets
-// the chance to matter).
+// about — the dialog-scoping fix needs this to mean anything, since a
+// collision's own "changed" events would otherwise erase the OTHER row
+// from the list before its dialog ever gets the chance to matter.
 function upsertPlugin(
   plugins: readonly PluginStatusRecord[],
   plugin: PluginStatusRecord,
@@ -109,8 +110,7 @@ function applyStatusEvents(
       // actually left. Leaving both untouched when the id is ambiguous
       // costs nothing real: the row that left has nothing pointing at it
       // once discovery moves on, and the caller that owns this merge
-      // reloads the authoritative list right after (#779-offers round 15
-      // finding 2).
+      // reloads the authoritative list right after.
       const matches = current.filter((plugin) => plugin.id === pluginId);
       return matches.length > 1 ? current : current.filter((plugin) => plugin.id !== pluginId);
     }
@@ -235,9 +235,9 @@ export function canInstall(plugin: PluginStatusRecord): boolean {
 
 // A fresh install that never succeeded lands here with no approvedHash —
 // none of the other action predicates match that combination, so without
-// this the plugin has no control at all (CodeRabbit #779 R30). Retrying is the
-// same installPlugin call as a first install; PluginPipeline's install()
-// always runs a full fresh build regardless of prior state.
+// this the plugin has no control at all. Retrying is the same installPlugin
+// call as a first install; PluginPipeline's install() always runs a full
+// fresh build regardless of prior state.
 export function canRetryInstall(plugin: PluginStatusRecord): boolean {
   return (
     plugin.valid &&
@@ -308,7 +308,7 @@ export function canRemove(plugin: PluginStatusRecord): boolean {
 
 // Uninstall is the one action an installed plugin keeps once its manifest
 // breaks: every other one needs the manifest the pipeline can no longer read,
-// so it would fail on click (#779 round 8 D2).
+// so it would fail on click.
 export function canDisable(plugin: PluginStatusRecord): boolean {
   return (
     plugin.valid &&
@@ -349,12 +349,26 @@ export function matchesFilter(plugin: PluginFilterRecord, filter: string): boole
   ].some((field) => field !== null && field.toLowerCase().includes(needle));
 }
 
+/** A rename the pipeline has proven, not guessed — a fresh object every
+ * time it fires, so a consumer's effect keyed on it runs exactly once per
+ * rename even when the same (pluginId, from, to) repeats. */
+export interface PluginRenamedFact {
+  pluginId: string;
+  from: string;
+  to: string;
+}
+
 export interface PluginCatalog {
   load: PluginLoadState;
   busy: Record<string, PluginAction | undefined>;
   openingWebApp: string | null;
   errors: Record<string, string | undefined>;
   confirmation: PluginUninstallConfirmation | null;
+  /** The most recent rename the pipeline has reported, for a tab tracking
+   * one open row to retarget on. Not accumulated as a queue — a consumer
+   * only ever cares whether ITS OWN (pluginId, directoryName) matches
+   * `from`, and this list's own row already moved. */
+  renamed: PluginRenamedFact | null;
   /** Built-in driver plugins this workspace doesn't have yet. */
   offersLoad: OfferedPluginLoadState;
   /** Keyed by offer directoryName, never by a plugin id — an offer's error
@@ -401,6 +415,11 @@ export function usePluginCatalog(
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
   const [confirmation, setConfirmation] =
     useState<PluginUninstallConfirmation | null>(null);
+  // A fresh object every time, even when the same (pluginId, from, to)
+  // repeats — the identity change is what lets a consumer's effect fire
+  // exactly once per rename, the same "adjusting state when props change"
+  // shape React's own docs use refs for.
+  const [renamed, setRenamed] = useState<PluginRenamedFact | null>(null);
   const [offersLoad, setOffersLoad] = useState<OfferedPluginLoadState>({ status: "loading" });
   const [offerBusy, setOfferBusy] = useState<Record<string, boolean>>({});
   const [offerErrors, setOfferErrors] = useState<Record<string, string | undefined>>({});
@@ -428,8 +447,7 @@ export function usePluginCatalog(
   // silent keeps whatever is already on screen while the fresh list is in
   // flight instead of resetting to "loading" first — an ambiguous removal
   // reload's whole point is that the survivor stays visible, which a
-  // loading reset would undo for the one render this fetch takes
-  // (#779-offers round 15 finding 2).
+  // loading reset would undo for the one render this fetch takes.
   async function loadPlugins(silent = false) {
     const requestToken = ++listRequestToken.current;
     const epoch = workspaceEpoch.current;
@@ -535,6 +553,7 @@ export function usePluginCatalog(
     setBusy({});
     setErrors({});
     setConfirmation(null);
+    setRenamed(null);
     // An open still in flight for the workspace being left skips its own
     // cleanup on the epoch guard, so this workspace clears it. Without this
     // every Open control here stays disabled for the rest of the session.
@@ -558,9 +577,37 @@ export function usePluginCatalog(
         // plugin's own transition, and this names no plugin at all.
         // Discovery itself moved; both surfaces that read it directly
         // (list() shows an invalid row, offers hide behind or return to
-        // one) re-check (#779-offers round 23 finding 3).
+        // one) re-check.
         void loadPlugins(true);
         void loadOffers();
+        return;
+      }
+      if (event.kind === "renamed") {
+        // The pipeline has PROVEN this is a rename, not a guess from
+        // directoryName drift on a "changed" event — moves the row in
+        // place rather than dropping and re-adding it, and hands the fact
+        // to setRenamed for a tab tracking this exact (id, from) pair to
+        // retarget on directly. The id is unchanged, so no offer's own
+        // suppression is affected.
+        if (loadRef.current.status === "ready") {
+          const moved = {
+            status: "ready" as const,
+            plugins: loadRef.current.plugins.map((plugin) =>
+              plugin.id === event.pluginId && plugin.directoryName === event.from
+                ? { ...plugin, directoryName: event.to }
+                : plugin
+            ),
+          };
+          // Mirrored into loadRef synchronously, not left to the next
+          // render: a "changed" event for this exact row can arrive in the
+          // same batch right behind this one (the pipeline reports a
+          // rename's own directoryName move separately from its current
+          // status), and that event's own ambiguity check below reads
+          // loadRef, not this setLoad call's eventual commit.
+          loadRef.current = moved;
+          setLoad(moved);
+        }
+        setRenamed({ pluginId: event.pluginId, from: event.from, to: event.to });
         return;
       }
       const pending = {
@@ -579,7 +626,7 @@ export function usePluginCatalog(
       // against loadRef, not a setLoad updater's own "current" — a
       // functional updater's ordering against the code right after this
       // setLoad call is not guaranteed, and reading it correctly matters
-      // here (#779-offers round 15 finding 2).
+      // here.
       //
       // loadRef not yet "ready" means there is no prior list to check
       // ambiguity against at all — the initial load (or a load still
@@ -592,13 +639,27 @@ export function usePluginCatalog(
       // under a shared id, which looks unambiguous by count but is really
       // an unrelated survivor. Reloading again with a fresh revisionAtStart
       // excludes this exact event from that later call's own merge, so the
-      // fresh list it fetches is trusted as-is instead of re-filtered
-      // (#779-offers round 16 finding 1).
+      // fresh list it fetches is trusted as-is instead of re-filtered.
       const priorLoad = loadRef.current;
       const ambiguousRemoval =
         event.kind === "removed" &&
         (priorLoad.status !== "ready" ||
           priorLoad.plugins.filter((plugin) => plugin.id === event.pluginId).length > 1);
+      // A genuine rename now always arrives as its own "renamed" event
+      // (handled above, before reaching here), so a "changed" event whose
+      // directoryName disagrees with an existing row's own id can no longer
+      // be trusted as that same row moving — upsertPlugin's single-match
+      // migration is then just as much a guess as an ambiguous removal, and
+      // gets the same correction: apply it optimistically, then reconcile
+      // against the authoritative list.
+      const ambiguousChange =
+        event.kind === "changed" &&
+        priorLoad.status === "ready" &&
+        priorLoad.plugins.some(
+          (plugin) =>
+            plugin.id === event.plugin.id &&
+            plugin.directoryName !== event.plugin.directoryName,
+        );
       setLoad((current) => {
         if (current.status !== "ready") return current;
         return {
@@ -606,7 +667,7 @@ export function usePluginCatalog(
           plugins: applyStatusEvents(current.plugins, [pending]),
         };
       });
-      if (ambiguousRemoval) void loadPlugins(true);
+      if (ambiguousRemoval || ambiguousChange) void loadPlugins(true);
       if (event.kind === "removed" || event.kind === "changed") {
         // A plugin's identity can move either direction: an uninstall frees
         // a directory (removed) an offer might now fit again, and a fresh
@@ -632,8 +693,7 @@ export function usePluginCatalog(
         // directory-derived fallback colliding with some other, unrelated
         // plugin's real id), and an unrelated installed row's OWN status
         // event reporting isInstalled would otherwise close a completely
-        // different row's dialog for a transition that never happened to it
-        // (#779-offers round 17 finding 4).
+        // different row's dialog for a transition that never happened to it.
         setConfirmation((current) =>
           current &&
           current.plugin.id === event.plugin.id &&
@@ -760,8 +820,7 @@ export function usePluginCatalog(
       // The directory this exact row is at, never trusted from pluginId
       // alone: a discovered (never-installed) row's id is only ever a
       // broken manifest's directory-derived fallback, which can coincide
-      // with some OTHER, unrelated plugin's real, valid manifest id
-      // (#779-offers round 11 finding 3).
+      // with some OTHER, unrelated plugin's real, valid manifest id.
       const result = await bridge().pluginUninstallPreflight({
         workspaceId,
         pluginId: plugin.id,
@@ -793,7 +852,7 @@ export function usePluginCatalog(
       // otherwise read as proof THIS row (still never installed) also
       // transitioned, and refuse to show its Remove dialog for a change
       // that never happened to it. directoryName is what the map's key
-      // cannot tell apart on its own (#779-offers round 18 finding 2).
+      // cannot tell apart on its own.
       const newer = pendingStatusEvents.current.get(plugin.id);
       const staleInstall =
         newer &&
@@ -843,8 +902,7 @@ export function usePluginCatalog(
         // fallback colliding with some other, unrelated plugin's real id),
         // and dropping every row with this id would take the survivor down
         // with it. currentConfirmation.plugin already carries the
-        // directoryName that names this one row precisely (#779-offers
-        // round 15 finding 2).
+        // directoryName that names this one row precisely.
         const removedDirectoryName = currentConfirmation.plugin.directoryName;
         setLoad((current) =>
           current.status === "ready"
@@ -960,6 +1018,7 @@ export function usePluginCatalog(
     openingWebApp,
     errors,
     confirmation,
+    renamed,
     offersLoad: offersLoadForWorkspace,
     offerBusy,
     offerErrors,

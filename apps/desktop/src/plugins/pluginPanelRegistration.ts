@@ -24,13 +24,12 @@ export interface RegisteredPlugin {
   // The pipeline's own discovered directoryName for this id — never
   // re-derived from pluginRoot's basename, which an in-workspace symlink
   // can resolve to a different final segment than the plugin's actual
-  // discovered directory (CodeRabbit on #779-offers round 24: a
-  // basename-derived name silently stopped matching the pipeline's own
-  // directoryName, so the round 24 finding 4 forget gate never matched and
-  // a stale registration survived uninstall). Explicit, the same way
-  // PluginHost.start's own directoryName stopped being derived in round 20
-  // finding 1 — this id's own claim on this workspace is only ever THIS
-  // directory's to forget.
+  // discovered directory: a basename-derived name can silently stop
+  // matching the pipeline's own directoryName, so the forget gate below
+  // never matches and a stale registration survives uninstall. Explicit,
+  // the same way PluginHost.start's own directoryName is never derived —
+  // this id's own claim on this workspace is only ever THIS directory's to
+  // forget.
   directoryName: string;
 }
 
@@ -39,8 +38,8 @@ export interface RegisteredPlugin {
  * one before it. Keeping the first registration forever froze the manifest
  * panels are served from, so an approved manifest edit that added a panel or
  * changed an entry never became servable — not even after reopening the
- * workspace (#779 round 10 B7). The plugin root is the one thing that cannot
- * change under an id while it is registered.
+ * workspace. The plugin root is the one thing that cannot change under an
+ * id while it is registered.
  */
 export function rememberPluginRegistration(
   registrations: Map<string, Map<string, RegisteredPlugin>>,
@@ -95,9 +94,9 @@ export type PluginPanelHostStartResult =
  * The claim is made only when this start performed the zero-to-running
  * transition, which the pipeline reports from inside its own per-plugin
  * queue: a plugin the workspace enabled keeps running with no panel open, so
- * a panel that merely rode along must not stop it on close (#779 round 4
- * finding 3, round 10 B3). A start that ran the host owns it even if that
- * host then fails to activate — nothing else is going to stop it.
+ * a panel that merely rode along must not stop it on close. A start that
+ * ran the host owns it even if that host then fails to activate — nothing
+ * else is going to stop it.
  */
 export async function startPluginForPanel(input: {
   panelStartedHosts: Set<string>;
@@ -122,8 +121,7 @@ export async function startPluginForPanel(input: {
 /**
  * Forgets what the main process remembers about a plugin that is gone: the
  * manifest its panels are served from, and any panel claim on its host. A
- * refused uninstall changes nothing, so the plugin keeps both (#779 round 10
- * B7).
+ * refused uninstall changes nothing, so the plugin keeps both.
  */
 export function forgetUninstalledPlugin(input: {
   registrations: Map<string, Map<string, RegisteredPlugin>>;
@@ -142,9 +140,8 @@ export function forgetUninstalledPlugin(input: {
   // id (a broken manifest's directory-derived fallback colliding with
   // some other, unrelated plugin's real id) — an id-losing loser's own
   // removal must never reach into a still-installed winner's live
-  // registration and host claim under that shared id (#779-offers round
-  // 24 finding 4). Nothing registered at all is trivially nothing to
-  // forget either way.
+  // registration and host claim under that shared id. Nothing registered
+  // at all is trivially nothing to forget either way.
   if (!registered || registered.directoryName !== input.directoryName) return;
   forWorkspace?.delete(input.pluginId);
   input.panelStartedHosts.delete(
@@ -153,12 +150,12 @@ export function forgetUninstalledPlugin(input: {
 }
 
 /**
- * Forgets a plugin the pipeline reports as removed. Uninstall is not the
- * only way an identity departs: a rename (`plugins/foo` to `plugins/bar`,
- * same manifest name) removes the old identity through the watcher path,
- * and its stale registration kept every panel of the reinstalled plugin
- * throwing "already running from another root" until the workspace
- * reopened (#779 round 14 A5).
+ * Forgets a plugin the pipeline reports as removed or renamed. A rename's
+ * OLD registration is just as stale as an uninstalled one — its pluginRoot
+ * still points at the vacated directory — so every panel of the renamed
+ * plugin would throw "already running from another root" until the
+ * workspace reopened, the same failure an uninstalled plugin's stale
+ * registration causes.
  */
 export function forgetRemovedPlugin(input: {
   registrations: Map<string, Map<string, RegisteredPlugin>>;
@@ -166,13 +163,15 @@ export function forgetRemovedPlugin(input: {
   workspaceId: string;
   event: PluginPipelineStatusEvent;
 }): void {
-  if (input.event.kind !== "removed") return;
+  if (input.event.kind !== "removed" && input.event.kind !== "renamed") return;
   forgetUninstalledPlugin({
     registrations: input.registrations,
     panelStartedHosts: input.panelStartedHosts,
     workspaceId: input.workspaceId,
     pluginId: input.event.pluginId,
-    directoryName: input.event.directoryName,
+    directoryName: input.event.kind === "removed"
+      ? input.event.directoryName
+      : input.event.from,
     uninstalled: true,
   });
 }
@@ -180,7 +179,7 @@ export function forgetRemovedPlugin(input: {
 /**
  * Forgets the registrations of a workspace that is closing. They describe
  * manifests read from a workspace that is no longer open; reopening a panel
- * re-reads them. Every other workspace keeps its own (#779 round 10 B7).
+ * re-reads them. Every other workspace keeps its own.
  */
 export function forgetWorkspaceRegistrations(
   registrations: Map<string, Map<string, RegisteredPlugin>>,

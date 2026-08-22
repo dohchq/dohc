@@ -1,10 +1,6 @@
 import { AlertTriangle, Blocks, ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { PluginSizesRecord, PluginStatusRecord } from "../ipc/bridgeContract";
-import {
-  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
-  BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES,
-} from "../ipc/channels";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   isHttpsUrl,
@@ -38,6 +34,7 @@ import {
   statusTone,
   usePluginCatalog,
   webAppKey,
+  type PluginRenamedFact,
 } from "./workbench/pluginCatalog";
 
 // One plugin's page, opened as an editor tab from the plugins list. VS Code's
@@ -85,48 +82,21 @@ function readmePath(directoryName: string): string {
   return `plugins/${directoryName}/README.md`;
 }
 
-// A tab opened for one exact row (#779-offers round 14: id alone can name two
-// unrelated rows). Prefer that exact (id, directoryName) pair so a collision
-// never repaints the wrong one. A rename moves the row this tab is tracking
-// to a new directoryName with no row left at the old one, so fall back to id
-// alone — but only under BOTH of the following, or a tab left open on a
-// removed plugin would silently adopt whatever next happened to install
-// under that id:
-//
-// - `withinRenameWindow`: a real directory-watcher rename does not always
-//   land as one listing transition — the underlying delete and create can
-//   surface as two, with a render in between showing "removed" (#779-offers
-//   round 22 finding 3). A genuine rename still lands close behind that
-//   render, though: this is true only for the transition that takes the
-//   tab's own exact row away, and the one immediately after it — never a
-//   later refresh, which is a different plugin that merely landed under the
-//   same id afterward.
-// - `knownCollisions` is empty: any OTHER directory ever seen sharing this
-//   id while the tab's own exact row was still present proves this id
-//   already named more than one row — a rename moves the SAME entry, so
-//   nothing else could have held this id under a different name while the
-//   tab's own row was still there, and once something did, this id can no
-//   longer prove which arrival, if any, is truly the tab's own row moving
-//   (#779-offers round 16 finding 2, tightened round 22 finding 3).
-//
-// The window is one render: the transition that takes the tab's own row
-// away, plus the render right after it (#779-offers round 22 finding 3).
-const RENAME_FOLLOW_WINDOW = 1;
-
+// A tab opened for one exact row (id alone can name two unrelated rows).
+// Following a rename used to be a heuristic — id-only matching, guarded by
+// a window and a collision history, guessing that a same-id arrival was the
+// tab's own row moving. It now follows the fact instead: catalog.renamed
+// fires only where the pipeline has itself PROVEN a rename, and this tab
+// retargets on that fact directly (see the component body below) rather
+// than inferring one from the list's own shape.
 function findTabPlugin(
   plugins: PluginStatusRecord[],
   pluginId: string,
   directoryName: string,
-  knownCollisions: ReadonlySet<string>,
-  withinRenameWindow: boolean,
 ): PluginStatusRecord | null {
-  const exact = plugins.find(
+  return plugins.find(
     (entry) => entry.id === pluginId && entry.directoryName === directoryName,
-  );
-  if (exact) return exact;
-  if (!withinRenameWindow || knownCollisions.size > 0) return null;
-  const byId = plugins.filter((entry) => entry.id === pluginId);
-  return byId.length === 1 ? byId[0] : null;
+  ) ?? null;
 }
 
 function useReadme(workspaceId: string, directoryName: string): ReadmeState {
@@ -251,7 +221,7 @@ function PluginSettingsSection(props: {
         // rows can share an id (a broken manifest's directory-derived
         // fallback colliding with some other, unrelated plugin's real id),
         // and settings answer only ever what one directory declared and
-        // stored (#779-offers round 18 finding 4).
+        // stored.
         directoryName: plugin.directoryName,
       })
       .then((result) => {
@@ -486,7 +456,7 @@ function usePluginSizes(
       // colliding with some other, unrelated plugin's real id), and dohc's
       // own build and state storage answers only ever what THIS id
       // actually built and ran, which the pipeline refuses to report for a
-      // directory it does not belong to (#779-offers round 19 finding 3).
+      // directory it does not belong to.
       .pluginSizes({ workspaceId, pluginId, directoryName })
       .then((result) => {
         if (request !== requestToken.current) return;
@@ -665,7 +635,7 @@ export function PluginDetailsPage(props: {
    * a broken manifest's directory-derived fallback, which can coincide
    * with some OTHER, unrelated plugin's real id — matching by id alone
    * found whichever row sorted first, never the second-sorting one a user
-   * actually clicked (#779-offers round 14). */
+   * actually clicked. */
   directoryName: string;
   /** Reports what this plugin calls itself, so its tab can carry the name the
    * user installed instead of the raw plugin id. This page is the only surface
@@ -675,7 +645,7 @@ export function PluginDetailsPage(props: {
   /** Reports a rename this page followed by id, so the tab's own virtual
    * path can retarget to it — otherwise only this page's in-memory tracking
    * knows, and a remount (a tab switch away and back) reseeds from the
-   * tab's original, now-vacated directory (#779-offers round 20 finding 2). */
+   * tab's original, now-vacated directory. */
   onDirectoryRenamed?: (
     pluginId: string,
     fromDirectoryName: string,
@@ -683,35 +653,10 @@ export function PluginDetailsPage(props: {
   ) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
-  // Every OTHER directoryName ever seen sharing props.pluginId while the
-  // tab's own exact (pluginId, directoryName) row was still present —
-  // recorded here, rather than read fresh each render, because the
-  // evidence only exists WHILE that exact row is still around: once it is
-  // gone, findTabPlugin can no longer tell a pre-existing collision from a
-  // rename target by looking at the current list alone.
-  const knownCollisionsRef = useRef<Set<string>>(new Set());
-  // Whose evidence knownCollisionsRef currently holds. A tab is one virtual
-  // path per (pluginId, directoryName) pair, so this component ordinarily
-  // never sees that pair change under it — but nothing enforces a remount
-  // on identity change, and stale evidence from a PREVIOUS tab's pair would
-  // otherwise reject a later, genuinely legitimate rename this new tab's
-  // own pair never actually collided with. Cleared during render, not an
-  // effect, so the very first render for a new pair already reads an empty
-  // set — never one render of stale history (#779-offers round 17
-  // finding 3).
-  const knownCollisionsOwnerRef = useRef<{ pluginId: string; directoryName: string } | null>(
-    null,
-  );
   // The directoryName this tab is CURRENTLY following. Starts at
-  // props.directoryName, the tab's own opened identity, but once the id-
-  // only fallback below proves a rename happened (the exact match failed
-  // and exactly one OTHER directory under the same id was found), this
-  // moves to track it. Without this, the exact-match check would keep
-  // trusting the tab's ORIGINAL directoryName forever — and once the
-  // vacated original directory gets a later, unrelated occupant sharing
-  // this id, that check would wrongly re-capture the tab onto it instead
-  // of staying on the plugin that actually renamed (#779-offers round 19
-  // finding 4).
+  // props.directoryName, the tab's own opened identity, and moves only when
+  // catalog.renamed proves this exact row moved — never guessed from the
+  // list's own shape.
   const trackedDirectoryNameRef = useRef(props.directoryName);
   // A rename this render just detected, queued for the effect below to
   // report to onDirectoryRenamed — reporting it directly here would call a
@@ -719,67 +664,45 @@ export function PluginDetailsPage(props: {
   // genuinely new tab, so a previous tab's own in-flight rename can never
   // reach a DIFFERENT tab this instance goes on to show.
   const pendingRenameRef = useRef<{ from: string; to: string } | null>(null);
-  // How many consecutive ready renders have shown the tracked row absent,
-  // as of the LAST commit — 0 on the render that takes it away, 1 the
-  // render right after, and so on. findTabPlugin's fallback only fires
-  // through RENAME_FOLLOW_WINDOW: a real watcher rename can surface as two
-  // listing transitions (delete, then create) rather than one, and this is
-  // the one render of slack that covers it without leaving the fallback
-  // open to a same-id plugin that installs an arbitrary amount of time
-  // later (#779-offers round 22 finding 3). Reset above the window on a
-  // genuinely new tab (not to 0): nothing has confirmed this tab's own row
-  // present yet, so nothing has "just" been taken away either — the effect
-  // below corrects this the moment real data says otherwise. Advanced only
-  // by that effect, never during render: a render React discards (Strict
-  // Mode's double-invoke, or an interrupted concurrent render) must never
-  // advance what the NEXT render compares against, or a retried render of
-  // the very same transition would count it twice (#779-offers round 22
-  // finding 2).
-  const rendersSinceExactRef = useRef(RENAME_FOLLOW_WINDOW + 1);
+  // The catalog.renamed object this tab has already applied (or ruled out).
+  // catalog.renamed is a fresh object per rename but is NOT cleared once
+  // consumed, so without this, a component instance reused for a brand new
+  // tab (same pluginId and directoryName as a plugin renamed a while ago)
+  // would re-apply a stale fact that has nothing to do with this tab.
+  // Baselined to whatever fact already exists on identity change, below —
+  // only a rename that happens WHILE this tab is open is ever this tab's.
+  const lastHandledRenameRef = useRef<PluginRenamedFact | null>(null);
+  // Whose identity trackedDirectoryNameRef/pendingRenameRef/
+  // lastHandledRenameRef currently belong to — a tab is one virtual path
+  // per (pluginId, directoryName) pair, so this component ordinarily never
+  // sees that pair change under it, but nothing enforces a remount on
+  // identity change.
+  const identityRef = useRef<{ pluginId: string; directoryName: string } | null>(null);
   if (
-    knownCollisionsOwnerRef.current?.pluginId !== props.pluginId ||
-    knownCollisionsOwnerRef.current?.directoryName !== props.directoryName
+    identityRef.current?.pluginId !== props.pluginId ||
+    identityRef.current?.directoryName !== props.directoryName
   ) {
-    knownCollisionsRef.current = new Set();
-    knownCollisionsOwnerRef.current = {
-      pluginId: props.pluginId,
-      directoryName: props.directoryName,
-    };
+    identityRef.current = { pluginId: props.pluginId, directoryName: props.directoryName };
     trackedDirectoryNameRef.current = props.directoryName;
     pendingRenameRef.current = null;
-    rendersSinceExactRef.current = RENAME_FOLLOW_WINDOW + 1;
+    lastHandledRenameRef.current = catalog.renamed;
   }
-  useEffect(() => {
-    if (catalog.load.status !== "ready") return;
-    const tracked = trackedDirectoryNameRef.current;
-    const exact = catalog.load.plugins.some(
-      (entry) => entry.id === props.pluginId && entry.directoryName === tracked,
-    );
-    rendersSinceExactRef.current = exact ? 0 : rendersSinceExactRef.current + 1;
-    if (!exact) return;
-    for (const entry of catalog.load.plugins) {
-      if (entry.id === props.pluginId && entry.directoryName !== tracked) {
-        knownCollisionsRef.current.add(entry.directoryName);
-      }
-    }
-  }, [catalog.load, props.pluginId, props.directoryName]);
+  if (
+    catalog.renamed !== lastHandledRenameRef.current &&
+    catalog.renamed !== null &&
+    catalog.renamed.pluginId === props.pluginId &&
+    catalog.renamed.from === trackedDirectoryNameRef.current
+  ) {
+    pendingRenameRef.current = { from: catalog.renamed.from, to: catalog.renamed.to };
+    trackedDirectoryNameRef.current = catalog.renamed.to;
+  }
+  if (catalog.renamed !== lastHandledRenameRef.current) {
+    lastHandledRenameRef.current = catalog.renamed;
+  }
   const plugin =
     catalog.load.status === "ready"
-      ? findTabPlugin(
-        catalog.load.plugins,
-        props.pluginId,
-        trackedDirectoryNameRef.current,
-        knownCollisionsRef.current,
-        rendersSinceExactRef.current <= RENAME_FOLLOW_WINDOW,
-      )
+      ? findTabPlugin(catalog.load.plugins, props.pluginId, trackedDirectoryNameRef.current)
       : null;
-  if (plugin && plugin.directoryName !== trackedDirectoryNameRef.current) {
-    pendingRenameRef.current = {
-      from: trackedDirectoryNameRef.current,
-      to: plugin.directoryName,
-    };
-    trackedDirectoryNameRef.current = plugin.directoryName;
-  }
 
   // Held in a ref so a new callback identity never re-reports, and written
   // after the commit: a ref written while rendering keeps the value of a
@@ -1141,17 +1064,10 @@ function PluginUninstallDialog(props: {
   // held. Anything else has no such path at all, and dohc's own delete here
   // is permanent either way (PluginPipeline.uninstall removes the source
   // directly, no trash) — the copy below says exactly that, never more.
-  const isBuiltinOffer = (
-    BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES as readonly string[]
-  ).includes(confirmation.plugin.directoryName);
-  // The packaged plugin's own name, never this copy's — a directory named
-  // "codex" carries no guarantee its manifest still says so: it can be
-  // hand-edited, or too broken to read at all.
-  const packagedDisplayName = isBuiltinOffer
-    ? BUILTIN_DRIVER_PLUGIN_DISPLAY_NAMES[
-        confirmation.plugin.directoryName as (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number]
-      ]
-    : null;
+  // The preflight this confirmation came from already read the packaged
+  // manifest itself (never this copy's, which can be hand-edited or too
+  // broken to read) — a non-null name here IS the built-in-offer fact.
+  const packagedDisplayName = confirmation.preflight.packagedDisplayName;
 
   return (
     <Overlay
@@ -1178,7 +1094,7 @@ function PluginUninstallDialog(props: {
           <p className="m-0 mt-2 text-xs text-muted">
             {installed
               ? "This removes the plugin source and build files from this workspace."
-              : isBuiltinOffer
+              : packagedDisplayName !== null
                 ? `This deletes plugins/${confirmation.plugin.directoryName}'s files from this workspace. Add restores dohc's packaged ${packagedDisplayName} plugin, not this copy.`
                 : `This permanently deletes plugins/${confirmation.plugin.directoryName} from this workspace. dohc has no way to bring it back.`}
           </p>

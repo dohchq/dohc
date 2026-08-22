@@ -1898,7 +1898,7 @@ export function DesktopWorkspaceShell(props: {
   const focusedTabPath = activeTabPath(wb);
   // The plugins list marks the row whose details tab the user is looking at,
   // the way the explorer marks the open file. Directory, not only id: an
-  // id can collide between two discovered rows (#779-offers round 14).
+  // id can collide between two discovered rows.
   const activePluginDetails = parsePluginDetailsTabPath(focusedTabPath);
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const dirtyPaths = useMemo(
@@ -2085,15 +2085,13 @@ export function DesktopWorkspaceShell(props: {
     [],
   );
 
-  // A details tab that followed a rename (an id-only fallback, since a
-  // discovered row's id alone can never disambiguate two rows) only tracks
-  // that rename in memory — nothing else ever hears about it. A later tab
-  // switch remounts the page, whose tracking ref reseeds from THIS tab's own
-  // virtual path, still naming the ORIGINAL, now-vacated directory. The same
-  // remap onExplorerPathsChanged already applies for a file rename retargets
-  // the tab's own path here too, so a remount reads the directory the plugin
-  // actually renamed to, not the one it left (#779-offers round 20 finding
-  // 2).
+  // A details tab that followed a rename only tracks that rename in
+  // memory — nothing else ever hears about it. A later tab switch remounts
+  // the page, whose tracking reseeds from THIS tab's own virtual path,
+  // still naming the ORIGINAL, now-vacated directory. The same remap
+  // onExplorerPathsChanged already applies for a file rename retargets the
+  // tab's own path here too, so a remount reads the directory the plugin
+  // actually renamed to, not the one it left.
   const retargetPluginDetailsTab = useCallback(
     (pluginId: string, fromDirectoryName: string, toDirectoryName: string) => {
       const from = pluginDetailsTabPath(pluginId, fromDirectoryName);

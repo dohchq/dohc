@@ -233,7 +233,7 @@ async function createNamedPluginWorkspace(directoryName: string, pluginId: strin
 
 // Matches PluginPipeline's own dohcDir computation exactly: derived plugin
 // artifacts live under <stateDir>/plugin-data/<workspaceStateKey>, never
-// inside the workspace folder (CERT779).
+// inside the workspace folder.
 function pluginsDataRoot(
   fixture: { stateDir: string; workspaceRoot: string },
 ): string {
@@ -967,7 +967,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // The user named the invalid row specifically — its own id AND its
       // own directory, exactly what the renderer sends for a discovered
-      // row (#779-offers round 11 finding 3's payload change).
+      // row.
       const preflight = await pipeline.uninstallPreflight("target-dir", "target-dir");
       if (!preflight.ok) throw new Error(preflight.error.message);
       // Round 13: the dialog must not threaten data cleanup already
@@ -1009,7 +1009,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await expect(lstat(invalidRoot)).rejects.toMatchObject({ code: "ENOENT" });
       // ...and the unrelated, installed plugin is completely untouched:
       // its source, its build, its state, and its running process all
-      // survive — not only its files (#779-offers round 12 finding 1).
+      // survive — not only its files.
       await expect(readFile(join(survivorStateRoot, "t3", "session.sqlite"), "utf8"))
         .resolves.toBe("session-bytes");
       await expect(readFile(join(otherRoot, "dohc-plugin.json"), "utf8"))
@@ -1787,7 +1787,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pipeline.pluginIdForPath(fixture.pluginRoot)).toBe("example-plugin");
       // A ".." that is not a whole segment is still inside the root: prefix
       // containment left a "..cache/" write unattributed, and the plugin
-      // later held for its own door write (#779 round 14 A3, round 10 B5).
+      // later held for its own door write.
       expect(pipeline.pluginIdForPath(join(fixture.pluginRoot, "..cache", "x.ts")))
         .toBe("example-plugin");
       expect(pipeline.pluginIdForPath(join(fixture.workspaceRoot, "notes.md")))
@@ -2092,7 +2092,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pipeline.list()[0]?.approvedHash).toBe(approvedHashBefore);
       // The failure path's discard() ran: nothing staged or set aside
       // survives beside the live root, and the live root itself is exactly
-      // the tree the approved build left (#779 round 7 A2).
+      // the tree the approved build left.
       expect(await readdir(dataRoot)).toEqual(["example-plugin"]);
       const liveAfter = await fileHashes(liveRoot);
       expect(publishedOutputs(liveAfter)).toEqual(liveBefore);
@@ -3059,8 +3059,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await mkdir(orphanedStaging, { recursive: true });
       await writeFile(join(orphanedStaging, "bundle.mjs"), "orphaned bytes\n");
       // npm names allow dots, so this is another installed plugin's own live
-      // root — not an artifact of this one, and never uninstall's to delete
-      // (#779 round 10 B1).
+      // root — not an artifact of this one, and never uninstall's to delete.
       const neighbourRoot = join(dataRoot, "example-plugin.bar");
       await mkdir(join(neighbourRoot, "snapshot"), { recursive: true });
       await writeFile(join(neighbourRoot, "bundle.mjs"), "neighbour bytes\n");
@@ -3387,7 +3386,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       expect(enabled.ok).toBe(false);
       // "snapshotting" is a busy status: it disables every action for this
-      // plugin, and nothing else restores it (#779 round 7 B5).
+      // plugin, and nothing else restores it.
       expect(pipeline.list()[0]?.status).not.toBe("snapshotting");
       expect(pipeline.list()[0]).toMatchObject({ status: "failed" });
       expect(pipeline.list()[0]?.error).toMatchObject({
@@ -3722,7 +3721,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // Both interlopers are listed, but only as invalid duplicates: neither
       // holds an approval or an installation of its own. Each keeps its own
       // directory-derived id — one id per row — and its duplicate
-      // diagnostics stay reachable on that row (#779 round 14 A4).
+      // diagnostics stay reachable on that row.
       const listed = pipeline.list();
       expect(new Set(listed.map((plugin) => plugin.id)).size).toBe(listed.length);
       for (const directoryName of ["alpha", "zzz"]) {
@@ -4601,7 +4600,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             ...result,
             // A disk-only change landed between the door write's hash check
             // and this snapshot, so the build must drop the staged tree and
-            // hold for approval instead of building it (#779 round 9 B2).
+            // hold for approval instead of building it.
             sourceHash: "0".repeat(64),
             discard: async () => {
               discards.push(result.snapshotRoot);
@@ -6134,7 +6133,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             publish: async () => {
               // The live source tree is as reachable by a running plugin as
               // the bundle is, so the stop has to precede THIS publish too,
-              // not just the bundle's (#779 round 13 D4).
+              // not just the bundle's.
               order.push("snapshot-publish");
               return snapshot.publish();
             },

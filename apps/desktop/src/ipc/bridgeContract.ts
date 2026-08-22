@@ -2391,7 +2391,7 @@ export const PluginActionPayload = z.object({
 // derived fallback, a plain string that can coincide with some OTHER,
 // unrelated plugin's real, valid manifest id. Preflight resolves the exact
 // directory the caller named, never trusting pluginId alone to disambiguate
-// which plugin that id actually means (#779-offers round 11 finding 3).
+// which plugin that id actually means.
 export const PluginUninstallPreflightPayload = PluginActionPayload.extend({
   directoryName: z.string().min(1).max(255),
 }).strict();
@@ -2430,7 +2430,7 @@ const PluginSettingsValues = z.record(
 // directoryName, not pluginId alone, is what settles which row's answers a
 // call reads or writes: an id is only ever a broken manifest's directory-
 // derived fallback, which can coincide with some OTHER, unrelated plugin's
-// real id (#779-offers round 18 finding 4).
+// real id.
 export const GetPluginSettingsPayload = PluginActionPayload.extend({
   directoryName: z.string().min(1).max(255),
 }).strict();
@@ -2514,8 +2514,14 @@ export const PluginUninstallPreflightRecord = z.object({
     path: PATH_STRING,
     fileCount: z.number().int().nonnegative(),
     totalBytes: z.number().int().nonnegative(),
+    additionalLocations: z.number().int().nonnegative(),
   }).strict().nullable(),
   warning: PluginUninstallWarning.nullable(),
+  // The packaged built-in's own manifest displayName, read fresh for this
+  // directoryName — never this copy's own, which can be hand-edited or too
+  // broken to read. Null for anything that isn't a built-in driver
+  // directory: nothing packaged for Add to ever restore there.
+  packagedDisplayName: z.string().min(1).max(120).nullable(),
 }).strict();
 export type PluginUninstallPreflightRecord = z.infer<
   typeof PluginUninstallPreflightRecord
@@ -2550,8 +2556,7 @@ export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
 
 // directoryName is what settles which row's bytes a call reports: an id is
 // only ever a broken manifest's directory-derived fallback, which can
-// coincide with some OTHER, unrelated plugin's real id (#779-offers round
-// 19 finding 3).
+// coincide with some OTHER, unrelated plugin's real id.
 export const PluginSizesPayload = PluginActionPayload.extend({
   directoryName: z.string().min(1).max(255),
 }).strict();
@@ -2561,8 +2566,7 @@ export type PluginSizesPayload = z.infer<typeof PluginSizesPayload>;
 // can share an id (a broken manifest's directory-derived fallback colliding
 // with some other, unrelated plugin's real id), and each row's own
 // preflight confirmation has to be resolved by the exact row it was issued
-// for, not whichever row this id happens to name second (#779-offers round
-// 22 finding 4).
+// for, not whichever row this id happens to name second.
 export const UninstallPluginPayload = PluginActionPayload.extend({
   directoryName: z.string().min(1).max(255),
   confirmationToken: z.uuid(),
@@ -2577,8 +2581,7 @@ export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
   }).strict(),
   // directoryName is the departed row's own — never re-derived from
   // whatever this id currently names, which a collision can leave
-  // pointing at an entirely different, still-installed row (#779-offers
-  // round 24 finding 4).
+  // pointing at an entirely different, still-installed row.
   z.object({
     kind: z.literal("removed"),
     workspaceId: WORKSPACE_ID,
@@ -2589,10 +2592,20 @@ export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
   // pluginId "changed"/"removed" could carry — this is the one honest fact
   // discovery has to offer instead: something in this workspace's invalid
   // candidates moved, so anything reading discovery (offers, the plugin
-  // list) should re-check (#779-offers round 23 finding 3).
+  // list) should re-check.
   z.object({
     kind: z.literal("discovery-changed"),
     workspaceId: WORKSPACE_ID,
+  }).strict(),
+  // Emitted only where the pipeline itself has proven a rename, never
+  // guessed from directoryName drift on a "changed" event — a renderer
+  // tab tracking one open row retargets on this fact directly.
+  z.object({
+    kind: z.literal("renamed"),
+    workspaceId: WORKSPACE_ID,
+    pluginId: PLUGIN_ID,
+    from: z.string().min(1).max(255),
+    to: z.string().min(1).max(255),
   }).strict(),
 ]);
 export type PluginStatusChangedEvent = z.infer<typeof PluginStatusChangedEvent>;

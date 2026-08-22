@@ -1,10 +1,10 @@
-import { rename, rm, rmdir } from "node:fs/promises";
+import { rename, rm } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 
 /**
  * Helpers every plugin pipeline module used to carry its own copy of.
- * One body each — a fix that lands here lands everywhere (#779 round 13 C1;
- * round 10 B5 had to be inherited file by file).
+ * One body each — a fix that lands here lands everywhere, instead of
+ * needing to be inherited file by file.
  */
 
 export function errorMessage(error: unknown): string {
@@ -41,8 +41,7 @@ export function isInside(parent: string, child: string): boolean {
   if (child === parent) return true;
   const pathFromParent = relative(parent, child);
   // The ".." has to be a whole segment. Testing the prefix alone rejected
-  // real contained names — a child under "..cache/" is inside the root
-  // (#779 round 10 B5).
+  // real contained names — a child under "..cache/" is inside the root.
   return (
     pathFromParent.length > 0 &&
     !isAbsolute(pathFromParent) &&
@@ -60,19 +59,19 @@ function isWindowsRenameLock(error: unknown): boolean {
 }
 
 /**
- * Retries `operation` through Windows EPERM/EBUSY locks, one body shared by
- * every op that can land on a transiently-held path — a rename, a
- * directory's own rmdir. When it still fails, `wrapError` turns the cause
- * into the caller's own error; `lockedAfterRetries` is true when the target
- * stayed locked through every retry in WINDOWS_RENAME_RETRY_DELAYS_MS.
+ * Retries rename() through Windows EPERM/EBUSY locks. When it still fails,
+ * `wrapError` turns the cause into the caller's own error;
+ * `lockedAfterRetries` is true when the target stayed locked through every
+ * retry in WINDOWS_RENAME_RETRY_DELAYS_MS.
  */
-async function retryThroughWindowsLock<T>(
-  operation: () => Promise<T>,
+export async function renameWithWindowsRetry(
+  source: string,
+  destination: string,
   wrapError: (error: unknown, lockedAfterRetries: boolean) => unknown,
-): Promise<T> {
+): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await operation();
+      return await rename(source, destination);
     } catch (error) {
       const retryDelay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
       if (!isWindowsRenameLock(error) || retryDelay === undefined) {
@@ -81,25 +80,6 @@ async function retryThroughWindowsLock<T>(
       await delay(retryDelay);
     }
   }
-}
-
-export function renameWithWindowsRetry(
-  source: string,
-  destination: string,
-  wrapError: (error: unknown, lockedAfterRetries: boolean) => unknown,
-): Promise<void> {
-  return retryThroughWindowsLock(() => rename(source, destination), wrapError);
-}
-
-/** rmdir() through the same bounded Windows-lock retry renameWithWindowsRetry
- * uses — a transient antivirus hold on a just-freed or just-created empty
- * directory is the one seen in practice, and a single attempt reads it as a
- * permanent refusal rather than the hold it actually is. */
-export function rmdirWithWindowsRetry(
-  path: string,
-  wrapError: (error: unknown, lockedAfterRetries: boolean) => unknown,
-): Promise<void> {
-  return retryThroughWindowsLock(() => rmdir(path), wrapError);
 }
 
 export function removeStaging(stagingRoot: string): Promise<void> {

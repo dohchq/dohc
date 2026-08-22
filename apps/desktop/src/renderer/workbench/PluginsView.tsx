@@ -42,7 +42,7 @@ export function PluginsView(props: {
    * carry the same selected read-out the explorer gives the open file.
    * Directory, not only id: a discovered row's id can coincide with some
    * OTHER, unrelated plugin's real id, so id alone cannot tell two rows
-   * apart (#779-offers round 14). */
+   * apart. */
   activePluginId: string | null;
   activePluginDirectoryName: string | null;
   onOpenDetails: (pluginId: string, directoryName: string) => void;

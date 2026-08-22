@@ -8,7 +8,6 @@ import {
   isInside,
   removeStaging,
   renameWithWindowsRetry,
-  rmdirWithWindowsRetry,
 } from "./pluginShared";
 import { EXCLUDED_SOURCE_NAMES, hashPluginSourceFiles } from "./pluginSourceSnapshot";
 
@@ -47,7 +46,6 @@ export async function listOfferedPlugins(
 ): Promise<OfferedPluginSource[]> {
   const offers: OfferedPluginSource[] = [];
   for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
-    if (existingPluginIds.has(directoryName)) continue;
     const target = join(workspaceRoot, "plugins", directoryName);
     try {
       if (await pathExists(target)) continue;
@@ -70,6 +68,8 @@ export async function listOfferedPlugins(
           manifest.diagnostics.join(" "),
       );
     }
+    // Read from the manifest itself, never directoryName (see above).
+    if (existingPluginIds.has(manifest.manifest.name)) continue;
     offers.push({
       directoryName,
       displayName: manifest.manifest.displayName ?? null,
@@ -78,24 +78,6 @@ export async function listOfferedPlugins(
     });
   }
   return offers;
-}
-
-/**
- * The plugin whose discovery entry lost a duplicate-id collision to
- * `directoryName`'s own copy, if any — read from `supersededPluginId`, the
- * discovery layer's own structured marker, never from scanning diagnostic
- * text. That text is bounded and re-worded for display, so a record whose
- * diagnostics merely happen to CONTAIN a similar-looking phrase for an
- * unrelated reason must never read as a real collision.
- */
-export function findDisplacedByAdd<
-  T extends { directoryName: string; supersededPluginId: string | null },
->(plugins: readonly T[], directoryName: string): T | undefined {
-  return plugins.find(
-    (entry) =>
-      entry.directoryName !== directoryName &&
-      entry.supersededPluginId === directoryName,
-  );
 }
 
 export class OfferedPluginAddError extends Error {
@@ -201,15 +183,14 @@ async function ensureContainedDirectory(
  * on in that case, weaker than a dev+ino match but still real evidence,
  * never a blind delete.
  *
- * Once every check above has passed, this is no longer "can this call
- * vouch for what is there" — it can, definitively — so a delete that still
- * fails here is not evidence to walk away from quietly. A transient
- * Windows lock (an antivirus hold on the claim, the same one publishStaged
- * itself now retries through) gets the identical bounded retry; only once
- * that retry exhausts does this throw a named refusal naming the leftover
- * path, rather than leave a permanently "occupied" claim for every later
- * listOfferedPlugins call and Add attempt to silently trip over
- * (#779-offers round 18 finding 3).
+ * POSIX-only: this is the atomic claim's own cleanup, and only POSIX still
+ * holds a claim rename() can fail to release (Windows's own rename()
+ * already refuses to land on any existing directory, so it never needs
+ * one). A delete that fails once every check above has passed is real
+ * evidence, not something to walk away from quietly — it throws a named
+ * refusal naming the leftover path, rather than leave a permanently
+ * "occupied" claim for every later listOfferedPlugins call and Add attempt
+ * to silently trip over.
  */
 async function removeOwnedEmptyClaim(
   target: string,
@@ -230,66 +211,62 @@ async function removeOwnedEmptyClaim(
     return;
   }
   if (entries.length > 0) return;
-  // Node has no dirfd-relative rmdir, so this still names `target` by path
-  // rather than the handle just verified — the same platform floor as the
-  // rollback's move-into-staging, with strictly smaller harm here: the
-  // worst case is deleting a competitor's just-created EMPTY directory in
-  // a microsecond window, never real content, and their own Add simply
-  // refuses and can retry.
-  await rmdirWithWindowsRetry(target, (error) =>
-    new OfferedPluginAddError(
+  try {
+    await rmdir(target);
+  } catch (error) {
+    throw new OfferedPluginAddError(
       `A claim at ${target} could not be removed after a publish failure; ` +
         `remove it manually before retrying. ${errorMessage(error)}`,
-    ));
+    );
+  }
 }
 
 /**
  * Publishes `staged` at `target`, refusing to silently replace anything
- * already there. A bare rename() cannot tell "nothing at target" from
- * "something raced this call here": POSIX rename() atomically REPLACES an
- * existing empty directory rather than failing, so a check-then-rename
- * sequence still clobbers whatever a concurrent creator placed at target in
- * the gap between the two. mkdir(target) is the one atomic claim Node
- * exposes — it fails EEXIST the instant anything (a real plugin, or another
- * concurrent add) already occupies the slot, before this ever touches it.
- * `false` means the claim lost that race; `target` is left exactly as this
- * call found it, for the caller to refuse over.
+ * already there. `false` means the publish lost that race; `target` is
+ * left exactly as this call found it, for the caller to refuse over.
  *
- * What happens to a successful claim before the rename lands is platform-
- * specific:
+ * Windows: rename() refuses to land on ANY existing directory, empty or
+ * not (verified empirically — MoveFileEx's REPLACE_EXISTING flag is
+ * documented not to accept a directory name, and throws EPERM in practice
+ * either way). That IS the no-clobber property; nothing else is needed.
+ * EPERM after the retry exhausts does not by itself distinguish "target is
+ * genuinely occupied" from "a transient lock outlived the retry with
+ * nothing really there" — re-checking target tells them apart, so a
+ * transient hold is named for what it is rather than misreported as an
+ * existing plugin.
  *
- * - POSIX: rename() replacing an existing EMPTY directory is exactly the
- *   safe case — and this call is the only one that could have created
- *   target, since mkdir() above is the atomic fail-on-exist claim. Renaming
- *   `staged` directly onto the still-held claim keeps a concurrent
- *   creator's own mkdir(target) failing for as long as this claim stands,
- *   never racing this rename for the slot.
- * - Windows: rename() refuses to land on ANY existing directory, even an
- *   empty one this call just created and exclusively owns (verified
- *   empirically — MoveFileEx's REPLACE_EXISTING flag is documented not to
- *   accept a directory name, and throws EPERM in practice for both an
- *   empty and a populated destination) — so the claim has to be freed with
- *   rmdir first. That reopens a narrow window a concurrent creator could
- *   land in, but the rename that follows FAILS LOUD when it does (the same
- *   EPERM, now because a real directory sits where an empty one was) —
- *   this reads as the claim having been lost, the same refusal as an
- *   outright EEXIST, never a silent clobber.
+ * POSIX: a bare rename() cannot tell "nothing at target" from "something
+ * raced this call here" — rename() atomically REPLACES an existing empty
+ * directory rather than failing, so a check-then-rename sequence would
+ * still clobber whatever a concurrent creator placed at target in the gap
+ * between the two. mkdir(target) is the one atomic claim Node exposes: it
+ * fails EEXIST the instant anything already occupies the slot, before this
+ * ever touches it, and this call is the only one that could have created
+ * target through it. A rename failure after a successful claim (disk full,
+ * a locked file — not the ordinary case) leaves the claim behind, still
+ * empty; removeOwnedEmptyClaim removes it before this rethrows, verifying
+ * first that it is still exactly what this call created.
  *
- * On POSIX, a rename failure for any OTHER reason (disk full, a locked
- * file) leaves this call's own mkdir() claim behind — still empty, never
- * replaced. Left there, it reads as "occupied" forever: every later
- * listOfferedPlugins call and Add attempt sees a directory already at
- * target and refuses, with nothing left to clean it up. removeOwnedEmptyClaim
- * removes it before this rethrows, verifying first that it is still exactly
- * what this call created rather than removing it unconditionally.
+ * Node has no dirfd-relative mkdir/rename, so this still names `target` by
+ * path rather than a handle bound to the `plugins/` this call's caller
+ * already verified. Bounded: the worst case publishes dohc's own packaged
+ * plugin bytes at wherever a swapped-in junction points, never workspace
+ * content lost or private data disclosed.
  */
-// Node has no dirfd-relative mkdir/rename, so this still names `target` by
-// path rather than a handle bound to the `plugins/` this call's caller
-// already verified — the same platform floor as the rollback's move-into-
-// staging and the claim's own rmdir. Bounded here too: the worst case
-// publishes dohc's own packaged plugin bytes at wherever a swapped-in
-// junction points, never workspace content lost or private data disclosed.
 async function publishStaged(staged: string, target: string): Promise<boolean> {
+  if (process.platform === "win32") {
+    try {
+      await renameWithWindowsRetry(staged, target, (error) => error);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      if (await pathExists(target)) return false;
+      throw new OfferedPluginAddError(
+        `plugins/${basename(target)} stayed locked through every retry; try again.`,
+      );
+    }
+    return true;
+  }
   try {
     await mkdir(target);
   } catch (error) {
@@ -310,33 +287,10 @@ async function publishStaged(staged: string, target: string): Promise<boolean> {
     await removeOwnedEmptyClaim(target, null);
     throw error;
   }
-  if (process.platform !== "win32") {
-    try {
-      await renameWithWindowsRetry(staged, target, (error) => error);
-    } catch (error) {
-      await removeOwnedEmptyClaim(target, claimIdentity);
-      throw error;
-    }
-    return true;
-  }
-  // Guarded the same way every other failure point past the claim already
-  // is: an unfreed rmdir failure here — a transient antivirus hold on the
-  // just-created empty directory is the one seen in practice — used to
-  // propagate straight past this function with the mkdir() claim still
-  // standing and nothing left to clean it up. Every later listOfferedPlugins
-  // call and Add attempt would then see target already occupied and refuse
-  // it forever, not only until the hold clears (#779-offers round 17
-  // finding 5).
-  try {
-    await rmdir(target);
-  } catch (error) {
-    await removeOwnedEmptyClaim(target, claimIdentity);
-    throw error;
-  }
   try {
     await renameWithWindowsRetry(staged, target, (error) => error);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EPERM") return false;
+    await removeOwnedEmptyClaim(target, claimIdentity);
     throw error;
   }
   return true;
@@ -376,7 +330,6 @@ export async function addOfferedPlugin(params: {
     "Plugins directory",
   );
   const target = join(pluginsRoot, directoryName);
-  if (await pathExists(target)) throw existingTargetError(directoryName);
 
   // Staged under .dohc, never under plugins/: a mid-copy watcher batch would
   // otherwise list the staging directory itself as a phantom plugin
@@ -422,7 +375,7 @@ export async function addOfferedPlugin(params: {
     // staging for the same private-until-published reason identity is —
     // this is what the published copy looked like at the instant it became
     // real, so a later rollback can tell "unchanged" from "someone's real
-    // work landed on it since" (#779-offers round 15 finding 3).
+    // work landed on it since".
     const contentHash = (await hashPluginSourceFiles(staging)).sourceHash;
     if (!(await publishStaged(staging, target))) {
       throw existingTargetError(directoryName);
@@ -594,7 +547,7 @@ export async function removeAddedOfferedPlugin(params: {
   // left in the README — can happen inside that window. Deleting it because
   // an unrelated identity check happened to pass would be exactly the harm
   // the identity check itself exists to prevent, just for a different
-  // question (#779-offers round 15 finding 3).
+  // question.
   const currentContentHash = await hashPluginSourceFiles(staged)
     .then((digest) => digest.sourceHash)
     .catch(
