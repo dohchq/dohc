@@ -1080,6 +1080,7 @@ async function ensurePluginPipeline(
     create: () => createPluginPipeline(workspace),
     start: (pipeline) => pipeline.start(),
     dispose: (pipeline) => disposePluginPipeline(workspace.workspaceId, pipeline),
+    stillWanted: () => isWorkspaceOpenInAnyWindow(workspace.workspaceId),
   });
 }
 
@@ -1253,6 +1254,17 @@ function nativeWorkspaceSummaries(): WorkspaceSummary[] {
 let preferredWorkspaceId: string | null = null;
 const activeWorkspaceIdBySender = new Map<number, string>();
 const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
+
+// True while some window still has this workspace open — the fact
+// ensurePluginPipeline's own stillWanted check is built on (#779 round 18
+// finding 2): a workspace no other window has open is not this function's
+// to decide alone, so every caller shares the same answer.
+function isWorkspaceOpenInAnyWindow(workspaceId: string): boolean {
+  for (const activeId of activeWorkspaceIdBySender.values()) {
+    if (activeId === workspaceId) return true;
+  }
+  return false;
+}
 
 function prioritizePreferredWorkspace(
   workspaces: WorkspaceSummary[],
@@ -2951,23 +2963,20 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
 // It returns when the plugin can serve the caller's next request — every
 // caller here makes one — which is when the host's activation settles, not
 // when its process exists (#798).
+/**
+ * A command's own recheck of the claim barrier it already gated on before
+ * it claimed, called with no `await` before the pipeline enqueue it guards
+ * (round-17 finding 2). Throws to refuse; a panel open never supplies one.
+ */
+type CommandClaimsRecheck = () => void;
+
 async function ensurePluginStarted(
   workspace: CreatedWorkspace,
   plugin: RegisteredPlugin,
   options: {
     claim?: boolean;
     onColdStartWithoutClaim?: () => void;
-    /**
-     * Rechecked immediately before the pipeline enqueue call below — the
-     * exact point a command's own earlier isDraining check (before it
-     * claimed, before this call's own lifecycle-lock wait) can no longer
-     * see: a stopping action can raise its own barrier and enqueue in that
-     * gap. Only a command claim holds anything that action's own later
-     * wait could stall on, so only the command path supplies this; a panel
-     * open holds no claim and is left to queue normally (round-17
-     * finding 2).
-     */
-    refuseIfClaimsBarrierRaised?: () => boolean;
+    recheckCommandClaims?: CommandClaimsRecheck;
   } = {},
 ): Promise<PluginHost> {
   const pipeline = await ensurePluginPipeline(workspace);
@@ -2979,9 +2988,7 @@ async function ensurePluginStarted(
     onColdStartWithoutClaim: options.onColdStartWithoutClaim,
     hostActivation: () => pipeline.host.activationOf(plugin.manifest.name),
     ensureStarted: () => {
-      if (options.refuseIfClaimsBarrierRaised?.()) {
-        throw new PluginClaimsDrainingError(plugin.manifest.name);
-      }
+      options.recheckCommandClaims?.();
       return pipeline.ensureStarted(plugin.manifest.name);
     },
   });
@@ -6896,8 +6903,11 @@ function registerIpcHandlers(
                 claim: false,
                 onColdStartWithoutClaim: () =>
                   activeCommandClaims.markStartedHost(claimKey),
-                refuseIfClaimsBarrierRaised: () =>
-                  activeCommandClaims.isDraining(claimKey),
+                recheckCommandClaims: () => {
+                  if (activeCommandClaims.isDraining(claimKey)) {
+                    throw new PluginClaimsDrainingError(input.pluginId);
+                  }
+                },
               }),
             );
           },
@@ -7411,8 +7421,14 @@ function registerIpcHandlers(
     pipeline.approve(pluginId));
   pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId, workspaceId) =>
     pipeline.rebuild(pluginId, {
-      onOldRuntimeStopped: () =>
-        stopPluginWebAppsForPlugin(workspaceId, pluginId),
+      // The old grant must not survive the runtime it was authorized
+      // against — disable/uninstall already revoke here, rebuild only tore
+      // down web apps (#779 round 18 finding 3). A later SDK call still
+      // re-grants against the new runtime regardless (round-5 split).
+      onOldRuntimeStopped: () => {
+        revokePluginPanels(workspaceId, pluginId);
+        stopPluginWebAppsForPlugin(workspaceId, pluginId);
+      },
     }));
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {

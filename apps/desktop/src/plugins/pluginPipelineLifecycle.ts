@@ -16,6 +16,15 @@ export async function ensureWorkspacePipeline<T>(input: {
   create: () => T;
   start: (pipeline: T) => Promise<void>;
   dispose: (pipeline: T) => Promise<void>;
+  /**
+   * Checked once no existing or disposing pipeline remains — including
+   * after waiting out a disposal already in flight, since a workspace
+   * switch can abandon this workspace during that whole wait. False
+   * refuses instead of creating: every caller shares this gate, so none
+   * can resurrect a workspace nothing has open by racing its own point
+   * check (#779 round 18 finding 2).
+   */
+  stillWanted?: () => boolean;
 }): Promise<T> {
   const { live, disposals } = input;
   for (;;) {
@@ -31,6 +40,12 @@ export async function ensureWorkspacePipeline<T>(input: {
     const disposal = disposals.get(input.workspaceId);
     if (!disposal) break;
     await disposal.catch(() => undefined);
+  }
+
+  if (input.stillWanted && !input.stillWanted()) {
+    throw new Error(
+      `Workspace "${input.workspaceId}" is no longer open. Open it again and retry.`,
+    );
   }
 
   const pipeline = input.create();

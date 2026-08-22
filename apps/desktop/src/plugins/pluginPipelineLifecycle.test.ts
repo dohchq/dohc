@@ -288,6 +288,67 @@ describe("workspace plugin pipeline lifecycle", () => {
     expect(disposals.size).toBe(0);
   });
 
+  it("refuses to create a pipeline for a workspace nothing has open once the disposal it waited on finishes (#779 round 18 finding 2)", async () => {
+    const live = new Map<string, FakePipeline>();
+    const disposals = new Map<string, Promise<void>>();
+    const events: string[] = [];
+    let created = 0;
+    let wanted = true;
+    const teardown = deferred();
+    const ensure = () =>
+      ensureWorkspacePipeline<FakePipeline>({
+        live,
+        disposals,
+        workspaceId: "workspace-1",
+        create: () => {
+          const pipeline = { id: ++created, started: false, disposed: false };
+          events.push(`create ${pipeline.id}`);
+          return pipeline;
+        },
+        start: async (pipeline) => {
+          pipeline.started = true;
+        },
+        dispose: async (pipeline) => {
+          pipeline.disposed = true;
+        },
+        stillWanted: () => wanted,
+      });
+
+    await ensure();
+    // A stale caller — a command still in flight when the user switched
+    // workspaces — is already waiting out this exact disposal when the
+    // switch finishes abandoning the workspace entirely: no window has it
+    // open any more.
+    const stopping = disposeWorkspacePipeline<FakePipeline>({
+      live,
+      disposals,
+      workspaceId: "workspace-1",
+      dispose: async (pipeline) => {
+        events.push(`dispose start ${pipeline.id}`);
+        await teardown.promise;
+        pipeline.disposed = true;
+        events.push(`dispose end ${pipeline.id}`);
+      },
+    });
+    const stale = ensure();
+    stale.catch(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["create 1", "dispose start 1"]);
+
+    wanted = false;
+    teardown.resolve();
+    await stopping;
+
+    // MUTATION (zombie pipeline): a stillWanted check that never runs, or
+    // that only main.ts's own point-in-time checks provide, lets this stale
+    // caller create a fresh pipeline for a workspace nothing has open —
+    // resurrecting it instead of refusing.
+    await expect(stale).rejects.toThrow(/no longer open/);
+    expect(events).toEqual(["create 1", "dispose start 1", "dispose end 1"]);
+    expect(live.has("workspace-1")).toBe(false);
+    expect(disposals.size).toBe(0);
+  });
+
   it("disposes nothing for a workspace with no pipeline", async () => {
     const live = new Map<string, FakePipeline>();
     const disposals = new Map<string, Promise<void>>();

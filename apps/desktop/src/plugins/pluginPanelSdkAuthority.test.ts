@@ -103,4 +103,30 @@ describe("plugin panel SDK authority", () => {
     registry.revokeAll();
     expect(all.signal.aborted).toBe(true);
   });
+
+  it("aborts an in-flight brokered call at revocation, and lets the panel re-grant against a new runtime after (#779 round 18 finding 3)", () => {
+    const registry = createPluginPanelSdkAuthorityRegistry();
+    registry.register(owned);
+    // A brokered request already authorized against the old runtime — its
+    // own signal, not the process dying, is what a caller awaits on.
+    const inFlight = authorize(registry, { liveSpawnId: "spawn-old" });
+    expect(inFlight.signal.aborted).toBe(false);
+
+    // A rebuild's stop boundary revokes this panel — main.ts's
+    // onOldRuntimeStopped — before the new runtime starts.
+    registry.revokePanel(owned.workspaceId, owned.pluginId, owned.panelId);
+    expect(inFlight.signal.aborted).toBe(true);
+    expect(() => authorize(registry, { liveSpawnId: "spawn-old" })).toThrow(
+      /active panel/i,
+    );
+
+    // The panel's own retry re-registers and authorizes clean against
+    // whatever the pipeline now reports live — the new runtime's spawn id,
+    // unaffected by the revoke above (round-5 authority-registry split).
+    const regranted = registry.register(owned);
+    expect(regranted.signal.aborted).toBe(false);
+    expect(authorize(registry, { liveSpawnId: "spawn-new" })).toMatchObject({
+      spawnId: "spawn-new",
+    });
+  });
 });

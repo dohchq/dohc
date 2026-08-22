@@ -510,46 +510,65 @@ describe("plugin panel main-process wiring", () => {
     // A command's own isDraining check above only runs once, before it
     // claims and before its lifecycle-lock wait — a stopping action can
     // still raise its own barrier and enqueue in that gap. ensurePluginStarted
-    // rechecks the same barrier immediately before the pipeline's own
-    // enqueue call, with no `await` between the check and the call, so
-    // nothing can interleave between them (round-17 finding 2).
+    // calls the command's own recheck immediately before the pipeline's own
+    // enqueue call, with no `await` between the two, so nothing can
+    // interleave between them (round-17 finding 2, round-18 finding 1).
     const ensureStartedFn = functionSource("async function ensurePluginStarted(");
-    const refuseParamAt = ensureStartedFn.indexOf("refuseIfClaimsBarrierRaised?: () => boolean;");
-    const refuseCheckAt = ensureStartedFn.indexOf(
-      "if (options.refuseIfClaimsBarrierRaised?.())",
-      refuseParamAt,
-    );
-    const throwAt = ensureStartedFn.indexOf(
-      "throw new PluginClaimsDrainingError(",
-      refuseCheckAt,
+    const recheckParamAt = ensureStartedFn.indexOf("recheckCommandClaims?: CommandClaimsRecheck;");
+    const recheckCallAt = ensureStartedFn.indexOf(
+      "options.recheckCommandClaims?.();",
+      recheckParamAt,
     );
     const pipelineEnsureStartedAt = ensureStartedFn.indexOf(
       "return pipeline.ensureStarted(plugin.manifest.name);",
-      throwAt,
+      recheckCallAt,
     );
     // MUTATION (TOCTOU stall): a recheck that runs anywhere but immediately
     // before this exact call leaves a window where a racing action's own
     // enqueue still lands ahead of this one on the same per-plugin queue —
     // this call's own claim is then the exact thing that action's later
     // stopOldRuntime wait stalls on.
-    expect(refuseParamAt).toBeGreaterThan(-1);
-    expect(refuseCheckAt).toBeGreaterThan(refuseParamAt);
-    expect(throwAt).toBeGreaterThan(refuseCheckAt);
-    expect(pipelineEnsureStartedAt).toBeGreaterThan(throwAt);
+    expect(recheckParamAt).toBeGreaterThan(-1);
+    expect(recheckCallAt).toBeGreaterThan(recheckParamAt);
+    expect(pipelineEnsureStartedAt).toBeGreaterThan(recheckCallAt);
 
     const wireAt = invoke.indexOf(
-      "refuseIfClaimsBarrierRaised: () =>",
+      "recheckCommandClaims: () =>",
       claimAt,
     );
-    const wireCallAt = invoke.indexOf(
+    const wireCheckAt = invoke.indexOf(
       "activeCommandClaims.isDraining(claimKey)",
       wireAt,
+    );
+    const wireThrowAt = invoke.indexOf(
+      "throw new PluginClaimsDrainingError(",
+      wireCheckAt,
     );
     // MUTATION (no recheck): a command path that never supplies this hook
     // leaves ensurePluginStarted's own recheck permanently a no-op — the
     // exact TOCTOU this round closes never gets checked at all.
     expect(wireAt).toBeGreaterThan(-1);
-    expect(wireCallAt).toBeGreaterThan(wireAt);
+    expect(wireCheckAt).toBeGreaterThan(wireAt);
+    expect(wireThrowAt).toBeGreaterThan(wireCheckAt);
+
+    // A stale command's own recheck above can pass once disposal's drain
+    // deadline resets the barrier (round-18 finding 2) — the pipeline
+    // creation it then reaches must independently refuse a workspace no
+    // window has open any more, so ensurePluginPipeline shares one gate
+    // with every other caller instead of trusting each one's own point
+    // check.
+    const ensurePipelineFn = functionSource("async function ensurePluginPipeline(");
+    const stillWantedAt = ensurePipelineFn.indexOf("stillWanted: () =>");
+    const stillWantedCallAt = ensurePipelineFn.indexOf(
+      "isWorkspaceOpenInAnyWindow(workspace.workspaceId)",
+      stillWantedAt,
+    );
+    // MUTATION (zombie pipeline): no stillWanted wire-up leaves
+    // ensureWorkspacePipeline's own gate a no-op — a stale caller that
+    // waited out a workspace's disposal creates a fresh pipeline for it
+    // anyway, even though no window has that workspace open any more.
+    expect(stillWantedAt).toBeGreaterThan(-1);
+    expect(stillWantedCallAt).toBeGreaterThan(stillWantedAt);
   });
 
   it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {
@@ -582,5 +601,31 @@ describe("plugin panel main-process wiring", () => {
     expect(disableCallAt).toBeGreaterThan(disableRevokeAt);
     expect(uninstallRevokeAt).toBeGreaterThan(-1);
     expect(uninstallCallAt).toBeGreaterThan(uninstallRevokeAt);
+
+    // Rebuild replaces the runtime instead of stopping it for good, but the
+    // old grant is still against a runtime that is gone by the time this
+    // fires — it must not straddle into the replacement (#779 round 18
+    // finding 3).
+    const rebuildAt = mainSource.indexOf(
+      "pluginAction(CHANNELS.rebuildPlugin,",
+    );
+    const rebuildRevokeAt = mainSource.indexOf(
+      "revokePluginPanels(workspaceId, pluginId);",
+      rebuildAt,
+    );
+    const rebuildStopWebAppsAt = mainSource.indexOf(
+      "stopPluginWebAppsForPlugin(workspaceId, pluginId);",
+      rebuildRevokeAt,
+    );
+    // MUTATION (grant straddles the replacement): rebuild without this
+    // wire-up leaves a panel's grant against the old runtime live through
+    // the swap — an in-flight brokered call never aborts, and a stale grant
+    // sits unrevoked until the panel's own next call happens to supersede
+    // it. Revoking here does not block re-granting: authorize() always
+    // reads the pipeline's current spawn id (round-5 authority-registry
+    // split), pinned behaviorally in pluginPanelSdkAuthority.test.ts.
+    expect(rebuildAt).toBeGreaterThan(-1);
+    expect(rebuildRevokeAt).toBeGreaterThan(rebuildAt);
+    expect(rebuildStopWebAppsAt).toBeGreaterThan(rebuildRevokeAt);
   });
 });
