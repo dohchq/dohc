@@ -3139,6 +3139,12 @@ describe("application menu command routing", () => {
     const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
+    // Flush the commit's passive effects before emitting: the menu-command
+    // listener re-subscribes with a closure that sees the chats surface in
+    // an effect, and under load the panel's DOM node appears before that
+    // effect runs — the emit would land on a listener still holding
+    // chatsSurfaceExists=false and no-op.
+    await act(async () => {});
 
     act(() => bridge.emitMenuCommand("toggle-chats"));
     await waitFor(() => expect(screen.queryByTestId("chats-panel")).toBeNull());
