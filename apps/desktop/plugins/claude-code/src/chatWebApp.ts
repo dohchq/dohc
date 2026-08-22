@@ -25,6 +25,11 @@ const CHAT_WEB_APP_ID = "chat";
 // publish), and eviction drops whole turns (see trimLog), so a replay
 // starts at a turn boundary instead of mid-sentence.
 const MAX_BUFFERED_EVENTS = 500;
+// Bounds what one coalesced entry can retain, so the entry cap above stays
+// a real memory guard: an item whose text outgrows this continues in a
+// fresh entry (whole deltas only), and a replay's concatenation is
+// unchanged.
+const MAX_COALESCED_TEXT_CHARS = 256 * 1024;
 
 type SessionStateEvent = Extract<PluginAgentEvent, { kind: "session-state" }>;
 
@@ -322,7 +327,11 @@ export function createChatWebApp(
       // this server's own object -- never the driver's, which must not be
       // mutated as later deltas append.
       const open = openDeltas.get(event.stream + ":" + event.itemId);
-      if (open && open.event.kind === "text-delta") {
+      if (
+        open &&
+        open.event.kind === "text-delta" &&
+        open.event.text.length < MAX_COALESCED_TEXT_CHARS
+      ) {
         open.event.text += event.text;
       } else {
         const entry = { event: { ...event }, at };
@@ -480,7 +489,12 @@ export function createChatWebApp(
     if (!isRecord(body) || typeof body.text !== "string" || body.text.trim() === "") {
       throw requestError(400, "Enter a message before sending.");
     }
-    if (turnActive) {
+    // pendingPrompt gates alongside turnActive: a prompt still awaiting the
+    // driver's accept holds the single active turn just as much as an
+    // accepted one -- admitting a second prompt in that window would
+    // overlap the drivers' one tracked turn and steal the stop intent
+    // recorded for the first.
+    if (turnActive || pendingPrompt) {
       throw requestError(409, "Wait for the current response to finish.");
     }
     const clientId =

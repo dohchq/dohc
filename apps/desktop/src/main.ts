@@ -1084,8 +1084,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
             // keeps an explicit DOHC_MCP_COMMAND override first.
             DOHC_MCP_COMMAND: resolveDohcMcpCommand({
               isPackaged: app.isPackaged,
-              resourcesPath: (process as NodeJS.Process & { resourcesPath?: string })
-                .resourcesPath,
+              resourcesPath: process.resourcesPath,
             }),
           },
         },
@@ -2270,7 +2269,7 @@ function mcpConfigFor(
 } {
   const command = resolveDohcMcpCommand({
     isPackaged: app.isPackaged,
-    resourcesPath: (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+    resourcesPath: process.resourcesPath,
   });
   const home = stateDir();
   const args = ["--workspace", rootPath, "--home", home];

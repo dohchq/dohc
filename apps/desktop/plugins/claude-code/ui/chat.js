@@ -136,54 +136,36 @@ function setSessionState(state, reason, options = {}) {
   }
 }
 
+// Every error card is an alert: role="alert" is what a screen reader
+// actually hears -- the status region above only ever speaks the state
+// label ("Error"), so without it the explanation and next step render
+// silently. nextAction names what the user can do now, and it must be
+// true for the state the card reports: "start a new session" only when
+// the session actually ended, "try again" when only the turn failed.
+function errorCard(message, nextAction) {
+  hideEmptyState();
+  const card = document.createElement("section");
+  card.className = "error-card";
+  card.setAttribute("role", "alert");
+  if (nextAction) {
+    const heading = document.createElement("strong");
+    heading.textContent = message;
+    const next = document.createElement("p");
+    next.className = "next-action";
+    next.textContent = nextAction;
+    card.append(heading, next);
+  } else {
+    const text = document.createElement("p");
+    text.textContent = message;
+    card.append(text);
+  }
+  transcript.append(card);
+  scrollToLatest();
+}
+
 // The session actually ended: sending a message means starting over.
-// role="alert" on these error cards is what a screen reader actually
-// hears: the status region above only ever speaks the state label
-// ("Error"), so without it the explanation and next step render silently.
 function recoveryCard(message) {
-  hideEmptyState();
-  const card = document.createElement("section");
-  card.className = "error-card";
-  card.setAttribute("role", "alert");
-  const heading = document.createElement("strong");
-  heading.textContent = message;
-  const next = document.createElement("p");
-  next.className = "next-action";
-  next.textContent = "Send a message to start a new session.";
-  card.append(heading, next);
-  transcript.append(card);
-  scrollToLatest();
-}
-
-// A turn failed, but the session itself is still alive (setSessionState
-// already went back to Ready by the time this renders) -- recoveryCard's
-// "start a new session" line would be false here, since there isn't a new
-// one to start.
-function failedTurnCard(message) {
-  hideEmptyState();
-  const card = document.createElement("section");
-  card.className = "error-card";
-  card.setAttribute("role", "alert");
-  const heading = document.createElement("strong");
-  heading.textContent = message;
-  const next = document.createElement("p");
-  next.className = "next-action";
-  next.textContent = "Send a message to try again.";
-  card.append(heading, next);
-  transcript.append(card);
-  scrollToLatest();
-}
-
-function transientError(message) {
-  hideEmptyState();
-  const card = document.createElement("section");
-  card.className = "error-card";
-  card.setAttribute("role", "alert");
-  const text = document.createElement("p");
-  text.textContent = message;
-  card.append(text);
-  transcript.append(card);
-  scrollToLatest();
+  errorCard(message, "Send a message to start a new session.");
 }
 
 function renderText(event) {
@@ -421,7 +403,12 @@ function renderEvent(event) {
       break;
     case "turn-completed":
       setSessionState("ready");
-      if (event.status === "failed") failedTurnCard(event.errorMessage || "This response failed.");
+      // The session itself is still alive (the pill just went back to
+      // Ready), so the next action is a retry -- "start a new session"
+      // would be false here.
+      if (event.status === "failed") {
+        errorCard(event.errorMessage || "This response failed.", "Send a message to try again.");
+      }
       break;
     case "auth":
       if (event.detail) messageCard("Claude Code", event.detail, "agent", event.at);
@@ -537,7 +524,7 @@ stopButton.addEventListener("click", async () => {
     });
     if (!response.ok) {
       stopButton.disabled = false;
-      transientError("dohc could not stop this session.");
+      errorCard("dohc could not stop this session.");
       return;
     }
     // Stop now cancels the current turn rather than ending the session --
@@ -549,6 +536,6 @@ stopButton.addEventListener("click", async () => {
     stopButton.disabled = false;
   } catch {
     stopButton.disabled = false;
-    transientError("dohc could not stop this session.");
+    errorCard("dohc could not stop this session.");
   }
 });

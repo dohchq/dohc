@@ -638,6 +638,66 @@ describe("Codex chat web app", () => {
     expect(fake.disposed).toEqual([]);
   });
 
+  it("refuses a second message while a prompt is still awaiting acceptance", async () => {
+    // The pre-acceptance window holds the single active turn just as much
+    // as an accepted one: admitting a second prompt there would overlap
+    // the drivers' one tracked turn and steal a recorded stop's target.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "First" }, token);
+    await entered.promise;
+    expect(await post(url, "message", { text: "Second" }, token)).toMatchObject({ status: 409 });
+
+    gate.resolve();
+    expect((await sendPromise).status).toBe(202);
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+  });
+
+  it("continues an oversized streamed reply in a fresh log entry, keeping replay content exact", async () => {
+    // Coalescing must not turn the entry cap into no memory guard at all:
+    // one entry stops growing at its own bound and the item continues in a
+    // new entry, whole deltas only, so a replay's concatenation never
+    // changes.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "Question", clientId: "c1" }, token);
+
+    const chunk = "y".repeat(1024);
+    for (let index = 0; index < 300; index += 1) {
+      fake.startInputs[0]?.onEvent({
+        kind: "text-delta",
+        itemId: "i1",
+        stream: "assistant",
+        text: chunk,
+      });
+    }
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    await reattached.next(); // the user's own message
+    let text = "";
+    let frames = 0;
+    for (;;) {
+      const event = await reattached.next();
+      if (event.kind === "turn-completed") break;
+      expect(event.kind).toBe("text-delta");
+      if (event.kind === "text-delta") {
+        text += event.text;
+        frames += 1;
+      }
+    }
+    expect(frames).toBeGreaterThan(1);
+    expect(text).toBe(chunk.repeat(300));
+    await reattached.close();
+  });
+
   it("a Stop with no prompt in flight never dooms the next message's turn", async () => {
     // The stop intent is scoped to the one prompt that was in flight when
     // Stop arrived -- an idle Stop must not linger and cancel a turn the
