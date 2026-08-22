@@ -9684,7 +9684,17 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "The watcher reconcile never ran.",
         60_000,
       );
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+      // Wait for the reconcile to SETTLE, not a fixed delay: under load the
+      // no-op reconcile is still mid-flight ("snapshotting") long after its
+      // snapshot started. A wrong re-enable never returns to "disabled" and
+      // times out here; a wrong rebuild is caught by the counters below.
+      await waitFor(
+        () => pipeline.list()[0]?.status === "disabled",
+        () =>
+          `The reconcile never settled back to disabled; status is ` +
+          `"${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
 
       const row = pipeline.list()[0];
       expect(row?.status).toBe("disabled");
