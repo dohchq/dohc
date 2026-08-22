@@ -1261,18 +1261,23 @@ const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
 function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
   workspaceWindows.track(window);
   window.on("closed", () => workspaceWindows.forget(window));
-  // The persisted zoom level is a window property main owns: apply it once
-  // the first load finishes, so every window opens at the level Settings
-  // shows. Best-effort — a fresh install has only the default.
-  window.webContents.once("did-finish-load", () => {
-    void readCachedUserSettingsFile(stateDir())
-      .then(({ settings }) => {
-        if (!window.isDestroyed()) {
-          window.webContents.setZoomLevel(settings.appearance.zoomLevel);
-        }
-      })
-      .catch(() => undefined);
-  });
+  // The persisted zoom level is a window property main owns. The read starts
+  // now and the level applies on BOTH ready-to-show and did-finish-load:
+  // createMainWindow shows the window on ready-to-show, so waiting for the
+  // load alone painted one visible frame at 100% before jumping to the
+  // persisted scale. Best-effort — a fresh install has only the default.
+  const persistedZoom = readCachedUserSettingsFile(stateDir())
+    .then(({ settings }) => settings.appearance.zoomLevel)
+    .catch(() => null);
+  const applyPersistedZoom = () => {
+    void persistedZoom.then((zoomLevel) => {
+      if (zoomLevel !== null && !window.isDestroyed()) {
+        window.webContents.setZoomLevel(zoomLevel);
+      }
+    });
+  };
+  window.once("ready-to-show", applyPersistedZoom);
+  window.webContents.once("did-finish-load", applyPersistedZoom);
   return window;
 }
 function liveWorkspaceWindow(): BrowserWindow | undefined {
