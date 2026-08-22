@@ -2409,6 +2409,47 @@ export function DesktopWorkspaceShell(props: {
     [],
   );
 
+  // #874: the rebuild flow for a data store the engine refused. The notice
+  // center offers the way in; this dialog is the explicit action — it states
+  // the destination before anything moves, and its success copy names the
+  // moved store's location (the reverse path). Main performs the move and
+  // derives everything from its own state; the renderer only asks.
+  const [engineRebuild, setEngineRebuild] = useState<
+    | { phase: "confirm" }
+    | { phase: "moving" }
+    | { phase: "moved"; backupDir: string }
+    | { phase: "backup-exists"; backupDir: string }
+    | null
+  >(null);
+  // Workspace-scoped guard (AGENTS.md): a slow response for workspace A must
+  // never repaint workspace B. Switching workspaces closes the dialog and
+  // invalidates any in-flight move's answer.
+  const engineRebuildToken = useRef(0);
+  useEffect(() => {
+    engineRebuildToken.current += 1;
+    setEngineRebuild(null);
+  }, [workspaceId]);
+  const confirmEngineRebuild = useCallback(async () => {
+    const token = engineRebuildToken.current;
+    setEngineRebuild({ phase: "moving" });
+    try {
+      const result = await bridge().rebuildEngineStore({ workspaceId });
+      if (engineRebuildToken.current !== token) return;
+      setEngineRebuild(
+        result.moved
+          ? { phase: "moved", backupDir: result.backupDir }
+          : { phase: "backup-exists", backupDir: result.backupDir },
+      );
+    } catch (error) {
+      if (engineRebuildToken.current !== token) return;
+      setEngineRebuild(null);
+      reportShellError(
+        "dohc could not move this workspace's data store.",
+        error,
+      );
+    }
+  }, [workspaceId, reportShellError]);
+
   // Quiet, self-dismissing status line for import/share-mount summaries
   // ("Imported 3 files into notes.") — informational, never the error banner.
   const [shellNotice, setShellNotice] = useState<string | null>(null);
@@ -6144,11 +6185,101 @@ export function DesktopWorkspaceShell(props: {
         shareChangeNotices={shareChangeNotices}
         onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
+        onRebuildEngineStore={() => setEngineRebuild({ phase: "confirm" })}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
         onDismissAgentNotification={agentNotifs.dismiss}
       />
+
+      {engineRebuild ? (
+        <Overlay
+          onClose={() => {
+            if (engineRebuild.phase !== "moving") setEngineRebuild(null);
+          }}
+        >
+          <div
+            data-testid="engine-rebuild-dialog"
+            className="flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
+          >
+            <div className="p-4">
+              {engineRebuild.phase === "moved" ? (
+                <>
+                  <p className="m-0 text-sm text-ink">Data store moved</p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    The old data store is at{" "}
+                    <span className="font-mono">{engineRebuild.backupDir}</span>.
+                    dohc is rebuilding history from your files.
+                  </p>
+                </>
+              ) : engineRebuild.phase === "backup-exists" ? (
+                <>
+                  <p className="m-0 text-sm text-ink">
+                    dohc did not move the data store
+                  </p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    A folder already exists at{" "}
+                    <span className="font-mono">{engineRebuild.backupDir}</span>.
+                    Move that folder away, then try again.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="m-0 text-sm text-ink">
+                    Move the old data store aside and rebuild?
+                  </p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    {syncStatus?.engineStoreRefused === "foreign-database"
+                      ? "This workspace's data store was not created by dohc."
+                      : "This workspace's data store is from an older version of dohc."}{" "}
+                    dohc moves it to{" "}
+                    <span className="font-mono">.dohc/engine/pre-v2-backup</span>{" "}
+                    and starts fresh history from your files.
+                  </p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    Past history and chats stay in the moved data store. Your
+                    files are untouched.
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
+              {engineRebuild.phase === "confirm" ||
+              engineRebuild.phase === "moving" ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={engineRebuild.phase === "moving"}
+                    onClick={() => setEngineRebuild(null)}
+                    className="rounded border border-line px-3 py-1 text-xs text-muted hover:text-ink disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="engine-rebuild-confirm"
+                    disabled={engineRebuild.phase === "moving"}
+                    onClick={() => void confirmEngineRebuild()}
+                    className="rounded bg-accent px-3 py-1 text-xs text-bg disabled:opacity-50"
+                  >
+                    {engineRebuild.phase === "moving"
+                      ? "Moving"
+                      : "Move and rebuild"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setEngineRebuild(null)}
+                  className="rounded bg-accent px-3 py-1 text-xs text-bg"
+                >
+                  {engineRebuild.phase === "moved" ? "Done" : "Close"}
+                </button>
+              )}
+            </div>
+          </div>
+        </Overlay>
+      ) : null}
 
       {/* A blocked agent run's consent asks (the retired Agent panel's one
           load-bearing interaction). Floats wherever the user already is —

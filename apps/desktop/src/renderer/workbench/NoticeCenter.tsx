@@ -94,6 +94,10 @@ export function NoticeCenter(props: {
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
+  // Opens the rebuild confirmation for a refused data store (#874). The
+  // shell owns the dialog and the move; the notice only announces the
+  // refusal and offers the way in.
+  onRebuildEngineStore: () => void;
   // Changes a share recipient sent to this workspace, awaiting the granter
   // (#646 PR3a). One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -283,11 +287,27 @@ export function NoticeCenter(props: {
       });
     }
 
-    // Persistent while true (PR 0M-7): the flagged workspace's engine capture
-    // is its sole history recorder, so a failing capture means History is
-    // silently incomplete. Main clears the flag when a later capture
-    // succeeds; one notice per workspace by construction (per-workspace flag).
-    if (props.syncStatus?.historyCaptureFailed) {
+    // #874: the engine refused to open this workspace's database — a
+    // designed recovery outcome, not a generic capture failure. Say what was
+    // found in the user's nouns and offer the real recovery; the
+    // capture-failed copy below would claim recent changes "may be missing"
+    // from a History that cannot open at all, and offers nothing.
+    if (props.syncStatus?.engineStoreRefused) {
+      next.push({
+        id: "engine-store-refused",
+        tone: "danger",
+        title:
+          props.syncStatus.engineStoreRefused === "unsupported-fingerprint"
+            ? "Data store from an older dohc"
+            : "Data store not created by dohc",
+        body:
+          props.syncStatus.engineStoreRefused === "unsupported-fingerprint"
+            ? "This workspace's data store is from an older version of dohc. Your files are untouched."
+            : "This workspace's data store was not created by dohc. Your files are untouched.",
+        action: { label: "Rebuild", onClick: props.onRebuildEngineStore },
+        Icon: AlertTriangle,
+      });
+    } else if (props.syncStatus?.historyCaptureFailed) {
       next.push({
         id: "history-capture-failed",
         tone: "warning",
@@ -399,6 +419,7 @@ export function NoticeCenter(props: {
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onOpenSettings,
+    props.onRebuildEngineStore,
     props.onReviewShareChanges,
     props.shareChangeNotices,
     props.syncStatus,

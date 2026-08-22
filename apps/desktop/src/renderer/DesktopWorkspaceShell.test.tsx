@@ -49,6 +49,7 @@ import type {
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   SetPluginWebAppBoundsPayload,
+  RebuildEngineStoreResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
@@ -130,10 +131,12 @@ const SYNC_STATUS: SyncStatusResult = {
   state: "synced",
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
-  // Required on the contract (#505, #540): every status states whether the
-  // recorder failed to build and whether the workspace is a shared view.
+  // Required on the contract (#505, #540, #874): every status states whether
+  // the recorder failed to build, whether the workspace is a shared view,
+  // and whether the engine refused the workspace's data store.
   historyRecordingUnavailable: false,
   historyShareView: false,
+  engineStoreRefused: null,
 };
 
 const IDLE_UPDATE_STATE: UpdateStateEvent = {
@@ -321,6 +324,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
+    // #874: the refused-store rebuild. Typed to the contract, not to this
+    // default: the recovery tests swap in the no-clobber refusal.
+    rebuildEngineStore: vi.fn(
+      async (): Promise<RebuildEngineStoreResult> => ({
+        moved: true,
+        backupDir: ".dohc/engine/pre-v2-backup",
+      }),
+    ),
     // Typed to the contract, not to this idle default: a freshness test drives
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
@@ -5963,6 +5974,103 @@ describe("ui-state merge-on-load", () => {
     // Chats panel (and its titlebar toggle) must not exist at all.
     expect(screen.queryByTestId("chats-panel")).toBeNull();
     expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+  });
+});
+
+// #874: a data store the engine refuses gets a real recovery, not a dead
+// generic error. The notice explains what was found; the rebuild is explicit
+// (a confirmed click), states the destination BEFORE anything moves, and the
+// success copy names the reverse path.
+describe("engine store recovery", () => {
+  const refusedStatus = {
+    ...SYNC_STATUS,
+    historyCaptureFailed: true,
+    engineStoreRefused: "unsupported-fingerprint" as const,
+  };
+
+  async function openRebuildDialog(bridge: ReturnType<typeof makeBridge>) {
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(
+      within(
+        await screen.findByTestId("notice-engine-store-refused"),
+      ).getByRole("button", { name: "Rebuild" }),
+    );
+    return { user, dialog: await screen.findByTestId("engine-rebuild-dialog") };
+  }
+
+  it("confirms before moving, names the destination, then names the reverse path", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    // The user learns what moves, where it goes, and what does NOT come
+    // back, before anything moves.
+    expect(dialog.textContent).toContain(
+      "This workspace's data store is from an older version of dohc.",
+    );
+    expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
+    expect(dialog.textContent).toContain(
+      "Past history and chats stay in the moved data store.",
+    );
+    expect(bridge.rebuildEngineStore).not.toHaveBeenCalled();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    expect(bridge.rebuildEngineStore).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+    });
+    // The reverse path, named in the success copy (product invariant: every
+    // reversible state change shows its reverse).
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("engine-rebuild-dialog").textContent,
+      ).toContain("The old data store is at .dohc/engine/pre-v2-backup"),
+    );
+  });
+
+  it("refuses to write over an existing backup and says what to do", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => ({
+      moved: false as const,
+      reason: "backup-exists" as const,
+      backupDir: ".dohc/engine/pre-v2-backup",
+    }));
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    await waitFor(() => {
+      const text = screen.getByTestId("engine-rebuild-dialog").textContent;
+      expect(text).toContain(
+        "A folder already exists at .dohc/engine/pre-v2-backup",
+      );
+      expect(text).toContain("Move that folder away, then try again.");
+    });
+  });
+
+  it("surfaces a failed move in the shell error banner", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => {
+      throw new Error("EACCES: permission denied");
+    });
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("EACCES: permission denied");
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 });
 
@@ -12108,6 +12216,7 @@ describe("version-compare off copy", () => {
     lastSyncedAtMs: null,
     historyRecordingUnavailable: false,
     historyShareView: false,
+    engineStoreRefused: null,
   };
 
   it("calls a failed capture build unavailable, never empty", () => {
@@ -12171,6 +12280,7 @@ describe("chats off copy", () => {
     lastSyncedAtMs: null,
     historyRecordingUnavailable: false,
     historyShareView: false,
+    engineStoreRefused: null,
   };
 
   it("calls a failed capture build unavailable, never empty", () => {

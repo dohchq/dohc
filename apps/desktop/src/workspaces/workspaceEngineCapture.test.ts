@@ -104,7 +104,10 @@ interface CaptureOptions {
   now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
-  onCaptureOutcome?: (outcome: { ok: boolean }) => void;
+  onCaptureOutcome?: (outcome: {
+    ok: boolean;
+    storeRefused: "unsupported-fingerprint" | "foreign-database" | null;
+  }) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
   daemonOwnsCapture?: boolean;
@@ -875,6 +878,77 @@ describe("workspaceEngineCapture batch capture", () => {
         await engine.flush();
 
         expect(outcomes).toEqual([true, false]);
+      } finally {
+        try {
+          await engine.stop();
+        } finally {
+          await liveStore.close();
+        }
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // #874: the engine refusing the workspace's DATABASE is not a degraded
+  // watcher. The outcome carries the fence's classification so the product
+  // offers the move-aside rebuild instead of "History paused" — and a later
+  // pass that reaches the store clears it.
+  it("carries the store refusal on the health outcome and clears it on recovery", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await tempRoot();
+      let refuse = true;
+      const outcomes: Array<{ ok: boolean; storeRefused: string | null }> = [];
+      const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+      const liveStore = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ).store;
+      const daemonStore = new Proxy(liveStore, {
+        get(target, property) {
+          if (property === "watcherStatus") {
+            return async () => {
+              if (refuse) {
+                // The wire shape a refused workspace.open reaches the desktop
+                // in: an INTERNAL error whose message is the storage code.
+                throw Object.assign(new Error("foreign-database"), {
+                  wireError: {
+                    code: "INTERNAL",
+                    message: "foreign-database",
+                    retry: "no",
+                  },
+                });
+              }
+              return { running: true, degraded: false, terminal: false };
+            };
+          }
+          if (property === "flushCapture") return async () => undefined;
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const engine = capture(root, {
+        store: daemonStore,
+        rustEngineSessions: sessions,
+        daemonOwnsCapture: true,
+        onError: () => {},
+        onCaptureOutcome: (outcome) => outcomes.push(outcome),
+      });
+      try {
+        engine.start();
+        await engine.flush();
+        expect(outcomes).toEqual([
+          { ok: false, storeRefused: "foreign-database" },
+        ]);
+
+        refuse = false;
+        await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+        await engine.flush();
+        expect(outcomes).toEqual([
+          { ok: false, storeRefused: "foreign-database" },
+          { ok: true, storeRefused: null },
+        ]);
       } finally {
         try {
           await engine.stop();

@@ -33,6 +33,7 @@ import type {
 import {
   openEngineYdocProviderSession,
   DaemonRefusalError,
+  engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
@@ -41,6 +42,7 @@ import {
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
+  type EngineStoreRefusal,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
@@ -602,7 +604,17 @@ export interface WorkspaceEngineCaptureOptions {
   // than onError: version/restore operations reject to their caller (the UI
   // surfaces those directly) and best-effort rename coordination falls back
   // to plain capture, so neither means history is silently missing.
-  onCaptureOutcome?: (outcome: { ok: boolean }) => void;
+  //
+  // `storeRefused` carries the fingerprint fence's classification when the
+  // failure was the engine refusing to open this workspace's database (#874).
+  // REQUIRED, not optional: null asserts "the store was not refused", and a
+  // producer that cannot say which failure it saw must not compile — an
+  // omitted field would silently route a refused store to the generic
+  // capture-failure copy, which is the bug this field exists to fix.
+  onCaptureOutcome?: (outcome: {
+    ok: boolean;
+    storeRefused: EngineStoreRefusal | null;
+  }) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -1451,10 +1463,15 @@ export function createWorkspaceEngineCapture(
   // Dead-session failures are an independent penalty, so retain the latest
   // watcher/health result when that penalty is added and later removed.
   let backgroundCaptureHealthy = true;
+  // The fingerprint fence's classification from the latest background pass
+  // (#874). Set when a pass failed because the engine REFUSED this
+  // workspace's database, cleared by the next pass that reached the store.
+  let storeRefused: EngineStoreRefusal | null = null;
 
   const publishCaptureOutcome = (): void => {
     options.onCaptureOutcome?.({
       ok: backgroundCaptureHealthy && deadYDocSessions.size === 0,
+      storeRefused,
     });
   };
 
@@ -3331,6 +3348,13 @@ export function createWorkspaceEngineCapture(
     let ok = false;
     try {
       ok = await task();
+      storeRefused = null;
+    } catch (error) {
+      // A thrown pass says whether the engine REFUSED the store (#874) or
+      // failed some other way; a pass that completed — even degraded —
+      // reached the store, so any earlier refusal no longer describes it.
+      storeRefused = engineStoreRefusalOf(error);
+      throw error;
     } finally {
       emitCaptureOutcome(ok);
     }

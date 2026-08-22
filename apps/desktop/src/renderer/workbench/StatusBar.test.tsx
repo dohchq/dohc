@@ -72,6 +72,7 @@ function renderBar(
         ? { onDismissAgentNotification: props.onDismissAgentNotification }
         : {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
+      onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
     />,
@@ -174,6 +175,7 @@ describe("sync status surface", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
       },
     });
     const status = screen.getByTestId("sync-status");
@@ -194,6 +196,7 @@ describe("sync status surface", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         conflictCount: 2,
       },
     });
@@ -210,6 +213,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         sharingDeclined: [
           {
             path: "notes/large.md",
@@ -244,6 +248,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         conflictCount: 2,
       },
       agentActive: true,
@@ -291,6 +296,61 @@ describe("notice center", () => {
     expect(onOpenHistory).toHaveBeenCalledOnce();
   });
 
+  // #874: a database the engine refuses is a designed recovery outcome, not
+  // a generic capture failure. The notice must say what was found in the
+  // user's nouns, state that files are untouched, and offer the rebuild —
+  // and it REPLACES the "History paused" copy, which says nothing is wrong
+  // with the store and offers no recovery.
+  it("explains a data store from an older dohc and offers the rebuild", async () => {
+    const onRebuildEngineStore = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyCaptureFailed: true,
+        engineStoreRefused: "unsupported-fingerprint",
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+      },
+      onRebuildEngineStore,
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-engine-store-refused");
+    expect(notice.textContent).toContain(
+      "This workspace's data store is from an older version of dohc.",
+    );
+    expect(notice.textContent).toContain("Your files are untouched.");
+    expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
+
+    await userEvent.click(within(notice).getByRole("button", { name: "Rebuild" }));
+    expect(onRebuildEngineStore).toHaveBeenCalledOnce();
+  });
+
+  it("explains a data store that dohc did not create", async () => {
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyCaptureFailed: true,
+        engineStoreRefused: "foreign-database",
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+      },
+      onRebuildEngineStore: vi.fn(),
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-engine-store-refused");
+    expect(notice.textContent).toContain(
+      "This workspace's data store was not created by dohc.",
+    );
+    expect(notice.textContent).toContain("Your files are untouched.");
+    expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
+  });
+
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
     renderBar({
       syncStatus: {
@@ -299,6 +359,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         conflictCount: 1,
       },
     });
@@ -323,6 +384,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         historyRecordingOff: true,
         // #483: the cause rides main's open-time read, on the same status
         // that decided history is off. One read answers both.
@@ -348,6 +410,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         historyRecordingOff: true,
       },
     });
@@ -370,6 +433,7 @@ describe("notice center", () => {
         historyRecordingOff: true,
         historyRecordingUnavailable: true,
         historyShareView: false,
+        engineStoreRefused: null,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -399,6 +463,7 @@ describe("notice center", () => {
         historyRecordingOff: true,
         historyRecordingUnavailable: false,
         historyShareView: true,
+        engineStoreRefused: null,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -419,6 +484,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -434,6 +500,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         historyCaptureFailed: true,
       },
       onOpenHistory,
@@ -460,6 +527,7 @@ describe("notice center", () => {
       lastSyncedAtMs: null,
       historyRecordingUnavailable: false,
       historyShareView: false,
+      engineStoreRefused: null,
       historyCaptureFailed: true,
     };
     const { rerender } = renderBar({ syncStatus: failedStatus });
@@ -481,6 +549,7 @@ describe("notice center", () => {
         onOpenHistory={() => {}}
         onOpenConflicts={() => {}}
         onOpenSettings={() => {}}
+        onRebuildEngineStore={() => {}}
         onToggleTheme={() => {}}
         onContextMenu={() => {}}
       />,
@@ -642,6 +711,7 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
       },
     });
 

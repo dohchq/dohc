@@ -1830,6 +1830,7 @@ describe("sync status IPC contract (#505, #540)", () => {
       lastSyncedAtMs: null,
       historyRecordingUnavailable: false,
       historyShareView: false,
+      engineStoreRefused: null,
       sharingDeclined: [
         {
           path: "notes/large.md",
@@ -1842,13 +1843,22 @@ describe("sync status IPC contract (#505, #540)", () => {
     expect(SyncStatusResult.parse(status).sharingDeclined).toEqual(
       status.sharingDeclined,
     );
-    // Both cause fields are REQUIRED where their neighbours are optional: an
-    // omitted boolean would read as "the user chose this", which is the false
-    // cause #505 (build failure) and #540 (shared view) exist to kill.
+    // The cause fields are REQUIRED where their neighbours are optional: an
+    // omitted value would read as "the user chose this" / "the store opened",
+    // which are the false causes #505 (build failure), #540 (shared view),
+    // and #874 (refused store) exist to kill.
     const { historyRecordingUnavailable: _dropped, ...withoutFailureCause } = status;
     expect(SyncStatusResult.safeParse(withoutFailureCause).success).toBe(false);
     const { historyShareView: _alsoDropped, ...withoutShareCause } = status;
     expect(SyncStatusResult.safeParse(withoutShareCause).success).toBe(false);
+    const { engineStoreRefused: _refusalDropped, ...withoutRefusalCause } = status;
+    expect(SyncStatusResult.safeParse(withoutRefusalCause).success).toBe(false);
+    expect(
+      SyncStatusResult.parse({
+        ...status,
+        engineStoreRefused: "unsupported-fingerprint",
+      }).engineStoreRefused,
+    ).toBe("unsupported-fingerprint");
   });
 });
 

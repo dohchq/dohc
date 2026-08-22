@@ -41,6 +41,9 @@ export function StatusBar(props: {
   shareChangeNotices?: readonly { proposalId: string; sender: string }[];
   onReviewShareChanges?: (proposalId: string) => void;
   onOpenSettings: () => void;
+  // Opens the rebuild confirmation for a refused data store (#874); the
+  // shell owns the dialog, the notice center offers the way in.
+  onRebuildEngineStore: () => void;
   onToggleTheme: () => void;
   onContextMenu: () => void;
   agentNotifications?: readonly AgentNotification[];
@@ -95,6 +98,7 @@ export function StatusBar(props: {
           onOpenHistory={props.onOpenHistory}
           onOpenSettings={props.onOpenSettings}
           onOpenConflicts={props.onOpenConflicts}
+          onRebuildEngineStore={props.onRebuildEngineStore}
           {...(props.shareChangeNotices
             ? { shareChangeNotices: props.shareChangeNotices }
             : {})}

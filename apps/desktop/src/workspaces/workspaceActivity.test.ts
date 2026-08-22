@@ -1,7 +1,10 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import {
+  createWorkspaceActivity,
+  type WorkspaceCaptureHooks,
+} from "./workspaceActivity";
 import { captureForFlaggedWorkspace } from "./engineCaptureGate";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -303,6 +306,53 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     // The entry is gone: status derives from nothing and re-open works.
     expect(activity.getStatus("activity-test").conflictCount).toBe(0);
     await activity.close("activity-test"); // idempotent, never throws
+    await activity.stopAll();
+  });
+
+  // #874: a refused engine store rides the capture outcome into the status
+  // the notice center reads, transition-only like the capture-failed flag —
+  // a persistently refused store re-reports the same code on every pass and
+  // must not re-notify.
+  it("publishes a store refusal, clears it on recovery, and notifies only on transitions", async () => {
+    let hooks: WorkspaceCaptureHooks | null = null;
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: (_workspace, captureHooks) => {
+        hooks = captureHooks;
+        return {
+          shareView: false,
+          capture: {
+            start: vi.fn(),
+            captureBatch: vi.fn(),
+            stop: vi.fn(async () => undefined),
+          } as never,
+        };
+      },
+    });
+    await activity.open(workspace());
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeNull();
+
+    notify.mockClear();
+    hooks!.onCaptureOutcome({
+      ok: false,
+      storeRefused: "unsupported-fingerprint",
+    });
+    const refused = activity.getStatus("activity-test");
+    expect(refused.engineStoreRefused).toBe("unsupported-fingerprint");
+    expect(refused.historyCaptureFailed).toBe(true);
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    // The same refusal again is not news.
+    hooks!.onCaptureOutcome({
+      ok: false,
+      storeRefused: "unsupported-fingerprint",
+    });
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    // A pass that reached the store clears the refusal with the failure.
+    hooks!.onCaptureOutcome({ ok: true, storeRefused: null });
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeNull();
+    expect(notify).toHaveBeenCalledTimes(2);
     await activity.stopAll();
   });
 });

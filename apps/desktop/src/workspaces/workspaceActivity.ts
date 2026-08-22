@@ -2,6 +2,7 @@ import {
   deriveSyncStatus,
   type WatcherEvent,
 } from "@dohc/workspace-core";
+import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
@@ -50,6 +51,12 @@ interface WatchedWorkspace {
   // first failed capture pass, cleared when a later pass succeeds, notify()
   // only on transitions so repeated failures never spam the UI.
   captureFailed: boolean;
+  // The engine's classification when it REFUSES to open this workspace's
+  // database (#874): a store from an unsupported dohc version, or a file the
+  // engine will not initialize over. Null while the store opens (or fails for
+  // any other reason). Drives the recovery notice — the copy and the
+  // move-aside rebuild action — instead of the generic capture-failure one.
+  engineStoreRefused: EngineStoreRefusal | null;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -114,7 +121,12 @@ export interface WorkspaceCaptureHooks {
   // Wire into WorkspaceEngineCaptureOptions.onCaptureOutcome: each background
   // capture pass reports here, and the activity layer turns failure/recovery
   // transitions into the workspace's persistent capture-failure notice.
-  onCaptureOutcome: (outcome: { ok: boolean }) => void;
+  // `storeRefused` rides along (#874) so a refused store raises the recovery
+  // notice instead of the generic capture-failure one.
+  onCaptureOutcome: (outcome: {
+    ok: boolean;
+    storeRefused: EngineStoreRefusal | null;
+  }) => void;
   // Wire into WorkspaceEngineCaptureOptions.activeAgentRun: the workspace's
   // live agent-run slot, so settled batches captured while a dohc-tracked
   // run is active carry agent authorship into engine moments (PR 0N-1).
@@ -158,6 +170,7 @@ export function createWorkspaceActivity(
       ...status,
       conflictCount,
       historyCaptureFailed: w?.captureFailed ?? false,
+      engineStoreRefused: w?.engineStoreRefused ?? null,
       historyRecordingOff: w?.historyRecordingOff ?? false,
       ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
@@ -181,6 +194,7 @@ export function createWorkspaceActivity(
         historyRecordingUnavailable: false,
         historyShareView: false,
         captureFailed: false,
+        engineStoreRefused: null,
         agentRun: null,
       };
       watched.set(workspace.workspaceId, entry);
@@ -197,13 +211,21 @@ export function createWorkspaceActivity(
               // whatever run is active at that moment (may flip between
               // batches within one open).
               activeAgentRun: () => entry.agentRun,
-              onCaptureOutcome: ({ ok }) => {
+              onCaptureOutcome: ({ ok, storeRefused }) => {
                 // Transition-only: the FIRST failure raises the notice, the
                 // first success after a failure clears it, and repeated
                 // failures (a persistently broken store retries every batch)
-                // never re-notify.
-                if (entry.captureFailed === !ok) return;
+                // never re-notify. The refusal classification transitions the
+                // same way (#874): a persistently refused store re-reports
+                // the same code on every pass.
+                if (
+                  entry.captureFailed === !ok &&
+                  entry.engineStoreRefused === storeRefused
+                ) {
+                  return;
+                }
                 entry.captureFailed = !ok;
+                entry.engineStoreRefused = storeRefused;
                 notify();
               },
             });
