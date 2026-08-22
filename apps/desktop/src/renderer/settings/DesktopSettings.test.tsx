@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -350,6 +350,52 @@ describe("DesktopSettings", () => {
     // unconditionally right after the guarded repaint line. Waiting on it
     // (not a timer) guarantees the stale repaint had its chance.
     await waitFor(() => expect(bridge.setTitlebarTheme).toHaveBeenCalled());
+    expect(row.textContent).toContain("144%");
+  });
+
+  it("an in-flight save's response cannot overwrite a newer zoom broadcast", async () => {
+    const user = userEvent.setup();
+    let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
+    bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
+      pushUserSettings = listener;
+      return () => undefined;
+    });
+    const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    // A full save is now awaiting main's response…
+    await user.click(await screen.findByRole("radio", { name: "Dark" }));
+    // …when a zoom broadcast lands with a newer result.
+    pushUserSettings?.({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 },
+      },
+      source: "stored",
+    });
+    const row = await screen.findByTestId("settings-row-zoom");
+    await waitFor(() => expect(row.textContent).toContain("144%"));
+
+    // The older response arrives; awaiting its own promise (not a timer)
+    // guarantees the component's continuation ran before the assertion.
+    await act(async () => {
+      save.resolve({
+        settings: {
+          ...DEFAULT_USER_SETTINGS,
+          appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
+        },
+        source: "stored",
+      });
+      await save.promise;
+    });
     expect(row.textContent).toContain("144%");
   });
 

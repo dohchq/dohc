@@ -221,9 +221,15 @@ export function SettingsDialog(props: {
         const parsed = DesktopUserSettingsResult.safeParse(result);
         if (!parsed.success) return;
         settingsEventFiredRef.current = true;
+        // A broadcast is NEWER than any request still in flight: bumping the
+        // request counter drops those pending responses, so an older save's
+        // answer cannot overwrite this result. The write behind the broadcast
+        // already succeeded, so the saved state is honest.
+        userSaveRequestRef.current += 1;
         setUserResult(parsed.data);
+        markSaved();
       }),
-    [],
+    [markSaved],
   );
 
   useEffect(() => {

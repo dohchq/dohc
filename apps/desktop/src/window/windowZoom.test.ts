@@ -102,8 +102,9 @@ describe("the zoom mutation", () => {
       apply,
     });
 
+    // The refusal repeats the read's own recovery reason, never a guess.
     await expect(step("in")).rejects.toThrow(
-      "Zoom is unavailable while the settings file is unreadable. Open Settings to repair or reset it.",
+      "The settings file could not be read. Open Settings to repair or reset it.",
     );
     expect(write).not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();

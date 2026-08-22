@@ -40,8 +40,12 @@ export function createZoomMutation(deps: {
     deps.enqueue(async () => {
       const current = await deps.read();
       if (current.source === "recovered") {
+        // The read names why it recovered (not a regular file, too large,
+        // unsupported shape, unreadable) — repeat its reason, never a guess.
         throw new Error(
-          "Zoom is unavailable while the settings file is unreadable. Open Settings to repair or reset it.",
+          `${
+            current.warning ?? "dohc could not read its settings file."
+          } Open Settings to repair or reset it.`,
         );
       }
       const zoomLevel = nextZoomLevel(
