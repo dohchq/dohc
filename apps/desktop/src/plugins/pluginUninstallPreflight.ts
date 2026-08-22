@@ -188,9 +188,17 @@ export interface PluginUninstallPreflightInput {
   dohcDir: string;
   pluginId: string;
   pluginRoot: string;
-  /** The plugin's durable data directory (pluginStateRoot) — inventoried so
-   * the uninstall warning can name what deleting it destroys. */
-  stateRoot: string;
+  /**
+   * The plugin's durable data directory (pluginStateRoot) — inventoried so
+   * the uninstall warning can name what deleting it destroys. Null when
+   * pluginId's own path resolves to data cleanup will never touch: an
+   * invalid, never-installed row's own fallback id can coincide with some
+   * OTHER, unrelated, installed plugin's real id, and that path is real
+   * DATA belonging entirely to that other installation — inventorying it
+   * here would threaten deleting it when cleanup already excludes it
+   * (#779-offers round 13).
+   */
+  stateRoot: string | null;
   /**
    * Other durable data directories cleanup will ALSO delete for this same
    * plugin — a record's state and plugin data can be filed under an id
@@ -552,9 +560,10 @@ function withStateData(
 export async function pluginUninstallPreflight(
   input: PluginUninstallPreflightInput,
 ): Promise<PluginUninstallPreflightResult> {
-  const stateSizes = await Promise.all(
-    [input.stateRoot, ...input.additionalStateRoots].map(measurePluginDirectory),
-  );
+  const stateRoots = input.stateRoot === null
+    ? input.additionalStateRoots
+    : [input.stateRoot, ...input.additionalStateRoots];
+  const stateSizes = await Promise.all(stateRoots.map(measurePluginDirectory));
   return withStateData(
     await sourceUninstallPreflight(input),
     combineDirectorySizes(stateSizes),

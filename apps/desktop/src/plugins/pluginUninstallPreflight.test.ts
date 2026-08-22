@@ -160,6 +160,41 @@ describe("plugin uninstall preflight", () => {
     expect(empty.warning).toBeNull();
   });
 
+  // A null stateRoot means the caller has already determined pluginId's own
+  // state path belongs to an unrelated installation (an id collision
+  // between a discovered row's fallback id and some OTHER, unrelated,
+  // installed plugin's real id) and must not be inventoried here — only
+  // additionalStateRoots, resolved separately by directory, may still
+  // apply (#779-offers round 13).
+  it("skips the primary state root entirely when it is null, measuring only additionalStateRoots", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+
+    // Data at pluginId's own state path — must never appear in the result
+    // when stateRoot is null, even though it physically exists.
+    const ownStateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(ownStateRoot, { recursive: true });
+    await writeFile(join(ownStateRoot, "not-this-plugins.txt"), "belongs to someone else");
+
+    // Data under a genuinely different, correctly-scoped identity.
+    const otherStateRoot = pluginStateRoot(fixture.dohcDir, "other-plugin-id");
+    await mkdir(otherStateRoot, { recursive: true });
+    await writeFile(join(otherStateRoot, "session.json"), "{}");
+
+    const result = await pluginUninstallPreflight({
+      dohcDir: fixture.dohcDir,
+      pluginId,
+      pluginRoot: fixture.pluginRoot,
+      stateRoot: null,
+      additionalStateRoots: [otherStateRoot],
+      installedBaselineHash: baseline,
+      engineCaptureAvailable: true,
+    });
+
+    expect(result.stateData).toMatchObject({ path: otherStateRoot, fileCount: 1 });
+  });
+
   it("warns instead of reporting a clean tree when a symlink was dropped into the source", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");

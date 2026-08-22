@@ -946,13 +946,24 @@ export class PluginPipeline {
         const additionalStateRoots = candidate
           ? this.additionalCleanupStateRoots(candidate, state)
           : [];
+        // pluginId's own path and baseline are only this row's to warn
+        // about when nothing proves otherwise — the same
+        // pluginIdTracesDirectory check cleanup itself uses. An invalid,
+        // never-installed row's fallback id can coincide with some OTHER,
+        // unrelated, installed plugin's real id: inventorying that path
+        // would threaten data cleanup already excludes, and comparing live
+        // source against that plugin's OWN installedBaselineHash compares
+        // the wrong plugin's files to the wrong plugin's baseline
+        // (#779-offers round 13).
+        const pluginIdTracesHere = !candidate ||
+          this.pluginIdTracesDirectory(record, candidate);
         const preflight = await this.operations.uninstallPreflight({
           dohcDir: this.dohcDir,
           pluginId,
           pluginRoot,
-          stateRoot: pluginStateRoot(this.dohcDir, pluginId),
+          stateRoot: pluginIdTracesHere ? pluginStateRoot(this.dohcDir, pluginId) : null,
           additionalStateRoots,
-          installedBaselineHash: record?.installedBaselineHash,
+          installedBaselineHash: pluginIdTracesHere ? record?.installedBaselineHash : undefined,
           engineCaptureAvailable: this.engineCaptureAvailable(),
         });
         const confirmationToken = randomUUID();
@@ -1031,9 +1042,7 @@ export class PluginPipeline {
       // key — disabling it, stopping its running process, and deleting its
       // build and state right along with the invalid row's source
       // (#779-offers round 12 finding 1).
-      const pluginIdTracesHere =
-        record?.directoryName === undefined ||
-        record.directoryName === candidate.directoryName;
+      const pluginIdTracesHere = this.pluginIdTracesDirectory(record, candidate);
       const cleanupIds = new Set([
         ...(pluginIdTracesHere ? [pluginId] : []),
         ...this.additionalCleanupIds(candidate, state),
@@ -1310,6 +1319,25 @@ export class PluginPipeline {
       }
     }
     return ids;
+  }
+
+  /**
+   * Whether pluginId's own persisted record — if any — genuinely belongs
+   * to candidate's directory, rather than to some OTHER, unrelated
+   * installation whose real id happens to collide with candidate's own
+   * fallback id. Nothing recorded there yet is not evidence of a
+   * collision, so this reads true by default; only a record that
+   * positively names a DIFFERENT directory excludes pluginId. Shared by
+   * uninstallPreflight (what the confirmation warns about and compares
+   * against) and uninstall (what cleanup actually touches), so both agree
+   * (#779-offers round 12 finding 1, round 13).
+   */
+  private pluginIdTracesDirectory(
+    record: PluginRecordShape | undefined,
+    candidate: InstalledPluginRecord,
+  ): boolean {
+    return record?.directoryName === undefined ||
+      record.directoryName === candidate.directoryName;
   }
 
   /**

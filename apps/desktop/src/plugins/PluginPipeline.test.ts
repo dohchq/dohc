@@ -911,6 +911,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
 
+    // The unrelated plugin's own stored data, genuinely filed under the
+    // id it was installed under — "target-dir" — the same key the invalid
+    // row's own fallback id happens to collide with.
+    const survivorStateRoot = pluginStateRoot(
+      pluginDataDir(stateDir, workspaceRoot),
+      "target-dir",
+    );
+    await mkdir(join(survivorStateRoot, "t3"), { recursive: true });
+    await writeFile(join(survivorStateRoot, "t3", "session.sqlite"), "session-bytes");
+
     // The row the user actually clicks Remove on, added AFTER the other
     // plugin is already running: a broken manifest, so discovery names it
     // by its directory — "target-dir" — which is ALSO, coincidentally,
@@ -942,6 +952,17 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // row (#779-offers round 11 finding 3's payload change).
       const preflight = await pipeline.uninstallPreflight("target-dir", "target-dir");
       if (!preflight.ok) throw new Error(preflight.error.message);
+      // Round 13: the dialog must not threaten data cleanup already
+      // excludes. The survivor's real stored data planted above is not
+      // named here at all — the invalid row genuinely has none of its
+      // own — and the comparison never claims the invalid row's source
+      // is "modified" against the survivor's own baseline; with no
+      // baseline of its own, it honestly reads as unverifiable instead.
+      expect(preflight.preflight.stateData).toBeNull();
+      expect(preflight.preflight.warning?.summary ?? "").not.toContain("stored data");
+      expect(preflight.preflight.verification).toBe("cannot-verify");
+      expect(preflight.preflight.installedBaselineHash).toBeNull();
+
       const removed = await pipeline.uninstall("target-dir", preflight.confirmationToken);
       expect(removed.ok).toBe(true);
 
@@ -950,6 +971,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // ...and the unrelated, installed plugin is completely untouched:
       // its source, its build, its state, and its running process all
       // survive — not only its files (#779-offers round 12 finding 1).
+      await expect(readFile(join(survivorStateRoot, "t3", "session.sqlite"), "utf8"))
+        .resolves.toBe("session-bytes");
       await expect(readFile(join(otherRoot, "dohc-plugin.json"), "utf8"))
         .resolves.toContain('"name": "target-dir"');
       const survivor = pipeline.list().find((row) => row.directoryName === "other-dir");
