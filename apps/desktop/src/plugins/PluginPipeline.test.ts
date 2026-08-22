@@ -3555,10 +3555,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         );
 
         await setup.failEstablishedBuild();
-        // The palette has nothing to show — recoveredManifests never
-        // populated, since the manifest above could not be parsed — but
-        // Retry's own fact must not depend on that.
-        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(false);
+        // hasFailedReplacement reports the fact (failedReplacements), not
+        // the cache: it stays true even though recoveredManifests never
+        // populated, since the manifest above could not be parsed — only
+        // the palette's own preview of what the recovered build contains
+        // is missing (#779 round 22 finding 2).
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
 
         // A crash-loop respawn between the failure and the fix — the
         // host's own health reporting, not a rebuild — flips status back
@@ -3573,6 +3575,93 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         // palette its preview, not the user their own way back.
         const rebuilt = await setup.pipeline.rebuild("example-plugin");
         expect(rebuilt.ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps offering a build retry after a failed approve with no old runtime to preserve, even once something later resets status (round-22 finding 4)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin");
+        expect(disabled.ok).toBe(true);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+
+        // Approve fails with nothing running to preserve — the branch
+        // captureRecoveredManifest's own call used to skip entirely.
+        setup.failNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "attempted while disabled";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // Nothing was ever running to crash-loop respawn, but the same
+        // durable fact must survive whatever else can still reset status
+        // for a stopped plugin — simulated directly here the way round-8's
+        // own respawn test simulates its own status flip.
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+
+        const retried = await setup.pipeline.rebuild("example-plugin");
+        expect(retried.ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("falls back to the prior contributions, not the failed candidate's own manifest, when a failed replacement has no readable recovered manifest (round-22 finding 5)", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        // captureRecoveredManifest's own read of this file fails, so
+        // recoveredManifests never populates — the fallback this pin
+        // exercises has nothing but the fact and the failed candidate's
+        // own (different, never-approved) manifest to choose between.
+        const liveRoot = join(pluginsDataRoot(setup.fixture), "example-plugin");
+        await writeFile(
+          join(liveRoot, "dohc-plugin.generated.json"),
+          "not valid json",
+        );
+
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        // requireValidCandidate reads a discovery-cached record, not the
+        // source tree directly — an unrelated-plugin event forces the
+        // rescan that actually picks up the edit above, without itself
+        // queuing a reconcile against example-plugin ahead of approve()
+        // (the same trigger this file's other manifest-edit tests use).
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+
+        setup.failNextBuild();
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // The old build is still what's actually running — its own
+        // commands, not the failed candidate's, since the candidate's own
+        // manifest (confirmed above to now hold newCommands) was never
+        // approved and may not even be compatible with what is still
+        // serving requests.
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        // pluginRegistration has no full manifest object left to serve —
+        // the live root's own generated manifest could not be read, and
+        // the candidate's is exactly what must not stand in for it. A
+        // caller reads null here as "nothing new to serve" and falls back
+        // to its own last-known-good registration, never to this failed
+        // candidate.
+        expect(setup.pipeline.pluginRegistration("example-plugin")).toBeNull();
       } finally {
         await setup.pipeline.dispose();
       }
@@ -3874,6 +3963,41 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
         const enabled = await enabling;
         expect(enabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("still lowers a raised drain barrier when the wrapped action throws synchronously instead of rejecting (#779 round 22 findings 11-12)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // A run() that throws before ever returning a promise: finally()
+        // has nothing to attach to in that case, so only a try/catch
+        // around the call itself can still reach lowerBarrier — the
+        // scenario withCommandClaimsBarrier's own try/catch exists for,
+        // even though every current caller's run closure is an async
+        // wrapper that cannot actually do this today.
+        const withCommandClaimsBarrier = (
+          setup.pipeline as unknown as {
+            withCommandClaimsBarrier: <T>(
+              pluginId: string,
+              run: () => Promise<T>,
+            ) => Promise<T>;
+          }
+        ).withCommandClaimsBarrier.bind(setup.pipeline);
+
+        expect(() =>
+          withCommandClaimsBarrier(key, () => {
+            throw new Error("synchronous run() failure");
+          }),
+        ).toThrow("synchronous run() failure");
+        // No `await` above and no microtask between the throw and this
+        // read: only a synchronous catch, not a dangling finally(), could
+        // have lowered the barrier already.
         expect(setup.commandClaims.isDraining(key)).toBe(false);
       } finally {
         await setup.pipeline.dispose();

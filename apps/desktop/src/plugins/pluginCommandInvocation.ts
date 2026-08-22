@@ -29,7 +29,7 @@ function errorMessage(error: unknown): string {
  */
 export class PluginClaimsDrainingError extends Error {
   constructor(pluginId: string) {
-    super(`Plugin "${pluginId}" isn't available right now. Try the command again in a moment.`);
+    super(`dohc is still working on plugin "${pluginId}". Try the command again in a moment.`);
     this.name = "PluginClaimsDrainingError";
   }
 }

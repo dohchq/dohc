@@ -685,7 +685,7 @@ export class PluginPipeline {
           webApps: manifestWebApps(candidate.manifest),
           panels: manifestPanels(candidate.manifest),
           commands: manifestCommands(candidate.manifest),
-          hasFailedReplacement: this.recoveredManifests.has(candidate.id),
+          hasFailedReplacement: this.failedReplacements.has(candidate.id),
           diagnostics: boundedStatusLines(candidate.diagnostics),
           warnings: [],
           error: invalidPluginError(candidate),
@@ -722,6 +722,13 @@ export class PluginPipeline {
     if (recovered) {
       return { pluginRoot: this.liveRoot(pluginId), manifest: recovered };
     }
+    // A failed replacement with nothing recoverable from the live root must
+    // not fall through to the freshly discovered candidate's own manifest
+    // either — that candidate was never approved and may not even be
+    // compatible with what is still running. Callers already treat a null
+    // registration as "nothing new to serve" and fall back to their own
+    // last-known-good record (#779 round 22 finding 5).
+    if (this.failedReplacements.has(pluginId)) return null;
     for (const candidate of this.discovery) {
       if (candidate.id !== pluginId || !candidate.manifest) continue;
       return { pluginRoot: candidate.rootPath, manifest: candidate.manifest };
@@ -1794,6 +1801,15 @@ export class PluginPipeline {
       );
     }
     const validCandidate = { ...candidate, manifest: candidate.manifest };
+    // Every setStatus call this attempt makes below — "snapshotting",
+    // "installing", "scanning", "building" — optimistically re-derives
+    // commands/webApps/panels/settings from this candidate's own manifest,
+    // since failedReplacements is not set yet for any of them. If the
+    // attempt then fails with nothing recoverable from the live root, the
+    // catch below needs what those fields held before this attempt touched
+    // them, not whatever they drifted to along the way (#779 round 22
+    // finding 5).
+    const priorStatus = this.statuses.get(candidate.id) ?? null;
     let oldRuntimeStopped = false;
     let sourceHash: string | null = null;
     // The staged source tree, until it is published or discarded. Anything
@@ -2039,14 +2055,39 @@ export class PluginPipeline {
           error: detail,
         });
       } else {
-        if (oldRuntime !== null && !oldRuntimeStopped) {
+        // Recorded whether or not a runtime was ever running to preserve:
+        // a stopped plugin's own failed approve needs the same durable
+        // fact a running one does, or a later watcher-triggered reseed can
+        // still wipe status "failed" out from under it with nothing left
+        // to prove Retry is still owed (#779 round 22 finding 4).
+        let recovered = false;
+        if (!oldRuntimeStopped) {
           await this.captureRecoveredManifest(candidate.id);
+          recovered = this.recoveredManifests.has(candidate.id);
         }
         this.setStatus(candidate, {
           status: "failed",
           runtimeStatus: oldRuntime,
           sourceHash,
           error: detail,
+          // The recovery cache above can still come back empty (an
+          // unreadable or missing generated manifest) even though
+          // failedReplacements is now set. setStatus's own
+          // authoritativeManifest fallback would otherwise fall to
+          // whatever these fields already drifted to during this same
+          // attempt's own "snapshotting"/"installing"/"scanning"/
+          // "building" stages — each one re-derived them from this
+          // candidate's own never-approved manifest before failedReplacements
+          // existed to stop it. priorStatus is what they held before this
+          // attempt touched them (#779 round 22 finding 5).
+          ...(!recovered && priorStatus
+            ? {
+              settings: priorStatus.settings,
+              webApps: priorStatus.webApps,
+              panels: priorStatus.panels,
+              commands: priorStatus.commands,
+            }
+            : {}),
         });
         return this.failure(candidate.id, detail);
       }
@@ -2629,7 +2670,7 @@ export class PluginPipeline {
       webApps: manifestWebApps(candidate.manifest),
       panels: manifestPanels(candidate.manifest),
       commands: manifestCommands(candidate.manifest),
-      hasFailedReplacement: this.recoveredManifests.has(candidate.id),
+      hasFailedReplacement: this.failedReplacements.has(candidate.id),
       diagnostics: boundedStatusLines(candidate.diagnostics),
       warnings: [],
       error: null,
@@ -2641,8 +2682,13 @@ export class PluginPipeline {
     patch: Partial<PluginPipelinePluginStatus>,
   ): PluginPipelinePluginStatus {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
-    const authoritativeManifest =
-      this.recoveredManifests.get(candidate.id) ?? candidate.manifest;
+    // A failed replacement with no recovered manifest must not treat its
+    // own (possibly broken, never-approved) candidate manifest as
+    // authoritative while the old build still serves it — null falls
+    // every derivation below back to the prior status's own contributions
+    // instead (#779 round 22 finding 5).
+    const authoritativeManifest = this.recoveredManifests.get(candidate.id) ??
+      (this.failedReplacements.has(candidate.id) ? null : candidate.manifest);
     const next: PluginPipelinePluginStatus = {
       ...current,
       ...patch,
@@ -2667,16 +2713,16 @@ export class PluginPipeline {
       settings: authoritativeManifest
         ? manifestSettings(authoritativeManifest)
         : current.settings,
-      webApps: patch.webApps ?? manifestWebApps(
-        authoritativeManifest,
-      ),
-      panels: patch.panels ?? manifestPanels(
-        authoritativeManifest,
-      ),
-      commands: patch.commands ?? manifestCommands(
-        authoritativeManifest,
-      ),
-      hasFailedReplacement: this.recoveredManifests.has(candidate.id),
+      webApps: patch.webApps ?? (authoritativeManifest
+        ? manifestWebApps(authoritativeManifest)
+        : current.webApps),
+      panels: patch.panels ?? (authoritativeManifest
+        ? manifestPanels(authoritativeManifest)
+        : current.panels),
+      commands: patch.commands ?? (authoritativeManifest
+        ? manifestCommands(authoritativeManifest)
+        : current.commands),
+      hasFailedReplacement: this.failedReplacements.has(candidate.id),
       diagnostics: boundedStatusLines(patch.diagnostics ?? current.diagnostics),
       warnings: boundedStatusLines(patch.warnings ?? current.warnings),
       error: patch.error === undefined ? cloneError(current.error) : cloneError(patch.error),
@@ -2773,7 +2819,15 @@ export class PluginPipeline {
   ): Promise<T> {
     const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
     if (!lowerBarrier) return run();
-    return run().finally(lowerBarrier);
+    // A synchronous throw from run() never returns a promise for finally
+    // to attach to — caught here so the raise above is never stranded up
+    // (#779 round 22 findings 11-12).
+    try {
+      return run().finally(lowerBarrier);
+    } catch (error) {
+      lowerBarrier();
+      throw error;
+    }
   }
 
   private enqueueAction(

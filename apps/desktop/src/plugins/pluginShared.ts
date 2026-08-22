@@ -65,8 +65,10 @@ export function awaitCommandClaimsDrainedWithDeadline(
   ).catch((error: unknown) => {
     warn(`[desktop] ${errorMessage(error)}. Stopping its host anyway.`);
     // The claim will still lower once its command eventually settles —
-    // never discard the real lower, or the barrier leaks.
-    void drained.then((lower) => lower());
+    // never discard the real lower, or the barrier leaks. Also catches: a
+    // rejected drain has no lower to call, only itself to swallow (#779
+    // round 22 finding 13).
+    void drained.then((lower) => lower()).catch(() => undefined);
     return () => {};
   });
 }

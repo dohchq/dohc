@@ -450,6 +450,10 @@ describe("plugin panel main-process wiring", () => {
       claimKeyAt,
     );
     const refusalAt = invoke.indexOf('"plugin-rebuilding"', isDrainingAt);
+    const refusalMessageAt = invoke.indexOf(
+      'dohc is still working on plugin "${input.pluginId}". Try the command again in a moment.',
+      refusalAt,
+    );
     const claimAt = invoke.indexOf("claimHostForCommand(claimKey);", refusalAt);
     // MUTATION (unbounded wait): dropping this refusal lets a new command
     // join a plugin whose rebuild or workspace close is already draining
@@ -457,7 +461,11 @@ describe("plugin panel main-process wiring", () => {
     expect(claimKeyAt).toBeGreaterThan(-1);
     expect(isDrainingAt).toBeGreaterThan(claimKeyAt);
     expect(refusalAt).toBeGreaterThan(isDrainingAt);
-    expect(claimAt).toBeGreaterThan(refusalAt);
+    // MUTATION (passive voice hides the actor): dohc-interface requires a
+    // named actor for a failing action, not a passive "isn't available"
+    // that never says who is busy (#779 round 22 finding 6).
+    expect(refusalMessageAt).toBeGreaterThan(refusalAt);
+    expect(claimAt).toBeGreaterThan(refusalMessageAt);
 
     const createPipeline = functionSource(
       "function createPluginPipeline(",
@@ -531,9 +539,22 @@ describe("plugin panel main-process wiring", () => {
     // interleave between them (round-17 finding 2, round-18 finding 1).
     const ensureStartedFn = functionSource("async function ensurePluginStarted(");
     const recheckParamAt = ensureStartedFn.indexOf("recheckCommandClaims?: CommandClaimsRecheck;");
+    // The recheck and the enqueue call both live inside this one callback,
+    // not the outer async function — declared with a plain `() => {`, not
+    // `async () => {`. That declaration is what actually makes an `await`
+    // between the two impossible: TypeScript refuses to compile one inside
+    // a non-async arrow. A mutation that turns this callback async is the
+    // one way "no await between them" could stop being true (#779 round 22
+    // finding 7 — the position checks below only proved ordering, not the
+    // absence of a gap; this line proves there is structurally no room for
+    // one).
+    const ensureStartedCallbackAt = ensureStartedFn.indexOf(
+      "ensureStarted: () => {",
+      recheckParamAt,
+    );
     const recheckCallAt = ensureStartedFn.indexOf(
       "options.recheckCommandClaims?.();",
-      recheckParamAt,
+      ensureStartedCallbackAt,
     );
     const pipelineEnsureStartedAt = ensureStartedFn.indexOf(
       "return pipeline.ensureStarted(plugin.manifest.name);",
@@ -545,8 +566,18 @@ describe("plugin panel main-process wiring", () => {
     // this call's own claim is then the exact thing that action's later
     // stopOldRuntime wait stalls on.
     expect(recheckParamAt).toBeGreaterThan(-1);
-    expect(recheckCallAt).toBeGreaterThan(recheckParamAt);
+    expect(ensureStartedCallbackAt).toBeGreaterThan(recheckParamAt);
+    expect(recheckCallAt).toBeGreaterThan(ensureStartedCallbackAt);
     expect(pipelineEnsureStartedAt).toBeGreaterThan(recheckCallAt);
+    // MUTATION (async callback reopens the gap): nothing between the two
+    // calls but whitespace — an inserted `await` (which the callback's own
+    // sync signature above already forbids, so this also catches making
+    // the callback async first) or any other statement would push this
+    // slice past a bare closing brace.
+    const betweenRecheckAndEnsure = ensureStartedFn
+      .slice(recheckCallAt + "options.recheckCommandClaims?.();".length, pipelineEnsureStartedAt)
+      .trim();
+    expect(betweenRecheckAndEnsure).toBe("");
 
     const wireAt = invoke.indexOf(
       "recheckCommandClaims: () =>",
@@ -625,15 +656,24 @@ describe("plugin panel main-process wiring", () => {
     const rebuildAt = mainSource.indexOf(
       "pluginAction(CHANNELS.rebuildPlugin,",
     );
-    const rebuildRevokeAt = mainSource.indexOf(
-      "revokePluginPanels(workspaceId, pluginId);",
+    // Bounded to this one handler's own body: an unbounded forward search
+    // for any of these calls can match a same-named call belonging to a
+    // different handler further down the file instead of catching a
+    // mutation that removed it from here (#779 round 22 finding 8).
+    const rebuildEnd = mainSource.indexOf(
+      "\n\n  ipcMain.handle(CHANNELS.pluginUninstallPreflight",
       rebuildAt,
     );
-    const rebuildReregisterAt = mainSource.indexOf(
+    expect(rebuildEnd).toBeGreaterThan(rebuildAt);
+    const rebuildBody = mainSource.slice(rebuildAt, rebuildEnd);
+    const rebuildRevokeAt = rebuildBody.indexOf(
+      "revokePluginPanels(workspaceId, pluginId);",
+    );
+    const rebuildReregisterAt = rebuildBody.indexOf(
       "reregisterPluginPanels(workspaceId, pluginId);",
       rebuildRevokeAt,
     );
-    const rebuildStopWebAppsAt = mainSource.indexOf(
+    const rebuildStopWebAppsAt = rebuildBody.indexOf(
       "stopPluginWebAppsForPlugin(workspaceId, pluginId);",
       rebuildReregisterAt,
     );
@@ -645,7 +685,8 @@ describe("plugin panel main-process wiring", () => {
     // reads the pipeline's current spawn id (round-5 authority-registry
     // split), pinned behaviorally in pluginPanelSdkAuthority.test.ts.
     expect(rebuildAt).toBeGreaterThan(-1);
-    expect(rebuildRevokeAt).toBeGreaterThan(rebuildAt);
+    // Relative to rebuildBody, not mainSource, from here down.
+    expect(rebuildRevokeAt).toBeGreaterThan(-1);
     // MUTATION (mounted panel never re-grants): a still-mounted panel
     // never calls startPluginPanel again on its own, so a revoke with no
     // fresh registration after it leaves every later SDK call from that
@@ -693,6 +734,10 @@ describe("plugin panel main-process wiring", () => {
       "return stopPluginWorkspace(activeWorkspaceId);",
       destroyedGateAt,
     );
+    const destroyedCatchAt = open.indexOf(
+      "}).catch((error: unknown) => {",
+      destroyedStopAt,
+    );
     // MUTATION (cross-window teardown): either gate missing lets one
     // window's switch or close stop a workspace a second window still has
     // open — that second window's own in-flight command then runs against
@@ -708,6 +753,11 @@ describe("plugin panel main-process wiring", () => {
     expect(destroyedSurfacesAt).toBeGreaterThan(destroyedAt);
     expect(destroyedGateAt).toBeGreaterThan(destroyedSurfacesAt);
     expect(destroyedStopAt).toBeGreaterThan(destroyedGateAt);
+    // MUTATION (unhandled rejection): this chain is detached with `void`,
+    // so a rejection from either stage without a catch here surfaces as an
+    // unhandled promise rejection instead of a logged warning (#779 round
+    // 22 finding 9).
+    expect(destroyedCatchAt).toBeGreaterThan(destroyedStopAt);
   });
 
   it("stops a departing window's own panels, not a survivor's sharing the same workspace (#779 round 20 finding 1)", () => {
@@ -797,9 +847,13 @@ describe("plugin panel main-process wiring", () => {
       "if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {",
       previousAt,
     );
+    const generationBumpAt = open.indexOf(
+      "advanceRendererGeneration(senderId);",
+      switchSurfacesAt,
+    );
     const switchSurfacesCallAt = open.indexOf(
       "await stopPluginSurfacesForSender(senderId);",
-      switchSurfacesAt,
+      generationBumpAt,
     );
     const setAt = open.indexOf(
       "activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);",
@@ -812,7 +866,13 @@ describe("plugin panel main-process wiring", () => {
     // that workspace inherits claims this window never released.
     expect(previousAt).toBeGreaterThan(-1);
     expect(switchSurfacesAt).toBeGreaterThan(previousAt);
-    expect(switchSurfacesCallAt).toBeGreaterThan(switchSurfacesAt);
+    // MUTATION (in-flight start slips past the sweep): startPluginPanel
+    // and startPluginWebApp both re-check the sender's own generation
+    // right before they register — bumping it after the sweep instead of
+    // before leaves a start already in flight free to register into the
+    // sweep's own blind spot once it finishes (#779 round 22 finding 3).
+    expect(generationBumpAt).toBeGreaterThan(switchSurfacesAt);
+    expect(switchSurfacesCallAt).toBeGreaterThan(generationBumpAt);
     expect(setAt).toBeGreaterThan(switchSurfacesCallAt);
   });
 });

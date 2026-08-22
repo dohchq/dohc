@@ -83,7 +83,6 @@ describe("invokeRegisteredPluginCommand", () => {
   });
 
   it("reports the retryable plugin-rebuilding status, not a generic failure, when ensureStarted rechecks the barrier and finds it raised (round-17 finding 2)", async () => {
-    const invokeCommand = vi.fn(async () => null);
     const ensureStarted = vi.fn(async () => {
       // What ensurePluginStarted throws once it rechecks the barrier right
       // at its own pipeline-enqueue point and finds a stopping action
@@ -103,9 +102,11 @@ describe("invokeRegisteredPluginCommand", () => {
       }),
     ).resolves.toEqual({
       status: "plugin-rebuilding",
-      message: 'Plugin "hello-plugin" isn\'t available right now. Try the command again in a moment.',
+      message: 'dohc is still working on plugin "hello-plugin". Try the command again in a moment.',
     });
-    expect(invokeCommand).not.toHaveBeenCalled();
+    // ensureStarted's own throw means invokeRegisteredPluginCommand never
+    // has a host to call — nothing to spy on that this test's outcome
+    // does not already prove (#779 round 22 finding 10).
   });
 
   it("cancels after a successful start when the renderer changed", async () => {

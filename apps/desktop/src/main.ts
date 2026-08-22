@@ -2778,16 +2778,10 @@ function registerPluginPanelGrant(input: {
   return grant;
 }
 
-// Re-establishes a fresh grant for every panel this plugin still has
-// mounted, right after its old one is revoked by a stop that replaces the
-// runtime instead of ending the plugin for good — disable/uninstall never
-// call this; there is no new runtime left for a fresh grant to eventually
-// serve. authorize() already tolerates a live grant through a transient
-// stop on its own, re-checking the host's own current state on every
-// call (proved by pluginPanelSdkAuthority.test.ts's own "transiently
-// stopped runtime" case) — this restores what a full revoke removes that
-// a transient stop never does: a grant at all, since an aborted
-// AbortController can never signal live again.
+// Re-establishes a fresh grant for every one of this plugin's still-
+// mounted panels — called only where a stop replaces the runtime instead
+// of ending the plugin (rebuild), since a revoked grant's own
+// AbortController can never signal live again on its own.
 function reregisterPluginPanels(workspaceId: string, pluginId: string): void {
   for (const panel of runningPluginPanels.values()) {
     if (panel.workspaceId !== workspaceId || panel.pluginId !== pluginId) {
@@ -6996,7 +6990,7 @@ function registerIpcHandlers(
     if (activeCommandClaims.isDraining(claimKey)) {
       return InvokePluginCommandResult.parse({
         status: "plugin-rebuilding",
-        message: `Plugin "${input.pluginId}" isn't available right now. Try the command again in a moment.`,
+        message: `dohc is still working on plugin "${input.pluginId}". Try the command again in a moment.`,
       });
     }
     claimHostForCommand(claimKey);
@@ -7673,8 +7667,13 @@ function registerIpcHandlers(
     // Before the set below flips this sender's own entry: this window's
     // own panels and web apps on the workspace it's leaving are gone
     // regardless of whether that workspace survives the switch (#779
-    // round 21 finding 4).
+    // round 21 finding 4). The generation bumps first — startPluginPanel
+    // and startPluginWebApp both re-check it right before they register,
+    // so an in-flight start from before the switch discards itself instead
+    // of registering into this sweep's blind spot after it already ran
+    // (#779 round 22 finding 3).
     if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+      advanceRendererGeneration(senderId);
       await stopPluginSurfacesForSender(senderId);
     }
     preferredWorkspaceId = workspace.workspaceId;
@@ -7697,6 +7696,11 @@ function registerIpcHandlers(
           if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
             return stopPluginWorkspace(activeWorkspaceId);
           }
+        }).catch((error: unknown) => {
+          console.warn(
+            `[desktop] failed to clean up plugin surfaces for a destroyed window (sender ${senderId})`,
+            error,
+          );
         });
       });
     }

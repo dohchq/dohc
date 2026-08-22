@@ -73,4 +73,47 @@ describe("awaitCommandClaimsDrainedWithDeadline", () => {
       }
     },
   );
+
+  it(
+    "never produces an unhandled rejection when the drain itself rejects after the deadline already elapsed (#779 round 22 finding 13)",
+    async () => {
+      vi.useFakeTimers();
+      const unhandled: unknown[] = [];
+      const onUnhandledRejection = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.on("unhandledRejection", onUnhandledRejection);
+      try {
+        let rejectDrain!: (error: unknown) => void;
+        const drained = new Promise<() => void>((_resolve, reject) => {
+          rejectDrain = reject;
+        });
+        const warn = vi.fn();
+
+        const resultPromise = awaitCommandClaimsDrainedWithDeadline(
+          "example-plugin",
+          drained,
+          warn,
+        );
+        await vi.advanceTimersByTimeAsync(COMMAND_CLAIMS_DRAIN_DEADLINE_MS);
+        await resultPromise;
+        expect(warn).toHaveBeenCalledTimes(1);
+
+        // The deferred `drained.then((lower) => lower())` chain this
+        // deadline attached above has no lower to call once the drain
+        // itself rejects instead of ever settling — only itself to
+        // swallow. Rejecting it here, after the deadline already fired,
+        // is what actually exercises that swallow.
+        rejectDrain(new Error("drain rejected after the deadline"));
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandledRejection);
+        vi.useRealTimers();
+      }
+    },
+  );
 });
