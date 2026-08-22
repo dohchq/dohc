@@ -2548,6 +2548,15 @@ export const PluginSizesResult = z.discriminatedUnion("ok", [
 ]);
 export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
 
+// directoryName is what settles which row's bytes a call reports: an id is
+// only ever a broken manifest's directory-derived fallback, which can
+// coincide with some OTHER, unrelated plugin's real id (#779-offers round
+// 19 finding 3).
+export const PluginSizesPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
+}).strict();
+export type PluginSizesPayload = z.infer<typeof PluginSizesPayload>;
+
 export const UninstallPluginPayload = PluginActionPayload.extend({
   confirmationToken: z.uuid(),
 }).strict();
@@ -4325,7 +4334,7 @@ export interface DohcDesktopBridge {
   pluginUninstallPreflight(
     payload: PluginUninstallPreflightPayload,
   ): Promise<PluginUninstallPreflightResult>;
-  pluginSizes(payload: PluginActionPayload): Promise<PluginSizesResult>;
+  pluginSizes(payload: PluginSizesPayload): Promise<PluginSizesResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;
   getPluginSettings(payload: GetPluginSettingsPayload): Promise<PluginSettingsResult>;
   setPluginSettings(payload: SetPluginSettingsPayload): Promise<PluginSettingsResult>;

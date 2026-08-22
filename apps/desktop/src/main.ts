@@ -127,6 +127,7 @@ import {
   PluginActionPayload,
   PluginActionResult,
   PluginSizesResult,
+  PluginSizesPayload,
   PluginUninstallPreflightPayload,
   PluginUninstallPreflightResult,
   UninstallPluginPayload,
@@ -1022,9 +1023,11 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         params,
       }),
     // The plugin gets its settings with its activation, so it never starts
-    // without them and never has to ask.
-    readPluginSettings: async (pluginId) =>
-      (await pipeline?.getPluginSettings(pluginId)) ?? {},
+    // without them and never has to ask. Named by directoryName — settings
+    // are stored per directory, and a manifest's declared name can differ
+    // from the folder it was found in (#779-offers round 19 finding 1).
+    readPluginSettings: async (directoryName) =>
+      (await pipeline?.getPluginSettings(directoryName)) ?? {},
     onDriversRegistered: (pluginId, spawnId, drivers) =>
       pluginDrivers.register(pluginId, spawnId, drivers),
     onDriverEvent: (pluginId, spawnId, params) =>
@@ -7400,12 +7403,12 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.pluginSizes, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PluginActionPayload.parse(payload);
+    const input = PluginSizesPayload.parse(payload);
     try {
       const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginSizesResult.parse({
         ok: true,
-        sizes: await pipeline.sizes(input.pluginId),
+        sizes: await pipeline.sizes(input.directoryName, input.pluginId),
       });
     } catch (error) {
       return PluginSizesResult.parse({

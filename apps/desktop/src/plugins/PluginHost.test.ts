@@ -2450,6 +2450,47 @@ describe("PluginHost web apps", () => {
     );
   });
 
+  // Round 19 finding 1: readPluginSettings used to be handed the manifest's
+  // OWN declared id — but settings are stored and looked up per directory
+  // (round 18 finding 4), and a manifest's declared name can differ from
+  // the folder it was actually found in. Handing it the id there threw
+  // "Unknown plugin directory" for every such plugin, refusing it its own
+  // settings at every activation.
+  it("hears its settings at activation even when its manifest declares a name that differs from its folder", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createProcessHarness({
+      modes: { "renamed-plugin": "report-settings" },
+    });
+    const readPluginSettings = vi.fn(
+      async () => ({ greeting: "Hei", shout: false }),
+    );
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      readPluginSettings,
+    });
+    // plugins/hello-plugin declaring a manifest name of "renamed-plugin" —
+    // exactly what a name-differs-from-folder plugin looks like.
+    const manifest = { ...await fixtureManifest(), name: "renamed-plugin" };
+
+    await host.start(helloPluginRoot, manifest);
+    await waitFor(
+      () => host.getStatus("renamed-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    // Asked for the FOLDER's settings, never the manifest's own declared id.
+    expect(readPluginSettings).toHaveBeenCalledWith("hello-plugin");
+    const reported = await host.invokeCommand(
+      "renamed-plugin",
+      "report.settings",
+    ) as { atActivation: Record<string, unknown> };
+    expect(reported.atActivation).toEqual({ greeting: "Hei", shout: false });
+  });
+
   it("gives a plugin its settings at activation and tells it about every change", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
@@ -2486,7 +2527,7 @@ describe("PluginHost web apps", () => {
     expect(started.heard).toBeNull();
     expect(started.changeCount).toBe(0);
 
-    await host.notifySettingsChanged("hello-plugin", {
+    await host.notifySettingsChanged("hello-plugin", "hello-plugin", {
       greeting: "Hello",
       shout: true,
     });
@@ -2519,8 +2560,49 @@ describe("PluginHost web apps", () => {
     // Never started: a plugin with no process reads its settings from its next
     // activation, so this must resolve quietly rather than throw or hang.
     await expect(
-      host.notifySettingsChanged("hello-plugin", { greeting: "Hello" }),
+      host.notifySettingsChanged("hello-plugin", "hello-plugin", { greeting: "Hello" }),
     ).resolves.toBeUndefined();
+  });
+
+  // Round 19 finding 2: settings are saved per directory (round 18 finding
+  // 4), but pluginHost only ever runs one process under a given id at a
+  // time — the id-share's own directory, not the one a save was actually
+  // for. Telling that running process about a save meant for a DIFFERENT
+  // directory would hand it values it never asked for.
+  it("does not push a settings change meant for a different directory than the one running", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const harness = createProcessHarness({
+      modes: { "hello-plugin": "report-settings" },
+    });
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+      readPluginSettings: async () => ({ greeting: "Hei", shout: false }),
+    });
+    await host.start(helloPluginRoot, await fixtureManifest());
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "Plugin did not become ready.",
+    );
+
+    // Same id, but a save that was actually for some OTHER, unrelated
+    // directory this id happens to collide with.
+    await host.notifySettingsChanged("hello-plugin", "unrelated-directory", {
+      greeting: "Hello",
+      shout: true,
+    });
+
+    const reported = await host.invokeCommand(
+      "hello-plugin",
+      "report.settings",
+    ) as { current: Record<string, unknown>; changeCount: number };
+    // Untouched: the running process never heard about a change that was
+    // never actually its own.
+    expect(reported.current).toEqual({ greeting: "Hei", shout: false });
+    expect(reported.changeCount).toBe(0);
   });
 });
 

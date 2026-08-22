@@ -541,7 +541,22 @@ export class PluginPipeline {
    * Not queued behind the action lock: this only reads, and a reader opening
    * the page while an install runs should not have to wait for it.
    */
-  async sizes(pluginId: string): Promise<PluginPipelineSizes> {
+  async sizes(directoryName: string, pluginId: string): Promise<PluginPipelineSizes> {
+    // liveRoot and the state root below are dohc's own build and runtime
+    // storage, keyed by pluginId — the identity dohc actually built and ran
+    // under. Presence alone is not enough to measure them for a caller's
+    // chosen directory: two directories can share an id (a broken
+    // manifest's directory-derived fallback colliding with some other,
+    // unrelated plugin's real id), and pluginId's own persisted record is
+    // what proves which directory it actually belongs to. A record that
+    // positively names a DIFFERENT directory means this id's real bytes are
+    // the OTHER row's, not this one's, to report (#779-offers round 19
+    // finding 3).
+    const state = await this.localState();
+    const record = state.plugins[pluginId];
+    if (record?.directoryName !== undefined && record.directoryName !== directoryName) {
+      return { installedBytes: null, dataBytes: null };
+    }
     const [installed, data] = await Promise.all([
       measurePluginDirectory(this.liveRoot(pluginId)),
       measurePluginDirectory(pluginStateRoot(this.dohcDir, pluginId)),
@@ -568,7 +583,11 @@ export class PluginPipeline {
    * notify — pluginHost tracks running instances by id, never directoryName
    * — and appears in an error message; the stored answers themselves are
    * always read and written under directoryName (#779-offers round 18
-   * finding 4). */
+   * finding 4). directoryName also gates the notification itself: two
+   * directories can share an id, and pluginHost only ever runs one of them
+   * under it at a time — telling it about a save meant for the OTHER one
+   * would hand a running process values it never asked for (#779-offers
+   * round 19 finding 2). */
   async setPluginSettings(
     directoryName: string,
     pluginId: string,
@@ -584,13 +603,13 @@ export class PluginPipeline {
     );
     // Not awaited: the value is already saved, and a plugin that is slow to
     // take the change must not make the user wait for a save that landed.
-    void this.options.pluginHost.notifySettingsChanged(pluginId, values).catch(
-      (error: unknown) => {
+    void this.options.pluginHost
+      .notifySettingsChanged(pluginId, directoryName, values)
+      .catch((error: unknown) => {
         console.warn(
           `[desktop] plugin "${pluginId}" did not take a settings change: ${errorMessage(error)}`,
         );
-      },
-    );
+      });
     return values;
   }
 

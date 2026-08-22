@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import {
   mutatePluginRecord,
@@ -63,9 +64,12 @@ export interface PluginHostOptions {
     signal: AbortSignal,
     emitEvent: (subscriptionId: string, event: string, data: unknown) => void,
   ) => Promise<unknown>;
-  /** This plugin's settings, resolved against its manifest, for activation. */
+  /** This plugin's settings, resolved against its manifest, for activation.
+   * Named by directoryName, never pluginId — settings are stored and looked
+   * up per directory, and a manifest's declared name can differ from the
+   * folder it was found in (#779-offers round 19 finding 1). */
   readPluginSettings?: (
-    pluginId: string,
+    directoryName: string,
   ) => Promise<Record<string, PluginSettingValue>>;
   /**
    * Offers this spawn's manifest-declared drivers to the workspace's driver
@@ -120,6 +124,11 @@ interface PluginSpawn {
 interface PluginRecord {
   pluginId: string;
   pluginRoot: string;
+  /** One directory is one discovery entry, so this is basename(pluginRoot)
+   * — the identity a manifest's own declared name cannot stand in for when
+   * it differs from the folder it was found in (#779-offers round 19
+   * finding 1/2). */
+  directoryName: string;
   manifest: DohcPluginManifest;
   status: PluginRuntimeStatus;
   stderr: string[];
@@ -248,6 +257,7 @@ export class PluginHost {
       const record: PluginRecord = {
         pluginId,
         pluginRoot,
+        directoryName: basename(pluginRoot),
         manifest,
         status: "starting",
         stderr: [],
@@ -487,14 +497,30 @@ export class PluginHost {
    * needs no telling — it reads the new values from its next activation. The
    * caller does not wait on this: a slow plugin must never hold up the save
    * the user already made.
+   *
+   * `directoryName` must match the running record's own — two directories
+   * can share a manifest id (a broken manifest's directory-derived fallback
+   * colliding with some other, unrelated plugin's real id), and only ONE of
+   * them can ever be the process actually running under this id at a time.
+   * Settings are saved per directory (round 18 finding 4); telling
+   * whichever process happens to be running under the shared id, rather
+   * than the one the save was actually for, would hand it values it never
+   * asked for (#779-offers round 19 finding 2).
    */
   async notifySettingsChanged(
     pluginId: string,
+    directoryName: string,
     values: Record<string, PluginSettingValue>,
   ): Promise<void> {
     const record = this.plugins.get(pluginId);
     const spawn = record?.current;
-    if (!record || !spawn || !spawn.transport || !this.isLive(record, spawn)) {
+    if (
+      !record ||
+      record.directoryName !== directoryName ||
+      !spawn ||
+      !spawn.transport ||
+      !this.isLive(record, spawn)
+    ) {
       return;
     }
     await spawn.transport.request(PLUGIN_HOST_METHODS.settingsChanged, {
@@ -594,7 +620,8 @@ export class PluginHost {
       // awaited before the spawn, so it is covered by the activation deadline
       // like every other part of starting a plugin.
       const activation = (async () => {
-        const settings = await this.options.readPluginSettings?.(record.pluginId) ?? {};
+        const settings =
+          await this.options.readPluginSettings?.(record.directoryName) ?? {};
         return spawn.transport!.request<unknown>(
           PLUGIN_HOST_METHODS.activate,
           {

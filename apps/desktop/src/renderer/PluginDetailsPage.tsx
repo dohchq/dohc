@@ -451,7 +451,11 @@ type SizesState =
  * the rows simply do not appear — a size dohc could not read is not a size
  * worth printing, and this rail has nothing the reader must act on.
  */
-function usePluginSizes(workspaceId: string, pluginId: string): SizesState {
+function usePluginSizes(
+  workspaceId: string,
+  pluginId: string,
+  directoryName: string,
+): SizesState {
   const [state, setState] = useState<SizesState>({ status: "loading" });
   // The same guard the README and the settings section use: the effect
   // re-runs for every workspace or plugin and its cleanup raises the token,
@@ -463,7 +467,13 @@ function usePluginSizes(workspaceId: string, pluginId: string): SizesState {
     const request = ++requestToken.current;
     setState({ status: "loading" });
     void bridge()
-      .pluginSizes({ workspaceId, pluginId })
+      // The exact row this rail is about, never pluginId alone — two rows
+      // can share an id (a broken manifest's directory-derived fallback
+      // colliding with some other, unrelated plugin's real id), and dohc's
+      // own build and state storage answers only ever what THIS id
+      // actually built and ran, which the pipeline refuses to report for a
+      // directory it does not belong to (#779-offers round 19 finding 3).
+      .pluginSizes({ workspaceId, pluginId, directoryName })
       .then((result) => {
         if (request !== requestToken.current) return;
         setState(
@@ -479,7 +489,7 @@ function usePluginSizes(workspaceId: string, pluginId: string): SizesState {
     return () => {
       requestToken.current += 1;
     };
-  }, [workspaceId, pluginId]);
+  }, [workspaceId, pluginId, directoryName]);
 
   return state;
 }
@@ -549,7 +559,7 @@ function PluginDetailsRail(props: {
   plugin: PluginStatusRecord;
 }) {
   const { plugin } = props;
-  const sizes = usePluginSizes(props.workspaceId, plugin.id);
+  const sizes = usePluginSizes(props.workspaceId, plugin.id, plugin.directoryName);
 
   const installation: RailRow[] = [
     {
@@ -669,6 +679,17 @@ export function PluginDetailsPage(props: {
   const knownCollisionsOwnerRef = useRef<{ pluginId: string; directoryName: string } | null>(
     null,
   );
+  // The directoryName this tab is CURRENTLY following. Starts at
+  // props.directoryName, the tab's own opened identity, but once the id-
+  // only fallback below proves a rename happened (the exact match failed
+  // and exactly one OTHER directory under the same id was found), this
+  // moves to track it. Without this, the exact-match check would keep
+  // trusting the tab's ORIGINAL directoryName forever — and once the
+  // vacated original directory gets a later, unrelated occupant sharing
+  // this id, that check would wrongly re-capture the tab onto it instead
+  // of staying on the plugin that actually renamed (#779-offers round 19
+  // finding 4).
+  const trackedDirectoryNameRef = useRef(props.directoryName);
   if (
     knownCollisionsOwnerRef.current?.pluginId !== props.pluginId ||
     knownCollisionsOwnerRef.current?.directoryName !== props.directoryName
@@ -678,15 +699,17 @@ export function PluginDetailsPage(props: {
       pluginId: props.pluginId,
       directoryName: props.directoryName,
     };
+    trackedDirectoryNameRef.current = props.directoryName;
   }
   useEffect(() => {
     if (catalog.load.status !== "ready") return;
+    const tracked = trackedDirectoryNameRef.current;
     const exact = catalog.load.plugins.some(
-      (entry) => entry.id === props.pluginId && entry.directoryName === props.directoryName,
+      (entry) => entry.id === props.pluginId && entry.directoryName === tracked,
     );
     if (!exact) return;
     for (const entry of catalog.load.plugins) {
-      if (entry.id === props.pluginId && entry.directoryName !== props.directoryName) {
+      if (entry.id === props.pluginId && entry.directoryName !== tracked) {
         knownCollisionsRef.current.add(entry.directoryName);
       }
     }
@@ -696,10 +719,13 @@ export function PluginDetailsPage(props: {
       ? findTabPlugin(
         catalog.load.plugins,
         props.pluginId,
-        props.directoryName,
+        trackedDirectoryNameRef.current,
         knownCollisionsRef.current,
       )
       : null;
+  if (plugin && plugin.directoryName !== trackedDirectoryNameRef.current) {
+    trackedDirectoryNameRef.current = plugin.directoryName;
+  }
 
   // Held in a ref so a new callback identity never re-reports, and written
   // after the commit: a ref written while rendering keeps the value of a

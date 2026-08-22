@@ -487,6 +487,60 @@ describe("PluginDetailsPage", () => {
     expect(screen.queryByTestId("plugin-details-missing")).toBeNull();
   });
 
+  // Round 19 finding 4: once the id-only fallback follows a rename, the
+  // tab's own static directoryName prop never updates — nothing tells the
+  // parent to retarget it. If the exact-match check kept trusting that
+  // stale prop forever, a LATER, unrelated occupant landing at the
+  // vacated original directory (sharing the same id) would exact-match
+  // it and hijack the tab right back, undoing the rename it already
+  // correctly followed.
+  it("stays on the renamed plugin when a later, unrelated row occupies its old directory", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    const view = renderPage("foo", "ws-1", "old-folder");
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    // The rename: same id, new directoryName, nothing left at the old one.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "new-folder", displayName: "Renamed" }),
+      });
+    });
+    expect(await screen.findByText("Renamed")).toBeTruthy();
+
+    // A later, genuinely unrelated installation lands at the vacated
+    // old-folder, sharing the same id — fetched fresh (not through an
+    // incremental event) so both rows are unambiguously present at once,
+    // the shape a real rescan produces.
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("foo", { directoryName: "new-folder", displayName: "Renamed" }),
+        plugin("foo", { directoryName: "old-folder", displayName: "New Occupant" }),
+      ],
+    });
+    // Forces usePluginCatalog to refetch: it only refetches on a workspaceId
+    // change. The tab's own (pluginId, directoryName) props never change —
+    // exactly like a real workspace-switch-and-back a user could trigger
+    // while this tab stays open, and the shape that matters here: nothing
+    // about the tab's OWN identity resets, only the catalog's data does.
+    view.rerender(
+      <PluginDetailsPage workspaceId="ws-2" pluginId="foo" directoryName="old-folder" />,
+    );
+    view.rerender(
+      <PluginDetailsPage workspaceId="ws-1" pluginId="foo" directoryName="old-folder" />,
+    );
+
+    await screen.findByTestId("plugin-details-page");
+    expect(screen.getByText("Renamed")).toBeTruthy();
+    expect(screen.queryByText("New Occupant")).toBeNull();
+  });
+
   it("offers Remove for a plugin that was added but never installed, and restores its offer on confirm", async () => {
     // What Add's own result looks like: discovered, never approved.
     // isInstalled (approvedHash !== null) is false, so Uninstall never
@@ -2213,6 +2267,7 @@ describe("the details rail", () => {
     expect(bridgeMock.pluginSizes).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "t3-code",
+      directoryName: "t3-code",
     });
   });
 
@@ -2324,6 +2379,7 @@ describe("the details rail", () => {
       expect(bridgeMock.pluginSizes).toHaveBeenCalledWith({
         workspaceId: "ws-2",
         pluginId: "t3-code",
+        directoryName: "t3-code",
       })
     );
   });

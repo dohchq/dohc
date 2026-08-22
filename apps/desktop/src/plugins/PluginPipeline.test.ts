@@ -5943,7 +5943,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // Every declared setting under the one answer the user changed: a
       // plugin hears what its settings ARE, never the patch.
       expect(values).toEqual({ greeting: "Hei", shout: false });
-      expect(told).toHaveBeenCalledWith("example-plugin", values);
+      expect(told).toHaveBeenCalledWith("example-plugin", "example-plugin", values);
       // Saved, not only announced.
       expect(await pipeline.getPluginSettings("example-plugin")).toEqual(values);
     } finally {
@@ -6026,6 +6026,109 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   });
+
+  // Round 19 finding 3: dohc's own build and state storage (liveRoot,
+  // pluginStateRoot) is keyed by pluginId, not directoryName — an id an
+  // invalid, never-installed collision loser shares with a genuinely
+  // installed row's real id. Presence of an id alone must not report the
+  // installed row's real bytes for the OTHER directory that happens to
+  // share it.
+  it("reports no bytes for an id-colliding directory that never actually built or ran", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-sizes-collision-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const installedRoot = join(workspaceRoot, "plugins", "installed-dir");
+    await mkdir(join(installedRoot, "src"), { recursive: true });
+    await writeFile(
+      join(installedRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "collide", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(
+      join(installedRoot, "package.json"),
+      `${JSON.stringify({
+        name: "collide",
+        version: "1.0.0",
+        private: true,
+        type: "module",
+        packageManager: "pnpm@11.20.0",
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(installedRoot, "pnpm-lock.yaml"), [
+      "lockfileVersion: '9.0'",
+      "settings:",
+      "  autoInstallPeers: true",
+      "  excludeLinksFromLockfile: false",
+      "importers:",
+      "  .: {}",
+      "",
+    ].join("\n"));
+    await writeFile(join(installedRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("collide");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list().find((row) => row.directoryName === "installed-dir")?.status
+          === "ready",
+        "installed-dir did not reach ready.",
+      );
+
+      // The installed row's own bytes are real.
+      const ownSizes = await pipeline.sizes("installed-dir", "collide");
+      expect(ownSizes.installedBytes).not.toBeNull();
+
+      // A second, unrelated directory declaring the SAME manifest name —
+      // never installed, no build or state of its own.
+      const otherRoot = join(workspaceRoot, "plugins", "other-dir");
+      await mkdir(join(otherRoot, "src"), { recursive: true });
+      await writeFile(
+        join(otherRoot, "dohc-plugin.json"),
+        `${JSON.stringify({ version: 1, name: "collide", entry: "src/main.ts" }, null, 2)}\n`,
+      );
+      await writeFile(join(otherRoot, "src", "main.ts"), "export default {};\n");
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+
+      // Never the installed row's real bytes, reported under the OTHER
+      // directory's own name.
+      expect(await pipeline.sizes("other-dir", "collide")).toEqual({
+        installedBytes: null,
+        dataBytes: null,
+      });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 
   it("advertises no icon, and says why, when the declared file is missing", async () => {
     const fixture = await createPluginWorkspace();
