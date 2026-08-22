@@ -695,7 +695,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
       const pluginId = row!.id;
 
-      const preflight = await pipeline.uninstallPreflight(pluginId);
+      const preflight = await pipeline.uninstallPreflight(pluginId, pluginId);
       if (!preflight.ok) {
         throw new Error(`${preflight.error.stage}/${preflight.error.code}: ${preflight.error.message}`);
       }
@@ -786,7 +786,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         approvedHash: null,
       });
 
-      const preflight = await pipeline.uninstallPreflight(row!.id);
+      const preflight = await pipeline.uninstallPreflight(row!.id, row!.id);
       if (!preflight.ok) {
         throw new Error(`${preflight.error.stage}/${preflight.error.code}: ${preflight.error.message}`);
       }
@@ -813,6 +813,106 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!state.ok) throw new Error(state.warning);
       expect(state.state.plugins["codex"]).toBeUndefined();
       expect(state.state.plugins["my-codex-copy"]).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Round 11 finding 3: a discovered (never-installed) row's own id is only
+  // ever a broken manifest's directory-derived fallback — a plain string
+  // that can coincide with some OTHER, unrelated, VALID plugin's real
+  // manifest id. classifyInstalledPlugins's own duplicate-id detection
+  // never sees this collision at all: it only compares REAL, parsed
+  // manifest ids against each other, and a broken manifest has none to
+  // compare. Resolving by id first — id-matched candidates are never
+  // ambiguous, discovery's duplicate handling already guarantees that
+  // among valid manifests — used to hand this call the wrong plugin
+  // entirely: the unrelated one whose id string happens to match, not the
+  // one at the directory the caller actually named.
+  it("resolves Remove by the exact directory named, even when an invalid row's fallback id collides with another plugin's real id", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-id-collision-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    // The row the user actually clicked Remove on: a broken manifest, so
+    // discovery names it by its directory — "target-dir" — which is ALSO,
+    // coincidentally, the real manifest id an entirely unrelated, valid
+    // plugin in a DIFFERENT directory declares.
+    const invalidRoot = join(workspaceRoot, "plugins", "target-dir");
+    await mkdir(join(invalidRoot, "src"), { recursive: true });
+    await writeFile(join(invalidRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
+    await writeFile(join(invalidRoot, "src", "main.ts"), "export default {};\n");
+
+    const otherRoot = join(workspaceRoot, "plugins", "other-dir");
+    await mkdir(join(otherRoot, "src"), { recursive: true });
+    await writeFile(
+      join(otherRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "target-dir", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(otherRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const invalidRow = pipeline.list().find((row) => row.directoryName === "target-dir");
+      const otherRow = pipeline.list().find((row) => row.directoryName === "other-dir");
+      // The collision itself: both rows claim id "target-dir".
+      expect(invalidRow).toMatchObject({ id: "target-dir", valid: false });
+      expect(otherRow).toMatchObject({ id: "target-dir", valid: true });
+
+      // The user named the invalid row specifically — its own id AND its
+      // own directory, exactly what the renderer sends for a discovered
+      // row (#779-offers round 11 finding 3's payload change).
+      const preflight = await pipeline.uninstallPreflight("target-dir", "target-dir");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const removed = await pipeline.uninstall("target-dir", preflight.confirmationToken);
+      expect(removed.ok).toBe(true);
+
+      // The invalid directory is gone...
+      await expect(lstat(invalidRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      // ...and the unrelated, valid plugin's own FILES are completely
+      // untouched — the harm this finding names (Remove deleting the wrong
+      // plugin's source) never happens.
+      await expect(readFile(join(otherRoot, "dohc-plugin.json"), "utf8"))
+        .resolves.toContain('"name": "target-dir"');
+      // The two rows shared one id string, so this.statuses — still keyed
+      // by that string, a residual effect of the collision this fix does
+      // not extend to — transiently drops the surviving row's status
+      // alongside the deleted one's. Its files were never touched, and a
+      // rescan (the same reconciliation an ordinary watcher batch runs)
+      // finds them and reseeds it correctly.
+      pipeline.handleWatcherEvents([{ path: "plugins", operation: "update" }]);
+      await waitFor(
+        () => pipeline.list().some((row) => row.directoryName === "other-dir"),
+        "The surviving plugin's status did not reseed after the rescan.",
+      );
+      expect(
+        pipeline.list().find((row) => row.directoryName === "other-dir"),
+      ).toMatchObject({ id: "target-dir", valid: true });
     } finally {
       await pipeline.dispose();
     }
@@ -1193,7 +1293,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await mkdir(join(stateRoot, "t3"), { recursive: true });
       await writeFile(join(stateRoot, "t3", "state.sqlite"), "session-bytes");
 
-      const preflight = await pipeline.uninstallPreflight("renamed-plugin");
+      const preflight = await pipeline.uninstallPreflight("renamed-plugin", "example-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
       expect(preflight.preflight.warning?.kind).toBe("plugin-state");
       expect(preflight.preflight.stateData).toMatchObject({
@@ -1696,7 +1796,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Plugin did not reach ready after install.",
       );
 
-      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      const preflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const result = await pipeline.uninstall(
         "example-plugin",
@@ -1772,7 +1872,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Plugin did not reach ready after install.",
       );
 
-      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      const preflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const result = await pipeline.uninstall(
         "example-plugin",
@@ -2170,7 +2270,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "Plugin did not reach ready after install.",
       );
 
-      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      const preflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const failed = await pipeline.uninstall(
         "example-plugin",
@@ -2191,7 +2291,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // The record survived, so a fresh preflight + retry succeeds once the
       // underlying problem (here, the mocked one-shot failure) is gone.
-      const retryPreflight = await pipeline.uninstallPreflight("example-plugin");
+      const retryPreflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
       const retried = await pipeline.uninstall(
         "example-plugin",
@@ -2328,7 +2428,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await mkdir(join(neighbourRoot, "snapshot"), { recursive: true });
       await writeFile(join(neighbourRoot, "bundle.mjs"), "neighbour bytes\n");
 
-      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      const preflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const uninstalled = await pipeline.uninstall(
         "example-plugin",
@@ -2410,7 +2510,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(row?.approvedHash).not.toBeNull();
       expect(row?.error?.code).toBe("invalid-plugin");
 
-      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      const preflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const uninstalled = await pipeline.uninstall(
         "example-plugin",
@@ -2888,7 +2988,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
       expect(row?.approvedHash).not.toBeNull();
 
-      const preflight = await pipeline.uninstallPreflight("@scope/bar");
+      const preflight = await pipeline.uninstallPreflight("@scope/bar", "foo");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const uninstalled = await pipeline.uninstall(
         "@scope/bar",
@@ -2997,7 +3097,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           .toContain('duplicate plugin id "shared-id"');
       }
 
-      const preflight = await pipeline.uninstallPreflight("shared-id");
+      const preflight = await pipeline.uninstallPreflight("shared-id", "zeta");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const uninstalled = await pipeline.uninstall(
         "shared-id",
@@ -3078,7 +3178,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
       expect(row?.approvedHash).not.toBeNull();
 
-      const preflight = await pipeline.uninstallPreflight("shared-id");
+      const preflight = await pipeline.uninstallPreflight("shared-id", "beta");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const uninstalled = await pipeline.uninstall(
         "shared-id",
@@ -3629,7 +3729,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
 
       failDataRemoval = true;
-      const firstPreflight = await pipeline.uninstallPreflight("example-plugin");
+      const firstPreflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
       const failed = await pipeline.uninstall(
         "example-plugin",
@@ -3682,7 +3782,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // The retry is the same action from the same row, and it finishes.
       failDataRemoval = false;
-      const retryPreflight = await pipeline.uninstallPreflight("example-plugin");
+      const retryPreflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
       expect(retryPreflight.preflight.liveHash).toBeNull();
       const finished = await pipeline.uninstall(
@@ -3773,7 +3873,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pluginId).toBe("my-codex-copy");
 
       failCodexDataRemoval = true;
-      const firstPreflight = await pipeline.uninstallPreflight(pluginId);
+      const firstPreflight = await pipeline.uninstallPreflight(pluginId, pluginId);
       if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
       const failed = await pipeline.uninstall(pluginId, firstPreflight.confirmationToken);
       expect(failed.ok).toBe(false);
@@ -3799,8 +3899,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // clearing the ORIGINAL "codex" key's state and record too, not only
       // pluginId's own (which never had anything under it to begin with).
       failCodexDataRemoval = false;
-      const retryPreflight = await pipeline.uninstallPreflight(pluginId);
+      const retryPreflight = await pipeline.uninstallPreflight(pluginId, pluginId);
       if (!retryPreflight.ok) throw new Error(retryPreflight.error.message);
+      // Round 11 finding 1: this retry's OWN preflight — the sourceless
+      // path, with no discovery candidate left at all — must still name
+      // the original "codex" key's data before the user confirms deleting
+      // it, not only report on pluginId's own (empty) state.
+      expect(retryPreflight.preflight.stateData).toMatchObject({ fileCount: 1 });
+      expect(retryPreflight.preflight.stateData?.path).toContain(strandedStateRoot);
       const finished = await pipeline.uninstall(pluginId, retryPreflight.confirmationToken);
       expect(finished.ok).toBe(true);
 
@@ -4734,7 +4840,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
 
       epermArmed = true;
-      const preflight = await pipeline.uninstallPreflight("example-plugin");
+      const preflight = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       expect(preflight.ok).toBe(false);
       if (preflight.ok) throw new Error("unreachable");
       expect(preflight.error.message).toContain("could not be inspected");
@@ -4752,7 +4858,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // Once the root is inspectable again, the same uninstall proceeds.
       epermArmed = false;
-      const retry = await pipeline.uninstallPreflight("example-plugin");
+      const retry = await pipeline.uninstallPreflight("example-plugin", "example-plugin");
       expect(retry.ok).toBe(true);
     } finally {
       await pipeline.dispose();

@@ -662,9 +662,15 @@ export function usePluginCatalog(
     setBusy((current) => ({ ...current, [plugin.id]: "preflight" }));
     setErrors((current) => ({ ...current, [plugin.id]: undefined }));
     try {
+      // The directory this exact row is at, never trusted from pluginId
+      // alone: a discovered (never-installed) row's id is only ever a
+      // broken manifest's directory-derived fallback, which can coincide
+      // with some OTHER, unrelated plugin's real, valid manifest id
+      // (#779-offers round 11 finding 3).
       const result = await bridge().pluginUninstallPreflight({
         workspaceId,
         pluginId: plugin.id,
+        directoryName: plugin.directoryName,
       });
       if (epoch !== workspaceEpoch.current) return;
       if (!result.ok) {

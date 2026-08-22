@@ -40,8 +40,10 @@ const raceState = vi.hoisted(() => ({
   rmdirTrap: null as null | { path: string; run: () => Promise<void> },
   // A one-shot simulated rename failure, unrelated to any race — a locked
   // file, a full disk — keyed to the exact destination so only the
-  // intended publish call is affected.
-  renameFailureTrap: null as null | { path: string; code: string },
+  // intended publish call is affected. `run`, when set, fires right before
+  // the synthetic throw — used to replace whatever sits at the destination
+  // in the same window a real race would.
+  renameFailureTrap: null as null | { path: string; code: string; run?: () => Promise<void> },
 }));
 
 vi.mock("node:fs/promises", async () => {
@@ -93,6 +95,7 @@ vi.mock("node:fs/promises", async () => {
       const trap = raceState.renameFailureTrap;
       if (trap && destination === trap.path) {
         raceState.renameFailureTrap = null;
+        if (trap.run) await trap.run();
         throw Object.assign(new Error(`simulated ${trap.code}`), { code: trap.code });
       }
       return actual.rename(source, destination);
@@ -532,6 +535,59 @@ describe("addOfferedPlugin", () => {
     expect(added.rootPath).toBe(target);
     await expect(readFile(join(target, "dohc-plugin.json"), "utf8"))
       .resolves.toContain('"name": "codex"');
+  });
+
+  // Round 11 finding 2: removeOwnedEmptyClaim used to verify only "still an
+  // empty, real directory right now" — true of ANY fresh empty directory
+  // that happens to occupy the same path, not proof it is the one THIS
+  // call's own mkdir() created. Something else replacing the claim in the
+  // window between the mkdir landing and the failure-path cleanup, then
+  // ALSO leaving it empty, used to pass that check and get deleted anyway.
+  it("[POSIX] leaves a replaced claim alone instead of deleting it", async () => {
+    const fixture = await createFixture();
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    raceState.renameFailureTrap = {
+      path: target,
+      code: "EACCES",
+      run: async () => {
+        // The claim publishStaged's own mkdir() created is replaced with a
+        // DIFFERENT empty directory at the same path — a different device
+        // and inode, indistinguishable from the original by an emptiness
+        // check alone.
+        await rm(target, { recursive: true, force: true });
+        await mkdir(target, { recursive: true });
+        await writeFile(join(target, "marker.txt"), "not this call's claim");
+        await rm(join(target, "marker.txt"));
+      },
+    };
+
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    try {
+      await expect(
+        addOfferedPlugin({
+          builtinPluginsRoot: fixture.builtinPluginsRoot,
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
+
+    // The replacement directory survives — this call never verified it was
+    // the one its own mkdir() created, so it left it alone.
+    await expect(lstat(target)).resolves.toBeDefined();
+    // Not offered again either: from listOfferedPlugins's own perspective
+    // this is just some directory sitting there in an unknown state, the
+    // same "any state at all" refusal an offer already gives a real plugin.
+    const offers = await listOfferedPlugins(
+      fixture.builtinPluginsRoot,
+      fixture.workspaceRoot,
+      NO_EXISTING_PLUGIN_IDS,
+    );
+    expect(offers.map((offer) => offer.directoryName)).not.toContain("codex");
   });
 });
 

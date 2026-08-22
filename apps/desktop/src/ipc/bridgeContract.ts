@@ -2385,6 +2385,19 @@ export const PluginActionPayload = z.object({
   workspaceId: WORKSPACE_ID,
   pluginId: PLUGIN_ID,
 }).strict();
+
+// The directory a discovered (never-installed) row's own id can never
+// safely stand in for: that id is only ever a broken manifest's directory-
+// derived fallback, a plain string that can coincide with some OTHER,
+// unrelated plugin's real, valid manifest id. Preflight resolves the exact
+// directory the caller named, never trusting pluginId alone to disambiguate
+// which plugin that id actually means (#779-offers round 11 finding 3).
+export const PluginUninstallPreflightPayload = PluginActionPayload.extend({
+  directoryName: z.string().min(1).max(255),
+}).strict();
+export type PluginUninstallPreflightPayload = z.infer<
+  typeof PluginUninstallPreflightPayload
+>;
 export type PluginActionPayload = z.infer<typeof PluginActionPayload>;
 
 export const ListPluginsPayload = z.object({
@@ -4300,7 +4313,7 @@ export interface DohcDesktopBridge {
   enablePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   approvePlugin(payload: PluginActionPayload): Promise<PluginActionResult>;
   pluginUninstallPreflight(
-    payload: PluginActionPayload,
+    payload: PluginUninstallPreflightPayload,
   ): Promise<PluginUninstallPreflightResult>;
   pluginSizes(payload: PluginActionPayload): Promise<PluginSizesResult>;
   uninstallPlugin(payload: UninstallPluginPayload): Promise<PluginActionResult>;

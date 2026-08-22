@@ -181,15 +181,23 @@ async function ensureContainedDirectory(
 
 /**
  * Removes `target` only after confirming it is still exactly the empty
- * claim publishStaged's own mkdir() created — a real directory, not a
- * symlink, and empty — never unconditionally. A verification failure
- * (gone already, no longer empty, no longer a plain directory) means this
- * call can no longer vouch for what is there, so it leaves it alone rather
- * than delete something it cannot account for; the caller's own error
- * still propagates either way, so a genuinely stray claim is at worst
- * inert, never silently swallowed as success.
+ * claim publishStaged's own mkdir() created — same device+inode as the
+ * moment that mkdir() landed, the same identity discipline
+ * removeAddedOfferedPlugin's rollback already uses, not merely "looks like
+ * an empty directory right now": a dev+ino match is the filesystem's own
+ * answer to "is this the same directory entry", immune to a symlink or a
+ * fresh directory of the same name that raced in and happens to also be
+ * empty. A verification failure (gone already, no longer empty, no longer
+ * a plain directory, or a genuinely different entry) means this call can
+ * no longer vouch for what is there, so it leaves it alone rather than
+ * delete something it cannot account for; the caller's own error still
+ * propagates either way, so a genuinely stray claim is at worst inert,
+ * never silently swallowed as success.
  */
-async function removeOwnedEmptyClaim(target: string): Promise<void> {
+async function removeOwnedEmptyClaim(
+  target: string,
+  identity: OfferedPluginIdentity,
+): Promise<void> {
   let stats;
   try {
     stats = await lstat(target);
@@ -197,6 +205,7 @@ async function removeOwnedEmptyClaim(target: string): Promise<void> {
     return;
   }
   if (stats.isSymbolicLink() || !stats.isDirectory()) return;
+  if (stats.dev !== identity.dev || stats.ino !== identity.ino) return;
   let entries;
   try {
     entries = await readdir(target);
@@ -254,11 +263,16 @@ async function publishStaged(staged: string, target: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
   }
+  // Captured the instant the claim lands, before anything else can ever
+  // observe it — removeOwnedEmptyClaim's own failure-path cleanup verifies
+  // against this rather than trusting that whatever sits at `target` later
+  // is still the same entry this mkdir() created.
+  const claimIdentity = await targetIdentity(target);
   if (process.platform !== "win32") {
     try {
       await renameWithWindowsRetry(staged, target, (error) => error);
     } catch (error) {
-      await removeOwnedEmptyClaim(target);
+      await removeOwnedEmptyClaim(target, claimIdentity);
       throw error;
     }
     return true;

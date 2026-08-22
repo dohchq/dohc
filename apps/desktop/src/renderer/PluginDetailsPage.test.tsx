@@ -370,6 +370,7 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.pluginUninstallPreflight).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "uninstall-plugin",
+      directoryName: "uninstall-plugin",
     });
     expect(bridgeMock.uninstallPlugin).toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -839,6 +840,7 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.pluginUninstallPreflight).toHaveBeenCalledWith({
       workspaceId: "ws-1",
       pluginId: "broken-plugin",
+      directoryName: "broken-plugin",
     });
   });
 

@@ -216,6 +216,13 @@ interface UninstallConfirmation {
   /** Null when preflight found no source tree left to delete (#779 round 12 A2). */
   pluginRoot: string | null;
   liveHash: string | null;
+  /**
+   * The directory preflight resolved and reported on — uninstall() re-
+   * resolves its own candidate from THIS, never from a fresh caller-
+   * supplied value, so the row an uninstall deletes can never drift from
+   * the one its own preflight named (#779-offers round 11 finding 3).
+   */
+  directoryName: string;
 }
 
 interface FullBuildOptions {
@@ -915,23 +922,27 @@ export class PluginPipeline {
 
   uninstallPreflight(
     pluginId: string,
+    directoryName: string,
   ): Promise<PluginPipelineUninstallPreflightResult> {
     return this.enqueueActionValue(pluginId, async () => {
       try {
         const state = await this.localState();
         const record = state.plugins[pluginId];
-        const pluginRoot = this.uninstallRootPath(pluginId, record);
+        const pluginRoot = this.uninstallRootPath(directoryName, pluginId, record);
         const sourcePresent = await this.sourceRootPresent(pluginRoot);
         // The confirmation this produces has to report every identity
         // cleanup will touch, not only pluginId's own — durable state
         // filed under a record's ORIGINAL id (the same directoryName join
         // round 9 finding 3 already resolves for the actual delete) must
         // appear here too, or the dialog understates what Remove deletes
-        // (#779-offers round 10 finding 1). No discovery candidate at all
-        // (a sourceless retry) has nothing to join by directory here — its
-        // own delete path, not this display, is where round 10 finding 2
-        // resolves that case.
-        const candidate = this.uninstallableCandidate(pluginId, record);
+        // (#779-offers round 10 finding 1). A sourceless retry (no
+        // discovery candidate left) still has a directory to join by — the
+        // exact same synthetic candidate finishSourcelessUninstall itself
+        // builds and deletes under, reused here so the confirmation and the
+        // delete always agree on what is left to warn about (#779-offers
+        // round 11 finding 1).
+        const candidate = this.uninstallableCandidate(directoryName, pluginId, record)
+          ?? this.sourcelessCandidate(pluginId);
         const additionalStateRoots = candidate
           ? this.additionalCleanupStateRoots(candidate, state)
           : [];
@@ -949,6 +960,7 @@ export class PluginPipeline {
           token: confirmationToken,
           pluginRoot: sourcePresent ? resolve(pluginRoot) : null,
           liveHash: preflight.liveHash,
+          directoryName,
         });
         return {
           ok: true,
@@ -991,7 +1003,15 @@ export class PluginPipeline {
       if (confirmation.pluginRoot === null) {
         return this.finishSourcelessUninstall(pluginId, state);
       }
-      const candidate = this.requireUninstallableCandidate(pluginId, record);
+      // Resolved from what THIS confirmation's own preflight named, never
+      // a fresh lookup a caller could otherwise steer — the row an
+      // uninstall deletes can never drift from the one its own preflight
+      // reported on (#779-offers round 11 finding 3).
+      const candidate = this.requireUninstallableCandidate(
+        confirmation.directoryName,
+        pluginId,
+        record,
+      );
       // State/artifacts might be filed under the id the record was
       // ORIGINALLY installed under, not pluginId: a broken manifest gives
       // discovery a directory-derived fallback id (#779 round 8 finding 4),
@@ -2100,11 +2120,26 @@ export class PluginPipeline {
    * root, the live root and plugin data keyed by plugin id, and the state
    * record — so a broken manifest must not remove the way back (#779 round 8
    * D2).
+   *
+   * Directory is checked FIRST, against every discovered candidate —
+   * valid or not. pluginId alone is not a safe key to search discovery by:
+   * a discovered (never-installed) row's own id is only ever a broken
+   * manifest's directory-derived fallback, a plain string that can coincide
+   * with some OTHER, unrelated plugin's real, valid manifest id. Matching
+   * that id first — the id-then-fallback shape this method used to check
+   * first — would then resolve the WRONG plugin whenever the two collide,
+   * naming one row while deleting another (#779-offers round 11 finding 3).
+   * Every discovered entry carries exactly one physical directory, so a
+   * directory match can never be ambiguous the way an id match can.
    */
   private uninstallableCandidate(
+    directoryName: string,
     pluginId: string,
     record: PluginRecordShape | undefined,
   ): InstalledPluginRecord | null {
+    const byDirectory = this.discovery.find((entry) => entry.directoryName === directoryName);
+    if (byDirectory) return byDirectory;
+
     const valid = this.validCandidate(pluginId);
     if (valid) return valid;
     // Never approved: there is no installation for the root-path fallback
@@ -2130,10 +2165,11 @@ export class PluginPipeline {
   }
 
   private requireUninstallableCandidate(
+    directoryName: string,
     pluginId: string,
     record: PluginRecordShape | undefined,
   ): InstalledPluginRecord {
-    const candidate = this.uninstallableCandidate(pluginId, record);
+    const candidate = this.uninstallableCandidate(directoryName, pluginId, record);
     if (candidate) return candidate;
     throw new PipelineFailure(notDiscoveredError(pluginId));
   }
@@ -2147,10 +2183,11 @@ export class PluginPipeline {
    * be finished (#779 round 12 A2).
    */
   private uninstallRootPath(
+    directoryName: string,
     pluginId: string,
     record: PluginRecordShape | undefined,
   ): string {
-    const candidate = this.uninstallableCandidate(pluginId, record);
+    const candidate = this.uninstallableCandidate(directoryName, pluginId, record);
     if (candidate) return candidate.rootPath;
     const status = this.statuses.get(pluginId);
     if (status) return status.rootPath;
@@ -2181,6 +2218,31 @@ export class PluginPipeline {
   }
 
   /**
+   * The synthetic candidate a sourceless retry acts on — the discovered
+   * candidate shape, but built from the persisted status once discovery has
+   * nothing left there, so a partial earlier failure (source gone, state or
+   * the record still owed) still has something to resolve additional
+   * cleanup identities from. Shared by uninstallPreflight (so the
+   * confirmation reports that data too, not only what discovery can still
+   * find) and finishSourcelessUninstall (the actual delete), so both agree
+   * on exactly the same candidate (#779-offers round 11 finding 1).
+   */
+  private sourcelessCandidate(pluginId: string): InstalledPluginRecord | null {
+    const status = this.statuses.get(pluginId);
+    if (!status) return null;
+    return {
+      id: pluginId,
+      directoryName: status.directoryName,
+      rootPath: status.rootPath,
+      manifest: null,
+      iconPath: null,
+      diagnostics: status.diagnostics,
+      valid: status.valid,
+      supersededPluginId: null,
+    };
+  }
+
+  /**
    * Finishes an uninstall that has no source tree left to delete. An earlier
    * attempt deleted the root and then failed on the plugin data or the
    * record, stranding both: discovery offers no candidate, and every live
@@ -2203,17 +2265,8 @@ export class PluginPipeline {
     state: PluginLocalState,
   ): Promise<PluginPipelineActionResult> {
     const status = this.statuses.get(pluginId);
-    if (!status) return this.failure(pluginId, notDiscoveredError(pluginId));
-    const candidate: InstalledPluginRecord = {
-      id: pluginId,
-      directoryName: status.directoryName,
-      rootPath: status.rootPath,
-      manifest: null,
-      iconPath: null,
-      diagnostics: status.diagnostics,
-      valid: status.valid,
-      supersededPluginId: null,
-    };
+    const candidate = this.sourcelessCandidate(pluginId);
+    if (!status || !candidate) return this.failure(pluginId, notDiscoveredError(pluginId));
     const cleanupIds = new Set([pluginId, ...this.additionalCleanupIds(candidate, state)]);
     this.setStatus(candidate, {
       status: "uninstalling",

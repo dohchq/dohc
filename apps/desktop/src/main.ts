@@ -126,6 +126,7 @@ import {
   PluginActionPayload,
   PluginActionResult,
   PluginSizesResult,
+  PluginUninstallPreflightPayload,
   PluginUninstallPreflightResult,
   UninstallPluginPayload,
   PluginPanelSdkEvent,
@@ -7381,11 +7382,11 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PluginActionPayload.parse(payload);
+    const input = PluginUninstallPreflightPayload.parse(payload);
     try {
       const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
       return PluginUninstallPreflightResult.parse(
-        await pipeline.uninstallPreflight(input.pluginId),
+        await pipeline.uninstallPreflight(input.pluginId, input.directoryName),
       );
     } catch (error) {
       return PluginUninstallPreflightResult.parse({
