@@ -287,6 +287,32 @@ export function resolveDohcCliBinDirectory(input: {
   return resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
 }
 
+/**
+ * The dohc-mcp command a chat session config points the user's AI tool at.
+ *
+ * A packaged install ships the launcher in its cli-bin extraResource
+ * (build-cli-bin.mjs stages it; scripts/package-smoke.mjs asserts it), so
+ * the resolved command is that file's absolute path -- a bare `dohc-mcp`
+ * exists on no user's PATH. Dev keeps the bare name: the workspace's
+ * node_modules/.bin provides it. DOHC_MCP_COMMAND stays the explicit
+ * override either way.
+ */
+export function resolveDohcMcpCommand(input: {
+  isPackaged: boolean;
+  resourcesPath?: string;
+  platform?: NodeJS.Platform;
+  env?: Record<string, string | undefined>;
+}): string {
+  const override = (input.env ?? process.env).DOHC_MCP_COMMAND?.trim();
+  if (override) return override;
+  if (!input.isPackaged) return "dohc-mcp";
+  const platform = input.platform ?? process.platform;
+  return join(
+    resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin"),
+    platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp",
+  );
+}
+
 export function tokenizeRunnerCommand(command: string): string[] {
   const tokens: string[] = [];
   let token = "";

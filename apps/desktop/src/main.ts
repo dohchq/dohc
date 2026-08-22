@@ -631,6 +631,7 @@ import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
+  resolveDohcMcpCommand,
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
@@ -1074,6 +1075,19 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
           cwd: callbacks.pluginRoot,
           serviceName: "dohc-plugin-host",
           stdio: ["ignore", "ignore", "pipe"],
+          env: {
+            ...process.env,
+            // The driver plugins' chat session configs read this seam for
+            // the dohc-mcp command they hand the user's AI tool. Resolved
+            // here because only main knows whether this install is packaged
+            // (and where its shipped cli-bin launcher lives); the resolver
+            // keeps an explicit DOHC_MCP_COMMAND override first.
+            DOHC_MCP_COMMAND: resolveDohcMcpCommand({
+              isPackaged: app.isPackaged,
+              resourcesPath: (process as NodeJS.Process & { resourcesPath?: string })
+                .resourcesPath,
+            }),
+          },
         },
       );
       return createPluginUtilityTransport(child, callbacks);
@@ -2223,8 +2237,9 @@ async function runSharedChannelSyncPass(
 // The copyable MCP launch config for a workspace. The user's AI tool spawns the
 // dohc MCP stdio server with these args; --workspace scopes every tool to this
 // root (path containment), --home points it at the desktop registry/state dir.
-// DOHC_MCP_COMMAND lets a packaged build override the launcher with its shipped
-// binary; the default `dohc-mcp` is the @dohc/mcp bin on PATH.
+// The command comes from resolveDohcMcpCommand: a packaged install's own
+// shipped cli-bin launcher by absolute path, the workspace bin `dohc-mcp` in
+// dev, with DOHC_MCP_COMMAND as the explicit override.
 // The MCP profile a workspace hands out (#646): `null` for a workspace this
 // machine owns, and the share's level for a share view.
 //
@@ -2253,7 +2268,10 @@ function mcpConfigFor(
   workspacePath: string;
   home: string;
 } {
-  const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
+  const command = resolveDohcMcpCommand({
+    isPackaged: app.isPackaged,
+    resourcesPath: (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  });
   const home = stateDir();
   const args = ["--workspace", rootPath, "--home", home];
   // A share view hands out the MCP profile for its level (#646): the launched

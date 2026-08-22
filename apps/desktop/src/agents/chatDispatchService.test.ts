@@ -30,6 +30,7 @@ import {
   RUNNER_SELF_TEST_TIMEOUT_MS,
   createChatDispatchService,
   messageCanTrigger,
+  resolveDohcMcpCommand,
   tokenizeRunnerCommand,
   type ChatDispatchIdentity,
   type ChatDispatchPresenceInput,
@@ -2743,5 +2744,40 @@ describe("chatDispatchService", () => {
     expect(() => tokenizeRunnerCommand('claude -p "unterminated')).toThrow(
       "Runner command has an unterminated double quote.",
     );
+  });
+
+  describe("resolveDohcMcpCommand", () => {
+    it("resolves a packaged install to its shipped cli-bin launcher by absolute path", () => {
+      // A bare `dohc-mcp` exists on no user's PATH; a packaged chat session
+      // config must name the file the app actually ships.
+      expect(
+        resolveDohcMcpCommand({
+          isPackaged: true,
+          resourcesPath: join("C:", "apps", "dohc", "resources"),
+          platform: "win32",
+          env: {},
+        }),
+      ).toBe(join("C:", "apps", "dohc", "resources", "cli-bin", "dohc-mcp.cmd"));
+      expect(
+        resolveDohcMcpCommand({
+          isPackaged: true,
+          resourcesPath: "/opt/dohc/resources",
+          platform: "linux",
+          env: {},
+        }),
+      ).toBe(join(resolve("/opt/dohc/resources"), "cli-bin", "dohc-mcp"));
+    });
+
+    it("keeps the workspace bin in dev and the DOHC_MCP_COMMAND override everywhere", () => {
+      expect(resolveDohcMcpCommand({ isPackaged: false, env: {} })).toBe("dohc-mcp");
+      expect(
+        resolveDohcMcpCommand({
+          isPackaged: true,
+          resourcesPath: "/opt/dohc/resources",
+          platform: "linux",
+          env: { DOHC_MCP_COMMAND: " /custom/dohc-mcp " },
+        }),
+      ).toBe("/custom/dohc-mcp");
+    });
   });
 });
