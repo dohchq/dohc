@@ -345,8 +345,11 @@ describe("DesktopSettings", () => {
 
     const row = await screen.findByTestId("settings-row-zoom");
     await waitFor(() => expect(row.textContent).toContain("144%"));
-    // Give the resolved load a chance to (wrongly) repaint before asserting.
-    await new Promise((settle) => setTimeout(settle, 0));
+    // The load's callback proves it ran to completion through its
+    // applyAppearanceSettings side effect — the titlebar mirror fires
+    // unconditionally right after the guarded repaint line. Waiting on it
+    // (not a timer) guarantees the stale repaint had its chance.
+    await waitFor(() => expect(bridge.setTitlebarTheme).toHaveBeenCalled());
     expect(row.textContent).toContain("144%");
   });
 

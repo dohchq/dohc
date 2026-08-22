@@ -1258,20 +1258,31 @@ function prioritizePreferredWorkspace(
 const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
   (window) => window.isDestroyed(),
 );
+// The last zoom level any path applied (mutation, settings save, or the
+// persisted read below). Lets a window created later — the tray/dock
+// recreation path shows synchronously — start at the right scale before
+// any show(). Null only before the first read of a launch resolves.
+let knownZoomLevel: number | null = null;
+
 function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
   workspaceWindows.track(window);
   window.on("closed", () => workspaceWindows.forget(window));
-  // The persisted zoom level is a window property main owns. The read starts
-  // now and the level applies on BOTH ready-to-show and did-finish-load:
-  // createMainWindow shows the window on ready-to-show, so waiting for the
-  // load alone painted one visible frame at 100% before jumping to the
-  // persisted scale. Best-effort — a fresh install has only the default.
+  // The persisted zoom level is a window property main owns. A level any
+  // window already applied is set SYNCHRONOUSLY at creation — before any
+  // show() on either creation path — so no visible frame paints at 100%
+  // and then jumps. The async read covers the first window of a launch and
+  // reconciles on did-finish-load; best-effort — a fresh install has only
+  // the default.
+  if (knownZoomLevel !== null) {
+    window.webContents.setZoomLevel(knownZoomLevel);
+  }
   const persistedZoom = readCachedUserSettingsFile(stateDir())
     .then(({ settings }) => settings.appearance.zoomLevel)
     .catch(() => null);
   const applyPersistedZoom = () => {
     void persistedZoom.then((zoomLevel) => {
       if (zoomLevel !== null && !window.isDestroyed()) {
+        knownZoomLevel = zoomLevel;
         window.webContents.setZoomLevel(zoomLevel);
       }
     });
@@ -1324,6 +1335,7 @@ function quoteWindowsArg(value: string): string {
 // window (the PDF export renderer) must keep its own zoom, or an export
 // mid-render would change layout with the user's keystroke.
 function applyZoomLevelToWindows(zoomLevel: number): void {
+  knownZoomLevel = zoomLevel;
   for (const window of workspaceWindows.allLive()) {
     window.webContents.setZoomLevel(zoomLevel);
   }
