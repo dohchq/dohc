@@ -44,7 +44,15 @@ interface UserMessageEvent {
   clientId: string;
 }
 
-type ChatStreamEvent = PluginAgentEvent | UserMessageEvent;
+/** Log-only marker trimLog leaves where an overflow cut could not reach a
+ * turn boundary: the page renders it as a notice that earlier messages are
+ * missing, instead of replaying mid-turn as if nothing were. Never
+ * broadcast live -- it only exists in the replayed log. */
+interface HistoryTrimmedEvent {
+  kind: "history-trimmed";
+}
+
+type ChatStreamEvent = PluginAgentEvent | UserMessageEvent | HistoryTrimmedEvent;
 
 export interface ChatWebApp {
   startWebApp(webAppId: string, instanceKey: string | null): Promise<PluginWebAppStart>;
@@ -269,8 +277,12 @@ export function createChatWebApp(
   // session left behind it.
   const claimedPermissions = new Set<string>();
 
-  function frame(event: ChatStreamEvent, at: number): string {
-    return "data: " + JSON.stringify({ ...event, at }) + "\n\n";
+  /** replay marks a frame rebuilt from the buffered log for a new
+   * connection, as opposed to one happening now: the page renders replayed
+   * failures quietly (role="status") instead of re-alerting a screen
+   * reader to history it already heard. */
+  function frame(event: ChatStreamEvent, at: number, replay?: boolean): string {
+    return "data: " + JSON.stringify({ ...event, at, ...(replay ? { replay: true } : {}) }) + "\n\n";
   }
 
   /** The current-state snapshot every new connection gets first, marked so
@@ -296,11 +308,19 @@ export function createChatWebApp(
     while (boundary < eventLog.length && eventLog[boundary].event.kind !== "user-message") {
       boundary += 1;
     }
-    if (boundary < eventLog.length) cut = boundary;
+    const cutAtBoundary = boundary < eventLog.length;
+    if (cutAtBoundary) cut = boundary;
     for (const dropped of eventLog.splice(0, cut)) {
       if (dropped.event.kind !== "text-delta") continue;
       const key = dropped.event.stream + ":" + dropped.event.itemId;
       if (openDeltas.get(key) === dropped) openDeltas.delete(key);
+    }
+    // A cut that could not reach a boundary starts the replay mid-turn --
+    // leave a marker saying so instead of replaying as if nothing were
+    // missing. At the front, so repeated bare-cap trims never stack a
+    // second one.
+    if (!cutAtBoundary && eventLog[0]?.event.kind !== "history-trimmed") {
+      eventLog.unshift({ event: { kind: "history-trimmed" }, at: Date.now() });
     }
   }
 
@@ -347,7 +367,7 @@ export function createChatWebApp(
     for (const client of clients) client.write(encoded);
   }
 
-  function sessionEnded(event: PluginAgentEvent): boolean {
+  function sessionEnded(event: ChatStreamEvent): boolean {
     return (
       (event.kind === "error" && event.fatal) ||
       (event.kind === "session-state" && (event.state === "error" || event.state === "closed"))
@@ -651,7 +671,7 @@ export function createChatWebApp(
     response.write(snapshotFrame());
     for (const entry of eventLog) {
       if (entry.provisional) continue;
-      response.write(frame(entry.event, entry.at));
+      response.write(frame(entry.event, entry.at, true));
     }
     clients.add(response);
     request.once("close", () => clients.delete(response));

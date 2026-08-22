@@ -256,6 +256,31 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(status?.textContent).toBe("Failed");
   });
 
+  it("keeps replayed failures quiet -- a replayed error card is status, a live one alerts", async () => {
+    // A reconnect's replay rebuilds cards the reader already heard; only a
+    // failure happening now may interrupt as an alert.
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, { kind: "error", message: "Old failure.", fatal: true, replay: true });
+    sendEvent(eventSource, { kind: "session-state", state: "closed", reason: "Stopped", replay: true });
+    for (const card of document.querySelectorAll(".error-card")) {
+      expect(card.getAttribute("role")).toBe("status");
+    }
+    sendEvent(eventSource, { kind: "error", message: "New failure.", fatal: true });
+    const cards = document.querySelectorAll(".error-card");
+    expect(cards).toHaveLength(3);
+    expect(cards[2]?.getAttribute("role")).toBe("alert");
+    expect(cards[2]?.textContent).toContain("New failure.");
+  });
+
+  it("says earlier messages are missing when the replay was trimmed", async () => {
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, { kind: "history-trimmed", replay: true });
+    const notice = document.querySelector(".notice");
+    expect(notice?.textContent).toBe(
+      "Only recent messages are shown. Earlier ones were trimmed to save memory.",
+    );
+  });
+
   it("renders a streamed reply's fragments in order, each stream in its own card", async () => {
     const { eventSource } = await loadChatModule();
     let full = "";
@@ -269,6 +294,10 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     sendEvent(eventSource, { kind: "text-delta", itemId: "i1", stream: "reasoning", text: "thinking" });
     expect(textOf(".message.reasoning .message-body")).toBe("thinking");
     expect(textOf(".message.agent:not(.reasoning) .message-body")).toBe(full);
+    // All 40 fragments grew one Text node in place -- per-delta appends
+    // would leave one child per fragment behind.
+    const body = document.querySelector(".message.agent:not(.reasoning) .message-body");
+    expect(body?.childNodes.length).toBe(1);
   });
 
   it("batches transcript scrolling to one layout read per frame while a reply streams", async () => {

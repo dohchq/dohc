@@ -132,21 +132,23 @@ function setSessionState(state, reason, options = {}) {
   // card here the next message would silently start a fresh, context-free
   // session under what still looks like one continuous transcript.
   if (state === "closed") {
-    recoveryCard(reason || "This session ended.");
+    recoveryCard(reason || "This session ended.", options.replay);
   }
 }
 
-// Every error card is an alert: role="alert" is what a screen reader
+// A live error card is an alert: role="alert" is what a screen reader
 // actually hears -- the status region above only ever speaks the state
 // label ("Error"), so without it the explanation and next step render
-// silently. nextAction names what the user can do now, and it must be
-// true for the state the card reports: "start a new session" only when
-// the session actually ended, "try again" when only the turn failed.
-function errorCard(message, nextAction) {
+// silently. A replayed card (a reconnect rebuilding history the reader
+// already heard) renders as quiet role="status" instead of re-alerting.
+// nextAction names what the user can do now, and it must be true for the
+// state the card reports: "start a new session" only when the session
+// actually ended, "try again" when only the turn failed.
+function errorCard(message, nextAction, replay) {
   hideEmptyState();
   const card = document.createElement("section");
   card.className = "error-card";
-  card.setAttribute("role", "alert");
+  card.setAttribute("role", replay ? "status" : "alert");
   if (nextAction) {
     const heading = document.createElement("strong");
     heading.textContent = message;
@@ -164,26 +166,29 @@ function errorCard(message, nextAction) {
 }
 
 // The session actually ended: sending a message means starting over.
-function recoveryCard(message) {
-  errorCard(message, "Send a message to start a new session.");
+function recoveryCard(message, replay) {
+  errorCard(message, "Send a message to start a new session.", replay);
 }
 
 function renderText(event) {
   const key = event.stream + ":" + event.itemId;
-  let body = textItems.get(key);
-  if (!body) {
-    ({ body } = messageCard(
+  let tail = textItems.get(key);
+  if (!tail) {
+    const { body } = messageCard(
       event.stream === "reasoning" ? "Reasoning" : "Codex",
       "",
       event.stream === "reasoning" ? "agent reasoning" : "agent",
       event.at,
-    ));
-    textItems.set(key, body);
+    );
+    // One Text node per streamed message, grown in place: `textContent +=`
+    // re-serialized and replaced the whole accumulated reply on every
+    // delta (quadratic over a long answer), and appending a node per delta
+    // left thousands of Text children behind.
+    tail = document.createTextNode("");
+    body.append(tail);
+    textItems.set(key, tail);
   }
-  // Appends a new text node: `textContent +=` re-serialized and replaced
-  // the whole accumulated reply on every delta, which is quadratic over a
-  // long answer.
-  body.append(event.text);
+  tail.appendData(event.text);
   scrollToLatest();
 }
 
@@ -379,7 +384,7 @@ function renderEvent(event) {
   }
   switch (event.kind) {
     case "session-state":
-      setSessionState(event.state, event.reason);
+      setSessionState(event.state, event.reason, { replay: event.replay });
       break;
     case "user-message":
       renderUserMessage(event);
@@ -407,16 +412,32 @@ function renderEvent(event) {
       // Ready), so the next action is a retry -- "start a new session"
       // would be false here.
       if (event.status === "failed") {
-        errorCard(event.errorMessage || "This response failed.", "Send a message to try again.");
+        errorCard(
+          event.errorMessage || "This response failed.",
+          "Send a message to try again.",
+          event.replay,
+        );
       }
       break;
+    case "history-trimmed": {
+      // The server's log could not keep this replay whole (one turn
+      // outgrew the whole buffer): say so instead of starting mid-turn as
+      // if nothing were missing.
+      hideEmptyState();
+      const notice = document.createElement("p");
+      notice.className = "notice";
+      notice.textContent = "Only recent messages are shown. Earlier ones were trimmed to save memory.";
+      transcript.append(notice);
+      scrollToLatest();
+      break;
+    }
     case "auth":
       if (event.detail) messageCard("Codex", event.detail, "agent", event.at);
       break;
     case "error":
       if (event.fatal) {
         setSessionState("error");
-        recoveryCard(event.message);
+        recoveryCard(event.message, event.replay);
       } else {
         messageCard("Codex", event.message, "agent", event.at);
         announce(event.message);

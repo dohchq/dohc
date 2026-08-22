@@ -212,9 +212,10 @@ function fakeDriver(
 }
 
 interface EventStream {
-  /** The event with `at` (publish time) and `snapshot` (the initial
-   * connection-state frame's own marker) stripped, for every existing
-   * assertion that only cares about the event's own semantic content. */
+  /** The event with its wire metadata stripped -- `at` (publish time),
+   * `snapshot` (the initial connection-state frame's own marker), and
+   * `replay` (a frame rebuilt from the log rather than happening now) --
+   * for every assertion that only cares about semantic content. */
   next(): Promise<PluginAgentEvent | { kind: "user-message"; text: string; clientId: string }>;
   /** The exact wire object, `at`/`snapshot` included -- for the tests that
    * specifically pin those two fields. */
@@ -256,7 +257,7 @@ async function eventStream(url: string, token: string): Promise<EventStream> {
 
   return {
     async next() {
-      const { at: _at, snapshot: _snapshot, ...rest } = await nextRaw();
+      const { at: _at, snapshot: _snapshot, replay: _replay, ...rest } = await nextRaw();
       return rest as PluginAgentEvent | { kind: "user-message"; text: string; clientId: string };
     },
     nextRaw,
@@ -532,6 +533,50 @@ describe("Codex chat web app", () => {
     await after.next(); // snapshot
     expect(await after.next()).toEqual({ kind: "user-message", text: "Hello", clientId: "c1" });
     await after.close();
+  });
+
+  it("marks replayed frames, and only replayed frames, as replay", async () => {
+    // The page renders a replayed failure quietly (role="status") instead
+    // of re-alerting a screen reader to history it already heard -- this
+    // marker is how it tells the difference.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "Hello", clientId: "c1" }, token);
+
+    const reattached = await eventStream(url, token);
+    expect((await reattached.nextRaw()).snapshot).toBe(true);
+    const replayed = await reattached.nextRaw();
+    expect(replayed.kind).toBe("user-message");
+    expect(replayed.replay).toBe(true);
+
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "boom", fatal: false });
+    const live = await reattached.nextRaw();
+    expect(live.kind).toBe("error");
+    expect(live.replay).toBeUndefined();
+    await reattached.close();
+  });
+
+  it("marks the cut when one turn overflows the whole log, so a replay says history is missing", async () => {
+    // No user-message boundary exists ahead of the cut here, so the bare
+    // cap applies -- and the replay must open by saying earlier messages
+    // are gone rather than silently starting mid-turn.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "Question" }, token);
+    for (let index = 0; index < 550; index += 1) {
+      fake.startInputs[0]?.onEvent({
+        kind: "item",
+        phase: "completed",
+        item: { id: `t-${index}`, type: "command", title: "Run", status: "completed" },
+      });
+    }
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({ kind: "history-trimmed" });
+    // What follows the notice is a whole card, never a fragment of one.
+    expect((await reattached.next()).kind).toBe("item");
+    await reattached.close();
   });
 
   it("carries a long streamed reply whole through a reload, never starting mid-delta", async () => {
