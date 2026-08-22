@@ -4,6 +4,7 @@ import {
   createUserSettingsWriteQueue,
   createZoomMutation,
   nextZoomLevel,
+  resolvePersistedZoomApplication,
 } from "./windowZoom";
 
 function storeAt(zoomLevel: number) {
@@ -47,6 +48,24 @@ describe("nextZoomLevel", () => {
     expect(nextZoomLevel(5, "in")).toBe(5);
     expect(nextZoomLevel(-5, "out")).toBe(-5);
     expect(nextZoomLevel(3, "reset")).toBe(0);
+  });
+});
+
+describe("resolvePersistedZoomApplication", () => {
+  it("the first level of a launch applies everywhere, hosts and guests", () => {
+    // A guest attached before the launch read resolved would otherwise stay
+    // at 100% until the next zoom change.
+    expect(resolvePersistedZoomApplication(2, null)).toEqual({
+      applyEverywhere: 2,
+    });
+  });
+
+  it("a user zoom that landed first outranks the launch read", () => {
+    expect(resolvePersistedZoomApplication(2, 1)).toEqual({ applyToWindow: 1 });
+  });
+
+  it("with nothing known and nothing persisted there is nothing to apply", () => {
+    expect(resolvePersistedZoomApplication(null, null)).toBeNull();
   });
 });
 

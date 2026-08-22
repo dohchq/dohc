@@ -363,6 +363,7 @@ import { buildMenuTemplate } from "./window/applicationMenu";
 import {
   createUserSettingsWriteQueue,
   createZoomMutation,
+  resolvePersistedZoomApplication,
 } from "./window/windowZoom";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
@@ -1636,9 +1637,17 @@ function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
     .catch(() => null);
   const applyPersistedZoom = () => {
     void persistedZoom.then((zoomLevel) => {
-      if (zoomLevel !== null && !window.isDestroyed()) {
-        knownZoomLevel = zoomLevel;
-        window.webContents.setZoomLevel(zoomLevel);
+      const application = resolvePersistedZoomApplication(
+        zoomLevel,
+        knownZoomLevel,
+      );
+      if (application === null) return;
+      if ("applyEverywhere" in application) {
+        // One path for hosts AND guests: a guest attached before the read
+        // resolved must not stay at 100% until the next zoom change.
+        applyZoomLevelToWindows(application.applyEverywhere);
+      } else if (!window.isDestroyed()) {
+        window.webContents.setZoomLevel(application.applyToWindow);
       }
     });
   };

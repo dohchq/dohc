@@ -145,6 +145,15 @@ describe("plugin web app main-process wiring", () => {
       "for(constrecordofpluginWebAppViews.all()){",
     );
     expect(squeeze(apply)).toContain("guest.setZoomLevel(zoomLevel);");
+
+    // The launch read routes its first application through that same
+    // window-wide apply (behavior pinned in windowZoom.test.ts) — a
+    // host-only apply here would leave an early-attached guest at 100%.
+    const track = functionSource("function trackWorkspaceWindow(");
+    expect(squeeze(track)).toContain("resolvePersistedZoomApplication(");
+    expect(squeeze(track)).toContain(
+      "applyZoomLevelToWindows(application.applyEverywhere);",
+    );
   });
 
   it("applies bounds only through the registry's sender-and-generation guard", () => {

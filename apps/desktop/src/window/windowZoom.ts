@@ -11,6 +11,22 @@ export function nextZoomLevel(current: number, step: ZoomStep): number {
   return clampZoomLevel(current + (step === "in" ? 1 : -1));
 }
 
+/**
+ * What a window's launch read should do when it resolves. The FIRST level of
+ * a launch applies everywhere — hosts and guests — through the one window-wide
+ * apply, or a guest attached before the read resolved would stay at 100%
+ * until the next zoom change. A user zoom that landed first set the known
+ * level and outranks the read: only this window still needs it.
+ */
+export function resolvePersistedZoomApplication(
+  persisted: number | null,
+  known: number | null,
+): { applyEverywhere: number } | { applyToWindow: number } | null {
+  if (known !== null) return { applyToWindow: known };
+  if (persisted !== null) return { applyEverywhere: persisted };
+  return null;
+}
+
 export type UserSettingsWriteQueue = <T>(
   task: () => Promise<T>,
 ) => Promise<T>;
