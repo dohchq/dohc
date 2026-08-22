@@ -467,6 +467,18 @@ describe("plugin panel main-process wiring", () => {
       "activeCommandClaims.raiseDrainBarrier(",
       raiseAt,
     );
+    const lowerCallAt = createPipeline.indexOf("lower();", raiseCallAt);
+    const consumeAt = createPipeline.indexOf(
+      "activeCommandClaims.consumeStartedHost(key);",
+      lowerCallAt,
+    );
+    // MUTATION (stale marker survives a rebuild): a marker not settled at
+    // this same lower survives a successful in-queue rebuild that replaced
+    // the runtime — a later, unrelated release then finds it and stops the
+    // replacement it never claimed (#779 round 19 finding 3).
+    expect(lowerCallAt).toBeGreaterThan(raiseCallAt);
+    expect(consumeAt).toBeGreaterThan(lowerCallAt);
+
     const drainedAt = createPipeline.indexOf(
       "awaitCommandClaimsDrained: (pluginId) =>",
       raiseCallAt,
@@ -558,17 +570,17 @@ describe("plugin panel main-process wiring", () => {
     // with every other caller instead of trusting each one's own point
     // check.
     const ensurePipelineFn = functionSource("async function ensurePluginPipeline(");
-    const stillWantedAt = ensurePipelineFn.indexOf("stillWanted: () =>");
-    const stillWantedCallAt = ensurePipelineFn.indexOf(
+    const createOnlyWhileAt = ensurePipelineFn.indexOf("createOnlyWhile: () =>");
+    const createOnlyWhileCallAt = ensurePipelineFn.indexOf(
       "isWorkspaceOpenInAnyWindow(workspace.workspaceId)",
-      stillWantedAt,
+      createOnlyWhileAt,
     );
-    // MUTATION (zombie pipeline): no stillWanted wire-up leaves
+    // MUTATION (zombie pipeline): no createOnlyWhile wire-up leaves
     // ensureWorkspacePipeline's own gate a no-op — a stale caller that
     // waited out a workspace's disposal creates a fresh pipeline for it
     // anyway, even though no window has that workspace open any more.
-    expect(stillWantedAt).toBeGreaterThan(-1);
-    expect(stillWantedCallAt).toBeGreaterThan(stillWantedAt);
+    expect(createOnlyWhileAt).toBeGreaterThan(-1);
+    expect(createOnlyWhileCallAt).toBeGreaterThan(createOnlyWhileAt);
   });
 
   it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {
@@ -627,5 +639,34 @@ describe("plugin panel main-process wiring", () => {
     expect(rebuildAt).toBeGreaterThan(-1);
     expect(rebuildRevokeAt).toBeGreaterThan(rebuildAt);
     expect(rebuildStopWebAppsAt).toBeGreaterThan(rebuildRevokeAt);
+  });
+
+  it("never tears down a workspace's plugins while another window still has it open (#779 round 19 finding 2)", () => {
+    const open = handler("openWorkspace");
+    const switchAt = open.indexOf(
+      "if (\n      previousWorkspaceId &&\n      previousWorkspaceId !== workspace.workspaceId &&\n      !isWorkspaceOpenInAnyWindow(previousWorkspaceId)\n    ) {",
+    );
+    const switchStopAt = open.indexOf(
+      "await stopPluginWorkspace(previousWorkspaceId);",
+      switchAt,
+    );
+    const destroyedAt = open.indexOf('event.sender.once("destroyed"');
+    const destroyedGateAt = open.indexOf(
+      "if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {",
+      destroyedAt,
+    );
+    const destroyedStopAt = open.indexOf(
+      "void stopPluginWorkspace(activeWorkspaceId);",
+      destroyedGateAt,
+    );
+    // MUTATION (cross-window teardown): either gate missing lets one
+    // window's switch or close stop a workspace a second window still has
+    // open — that second window's own in-flight command then runs against
+    // a host the first window just tore down.
+    expect(switchAt).toBeGreaterThan(-1);
+    expect(switchStopAt).toBeGreaterThan(switchAt);
+    expect(destroyedAt).toBeGreaterThan(-1);
+    expect(destroyedGateAt).toBeGreaterThan(destroyedAt);
+    expect(destroyedStopAt).toBeGreaterThan(destroyedGateAt);
   });
 });

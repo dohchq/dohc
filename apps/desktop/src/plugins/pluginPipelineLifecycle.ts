@@ -9,6 +9,9 @@
  * promise a second pipeline is created over the same userData snapshot and
  * bundle roots while the first one is still writing them (#779 round 11 A3).
  */
+/** Whether this workspace is still wanted enough to create a pipeline for. */
+type PipelineCreateGuard = () => boolean;
+
 export async function ensureWorkspacePipeline<T>(input: {
   live: Map<string, T>;
   disposals: Map<string, Promise<void>>;
@@ -16,15 +19,8 @@ export async function ensureWorkspacePipeline<T>(input: {
   create: () => T;
   start: (pipeline: T) => Promise<void>;
   dispose: (pipeline: T) => Promise<void>;
-  /**
-   * Checked once no existing or disposing pipeline remains — including
-   * after waiting out a disposal already in flight, since a workspace
-   * switch can abandon this workspace during that whole wait. False
-   * refuses instead of creating: every caller shares this gate, so none
-   * can resurrect a workspace nothing has open by racing its own point
-   * check (#779 round 18 finding 2).
-   */
-  stillWanted?: () => boolean;
+  /** Checked right before create(); false refuses instead (#779 round 18/19). */
+  createOnlyWhile?: PipelineCreateGuard;
 }): Promise<T> {
   const { live, disposals } = input;
   for (;;) {
@@ -42,7 +38,7 @@ export async function ensureWorkspacePipeline<T>(input: {
     await disposal.catch(() => undefined);
   }
 
-  if (input.stillWanted && !input.stillWanted()) {
+  if (input.createOnlyWhile && !input.createOnlyWhile()) {
     throw new Error(
       `Workspace "${input.workspaceId}" is no longer open. Open it again and retry.`,
     );

@@ -1260,21 +1260,24 @@ export class PluginPipeline {
     if (this.disposed) return;
     this.disposed = true;
     this.abortController.abort();
-    this.options.pluginHost.bumpGeneration();
     await this.discoveryTail.catch(() => undefined);
     await Promise.all(
       [...this.queues.values()]
         .map((queue) => queue.draining)
         .filter((draining): draining is Promise<void> => draining !== null),
     );
-    // Drains every plugin's command claims before stopAll() severs their
-    // transports, so a command still mid-flight is never cut off partway
-    // through.
+    // Drains every plugin's command claims before bumpGeneration/stopAll()
+    // abort their transports, so a command still mid-flight gets the wait
+    // this call exists to grant instead of being cut off the instant
+    // dispose starts (#779 round 19 finding 4: bumpGeneration aborts every
+    // spawn's in-flight SDK work synchronously, so it must run after this
+    // wait, not before it).
     const pluginIds = [...this.statuses.keys()];
     try {
       await Promise.all(
         pluginIds.map((pluginId) => this.options.awaitCommandClaimsDrained?.(pluginId)),
       );
+      this.options.pluginHost.bumpGeneration();
       await this.options.pluginHost.stopAll();
     } finally {
       // Resets rather than just lowers: this pipeline is gone for good,
@@ -1695,6 +1698,18 @@ export class PluginPipeline {
     const lowerBarrier = await this.options.awaitCommandClaimsDrained?.(pluginId);
     try {
       await this.options.pluginHost.stop(pluginId);
+    } catch (error) {
+      // PluginHost deletes its own record in shutdown()'s own finally
+      // regardless of whether the transport's own dispose() rejected, so a
+      // rejection here does not mean this runtime is still running. Only a
+      // record that is genuinely still there re-throws — this stop's own
+      // consequences below must not fire for a plugin that might still be
+      // alive (#779 round 19 finding 5).
+      if (this.options.pluginHost.getStatus(pluginId) !== undefined) throw error;
+      console.error(
+        `[PluginPipeline] stop for "${pluginId}" rejected after its record was already gone.`,
+        error,
+      );
     } finally {
       lowerBarrier?.();
     }

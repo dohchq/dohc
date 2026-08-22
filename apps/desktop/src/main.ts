@@ -1050,10 +1050,20 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       notifyPluginStatusChanged(workspace.workspaceId, event),
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
-    raiseCommandClaimsBarrier: (pluginId) =>
-      activeCommandClaims.raiseDrainBarrier(
-        pluginLifecycleKey(workspace.workspaceId, pluginId),
-      ),
+    raiseCommandClaimsBarrier: (pluginId) => {
+      const key = pluginLifecycleKey(workspace.workspaceId, pluginId);
+      const lower = activeCommandClaims.raiseDrainBarrier(key);
+      return () => {
+        lower();
+        // The action this barrier belonged to just decided this key's
+        // runtime — stopped it, or replaced it with a fresh instance the
+        // action itself now owns. Either way, a marker from before that
+        // decision no longer describes what's running, so it settles here
+        // instead of surviving to misattribute a later, unrelated release
+        // (#779 round 19 finding 3).
+        activeCommandClaims.consumeStartedHost(key);
+      };
+    },
     awaitCommandClaimsDrained: (pluginId) =>
       awaitCommandClaimsDrainedWithDeadline(
         pluginId,
@@ -1080,7 +1090,7 @@ async function ensurePluginPipeline(
     create: () => createPluginPipeline(workspace),
     start: (pipeline) => pipeline.start(),
     dispose: (pipeline) => disposePluginPipeline(workspace.workspaceId, pipeline),
-    stillWanted: () => isWorkspaceOpenInAnyWindow(workspace.workspaceId),
+    createOnlyWhile: () => isWorkspaceOpenInAnyWindow(workspace.workspaceId),
   });
 }
 
@@ -1255,10 +1265,11 @@ let preferredWorkspaceId: string | null = null;
 const activeWorkspaceIdBySender = new Map<number, string>();
 const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
 
-// True while some window still has this workspace open — the fact
-// ensurePluginPipeline's own stillWanted check is built on (#779 round 18
-// finding 2): a workspace no other window has open is not this function's
-// to decide alone, so every caller shares the same answer.
+// True while some window still has this workspace open — the one answer
+// both pipeline creation (createOnlyWhile) and pipeline teardown below
+// share, so a switch or close in one window can never act on a workspace
+// another window still has open (#779 round 18 finding 2, round 19
+// finding 2).
 function isWorkspaceOpenInAnyWindow(workspaceId: string): boolean {
   for (const activeId of activeWorkspaceIdBySender.values()) {
     if (activeId === workspaceId) return true;
@@ -7559,12 +7570,21 @@ function registerIpcHandlers(
         pluginPanelSdkAuthorities.revokeSender(senderId);
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
-        if (activeWorkspaceId) {
+        // This sender's own entry is already gone above, so a true result
+        // here means another window, not a stale read of this one.
+        if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
           void stopPluginWorkspace(activeWorkspaceId);
         }
       });
     }
-    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+    // Set above, before this read: a true result here means another window
+    // has it, not a stale read of this sender's own now-superseded entry
+    // (#779 round 19 finding 2).
+    if (
+      previousWorkspaceId &&
+      previousWorkspaceId !== workspace.workspaceId &&
+      !isWorkspaceOpenInAnyWindow(previousWorkspaceId)
+    ) {
       await stopPluginWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();

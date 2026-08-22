@@ -288,7 +288,7 @@ describe("workspace plugin pipeline lifecycle", () => {
     expect(disposals.size).toBe(0);
   });
 
-  it("refuses to create a pipeline for a workspace nothing has open once the disposal it waited on finishes (#779 round 18 finding 2)", async () => {
+  it("refuses to create a pipeline for a workspace nothing has open once the disposal it waited on finishes (#779 round 18 finding 2, round 19 finding 1)", async () => {
     const live = new Map<string, FakePipeline>();
     const disposals = new Map<string, Promise<void>>();
     const events: string[] = [];
@@ -311,7 +311,7 @@ describe("workspace plugin pipeline lifecycle", () => {
         dispose: async (pipeline) => {
           pipeline.disposed = true;
         },
-        stillWanted: () => wanted,
+        createOnlyWhile: () => wanted,
       });
 
     await ensure();
@@ -339,7 +339,7 @@ describe("workspace plugin pipeline lifecycle", () => {
     teardown.resolve();
     await stopping;
 
-    // MUTATION (zombie pipeline): a stillWanted check that never runs, or
+    // MUTATION (zombie pipeline): a createOnlyWhile check that never runs, or
     // that only main.ts's own point-in-time checks provide, lets this stale
     // caller create a fresh pipeline for a workspace nothing has open —
     // resurrecting it instead of refusing.

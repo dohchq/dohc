@@ -2774,7 +2774,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         onStatusChange: (event) => {
           if (event.kind === "changed") statuses.push(event.plugin.status);
         },
-        raiseCommandClaimsBarrier: (pluginId) => commandClaims.raiseDrainBarrier(pluginId),
+        // Mirrors main.ts's own wiring: the marker settles at the same
+        // lower every barrier-raising action already shares, not only on
+        // an explicit reset (#779 round 19 finding 3).
+        raiseCommandClaimsBarrier: (pluginId) => {
+          const lower = commandClaims.raiseDrainBarrier(pluginId);
+          return () => {
+            lower();
+            commandClaims.consumeStartedHost(pluginId);
+          };
+        },
         awaitCommandClaimsDrained: async (pluginId) => {
           const gate = nextCommandDrainGate;
           const drained = commandClaims.drain(pluginId);
@@ -3811,7 +3820,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
-    it("clears the drain barrier even when the stop itself rejects (round-12 finding 3)", async () => {
+    it("treats a stop as settled once its record is confirmed gone, even when the transport's own dispose rejects, and still clears the drain barrier (round-12 finding 3, round-19 finding 5)", async () => {
       const setup = await setupEstablishedPlugin();
       try {
         const key = "example-plugin";
@@ -3820,9 +3829,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
         const rebuilt = await setup.pipeline.rebuild("example-plugin");
 
-        // The stop's own rejection surfaces as the retry's own failure —
-        // this pin only cares that the barrier didn't leak because of it.
-        expect(rebuilt.ok).toBe(false);
+        // PluginHost's own shutdown() deletes its record in its own
+        // finally regardless of whether transport.dispose() rejected —
+        // the runtime did stop, so this must not fail the whole retry
+        // over a cleanup step that failed after the fact.
+        expect(rebuilt.ok).toBe(true);
         expect(setup.commandClaims.isDraining(key)).toBe(false);
 
         // A later invocation proceeds normally against whatever state is
@@ -3850,8 +3861,34 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
         const disabled = await setup.pipeline.disable("example-plugin");
 
-        expect(disabled.ok).toBe(false);
+        // The record is confirmed gone despite the transport's own dispose
+        // rejecting, so this succeeds too (round-19 finding 5).
+        expect(disabled.ok).toBe(true);
         expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("runs the stop's own boundary consequences even when the transport's own dispose rejects (round-19 finding 5)", async () => {
+      const setup = await setupEstablishedPlugin();
+      let oldRuntimeStoppedCalls = 0;
+      try {
+        await setup.failEstablishedBuild();
+        setup.failNextStop();
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            oldRuntimeStoppedCalls += 1;
+          },
+        });
+
+        // The boundary callback (a panel/web-app teardown in main.ts) must
+        // still fire once the record is confirmed gone — a runtime that
+        // died leaves nothing for a stale grant or view to straddle into,
+        // whether or not its own transport cleanup rejected on the way out.
+        expect(rebuilt.ok).toBe(true);
+        expect(oldRuntimeStoppedCalls).toBe(1);
       } finally {
         await setup.pipeline.dispose();
       }
@@ -3900,6 +3937,29 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
     }, 60_000);
 
+    it("bumps PluginHost's generation only after the claims drain, not before, so in-flight SDK work is not cut off the instant dispose starts (round-19 finding 4)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      const bumpSpy = vi.spyOn(setup.pipeline.host, "bumpGeneration");
+      setup.commandClaims.claim(key);
+
+      const disposing = setup.pipeline.dispose();
+
+      await waitFor(
+        () => setup.commandClaims.isDraining(key),
+        "Disposal never marked the drain barrier.",
+      );
+      // The claim above is still outstanding, so the drain wait has not
+      // finished — bumpGeneration, which aborts every spawn's in-flight
+      // SDK work synchronously, must not have run yet.
+      expect(bumpSpy).not.toHaveBeenCalled();
+
+      setup.commandClaims.release(key);
+      await disposing;
+
+      expect(bumpSpy).toHaveBeenCalledTimes(1);
+    }, 60_000);
+
     it("clears every plugin's drain barrier even when workspace disposal's own stop rejects (round-12 finding 3, dispose path)", async () => {
       const setup = await setupEstablishedPlugin();
       const key = "example-plugin";
@@ -3927,6 +3987,29 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // later session's own host, opened under this same lifecycle
       // key, to whatever this one never consumed.
       expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
+    }, 60_000);
+
+    it("clears a cold-start command's on-demand marker once an in-queue rebuild's barrier lowers, so a later release does not stop the replacement (round-19 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // A command cold-started this host before the rebuild below — its
+        // own on-demand marker, set the same way main.ts's
+        // invokePluginCommand does on a claimless cold start.
+        setup.commandClaims.markStartedHost(key);
+
+        await setup.failEstablishedBuild();
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+        expect(rebuilt.ok).toBe(true);
+
+        // The rebuild's own barrier just lowered, replacing the runtime as
+        // the workspace's own enabled process — the pre-rebuild marker no
+        // longer describes what's running, so a later, unrelated release
+        // must not consume it and stop the replacement it never claimed.
+        expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
     }, 60_000);
 
     it("keeps the drain barrier up across a door-write reconcile and the watcher-driven identity removal queued behind it, clearing only once both settle (round-16 finding 2, round-17 finding 4)", async () => {
