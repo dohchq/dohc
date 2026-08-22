@@ -2,6 +2,7 @@ import {
   defaultWorkspaceRoot,
   isSharedWithMePath,
   normalizeAbsolutePath,
+  preferredBuildOutput,
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
@@ -117,6 +118,15 @@ import {
   InvokePluginCommandResult,
   InvokePluginPanelSdkPayload,
   InvokePluginPanelSdkResult,
+  ListSitesPayload,
+  ListSitesResult,
+  GetSitePreviewLogsPayload,
+  GetSitePreviewLogsResult,
+  SitePackagePayload,
+  SitePackageResult,
+  StartSitePreviewPayload,
+  StartSitePreviewResult,
+  StopSitePreviewPayload,
   ListPluginsPayload,
   PluginSettingsResult,
   SetPluginSettingsPayload,
@@ -619,6 +629,30 @@ import {
   type LiveAgentDispatchStoreHandle,
 } from "./agents/liveAgentDispatchStore";
 import {
+  buildOutputSiteRoot,
+  staticPreviewTargetForSite,
+  getSitePackage,
+  listSitePackages,
+  requireExactSiteRoot,
+  type SitePackageInfo,
+} from "./workspaces/sitePackage";
+import {
+  buildSite,
+  startSiteDevServer,
+  startStaticSitePreview,
+  WILL_QUIT_BUDGET_MS,
+  type SiteLogEntry,
+} from "./workspaces/siteRunner";
+import { commandForSiteScript } from "./workspaces/siteScriptCommand";
+import {
+  createSitePreviewLifecycle,
+  createSitePreviewStartRegistry,
+  stopSitePreviewForRequest,
+  withActiveWorkspaceForSiteRead,
+  withKeyedStartLock,
+  type SitePreviewHandle,
+} from "./workspaces/sitePreviewLifecycle";
+import {
   startStaticDirectoryPreview,
   type StaticDirectoryPreview,
 } from "./security/staticDirectoryPreview";
@@ -859,6 +893,22 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
   }
 }
 
+// Dev and build preview modes execute the folder's own code. A shared view
+// holds someone else's code, so it can only serve an existing static artifact.
+function assertSitePreviewMode(
+  workspaceId: string,
+  mode: "static" | "dev" | "build",
+): void {
+  if (mode !== "static" && sharedViewOf(workspaceId)) {
+    throw new Error(
+      "Live and built site previews run the site's own code, so they're disabled in a shared view. Use the static preview.",
+    );
+  }
+}
+
+const sitePreviews = createSitePreviewLifecycle({
+  allowOrigin: allowLoopbackFrameOrigin,
+});
 const pluginPipelines = new Map<string, PluginPipeline>();
 const pluginPipelineDisposals = new Map<string, Promise<void>>();
 // One per workspace, alive for as long as that workspace's plugin pipeline is.
@@ -866,6 +916,7 @@ const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
 // Also one per workspace, so one workspace's settled batch can only ever
 // reach the plugins running in that workspace.
 const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>();
+const sitePreviewStarts = createSitePreviewStartRegistry();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
@@ -1154,26 +1205,207 @@ function advanceRendererGeneration(senderId: number): void {
   rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
 }
 
-async function withKeyedStartLock<T>(
-  locks: Map<string, Promise<void>>,
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = locks.get(key) ?? Promise.resolve();
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.catch(() => undefined).then(() => current);
-  locks.set(key, queued);
+async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
+  await Promise.all(
+    sitePreviews.previewsForWorkspace(workspaceId).map(({ siteRoot, handle }) =>
+      sitePreviews
+        .withStartLock(workspaceId, siteRoot, () => sitePreviews.stop(workspaceId, siteRoot, handle))
+        .catch((error) => {
+          console.warn("[desktop] failed to stop site preview during workspace switch", error);
+        }),
+    ),
+  );
+}
 
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (locks.get(key) === queued) locks.delete(key);
+function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
+  const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
+  if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
+    throw new Error(`Build output escaped the workspace: ${absolutePath}`);
   }
+  return rel;
+}
+
+function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: string): string {
+  if (siteRoot === ".") return workspaceRelativeOutput;
+  if (workspaceRelativeOutput === siteRoot) return ".";
+  if (!workspaceRelativeOutput.startsWith(`${siteRoot}/`)) {
+    throw new Error(
+      `Build output must be within the site directory: ${workspaceRelativeOutput}`,
+    );
+  }
+  return workspaceRelativeOutput.slice(siteRoot.length + 1);
+}
+
+function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
+  const text = logs
+    .slice(-3)
+    .map((log) => log.text)
+    .join("\n")
+    .trim();
+  return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
+}
+
+type SitePreviewStartInput = {
+  workspaceId: string;
+  workspaceRoot: string;
+  site: SitePackageInfo;
+  mode: "static" | "dev" | "build";
+  isCurrent: () => boolean;
+  signal: AbortSignal;
+  sharedView: boolean;
+};
+
+async function rememberCurrentSitePreviewHandle(
+  input: SitePreviewStartInput,
+  handle: SitePreviewHandle,
+): Promise<void> {
+  if (!input.isCurrent()) {
+    await handle.stop().catch(() => undefined);
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
+  sitePreviews.remember(input.workspaceId, input.site.root, handle);
+}
+
+type StartedSitePreview = Omit<StartSitePreviewResult, "exited"> & {
+  handle: SitePreviewHandle;
+};
+
+async function startPreviewForSite(
+  input: SitePreviewStartInput,
+): Promise<StartedSitePreview> {
+  return sitePreviews.withStartLock(input.workspaceId, input.site.root, () =>
+    startPreviewForSiteUnlocked(input),
+  );
+}
+
+async function startPreviewForSiteUnlocked(
+  input: SitePreviewStartInput,
+): Promise<StartedSitePreview> {
+  if (!input.isCurrent()) {
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
+  try {
+    await sitePreviews.stop(input.workspaceId, input.site.root);
+  } catch (error) {
+    console.warn("[desktop] failed to stop previous site preview", error);
+  }
+  if (!input.isCurrent()) {
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
+
+  if (input.mode === "static") {
+    const target = staticPreviewTargetForSite(input.site, {
+      sharedView: input.sharedView,
+    });
+    const entry = target.entry ?? undefined;
+    if ((input.sharedView || input.site.authority.kind === "share") && !entry) {
+      throw new Error(
+        "This shared site does not include a built artifact. Ask the owner to build and share it again.",
+      );
+    }
+    const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
+      authority: input.site.authority,
+      entry,
+    });
+    await rememberCurrentSitePreviewHandle(input, handle);
+    return {
+      handle,
+      siteRoot: input.site.root,
+      mode: input.mode,
+      url: handle.url,
+      logs: [],
+    };
+  }
+
+  if (input.mode === "dev") {
+    if (
+      !input.site.configuredScripts.dev &&
+      !input.site.scripts.dev &&
+      !input.site.configuredScripts.start &&
+      !input.site.scripts.start
+    ) {
+      throw new Error(`Site has no dev or start script: ${input.site.root}`);
+    }
+    const script =
+      input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
+    const command = commandForSiteScript(input.site, script);
+    const handle = await startSiteDevServer({
+      workspaceRoot: input.workspaceRoot,
+      siteRoot: input.site.root,
+      command: command.command,
+      args: command.args,
+      signal: input.signal,
+    });
+    await rememberCurrentSitePreviewHandle(input, handle);
+    return {
+      handle,
+      siteRoot: input.site.root,
+      mode: input.mode,
+      url: handle.url,
+      logs: handle.logs(),
+    };
+  }
+
+  let logs: SiteLogEntry[] = [];
+  let build:
+    | {
+        ok: boolean;
+        command: string;
+        args: string[];
+        outputPath: string | null;
+        exitCode: number | null;
+      }
+    | undefined;
+  let outputRoot = preferredBuildOutput(input.site);
+  if (input.site.configuredScripts.build || input.site.scripts.build) {
+    const command = commandForSiteScript(input.site, "build");
+    const result = await buildSite({
+      workspaceRoot: input.workspaceRoot,
+      siteRoot: input.site.root,
+      command: command.command,
+      args: command.args,
+      output: outputRoot ?? undefined,
+      signal: input.signal,
+    });
+    logs = result.logs;
+    build = {
+      ok: result.ok,
+      command: result.command,
+      args: result.args,
+      outputPath: result.outputPath,
+      exitCode: result.exitCode,
+    };
+    if (!result.ok || !result.outputPath) {
+      const recentLogs = recentSiteBuildLogText(result.logs);
+      throw new Error(
+        `Site build failed or did not produce a static output folder.${
+          recentLogs ? `\n\nRecent output:\n${recentLogs}` : ""
+        }`,
+      );
+    }
+    outputRoot = buildOutputRelativeToSite(
+      input.site.root,
+      relativeWorkspacePath(input.workspaceRoot, result.outputPath),
+    );
+  }
+  if (!input.isCurrent()) {
+    throw new Error("Site preview start was cancelled because the renderer restarted.");
+  }
+  if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
+  const handle = await startStaticSitePreview(
+    input.workspaceRoot,
+    buildOutputSiteRoot(input.site, outputRoot),
+    { authority: input.site.authority },
+  );
+  await rememberCurrentSitePreviewHandle(input, handle);
+  return {
+    handle,
+    siteRoot: input.site.root,
+    mode: input.mode,
+    url: handle.url,
+    logs,
+    ...(build ? { build } : {}),
+  };
 }
 
 // Native dialogs cannot be driven by Playwright, so every dialog-backed IPC
@@ -1954,35 +2186,11 @@ function mcpConfigFor(
 } {
   const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
   const home = stateDir();
-  const configuredSdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim();
-  const packagedSdkPackageJsonPath = join(
-    process.resourcesPath,
-    "sdk-package",
-    "package.json",
-  );
-  const developmentSdkPackageJsonPath = resolve(
-    app.getAppPath(),
-    "..",
-    "..",
-    "packages",
-    "sdk",
-    "package.json",
-  );
-  const sdkPackageJsonPath =
-    configuredSdkPackageJsonPath ||
-    (existsSync(packagedSdkPackageJsonPath)
-      ? packagedSdkPackageJsonPath
-      : existsSync(developmentSdkPackageJsonPath)
-        ? developmentSdkPackageJsonPath
-        : undefined);
-  const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
   const args = ["--workspace", rootPath, "--home", home];
   // A share view hands out the MCP profile for its level (#646): the launched
   // server registers only the write tools that level grants. `null` is a local
   // workspace, which gets every tool.
   if (shareAccess) args.push("--share-access", shareAccess);
-  if (sdkPackageJsonPath) args.push("--sdk-package-json", sdkPackageJsonPath);
-  if (sdkDependencyRange) args.push("--sdk-dependency-range", sdkDependencyRange);
   return {
     command,
     args,
@@ -3392,14 +3600,20 @@ async function stopPluginWorkspace(workspaceId: string): Promise<void> {
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
+  // Runs once, from the will-quit teardown — the first moment a quit can no
+  // longer be cancelled. Idempotent. The caller awaits it inside
+  // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
+  // hard-kill path.
+  const sitePreviewStop = sitePreviews.stopAll();
   pluginPanelSdkAuthorities.revokeAll();
   destroyPluginWebAppViews(pluginWebAppViews.removeAll());
-  await Promise.allSettled(
-    [...new Set([
+  await Promise.allSettled([
+    sitePreviewStop,
+    ...[...new Set([
       ...pluginPipelines.keys(),
       ...[...runningPluginPanels.values()].map((panel) => panel.workspaceId),
     ])].map((workspaceId) => stopPluginWorkspace(workspaceId)),
-  );
+  ]);
   pluginRegistrations.clear();
 }
 
@@ -3791,10 +4005,20 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
+  sitePreviewStarts.abortForSender(senderId);
   pluginPanelSdkAuthorities.revokeSender(senderId);
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
+    // Same exclusion as stopPluginWorkspace below, for the same reason: this
+    // sender's own entry has not been cleared yet, so without excluding it
+    // here a reload of window A would count window A itself as "another
+    // window" still showing the workspace — stopping window B's still-live
+    // site preview of that same workspace out from under it.
+    activeWorkspaceId &&
+      !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
+      ? stopSitePreviewsForWorkspace(activeWorkspaceId)
+      : Promise.resolve(),
     closeEngineYDocSessionsForSender(senderId),
     waitForPendingEngineYDocOpens(senderId),
     // See stopPluginSurfacesForSender's own doc (#779 round 20 finding 1).
@@ -4110,7 +4334,7 @@ app.on("will-quit", (event) => {
       dispatchStoreStop,
       rustEngineStop,
     ]).then(() => undefined),
-    new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+    new Promise<void>((resolve) => setTimeout(resolve, WILL_QUIT_BUDGET_MS)),
   ]).finally(() => app.exit(0));
 });
 
@@ -6962,6 +7186,153 @@ function registerIpcHandlers(
     );
   });
 
+  ipcMain.handle(CHANNELS.listSites, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListSitesPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    // requireWorkspace only proves input.workspaceId is a REGISTERED
+    // workspace somewhere in this app instance, not that it's the one
+    // this sender's own window is currently showing — a stale or
+    // compromised renderer could otherwise enumerate another workspace's
+    // site paths, titles, diagnostics, and dependency manifests just by
+    // naming its id, the same gap startSitePreview/getSitePreviewLogs
+    // below already guard against.
+    return ListSitesResult.parse({
+      sites: await withActiveWorkspaceForSiteRead(
+        activeWorkspaceIdBySender.get(event.sender.id),
+        workspace.workspaceId,
+        () => listSitePackages(workspace.rootPath),
+      ),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = SitePackagePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    // Same active-workspace check as listSites just above — without it, a
+    // stale or compromised renderer can read another workspace's full
+    // package-script bodies and share manifest by naming its id.
+    return SitePackageResult.parse(
+      await withActiveWorkspaceForSiteRead(
+        activeWorkspaceIdBySender.get(event.sender.id),
+        workspace.workspaceId,
+        () => getSitePackage(workspace.rootPath, input.path, undefined, input.effectivePreviewMode),
+      ),
+    );
+  });
+
+  ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StartSitePreviewPayload.parse(payload);
+    const sender = event.sender;
+    const generation = rendererGeneration(sender.id);
+    const pendingStart = sitePreviewStarts.begin(
+      sender.id,
+      input.workspaceId,
+      input.siteRoot,
+    );
+    const isCurrent = () =>
+      !pendingStart.controller.signal.aborted &&
+      !sender.isDestroyed() &&
+      rendererGeneration(sender.id) === generation;
+    try {
+      const workspace = requireWorkspace(input.workspaceId);
+      if (
+        activeWorkspaceIdBySender.get(sender.id) !== workspace.workspaceId
+      ) {
+        throw new Error(
+          "The Site preview request does not target the active workspace. Open the workspace and start the preview again.",
+        );
+      }
+      const sharedView = sharedViewOf(workspace.workspaceId);
+      assertSitePreviewMode(workspace.workspaceId, input.mode);
+      // A mounted share may provide a ready browser artifact, but must never
+      // cause package/configured commands from somebody else to execute.
+      if (isSharedWithMePath(input.siteRoot) && input.mode !== "static") {
+        throw new Error(
+          "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
+        );
+      }
+      const site = requireExactSiteRoot(
+        await getSitePackage(workspace.rootPath, input.siteRoot),
+        input.siteRoot,
+      );
+      const started = await startPreviewForSite({
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace.rootPath,
+        site,
+        mode: input.mode,
+        isCurrent,
+        signal: pendingStart.controller.signal,
+        sharedView: !!sharedView,
+      });
+      const result = StartSitePreviewResult.parse({
+        ...started,
+        exited: false,
+      });
+      if (!isCurrent()) {
+        await sitePreviews.stop(input.workspaceId, site.root, started.handle);
+        throw new Error("Site preview start was cancelled because the renderer restarted.");
+      }
+      if (!sitePreviews.isCurrent(input.workspaceId, site.root, started.handle)) {
+        if (
+          sitePreviews.exited(
+            input.workspaceId,
+            site.root,
+            started.handle,
+          )
+        ) {
+          return StartSitePreviewResult.parse({
+            ...result,
+            logs: sitePreviews.logs(input.workspaceId, site.root),
+            exited: true,
+          });
+        }
+        if (sitePreviews.isRunning(input.workspaceId, site.root)) {
+          throw new Error("A newer site preview replaced this start.");
+        }
+        throw new Error(
+          "The site preview stopped before it opened. Start the preview again.",
+        );
+      }
+      return result;
+    } finally {
+      pendingStart.finish();
+    }
+  });
+
+  ipcMain.handle(CHANNELS.getSitePreviewLogs, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetSitePreviewLogsPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    if (
+      activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId
+    ) {
+      throw new Error(
+        "The Site preview logs request does not target the active workspace. Open the workspace and try again.",
+      );
+    }
+    return GetSitePreviewLogsResult.parse({
+      logs: sitePreviews.logs(workspace.workspaceId, input.siteRoot),
+      exited: sitePreviews.exited(workspace.workspaceId, input.siteRoot),
+    });
+  });
+
+  ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StopSitePreviewPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const senderId = event.sender.id;
+    await stopSitePreviewForRequest({
+      getActiveWorkspaceId: () => activeWorkspaceIdBySender.get(senderId),
+      workspaceId: workspace.workspaceId,
+      siteRoot: input.siteRoot,
+      starts: sitePreviewStarts,
+      previews: sitePreviews,
+    });
+  });
+
   ipcMain.handle(CHANNELS.openPluginPanel, async (event, payload) => {
     assertTrustedSender(event);
     const input = OpenPluginPanelPayload.parse(payload);
@@ -7853,6 +8224,13 @@ function registerIpcHandlers(
     // (#779 round 22 finding 3).
     if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
       advanceRendererGeneration(senderId);
+      // Per-sender, not per-workspace: this window's own in-flight site
+      // preview start is tied to ITS request, so aborting it on switch-away
+      // is correct regardless of whether another window still has
+      // previousWorkspaceId open — unlike stopping the workspace's actual
+      // previews below, which must not stop a preview another window is
+      // still showing.
+      sitePreviewStarts.abortForSender(senderId);
       await stopPluginSurfacesForSender(senderId);
     }
     // A→B then A→C both read previousWorkspaceId=A above and raced through
@@ -7867,6 +8245,7 @@ function registerIpcHandlers(
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
         const activeWorkspaceId = activeWorkspaceIdBySender.get(senderId);
+        sitePreviewStarts.abortForSender(senderId);
         pluginPanelSdkAuthorities.revokeSender(senderId);
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
@@ -7887,8 +8266,11 @@ function registerIpcHandlers(
             // instead of just this sender's own claims (#779 round 23
             // finding 3). This sender's own entry is already gone above,
             // so a true result here means another window, not a stale
-            // read of this one.
+            // read of this one. The same guard covers site previews too —
+            // stopping them just because THIS window closed would end a
+            // preview another window showing the same workspace still needs.
             if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
+              void stopSitePreviewsForWorkspace(activeWorkspaceId);
               await stopPluginWorkspace(activeWorkspaceId).catch((error: unknown) => {
                 console.warn(
                   `[desktop] failed to stop an orphaned plugin workspace after a destroyed window (sender ${senderId})`,
@@ -7902,12 +8284,14 @@ function registerIpcHandlers(
     }
     // Set above, before this read: a true result here means another window
     // has it, not a stale read of this sender's own now-superseded entry
-    // (#779 round 19 finding 2).
+    // (#779 round 19 finding 2). Guards the site-preview stop too, for the
+    // same reason as the destroyed-sender cleanup above.
     if (
       previousWorkspaceId &&
       previousWorkspaceId !== workspace.workspaceId &&
       !isWorkspaceOpenInAnyWindow(previousWorkspaceId)
     ) {
+      await stopSitePreviewsForWorkspace(previousWorkspaceId);
       await stopPluginWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();

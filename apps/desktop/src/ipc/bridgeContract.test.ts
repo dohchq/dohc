@@ -67,6 +67,12 @@ import {
   WorkspaceUiState,
   WorkspaceGraphResult,
   WorkspaceVersionConflict,
+  ListSitesResult,
+  GetSitePreviewLogsPayload,
+  GetSitePreviewLogsResult,
+  StartSitePreviewPayload,
+  StartSitePreviewResult,
+  StopSitePreviewPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   OpenPluginPanelPayload,
@@ -106,6 +112,7 @@ import {
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
   pluginPanelTabPath,
+  siteTabPath,
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
@@ -847,6 +854,7 @@ describe("workspace UI state IPC contract", () => {
   });
 
   it.each([
+    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),
@@ -1038,6 +1046,393 @@ describe("update IPC contract", () => {
     expect(UpdateStateEvent.safeParse({ ...readyState, channel: "beta" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("site IPC contract", () => {
+  it("accepts detected normal website metadata", () => {
+    expect(
+      ListSitesResult.parse({
+        sites: [
+          {
+            root: "client-portal",
+            title: "Client Portal",
+            kind: "package",
+            confidence: "high",
+            entryPath: "client-portal/index.html",
+            configPath: "client-portal/vite.config.ts",
+            packagePath: "client-portal/package.json",
+            packageManager: "pnpm",
+            scripts: { dev: "vite", build: "vite build" },
+            configuredScripts: {},
+            configuredPreviewMode: "build",
+            configuredBuildOutput: null,
+            buildOutputs: ["dist"],
+            sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
+            shareManifest: { ok: false, reason: "no-runnable-artifact" },
+            diagnostics: [],
+            authority: { kind: "workspace" },
+          },
+        ],
+      }).sites[0],
+    ).toMatchObject({
+      root: "client-portal",
+      configuredPreviewMode: "build",
+    });
+    expect(ListSitesResult.parse({ sites: [] }).sites).toEqual([]);
+    expect(
+      ListSitesResult.parse({
+        sites: [
+          {
+            root: "static",
+            title: "Static",
+            kind: "static",
+            confidence: "medium",
+            entryPath: null,
+            configPath: null,
+            packagePath: null,
+            packageManager: null,
+            scripts: {},
+            configuredScripts: {},
+            configuredPreviewMode: null,
+            configuredBuildOutput: null,
+            buildOutputs: [],
+            sourceFiles: [],
+            shareManifest: { ok: false, reason: "no-runnable-artifact" },
+            diagnostics: [],
+            authority: { kind: "workspace" },
+          },
+        ],
+      }).sites[0]?.entryPath,
+    ).toBeNull();
+  });
+
+  it("accepts a site with more than 1000 discovered source files", () => {
+    const sourceFiles = Array.from(
+      { length: 1001 },
+      (_, index) => `large-site/assets/${index}.js`,
+    );
+
+    expect(
+      ListSitesResult.parse({
+        sites: [
+          {
+            root: "large-site",
+            title: "Large site",
+            kind: "package",
+            confidence: "high",
+            entryPath: null,
+            configPath: null,
+            packagePath: null,
+            packageManager: "pnpm",
+            scripts: { dev: "vite" },
+            configuredScripts: {},
+            configuredPreviewMode: null,
+            configuredBuildOutput: null,
+            buildOutputs: [],
+            sourceFiles,
+            shareManifest: { ok: false, reason: "no-runnable-artifact" },
+            diagnostics: [],
+            authority: { kind: "workspace" },
+          },
+        ],
+      }).sites[0]?.sourceFiles,
+    ).toHaveLength(1001);
+  });
+
+  it("keeps package script names while removing the deleted configured preview slot", () => {
+    const parsed = ListSitesResult.parse({
+      sites: [
+        {
+          root: "configured-site",
+          title: "Configured site",
+          kind: "configured",
+          confidence: "high",
+          entryPath: "configured-site/index.html",
+          configPath: "configured-site/dohc.json",
+          packagePath: null,
+          packageManager: null,
+          scripts: { preview: "npm run preview" },
+          configuredScripts: { preview: "serve dist" },
+          configuredPreviewMode: null,
+          configuredBuildOutput: null,
+          buildOutputs: [],
+          sourceFiles: ["configured-site/index.html"],
+          shareManifest: {
+            ok: true,
+            manifest: {
+              entryPath: "configured-site/index.html",
+              assets: [],
+            },
+          },
+          diagnostics: [],
+          authority: { kind: "workspace" },
+        },
+      ],
+    }).sites[0];
+
+    expect(parsed?.scripts).toEqual({ preview: "npm run preview" });
+    expect(parsed?.configuredScripts).toEqual({});
+  });
+
+  it("accepts more than 100 detected sites", () => {
+    const sites = Array.from({ length: 101 }, (_, index) => ({
+      root: `site-${index}`,
+      title: `Site ${index}`,
+      kind: "static" as const,
+      confidence: "high" as const,
+      entryPath: `site-${index}/index.html`,
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      configuredPreviewMode: null,
+      configuredBuildOutput: null,
+      buildOutputs: [],
+      sourceFiles: [`site-${index}/index.html`],
+      shareManifest: {
+        ok: true as const,
+        manifest: {
+          entryPath: `site-${index}/index.html`,
+          assets: [],
+        },
+      },
+      diagnostics: [],
+      authority: { kind: "workspace" as const },
+    }));
+
+    expect(ListSitesResult.parse({ sites }).sites).toHaveLength(101);
+  });
+
+  it("requires a mount root for shared-site authority", () => {
+    const sharedSite = {
+      root: "shared-with-me/alex/report",
+      title: "Report",
+      kind: "static",
+      confidence: "high",
+      entryPath: "shared-with-me/alex/report/index.html",
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      configuredPreviewMode: null,
+      configuredBuildOutput: null,
+      buildOutputs: [],
+      sourceFiles: ["shared-with-me/alex/report/index.html"],
+      shareManifest: {
+        ok: true,
+        manifest: {
+          entryPath: "shared-with-me/alex/report/index.html",
+          assets: [],
+        },
+      },
+      diagnostics: [],
+    };
+    expect(
+      ListSitesResult.safeParse({
+        sites: [
+          {
+            ...sharedSite,
+            authority: { kind: "share", mountRoot: "shared-with-me/alex" },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [{ ...sharedSite, authority: { kind: "share" } }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [{ ...sharedSite, authority: { kind: "share", mountRoot: "." } }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [
+          {
+            ...sharedSite,
+            authority: { kind: "share", mountRoot: "shared-with-me/someone-else" },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts bounded preview start/result payloads", () => {
+    expect(
+      StartSitePreviewPayload.parse({
+        workspaceId: "ws-sites",
+        siteRoot: ".",
+        mode: "static",
+      }),
+    ).toEqual({
+      workspaceId: "ws-sites",
+      siteRoot: ".",
+      mode: "static",
+    });
+
+    expect(
+      StartSitePreviewResult.parse({
+        siteRoot: ".",
+        mode: "build",
+        url: "http://127.0.0.1:4173/",
+        logs: [{ stream: "stdout", text: "built", at: 1 }],
+        exited: false,
+        build: {
+          ok: true,
+          command: "pnpm",
+          args: ["build"],
+          outputPath: "/tmp/workspace/dist",
+          exitCode: 0,
+        },
+      }).mode,
+    ).toBe("build");
+    expect(
+      StartSitePreviewResult.parse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://localhost:4173/",
+        logs: [],
+        exited: false,
+      }).logs,
+    ).toEqual([]);
+    expect(
+      StopSitePreviewPayload.parse({
+        workspaceId: "ws-sites",
+        siteRoot: ".",
+      }),
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    expect(
+      GetSitePreviewLogsPayload.parse({
+        workspaceId: "ws-sites",
+        siteRoot: ".",
+      }),
+    ).toEqual({ workspaceId: "ws-sites", siteRoot: "." });
+    expect(
+      GetSitePreviewLogsResult.parse({
+        logs: [{ stream: "stderr", text: "late output", at: 2 }],
+        exited: false,
+      }).logs,
+    ).toEqual([{ stream: "stderr", text: "late output", at: 2 }]);
+    for (const workspaceId of ["", "WS-SITES", "ws_sites"]) {
+      expect(
+        StartSitePreviewPayload.safeParse({
+          workspaceId,
+          siteRoot: "site",
+          mode: "static",
+        }).success,
+      ).toBe(false);
+      expect(
+        StopSitePreviewPayload.safeParse({
+          workspaceId,
+          siteRoot: "site",
+        }).success,
+      ).toBe(false);
+    }
+    for (const siteRoot of [
+      "",
+      "../escape",
+      "site/../../escape",
+      "/tmp/site",
+      "C:/site",
+      "site/./dist",
+      "site\0/index.html",
+      "site\\index.html",
+    ]) {
+      expect(
+        StartSitePreviewPayload.safeParse({
+          workspaceId: "ws-sites",
+          siteRoot,
+          mode: "static",
+        }).success,
+      ).toBe(false);
+      expect(
+        StopSitePreviewPayload.safeParse({
+          workspaceId: "ws-sites",
+          siteRoot,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects unknown preview modes and non-local preview URLs", () => {
+    expect(
+      StartSitePreviewPayload.safeParse({
+        workspaceId: "ws-sites",
+        siteRoot: "site",
+        mode: "native",
+      }).success,
+    ).toBe(false);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://127.0.0.1:43210",
+        logs: [],
+        exited: false,
+      }).success,
+    ).toBe(true);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://[::1]:43210/",
+        logs: [],
+        exited: false,
+      }).success,
+    ).toBe(true);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://[::ffff:127.0.0.1]:43210/",
+        logs: [],
+        exited: false,
+      }).success,
+    ).toBe(true);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://127.0.0.1/",
+        logs: [],
+        exited: false,
+      }).success,
+    ).toBe(true);
+    expect(
+      StartSitePreviewResult.safeParse({
+        siteRoot: "site",
+        mode: "static",
+        url: "http://127.42.0.7:43210/",
+        logs: [],
+        exited: false,
+      }).success,
+    ).toBe(true);
+    for (const url of [
+      "https://example.com/",
+      "file:///tmp/site/index.html",
+      "javascript:alert(1)",
+      "data:text/html,<h1>x</h1>",
+      "http://0.0.0.0:43210/",
+      "http://user:pass@127.0.0.1:43210/",
+      "http://127.0.0.1:abc/",
+      "http://127.0.0.1:0/",
+      "http://127.0.0.1:70000/",
+    ]) {
+      expect(
+        StartSitePreviewResult.safeParse({
+          siteRoot: "site",
+          mode: "static",
+          url,
+          logs: [],
+          exited: false,
+        }).success,
+      ).toBe(false);
+    }
   });
 });
 

@@ -3,8 +3,10 @@ import type {
   CreateLocalWorkspacePayload,
   DesktopUserSettingsResult,
   DohcDesktopBridge,
+  GetSitePreviewLogsPayload,
   InvokePluginCommandPayload,
   InvokePluginPanelSdkPayload,
+  ListSitesPayload,
   MenuCommand,
   PluginPanelOpenedEvent,
   PluginPanelSdkEvent,
@@ -17,9 +19,12 @@ import type {
   StopPluginWebAppPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
+  SitePackagePayload,
+  StartSitePreviewPayload,
   OpenPluginPanelPayload,
   StartPluginPanelPayload,
   StopPluginPanelPayload,
+  StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceSummary,
   WriteClipboardTextPayload,
@@ -155,6 +160,16 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.applyDatabaseEdit, payload),
   importToDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.importToDatabase, payload),
+  listSites: (payload: ListSitesPayload) =>
+    ipcRenderer.invoke(CHANNELS.listSites, payload),
+  getSitePackage: (payload: SitePackagePayload) =>
+    ipcRenderer.invoke(CHANNELS.getSitePackage, payload),
+  startSitePreview: (payload: StartSitePreviewPayload) =>
+    ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
+  getSitePreviewLogs: (payload: GetSitePreviewLogsPayload) =>
+    ipcRenderer.invoke(CHANNELS.getSitePreviewLogs, payload),
+  stopSitePreview: (payload: StopSitePreviewPayload) =>
+    ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
   openPluginPanel: async (payload: OpenPluginPanelPayload) => {
     const result = OpenPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.openPluginPanel, payload),

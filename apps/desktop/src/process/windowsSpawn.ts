@@ -18,7 +18,7 @@ import { win32 } from "node:path";
 //   - a percent sign: cmd.exe still expands %VAR% inside double quotes with no
 //     reliable escape, so a crafted env value (e.g. DOHC_PWN='" & calc & "')
 //     would break out of the quotes and inject a second command that the
-//     pre-expansion argv allowlist of the caller never saw. Quoting cannot
+//     pre-expansion argv allowlist in siteRunner never saw. Quoting cannot
 //     contain it, so any token carrying % is rejected.
 function quoteForCmd(token: string): string {
   if (token.includes('"')) {
@@ -124,6 +124,49 @@ export function killProcessTreeWin32(
       ["/pid", String(pid), "/T", "/F"],
       { windowsHide: true },
       (error) => resolve(!error),
+    );
+  });
+}
+
+// taskkill /PID <wrapper> /T walks the LIVE process tree from a still-running
+// wrapper pid — it has nothing to walk once that wrapper has already exited,
+// the same gap posixSpawn.ts's module comment describes for "-pid" process
+// groups. siteRunner's stopChild needs a snapshot taken WHILE the wrapper was
+// still alive, captured periodically the same way posixSpawn.ts's shared
+// processDescendants lets a backgrounded descendant stay reachable after its
+// own wrapper exits and gets reparented away in the process table.
+//
+// Win32_Process (via CIM) is used rather than `wmic` — Windows 11 24H2
+// removed wmic.exe by default — or `tasklist`, whose plain-text table has no
+// machine-stable delimiter; Get-CimInstance is available from the Windows
+// PowerShell 5.1 that ships on every supported Windows host, no pwsh (7)
+// install required. Its output is reduced to the same "pid ppid startedAt"
+// shape posixSpawn's parseProcessTable already parses (CreationDate is CIM's
+// own per-process start-time equivalent to POSIX's `lstart` column — a
+// single token, no internal whitespace, so it satisfies the same "one
+// trailing non-space-bounded field" capture group `lstart`'s own multi-word
+// value needs), so the tree-walk itself (posixSpawn.ts's processDescendants)
+// stays a single, platform-agnostic implementation shared by both platforms
+// — this module supplies only the platform-specific text source. A process
+// with no CreationDate (some system processes report none) renders as a
+// trailing space with nothing after it — parseProcessTable's own "ignores
+// lines it cannot read" contract already drops that row rather than fail
+// the whole read, the same as any other malformed line.
+export function readProcessTableWithPowershell(): Promise<string> {
+  return new Promise((resolveOutput, reject) => {
+    execFile(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate)\" }",
+      ],
+      { windowsHide: true },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolveOutput(stdout);
+      },
     );
   });
 }

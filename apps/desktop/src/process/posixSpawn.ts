@@ -5,8 +5,8 @@
 // The negated "-pid" process-group form cannot do this job here: the callers
 // fork children through Electron's utilityProcess.fork, which has no
 // `detached` option, so a child never becomes its own group leader and "-pid"
-// would signal this app's own group (CodeRabbit #779 R10). Enumerate the tree
-// from the process table instead and signal each pid.
+// would signal this app's own group. Enumerate the tree from the process
+// table instead and signal each pid.
 import { execFile } from "node:child_process";
 
 // The nominal read cap equals the default total shutdown budget. A stopped
@@ -157,7 +157,43 @@ export interface StopProcessTreePosixOptions extends Pick<
   isAlive?: (pid: number) => boolean;
 }
 
-function readProcessTableWithPs(readTimeoutMs: number): Promise<string> {
+/**
+ * Every descendant of `rootPid`, enumerated but not signalled — for a
+ * caller that wants to keep a rolling snapshot of a still-running tree
+ * (siteRunner's stopChild) so a descendant is still reachable by pid even
+ * after the process it was captured under has since exited and been
+ * reparented away from `rootPid` in the process table. Excludes `rootPid`
+ * itself. An unreadable process table degrades to an empty list, the same
+ * way killProcessTreePosix degrades to signalling only its known pids.
+ *
+ * Platform-agnostic: `readProcessTable` supplies the platform-specific text
+ * source (POSIX `ps`, here; Windows Get-CimInstance, windowsSpawn.ts's own
+ * readProcessTableWithPowershell) in the same "pid ppid startedAt" shape
+ * parseProcessTable expects, so the tree-walk itself needs only this one
+ * implementation for both platforms — the caller picks which reader to pass.
+ * A plain capture snapshot has no kill-path budget to share, so it reads
+ * with readProcessTableWithPs's own default timeout rather than threading
+ * one through from a caller that has no reason to configure it.
+ */
+export async function processDescendants(
+  rootPid: number,
+  readProcessTable: () => Promise<string>,
+): Promise<number[]> {
+  try {
+    const table = parseProcessTable(await readProcessTable());
+    return processTreePids(table, rootPid).filter((pid) => pid !== rootPid);
+  } catch {
+    return [];
+  }
+}
+
+// Exported (unlike the rest of this module's internals) so processDescendants
+// callers outside this file (siteRunner's descendant-capture snapshot) can
+// pass it directly as a zero-arg reader — the default timeout matches what
+// the kill path itself falls back to when no caller-supplied budget applies.
+export function readProcessTableWithPs(
+  readTimeoutMs: number = PROCESS_TABLE_READ_TIMEOUT_MS,
+): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile(
       "ps",

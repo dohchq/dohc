@@ -1,6 +1,6 @@
 import { Check, Copy, Share2, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { ShareAccess } from "../ipc/bridgeContract";
+import type { CreateRelaySharePayload, ShareAccess } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { IconButton, PrimaryButton } from "./ui/controls";
 
@@ -9,11 +9,14 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 // or a version) was made where the user clicked — this dialog only confirms
 // and addresses it.
 
-export interface RelayShareTarget {
-  path?: string;
-  versionId?: string;
-  versionName?: string;
-}
+export type RelayShareTarget =
+  // At least one path — every real construction site passes one already
+  // (a single clicked path, or a site's own non-empty share manifest); the
+  // type itself now says so instead of leaving an empty array a caller
+  // could still construct but that this dialog's own subject/payload logic
+  // already assumes never happens.
+  | { kind: "paths"; paths: [string, ...string[]]; label?: string }
+  | { kind: "version"; versionId: string; versionName?: string };
 
 function errorMessage(cause: unknown): string {
   const text = cause instanceof Error ? cause.message : String(cause);
@@ -61,9 +64,10 @@ export function RelayShareDialog(props: {
   } | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const subject = props.target.versionId
-    ? `version “${props.target.versionName ?? props.target.versionId}”`
-    : (props.target.path ?? "this selection");
+  const subject =
+    props.target.kind === "version"
+      ? `version “${props.target.versionName ?? props.target.versionId}”`
+      : (props.target.label ?? props.target.paths[0] ?? "this selection");
 
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
 
@@ -72,13 +76,15 @@ export function RelayShareDialog(props: {
     setBusy(true);
     setError(null);
     try {
-      const result = await bridge().createRelayShare({
+      const payload: CreateRelaySharePayload = {
         workspaceId: props.workspaceId,
         recipientEmail: email.trim(),
         access,
-        ...(props.target.path ? { paths: [props.target.path] } : {}),
-        ...(props.target.versionId ? { versionId: props.target.versionId } : {}),
-      });
+        ...(props.target.kind === "version"
+          ? { versionId: props.target.versionId }
+          : { paths: props.target.paths }),
+      };
+      const result = await bridge().createRelayShare(payload);
       setCreated({ shareCode: result.shareCode, recipientEmail: result.recipientEmail });
     } catch (cause) {
       setError(errorMessage(cause));
@@ -111,7 +117,7 @@ export function RelayShareDialog(props: {
       </div>
 
       <p className="m-0 text-xs leading-relaxed text-muted">
-        {props.target.versionId ? (
+        {props.target.kind === "version" ? (
           <>Share {subject}.</>
         ) : (
           <>

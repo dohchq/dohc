@@ -16,6 +16,7 @@ import {
   frameworkConfigName,
   hasIgnoredSegment,
   hasWebDependency,
+  hasWebScript,
   isDohcMetadataPath,
   mediaTypeForPath,
   notARealFolderRefusal,
@@ -41,6 +42,7 @@ import {
   type SiteScripts,
   type WorkspaceSite,
   isSharedWithMePath,
+  safeRelativeConfigPath,
 } from "@dohc/workspace-core";
 import {
   DohcCliError,
@@ -90,10 +92,6 @@ export interface ToolContext {
   root: string;
   // Desktop state/home dir (the --home arg): holds dohc-workspaces.json.
   home: string;
-  // Desktop/package launcher-owned SDK metadata. add_sdk must not infer this
-  // from the MCP build output path because packaged layouts can differ.
-  sdkPackageJsonPath?: string;
-  sdkDependencyRange?: string;
   // The share level this server was launched for (#646), from the
   // --share-access flag. Absent means a local workspace: every tool registers.
   // A level narrows the write surface — see createDohcMcpServer, which decides
@@ -1660,11 +1658,6 @@ const SITE_SOURCE_EXTENSIONS = new Set([
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
 const MAX_SITE_SCAN_DEPTH = 100;
-let cachedDohcSdkPackageVersion: {
-  packageJsonPath: string;
-  mtimeMs: number;
-  version: string;
-} | null = null;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1716,7 +1709,15 @@ function packageNameFromPath(root: string): string {
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: SiteScripts = {};
-  for (const key of ["dev", "start", "build", "preview"] as const) {
+  for (const key of [
+    "predev",
+    "dev",
+    "postdev",
+    "prestart",
+    "start",
+    "poststart",
+    "build",
+  ] as const) {
     const value = pkg.scripts[key];
     if (typeof value === "string" && value.trim()) scripts[key] = value;
   }
@@ -1729,56 +1730,76 @@ function configString(value: unknown, key: string): string | undefined {
   return typeof found === "string" && found.trim() ? found : undefined;
 }
 
+// Reads and validates config.preview.entry the same way workspace-core's
+// parsePreview does, so a site with a configured entry is detected with the
+// same value regardless of which detector runs — safeRelativeConfigPath is
+// the same relative/no-traversal/no-NUL/no-Windows-alias-suffix validator
+// build.output uses below, so the two dohc.json fields are rejected on the
+// same unsafe input the same way.
+function configuredPreviewEntry(
+  config: RawDohcSiteConfig | null,
+  path: string,
+  diagnostics: SiteDiagnostic[],
+): string | undefined {
+  const preview = config?.preview;
+  if (!isRecord(preview) || preview.entry === undefined) return undefined;
+  const raw = preview.entry;
+  const normalized = typeof raw === "string" ? safeRelativeConfigPath(raw) : undefined;
+  if (normalized === undefined) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-preview-entry",
+      path,
+      message:
+        typeof raw === "string" && raw.trim() !== ""
+          ? "dohc.json preview.entry must be a relative workspace path, not '.', './', or an empty path."
+          : "dohc.json preview.entry must be a non-empty string.",
+    });
+    return undefined;
+  }
+  return normalized;
+}
+
+// Joins a configured entry under the site root, mirroring desktop's
+// entryPathFor (apps/desktop/src/workspaces/sitePackage.ts): a value the
+// author already spelled starting with the site root is used as-is instead
+// of being prefixed twice.
+function siteEntryPathFor(root: string, entry: string): string {
+  if (root && (entry === root || entry.startsWith(`${root}/`))) return entry;
+  return relativeJoin(root, entry);
+}
+
+// A healthy dohc.json or package.json, even a large monorepo root listing
+// hundreds of dependencies, measures in the tens of kilobytes — mirrors
+// desktop's own MAX_METADATA_FILE_BYTES (apps/desktop/src/workspaces/
+// sitePackage.ts), so both detectors bound the same files the same way.
+// detect_sites calls this for every discovered dohc.json/package.json with
+// no per-call concurrency cap; without a size check first, a single very
+// large or sparse metadata file could stall or exhaust the MCP process.
+const MAX_SITE_METADATA_FILE_BYTES = 1024 * 1024;
+
 async function readJsonDetailed<T>(
   absolute: string,
 ): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
   try {
+    const info = await stat(absolute);
+    if (info.size > MAX_SITE_METADATA_FILE_BYTES) {
+      return {
+        ok: false,
+        reason: `exceeds the ${MAX_SITE_METADATA_FILE_BYTES / (1024 * 1024)} MiB metadata read limit (${info.size} bytes observed) and was not read`,
+      };
+    }
     return { ok: true, value: JSON.parse(await readFile(absolute, "utf8")) as T };
   } catch (error) {
     return { ok: false, reason: failureReason(error, "invalid JSON") };
   }
 }
 
-type DohcSdkDependency =
-  | { specifier: string; sourceDir: null }
-  | { specifier: string; sourceDir: string; version: string };
-
-async function dohcSdkDependency(ctx: ToolContext): Promise<DohcSdkDependency> {
-  const explicitRange = ctx.sdkDependencyRange?.trim();
-  const packageJsonPath = ctx.sdkPackageJsonPath?.trim();
-  if (!packageJsonPath) {
-    if (explicitRange) return { specifier: explicitRange, sourceDir: null };
-    throw new Error(
-      "MCP server configuration is missing @dohc/sdk package metadata; launch with --sdk-package-json or set DOHC_SDK_PACKAGE_JSON",
-    );
-  }
-
-  const packageStat = await stat(packageJsonPath);
-  if (
-    cachedDohcSdkPackageVersion?.packageJsonPath === packageJsonPath &&
-    cachedDohcSdkPackageVersion.mtimeMs === packageStat.mtimeMs
-  ) {
-    return {
-      specifier: explicitRange || "file:vendor/dohc-sdk",
-      sourceDir: dirname(packageJsonPath),
-      version: cachedDohcSdkPackageVersion.version,
-    };
-  }
-
-  const pkg = await readJson<{ version?: unknown }>(packageJsonPath);
-  const version = typeof pkg?.version === "string" ? pkg.version.trim() : "";
-  if (!version) {
-    throw new Error(`Unable to read @dohc/sdk version from ${packageJsonPath}`);
-  }
-  cachedDohcSdkPackageVersion = { packageJsonPath, mtimeMs: packageStat.mtimeMs, version };
-  return {
-    specifier: explicitRange || "file:vendor/dohc-sdk",
-    sourceDir: dirname(packageJsonPath),
-    version,
-  };
-}
-
-async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): Promise<WorkspaceSite | null> {
+async function detectSiteAt(
+  ctx: ToolContext,
+  absolute: string,
+  root: string,
+): Promise<{ site: WorkspaceSite; realBuildOutputs: readonly string[] } | null> {
   let dirents;
   try {
     dirents = await readdir(absolute, { withFileTypes: true });
@@ -1796,61 +1817,200 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   let config: RawDohcSiteConfig | null = null;
   if (configPath) {
     const parsed = await readJsonDetailed<RawDohcSiteConfig>(join(ctx.root, configPath));
-    if (parsed.ok) {
-      config = parsed.value;
-    } else {
+    if (!parsed.ok) {
       diagnostics.push({
         severity: "error",
         code: "invalid_dohc_json",
         path: configPath,
         message: parsed.reason,
       });
+    } else if (!isRecord(parsed.value)) {
+      // Valid JSON, but not an object (e.g. `[]`) — matches workspace-core's
+      // parseDohcSiteConfig shape check (packages/workspace-core/src/sites.ts),
+      // same code and message, so both detectors agree on this input. A bare
+      // JSON.parse cast would otherwise accept this as a well-formed config
+      // with no diagnostic at all.
+      diagnostics.push({
+        severity: "error",
+        code: "invalid-config",
+        path: configPath,
+        message: "dohc.json must contain a JSON object.",
+      });
+    } else {
+      config = parsed.value;
     }
   }
 
   let pkg: PackageJson | null = null;
   if (files.has("package.json")) {
     const parsed = await readJsonDetailed<PackageJson>(join(absolute, "package.json"));
-    if (parsed.ok) {
-      pkg = parsed.value;
-    } else {
+    if (!parsed.ok) {
       diagnostics.push({
         severity: "error",
         code: "invalid_package_json",
         path: relativeJoin(root, "package.json"),
         message: parsed.reason,
       });
+    } else if (!isRecord(parsed.value)) {
+      // Mirrors workspace-core's parsePackageJson shape check — same code and
+      // message as the shared parser's non-object case.
+      diagnostics.push({
+        severity: "error",
+        code: "invalid-package-json",
+        path: relativeJoin(root, "package.json"),
+        message: "package.json must contain a JSON object.",
+      });
+    } else {
+      pkg = parsed.value;
     }
   }
 
   const scripts = readPackageScripts(pkg);
   const configPreviewCommand = configString(config?.preview, "command");
   const configPreviewMode = configString(config?.preview, "mode");
+  const configuredPreviewMode =
+    configPreviewMode === "static" ||
+    configPreviewMode === "dev" ||
+    configPreviewMode === "build"
+      ? configPreviewMode
+      : undefined;
+  // Same code and message as workspace-core's parseDohcSiteConfig (packages/
+  // workspace-core/src/sites.ts) for the identical malformed input — a
+  // dohc.json preview.mode that isn't one of the three valid values must
+  // surface the SAME diagnostic here as it does for the desktop detector,
+  // or test_site can silently pass a config the desktop Sites view flags.
+  if (configPreviewMode !== undefined && configuredPreviewMode === undefined) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-preview-mode",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: "dohc.json preview.mode must be static, dev, or build.",
+    });
+  }
   if (configPreviewCommand) {
-    if (configPreviewMode === "dev") scripts.dev = configPreviewCommand;
-    else scripts.preview = configPreviewCommand;
+    if (configPreviewMode === "static" || configPreviewMode === "build") {
+      diagnostics.push({
+        severity: "warning",
+        code: "unsupported-preview-command-mode",
+        path: configPath ?? relativeJoin(root, "dohc.json"),
+        message:
+          "Configured preview commands run only in dev mode. Static and build previews use the site's entry file or build output.",
+      });
+    } else {
+      scripts.dev = configPreviewCommand;
+    }
   }
   const configBuildCommand = configString(config?.build, "command");
   if (configBuildCommand) scripts.build = configBuildCommand;
+  const configuredEntry = configuredPreviewEntry(
+    config,
+    configPath ?? relativeJoin(root, "dohc.json"),
+    diagnostics,
+  );
 
   const frameworkConfig = frameworkConfigName(files);
   const hasIndex = files.has("index.html");
+  // Whether ANY script exists is a materially looser test than whether
+  // one actually names a web dependency or a recognizable web-tool token —
+  // the shared hasWebScript predicate is the same one desktop's own
+  // discoverSites already applies, so both sites views agree on the same
+  // package.json.
   const hasPackageSignal =
     files.has("package.json") &&
-    (Object.keys(scripts).length > 0 || Boolean(frameworkConfig) || hasWebDependency(pkg));
-  const buildOutputs = [
-    configString(config?.build, "output"),
-    ...SITE_BUILD_OUTPUT_NAMES.filter((name) => directories.has(name)),
-  ].filter((output): output is string => typeof output === "string" && output.length > 0);
+    (hasWebScript(pkg ?? undefined) || Boolean(frameworkConfig) || hasWebDependency(pkg));
+  // A directory ACTUALLY found on disk vs. the configured build.output PATH
+  // (a claim, whether or not anything was ever built there) are different
+  // signals — workspace-core's hasIndependentWebsiteSignal only accepts the
+  // former as the independent signal that overrides an explicit non-site
+  // type declaration; its own doc comment explains why (an explicitly
+  // non-site config's own build.output claim can't override its own type).
+  // Both detectors have to agree on that rule for the SAME input. A bare
+  // directory presence isn't enough EITHER: workspace-core only counts a
+  // build output as DETECTED when it holds a real <output>/index.html
+  // artifact, the same check builtEntry (below) needs — one pass computes
+  // both instead of two separate stat sweeps.
+  const detectedBuildOutputs: string[] = [];
+  let builtEntry: string | undefined;
+  for (const name of SITE_BUILD_OUTPUT_NAMES) {
+    if (!directories.has(name)) continue;
+    const candidate = join(absolute, name, "index.html");
+    // stat() alone is truthy for a directory too — workspace-core's own
+    // detector only ever sees real FILES (it works from a file listing, not
+    // raw stat), so a directory literally named "index.html" must not pass
+    // here either, or the two detectors disagree on the identical input.
+    const info = await stat(candidate).catch(() => null);
+    if (!info?.isFile()) continue;
+    detectedBuildOutputs.push(name);
+    if (builtEntry === undefined) builtEntry = relativeJoin(relativeJoin(root, name), "index.html");
+  }
+  // Same safe-relative-path validation as workspace-core's parseBuild — an
+  // absolute path, a traversal, or a Windows-alias traversal in
+  // build.output gets the SAME invalid-build-output diagnostic and is
+  // dropped, not returned as an unsafe planned output for build_site/
+  // test_site to act on.
+  const rawConfiguredBuildOutput = configString(config?.build, "output");
+  const configuredBuildOutput = rawConfiguredBuildOutput
+    ? safeRelativeConfigPath(rawConfiguredBuildOutput)
+    : undefined;
+  if (rawConfiguredBuildOutput && !configuredBuildOutput) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-build-output",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: "dohc.json build.output must be a relative workspace path, not '.', './', or an empty path.",
+    });
+  }
+  // The conventional-names loop above only ever checks "dist"/"build"/
+  // "out" — a CONFIGURED output can be nested or custom-named
+  // ("public/dist"), so it needs its own verification, independent of
+  // whether a conventional one was ALSO found. workspace-core's
+  // preferredBuildOutput/presentBuildOutput (packages/workspace-core/src/
+  // sites.ts) give a real configured artifact priority over a real
+  // conventional one whenever both exist — this has to agree, or an agent
+  // building through the configured output sees MCP still reporting (and
+  // test_site/build_site acting on) a stale conventional artifact left
+  // over from an earlier build. So this check is unconditional, and its
+  // result OVERRIDES whatever the conventional loop already set.
+  // Every entry `detectedBuildOutputs` already required a passing isFile()
+  // check above; a configured output only joins them once its own check
+  // here passes too — so realBuildOutputs never needs a second stat of a
+  // path this function already confirmed. detectSites' own walk used to
+  // re-stat each of these itself to learn the same thing.
+  const realBuildOutputs = [...detectedBuildOutputs];
+  if (configuredBuildOutput) {
+    const configuredIndexInfo = await stat(join(absolute, configuredBuildOutput, "index.html")).catch(() => null);
+    if (configuredIndexInfo?.isFile()) {
+      builtEntry = relativeJoin(relativeJoin(root, configuredBuildOutput), "index.html");
+      realBuildOutputs.push(configuredBuildOutput);
+    }
+  }
+  const buildOutputs = [configuredBuildOutput, ...detectedBuildOutputs].filter(
+    (output): output is string => typeof output === "string" && output.length > 0,
+  );
   const uniqueBuildOutputs = [...new Set(buildOutputs)];
-  const explicitNonSite = config?.type !== undefined && config.type !== "site";
+  // A malformed type ({ "type": 42 }, or an empty string) is invalid
+  // CONFIG, not a legitimate declaration of some other dohc feature —
+  // workspace-core's own parser leaves declaredType unset for exactly this
+  // case (an "invalid-type" diagnostic, the candidate stays visible)
+  // rather than treating it as an explicit non-site type that can suppress
+  // the whole candidate.
+  const validType = typeof config?.type === "string" && config.type.trim() !== "" ? config.type : undefined;
+  if (config?.type !== undefined && validType === undefined) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-type",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: 'dohc.json type should be "site".',
+    });
+  }
+  const explicitNonSite = validType !== undefined && validType !== "site";
 
   if (
     explicitNonSite &&
     !hasIndex &&
     !hasPackageSignal &&
     !frameworkConfig &&
-    uniqueBuildOutputs.length === 0
+    detectedBuildOutputs.length === 0
   ) {
     return null;
   }
@@ -1867,40 +2027,56 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     return null;
   }
 
-  const kind: SiteKind = configPath ? "configured" : hasPackageSignal || frameworkConfig ? "package" : "static";
+  // Mirrors workspace-core's siteKind/siteConfidence (packages/workspace-
+  // core/src/sites.ts) branch-for-branch: a dohc.json config OR a
+  // framework config file (vite.config.ts, ...) is "configured", and
+  // either one is a high-confidence signal on its own, same as an actual
+  // index.html file — the desktop Sites view and MCP's detect_sites must
+  // describe the same project the same way.
+  const kind: SiteKind = configPath || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
+  // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
+  // counts toward HIGH confidence when it explicitly DECLARES type: "site"
+  // — a valid-but-empty config ({}) or one for another dohc feature isn't
+  // itself a high-confidence website signal, even though it parsed
+  // cleanly. The two detectors have to agree on the SAME dohc.json.
+  // Mirrors workspace-core's own siteConfidence exactly, including its
+  // medium branch: hasWebPackageSignal || hasBuildOutputSignal. A folder
+  // detected ONLY because a real build output exists (dist/index.html,
+  // say, with no package.json signal at all) still needs medium, not low
+  // — omitting uniqueBuildOutputs here left the two detectors disagreeing
+  // on exactly that input despite this branch's own parity comment.
   const confidence: SiteConfidence =
-    configPath && diagnostics.every((diagnostic) => diagnostic.severity !== "error")
+    validType === "site"
       ? "high"
-      : hasIndex && (hasPackageSignal || frameworkConfig)
+      : hasIndex || frameworkConfig
         ? "high"
-        : hasIndex || hasPackageSignal || frameworkConfig
+        : hasPackageSignal || uniqueBuildOutputs.length > 0
           ? "medium"
           : "low";
   const configuredTitle = typeof config?.title === "string" && config.title.trim() ? config.title : undefined;
   const packageTitle = typeof pkg?.name === "string" && pkg.name.trim() ? pkg.name : undefined;
-  let builtEntry: string | undefined;
-  for (const name of SITE_BUILD_OUTPUT_NAMES) {
-    if (!directories.has(name)) continue;
-    const candidate = join(absolute, name, "index.html");
-    if (await stat(candidate).catch(() => null)) {
-      builtEntry = relativeJoin(relativeJoin(root, name), "index.html");
-      break;
-    }
-  }
-  const entry = hasIndex ? relativeJoin(root, "index.html") : builtEntry;
+  const entry = configuredEntry
+    ? siteEntryPathFor(root, configuredEntry)
+    : hasIndex
+      ? relativeJoin(root, "index.html")
+      : builtEntry;
   const packageManager = packageManagerFromFiles(allNames, pkg);
 
   return {
-    root,
-    title: configuredTitle ?? packageTitle ?? siteTitleFromPath(root),
-    kind,
-    confidence,
-    ...(entry ? { entry } : {}),
-    ...(packageManager ? { packageManager } : {}),
-    scripts,
-    buildOutputs: uniqueBuildOutputs,
-    ...(configPath ? { configPath } : {}),
-    diagnostics,
+    site: {
+      root,
+      title: configuredTitle ?? packageTitle ?? siteTitleFromPath(root),
+      kind,
+      confidence,
+      ...(entry ? { entry } : {}),
+      ...(packageManager ? { packageManager } : {}),
+      scripts,
+      ...(configuredPreviewMode ? { configuredPreviewMode } : {}),
+      buildOutputs: uniqueBuildOutputs,
+      ...(configPath ? { configPath } : {}),
+      diagnostics,
+    },
+    realBuildOutputs: [...new Set(realBuildOutputs)],
   };
 }
 
@@ -1924,10 +2100,36 @@ export async function detectSites(
 
   const maxDepth = Math.min(12, Math.max(0, Math.floor(args.maxDepth ?? 5)));
   const sites: WorkspaceSite[] = [];
+  // A directory an already-visited ancestor reported as ITS OWN REAL build
+  // artifact (conventional dist/build/out, or an explicitly configured
+  // build.output path, single- or multi-segment — either way, backed by an
+  // actual <output>/index.html file on disk) is that site's own output,
+  // not an independent site — matches workspace-core's discoverSites,
+  // which never promotes a build output's own index.html into a separate
+  // site root. A MERELY configured build.output with no real artifact
+  // there yet must NOT suppress the path: an independent site (its own
+  // package.json-based project, say) can genuinely live at a path a
+  // sibling's dohc.json only claims as a future build output, and
+  // workspace-core's own configuredOutputArtifacts crediting is likewise
+  // gated on a real index.html existing at the exact claimed path, never
+  // on the claim alone. detectSiteAt already confirmed each of its own
+  // realBuildOutputs against the filesystem (a configured-only claim with
+  // no real artifact never joins that list), so nothing here re-stats a
+  // path detectSiteAt already checked. The walk visits a parent before its
+  // children, so a site's real outputs are always known before recursion
+  // reaches them.
+  const knownBuildOutputPaths = new Set<string>();
   async function walk(absolute: string, root: string, depth: number): Promise<void> {
     if (isIgnoredSitePath(root)) return;
-    const site = await detectSiteAt(ctx, absolute, root);
-    if (site) sites.push(site);
+    if (!knownBuildOutputPaths.has(root)) {
+      const detected = await detectSiteAt(ctx, absolute, root);
+      if (detected) {
+        sites.push(detected.site);
+        for (const output of detected.realBuildOutputs) {
+          knownBuildOutputPaths.add(relativeJoin(root, output));
+        }
+      }
+    }
     if (depth >= maxDepth) return;
 
     let dirents;
@@ -2161,7 +2363,7 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
   const root = await safeResolve(ctx, siteRoot, "read");
   if (!root.ok) return root;
   // Mounted shares (shared-with-me/) are readable, but site tools execute
-  // or mutate the site (test/build/preview/publish/add-sdk) — running
+  // or mutate the site (test/build/preview/publish) — running
   // someone else's shared code with workspace access is refused. Copying
   // the site into the user's own files makes it runnable. The check is the
   // shared case-insensitive/alias-normalizing predicate, NOT a literal
@@ -2187,8 +2389,9 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
 export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
   const root = await resolveSiteRoot(ctx, args.siteRoot);
   if (!root.ok) return root;
-  const site = await detectSiteAt(ctx, root.absolute, root.normalized);
-  if (!site) return { ok: false as const, reason: `not a detected site: ${root.normalized}` };
+  const detected = await detectSiteAt(ctx, root.absolute, root.normalized);
+  if (!detected) return { ok: false as const, reason: `not a detected site: ${root.normalized}` };
+  const { site } = detected;
 
   const checks: SiteCheck[] = [];
   checks.push({
@@ -2348,155 +2551,9 @@ export async function previewSite(ctx: ToolContext, args: { siteRoot: string }) 
     modes,
     message:
       modes.length > 0
-        ? "Open this site in the Sites plugin to run the preview."
+        ? "Open this site in Sites to run the preview."
         : "No preview mode is available yet.",
     checks: tested.checks,
-  };
-}
-
-function ensureObject(value: unknown): Record<string, unknown> {
-  return isRecord(value) ? { ...value } : {};
-}
-
-export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
-  const root = await resolveSiteRoot(ctx, args.siteRoot);
-  if (!root.ok) return root;
-  const recordable = await ensureRecordable(ctx);
-  if (recordable) return recordable;
-  // Detect before adding package.json: creating package metadata must not turn
-  // a plain static site into a package-import workflow that browsers cannot
-  // actually resolve without a bundler.
-  const detectedSite = await detectSiteAt(ctx, root.absolute, root.normalized);
-
-  const packagePath = join(root.absolute, "package.json");
-  const existingBytes = await readFile(packagePath).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  });
-  const expectedPackageSha256 = sha256(existingBytes ?? new Uint8Array());
-  let existing: PackageJson | null = null;
-  if (existingBytes) {
-    try {
-      existing = JSON.parse(existingBytes.toString("utf8")) as PackageJson;
-    } catch (error) {
-      return {
-        ok: false as const,
-        reason: `invalid package.json at ${relativeJoin(root.normalized, "package.json")}: ${failureReason(error, "invalid JSON")}`,
-      };
-    }
-  }
-  const siteRootNames = new Set(
-    (await readdir(root.absolute, { withFileTypes: true })).map((entry) => entry.name),
-  );
-  const usesPackageModuleResolution =
-    Boolean(frameworkConfigName(siteRootNames)) ||
-    hasWebDependency(existing) ||
-    Object.keys(readPackageScripts(existing)).length > 0;
-  const packageJson = ensureObject(existing);
-  packageJson.private = packageJson.private ?? true;
-  packageJson.type = packageJson.type ?? "module";
-  packageJson.name =
-    typeof packageJson.name === "string" && packageJson.name.trim()
-      ? packageJson.name
-      : packageNameFromPath(root.normalized);
-  let sdk: DohcSdkDependency;
-  try {
-    sdk = await dohcSdkDependency(ctx);
-  } catch (error) {
-    return {
-      ok: false as const,
-      reason: failureReason(error, "unable to resolve @dohc/sdk dependency range"),
-    };
-  }
-  if (!usesPackageModuleResolution && !sdk.sourceDir) {
-    return {
-      ok: false as const,
-      reason:
-        "A plain static site needs bundled @dohc/sdk browser files; configure sdkPackageJsonPath so add_sdk can create a browser-resolvable import.",
-    };
-  }
-  if (sdk.sourceDir) {
-    let sdkJavaScript: string;
-    let sdkTypes: string;
-    try {
-      [sdkJavaScript, sdkTypes] = await Promise.all([
-        readFile(join(sdk.sourceDir, "dist", "index.js"), "utf8"),
-        readFile(join(sdk.sourceDir, "dist", "index.d.ts"), "utf8"),
-      ]);
-    } catch (error) {
-      return {
-        ok: false as const,
-        reason: failureReason(error, "unable to read the bundled @dohc/sdk browser files"),
-      };
-    }
-    const vendorFiles = [
-      {
-        path: "vendor/dohc-sdk/package.json",
-        content: `${JSON.stringify(
-          {
-            name: "@dohc/sdk",
-            version: sdk.version,
-            type: "module",
-            types: "./dist/index.d.ts",
-            exports: {
-              ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
-            },
-          },
-          null,
-          2,
-        )}\n`,
-      },
-      {
-        path: "vendor/dohc-sdk/dist/index.js",
-        content: sdkJavaScript,
-      },
-      {
-        path: "vendor/dohc-sdk/dist/index.d.ts",
-        content: sdkTypes,
-      },
-    ];
-    for (const file of vendorFiles) {
-      const path = relativeJoin(root.normalized, file.path);
-      const existing = await readFile(join(ctx.root, path)).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      });
-      const writtenVendor = await writeWorkspaceFile(ctx, {
-        path,
-        content: file.content,
-        expectedSha256: sha256(existing ?? new Uint8Array()),
-        summary: `MCP installed the bundled @dohc/sdk in ${root.normalized}`,
-      });
-      if (!writtenVendor.ok) return writtenVendor;
-    }
-  }
-  const dependencies = ensureObject(packageJson.dependencies);
-  dependencies["@dohc/sdk"] = sdk.specifier;
-  packageJson.dependencies = dependencies;
-
-  const normalizedPackagePath = relativeJoin(root.normalized, "package.json");
-  const written = await writeWorkspaceFile(ctx, {
-    path: normalizedPackagePath,
-    content: `${JSON.stringify(packageJson, null, 2)}\n`,
-    expectedSha256: expectedPackageSha256,
-    summary: `MCP added @dohc/sdk to ${root.normalized}`,
-  });
-  if (!written.ok) return written;
-
-  const useVendoredBrowserImport = !usesPackageModuleResolution && sdk.sourceDir !== null;
-
-  return {
-    ok: true as const,
-    siteRoot: root.normalized,
-    packagePath: normalizedPackagePath,
-    dependency: "@dohc/sdk",
-    // Forward the write's history-recording shape honestly, including the
-    // unknown arm's cause.
-    ...forwardedRecordedChangeFields(written),
-    importMode: useVendoredBrowserImport ? "vendored-browser-module" : "package",
-    usage: useVendoredBrowserImport
-      ? `import { dohc } from "./vendor/dohc-sdk/dist/index.js";\nconst text = await dohc.files.read("notes/today.md");`
-      : `import { dohc } from "@dohc/sdk";\nconst text = await dohc.files.read("notes/today.md");`,
   };
 }
 

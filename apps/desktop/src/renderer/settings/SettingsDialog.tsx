@@ -8,6 +8,7 @@ import {
   Search,
   X,
 } from "lucide-react";
+import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
 import {
   useCallback,
   useEffect,
@@ -747,6 +748,44 @@ export function SettingsDialog(props: {
       case "workbench":
         return (
           <div data-testid="settings-section-workbench">
+            <SettingRow
+              title="Site previews"
+              description="Choose the mode Sites tries first when a site has no preview mode of its own."
+              modified={isModified(
+                workspaceSettings.sites.defaultPreviewMode,
+                DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+              )}
+              onReset={() =>
+                void saveWorkspaceSettings({
+                  sites: {
+                    defaultPreviewMode:
+                      DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
+                  },
+                })
+              }
+              testId="settings-row-site-preview-mode"
+            >
+              <select
+                aria-label="Default site preview mode"
+                data-testid="site-preview-mode-select"
+                value={workspaceSettings.sites.defaultPreviewMode}
+                onChange={(event) =>
+                  void saveWorkspaceSettings({
+                    sites: {
+                      defaultPreviewMode: event.target
+                        .value as WorkspaceSettings["sites"]["defaultPreviewMode"],
+                    },
+                  })
+                }
+                className="h-8 w-64 rounded-md border border-line bg-bg px-2 text-[12px] text-ink focus:border-ink"
+              >
+                {WORKSPACE_PREVIEW_MODES.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {mode.slice(0, 1).toUpperCase() + mode.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </SettingRow>
             <SettingRow
               title="History rail"
               description="Workbench layout restoration remains in workspace UI state. Full defaults arrive in the next workbench slice."
