@@ -7,7 +7,9 @@ import {
   DEFAULT_USER_SETTINGS,
   DesktopUserSettings,
   RunnerSettings,
+  clampZoomLevel,
   effectiveThemeMode,
+  zoomPercent,
   mergeDesktopUserSettings,
   parseDesktopUserSettings,
   userSettingsModified,
@@ -53,6 +55,8 @@ describe("desktop user settings model", () => {
       themeMode: "dark",
       density: "compact",
       reduceMotion: true,
+      // Untouched by the patch, so the merge keeps the current value.
+      zoomLevel: 0,
     });
     expect(next.editor).toEqual(DEFAULT_USER_SETTINGS.editor);
     expect(userSettingsModified(next)).toBe(true);
@@ -73,6 +77,49 @@ describe("desktop user settings model", () => {
       profile: {},
       runner: DEFAULT_RUNNER_SETTINGS,
     });
+  });
+
+  it("adds the default zoom level to settings written before zoom support", () => {
+    const legacySettings = {
+      version: DEFAULT_USER_SETTINGS.version,
+      profile: {},
+      appearance: {
+        themeMode: "dark" as const,
+        density: "compact" as const,
+        reduceMotion: true,
+      },
+      general: DEFAULT_USER_SETTINGS.general,
+      editor: DEFAULT_USER_SETTINGS.editor,
+      notifications: DEFAULT_USER_SETTINGS.notifications,
+      runner: DEFAULT_RUNNER_SETTINGS,
+    };
+
+    // The stored appearance choices survive; only the new field fills in.
+    expect(parseDesktopUserSettings(legacySettings).appearance).toEqual({
+      themeMode: "dark",
+      density: "compact",
+      reduceMotion: true,
+      zoomLevel: 0,
+    });
+
+    for (const zoomLevel of [-6, 6, 0.5, Number.NaN]) {
+      expect(
+        DesktopUserSettings.safeParse({
+          ...DEFAULT_USER_SETTINGS,
+          appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel },
+        }).success,
+        String(zoomLevel),
+      ).toBe(false);
+    }
+  });
+
+  it("clamps zoom levels and maps them to 20%-per-step percentages", () => {
+    expect(clampZoomLevel(99)).toBe(5);
+    expect(clampZoomLevel(-99)).toBe(-5);
+    expect(clampZoomLevel(Number.NaN)).toBe(0);
+    expect(zoomPercent(0)).toBe(100);
+    expect(zoomPercent(1)).toBe(120);
+    expect(zoomPercent(-1)).toBe(83);
   });
 
   it("migrates preferred-name support into old v1 settings and validates names", () => {

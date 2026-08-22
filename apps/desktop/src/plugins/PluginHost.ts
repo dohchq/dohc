@@ -178,25 +178,21 @@ function findDuplicateId(ids: readonly string[]): string | undefined {
   return undefined;
 }
 
-/**
- * A plugin's manifest is what dohc shows before the plugin runs, so a declared
- * driver that never registers would be a probe row nothing can answer, and a
- * registered driver nothing declared would be a driver no reader was told
- * about. The two sets must match exactly.
- */
-function driverRegistrationMismatch(
+function registrationMismatch(
+  pluginId: string,
+  noun: "command" | "driver",
   declared: readonly string[],
   registered: readonly string[],
 ): string | undefined {
   const declaredIds = new Set(declared);
   const registeredIds = new Set(registered);
-  const missing = declared.filter((id) => !registeredIds.has(id));
-  if (missing.length > 0) {
-    return `Plugin activation did not register the driver ids its manifest declares: ${missing.join(", ")}.`;
+  const missing = declared.find((id) => !registeredIds.has(id));
+  if (missing !== undefined) {
+    return `Plugin "${pluginId}" activation did not register ${noun} id "${missing}" declared in its manifest.`;
   }
-  const extra = registered.filter((id) => !declaredIds.has(id));
-  if (extra.length > 0) {
-    return `Plugin activation registered driver ids its manifest does not declare: ${extra.join(", ")}.`;
+  const extra = registered.find((id) => !declaredIds.has(id));
+  if (extra !== undefined) {
+    return `Plugin "${pluginId}" activation registered ${noun} id "${extra}" that its manifest does not declare.`;
   }
   return undefined;
 }
@@ -670,8 +666,20 @@ export class PluginHost {
       );
       return;
     }
+    const commandMismatch = registrationMismatch(
+      record.pluginId,
+      "command",
+      (record.manifest.commands ?? []).map((command) => command.id),
+      result.commands,
+    );
+    if (commandMismatch !== undefined) {
+      void this.handleActivationFailure(record, spawn, new Error(commandMismatch));
+      return;
+    }
     const declaredDrivers = record.manifest.drivers ?? [];
-    const mismatch = driverRegistrationMismatch(
+    const mismatch = registrationMismatch(
+      record.pluginId,
+      "driver",
       declaredDrivers.map((driver) => driver.id),
       result.drivers,
     );

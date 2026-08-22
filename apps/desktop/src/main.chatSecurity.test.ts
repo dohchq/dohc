@@ -1038,7 +1038,7 @@ describe("main-process chat authorization", () => {
   // rules live in shareProposals.ts and are driven behaviourally there; this
   // pin covers main's wiring — that both lanes go through them, and that
   // neither takes a share id from the renderer.
-  it("splits the share-changes lanes in main, and resolves every share id from the registry", () => {
+  it("wires share-change authorization and the submit guard in source order", () => {
     const granterLane = [
       "listShareProposals",
       "readShareProposalChanges",
@@ -1084,8 +1084,9 @@ describe("main-process chat authorization", () => {
     // level; seeing and taking back what was already sent need membership
     // only, because a reverse path a downgrade removes is not one. Both rules
     // are driven behaviourally in `workspaces/shareProposals.test.ts`.
+    const submit = handlerSource("submitShareChanges");
     expect(
-      handlerSource("submitShareChanges"),
+      submit,
       "MUTATION: an ungated submit sends a view recipient's edits to the granter",
     ).toContain("requireShareViewProposalScope,");
     for (const channel of ["listMyShareChanges", "withdrawShareChanges"]) {
@@ -1093,8 +1094,42 @@ describe("main-process chat authorization", () => {
     }
     // The grant that leaves this machine is the PINNED one the scope resolved,
     // never a selector the renderer stated.
-    expect(handlerSource("submitShareChanges")).toContain(
+    expect(submit).toContain(
       "grantedSelector: scope.grant,",
+    );
+    expect(
+      submit,
+      "MUTATION: submitting without a final disk capture drops edits made after the last refresh",
+    ).toContain("const captured = await withShareViewRefreshLifecycleLock(");
+    expect(submit).toContain("scope.workspace.rootPath,");
+    const lifecycleLockAt = submit.indexOf(
+      "const captured = await withShareViewRefreshLifecycleLock(",
+    );
+    const captureAt = submit.indexOf(
+      "captureStandaloneShareViewDivergence({",
+    );
+    const refusalAt = submit.indexOf(
+      "assertShareChangesJournalable(captured.unjournalablePaths);",
+    );
+    const submitAt = submit.indexOf(").submitShareProposal({");
+    // indexOf returns -1 for an absent anchor, and -1 orders below every real
+    // position, so a removed guard would satisfy the comparisons below.
+    expect(lifecycleLockAt).toBeGreaterThan(-1);
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(refusalAt).toBeGreaterThan(-1);
+    expect(submitAt).toBeGreaterThan(-1);
+    expect(lifecycleLockAt).toBeLessThan(captureAt);
+    expect(captureAt).toBeLessThan(refusalAt);
+    expect(refusalAt).toBeLessThan(submitAt);
+    expect(submit).toContain(
+      "pinnedSelector: isRecordValue(scope.workspace.shareView)",
+    );
+    expect(submit).toContain("? scope.workspace.shareView.grantedSelector");
+    expect(submit).toContain("scope.workspace.shareView.ended === true");
+    expect(submit).not.toContain("ended: false");
+    expect(submit).toContain("return resolveSubmitShareChangesResult(");
+    expect(submit).toContain(
+      "captured.capturedPaths + captured.repairedPaths,",
     );
   });
 });

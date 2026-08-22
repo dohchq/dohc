@@ -1,8 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
+  DesktopUserSettingsResult,
   DohcDesktopBridge,
   GetSitePreviewLogsPayload,
+  InvokePluginCommandPayload,
   InvokePluginPanelSdkPayload,
   ListSitesPayload,
   MenuCommand,
@@ -29,6 +31,7 @@ import type {
 } from "./ipc/bridgeContract";
 import {
   ListPluginsResult,
+  InvokePluginCommandResult,
   OpenPluginPanelResult,
   OpenPluginWebAppResult,
   PluginActionResult,
@@ -186,6 +189,10 @@ const bridge: DohcDesktopBridge = {
     StartPluginPanelResult.parse(
       await ipcRenderer.invoke(CHANNELS.startPluginPanel, payload),
     ),
+  invokePluginCommand: async (payload: InvokePluginCommandPayload) =>
+    InvokePluginCommandResult.parse(
+      await ipcRenderer.invoke(CHANNELS.invokePluginCommand, payload),
+    ),
   stopPluginPanel: (payload: StopPluginPanelPayload) =>
     ipcRenderer.invoke(CHANNELS.stopPluginPanel, payload),
   invokePluginPanelSdk: (payload: InvokePluginPanelSdkPayload) =>
@@ -248,6 +255,8 @@ const bridge: DohcDesktopBridge = {
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.enablePlugin, payload)),
   approvePlugin: async (payload) =>
     PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.approvePlugin, payload)),
+  rebuildPlugin: async (payload) =>
+    PluginActionResult.parse(await ipcRenderer.invoke(CHANNELS.rebuildPlugin, payload)),
   pluginUninstallPreflight: async (payload) =>
     PluginUninstallPreflightResult.parse(
       await ipcRenderer.invoke(CHANNELS.pluginUninstallPreflight, payload),
@@ -413,6 +422,20 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeClipboardText, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
+  onUserSettingsChanged: (
+    listener: (result: DesktopUserSettingsResult) => void,
+  ) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+        listener(raw as DesktopUserSettingsResult);
+      }
+    };
+    ipcRenderer.on(CHANNELS.userSettingsChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.userSettingsChanged, handler);
+  },
+  stepWindowZoom: (payload) =>
+    ipcRenderer.invoke(CHANNELS.stepWindowZoom, payload),
   getWorkspaceUiState: (payload) =>
     ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
   setWorkspaceUiState: (payload) =>

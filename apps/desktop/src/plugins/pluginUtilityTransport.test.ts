@@ -2,7 +2,12 @@ import type { UtilityProcess } from "electron";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+import { killProcessTreeWin32 } from "../process/windowsSpawn";
 import { createPluginUtilityTransport } from "./pluginUtilityTransport";
+
+vi.mock("../process/posixSpawn", () => ({
+  stopProcessTreePosix: vi.fn(async () => undefined),
+}));
 
 vi.mock("../process/windowsSpawn", () => ({
   killProcessTreeWin32: vi.fn(async () => false),
@@ -29,6 +34,8 @@ function setup() {
   );
   return { child, callbacks, transport };
 }
+
+const itWindows = process.platform === "win32" ? it : it.skip;
 
 describe("createPluginUtilityTransport", () => {
   it("sends requests and settles matching result and error responses", async () => {
@@ -124,6 +131,40 @@ describe("createPluginUtilityTransport", () => {
         expect.stringContaining("5000 ms"),
       );
     } finally {
+      error.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  itWindows("starts the exit wait cap after a slow Windows tree kill", async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      vi.mocked(killProcessTreeWin32).mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5_100));
+        return false;
+      });
+      const { child, transport } = setup();
+      child.pid = 4242;
+      child.kill.mockImplementationOnce(() => {
+        setTimeout(() => {
+          child.pid = undefined;
+          child.emit("exit", 0);
+        }, 250);
+        return true;
+      });
+
+      const disposing = transport.dispose();
+      await vi.advanceTimersByTimeAsync(5_100);
+      expect(child.kill).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(250);
+      await disposing;
+
+      expect(error).not.toHaveBeenCalledWith(
+        expect.stringContaining("5000 ms descendant shutdown limit"),
+      );
+    } finally {
+      error.mockRestore();
       vi.useRealTimers();
     }
   });

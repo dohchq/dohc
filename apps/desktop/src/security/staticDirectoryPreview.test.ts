@@ -199,4 +199,45 @@ describe("startStaticDirectoryPreview", () => {
       await preview.stop();
     }
   });
+
+  it("forbidSharedWithMePaths refuses even an ordinary same-directory request when the served root itself sits inside shared-with-me", async () => {
+    // siteRunner passes forbidSharedWithMePaths: true and, for an owned
+    // (non-share-authority) site, containmentRoot is the WHOLE workspace —
+    // so if this site's own served root turns out to sit inside a
+    // shared-with-me mount (its directory misclassified, or reached through
+    // a symlink resolved before the server ever starts), the rule must
+    // refuse it entirely, not just requests that escape the served
+    // directory. The plain isInside(root, realTarget) containment check
+    // alone would happily allow this — the entry file genuinely lives where
+    // it's requested from — so this exercises forbidSharedWithMePaths
+    // doing something isInside does not.
+    const workspaceRoot = join(root, "workspace");
+    const leakedSiteRoot = join(workspaceRoot, "shared-with-me", "alice", "leaked-site");
+    await mkdir(leakedSiteRoot, { recursive: true });
+    await writeFile(join(leakedSiteRoot, "index.html"), "<h1>Not this workspace's to serve</h1>");
+
+    const preview = await startStaticDirectoryPreview(leakedSiteRoot, {
+      containmentRoot: workspaceRoot,
+      entry: "index.html",
+      entryLabel: "site entry",
+      forbidSharedWithMePaths: true,
+    });
+    try {
+      // MUTATION (forbidSharedWithMePaths as a whole): drop BOTH the
+      // spelled-path and resolved-path isSharedWithMePath checks and this
+      // site's own entry file is served normally. The two checks are
+      // mutually redundant for every construction reachable in this test
+      // (no symlink separates "spelled" from "resolved" here, so they see
+      // the identical string) — verified directly: disabling either ONE
+      // alone still left this refused, via the other. Both still guard
+      // genuinely different code paths (one runs before any filesystem
+      // resolution, the other after) even though this specific scenario
+      // cannot distinguish them; disabling only ONE is deliberately NOT
+      // pinned here, to avoid asserting a false claim about which check
+      // did the refusing.
+      await expect(rawRequestStatus(preview.url, "/index.html")).resolves.toBe(403);
+    } finally {
+      await preview.stop();
+    }
+  });
 });

@@ -26,11 +26,18 @@ import {
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { createPluginAuthoredTextWriter } from "./pluginAuthoredWrite";
+import { PLUGIN_HOST_METHODS } from "./pluginHostProtocol";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
-import { PluginPipeline, type PluginPipelineStatusEvent } from "./PluginPipeline";
+import {
+  type DoorWrittenDelta,
+  overlayDoorWrittenSourceDeltas,
+  PluginPipeline,
+  type PluginPipelineStatusEvent,
+} from "./PluginPipeline";
 import {
   installPluginDependencies,
   type PluginInstallForkOptions,
@@ -46,7 +53,11 @@ import {
 import {
   pluginLifecycleKey,
   startPluginForPanel,
+  toPluginPanelHostStartResult,
 } from "./pluginPanelRegistration";
+import { invokeRegisteredPluginCommand } from "./pluginCommandInvocation";
+import { PluginCommandHostClaims } from "./pluginCommandHostClaims";
+import type { PluginSettingDeclaration } from "./pluginManifestSchema";
 import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
@@ -56,6 +67,16 @@ import {
 interface Deferred {
   promise: Promise<void>;
   resolve(): void;
+}
+
+type DoorWrittenDeltas = Map<
+  string,
+  Map<string, DoorWrittenDelta>
+>;
+
+function doorWrittenDeltasOf(pipeline: PluginPipeline): DoorWrittenDeltas {
+  return (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+    .doorWrittenDeltas;
 }
 
 const roots: string[] = [];
@@ -324,11 +345,47 @@ async function doorWrite(
   pipeline.handleDoorWrittenSourceChange(pluginId, { absolutePath, text });
 }
 
-function fakeSpawnTransport(): PluginHostOptions["spawnTransport"] {
+async function authoredDoorWrite(
+  pipeline: PluginPipeline,
+  workspaceRoot: string,
+  path: string,
+  text: string,
+): Promise<void> {
+  const write = createPluginAuthoredTextWriter({
+    signal: undefined,
+    requireWritableCapture: async () => ({
+      workspaceRoot,
+      capture: {
+        writeAuthoredTextFile: async (absolutePath, writtenText) => {
+          await writeFile(absolutePath, writtenText);
+          return { resolvedAbsolutePath: absolutePath };
+        },
+      },
+    }),
+    pipeline: () => pipeline,
+  });
+  await write(path, text, {
+    overwrite: true,
+    author: {
+      kind: "agent",
+      agentId: "plugin:example-plugin",
+      onBehalfOf: "local",
+      agentRunId: "spawn-1",
+    },
+  });
+}
+
+function fakeSpawnTransport(
+  registeredCommands: () => string[] = () => [],
+  beforeRequest?: (method: string) => Promise<void> | void,
+): PluginHostOptions["spawnTransport"] {
   return vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
-    request: async <T = unknown>(method: string): Promise<T> => (
-      method === "plugin.activate" ? { commands: [], drivers: [] } : {}
-    ) as T,
+    request: async <T = unknown>(method: string): Promise<T> => {
+      await beforeRequest?.(method);
+      return (method === PLUGIN_HOST_METHODS.activate
+        ? { commands: registeredCommands(), drivers: [] }
+        : {}) as T;
+    },
     notify: () => undefined,
     dispose: async () => undefined,
   }));
@@ -354,7 +411,1133 @@ afterAll(async () => {
   });
 });
 
+describe("overlayDoorWrittenSourceDeltas", () => {
+  it("replaces and adds files by exact relative path", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "aaa" }],
+      new Map([
+        ["src/index.ts", { sha256: "bbb", seq: 1 }],
+        ["src/new.ts", { sha256: "ccc", seq: 2 }],
+      ]),
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "bbb" },
+      { relPath: "src/new.ts", sha256: "ccc" },
+    ]);
+  });
+
+  it("matches only provisional case drift to a baseline spelling", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "aaa" }],
+      new Map([
+        ["SRC/index.ts", { sha256: "bbb", seq: 1, provisional: true }],
+        ["SRC/final.ts", { sha256: "ccc", seq: 2 }],
+      ]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "bbb" },
+      { relPath: "SRC/final.ts", sha256: "ccc" },
+    ]);
+  });
+
+  it("overlays a provisional delta onto its own exact baseline key, not a fold match", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [
+        { relPath: "SRC/a.ts", sha256: "upper" },
+        { relPath: "src/a.ts", sha256: "lower" },
+      ],
+      new Map([["SRC/a.ts", {
+        sha256: "written",
+        seq: 1,
+        provisional: true,
+      }]]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "SRC/a.ts", sha256: "written" },
+      { relPath: "src/a.ts", sha256: "lower" },
+    ]);
+  });
+
+  it("keeps baseline-absent provisional case variants distinct until recovery confirms one", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [],
+      new Map([
+        ["SRC/new.ts", { sha256: "first", seq: 1, provisional: true }],
+        ["src/new.ts", { sha256: "latest", seq: 2, provisional: true }],
+      ]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "SRC/new.ts", sha256: "first" },
+      { relPath: "src/new.ts", sha256: "latest" },
+    ]);
+  });
+
+  it("folds a provisional NFC path onto an NFD baseline spelling", () => {
+    const nfdRelPath = "src/caf\u0065\u0301.ts";
+    const nfcRelPath = "src/caf\u00e9.ts";
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: nfdRelPath, sha256: "baseline" }],
+      new Map([[nfcRelPath, {
+        sha256: "delta",
+        seq: 1,
+        provisional: true,
+      }]]),
+      "darwin",
+    );
+
+    expect(files).toEqual([{ relPath: nfdRelPath, sha256: "delta" }]);
+  });
+});
+
 describe("PluginPipeline real filesystem lifecycle", () => {
+  it("attributes and confirms an NFC-spelled write under an NFD plugin root", async () => {
+    const nfdDirectory = "caf\u0065\u0301";
+    const nfcDirectory = "caf\u00e9";
+    const fixture = await createNamedPluginWorkspace(
+      nfdDirectory,
+      "unicode-plugin",
+    );
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const callerPath = join(
+        fixture.workspaceRoot,
+        "plugins",
+        nfcDirectory,
+        "src",
+        "index.ts",
+      );
+      expect(pipeline.pluginIdForPath(callerPath)).toBe("unicode-plugin");
+
+      const text = "normalization-equivalent root\n";
+      const write = createPluginAuthoredTextWriter({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (absolutePath) => {
+              await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      await write(
+        join("plugins", nfcDirectory, "src", "index.ts"),
+        text,
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:unicode-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+
+      expect(doorWrittenDeltasOf(pipeline).get("unicode-plugin"))
+        .toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+            seq: 1,
+          },
+        ]]));
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("attributes a mixed-case directory that the source snapshot includes", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: join(fixture.pluginRoot, "Node_Modules", "x.ts"),
+        text: "included\n",
+      });
+
+      expect(doorWrittenDeltasOf(pipeline).get("example-plugin"))
+        .toEqual(new Map([[
+          "Node_Modules/x.ts",
+          {
+            sha256: createHash("sha256").update("included\n", "utf8").digest("hex"),
+            seq: 1,
+            provisional: true,
+          },
+        ]]));
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("deletes a landed delta when rekeying reveals an excluded path", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const callerPath = join(fixture.pluginRoot, "NODE_MODULES", "x.ts");
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: callerPath,
+        text: "excluded\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "example-plugin",
+        { absolutePath: callerPath },
+        { absolutePath: join(fixture.pluginRoot, "node_modules", "x.ts") },
+      );
+
+      expect(doorWrittenDeltasOf(pipeline).get("example-plugin"))
+        .toEqual(new Map());
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("confirms a recovered plugin root by exact on-disk spelling", async () => {
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    vi.resetModules();
+    // Model a case-sensitive volume even when this test runs on Windows.
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+      let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+      const host = new PluginHostWithPosixPaths({
+        stateDir: "/state",
+        workspaceRoot: "/workspace",
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipelineWithPosixPaths({
+        workspaceRoot: "/workspace",
+        stateDir: "/state",
+        pluginHost: host,
+        platform: "darwin",
+        pnpmRunnerEntry: "/runner",
+      });
+      const pipelineState = pipeline as unknown as {
+        discovery: InstalledPluginRecord[];
+        enqueueSourceRefresh(
+          pluginId: string,
+          run: () => Promise<void>,
+        ): void;
+      };
+      pipelineState.discovery = [{
+        id: "owned",
+        directoryName: "owned",
+        rootPath: "/workspace/plugins/owned",
+        manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+        iconPath: null,
+        diagnostics: [],
+        valid: true,
+      }];
+      pipelineState.enqueueSourceRefresh = () => undefined;
+
+      const recoveredPath = "/workspace/plugins/OWNED/src/index.ts";
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: recoveredPath,
+        text: "distinct root\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "owned",
+        { absolutePath: recoveredPath },
+        { absolutePath: recoveredPath },
+      );
+
+      expect(
+        (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+          .doorWrittenDeltas.get("owned"),
+      ).toEqual(new Map());
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: recoveredPath,
+        text: "confirmed root\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "owned",
+        { absolutePath: recoveredPath },
+        { absolutePath: "/workspace/plugins/owned/src/index.ts" },
+      );
+
+      expect(
+        (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+          .doorWrittenDeltas.get("owned"),
+      )
+        .toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256: createHash("sha256")
+              .update("confirmed root\n", "utf8")
+              .digest("hex"),
+            seq: 2,
+          },
+        ]]));
+    } finally {
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
+  for (const scenario of [
+    { name: "an empty directory", excludedOnly: false },
+    { name: "a directory with only excluded content", excludedOnly: true },
+  ]) {
+    it.skipIf(process.platform !== "win32")(
+      `auto-approves a case-drifted Windows door write under ${scenario.name}`,
+      async () => {
+        const fixture = await createPluginWorkspace();
+        const existingDirectory = join(fixture.pluginRoot, "src", "NewDir");
+        await mkdir(existingDirectory, { recursive: true });
+        if (scenario.excludedOnly) {
+          const excludedPath = join(existingDirectory, "node_modules", "x.js");
+          await mkdir(dirname(excludedPath), { recursive: true });
+          await writeFile(excludedPath, "excluded\n");
+        }
+        let pipeline: PluginPipeline;
+        const host = new PluginHost({
+          stateDir: fixture.stateDir,
+          workspaceRoot: fixture.workspaceRoot,
+          spawnTransport: fakeSpawnTransport(),
+          routeSdkRequest: async () => ({}),
+          onStatusChange: (pluginId, status) => {
+            pipeline.noteRuntimeStatus(pluginId, status);
+          },
+        });
+        pipeline = new PluginPipeline({
+          workspaceRoot: fixture.workspaceRoot,
+          stateDir: fixture.stateDir,
+          pluginHost: host,
+          resourcesBasePath,
+          pnpmRunnerEntry,
+          operations: {
+            install: (input) =>
+              installPluginDependencies({
+                ...input,
+                forkProcess: nodeForkProcess,
+              }),
+          },
+        });
+
+        try {
+          await pipeline.start();
+          const installed = await pipeline.install("example-plugin");
+          if (!installed.ok) throw new Error(installed.error.message);
+          await waitFor(
+            () => pipeline.list()[0]?.status === "ready",
+            "Plugin did not reach ready after install.",
+          );
+          const originalHash = pipeline.list()[0]?.approvedHash;
+          await authoredDoorWrite(
+            pipeline,
+            fixture.workspaceRoot,
+            join("plugins", "example-plugin", "SRC", "newdir", "a.ts"),
+            "export const added = true;\n",
+          );
+
+          await waitFor(
+            () => {
+              const plugin = pipeline.list()[0];
+              return plugin?.status === "disabled-pending-approval" ||
+                (plugin?.status === "ready" &&
+                  plugin.approvedHash !== originalHash);
+            },
+            "Door write did not finish reconciliation.",
+          );
+          expect(pipeline.list()[0]).toMatchObject({
+            status: "ready",
+            disabledReason: null,
+          });
+          expect(pipeline.list()[0]?.approvedHash).not.toBe(originalHash);
+        } finally {
+          await pipeline.dispose();
+        }
+      },
+      60_000,
+    );
+  }
+
+  it("retries a provisional new-directory delta before hashing it", async () => {
+    const fixture = await createPluginWorkspace();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const canonicalDirectory = join(fixture.pluginRoot, "src", "NewDir");
+    const canonicalPath = join(canonicalDirectory, "a.ts");
+    const failedDirectory = resolve(join(fixture.pluginRoot, "src"));
+    let transientFailures = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      if (
+        resolve(String(args[0])) === failedDirectory &&
+        transientFailures === 0
+      ) {
+        transientFailures += 1;
+        throw new Error("simulated transient readdir failure");
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const originalHash = pipeline.list()[0]?.approvedHash;
+      await mkdir(canonicalDirectory, { recursive: true });
+
+      const { createPluginAuthoredTextWriter: createWriterWithTransientRead } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithTransientRead({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath, text) => {
+              await writeFile(canonicalPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      await write(
+        join("plugins", "example-plugin", "SRC", "newdir", "a.ts"),
+        "export const recovered = true;\n",
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+
+      await waitFor(
+        () => {
+          const plugin = pipeline.list()[0];
+          return plugin?.status === "ready" &&
+            plugin.approvedHash !== originalHash;
+        },
+        "The retried door write did not reach ready.",
+        60_000,
+      );
+      expect(transientFailures).toBe(1);
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+    } finally {
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("confirms fold-attributed ownership before settling a provisional delta", async () => {
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    let pluginEntries: string[] = [];
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      switch (actualPath.posix.resolve(String(args[0]))) {
+        case "/workspace":
+          return ["plugins"];
+        case "/workspace/plugins":
+          return pluginEntries;
+        case "/workspace/plugins/owned":
+        case "/workspace/plugins/OWNED":
+          return ["src"];
+        case "/workspace/plugins/owned/src":
+        case "/workspace/plugins/OWNED/src":
+          return ["index.ts"];
+        default:
+          throw new Error("Unexpected readdir path: " + String(args[0]));
+      }
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+
+      for (const scenario of [
+        { entries: ["owned", "OWNED"], confirmed: false },
+        { entries: ["owned"], confirmed: true },
+      ]) {
+        pluginEntries = scenario.entries;
+        let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+        const host = new PluginHostWithPosixPaths({
+          stateDir: "/state",
+          workspaceRoot: "/workspace",
+          spawnTransport: fakeSpawnTransport(),
+          routeSdkRequest: async () => ({}),
+          onStatusChange: (pluginId, status) => {
+            pipeline.noteRuntimeStatus(pluginId, status);
+          },
+        });
+        pipeline = new PluginPipelineWithPosixPaths({
+          workspaceRoot: "/workspace",
+          stateDir: "/state",
+          pluginHost: host,
+          platform: "darwin",
+          pnpmRunnerEntry: "/runner",
+        });
+        const pipelineState = pipeline as unknown as {
+          discovery: InstalledPluginRecord[];
+          doorWrittenDeltas: DoorWrittenDeltas;
+          enqueueSourceRefresh(
+            pluginId: string,
+            run: () => Promise<void>,
+          ): void;
+          retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+        };
+        pipelineState.discovery = [{
+          id: "owned",
+          directoryName: "owned",
+          rootPath: "/workspace/plugins/owned",
+          manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+          iconPath: null,
+          diagnostics: [],
+          valid: true,
+        }];
+        pipelineState.enqueueSourceRefresh = () => undefined;
+
+        const callerPath = "/workspace/plugins/OWNED/src/index.ts";
+        const text = scenario.confirmed ? "confirmed\n" : "distinct root\n";
+        const sha256 = createHash("sha256")
+          .update(text, "utf8")
+          .digest("hex");
+        pipeline.handleDoorWrittenSourceChange("owned", {
+          absolutePath: callerPath,
+          text,
+        });
+        expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256,
+            seq: 1,
+            provisional: true,
+            provisionalOrigin: callerPath,
+          },
+        ]]));
+
+        await pipelineState.retryProvisionalDeltaRecovery("owned");
+
+        expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(
+          scenario.confirmed
+            ? new Map([["src/index.ts", { sha256, seq: 1 }]])
+            : new Map(),
+        );
+      }
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
+  it("converges baseline-absent provisional case variants after recovery confirms one", async () => {
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      switch (actualPath.posix.resolve(String(args[0]))) {
+        case "/workspace/plugins/owned":
+          return ["SRC"];
+        case "/workspace/plugins/owned/SRC":
+          return ["new.ts"];
+        default:
+          throw new Error("Unexpected readdir path: " + String(args[0]));
+      }
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+      let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+      const host = new PluginHostWithPosixPaths({
+        stateDir: "/state",
+        workspaceRoot: "/workspace",
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipelineWithPosixPaths({
+        workspaceRoot: "/workspace",
+        stateDir: "/state",
+        pluginHost: host,
+        platform: "darwin",
+        pnpmRunnerEntry: "/runner",
+      });
+      const pipelineState = pipeline as unknown as {
+        discovery: InstalledPluginRecord[];
+        doorWrittenDeltas: DoorWrittenDeltas;
+        enqueueSourceRefresh(
+          pluginId: string,
+          run: () => Promise<void>,
+        ): void;
+        retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+      };
+      pipelineState.discovery = [{
+        id: "owned",
+        directoryName: "owned",
+        rootPath: "/workspace/plugins/owned",
+        manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+        iconPath: null,
+        diagnostics: [],
+        valid: true,
+      }];
+      pipelineState.enqueueSourceRefresh = () => undefined;
+
+      const firstText = "first\n";
+      const latestText = "latest\n";
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: "/workspace/plugins/owned/SRC/new.ts",
+        text: firstText,
+      });
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: "/workspace/plugins/owned/src/new.ts",
+        text: latestText,
+      });
+      expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([
+        ["SRC/new.ts", {
+          sha256: createHash("sha256").update(firstText, "utf8").digest("hex"),
+          seq: 1,
+          provisional: true,
+          provisionalOrigin: undefined,
+        }],
+        ["src/new.ts", {
+          sha256: createHash("sha256").update(latestText, "utf8").digest("hex"),
+          seq: 2,
+          provisional: true,
+          provisionalOrigin: undefined,
+        }],
+      ]));
+
+      await pipelineState.retryProvisionalDeltaRecovery("owned");
+
+      expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([[
+        "SRC/new.ts",
+        {
+          sha256: createHash("sha256").update(latestText, "utf8").digest("hex"),
+          seq: 2,
+        },
+      ]]));
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
+  it("does not let stale provisional recovery replace a newer same-path write", async () => {
+    const fixture = await createPluginWorkspace();
+    const recoveryStarted = deferred();
+    const releaseRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let blockRecovery = false;
+    let blocked = false;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      if (
+        blockRecovery &&
+        !blocked &&
+        resolve(String(args[0])) === resolve(fixture.pluginRoot)
+      ) {
+        blocked = true;
+        recoveryStarted.resolve();
+        await releaseRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    const { PluginPipeline: PluginPipelineWithDelayedRecovery } =
+      await import("./PluginPipeline");
+    const { PluginHost: PluginHostWithDelayedRecovery } =
+      await import("./PluginHost");
+    let pipeline: InstanceType<typeof PluginPipelineWithDelayedRecovery>;
+    const host = new PluginHostWithDelayedRecovery({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipelineWithDelayedRecovery({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const oldText = "old bytes\n";
+      const deltas = new Map([[
+        "src/index.ts",
+        {
+          sha256: createHash("sha256").update(oldText, "utf8").digest("hex"),
+          seq: 1,
+          provisional: true,
+        },
+      ]]);
+      doorWrittenDeltasOf(pipeline).set("example-plugin", deltas);
+      (pipeline as unknown as { doorWriteSeq: number }).doorWriteSeq = 1;
+
+      blockRecovery = true;
+      const pendingRecovery = (pipeline as unknown as {
+        retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+      }).retryProvisionalDeltaRecovery("example-plugin");
+      await recoveryStarted.promise;
+
+      const newText = "new bytes\n";
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: fixture.entryPath,
+        text: newText,
+      });
+      releaseRecovery.resolve();
+      await pendingRecovery;
+
+      expect(deltas.get("src/index.ts")).toMatchObject({
+        sha256: createHash("sha256").update(newText, "utf8").digest("hex"),
+        seq: 2,
+      });
+    } finally {
+      releaseRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("attributes an authored write before delayed case recovery lets a watcher reconcile it", async () => {
+    const fixture = await createPluginWorkspace();
+    const recoveryStarted = deferred();
+    const releaseRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let readCount = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      readCount += 1;
+      if (readCount === 1) {
+        recoveryStarted.resolve();
+        await releaseRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    const observedStatuses: string[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      onStatusChange: (event) => {
+        if (event.kind === "changed") observedStatuses.push(event.plugin.status);
+      },
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.pluginIdForPath(
+        join(fixture.workspaceRoot, "PLUGINS", "EXAMPLE-PLUGIN", "src", "index.ts"),
+      )).toBe("example-plugin");
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const originalHash = pipeline.list()[0]?.approvedHash;
+      observedStatuses.length = 0;
+
+      const { createPluginAuthoredTextWriter: createWriterWithDelayedRecovery } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithDelayedRecovery({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath, text) => {
+              await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      const pendingWrite = write(
+        join("plugins", "example-plugin", "SRC", "index.ts"),
+        [
+          'export const marker = "watcher-window";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+      await recoveryStarted.promise;
+
+      await pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await waitFor(
+        () =>
+          pipeline.list()[0]?.status === "disabled-pending-approval" ||
+          (pipeline.list()[0]?.status === "ready" &&
+            pipeline.list()[0]?.approvedHash !== originalHash),
+        "The watcher-window reconciliation did not settle.",
+        60_000,
+      );
+      const statusesDuringRecovery = [...observedStatuses];
+      releaseRecovery.resolve();
+      await pendingWrite;
+      await waitFor(
+        () =>
+          pipeline.list()[0]?.status === "ready" &&
+          pipeline.list()[0]?.approvedHash !== originalHash,
+        "The attributed write did not finish rebuilding.",
+        60_000,
+      );
+
+      expect(statusesDuringRecovery).not.toContain("disabled-pending-approval");
+    } finally {
+      releaseRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("keeps the second same-file write from two separate writers when the first recovery finishes last", async () => {
+    const fixture = await createPluginWorkspace();
+    const firstRecoveryStarted = deferred();
+    const releaseFirstRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let readCount = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      readCount += 1;
+      if (readCount === 1) {
+        firstRecoveryStarted.resolve();
+        await releaseFirstRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      const { createPluginAuthoredTextWriter: createIndependentWriter } =
+        await import("./pluginAuthoredWrite");
+      const input = {
+        platform: "darwin" as const,
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath: string, text: string) => {
+              await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      };
+      const firstWriter = createIndependentWriter(input);
+      const secondWriter = createIndependentWriter(input);
+      const relativePath = join(
+        "plugins",
+        "example-plugin",
+        "SRC",
+        "index.ts",
+      );
+      const firstWrite = firstWriter(
+        relativePath,
+        [
+          'export const marker = "writer-one";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+      await firstRecoveryStarted.promise;
+      await secondWriter(
+        relativePath,
+        [
+          'export const marker = "writer-two";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-2",
+          },
+        },
+      );
+      releaseFirstRecovery.resolve();
+      await firstWrite;
+
+      await vi.waitFor(
+        async () => {
+          expect(pipeline.list()[0]?.status).toBe("ready");
+          expect(await readFile(
+            liveBundlePath(fixture, "example-plugin"),
+            "utf8",
+          )).toContain("writer-two");
+        },
+        { timeout: 60_000, interval: 20 },
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+    } finally {
+      releaseFirstRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
   it("installs, hot reloads with one coalesced follow-up, disables, enables, approves, and uninstalls", async () => {
     const fixture = await createPluginWorkspace();
     const installGate = deferred();
@@ -2667,6 +3850,1816 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  describe("established plugin rebuild recovery", () => {
+    async function setupEstablishedPlugin(options: {
+      commands?: { id: string; title: string }[];
+      settings?: PluginSettingDeclaration[];
+    } = {}) {
+      const fixture = await createPluginWorkspace();
+      const manifestPath = join(fixture.pluginRoot, "dohc-plugin.json");
+      const manifestText = (
+        commands: { id: string; title: string }[],
+        settings: PluginSettingDeclaration[] = options.settings ?? [],
+      ) =>
+        `${JSON.stringify({
+          version: 1,
+          name: "example-plugin",
+          displayName: "Example plugin",
+          entry: "src/index.ts",
+          commands,
+          settings,
+        }, null, 2)}\n`;
+      if (options.commands || options.settings) {
+        await writeFile(manifestPath, manifestText(options.commands ?? []));
+      }
+      let mismatchNextSnapshot = false;
+      let failNextDiscard = false;
+      let failPublish = false;
+      let failRecordWrite = false;
+      let failBuild = false;
+      let nextStopGate: { entered: Deferred; release: Deferred } | null = null;
+      let nextBuildGate: { entered: Deferred; release: Deferred } | null = null;
+      let nextCommandDrainGate: { entered: Deferred; release: Deferred } | null =
+        null;
+      let failNextStop = false;
+      let failNextDisposeAll = false;
+      // A real instance, wired the same way main.ts wires
+      // activeCommandClaims — so isDraining() reflects genuine barrier
+      // state (round-11), not a simulation of it.
+      const commandClaims = new PluginCommandHostClaims();
+      let buildCalls = 0;
+      let registeredCommands = (options.commands ?? [])
+        .map((command) => command.id);
+      const statuses: string[] = [];
+      let pipeline: PluginPipeline;
+      const baseSpawnTransport = fakeSpawnTransport(
+        () => [...registeredCommands],
+        async (method) => {
+          const gate = nextStopGate;
+          if (method !== PLUGIN_HOST_METHODS.deactivate || !gate) return;
+          nextStopGate = null;
+          gate.entered.resolve();
+          await gate.release.promise;
+        },
+      );
+      const host = new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        // Wraps the base transport's dispose() so a test can make
+        // PluginHost.stop() itself reject — shutdown() awaits dispose()
+        // outside any catch, unlike the deactivate RPC beside it, so this
+        // is the one seam that reaches stopOldRuntime's own stop() call
+        // as a genuine rejection (round-12 finding 3).
+        spawnTransport: (params) => {
+          const transport = baseSpawnTransport(params);
+          return {
+            ...transport,
+            dispose: async () => {
+              if (failNextStop) {
+                failNextStop = false;
+                throw new Error("simulated: PluginHost.stop() transport dispose failed");
+              }
+              return transport.dispose();
+            },
+          };
+        },
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+        // stopAll() awaits this directly, outside any catch — the one
+        // seam that reaches PluginPipeline.dispose()'s own stopAll() call
+        // as a genuine rejection, since stopAll() itself only settles
+        // (never rejects on) each plugin's individual stop().
+        onDispose: async () => {
+          if (failNextDisposeAll) {
+            failNextDisposeAll = false;
+            throw new Error("simulated: PluginHost.stopAll() onDispose failed");
+          }
+        },
+      });
+      pipeline = new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        pnpmRunnerEntry,
+        onStatusChange: (event) => {
+          if (event.kind === "changed") statuses.push(event.plugin.status);
+        },
+        // Mirrors main.ts's own wiring: the marker settles at the same
+        // lower every barrier-raising action already shares, not only on
+        // an explicit reset (#779 round 19 finding 3) — but only when
+        // this barrier's own action actually stopped or replaced the
+        // runtime, or a no-op reconcile eats a cold start's own marker
+        // for a runtime it never touched (#779 round 26 note A).
+        raiseCommandClaimsBarrier: (pluginId) => {
+          const lower = commandClaims.raiseDrainBarrier(pluginId);
+          return () => {
+            lower();
+            if (commandClaims.consumeRuntimeStop(pluginId)) {
+              commandClaims.consumeStartedHost(pluginId);
+            }
+          };
+        },
+        onOldRuntimeStopBoundary: (pluginId) => {
+          commandClaims.markRuntimeStopped(pluginId);
+        },
+        awaitCommandClaimsDrained: async (pluginId) => {
+          const gate = nextCommandDrainGate;
+          const drained = commandClaims.drain(pluginId);
+          if (gate) {
+            nextCommandDrainGate = null;
+            gate.entered.resolve();
+            await gate.release.promise;
+          }
+          return drained;
+        },
+        resetCommandClaims: (pluginId) => commandClaims.reset(pluginId),
+        // Mirrors main.ts's own wiring: a command that reached
+        // startFromApprovedSource through its own ensureStarted() call
+        // already holds one of the claims a hold would otherwise drain —
+        // refusing here instead of draining is what avoids waiting on
+        // itself (#779 round 25 finding 3).
+        hasOutstandingCommandClaim: (pluginId: string) => commandClaims.has(pluginId),
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+          mutateRecord: async (stateDir, workspaceRoot, pluginId, mutate) => {
+            if (failRecordWrite) {
+              failRecordWrite = false;
+              throw new Error("simulated approval record write failure");
+            }
+            return mutatePluginRecord(stateDir, workspaceRoot, pluginId, mutate);
+          },
+          snapshot: async (input) => {
+            const result = await snapshotPluginSource(input);
+            if (!result.ok || !mismatchNextSnapshot) return result;
+            mismatchNextSnapshot = false;
+            return {
+              ...result,
+              sourceHash: "0".repeat(64),
+              discard: async () => {
+                if (failNextDiscard) {
+                  failNextDiscard = false;
+                  throw new Error("simulated: staged tree is busy");
+                }
+                await result.discard();
+              },
+            };
+          },
+          build: async (input) => {
+            buildCalls += 1;
+            const gate = nextBuildGate;
+            if (gate) {
+              nextBuildGate = null;
+              gate.entered.resolve();
+              await gate.release.promise;
+            }
+            if (failBuild) {
+              failBuild = false;
+              throw new Error("simulated build failure before the approval record write");
+            }
+            const result = await buildPluginBundle(input);
+            if (!result.ok || !failPublish) return result;
+            failPublish = false;
+            return {
+              ...result,
+              publish: () => Promise.reject(new Error("simulated publish failure")),
+            };
+          },
+        },
+      });
+
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      return {
+        pipeline,
+        fixture,
+        entryPath: fixture.entryPath,
+        manifestPath,
+        manifestText,
+        statuses,
+        buildCalls: () => buildCalls,
+        failNextBuildPublish: () => {
+          failPublish = true;
+        },
+        failNextRecordWrite: () => {
+          failRecordWrite = true;
+        },
+        failNextBuild: () => {
+          failBuild = true;
+        },
+        gateNextStop: () => {
+          const gate = { entered: deferred(), release: deferred() };
+          nextStopGate = gate;
+          return gate;
+        },
+        gateNextBuild: () => {
+          const gate = { entered: deferred(), release: deferred() };
+          nextBuildGate = gate;
+          return gate;
+        },
+        gateNextCommandDrain: () => {
+          const gate = { entered: deferred(), release: deferred() };
+          nextCommandDrainGate = gate;
+          return gate;
+        },
+        failNextStop: () => {
+          failNextStop = true;
+        },
+        failNextDisposeAll: () => {
+          failNextDisposeAll = true;
+        },
+        commandClaims,
+        setRegisteredCommands: (commands: string[]) => {
+          registeredCommands = [...commands];
+        },
+        failEstablishedBuild: async () => {
+          mismatchNextSnapshot = true;
+          failNextDiscard = true;
+          pipeline.handleDoorWrittenSourceChange("example-plugin", {
+            absolutePath: fixture.entryPath,
+            text: await readFile(fixture.entryPath, "utf8"),
+          });
+          await waitFor(
+            () => pipeline.list()[0]?.status === "failed",
+            "The established plugin rebuild did not fail.",
+          );
+        },
+      };
+    }
+
+    it("retries against the durable approval after a later publish failure", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const oldApprovedHash = setup.pipeline.list()[0]?.approvedHash;
+        await writeFile(setup.entryPath, [
+          'export const marker = "durably approved before publish";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        setup.failNextBuildPublish();
+
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "failed",
+          approvedHash: oldApprovedHash,
+        });
+        const durableState = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!durableState.ok) throw new Error(durableState.warning);
+        const durableApprovedHash =
+          durableState.state.plugins["example-plugin"]?.approvedHash;
+        expect(durableApprovedHash).toMatch(/^[0-9a-f]{64}$/);
+        expect(durableApprovedHash).not.toBe(oldApprovedHash);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: {
+            status: "starting",
+            approvedHash: durableApprovedHash,
+          },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after retrying its durably approved build.",
+        );
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "ready",
+          sourceHash: durableApprovedHash,
+          approvedHash: durableApprovedHash,
+        });
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("retries unchanged bytes after an approved build fails before the record write", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const oldApprovedHash = setup.pipeline.list()[0]?.approvedHash;
+        await writeFile(setup.entryPath, [
+          'export const marker = "approved before a transient build failure";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        setup.failNextBuild();
+
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(false);
+        const durableState = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!durableState.ok) throw new Error(durableState.warning);
+        expect(durableState.state.plugins["example-plugin"]?.approvedHash)
+          .toBe(oldApprovedHash);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: { status: "starting" },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after retrying unchanged approved bytes.",
+        );
+        expect(setup.pipeline.list()[0]?.status)
+          .not.toBe("disabled-pending-approval");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("retries a failed build for an established plugin", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt.ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after retrying its build.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("tears down web apps only after the old runtime stops", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        const stopGate = setup.gateNextStop();
+        let callbackCalled = false;
+        let lateStart: Promise<unknown> | undefined;
+
+        const rebuilding = setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            callbackCalled = true;
+            lateStart = setup.pipeline.host.startWebApp(
+              "example-plugin",
+              "old-app",
+              null,
+            );
+            void lateStart.catch(() => undefined);
+          },
+        });
+
+        await stopGate.entered.promise;
+        expect(callbackCalled).toBe(false);
+        stopGate.release.resolve();
+        const rebuilt = await rebuilding;
+
+        expect(rebuilt.ok).toBe(true);
+        expect(callbackCalled).toBe(true);
+        if (!lateStart) throw new Error("The old-runtime stop callback did not run.");
+        await expect(lateStart).rejects.toThrow(
+          'Plugin "example-plugin" is not running.',
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the running build's commands after a pre-stop failure", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        setup.failNextRecordWrite();
+        setup.setRegisteredCommands(newCommands.map((command) => command.id));
+        await writeFile(
+          setup.manifestPath,
+          setup.manifestText(newCommands),
+        );
+        // Refresh discovery without reconciling this plugin. The attempted
+        // approval below must see the edited manifest while the old runtime
+        // remains up until the build reaches its stop step.
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+
+        const failed = await setup.pipeline.approve("example-plugin");
+
+        expect(failed).toMatchObject({
+          ok: false,
+          plugin: { commands: oldCommands },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "failed",
+          "The pre-stop record write failure did not reach failed status.",
+        );
+
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.host.getRegisteredCommands("example-plugin"))
+          .toEqual(["old.cmd"]);
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
+        setup.pipeline.noteRuntimeStatus("example-plugin", "crashed");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "starting");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
+        const recoveredRegistration =
+          setup.pipeline.pluginRegistration("example-plugin");
+        expect(recoveredRegistration).not.toBeNull();
+        if (!recoveredRegistration) {
+          throw new Error("The recovered plugin registration is missing.");
+        }
+        const invoked = await invokeRegisteredPluginCommand({
+          input: {
+            workspaceId: "workspace-1",
+            pluginId: "example-plugin",
+            commandId: "old.cmd",
+          },
+          plugin: recoveredRegistration,
+          ensureStarted: async () => setup.pipeline.host,
+          ensureCurrent: () => {},
+        });
+        expect(invoked.status).toBe("ok");
+
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after approving the replacement build.",
+        );
+        expect(setup.pipeline.list()[0]?.commands).toEqual(newCommands);
+        expect(setup.pipeline.host.getRegisteredCommands("example-plugin"))
+          .toEqual(["new.cmd"]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("reports no live runtime, not the pre-build status it captured before this attempt started, once the old runtime actually stopped and publish then failed (#779 round 24 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        // publish() rejects only once the build itself has already
+        // succeeded — runFullBuild stops the old runtime before either
+        // publish, so this failure lands after that stop already ran.
+        setup.failNextBuildPublish();
+        await writeFile(setup.entryPath, [
+          'export const marker = "attempted after the old runtime stopped";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+        // The stale pre-build "ready" this attempt captured before it ever
+        // touched anything must not be reported here — nothing is actually
+        // running now.
+        expect(setup.pipeline.list()[0]?.runtimeStatus).toBeNull();
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the running build's commands after a verify-pass failure (round-8 finding 1)", async () => {
+      // The twin of "keeps the running build's commands after a pre-stop
+      // failure" above, reached through reconcileApprovedCandidate's
+      // verifyApprovedSource pass instead of runFullBuild's own — the two
+      // failure paths write the recovery cache from two different call
+      // sites, and only one of them did until this fix.
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+
+        await setup.failEstablishedBuild();
+
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps recovered commands authoritative throughout a pre-stop retry", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        setup.failNextRecordWrite();
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+
+        const buildGate = setup.gateNextBuild();
+        setup.failNextBuild();
+        const retry = setup.pipeline.approve("example-plugin");
+        await buildGate.entered.promise;
+
+        try {
+          expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+          expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+          expect(
+            setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+          ).toEqual(oldCommands);
+        } finally {
+          buildGate.release.resolve();
+        }
+        expect((await retry).ok).toBe(false);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(oldCommands);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps a failed approved attempt's recovery intact through a watcher touch that changes nothing, and leaves Retry still working (round-20 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        // Approve new content, but the build behind it fails —
+        // recoveryState captures the still-running old build, and
+        // lastApprovedAttemptHash remembers this exact attempted content
+        // (the same hash Retry's own buildFromCurrentSource later accepts
+        // via alsoAcceptHash).
+        setup.failNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "attempted approval";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        // A watcher event touches the plugin's tree without changing its
+        // content — the exact same, still-unapproved attempted content
+        // that just failed. Awaited, not fire-and-forget: it settles once
+        // the reconcile below is queued (not once it has run), and the
+        // next two calls share its per-plugin FIFO queue — enqueuing
+        // after this await guarantees they land behind that reconcile,
+        // not racing ahead of it.
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin/src/index.ts",
+          operation: "update",
+        }]);
+
+        // Synchronizes with the watcher's own queued reconcile without
+        // itself changing anything: preflight shares the same per-plugin
+        // queue, so by the time it resolves, the reconcile above already
+        // has.
+        const preflight = await setup.pipeline.uninstallPreflight("example-plugin");
+        expect(preflight.ok).toBe(true);
+
+        // No hold: the recovery is untouched, and the old runtime the
+        // failed attempt left running is still running.
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        // Retry still works against the same attempted content — it would
+        // reject with "no-failed-build" had the watcher's own reconcile
+        // held this for approval instead.
+        const retried = await setup.pipeline.rebuild("example-plugin");
+        expect(retried.ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("never resurrects a superseded hold's own status for different content that only happens to hash the same as a much earlier failed attempt (round-21 finding 3, A-fail then B-hold then back-to-A)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // A fails to build — lastApprovedAttemptHash remembers A's hash,
+        // the old runtime stays up under recovery.
+        setup.failNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "content A";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approvedA = await setup.pipeline.approve("example-plugin");
+        expect(approvedA.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+
+        // Edited to B — genuinely different content, so the watcher's own
+        // reconcile finds no hash it recognizes and holds for approval,
+        // stopping the old runtime for real. That stop is where the
+        // recovery genuinely ends: A's own attempt hash must not survive
+        // it.
+        await writeFile(setup.entryPath, [
+          'export const marker = "content B";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin/src/index.ts",
+          operation: "update",
+        }]);
+        await setup.pipeline.uninstallPreflight("example-plugin");
+        const heldForB = setup.pipeline.list()[0];
+        expect(heldForB?.status).toBe("disabled-pending-approval");
+        const bSourceHash = heldForB?.sourceHash;
+        expect(bSourceHash).toBeDefined();
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+
+        // Edited back to A — its content hash matches what step one's own
+        // failed attempt recorded, but that recovery is long gone: this
+        // must evaluate A on its own, not resurrect B's exact status
+        // object (which would misreport A's own live content as B's).
+        await writeFile(setup.entryPath, [
+          'export const marker = "content A";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin/src/index.ts",
+          operation: "update",
+        }]);
+        await setup.pipeline.uninstallPreflight("example-plugin");
+        const afterReturnToA = setup.pipeline.list()[0];
+        expect(afterReturnToA?.status).toBe("disabled-pending-approval");
+        expect(afterReturnToA?.sourceHash).not.toBe(bSourceHash);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the running build's settings and validation after a pre-stop failure", async () => {
+      const oldSettings: PluginSettingDeclaration[] = [{
+        key: "greeting",
+        type: "string",
+        label: "Greeting",
+        description: "What the plugin says.",
+        default: "Hello",
+      }];
+      const newSettings: PluginSettingDeclaration[] = [{
+        key: "repeat",
+        type: "number",
+        label: "Repeat",
+        description: "How many times the plugin repeats itself.",
+        default: 1,
+      }];
+      const setup = await setupEstablishedPlugin({ settings: oldSettings });
+      try {
+        setup.failNextRecordWrite();
+        await writeFile(
+          setup.manifestPath,
+          setup.manifestText([], newSettings),
+        );
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.settings).toEqual(oldSettings);
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { greeting: "Hi" }),
+        ).resolves.toEqual({ greeting: "Hi" });
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { repeat: 2 }),
+        ).rejects.toThrow('does not declare a setting named "repeat"');
+
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after replacing its settings declaration.",
+        );
+        expect(setup.pipeline.list()[0]?.settings).toEqual(newSettings);
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { repeat: 2 }),
+        ).resolves.toEqual({ repeat: 2 });
+        await expect(
+          setup.pipeline.setPluginSettings("example-plugin", { greeting: "Hi" }),
+        ).rejects.toThrow('does not declare a setting named "greeting"');
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("notifies when rebuild stops an old runtime to hold changed source", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "changed before retry";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        let callbackCalled = false;
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            callbackCalled = true;
+          },
+        });
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: { status: "disabled-pending-approval" },
+        });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+        expect(callbackCalled).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("survives a throwing old-runtime-stopped notification and still publishes the replacement", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        setup.failNextRecordWrite();
+        expect((await setup.pipeline.approve("example-plugin")).ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        // The old runtime never stopped for this failure — it failed at the
+        // durable write, before the stop step. The retry below reuses the
+        // same, unchanged, durably-approved source, so it takes the ordinary
+        // success path (not approval-hold) and reaches its own stop, where
+        // the notification below throws.
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            throw new Error("simulated notification failure");
+          },
+        });
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: { status: "starting" },
+        });
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after a throwing stop notification.",
+        );
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("holds changed source for approval instead of approving it on rebuild", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        const approvedHash = setup.pipeline.list()[0]?.approvedHash;
+        await writeFile(setup.entryPath, [
+          'export const marker = "changed before retry";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt).toMatchObject({
+          ok: true,
+          plugin: {
+            status: "disabled-pending-approval",
+            approvedHash,
+          },
+        });
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "disabled-pending-approval",
+          approvedHash,
+        });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the approved build recoverable when its rebuild fails again", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        const approvedHash = setup.pipeline.list()[0]?.approvedHash;
+        setup.failNextBuildPublish();
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt.ok).toBe(false);
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "failed",
+          approvedHash,
+        });
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("rejects rebuild when the plugin has no failed approved build", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const buildsBefore = setup.buildCalls();
+        const statusesBefore = setup.statuses.length;
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+        expect(rebuilt).toMatchObject({
+          ok: false,
+          error: {
+            stage: "state",
+            code: "no-failed-build",
+            message: 'Plugin "example-plugin" has no failed build to retry.',
+          },
+        });
+        expect(setup.buildCalls()).toBe(buildsBefore);
+        expect(setup.statuses.slice(statusesBefore)).not.toContain("installing");
+        expect(setup.statuses.slice(statusesBefore)).not.toContain("scanning");
+        expect(setup.statuses.slice(statusesBefore)).not.toContain("building");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps offering a build retry through a crash-loop respawn, until the replacement publishes (round-8 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // A crash-loop respawn between the failure and the fix — the
+        // host's own health reporting, not a rebuild — flips
+        // runtimeStatus, and with it status via noteRuntimeStatus, back to
+        // "ready" even though the replacement this failure owes was never
+        // built.
+        setup.pipeline.noteRuntimeStatus("example-plugin", "crashed");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "starting");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt.ok).toBe(true);
+        await waitFor(
+          () =>
+            setup.pipeline.list()[0]?.status === "ready" &&
+            setup.pipeline.list()[0]?.hasFailedReplacement === false,
+          "Plugin did not clear its failed-replacement fact after the retried build.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps Retry available through a crash-loop respawn even when the generated manifest cannot be read (round-21 finding 5)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        // captureRecoveredManifest reads this file to populate the
+        // palette's own recovery cache — corrupted here so that read
+        // fails, the way an interrupted publish or a permissions error
+        // would leave it.
+        const liveRoot = join(pluginsDataRoot(setup.fixture), "example-plugin");
+        await writeFile(
+          join(liveRoot, "dohc-plugin.generated.json"),
+          "not valid json",
+        );
+
+        await setup.failEstablishedBuild();
+        // hasFailedReplacement reports recoveryState's own has(), true
+        // regardless of its value: the manifest above could not be
+        // parsed, so the value stays null — only the palette's own
+        // preview of what the recovered build contains is missing (#779
+        // round 22 finding 2).
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // A crash-loop respawn between the failure and the fix — the
+        // host's own health reporting, not a rebuild — flips status back
+        // to "ready" even though the replacement this failure owes was
+        // never built (mirrors round-8 finding 3's own respawn).
+        setup.pipeline.noteRuntimeStatus("example-plugin", "crashed");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "starting");
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+
+        // Retry must still be offered — an unreadable manifest cost the
+        // palette its preview, not the user their own way back.
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+        expect(rebuilt.ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps offering a build retry after a failed approve with no old runtime to preserve, even once something later resets status (round-22 finding 4)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin");
+        expect(disabled.ok).toBe(true);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+
+        // Approve fails with nothing running to preserve — the branch
+        // captureRecoveredManifest's own call used to skip entirely.
+        setup.failNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "attempted while disabled";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // Nothing was ever running to crash-loop respawn, but the same
+        // durable fact must survive whatever else can still reset status
+        // for a stopped plugin — simulated directly here the way round-8's
+        // own respawn test simulates its own status flip.
+        setup.pipeline.noteRuntimeStatus("example-plugin", "ready");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+
+        const retried = await setup.pipeline.rebuild("example-plugin");
+        expect(retried.ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("publishes the manifest a build actually installed and started, not discovery's own stale candidate, when the source changed again after discovery scanned it (#779 round 23 finding 5)", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        // No handleWatcherEvents call: requireValidCandidate's own
+        // discovery cache still reads oldCommands. approve()'s own
+        // snapshot reads this file directly off disk at build time and
+        // picks up newCommands regardless — that snapshot's manifest, not
+        // discovery's stale copy, is what actually got installed, scanned,
+        // built and started.
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(true);
+        expect(setup.pipeline.list()[0]?.commands).toEqual(newCommands);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("refreshes the icon a build actually installed, not discovery's own stale one, when the source declared it again after discovery last scanned (#779 round 25 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        expect(setup.pipeline.list()[0]?.icon).toBeNull();
+        // No handleWatcherEvents call, same as the manifest-staleness pin
+        // above: discovery's own cached candidate still reports no icon.
+        // Only this build's own snapshot sees the file added below.
+        await writeFile(join(setup.fixture.pluginRoot, "icon.svg"), "<svg/>");
+        await writeFile(
+          setup.manifestPath,
+          `${JSON.stringify({
+            version: 1,
+            name: "example-plugin",
+            displayName: "Example plugin",
+            entry: "src/index.ts",
+            icon: "icon.svg",
+            commands: [],
+            settings: [],
+          }, null, 2)}\n`,
+        );
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(true);
+        expect(setup.pipeline.list()[0]?.icon).toBe("icon.svg");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("refuses instead of draining when the caller's own ensureStarted() call already holds this plugin's command claim and the approved source changed out of band (#779 round 25 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        // A raw write, not through the door-write path: verifyApprovedSource's
+        // own snapshot reads this file fresh and detects the mismatch
+        // against the approved hash, the same as any genuine out-of-band
+        // edit reaching a cold ensureStarted() call.
+        await writeFile(setup.entryPath, [
+          'export const marker = "edited out of band";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        // Simulates claimHostForCommand: the caller's own claim taken
+        // before it calls ensureStarted, released only once its own
+        // invocation finishes — the exact claim that could never release
+        // during a drain this same call triggered (#779 round 25 finding
+        // 3). Without the fix, this call hangs until this test harness's
+        // own undeadlined drain never resolves, and the test times out.
+        setup.commandClaims.claim("example-plugin");
+        try {
+          const result = await setup.pipeline.ensureStarted("example-plugin");
+          expect(result.ok).toBe(false);
+          if (result.ok) throw new Error("unreachable: expected a refusal");
+          expect(result.error.code).toBe("claims-draining");
+        } finally {
+          setup.commandClaims.release("example-plugin");
+        }
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 5_000);
+
+    it("falls back to the prior contributions, not the failed candidate's own manifest, when a failed replacement has no readable recovered manifest (round-22 finding 5)", async () => {
+      const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
+      const newCommands = [{ id: "new.cmd", title: "New Command" }];
+      const setup = await setupEstablishedPlugin({ commands: oldCommands });
+      try {
+        // captureRecoveredManifest's own read of this file fails, so
+        // recoveryState's value stays null — the fallback this pin
+        // exercises has nothing but that and the failed candidate's own
+        // (different, never-approved) manifest to choose between.
+        const liveRoot = join(pluginsDataRoot(setup.fixture), "example-plugin");
+        await writeFile(
+          join(liveRoot, "dohc-plugin.generated.json"),
+          "not valid json",
+        );
+
+        await writeFile(setup.manifestPath, setup.manifestText(newCommands));
+        // requireValidCandidate reads a discovery-cached record, not the
+        // source tree directly — an unrelated-plugin event forces the
+        // rescan that actually picks up the edit above, without itself
+        // queuing a reconcile against example-plugin ahead of approve()
+        // (the same trigger this file's other manifest-edit tests use).
+        await setup.pipeline.handleWatcherEvents([{
+          path: "plugins/unrelated-plugin/dohc-plugin.json",
+          operation: "update",
+        }]);
+        expect(
+          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
+        ).toEqual(newCommands);
+
+        setup.failNextBuild();
+        const approved = await setup.pipeline.approve("example-plugin");
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]?.status).toBe("failed");
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // The old build is still what's actually running — its own
+        // commands, not the failed candidate's, since the candidate's own
+        // manifest (confirmed above to now hold newCommands) was never
+        // approved and may not even be compatible with what is still
+        // serving requests.
+        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
+        // pluginRegistration has no full manifest object left to serve —
+        // the live root's own generated manifest could not be read, and
+        // the candidate's is exactly what must not stand in for it. A
+        // caller reads null here as "nothing new to serve" and falls back
+        // to its own last-known-good registration, never to this failed
+        // candidate.
+        expect(setup.pipeline.pluginRegistration("example-plugin")).toBeNull();
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps offering a build retry once the old runtime crash-loops all the way to disabled (round-9 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await setup.failEstablishedBuild();
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        // The host's own crash-loop detector gives up and disables the
+        // plugin outright — a terminal transition, unlike the respawn round
+        // 8 covered, with no running host left at all afterward.
+        setup.pipeline.noteRuntimeStatus("example-plugin", "disabled");
+
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "disabled",
+          disabledReason: "crash-loop",
+        });
+        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rebuilt.ok).toBe(true);
+        await waitFor(
+          () =>
+            setup.pipeline.list()[0]?.status === "ready" &&
+            setup.pipeline.list()[0]?.hasFailedReplacement === false,
+          "Plugin did not recover from a crash-loop disable through Retry build.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("waits for an in-flight command claim to drain before stopping the old runtime (round-10 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const drainGate = setup.gateNextCommandDrain();
+        await writeFile(setup.entryPath, [
+          'export const marker = "replacement";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        const approving = setup.pipeline.approve("example-plugin");
+
+        await drainGate.entered.promise;
+        // The drain is pending: the old runtime has not been stopped, so
+        // a command claim against it right now would still reach a live
+        // host — this is the fact the drain exists to preserve.
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+        drainGate.release.resolve();
+        const approved = await approving;
+
+        expect(approved.ok).toBe(true);
+        await waitFor(
+          () => setup.pipeline.list()[0]?.status === "ready",
+          "Plugin did not reach ready after the drain released.",
+        );
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps refusing new command claims through the whole stop, not just the drain wait (round-11)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        const stopGate = setup.gateNextStop();
+        await writeFile(setup.entryPath, [
+          'export const marker = "replacement";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        const approving = setup.pipeline.approve("example-plugin");
+
+        // Nothing ever claimed this key — a "zero-claim rebuild" — and the
+        // barrier still marks: a command racing in has to be refused even
+        // when there was never anything for drain() itself to wait on
+        // (round-11 pin 2).
+        await waitFor(
+          () => setup.commandClaims.isDraining(key),
+          "The drain barrier never marked with zero claims outstanding.",
+        );
+
+        // The drain resolved instantly, so stopOldRuntime has already
+        // moved on to the real stop, which this gate now holds mid-flight.
+        await stopGate.entered.promise;
+        // A command arriving right now — between the last claim releasing
+        // (there was never one) and the stop's own completion — must
+        // still be refused (round-11 pin 1).
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        stopGate.release.resolve();
+        const approved = await approving;
+
+        expect(approved.ok).toBe(true);
+        // Only once the stop actually finished does the barrier clear —
+        // a new invocation is normal again (round-11 pin 3).
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier before a retry's own queued work runs, not only at its eventual stop (round-12 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        const buildGate = setup.gateNextBuild();
+        const rebuilding = setup.pipeline.rebuild("example-plugin");
+
+        // The barrier is up while the retry is still building — long
+        // before it could reach its own eventual stop of the old
+        // runtime, which the earlier failure left running. A command
+        // checking this (as main.ts's invokePluginCommand handler does
+        // before it ever takes a claim) refuses right here instead of
+        // enqueuing its own start behind this same job on the
+        // per-plugin queue — the exact enqueue that would deadlock this
+        // job's later wait for that claim to drain.
+        await buildGate.entered.promise;
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        buildGate.release.resolve();
+        const rebuilt = await rebuilding;
+
+        expect(rebuilt.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier the instant a retry is called, even while it still sits queued behind another job for the same plugin (round-13 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      let buildGate: ReturnType<typeof setup.gateNextBuild> | undefined;
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // Occupy the plugin's own per-plugin job queue with another
+        // action — approve(), which now raises its own outer hold before
+        // it is enqueued too (round-15 finding 1) — held mid-build.
+        buildGate = setup.gateNextBuild();
+        await writeFile(setup.entryPath, [
+          'export const marker = "queue occupant";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+        const approving = setup.pipeline.approve("example-plugin");
+        await buildGate.entered.promise;
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        // Called while the queue is still occupied by approve()'s own
+        // job — this call's own job has not started, let alone reached
+        // a build or snapshot step of its own. Both holds compose: the
+        // mark stays up regardless, so a command racing in right now
+        // still refuses instead of enqueuing its own start behind
+        // either call — deadlocking whichever job eventually reaches
+        // its own stop.
+        const rebuilding = setup.pipeline.rebuild("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        buildGate.release.resolve();
+        const approved = await approving;
+        expect(approved.ok).toBe(true);
+        // Retry's own gate check, once it finally runs, finds nothing
+        // left to retry — approve() already published something new.
+        // That's fine: this pins the barrier's timing, not this call's
+        // outcome.
+        const rebuilt = await rebuilding;
+        expect(rebuilt.ok).toBe(false);
+
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        // A failed assertion above can leave the build gate held open —
+        // release it defensively so dispose()'s own queue-drain wait
+        // does not hang the whole suite behind a gate nothing else will
+        // ever release.
+        buildGate?.release.resolve();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier synchronously the instant Disable is called, before its own job has any chance to run (round-15 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // No `await` between the call and this assertion: if the raise
+        // lived inside the enqueued job instead of before enqueueAction,
+        // the job has not had a single microtask to run yet, and this
+        // would still read false — exactly the gap that let a command
+        // race in and queue its own start behind Disable on the same
+        // queue, deadlocking Disable's later wait for that exact claim.
+        const disabling = setup.pipeline.disable("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        const disabled = await disabling;
+        expect(disabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier synchronously the instant Uninstall is called, before its own job has any chance to run (round-15 finding 1)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        const preflight = await setup.pipeline.uninstallPreflight("example-plugin");
+        if (!preflight.ok) throw new Error(preflight.error.message);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // No `await` between the call and this assertion — see the
+        // Disable test above for why that gap matters.
+        const uninstalling = setup.pipeline.uninstall(
+          "example-plugin",
+          preflight.confirmationToken,
+        );
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        const uninstalled = await uninstalling;
+        expect(uninstalled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier synchronously the instant Install is called, before its own job has any chance to run (round-16 finding 4)", async () => {
+      const fixture = await createPluginWorkspace();
+      const commandClaims = new PluginCommandHostClaims();
+      let pipeline: PluginPipeline;
+      const host = new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        pnpmRunnerEntry,
+        raiseCommandClaimsBarrier: (pluginId) =>
+          commandClaims.raiseDrainBarrier(pluginId),
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        },
+      });
+
+      try {
+        await pipeline.start();
+        const key = "example-plugin";
+        expect(commandClaims.isDraining(key)).toBe(false);
+
+        // No `await` between the call and this assertion — the same gap
+        // that finding 1 (round 15) closed for disable, uninstall,
+        // approve, and rebuild left install and enable exposed until this
+        // round's uniform rule (round-16 finding 4).
+        const installing = pipeline.install("example-plugin");
+        expect(commandClaims.isDraining(key)).toBe(true);
+
+        const installed = await installing;
+        expect(installed.ok).toBe(true);
+        expect(commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("marks the drain barrier synchronously the instant Enable is called, before its own job has any chance to run (round-16 finding 4)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        const disabled = await setup.pipeline.disable("example-plugin");
+        expect(disabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        const enabling = setup.pipeline.enable("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        const enabled = await enabling;
+        expect(enabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("still lowers a raised drain barrier when the wrapped action throws synchronously instead of rejecting (#779 round 22 findings 11-12)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // A run() that throws before ever returning a promise: finally()
+        // has nothing to attach to in that case, so only a try/catch
+        // around the call itself can still reach lowerBarrier — the
+        // scenario withCommandClaimsBarrier's own try/catch exists for,
+        // even though every current caller's run closure is an async
+        // wrapper that cannot actually do this today.
+        const withCommandClaimsBarrier = (
+          setup.pipeline as unknown as {
+            withCommandClaimsBarrier: <T>(
+              pluginId: string,
+              run: () => Promise<T>,
+            ) => Promise<T>;
+          }
+        ).withCommandClaimsBarrier.bind(setup.pipeline);
+
+        expect(() =>
+          withCommandClaimsBarrier(key, () => {
+            throw new Error("synchronous run() failure");
+          }),
+        ).toThrow("synchronous run() failure");
+        // No `await` above and no microtask between the throw and this
+        // read: only a synchronous catch, not a dangling finally(), could
+        // have lowered the barrier already.
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("refuses a racing command instead of stalling forever when Enable's own verify-and-hold branch reaches stopOldRuntime (round-16 finding 4, enable's crash-loop-shaped path)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        const disabled = await setup.pipeline.disable("example-plugin");
+        expect(disabled.ok).toBe(true);
+
+        // Source drifts from the approved hash while disabled — the same
+        // shape a crash-loop repair leaves behind — so enable()'s own
+        // verify step finds "changed" and calls holdForApproval instead of
+        // starting, reaching stopOldRuntime's own wait even though nothing
+        // is currently running (PluginPipeline.ts's holdForApproval always
+        // calls stopOldRuntime, unconditionally).
+        await writeFile(setup.entryPath, [
+          'export const marker = "drifted";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        // A claim already outstanding on this key, as if a command were
+        // mid-flight — without this round's barrier, a second racing
+        // command could still claim while enable sits queued, then both
+        // would wait on each other: enable's stopOldRuntime for this
+        // claim to drain, and nothing left to release it.
+        setup.commandClaims.claim(key);
+
+        const enabling = setup.pipeline.enable("example-plugin");
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        setup.commandClaims.release(key);
+        const enabled = await enabling;
+        expect(enabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("holds the drain barrier through the publish window after the old runtime stops, until the whole retry settles (round-13 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+
+        // onOldRuntimeStopped fires from inside stopOldRuntime, right
+        // after its own inner hold has already lowered (see
+        // PluginPipeline.stopOldRuntime — the lower runs in a finally
+        // immediately around PluginHost.stop(), strictly before this
+        // callback). Reading isDraining() from inside it is an exact,
+        // race-free snapshot of that instant — unlike polling
+        // getStatus(), which can flip old-stopped -> new-started faster
+        // than a poll interval ever observes it.
+        let isDrainingWhenOldRuntimeStopped: boolean | null = null;
+        const rebuilding = setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            isDrainingWhenOldRuntimeStopped = setup.commandClaims.isDraining(key);
+          },
+        });
+
+        const rebuilt = await rebuilding;
+
+        expect(rebuilt.ok).toBe(true);
+        // The inner hold is down, but the outer hold this retry raised
+        // before it was even enqueued is not — the action itself still
+        // has to publish the new source and build, and start the new
+        // host, before it settles (round-13 finding 2).
+        expect(isDrainingWhenOldRuntimeStopped).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("clears the drain barrier even when a retry is rejected before it ever reaches a stop (round-12 finding 1 and 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // No failed build exists — rebuild()'s own early gate rejects
+        // before buildFromCurrentSource ever runs, so stopOldRuntime is
+        // never reached to clear the barrier the top of rebuild() raised.
+        const rejected = await setup.pipeline.rebuild("example-plugin");
+
+        expect(rejected.ok).toBe(false);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("treats a stop as settled once its record is confirmed gone, even when the transport's own dispose rejects, and still clears the drain barrier (round-12 finding 3, round-19 finding 5)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        await setup.failEstablishedBuild();
+        setup.failNextStop();
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+
+        // PluginHost's own shutdown() deletes its record in its own
+        // finally regardless of whether transport.dispose() rejected —
+        // the runtime did stop, so this must not fail the whole retry
+        // over a cleanup step that failed after the fact.
+        expect(rebuilt.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // A later invocation proceeds normally against whatever state is
+        // honest now, instead of refusing forever behind a barrier the
+        // failed stop left standing.
+        setup.commandClaims.claim(key);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        setup.commandClaims.release(key);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("clears both disable's own outer hold and stopOldRuntime's own inner hold even when the stop itself rejects (round-12 finding 3, nested)", async () => {
+      // disable()'s own outer hold (round-15 finding 1) and
+      // stopOldRuntime's own inner hold nest on the same key — isDraining
+      // only returns false once both lower. A stop rejection must not
+      // strand either one: disable's own finally lowers its hold
+      // regardless of the outcome, and stopOldRuntime's own finally does
+      // the same for its own, narrower hold.
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        setup.failNextStop();
+
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        // The record is confirmed gone despite the transport's own dispose
+        // rejecting, so this succeeds too (round-19 finding 5).
+        expect(disabled.ok).toBe(true);
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("runs the stop's own boundary consequences even when the transport's own dispose rejects (round-19 finding 5)", async () => {
+      const setup = await setupEstablishedPlugin();
+      let oldRuntimeStoppedCalls = 0;
+      try {
+        await setup.failEstablishedBuild();
+        setup.failNextStop();
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin", {
+          onOldRuntimeStopped: () => {
+            oldRuntimeStoppedCalls += 1;
+          },
+        });
+
+        // The boundary callback (a panel/web-app teardown in main.ts) must
+        // still fire once the record is confirmed gone — a runtime that
+        // died leaves nothing for a stale grant or view to straddle into,
+        // whether or not its own transport cleanup rejected on the way out.
+        expect(rebuilt.ok).toBe(true);
+        expect(oldRuntimeStoppedCalls).toBe(1);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("clears disable's own outer hold even when the candidate lookup itself throws, before its job ever reaches a try (round-16 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "missing-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // No plugin named this was ever installed, so requireValidCandidate
+        // throws PipelineFailure the instant the job runs — before any try
+        // this job body's own barrier-lowering could depend on.
+        const disabled = await setup.pipeline.disable("missing-plugin");
+
+        expect(disabled.ok).toBe(false);
+        // The barrier must still be down: left up here would refuse every
+        // later command against this key until the workspace closes, not
+        // just the one call that already failed.
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("waits for an in-flight command claim to drain before workspace disposal stops every host (round-12 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      setup.commandClaims.claim(key);
+
+      const disposing = setup.pipeline.dispose();
+
+      // The barrier marks and the wait begins as soon as disposal
+      // starts — a command arriving right now would refuse (isDraining),
+      // and the host is still up while the claim above hasn't released.
+      await waitFor(
+        () => setup.commandClaims.isDraining(key),
+        "Disposal never marked the drain barrier.",
+      );
+      expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+
+      setup.commandClaims.release(key);
+      await disposing;
+
+      expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+    }, 60_000);
+
+    it("bumps PluginHost's generation only after the claims drain, not before, so in-flight SDK work is not cut off the instant dispose starts (round-19 finding 4)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      const bumpSpy = vi.spyOn(setup.pipeline.host, "bumpGeneration");
+      setup.commandClaims.claim(key);
+
+      const disposing = setup.pipeline.dispose();
+
+      await waitFor(
+        () => setup.commandClaims.isDraining(key),
+        "Disposal never marked the drain barrier.",
+      );
+      // The claim above is still outstanding, so the drain wait has not
+      // finished — bumpGeneration, which aborts every spawn's in-flight
+      // SDK work synchronously, must not have run yet.
+      expect(bumpSpy).not.toHaveBeenCalled();
+
+      setup.commandClaims.release(key);
+      await disposing;
+
+      expect(bumpSpy).toHaveBeenCalledTimes(1);
+    }, 60_000);
+
+    it("clears every plugin's drain barrier even when workspace disposal's own stop rejects (round-12 finding 3, dispose path)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      setup.failNextDisposeAll();
+
+      await expect(setup.pipeline.dispose()).rejects.toThrow(
+        "simulated: PluginHost.stopAll() onDispose failed",
+      );
+
+      expect(setup.commandClaims.isDraining(key)).toBe(false);
+    }, 60_000);
+
+    it("clears a stale started-host marker at dispose, so a later session reusing the same key is never misattributed to it (round-15 finding 2)", async () => {
+      const setup = await setupEstablishedPlugin();
+      const key = "example-plugin";
+      // A command that finished under dispose's own barrier skips
+      // consumeStartedHost (round-14's !isDraining guard defers it
+      // indefinitely, not just past this dispose) — simulate that
+      // stale marker directly, the state it would have left behind.
+      setup.commandClaims.markStartedHost(key);
+
+      await setup.pipeline.dispose();
+
+      // This workspace is gone for good. Nothing may still attribute a
+      // later session's own host, opened under this same lifecycle
+      // key, to whatever this one never consumed.
+      expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
+    }, 60_000);
+
+    it("clears a cold-start command's on-demand marker once an in-queue rebuild's barrier lowers, so a later release does not stop the replacement (round-19 finding 3)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // A command cold-started this host before the rebuild below — its
+        // own on-demand marker, set the same way main.ts's
+        // invokePluginCommand does on a claimless cold start.
+        setup.commandClaims.markStartedHost(key);
+
+        await setup.failEstablishedBuild();
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+        expect(rebuilt.ok).toBe(true);
+
+        // The rebuild's own barrier just lowered, replacing the runtime as
+        // the workspace's own enabled process — the pre-rebuild marker no
+        // longer describes what's running, so a later, unrelated release
+        // must not consume it and stop the replacement it never claimed.
+        expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps a command's own cold-start marker through a precondition-failed rebuild, so the host still stops once that command releases (#779 round 26 note A)", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const key = "example-plugin";
+        // A command cold-started this host before the rebuild below — its
+        // own on-demand marker, set the same way main.ts's
+        // invokePluginCommand does on a claimless cold start.
+        setup.commandClaims.markStartedHost(key);
+
+        // Nothing is currently failed, so rebuild()'s own precondition
+        // (hasRecoverableFailure) refuses here — this raise/lower cycle
+        // never reaches stopOldRuntime at all, unlike the twin test above.
+        const rebuilt = await setup.pipeline.rebuild(key);
+        expect(rebuilt.ok).toBe(false);
+
+        // The marker must have survived this no-op cycle: consuming it
+        // here is exactly what the cold-starting command's own eventual
+        // release does to decide whether it, and nothing else, is why the
+        // host is running — eating it here would leak that host ownerless
+        // until workspace close.
+        expect(setup.commandClaims.consumeStartedHost(key)).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the drain barrier up across a door-write reconcile and the watcher-driven identity removal queued behind it, clearing only once both settle (round-16 finding 2, round-17 finding 4)", async () => {
+      const setup = await setupEstablishedPlugin();
+      let buildGate: ReturnType<typeof setup.gateNextBuild> | undefined;
+      try {
+        const key = "example-plugin";
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+
+        // Occupy the plugin's own per-plugin job queue with a door-write
+        // reconcile — an internal, background refresh (enqueueSourceRefresh)
+        // that now raises its own barrier too (round-17 finding 4) — held
+        // mid-build.
+        buildGate = setup.gateNextBuild();
+        const driftedText = [
+          'export const marker = "door-written drift";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n");
+        await writeFile(setup.entryPath, driftedText);
+        setup.pipeline.handleDoorWrittenSourceChange("example-plugin", {
+          absolutePath: setup.entryPath,
+          text: driftedText,
+        });
+        await buildGate.entered.promise;
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        // The plugin's whole root vanishes — a real departure — while that
+        // reconcile is still gated mid-build. removeOldIdentity's own job
+        // cannot have started yet: it is still queued behind the reconcile
+        // job on the same per-plugin queue. isDraining stays true
+        // regardless — both holds compose — so a command racing in right
+        // now still refuses instead of enqueuing its own start behind
+        // either job.
+        await rm(setup.fixture.pluginRoot, { recursive: true, force: true });
+        const watching = setup.pipeline.handleWatcherEvents([
+          { path: "plugins/example-plugin", operation: "delete" },
+        ]);
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
+
+        buildGate.release.resolve();
+        await watching;
+
+        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(setup.pipeline.list().some((p) => p.id === "example-plugin"))
+          .toBe(false);
+      } finally {
+        buildGate?.release.resolve();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+  });
+
   it("opens a surface only once the host finished activating (#798)", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;
@@ -2709,7 +5702,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         workspaceId: "workspace-1",
         pluginId: "example-plugin",
         hostActivation: () => host.activationOf("example-plugin"),
-        ensureStarted: () => pipeline.ensureStarted("example-plugin"),
+        ensureStarted: () =>
+          pipeline.ensureStarted("example-plugin").then(toPluginPanelHostStartResult),
       }).then(() => {
         opened = true;
       });

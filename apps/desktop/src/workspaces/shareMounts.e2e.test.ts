@@ -73,6 +73,8 @@ describe("share mounts real daemon", () => {
         ).resolves.toEqual({
       status: "unchanged",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });

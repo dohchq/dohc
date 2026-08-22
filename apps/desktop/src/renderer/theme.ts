@@ -3,7 +3,10 @@ import type {
   DesktopUserSettingsResult,
   ThemeMode,
 } from "../settings/userSettings";
-import { effectiveThemeMode } from "../settings/userSettings";
+import {
+  DEFAULT_ZOOM_LEVEL,
+  effectiveThemeMode,
+} from "../settings/userSettings";
 
 const LEGACY_STORAGE_KEY = "dohc-theme";
 
@@ -14,6 +17,7 @@ let currentAppearance: AppearanceSettings = {
   themeMode: "system",
   density: "comfortable",
   reduceMotion: false,
+  zoomLevel: DEFAULT_ZOOM_LEVEL,
 };
 
 // The OS-drawn window controls (titleBarOverlay) can't read CSS — mirror
@@ -30,6 +34,9 @@ function applyAppearance(appearance: AppearanceSettings): void {
   applyTheme(effectiveThemeMode(appearance.themeMode, prefersDark));
   document.documentElement.dataset.density = appearance.density;
   document.documentElement.dataset.reduceMotion = String(appearance.reduceMotion);
+  // appearance.zoomLevel is deliberately not applied here: zoom is a window
+  // property main owns (windowZoom.ts) — main applies it on window load, on
+  // every zoom step, and on every settings save.
 }
 
 // Follows the system theme unless the user explicitly toggled; never

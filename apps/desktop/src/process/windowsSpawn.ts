@@ -140,11 +140,18 @@ export function killProcessTreeWin32(
 // removed wmic.exe by default — or `tasklist`, whose plain-text table has no
 // machine-stable delimiter; Get-CimInstance is available from the Windows
 // PowerShell 5.1 that ships on every supported Windows host, no pwsh (7)
-// install required. Its output is reduced to the same "pid ppid" shape
-// posixSpawn's parseProcessTable already parses, so the tree-walk itself
-// (posixSpawn.ts's processDescendants) stays a single, platform-agnostic
-// implementation shared by both platforms — this module supplies only the
-// platform-specific text source.
+// install required. Its output is reduced to the same "pid ppid startedAt"
+// shape posixSpawn's parseProcessTable already parses (CreationDate is CIM's
+// own per-process start-time equivalent to POSIX's `lstart` column — a
+// single token, no internal whitespace, so it satisfies the same "one
+// trailing non-space-bounded field" capture group `lstart`'s own multi-word
+// value needs), so the tree-walk itself (posixSpawn.ts's processDescendants)
+// stays a single, platform-agnostic implementation shared by both platforms
+// — this module supplies only the platform-specific text source. A process
+// with no CreationDate (some system processes report none) renders as a
+// trailing space with nothing after it — parseProcessTable's own "ignores
+// lines it cannot read" contract already drops that row rather than fail
+// the whole read, the same as any other malformed line.
 export function readProcessTableWithPowershell(): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile(
@@ -153,7 +160,7 @@ export function readProcessTableWithPowershell(): Promise<string> {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate)\" }",
       ],
       { windowsHide: true },
       (error, stdout) => {

@@ -171,8 +171,22 @@ describe("bootstrap window gate", () => {
   });
 
   it("quits with a visible error when the bootstrap continuation throws", () => {
-    const catchAt = mainSource.indexOf("}).catch((error: unknown) => {");
-    expect(catchAt).toBeGreaterThan(mainSource.indexOf("app.whenReady().then("));
+    const whenReadyAt = mainSource.indexOf("app.whenReady().then(");
+    // Bounded to search forward from the bootstrap chain itself: this exact
+    // catch shape is not unique in the file — a detached cleanup promise
+    // elsewhere attaches the same literal, and an unbounded search could
+    // match that one instead of the bootstrap's own (#779 round 22 finding
+    // 9 introduced the second occurrence).
+    const catchAt = mainSource.indexOf(
+      "}).catch((error: unknown) => {",
+      whenReadyAt,
+    );
+    // A -1 start here would let indexOf search from position 0 instead,
+    // so a mutation that removed or renamed the bootstrap chain itself
+    // could still find some unrelated catch elsewhere and pass (#779
+    // round 24 finding 1).
+    expect(whenReadyAt).toBeGreaterThan(-1);
+    expect(catchAt).toBeGreaterThan(whenReadyAt);
     // A throw after the daemon started leaves the gate shut forever, so the
     // continuation must not fail silently.
     const handler = mainSource.slice(catchAt, catchAt + 800);

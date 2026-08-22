@@ -25,6 +25,7 @@ import {
   canInstall,
   canOpenWebApps,
   openableWebApps,
+  canRebuild,
   canRetryInstall,
   isInstalled,
   isPipelineBusy,
@@ -816,6 +817,15 @@ function PluginDetailsHeader(props: {
           >
             {actionLabel("approve", busyAction === "approve")}
           </SecondaryButton>
+        ) : null}
+        {canRebuild(plugin) ? (
+          <PrimaryButton
+            data-testid="plugin-rebuild"
+            disabled={disabled}
+            onClick={() => catalog.runAction(plugin, "rebuild")}
+          >
+            {actionLabel("rebuild", busyAction === "rebuild")}
+          </PrimaryButton>
         ) : null}
         {canDisable(plugin) ? (
           <SecondaryButton

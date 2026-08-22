@@ -23,6 +23,24 @@ export type ThemeMode = (typeof THEME_MODES)[number];
 export const DENSITY_MODES = ["comfortable", "compact"] as const;
 export type DensityMode = (typeof DENSITY_MODES)[number];
 
+// Window zoom, stored as a Chromium zoom level like VS Code's
+// window.zoomLevel: each step scales the window by 20% (factor 1.2^level).
+export const MIN_ZOOM_LEVEL = -5;
+export const MAX_ZOOM_LEVEL = 5;
+export const DEFAULT_ZOOM_LEVEL = 0;
+
+export function clampZoomLevel(level: number): number {
+  if (!Number.isFinite(level)) return DEFAULT_ZOOM_LEVEL;
+  return Math.min(MAX_ZOOM_LEVEL, Math.max(MIN_ZOOM_LEVEL, Math.round(level)));
+}
+
+export function zoomPercent(level: number): number {
+  return Math.round(100 * Math.pow(1.2, level));
+}
+
+export const ZOOM_STEPS = ["in", "out", "reset"] as const;
+export type ZoomStep = (typeof ZOOM_STEPS)[number];
+
 export const RunnerSettings = z.object({
   command: z.string().max(4096),
   enabled: z.boolean(),
@@ -54,6 +72,10 @@ export const DesktopUserSettings = z.object({
     themeMode: z.enum(THEME_MODES),
     density: z.enum(DENSITY_MODES),
     reduceMotion: z.boolean(),
+    // Added after appearance shipped. The default migrates stored files in
+    // place instead of failing the strict parse and resetting preferences.
+    zoomLevel: z.number().int().min(MIN_ZOOM_LEVEL).max(MAX_ZOOM_LEVEL)
+      .default(DEFAULT_ZOOM_LEVEL),
   }).strict(),
   general: z.object({
     launchBehavior: z.enum(["last-workspace", "workspace-picker", "new-workspace"]),
@@ -79,6 +101,7 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
     themeMode: "system",
     density: "comfortable",
     reduceMotion: false,
+    zoomLevel: DEFAULT_ZOOM_LEVEL,
   },
   general: {
     launchBehavior: "last-workspace",
