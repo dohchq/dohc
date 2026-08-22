@@ -7,7 +7,11 @@ import {
   type WorkspaceTextReadResult,
   type WorkspaceTextWriteResult,
 } from "./workspaceAssets";
-import { materializeSharedViewPaths } from "./sharedView";
+import {
+  clearPendingMaterializationPaths,
+  materializeSharedViewPaths,
+  writePendingMaterializationPaths,
+} from "./sharedView";
 import {
   shareViewTakesLocalWrites,
   type ShareViewWriteScope,
@@ -93,6 +97,7 @@ async function writeShareViewText(input: {
     }
     const store = input.shareViewStore();
     const main = await store.ensureMainVersion({ workspaceId: input.workspaceId });
+    await writePendingMaterializationPaths(input.rootPath, [path.normalized]);
     await store.writeTextFile({
       workspaceId: input.workspaceId,
       versionId: main.id,
@@ -110,6 +115,7 @@ async function writeShareViewText(input: {
       [{ path: path.normalized, operation: "write", contentKind: "text" }],
       store,
     );
+    await clearPendingMaterializationPaths(input.rootPath, [path.normalized]);
     return {
       status: "written",
       contentHash: createHash("sha256").update(input.text).digest("hex"),

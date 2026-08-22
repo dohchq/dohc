@@ -915,6 +915,8 @@ describe("EngineRelayClient", () => {
     expect(outcome).toEqual({
       status: "unchanged",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1129,6 +1131,50 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("records a page's collisions before committing its cursor, even when a later page fails", async () => {
+    let pulls = 0;
+    const calls: string[] = [];
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.commitCursor") {
+        calls.push("commitCursor");
+        return { committed: true };
+      }
+      if (request.method !== "share.view.pull") return undefined;
+      pulls += 1;
+      if (pulls > 1) throw new Error("relay went away mid-page");
+      return {
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        refusals: [],
+        refusalCount: 0,
+        hasMore: true,
+        nextCursor: 1,
+        changedPaths: [
+          { path: "docs/collide.md", operation: "write", contentKind: "text" },
+        ],
+        pendingCursor: { kind: "shareView", token: "share-cursor-1" },
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(
+      client.pullShareView({
+        shareId: "share-view",
+        grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
+        recordCollisions: async () => {
+          calls.push("recordCollisions");
+        },
+      }),
+    ).rejects.toThrow();
+
+    expect(
+      calls,
+      "MUTATION: recording after the commit could lose a collision the crashed page already found",
+    ).toEqual(["recordCollisions", "commitCursor"]);
+    await sessions.closeAll();
+  });
+
   it("materializes a share view through the injected daemon store", async () => {
     const body = "read from daemon";
     const daemon = new MockDaemon((request) => {
@@ -1200,6 +1246,8 @@ describe("EngineRelayClient", () => {
     ).resolves.toEqual({
       status: "updated",
       changedPaths: 1,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1237,6 +1285,8 @@ describe("EngineRelayClient", () => {
     ).resolves.toEqual({
       status: "unchanged",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1316,6 +1366,8 @@ describe("EngineRelayClient", () => {
     ).resolves.toEqual({
       status: "ended",
       changedPaths: 0,
+      excludedPaths: [],
+      unjournalablePaths: [],
       refusedOps: 0,
       refusedDetail: null,
     });

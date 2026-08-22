@@ -128,11 +128,16 @@ describe("plugin web app main-process wiring", () => {
     const bounds = handler("setPluginWebAppBounds");
     const authorizeAt = bounds.indexOf("pluginWebAppViews.authorizeBounds({");
     const dropAt = bounds.indexOf("if (!record) return;", authorizeAt);
-    const applyAt = bounds.indexOf("record.view.view.setBounds(input.bounds);", dropAt);
+    // The applied rect is the renderer's CSS-pixel report scaled by the
+    // sender's zoom factor — raw CSS pixels would misplace the guest on a
+    // zoomed host.
+    const zoomAt = bounds.indexOf("event.sender.getZoomFactor()", dropAt);
+    const applyAt = bounds.indexOf("record.view.view.setBounds({", zoomAt);
 
     expect(authorizeAt).toBeGreaterThan(-1);
     expect(dropAt).toBeGreaterThan(authorizeAt);
-    expect(applyAt).toBeGreaterThan(dropAt);
+    expect(zoomAt).toBeGreaterThan(dropAt);
+    expect(applyAt).toBeGreaterThan(zoomAt);
     expect(bounds).toContain("generation: rendererGeneration(event.sender.id),");
   });
 

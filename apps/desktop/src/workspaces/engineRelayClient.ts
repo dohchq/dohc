@@ -598,6 +598,9 @@ export interface EngineRelayWorkspaceClient {
     // fails takes the earlier page's reasons with it while its cursor stays
     // committed.
     recordRefusals?: (refusals: ShareViewRefusal[]) => Promise<void>;
+    // Called with each page's changed paths before that page's cursor is
+    // committed, so callers can persist collision exclusions first.
+    recordCollisions?: (paths: readonly string[]) => Promise<void>;
   }): Promise<PullShareViewResult>;
   // #646 PR2: this replica's own chat about the shared files, back to the
   // granter. Takes the SAME pinned selector the pull takes, for the same
@@ -1106,7 +1109,12 @@ export class EngineRelayClient {
           morePending: booleanField(result, "morePending", "share.proposal.submit"),
         };
       },
-      pullShareView: async ({ shareId, grantedSelector, recordRefusals }) => {
+      pullShareView: async ({
+        shareId,
+        grantedSelector,
+        recordRefusals,
+        recordCollisions,
+      }) => {
         let fetched = 0;
         let applied = 0;
         let skipped = 0;
@@ -1190,10 +1198,14 @@ export class EngineRelayClient {
           // pull never offers these ops again, so a throw on a later page must
           // not be able to take the reason with it.
           if (pageRefusals.length > 0) await recordRefusals?.(pageRefusals);
-          for (const path of changedPaths(
+          const pageChangedPaths = changedPaths(
             result.changedPaths,
             "share.view.pull",
-          )) {
+          );
+          if (pageChangedPaths.length > 0) {
+            await recordCollisions?.(pageChangedPaths.map((path) => path.path));
+          }
+          for (const path of pageChangedPaths) {
             changed.set(path.path, path);
           }
           if (!hasMore) {

@@ -93,7 +93,7 @@ import {
   SettleShareProposalPayload,
   SettleShareProposalResult,
   SubmitShareChangesPayload,
-  SubmitShareChangesResult,
+  resolveSubmitShareChangesResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
   WithdrawShareChangesPayload,
@@ -261,6 +261,7 @@ import {
   PickImageFilesResult,
   WRITE_ASSET_MAX_BYTES,
   SetTitlebarThemePayload,
+  StepWindowZoomPayload,
   SetUserSettingsPayload,
   SetWorkspaceSettingsPayload,
   SetWorkspaceUiStatePayload,
@@ -340,6 +341,10 @@ import {
   shouldUseDarkSystemIcon,
 } from "./systemThemeIcon";
 import { buildMenuTemplate } from "./window/applicationMenu";
+import {
+  createUserSettingsWriteQueue,
+  createZoomMutation,
+} from "./window/windowZoom";
 import { renderHtmlToPdf } from "./window/documentPdfExport";
 import {
   allowLoopbackFrameOrigin,
@@ -479,10 +484,13 @@ import {
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
+  assertShareChangesJournalable,
+  captureStandaloneShareViewDivergence,
   SharePinInvalidError,
   recordedShareSelector,
-  refreshSharedViewOnce,
+  refreshStandaloneShareViewOnce,
   shareViewIdentitySelector,
+  withShareViewRefreshLifecycleLock,
 } from "./workspaces/sharedView";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
@@ -1323,9 +1331,37 @@ function prioritizePreferredWorkspace(
 const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
   (window) => window.isDestroyed(),
 );
+// The last zoom level any path applied (mutation, settings save, or the
+// persisted read below). Lets a window created later — the tray/dock
+// recreation path shows synchronously — start at the right scale before
+// any show(). Null only before the first read of a launch resolves.
+let knownZoomLevel: number | null = null;
+
 function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
   workspaceWindows.track(window);
   window.on("closed", () => workspaceWindows.forget(window));
+  // The persisted zoom level is a window property main owns. A level any
+  // window already applied is set SYNCHRONOUSLY at creation — before any
+  // show() on either creation path — so no visible frame paints at 100%
+  // and then jumps. The async read covers the first window of a launch and
+  // reconciles on did-finish-load; best-effort — a fresh install has only
+  // the default.
+  if (knownZoomLevel !== null) {
+    window.webContents.setZoomLevel(knownZoomLevel);
+  }
+  const persistedZoom = readCachedUserSettingsFile(stateDir())
+    .then(({ settings }) => settings.appearance.zoomLevel)
+    .catch(() => null);
+  const applyPersistedZoom = () => {
+    void persistedZoom.then((zoomLevel) => {
+      if (zoomLevel !== null && !window.isDestroyed()) {
+        knownZoomLevel = zoomLevel;
+        window.webContents.setZoomLevel(zoomLevel);
+      }
+    });
+  };
+  window.once("ready-to-show", applyPersistedZoom);
+  window.webContents.once("did-finish-load", applyPersistedZoom);
   return window;
 }
 function liveWorkspaceWindow(): BrowserWindow | undefined {
@@ -1365,6 +1401,37 @@ function quoteWindowsArg(value: string): string {
   return quoted;
 }
 
+// One user-settings write queue for every caller. Full saves and zoom steps
+// cannot interleave their file mutations.
+//
+// Tracked workspace windows only, never getAllWindows(): a hidden utility
+// window (the PDF export renderer) must keep its own zoom, or an export
+// mid-render would change layout with the user's keystroke.
+function applyZoomLevelToWindows(zoomLevel: number): void {
+  knownZoomLevel = zoomLevel;
+  for (const window of workspaceWindows.allLive()) {
+    window.webContents.setZoomLevel(zoomLevel);
+  }
+}
+
+const enqueueUserSettingsWrite = createUserSettingsWriteQueue();
+const mutateWindowZoom = createZoomMutation({
+  enqueue: enqueueUserSettingsWrite,
+  read: () => readCachedUserSettingsFile(stateDir()),
+  write: (settings) => writeUserSettingsFile(stateDir(), settings),
+  apply: applyZoomLevelToWindows,
+});
+
+async function stepWindowZoom(
+  step: Parameters<typeof mutateWindowZoom>[0],
+): Promise<DesktopUserSettingsResult> {
+  const result = DesktopUserSettingsResult.parse(await mutateWindowZoom(step));
+  for (const window of workspaceWindows.allLive()) {
+    window.webContents.send(CHANNELS.userSettingsChanged, result);
+  }
+  return result;
+}
+
 function refreshApplicationMenu(): void {
   if (!app.isReady()) return;
   const canInstallUpdate = currentUpdateState().canInstall === true;
@@ -1378,6 +1445,20 @@ function refreshApplicationMenu(): void {
         canInstallUpdate,
         sendCommand: (window, command) => {
           targetWindow(window)?.webContents.send(CHANNELS.menuCommand, command);
+        },
+        stepZoom: (step) => {
+          void stepWindowZoom(step).catch((error) => {
+            console.error("[desktop] window zoom:", error);
+            // The accelerator path has no renderer surface to answer on (the
+            // palette and Settings show their own errors), so the refusal —
+            // e.g. an unreadable settings file — must reach the user here.
+            dialog.showErrorBox(
+              "Zoom",
+              error instanceof Error
+                ? `${error.message} Open Settings to repair or reset it.`
+                : "dohc could not change the window zoom.",
+            );
+          });
         },
         openRecentWorkspace: (window, workspace) => {
           sendWorkspaceActivated(window, workspace);
@@ -6117,22 +6198,43 @@ function registerIpcHandlers(
       input.workspaceId,
       requireShareViewProposalScope,
     );
+    const store = sharedViewStoreFor(scope.workspace);
+    const captured = await withShareViewRefreshLifecycleLock(
+      scope.workspace.rootPath,
+      async () =>
+        captureStandaloneShareViewDivergence({
+          rootDir: scope.workspace.rootPath,
+          workspaceId: scope.workspace.workspaceId,
+          store,
+          pinnedSelector: isRecordValue(scope.workspace.shareView)
+            ? scope.workspace.shareView.grantedSelector
+            : null,
+          shareId: scope.shareId,
+          ended:
+            isRecordValue(scope.workspace.shareView) &&
+            scope.workspace.shareView.ended === true,
+        }),
+    );
+    assertShareChangesJournalable(captured.unjournalablePaths);
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
-    const result = await relayClientForWorkspace({
-      workspaceId: scope.workspace.workspaceId,
-      rootPath: scope.workspace.rootPath,
-      relay: scope.relay,
-    }).submitShareProposal({
-      shareId: scope.shareId,
-      grantedSelector: scope.grant,
-      // PR3a mints a fresh key per submit. It makes the relay's idempotency
-      // hold for a retry INSIDE one submit (blobs, then the POST), not for a
-      // second press: a second press sends whatever is pending then, which is
-      // a second set of changes and a second proposal.
-      submitId: randomUUID(),
-    });
-    return SubmitShareChangesResult.parse(result);
+    return resolveSubmitShareChangesResult(
+      captured.capturedPaths + captured.repairedPaths,
+      () =>
+        relayClientForWorkspace({
+          workspaceId: scope.workspace.workspaceId,
+          rootPath: scope.workspace.rootPath,
+          relay: scope.relay,
+        }).submitShareProposal({
+          shareId: scope.shareId,
+          grantedSelector: scope.grant,
+          // PR3a mints a fresh key per submit. It makes the relay's idempotency
+          // hold for a retry INSIDE one submit (blobs, then the POST), not for
+          // a second press: a second press sends whatever is pending then,
+          // which is a second set of changes and a second proposal.
+          submitId: randomUUID(),
+        }),
+    );
   });
 
   ipcMain.handle(CHANNELS.listMyShareChanges, async (event, payload) => {
@@ -6312,12 +6414,14 @@ function registerIpcHandlers(
           console.error("[desktop] share view identity:", error);
         },
       );
-      const outcome = await refreshSharedViewOnce({
+      const store = sharedViewStoreFor(created);
+      const outcome = await refreshStandaloneShareViewOnce({
         rootDir: created.rootPath,
         workspaceId: created.workspaceId,
         relay,
         shareId: parsed.shareId,
-        store: sharedViewStoreFor(created),
+        store,
+        ended: false,
         // Just pinned on the record above; the refresh reads it back through
         // the same defensive parse every later refresh uses.
         pinnedSelector: info.selector,
@@ -6327,8 +6431,10 @@ function registerIpcHandlers(
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
             recordRefusals: input.recordRefusals,
+            recordCollisions: input.recordCollisions,
           }),
       });
+      if (!outcome.ok) throw new Error(outcome.errorMessage);
       if (outcome.status === "ended") {
         throw new ShareUnavailableError();
       }
@@ -6380,8 +6486,11 @@ function registerIpcHandlers(
     if (!shareView) throw new Error("This workspace is not a shared view.");
     if (shareView.ended) {
       return RefreshSharedViewResult.parse({
+        ok: true,
         status: "ended",
         changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -6396,8 +6505,11 @@ function registerIpcHandlers(
       !relayUrlsMatch(cachedCredentials.relayUrl, shareView.relayUrl)
     ) {
       return RefreshSharedViewResult.parse({
+        ok: true,
         status: "unchanged",
         changedPaths: 0,
+        excludedPaths: [],
+        unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -6426,12 +6538,14 @@ function registerIpcHandlers(
       console.error("[desktop] share view chat push (refresh backstop):", error);
     });
     try {
-      outcome = await refreshSharedViewOnce({
+      const store = sharedViewStoreFor(workspace);
+      outcome = await refreshStandaloneShareViewOnce({
         rootDir: workspace.rootPath,
         workspaceId: workspace.workspaceId,
         relay,
         shareId: shareView.shareId,
-        store: sharedViewStoreFor(workspace),
+        store,
+        ended: shareView.ended ?? false,
         pinnedSelector: shareView.grantedSelector,
         recordRefusals: recordShareViewRefusals(workspace.workspaceId),
         pull: async (input) =>
@@ -6439,6 +6553,7 @@ function registerIpcHandlers(
             shareId: input.shareId,
             grantedSelector: input.grantedSelector,
             recordRefusals: input.recordRefusals,
+            recordCollisions: input.recordCollisions,
           }),
       });
     } catch (error) {
@@ -6455,6 +6570,10 @@ function registerIpcHandlers(
         );
       }
       throw error;
+    }
+    if (!outcome.ok) {
+      notifyRenderer();
+      return RefreshSharedViewResult.parse(outcome);
     }
     if (outcome.status === "ended") {
       // Persist the honest end state: the view stays readable and stops
@@ -7436,7 +7555,18 @@ function registerIpcHandlers(
       generation: rendererGeneration(event.sender.id),
     });
     if (!record) return;
-    record.view.view.setBounds(input.bounds);
+    // The renderer reports CSS pixels; page zoom changes the CSS→DIP mapping,
+    // so a zoomed host would otherwise place the guest at the wrong
+    // rectangle — over neighboring chrome, taking clicks outside its frame.
+    // The renderer re-reports on the resize a zoom change triggers, so a
+    // report in flight across a zoom step corrects itself.
+    const zoomFactor = event.sender.getZoomFactor();
+    record.view.view.setBounds({
+      x: Math.round(input.bounds.x * zoomFactor),
+      y: Math.round(input.bounds.y * zoomFactor),
+      width: Math.round(input.bounds.width * zoomFactor),
+      height: Math.round(input.bounds.height * zoomFactor),
+    });
     record.view.view.setVisible(input.visible);
   });
 
@@ -10203,8 +10333,17 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.setUserSettings, async (event, payload) => {
     assertTrustedSender(event);
     const input = SetUserSettingsPayload.parse(payload);
-    await writeUserSettingsFile(stateDir(), input.settings);
-    cachedPreferredName = input.settings.profile.preferredName;
+    const result = await enqueueUserSettingsWrite(async () => {
+      await writeUserSettingsFile(stateDir(), input.settings);
+      cachedPreferredName = input.settings.profile.preferredName;
+      // The windows must match whatever zoom level was just persisted, however
+      // it got into the saved object.
+      applyZoomLevelToWindows(input.settings.appearance.zoomLevel);
+      return DesktopUserSettingsResult.parse({
+        settings: input.settings,
+        source: "stored",
+      });
+    });
     await refreshDispatchTray();
     if (input.settings.runner.enabled && input.settings.runner.command.trim()) {
       for (const workspace of openDispatchWorkspaces()) {
@@ -10213,21 +10352,22 @@ function registerIpcHandlers(
         });
       }
     }
-    return DesktopUserSettingsResult.parse({
-      settings: input.settings,
-      source: "stored",
-    });
+    return result;
   });
 
   ipcMain.handle(CHANNELS.resetUserSettings, async (event) => {
     assertTrustedSender(event);
-    await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
-    cachedPreferredName = undefined;
-    await refreshDispatchTray();
-    return DesktopUserSettingsResult.parse({
-      settings: DEFAULT_USER_SETTINGS,
-      source: "stored",
+    const result = await enqueueUserSettingsWrite(async () => {
+      await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
+      cachedPreferredName = undefined;
+      applyZoomLevelToWindows(DEFAULT_USER_SETTINGS.appearance.zoomLevel);
+      return DesktopUserSettingsResult.parse({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "stored",
+      });
     });
+    await refreshDispatchTray();
+    return result;
   });
 
   ipcMain.handle(CHANNELS.getWorkspaceSettings, async (event, payload) => {
@@ -10279,6 +10419,15 @@ function registerIpcHandlers(
     } catch {
       // Platform without a title bar overlay: nothing to re-tint.
     }
+  });
+
+  // The palette and the Settings stepper share the menu accelerators' zoom
+  // mutation; the answer is the settings now on disk, so the caller paints
+  // the level actually in effect.
+  ipcMain.handle(CHANNELS.stepWindowZoom, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = StepWindowZoomPayload.parse(payload);
+    return DesktopUserSettingsResult.parse(await stepWindowZoom(input.step));
   });
 
   // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer

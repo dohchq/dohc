@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -148,7 +148,10 @@ describe("the guest-blocking UI signal", () => {
       </Shell>,
     );
     await screen.findByTestId("plugin-web-app-frame");
-    expect(lastVisible()).toBe(true);
+    // The frame div renders while the app is still starting; the first bounds
+    // push happens only after the mocked start resolves. Wait for the call
+    // instead of racing it (the frame alone does not prove a bounds report).
+    await waitFor(() => expect(lastVisible()).toBe(true));
 
     // MUTATION (Overlay stops registering, or the shell goes back to listing
     // its own flags): this confirm paints over the guest, the guest keeps
@@ -174,7 +177,10 @@ describe("the guest-blocking UI signal", () => {
       </Shell>,
     );
     await screen.findByTestId("plugin-web-app-frame");
-    expect(lastVisible()).toBe(true);
+    // The frame div renders while the app is still starting; the first bounds
+    // push happens only after the mocked start resolves. Wait for the call
+    // instead of racing it (the frame alone does not prove a bounds report).
+    await waitFor(() => expect(lastVisible()).toBe(true));
 
     // MUTATION (drop the registration from AgentPermissionRequests): the card
     // floats over the guest, its Allow button eats nothing, and the run stays
@@ -214,7 +220,10 @@ describe("the guest-blocking UI signal", () => {
       </Shell>,
     );
     await screen.findByTestId("plugin-web-app-frame");
-    expect(lastVisible()).toBe(true);
+    // The frame div renders while the app is still starting; the first bounds
+    // push happens only after the mocked start resolves. Wait for the call
+    // instead of racing it (the frame alone does not prove a bounds report).
+    await waitFor(() => expect(lastVisible()).toBe(true));
 
     // MUTATION (drop the registration): the warning paints inside the guest's
     // rectangle, the guest keeps compositing above it, and neither "Go back"
@@ -243,7 +252,9 @@ describe("the guest-blocking UI signal", () => {
       </Shell>,
     );
     await screen.findByTestId("plugin-web-app-frame");
-    expect(lastVisible()).toBe(false);
+    // Same race as above: the first report lands after the mocked start
+    // resolves, so wait for it rather than reading the mock too early.
+    await waitFor(() => expect(lastVisible()).toBe(false));
 
     await act(async () => {
       screen.getByText("Restore").click();

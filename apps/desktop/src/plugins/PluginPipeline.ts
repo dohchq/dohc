@@ -12,6 +12,10 @@ import {
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
 import { buildPluginBundle } from "./pluginBuildRunner";
+import {
+  foldForCompare,
+  recoverOnDiskSegments,
+} from "./pluginCaseRecovery";
 import { CLAIMS_DRAINING_ERROR_CODE } from "./pluginCommandInvocation";
 import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
@@ -38,11 +42,12 @@ import {
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
   canonicalPluginSourceHash,
-  EXCLUDED_SOURCE_NAMES,
+  isExcludedSourceName,
   isPluginRootArtifact,
   pluginIdToSafePath,
   pluginStateRoot,
   snapshotPluginSource,
+  type PluginSourceFileDigest,
   type PluginSourceSnapshotResult,
 } from "./pluginSourceSnapshot";
 import {
@@ -267,6 +272,7 @@ export interface PluginPipelineOptions {
    * of its own omits it.
    */
   hasOutstandingCommandClaim?: (pluginId: string) => boolean;
+  platform?: NodeJS.Platform;
   operations?: Partial<PluginPipelineOperations>;
 }
 
@@ -540,10 +546,50 @@ function candidateKey(candidate: InstalledPluginRecord): string {
   return `${candidate.id}\0${resolve(candidate.rootPath)}`;
 }
 
+export interface DoorWrittenDelta {
+  sha256: string;
+  seq: number;
+  provisional?: boolean;
+  /**
+   * The write's original, caller-spelled absolute path. Set only when
+   * landing attributed this delta through sourceRelPath's case-insensitive
+   * fold, not an exact root match — an exact landing already proved
+   * ownership, so it has nothing left to re-confirm. retryProvisionalDeltaRecovery
+   * walks this path from the workspace root to confirm or disprove that
+   * guess; a rekeyed or landing-exact delta carries no origin because it
+   * needs none.
+   */
+  provisionalOrigin?: string;
+}
+
+export function overlayDoorWrittenSourceDeltas(
+  baselineFiles: readonly PluginSourceFileDigest[],
+  deltas: Iterable<readonly [string, DoorWrittenDelta]>,
+  platform: NodeJS.Platform = process.platform,
+): PluginSourceFileDigest[] {
+  const files = new Map(
+    baselineFiles.map((file) => [file.relPath, file.sha256]),
+  );
+  const baselineKeys = new Set(files.keys());
+  const byLowerCase = platform === "win32" || platform === "darwin"
+    ? new Map([...files.keys()].map((relPath) => [foldForCompare(relPath), relPath]))
+    : undefined;
+  for (
+    const [relPath, delta] of [...deltas].sort((a, b) => a[1].seq - b[1].seq)
+  ) {
+    const target = delta.provisional && byLowerCase && !baselineKeys.has(relPath)
+      ? byLowerCase.get(foldForCompare(relPath)) ?? relPath
+      : relPath;
+    files.set(target, delta.sha256);
+  }
+  return [...files].map(([relPath, sha256]) => ({ relPath, sha256 }));
+}
+
 export class PluginPipeline {
   private readonly workspaceRoot: string;
   private readonly dohcDir: string;
   private readonly operations: PluginPipelineOperations;
+  private readonly platform: NodeJS.Platform;
   private readonly statuses = new Map<string, PluginPipelinePluginStatus>();
   // A key's presence is the fact a build failed with an old runtime still
   // standing in for it — set whenever captureRecoveredManifest runs, keyed
@@ -560,11 +606,13 @@ export class PluginPipeline {
    * relPath (POSIX, root-relative) to the sha256 of the written bytes and
    * the write's order in doorWriteSeq. See handleDoorWrittenSourceChange
    * and doorApprovedHash — this overlay, applied to the persisted baseline
-   * manifest, is the only tree the door path may auto-approve.
+   * manifest, is the only tree the door path may auto-approve. Overlay
+   * A landing-time key is provisional until pluginAuthoredWrite's async case
+   * recovery moves it to the spelling read from disk.
    */
   private readonly doorWrittenDeltas = new Map<
     string,
-    Map<string, { sha256: string; seq: number }>
+    Map<string, DoorWrittenDelta>
   >();
   /** Orders door writes against each build's snapshot; see runFullBuild. */
   private doorWriteSeq = 0;
@@ -589,6 +637,7 @@ export class PluginPipeline {
     this.workspaceRoot = resolve(options.workspaceRoot);
     this.dohcDir = pluginDataDir(options.stateDir, this.workspaceRoot);
     this.operations = { ...DEFAULT_OPERATIONS, ...options.operations };
+    this.platform = options.platform ?? process.platform;
   }
 
   /**
@@ -787,7 +836,53 @@ export class PluginPipeline {
     for (const candidate of this.discovery) {
       if (isInside(resolve(candidate.rootPath), target)) return candidate.id;
     }
+    if (this.platform === "win32" || this.platform === "darwin") {
+      const foldedTarget = foldForCompare(target);
+      for (const candidate of this.discovery) {
+        if (isInside(foldForCompare(resolve(candidate.rootPath)), foldedTarget)) {
+          return candidate.id;
+        }
+      }
+    }
     return null;
+  }
+
+  private sourceRelPathExact(
+    candidate: InstalledPluginRecord,
+    absolutePath: string,
+  ): string | null {
+    const root = resolve(candidate.rootPath);
+    const target = resolve(absolutePath);
+    if (target === root) return null;
+    if (!isInside(root, target)) return null;
+    return relative(root, target).replaceAll("\\", "/");
+  }
+
+  private sourceRelPath(
+    candidate: InstalledPluginRecord,
+    absolutePath: string,
+  ): string | null {
+    const exact = this.sourceRelPathExact(candidate, absolutePath);
+    if (exact !== null) return exact;
+    if (this.platform !== "win32" && this.platform !== "darwin") return null;
+    const root = resolve(candidate.rootPath);
+    const target = resolve(absolutePath);
+    const foldedRoot = foldForCompare(root);
+    const foldedTarget = foldForCompare(target);
+    if (foldedTarget === foldedRoot || !isInside(foldedRoot, foldedTarget)) return null;
+    const rootSegments = root.split(/[\\/]+/).filter(Boolean);
+    const targetSegments = target.split(/[\\/]+/).filter(Boolean);
+    if (
+      rootSegments.length >= targetSegments.length ||
+      rootSegments.some((segment, index) => {
+        const targetSegment = targetSegments[index];
+        return targetSegment === undefined ||
+          foldForCompare(segment) !== foldForCompare(targetSegment);
+      })
+    ) {
+      return null;
+    }
+    return targetSegments.slice(rootSegments.length).join("/");
   }
 
   install(pluginId: string): Promise<PluginPipelineActionResult> {
@@ -1021,24 +1116,78 @@ export class PluginPipeline {
   ): void {
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return;
-    const root = resolve(candidate.rootPath);
-    const target = resolve(write.absolutePath);
-    if (target === root || !isInside(root, target)) return;
-    const relPath = relative(root, target).replaceAll("\\", "/");
+    const exactRelPath = this.sourceRelPathExact(candidate, write.absolutePath);
+    const relPath = exactRelPath ?? this.sourceRelPath(candidate, write.absolutePath);
+    if (relPath === null) return;
     // node_modules and .dohc are excluded from every source digest, so a
     // write under them cannot change the hash this predicate compares.
-    if (relPath.split("/").some((segment) => EXCLUDED_SOURCE_NAMES.has(segment))) {
-      return;
-    }
+    if (this.isExcludedRelPath(relPath)) return;
     const deltas = this.doorWrittenDeltas.get(pluginId) ??
-      new Map<string, { sha256: string; seq: number }>();
+      new Map<string, DoorWrittenDelta>();
     deltas.set(relPath, {
       sha256: createHash("sha256").update(write.text, "utf8").digest("hex"),
       seq: ++this.doorWriteSeq,
+      provisional: true,
+      provisionalOrigin: exactRelPath === null ? write.absolutePath : undefined,
     });
     this.doorWrittenDeltas.set(pluginId, deltas);
     this.enqueueSourceRefresh(pluginId, () =>
       this.reconcileApprovedCandidate(pluginId, true));
+  }
+
+  /**
+   * Moves a door-written delta from its landing-time spelling to its recovered
+   * on-disk spelling, preserving its sequence. This settles one write; it
+   * does not create another. A missing source entry was already superseded.
+   */
+  rekeyDoorWrittenSourceChange(
+    pluginId: string,
+    from: { absolutePath: string },
+    to: { absolutePath: string },
+  ): void {
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) return;
+    const fromRelPath = this.sourceRelPath(candidate, from.absolutePath);
+    if (fromRelPath === null) return;
+    const deltas = this.doorWrittenDeltas.get(pluginId);
+    const delta = deltas?.get(fromRelPath);
+    if (!deltas || !delta) return;
+
+    const toRelPath = this.sourceRelPathExact(candidate, to.absolutePath);
+    if (toRelPath === null) {
+      // Recovery resolved the write's true on-disk path, and it is not
+      // under the plugin's real root: the landing-time fold guessed
+      // ownership from spelling alone, and a case-sensitive volume just
+      // proved that guess wrong. Drop the provisional attribution — this
+      // is an ordinary out-of-band change to a distinct, real directory,
+      // not this plugin's own source.
+      deltas.delete(fromRelPath);
+      this.enqueueSourceRefresh(pluginId, () =>
+        this.reconcileApprovedCandidate(pluginId, true));
+      return;
+    }
+
+    if (this.isExcludedRelPath(toRelPath)) {
+      deltas.delete(fromRelPath);
+      this.enqueueSourceRefresh(pluginId, () =>
+        this.reconcileApprovedCandidate(pluginId, true));
+      return;
+    }
+
+    const destination = deltas.get(toRelPath);
+    const pathChanged = fromRelPath !== toRelPath;
+    if (pathChanged) deltas.delete(fromRelPath);
+    if (!destination || destination.seq <= delta.seq) {
+      deltas.set(toRelPath, { sha256: delta.sha256, seq: delta.seq });
+    }
+    if (pathChanged) {
+      this.enqueueSourceRefresh(pluginId, () =>
+        this.reconcileApprovedCandidate(pluginId, true));
+    }
+  }
+
+  private isExcludedRelPath(relPath: string): boolean {
+    return relPath.split("/").some((segment) => isExcludedSourceName(segment));
   }
 
   /**
@@ -1800,6 +1949,60 @@ export class PluginPipeline {
   }
 
   /**
+   * Retries case recovery for every still-provisional delta before
+   * doorApprovedHash hashes them: confirms a landing-time fold's guessed
+   * ownership, or recovers a leaf's on-disk spelling.
+   */
+  private async retryProvisionalDeltaRecovery(pluginId: string): Promise<void> {
+    if (this.platform !== "win32" && this.platform !== "darwin") return;
+    const deltas = this.doorWrittenDeltas.get(pluginId);
+    if (!deltas) return;
+    const candidate = this.validCandidate(pluginId);
+    if (!candidate) return;
+    const root = resolve(candidate.rootPath);
+    for (const [relPath, delta] of [...deltas]) {
+      if (!delta.provisional) continue;
+      const origin = delta.provisionalOrigin;
+      const { segments, fullyRecovered } = await recoverOnDiskSegments(
+        origin !== undefined ? this.workspaceRoot : root,
+        origin !== undefined
+          ? relative(this.workspaceRoot, origin).replaceAll("\\", "/")
+          : relPath,
+        undefined,
+      );
+      const current = deltas.get(relPath);
+      if (!current || current.seq !== delta.seq) continue;
+      if (!fullyRecovered) continue;
+      const recoveredRelPath = origin !== undefined
+        ? this.sourceRelPathExact(candidate, join(this.workspaceRoot, ...segments))
+        : segments.join("/");
+      if (recoveredRelPath === null) {
+        // Recovery resolved the write's true on-disk path, and it is not
+        // under this plugin's real root: the landing-time fold guessed
+        // ownership from spelling alone, and a case-sensitive volume just
+        // proved that guess wrong. Drop it — the same confirmation
+        // rekeyDoorWrittenSourceChange applies to a delta the writer's own
+        // recovery rekeys.
+        deltas.delete(relPath);
+        continue;
+      }
+      if (this.isExcludedRelPath(recoveredRelPath)) {
+        deltas.delete(relPath);
+        continue;
+      }
+      if (recoveredRelPath === relPath) {
+        deltas.set(relPath, { sha256: delta.sha256, seq: delta.seq });
+        continue;
+      }
+      deltas.delete(relPath);
+      const destination = deltas.get(recoveredRelPath);
+      if (!destination || destination.seq <= delta.seq) {
+        deltas.set(recoveredRelPath, { sha256: delta.sha256, seq: delta.seq });
+      }
+    }
+  }
+
+  /**
    * The one tree the door path may auto-approve: the approved per-file
    * baseline overlaid with every door-written delta recorded since. Null
    * when no baseline verifies against the approved hash — a fresh
@@ -1809,7 +2012,8 @@ export class PluginPipeline {
    * deltas, so any other byte on disk — an interloper file, a
    * watcher-class edit, an out-of-band delete — makes the live tree miss
    * this hash and hold for approval. The SDK write surface has no delete,
-   * so a delta only ever adds or replaces one file.
+   * so a delta only ever adds or replaces one file. The retry also confirms
+   * ownership for a delta attributed through the landing-time path fold.
    */
   private async doorApprovedHash(
     pluginId: string,
@@ -1817,14 +2021,13 @@ export class PluginPipeline {
   ): Promise<string | null> {
     const baseline = await readPluginBaselineManifest(this.dohcDir, pluginId);
     if (!baseline || baseline.sourceHash !== approvedHash) return null;
-    const files = new Map(
-      baseline.files.map((file) => [file.relPath, file.sha256]),
-    );
-    for (const [relPath, delta] of this.doorWrittenDeltas.get(pluginId) ?? []) {
-      files.set(relPath, delta.sha256);
-    }
+    await this.retryProvisionalDeltaRecovery(pluginId);
     return canonicalPluginSourceHash(
-      [...files].map(([relPath, sha256]) => ({ relPath, sha256 })),
+      overlayDoorWrittenSourceDeltas(
+        baseline.files,
+        this.doorWrittenDeltas.get(pluginId) ?? [],
+        this.platform,
+      ),
     );
   }
 

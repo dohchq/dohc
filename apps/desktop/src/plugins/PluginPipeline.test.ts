@@ -26,12 +26,18 @@ import {
   PluginStatusRecord,
 } from "../ipc/bridgeContract";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { createPluginAuthoredTextWriter } from "./pluginAuthoredWrite";
 import { PLUGIN_HOST_METHODS } from "./pluginHostProtocol";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
 } from "./pluginDiscovery";
-import { PluginPipeline, type PluginPipelineStatusEvent } from "./PluginPipeline";
+import {
+  type DoorWrittenDelta,
+  overlayDoorWrittenSourceDeltas,
+  PluginPipeline,
+  type PluginPipelineStatusEvent,
+} from "./PluginPipeline";
 import {
   installPluginDependencies,
   type PluginInstallForkOptions,
@@ -61,6 +67,16 @@ import {
 interface Deferred {
   promise: Promise<void>;
   resolve(): void;
+}
+
+type DoorWrittenDeltas = Map<
+  string,
+  Map<string, DoorWrittenDelta>
+>;
+
+function doorWrittenDeltasOf(pipeline: PluginPipeline): DoorWrittenDeltas {
+  return (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+    .doorWrittenDeltas;
 }
 
 const roots: string[] = [];
@@ -329,6 +345,36 @@ async function doorWrite(
   pipeline.handleDoorWrittenSourceChange(pluginId, { absolutePath, text });
 }
 
+async function authoredDoorWrite(
+  pipeline: PluginPipeline,
+  workspaceRoot: string,
+  path: string,
+  text: string,
+): Promise<void> {
+  const write = createPluginAuthoredTextWriter({
+    signal: undefined,
+    requireWritableCapture: async () => ({
+      workspaceRoot,
+      capture: {
+        writeAuthoredTextFile: async (absolutePath, writtenText) => {
+          await writeFile(absolutePath, writtenText);
+          return { resolvedAbsolutePath: absolutePath };
+        },
+      },
+    }),
+    pipeline: () => pipeline,
+  });
+  await write(path, text, {
+    overwrite: true,
+    author: {
+      kind: "agent",
+      agentId: "plugin:example-plugin",
+      onBehalfOf: "local",
+      agentRunId: "spawn-1",
+    },
+  });
+}
+
 function fakeSpawnTransport(
   registeredCommands: () => string[] = () => [],
   beforeRequest?: (method: string) => Promise<void> | void,
@@ -365,7 +411,1133 @@ afterAll(async () => {
   });
 });
 
+describe("overlayDoorWrittenSourceDeltas", () => {
+  it("replaces and adds files by exact relative path", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "aaa" }],
+      new Map([
+        ["src/index.ts", { sha256: "bbb", seq: 1 }],
+        ["src/new.ts", { sha256: "ccc", seq: 2 }],
+      ]),
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "bbb" },
+      { relPath: "src/new.ts", sha256: "ccc" },
+    ]);
+  });
+
+  it("matches only provisional case drift to a baseline spelling", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: "src/index.ts", sha256: "aaa" }],
+      new Map([
+        ["SRC/index.ts", { sha256: "bbb", seq: 1, provisional: true }],
+        ["SRC/final.ts", { sha256: "ccc", seq: 2 }],
+      ]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "src/index.ts", sha256: "bbb" },
+      { relPath: "SRC/final.ts", sha256: "ccc" },
+    ]);
+  });
+
+  it("overlays a provisional delta onto its own exact baseline key, not a fold match", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [
+        { relPath: "SRC/a.ts", sha256: "upper" },
+        { relPath: "src/a.ts", sha256: "lower" },
+      ],
+      new Map([["SRC/a.ts", {
+        sha256: "written",
+        seq: 1,
+        provisional: true,
+      }]]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "SRC/a.ts", sha256: "written" },
+      { relPath: "src/a.ts", sha256: "lower" },
+    ]);
+  });
+
+  it("keeps baseline-absent provisional case variants distinct until recovery confirms one", () => {
+    const files = overlayDoorWrittenSourceDeltas(
+      [],
+      new Map([
+        ["SRC/new.ts", { sha256: "first", seq: 1, provisional: true }],
+        ["src/new.ts", { sha256: "latest", seq: 2, provisional: true }],
+      ]),
+      "darwin",
+    );
+
+    expect(files).toEqual([
+      { relPath: "SRC/new.ts", sha256: "first" },
+      { relPath: "src/new.ts", sha256: "latest" },
+    ]);
+  });
+
+  it("folds a provisional NFC path onto an NFD baseline spelling", () => {
+    const nfdRelPath = "src/caf\u0065\u0301.ts";
+    const nfcRelPath = "src/caf\u00e9.ts";
+    const files = overlayDoorWrittenSourceDeltas(
+      [{ relPath: nfdRelPath, sha256: "baseline" }],
+      new Map([[nfcRelPath, {
+        sha256: "delta",
+        seq: 1,
+        provisional: true,
+      }]]),
+      "darwin",
+    );
+
+    expect(files).toEqual([{ relPath: nfdRelPath, sha256: "delta" }]);
+  });
+});
+
 describe("PluginPipeline real filesystem lifecycle", () => {
+  it("attributes and confirms an NFC-spelled write under an NFD plugin root", async () => {
+    const nfdDirectory = "caf\u0065\u0301";
+    const nfcDirectory = "caf\u00e9";
+    const fixture = await createNamedPluginWorkspace(
+      nfdDirectory,
+      "unicode-plugin",
+    );
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const callerPath = join(
+        fixture.workspaceRoot,
+        "plugins",
+        nfcDirectory,
+        "src",
+        "index.ts",
+      );
+      expect(pipeline.pluginIdForPath(callerPath)).toBe("unicode-plugin");
+
+      const text = "normalization-equivalent root\n";
+      const write = createPluginAuthoredTextWriter({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (absolutePath) => {
+              await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      await write(
+        join("plugins", nfcDirectory, "src", "index.ts"),
+        text,
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:unicode-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+
+      expect(doorWrittenDeltasOf(pipeline).get("unicode-plugin"))
+        .toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+            seq: 1,
+          },
+        ]]));
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("attributes a mixed-case directory that the source snapshot includes", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: join(fixture.pluginRoot, "Node_Modules", "x.ts"),
+        text: "included\n",
+      });
+
+      expect(doorWrittenDeltasOf(pipeline).get("example-plugin"))
+        .toEqual(new Map([[
+          "Node_Modules/x.ts",
+          {
+            sha256: createHash("sha256").update("included\n", "utf8").digest("hex"),
+            seq: 1,
+            provisional: true,
+          },
+        ]]));
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("deletes a landed delta when rekeying reveals an excluded path", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const callerPath = join(fixture.pluginRoot, "NODE_MODULES", "x.ts");
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: callerPath,
+        text: "excluded\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "example-plugin",
+        { absolutePath: callerPath },
+        { absolutePath: join(fixture.pluginRoot, "node_modules", "x.ts") },
+      );
+
+      expect(doorWrittenDeltasOf(pipeline).get("example-plugin"))
+        .toEqual(new Map());
+    } finally {
+      await pipeline.dispose();
+    }
+  });
+
+  it("confirms a recovered plugin root by exact on-disk spelling", async () => {
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    vi.resetModules();
+    // Model a case-sensitive volume even when this test runs on Windows.
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+      let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+      const host = new PluginHostWithPosixPaths({
+        stateDir: "/state",
+        workspaceRoot: "/workspace",
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipelineWithPosixPaths({
+        workspaceRoot: "/workspace",
+        stateDir: "/state",
+        pluginHost: host,
+        platform: "darwin",
+        pnpmRunnerEntry: "/runner",
+      });
+      const pipelineState = pipeline as unknown as {
+        discovery: InstalledPluginRecord[];
+        enqueueSourceRefresh(
+          pluginId: string,
+          run: () => Promise<void>,
+        ): void;
+      };
+      pipelineState.discovery = [{
+        id: "owned",
+        directoryName: "owned",
+        rootPath: "/workspace/plugins/owned",
+        manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+        iconPath: null,
+        diagnostics: [],
+        valid: true,
+      }];
+      pipelineState.enqueueSourceRefresh = () => undefined;
+
+      const recoveredPath = "/workspace/plugins/OWNED/src/index.ts";
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: recoveredPath,
+        text: "distinct root\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "owned",
+        { absolutePath: recoveredPath },
+        { absolutePath: recoveredPath },
+      );
+
+      expect(
+        (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+          .doorWrittenDeltas.get("owned"),
+      ).toEqual(new Map());
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: recoveredPath,
+        text: "confirmed root\n",
+      });
+      pipeline.rekeyDoorWrittenSourceChange(
+        "owned",
+        { absolutePath: recoveredPath },
+        { absolutePath: "/workspace/plugins/owned/src/index.ts" },
+      );
+
+      expect(
+        (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
+          .doorWrittenDeltas.get("owned"),
+      )
+        .toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256: createHash("sha256")
+              .update("confirmed root\n", "utf8")
+              .digest("hex"),
+            seq: 2,
+          },
+        ]]));
+    } finally {
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
+  for (const scenario of [
+    { name: "an empty directory", excludedOnly: false },
+    { name: "a directory with only excluded content", excludedOnly: true },
+  ]) {
+    it.skipIf(process.platform !== "win32")(
+      `auto-approves a case-drifted Windows door write under ${scenario.name}`,
+      async () => {
+        const fixture = await createPluginWorkspace();
+        const existingDirectory = join(fixture.pluginRoot, "src", "NewDir");
+        await mkdir(existingDirectory, { recursive: true });
+        if (scenario.excludedOnly) {
+          const excludedPath = join(existingDirectory, "node_modules", "x.js");
+          await mkdir(dirname(excludedPath), { recursive: true });
+          await writeFile(excludedPath, "excluded\n");
+        }
+        let pipeline: PluginPipeline;
+        const host = new PluginHost({
+          stateDir: fixture.stateDir,
+          workspaceRoot: fixture.workspaceRoot,
+          spawnTransport: fakeSpawnTransport(),
+          routeSdkRequest: async () => ({}),
+          onStatusChange: (pluginId, status) => {
+            pipeline.noteRuntimeStatus(pluginId, status);
+          },
+        });
+        pipeline = new PluginPipeline({
+          workspaceRoot: fixture.workspaceRoot,
+          stateDir: fixture.stateDir,
+          pluginHost: host,
+          resourcesBasePath,
+          pnpmRunnerEntry,
+          operations: {
+            install: (input) =>
+              installPluginDependencies({
+                ...input,
+                forkProcess: nodeForkProcess,
+              }),
+          },
+        });
+
+        try {
+          await pipeline.start();
+          const installed = await pipeline.install("example-plugin");
+          if (!installed.ok) throw new Error(installed.error.message);
+          await waitFor(
+            () => pipeline.list()[0]?.status === "ready",
+            "Plugin did not reach ready after install.",
+          );
+          const originalHash = pipeline.list()[0]?.approvedHash;
+          await authoredDoorWrite(
+            pipeline,
+            fixture.workspaceRoot,
+            join("plugins", "example-plugin", "SRC", "newdir", "a.ts"),
+            "export const added = true;\n",
+          );
+
+          await waitFor(
+            () => {
+              const plugin = pipeline.list()[0];
+              return plugin?.status === "disabled-pending-approval" ||
+                (plugin?.status === "ready" &&
+                  plugin.approvedHash !== originalHash);
+            },
+            "Door write did not finish reconciliation.",
+          );
+          expect(pipeline.list()[0]).toMatchObject({
+            status: "ready",
+            disabledReason: null,
+          });
+          expect(pipeline.list()[0]?.approvedHash).not.toBe(originalHash);
+        } finally {
+          await pipeline.dispose();
+        }
+      },
+      60_000,
+    );
+  }
+
+  it("retries a provisional new-directory delta before hashing it", async () => {
+    const fixture = await createPluginWorkspace();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const canonicalDirectory = join(fixture.pluginRoot, "src", "NewDir");
+    const canonicalPath = join(canonicalDirectory, "a.ts");
+    const failedDirectory = resolve(join(fixture.pluginRoot, "src"));
+    let transientFailures = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      if (
+        resolve(String(args[0])) === failedDirectory &&
+        transientFailures === 0
+      ) {
+        transientFailures += 1;
+        throw new Error("simulated transient readdir failure");
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const originalHash = pipeline.list()[0]?.approvedHash;
+      await mkdir(canonicalDirectory, { recursive: true });
+
+      const { createPluginAuthoredTextWriter: createWriterWithTransientRead } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithTransientRead({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath, text) => {
+              await writeFile(canonicalPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      await write(
+        join("plugins", "example-plugin", "SRC", "newdir", "a.ts"),
+        "export const recovered = true;\n",
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+
+      await waitFor(
+        () => {
+          const plugin = pipeline.list()[0];
+          return plugin?.status === "ready" &&
+            plugin.approvedHash !== originalHash;
+        },
+        "The retried door write did not reach ready.",
+        60_000,
+      );
+      expect(transientFailures).toBe(1);
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+    } finally {
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("confirms fold-attributed ownership before settling a provisional delta", async () => {
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    let pluginEntries: string[] = [];
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      switch (actualPath.posix.resolve(String(args[0]))) {
+        case "/workspace":
+          return ["plugins"];
+        case "/workspace/plugins":
+          return pluginEntries;
+        case "/workspace/plugins/owned":
+        case "/workspace/plugins/OWNED":
+          return ["src"];
+        case "/workspace/plugins/owned/src":
+        case "/workspace/plugins/OWNED/src":
+          return ["index.ts"];
+        default:
+          throw new Error("Unexpected readdir path: " + String(args[0]));
+      }
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+
+      for (const scenario of [
+        { entries: ["owned", "OWNED"], confirmed: false },
+        { entries: ["owned"], confirmed: true },
+      ]) {
+        pluginEntries = scenario.entries;
+        let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+        const host = new PluginHostWithPosixPaths({
+          stateDir: "/state",
+          workspaceRoot: "/workspace",
+          spawnTransport: fakeSpawnTransport(),
+          routeSdkRequest: async () => ({}),
+          onStatusChange: (pluginId, status) => {
+            pipeline.noteRuntimeStatus(pluginId, status);
+          },
+        });
+        pipeline = new PluginPipelineWithPosixPaths({
+          workspaceRoot: "/workspace",
+          stateDir: "/state",
+          pluginHost: host,
+          platform: "darwin",
+          pnpmRunnerEntry: "/runner",
+        });
+        const pipelineState = pipeline as unknown as {
+          discovery: InstalledPluginRecord[];
+          doorWrittenDeltas: DoorWrittenDeltas;
+          enqueueSourceRefresh(
+            pluginId: string,
+            run: () => Promise<void>,
+          ): void;
+          retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+        };
+        pipelineState.discovery = [{
+          id: "owned",
+          directoryName: "owned",
+          rootPath: "/workspace/plugins/owned",
+          manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+          iconPath: null,
+          diagnostics: [],
+          valid: true,
+        }];
+        pipelineState.enqueueSourceRefresh = () => undefined;
+
+        const callerPath = "/workspace/plugins/OWNED/src/index.ts";
+        const text = scenario.confirmed ? "confirmed\n" : "distinct root\n";
+        const sha256 = createHash("sha256")
+          .update(text, "utf8")
+          .digest("hex");
+        pipeline.handleDoorWrittenSourceChange("owned", {
+          absolutePath: callerPath,
+          text,
+        });
+        expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([[
+          "src/index.ts",
+          {
+            sha256,
+            seq: 1,
+            provisional: true,
+            provisionalOrigin: callerPath,
+          },
+        ]]));
+
+        await pipelineState.retryProvisionalDeltaRecovery("owned");
+
+        expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(
+          scenario.confirmed
+            ? new Map([["src/index.ts", { sha256, seq: 1 }]])
+            : new Map(),
+        );
+      }
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
+  it("converges baseline-absent provisional case variants after recovery confirms one", async () => {
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    const actualPath = await vi.importActual<typeof import("node:path")>(
+      "node:path",
+    );
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      switch (actualPath.posix.resolve(String(args[0]))) {
+        case "/workspace/plugins/owned":
+          return ["SRC"];
+        case "/workspace/plugins/owned/SRC":
+          return ["new.ts"];
+        default:
+          throw new Error("Unexpected readdir path: " + String(args[0]));
+      }
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+    vi.doMock("node:path", () => ({
+      ...actualPath,
+      basename: actualPath.posix.basename,
+      dirname: actualPath.posix.dirname,
+      isAbsolute: actualPath.posix.isAbsolute,
+      join: actualPath.posix.join,
+      relative: actualPath.posix.relative,
+      resolve: actualPath.posix.resolve,
+      sep: actualPath.posix.sep,
+    }));
+
+    try {
+      const { PluginPipeline: PluginPipelineWithPosixPaths } =
+        await import("./PluginPipeline");
+      const { PluginHost: PluginHostWithPosixPaths } =
+        await import("./PluginHost");
+      let pipeline: InstanceType<typeof PluginPipelineWithPosixPaths>;
+      const host = new PluginHostWithPosixPaths({
+        stateDir: "/state",
+        workspaceRoot: "/workspace",
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+      pipeline = new PluginPipelineWithPosixPaths({
+        workspaceRoot: "/workspace",
+        stateDir: "/state",
+        pluginHost: host,
+        platform: "darwin",
+        pnpmRunnerEntry: "/runner",
+      });
+      const pipelineState = pipeline as unknown as {
+        discovery: InstalledPluginRecord[];
+        doorWrittenDeltas: DoorWrittenDeltas;
+        enqueueSourceRefresh(
+          pluginId: string,
+          run: () => Promise<void>,
+        ): void;
+        retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+      };
+      pipelineState.discovery = [{
+        id: "owned",
+        directoryName: "owned",
+        rootPath: "/workspace/plugins/owned",
+        manifest: { version: 1, name: "owned", entry: "src/index.ts" },
+        iconPath: null,
+        diagnostics: [],
+        valid: true,
+      }];
+      pipelineState.enqueueSourceRefresh = () => undefined;
+
+      const firstText = "first\n";
+      const latestText = "latest\n";
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: "/workspace/plugins/owned/SRC/new.ts",
+        text: firstText,
+      });
+      pipeline.handleDoorWrittenSourceChange("owned", {
+        absolutePath: "/workspace/plugins/owned/src/new.ts",
+        text: latestText,
+      });
+      expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([
+        ["SRC/new.ts", {
+          sha256: createHash("sha256").update(firstText, "utf8").digest("hex"),
+          seq: 1,
+          provisional: true,
+          provisionalOrigin: undefined,
+        }],
+        ["src/new.ts", {
+          sha256: createHash("sha256").update(latestText, "utf8").digest("hex"),
+          seq: 2,
+          provisional: true,
+          provisionalOrigin: undefined,
+        }],
+      ]));
+
+      await pipelineState.retryProvisionalDeltaRecovery("owned");
+
+      expect(pipelineState.doorWrittenDeltas.get("owned")).toEqual(new Map([[
+        "SRC/new.ts",
+        {
+          sha256: createHash("sha256").update(latestText, "utf8").digest("hex"),
+          seq: 2,
+        },
+      ]]));
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
+  it("does not let stale provisional recovery replace a newer same-path write", async () => {
+    const fixture = await createPluginWorkspace();
+    const recoveryStarted = deferred();
+    const releaseRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let blockRecovery = false;
+    let blocked = false;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      if (
+        blockRecovery &&
+        !blocked &&
+        resolve(String(args[0])) === resolve(fixture.pluginRoot)
+      ) {
+        blocked = true;
+        recoveryStarted.resolve();
+        await releaseRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    const { PluginPipeline: PluginPipelineWithDelayedRecovery } =
+      await import("./PluginPipeline");
+    const { PluginHost: PluginHostWithDelayedRecovery } =
+      await import("./PluginHost");
+    let pipeline: InstanceType<typeof PluginPipelineWithDelayedRecovery>;
+    const host = new PluginHostWithDelayedRecovery({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipelineWithDelayedRecovery({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+    });
+
+    try {
+      await pipeline.start();
+      const oldText = "old bytes\n";
+      const deltas = new Map([[
+        "src/index.ts",
+        {
+          sha256: createHash("sha256").update(oldText, "utf8").digest("hex"),
+          seq: 1,
+          provisional: true,
+        },
+      ]]);
+      doorWrittenDeltasOf(pipeline).set("example-plugin", deltas);
+      (pipeline as unknown as { doorWriteSeq: number }).doorWriteSeq = 1;
+
+      blockRecovery = true;
+      const pendingRecovery = (pipeline as unknown as {
+        retryProvisionalDeltaRecovery(pluginId: string): Promise<void>;
+      }).retryProvisionalDeltaRecovery("example-plugin");
+      await recoveryStarted.promise;
+
+      const newText = "new bytes\n";
+      pipeline.handleDoorWrittenSourceChange("example-plugin", {
+        absolutePath: fixture.entryPath,
+        text: newText,
+      });
+      releaseRecovery.resolve();
+      await pendingRecovery;
+
+      expect(deltas.get("src/index.ts")).toMatchObject({
+        sha256: createHash("sha256").update(newText, "utf8").digest("hex"),
+        seq: 2,
+      });
+    } finally {
+      releaseRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("attributes an authored write before delayed case recovery lets a watcher reconcile it", async () => {
+    const fixture = await createPluginWorkspace();
+    const recoveryStarted = deferred();
+    const releaseRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let readCount = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      readCount += 1;
+      if (readCount === 1) {
+        recoveryStarted.resolve();
+        await releaseRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    const observedStatuses: string[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      onStatusChange: (event) => {
+        if (event.kind === "changed") observedStatuses.push(event.plugin.status);
+      },
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.pluginIdForPath(
+        join(fixture.workspaceRoot, "PLUGINS", "EXAMPLE-PLUGIN", "src", "index.ts"),
+      )).toBe("example-plugin");
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const originalHash = pipeline.list()[0]?.approvedHash;
+      observedStatuses.length = 0;
+
+      const { createPluginAuthoredTextWriter: createWriterWithDelayedRecovery } =
+        await import("./pluginAuthoredWrite");
+      const write = createWriterWithDelayedRecovery({
+        platform: "darwin",
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath, text) => {
+              await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      });
+      const pendingWrite = write(
+        join("plugins", "example-plugin", "SRC", "index.ts"),
+        [
+          'export const marker = "watcher-window";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+      await recoveryStarted.promise;
+
+      await pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin/src/index.ts",
+        operation: "update",
+      }]);
+      await waitFor(
+        () =>
+          pipeline.list()[0]?.status === "disabled-pending-approval" ||
+          (pipeline.list()[0]?.status === "ready" &&
+            pipeline.list()[0]?.approvedHash !== originalHash),
+        "The watcher-window reconciliation did not settle.",
+        60_000,
+      );
+      const statusesDuringRecovery = [...observedStatuses];
+      releaseRecovery.resolve();
+      await pendingWrite;
+      await waitFor(
+        () =>
+          pipeline.list()[0]?.status === "ready" &&
+          pipeline.list()[0]?.approvedHash !== originalHash,
+        "The attributed write did not finish rebuilding.",
+        60_000,
+      );
+
+      expect(statusesDuringRecovery).not.toContain("disabled-pending-approval");
+    } finally {
+      releaseRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
+  it("keeps the second same-file write from two separate writers when the first recovery finishes last", async () => {
+    const fixture = await createPluginWorkspace();
+    const firstRecoveryStarted = deferred();
+    const releaseFirstRecovery = deferred();
+    const actualFs = await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+    let readCount = 0;
+    const readdirMock = vi.fn(async (...args: Parameters<typeof readdir>) => {
+      readCount += 1;
+      if (readCount === 1) {
+        firstRecoveryStarted.resolve();
+        await releaseFirstRecovery.promise;
+      }
+      return actualFs.readdir(...args);
+    });
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => ({
+      ...actualFs,
+      readdir: readdirMock,
+    }));
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      platform: "darwin",
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      const { createPluginAuthoredTextWriter: createIndependentWriter } =
+        await import("./pluginAuthoredWrite");
+      const input = {
+        platform: "darwin" as const,
+        signal: undefined,
+        requireWritableCapture: async () => ({
+          workspaceRoot: fixture.workspaceRoot,
+          capture: {
+            writeAuthoredTextFile: async (_absolutePath: string, text: string) => {
+              await writeFile(fixture.entryPath, text);
+              return { resolvedAbsolutePath: _absolutePath };
+            },
+          },
+        }),
+        pipeline: () => pipeline,
+      };
+      const firstWriter = createIndependentWriter(input);
+      const secondWriter = createIndependentWriter(input);
+      const relativePath = join(
+        "plugins",
+        "example-plugin",
+        "SRC",
+        "index.ts",
+      );
+      const firstWrite = firstWriter(
+        relativePath,
+        [
+          'export const marker = "writer-one";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-1",
+          },
+        },
+      );
+      await firstRecoveryStarted.promise;
+      await secondWriter(
+        relativePath,
+        [
+          'export const marker = "writer-two";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"),
+        {
+          overwrite: true,
+          author: {
+            kind: "agent",
+            agentId: "plugin:example-plugin",
+            onBehalfOf: "local",
+            agentRunId: "spawn-2",
+          },
+        },
+      );
+      releaseFirstRecovery.resolve();
+      await firstWrite;
+
+      await vi.waitFor(
+        async () => {
+          expect(pipeline.list()[0]?.status).toBe("ready");
+          expect(await readFile(
+            liveBundlePath(fixture, "example-plugin"),
+            "utf8",
+          )).toContain("writer-two");
+        },
+        { timeout: 60_000, interval: 20 },
+      );
+      expect(pipeline.list()[0]?.disabledReason).toBeNull();
+    } finally {
+      releaseFirstRecovery.resolve();
+      await pipeline.dispose();
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  }, 120_000);
+
   it("installs, hot reloads with one coalesced follow-up, disables, enables, approves, and uninstalls", async () => {
     const fixture = await createPluginWorkspace();
     const installGate = deferred();

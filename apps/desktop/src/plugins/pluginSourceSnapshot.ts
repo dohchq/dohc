@@ -89,6 +89,18 @@ const DEPENDENCY_FIELDS = [
 export const EXCLUDED_SOURCE_NAMES = new Set(["node_modules", ".dohc"]);
 
 /**
+ * Whether a single path segment is one of the source-excluded directory
+ * names. Shared with PluginPipeline's door-write exclusion checks: the
+ * snapshot's hash walk excludes by exact on-disk name, so every caller
+ * deciding whether a path is excluded must apply the same exact-match rule
+ * to the same on-disk spelling. A case-folded check would exclude names the
+ * snapshot hashes, and miss names the snapshot skips.
+ */
+export function isExcludedSourceName(name: string): boolean {
+  return EXCLUDED_SOURCE_NAMES.has(name);
+}
+
+/**
  * Package-manager configuration a plugin author must not supply. The install
  * runs pnpm with dohc's own registry, store, and output settings; every file
  * here is a second place pnpm would read those settings from, inside a tree
@@ -809,7 +821,7 @@ async function copySourceTree(
         sourcePath,
       );
     }
-    if (EXCLUDED_SOURCE_NAMES.has(entry.name)) continue;
+    if (isExcludedSourceName(entry.name)) continue;
 
     const destinationPath = join(destinationDirectory, entry.name);
     if (stats.isDirectory()) {
@@ -847,7 +859,7 @@ async function listSnapshotFiles(
   const files: string[] = [];
   const entries = await readdir(current, { withFileTypes: true });
   for (const entry of entries) {
-    if (EXCLUDED_SOURCE_NAMES.has(entry.name)) continue;
+    if (isExcludedSourceName(entry.name)) continue;
     const path = join(current, entry.name);
     assertSafeSnapshotEntryName(entry.name, path);
     if (entry.isDirectory()) {

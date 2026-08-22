@@ -2,6 +2,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   Download,
+  Minus,
+  Plus,
   RefreshCw,
   Search,
   X,
@@ -16,8 +18,11 @@ import {
 import type { UpdateStateEvent } from "../../ipc/bridgeContract";
 import {
   DEFAULT_USER_SETTINGS,
+  DesktopUserSettingsResult,
+  MAX_ZOOM_LEVEL,
+  MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
-  type DesktopUserSettingsResult,
+  zoomPercent,
 } from "../../settings/userSettings";
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
@@ -122,6 +127,10 @@ export function SettingsDialog(props: {
   // token guard DesktopWorkspaceShell uses for engine history.
   const workspaceTokenRef = useRef(0);
   const updateSubscriptionFiredRef = useRef(false);
+  // Same shape as updateSubscriptionFiredRef: a zoom broadcast arriving while
+  // the initial Promise.all load is in flight is NEWER than the user-settings
+  // snapshot that load retained, and must not be painted over.
+  const settingsEventFiredRef = useRef(false);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? DEFAULT_SETTINGS_SECTION,
   );
@@ -206,6 +215,23 @@ export function SettingsDialog(props: {
 
   useEffect(() => () => clearSaveStateTimer(), [clearSaveStateTimer]);
 
+  useEffect(
+    () =>
+      bridge().onUserSettingsChanged((result) => {
+        const parsed = DesktopUserSettingsResult.safeParse(result);
+        if (!parsed.success) return;
+        settingsEventFiredRef.current = true;
+        // A broadcast is NEWER than any request still in flight: bumping the
+        // request counter drops those pending responses, so an older save's
+        // answer cannot overwrite this result. The write behind the broadcast
+        // already succeeded, so the saved state is honest.
+        userSaveRequestRef.current += 1;
+        setUserResult(parsed.data);
+        markSaved();
+      }),
+    [markSaved],
+  );
+
   useEffect(() => {
     let cancelled = false;
     updateSubscriptionFiredRef.current = false;
@@ -241,6 +267,7 @@ export function SettingsDialog(props: {
     // result, saveWorkspaceSettings refuses ("still loading") instead.
     const token = workspaceTokenRef.current + 1;
     workspaceTokenRef.current = token;
+    settingsEventFiredRef.current = false;
     setWorkspaceResult(null);
     void Promise.all([
       bridge().getUserSettings(),
@@ -248,7 +275,7 @@ export function SettingsDialog(props: {
     ])
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
-        setUserResult(nextUser);
+        if (!settingsEventFiredRef.current) setUserResult(nextUser);
         applyAppearanceSettings(nextUser.settings.appearance);
         if (workspaceTokenRef.current !== token) return;
         setWorkspaceResult(nextWorkspace);
@@ -365,6 +392,33 @@ export function SettingsDialog(props: {
     },
     [markSaved, markSaving, props.workspaceId, workspaceResult],
   );
+
+  // Zoom goes through main's one serialized mutation instead of a full-file
+  // save: main persists the level before re-tinting the windows, and its
+  // answer is the settings now on disk, so the row paints the level actually
+  // in effect.
+  const stepZoomSetting = useCallback(async (step: "in" | "out" | "reset") => {
+    const requestId = userSaveRequestRef.current + 1;
+    userSaveRequestRef.current = requestId;
+    markSaving();
+    setError(null);
+    try {
+      const saved = await bridge().stepWindowZoom({ step });
+      if (userSaveRequestRef.current !== requestId) return;
+      setUserResult(saved);
+      markSaved();
+    } catch (cause) {
+      if (userSaveRequestRef.current !== requestId) return;
+      setSaveState("error");
+      // The refusal carries the reason; this surface owns the next step —
+      // "open Settings" would name the dialog the user is already in.
+      setError(
+        `${
+          cause instanceof Error ? cause.message : String(cause)
+        } Use Reset user settings in the Advanced section, or repair the file.`,
+      );
+    }
+  }, [markSaved, markSaving]);
 
   const resetUserSettings = useCallback(async () => {
     const requestId = userSaveRequestRef.current + 1;
@@ -585,6 +639,40 @@ export function SettingsDialog(props: {
                   })
                 }
               />
+            </SettingRow>
+            <SettingRow
+              title="Zoom"
+              description="Scales the whole window. Ctrl/Cmd+= zooms in, Ctrl/Cmd+- zooms out, Ctrl/Cmd+0 resets."
+              modified={isModified(
+                userSettings.appearance.zoomLevel,
+                DEFAULT_USER_SETTINGS.appearance.zoomLevel,
+              )}
+              onReset={() => void stepZoomSetting("reset")}
+              testId="settings-row-zoom"
+            >
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-label="Zoom out"
+                  disabled={userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL}
+                  onClick={() => void stepZoomSetting("out")}
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Minus size={14} strokeWidth={1.9} />
+                </button>
+                <span className="min-w-12 text-center font-mono text-[12px] text-ink">
+                  {zoomPercent(userSettings.appearance.zoomLevel)}%
+                </span>
+                <button
+                  type="button"
+                  aria-label="Zoom in"
+                  disabled={userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL}
+                  onClick={() => void stepZoomSetting("in")}
+                  className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-subtle"
+                >
+                  <Plus size={14} strokeWidth={1.9} />
+                </button>
+              </div>
             </SettingRow>
           </div>
         );

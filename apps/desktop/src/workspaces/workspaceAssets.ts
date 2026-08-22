@@ -403,6 +403,16 @@ export function createOrderedWorkspaceTextAccess(deps: {
           run(() => deps.readTarget(target)),
         ),
       ),
+    // The callback must not call read, write, or ordered for this resolved
+    // target. Re-entering targetTails would deadlock on the lock it holds.
+    orderedOnResolvedTarget: <T>(
+      rootPath: string,
+      resolvedTarget: string,
+      run: () => Promise<T>,
+    ): Promise<T> =>
+      scheduler.shared(rootPath, () =>
+        enqueueOrdered(targetTails, pathKey(resolvedTarget), run),
+      ),
   };
 }
 
@@ -506,6 +516,18 @@ export function withOrderedWorkspaceTextPath<T>(
       }
       throw error;
     });
+}
+
+export function withOrderedWorkspaceTargetPath<T>(
+  rootPath: string,
+  resolvedTarget: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return orderedWorkspaceTextAccess.orderedOnResolvedTarget(
+    rootPath,
+    resolvedTarget,
+    run,
+  );
 }
 
 export function withExclusiveWorkspaceOperation<T>(

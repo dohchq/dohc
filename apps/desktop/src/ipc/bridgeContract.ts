@@ -73,6 +73,7 @@ import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
+  ZOOM_STEPS,
 } from "../settings/userSettings";
 import type {
   DesktopUserSettings as DesktopUserSettingsType,
@@ -3081,12 +3082,15 @@ export const SubmitShareChangesPayload = z.object({
 });
 export type SubmitShareChangesPayload = z.infer<typeof SubmitShareChangesPayload>;
 
-// What a submit did, in the three facts the recipient's surface states. The
-// new proposal's id is NOT among them: the surface re-reads its own sent
-// changes right after, and an id that arrived by two routes would be two
-// answers to one question.
-export const SubmitShareChangesResult = z.object({
+// What a successful submit did. The new proposal's id is NOT among these
+// facts: the surface re-reads its own sent changes right after, and an id that
+// arrived by two routes would be two answers to one question.
+const SubmitShareChangesSuccessResult = z.object({
+  ok: z.literal(true),
   submitted: z.number().int().nonnegative(),
+  // Local changes the submit's capture pass journaled or repaired. Repairs can
+  // change the projection, so the renderer uses this count to repaint files.
+  capturedLocalChanges: z.number().int().nonnegative(),
   // Files this submit did NOT offer because they are not part of this share.
   // The count does not distinguish a file that LEFT the shared paths from one
   // that was never in them — both are the same fact to the person who pressed
@@ -3097,7 +3101,45 @@ export const SubmitShareChangesResult = z.object({
   // count: the scan stops AT the bound, so it never measures the remainder.
   morePending: z.boolean(),
 });
+
+// Capture happens before the relay submit. A relay failure can therefore
+// leave local repair or materialization changes that the renderer still has
+// to repaint. Electron does not preserve custom Error properties across
+// ipcMain.handle/ipcRenderer.invoke, so the failure is an ordinary result.
+const SubmitShareChangesFailureResult = z.object({
+  ok: z.literal(false),
+  capturedLocalChanges: z.number().int().nonnegative(),
+  errorMessage: z.string(),
+});
+
+export const SubmitShareChangesResult = z.discriminatedUnion("ok", [
+  SubmitShareChangesSuccessResult,
+  SubmitShareChangesFailureResult,
+]);
 export type SubmitShareChangesResult = z.infer<typeof SubmitShareChangesResult>;
+
+export async function resolveSubmitShareChangesResult(
+  capturedLocalChanges: number,
+  submit: () => Promise<{
+    submitted: number;
+    skippedOutsideShare: number;
+    morePending: boolean;
+  }>,
+): Promise<SubmitShareChangesResult> {
+  try {
+    return SubmitShareChangesResult.parse({
+      ok: true,
+      ...(await submit()),
+      capturedLocalChanges,
+    });
+  } catch (error) {
+    return SubmitShareChangesResult.parse({
+      ok: false,
+      capturedLocalChanges,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 export const ListMyShareChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -3357,11 +3399,27 @@ export const DismissShareSkipsPayload = z.object({
 });
 export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
 
-export const RefreshSharedViewResult = z.object({
+const RefreshSharedViewSuccessResult = z.object({
+  ok: z.literal(true),
   // "ended" means the granter revoked the share: the local view stays
   // readable but stops refreshing, and the UI says so honestly.
   status: z.enum(["updated", "unchanged", "ended"]),
   changedPaths: z.number().int().nonnegative(),
+  excludedPaths: z.array(z.string()),
+  unjournalablePaths: z.array(
+    z.object({
+      path: z.string(),
+      reason: z.enum([
+        "oversized-text",
+        "oversized-binary",
+        "non-utf8",
+        "non-file-replacement",
+        "local-collision",
+        "unreadable",
+      ]),
+    }),
+  ),
+  collisionRecordQuarantined: z.boolean().optional(),
   // Ops the pull refused. It skips them and keeps going, so a view that
   // quietly stopped carrying part of the share is invisible without this.
   refusedOps: z.number().int().nonnegative(),
@@ -3369,6 +3427,19 @@ export const RefreshSharedViewResult = z.object({
   // the log. Null when nothing was refused.
   refusedDetail: z.string().nullable(),
 });
+
+const RefreshSharedViewFailureResult = z.object({
+  ok: z.literal(false),
+  // Capture runs before the pull. A failed pull can still leave repaired
+  // projection files that the renderer must repaint.
+  changedPaths: z.number().int().nonnegative(),
+  errorMessage: z.string(),
+});
+
+export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
+  RefreshSharedViewSuccessResult,
+  RefreshSharedViewFailureResult,
+]);
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
 
 // ---- Share mounts ----
@@ -3665,6 +3736,16 @@ export const SetTitlebarThemePayload = z.object({
   theme: z.enum(["light", "dark"]),
 });
 export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
+
+// One zoom mutation, owned by main: it persists appearance.zoomLevel before
+// applying it to the windows, and answers with the settings now on disk so
+// the caller can paint the level in effect. The menu accelerators call the
+// same mutation directly in main; this channel is for the palette and the
+// Settings stepper.
+export const StepWindowZoomPayload = z.object({
+  step: z.enum(ZOOM_STEPS),
+}).strict();
+export type StepWindowZoomPayload = z.infer<typeof StepWindowZoomPayload>;
 
 // Application-menu commands. One closed set (channels.ts owns the tuple; the
 // sandboxed preload validates against it as a plain value): the menu sends
@@ -4458,6 +4539,12 @@ export interface DohcDesktopBridge {
   ): Promise<WorkspaceSettingsResult>;
   writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
+  onUserSettingsChanged(
+    listener: (result: DesktopUserSettingsResult) => void,
+  ): () => void;
+  stepWindowZoom(
+    payload: StepWindowZoomPayload,
+  ): Promise<DesktopUserSettingsResult>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
     payload: ListWorkspaceFilesPayload,

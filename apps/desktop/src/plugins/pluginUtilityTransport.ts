@@ -1,5 +1,6 @@
 import type { UtilityProcess } from "electron";
 import { createInterface } from "node:readline";
+import { stopProcessTreePosix } from "../process/posixSpawn";
 import { killProcessTreeWin32 } from "../process/windowsSpawn";
 import type { PluginHostOptions } from "./PluginHost";
 import type { PluginTransport } from "./pluginHostProtocol";
@@ -24,6 +25,13 @@ function rpcError(error: unknown): { code: number; message: string } {
     code: -32603,
     message: error instanceof Error ? error.message : "JSON-RPC handler failed.",
   };
+}
+
+function unrefDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 export function createPluginUtilityTransport(
@@ -141,36 +149,35 @@ export function createPluginUtilityTransport(
       close(new Error("Plugin utility transport disposed."));
       const pid = child.pid;
       if (pid === undefined) return;
-      await killProcessTreeWin32(pid, () => child.pid === undefined);
-      if (child.pid === undefined) return;
-      child.kill();
-      const forceKill = setTimeout(() => {
-        if (child.pid !== pid || process.platform === "win32") return;
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // The direct utility process may already be gone.
-        }
-      }, 2_000);
-      forceKill.unref();
-      let waitCap: NodeJS.Timeout | undefined;
-      const capped = new Promise<"capped">((resolve) => {
-        waitCap = setTimeout(() => resolve("capped"), 5_000);
-        waitCap.unref?.();
-      });
-      try {
-        const outcome = await Promise.race([
-          exited.then(() => "exited" as const),
-          capped,
-        ]);
-        if (outcome === "capped" && child.pid !== undefined) {
-          console.error(
-            `[desktop] plugin utility process PID ${child.pid} did not exit before the 5000 ms descendant shutdown limit.`,
-          );
-        }
-      } finally {
-        clearTimeout(forceKill);
-        if (waitCap) clearTimeout(waitCap);
+      if (process.platform === "win32") {
+        await killProcessTreeWin32(pid, () => child.pid === undefined);
+        if (child.pid === undefined) return;
+        child.kill();
+      } else {
+        await stopProcessTreePosix(pid, exited, 2_000, () => {
+          try {
+            child.kill();
+          } catch {
+            // The force signal below is the owned-handle fallback's guarantee.
+          }
+          const livePid = child.pid;
+          if (livePid === undefined) return;
+          try {
+            process.kill(livePid, "SIGKILL");
+          } catch {
+            // The process exited before the force signal reached it.
+          }
+        });
+      }
+      const capped = unrefDelay(5_000).then(() => "capped" as const);
+      const outcome = await Promise.race([
+        exited.then(() => "exited" as const),
+        capped,
+      ]);
+      if (outcome === "capped" && child.pid !== undefined) {
+        console.error(
+          `[desktop] plugin utility process PID ${child.pid} did not exit before the 5000 ms descendant shutdown limit.`,
+        );
       }
     },
   };

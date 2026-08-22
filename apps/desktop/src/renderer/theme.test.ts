@@ -64,4 +64,5 @@ describe("initTheme", () => {
       expect.any(Error),
     );
   });
+
 });

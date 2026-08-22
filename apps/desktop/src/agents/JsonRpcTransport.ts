@@ -87,6 +87,10 @@ export class JsonRpcTransport {
   private nextId = 1;
   private closed = false;
 
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
   private constructor(child: ChildProcessWithoutNullStreams, private readonly options: JsonRpcTransportOptions) {
     this.child = child;
     const stdout = createInterface({ input: child.stdout });

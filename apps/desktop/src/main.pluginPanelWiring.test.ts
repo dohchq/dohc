@@ -4,18 +4,20 @@ import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
-function handler(channel: string): string {
-  const start = mainSource.indexOf(`ipcMain.handle(CHANNELS.${channel}`);
+function sourceBlock(startMarker: string, endMarker: string): string {
+  const start = mainSource.indexOf(startMarker);
   expect(start).toBeGreaterThan(-1);
-  return mainSource.slice(start, mainSource.indexOf("\n  });", start));
+  const end = mainSource.indexOf(endMarker, start);
+  expect(end).toBeGreaterThan(start);
+  return mainSource.slice(start, end);
+}
+
+function handler(channel: string): string {
+  return sourceBlock(`ipcMain.handle(CHANNELS.${channel}`, "\n  });");
 }
 
 function functionSource(signature: string): string {
-  const start = mainSource.indexOf(signature);
-  expect(start).toBeGreaterThan(-1);
-  const end = mainSource.indexOf("\n}\n", start);
-  expect(end).toBeGreaterThan(start);
-  return mainSource.slice(start, end);
+  return sourceBlock(signature, "\n}\n");
 }
 
 const stopPluginPanelSource = () =>
@@ -26,6 +28,20 @@ const stopPluginHostIfUnclaimedSource = () =>
   functionSource("async function stopPluginHostIfUnclaimed(");
 
 describe("plugin panel main-process wiring", () => {
+  it("forwards watcher batches to the matching plugin pipeline and workspace events", () => {
+    const watcherBatch = sourceBlock(
+      "onWatcherBatch: (workspace, events) => {",
+      "\n  },",
+    );
+
+    expect(watcherBatch).toContain(
+      "pluginPipelines.get(workspace.workspaceId)?.handleWatcherEvents(events);",
+    );
+    expect(watcherBatch).toMatch(
+      /pluginWorkspaceEventsByWorkspace\s*\.get\(workspace\.workspaceId\)\s*\?\.handleWatcherEvents\(events\);/,
+    );
+  });
+
   it("drops file-watch events after the exact panel stops running", () => {
     let panelRunning = true;
     const send = vi.fn();

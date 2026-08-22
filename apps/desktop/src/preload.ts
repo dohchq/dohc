@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
+  DesktopUserSettingsResult,
   DohcDesktopBridge,
   InvokePluginCommandPayload,
   InvokePluginPanelSdkPayload,
@@ -406,6 +407,20 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.writeClipboardText, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
+  onUserSettingsChanged: (
+    listener: (result: DesktopUserSettingsResult) => void,
+  ) => {
+    const handler = (_event: unknown, raw: unknown) => {
+      if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+        listener(raw as DesktopUserSettingsResult);
+      }
+    };
+    ipcRenderer.on(CHANNELS.userSettingsChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.userSettingsChanged, handler);
+  },
+  stepWindowZoom: (payload) =>
+    ipcRenderer.invoke(CHANNELS.stepWindowZoom, payload),
   getWorkspaceUiState: (payload) =>
     ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
   setWorkspaceUiState: (payload) =>

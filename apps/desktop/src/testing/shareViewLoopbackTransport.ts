@@ -3,6 +3,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type {
   PullShareViewResult,
+  ShareViewRefusal,
   SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import {
@@ -558,6 +559,8 @@ export interface ShareViewDaemonHarness {
       versionId: string | null;
       access: ShareAccess;
     };
+    recordRefusals?: (refusals: ShareViewRefusal[]) => Promise<void>;
+    recordCollisions?: (paths: readonly string[]) => Promise<void>;
   }) => Promise<PullShareViewResult>;
   closeAll(): Promise<void>;
 }
@@ -608,8 +611,18 @@ export function createShareViewDaemonHarness(
     },
     pullFor(target) {
       const client = live.bind({ ...target, relay: bound });
-      return async ({ shareId, grantedSelector }) =>
-        await client.pullShareView({ shareId, grantedSelector });
+      return async ({
+        shareId,
+        grantedSelector,
+        recordRefusals,
+        recordCollisions,
+      }) =>
+        await client.pullShareView({
+          shareId,
+          grantedSelector,
+          recordRefusals,
+          recordCollisions,
+        });
     },
     async closeAll() {
       await sessions.closeAll();

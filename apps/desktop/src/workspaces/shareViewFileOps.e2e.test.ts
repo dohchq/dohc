@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,7 +13,12 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
-import { materializeSharedViewPaths } from "./sharedView";
+import {
+  captureSharedViewLocalDivergence,
+  materializeSharedViewPaths,
+  readPendingMaterializationPaths,
+  withShareViewRefreshLifecycleLock,
+} from "./sharedView";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
@@ -22,6 +28,7 @@ import {
   routeWorkspacePathDelete,
   routeWorkspacePathMove,
 } from "./workspaceFileOps";
+import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 
 // The four remaining writes a share view admits (#802), driven the way
 // `shareViewTextWrite.e2e.test.ts` drives the text save.
@@ -32,6 +39,7 @@ import {
 // and the projection, never the return value alone.
 
 const engine = requireEngineBinaryOrSkip();
+const SHARE_ID = "share-e2e";
 
 const requireModule = createRequire(import.meta.url);
 
@@ -212,6 +220,80 @@ async function exists(path: string): Promise<boolean> {
 
 describe("share-view file operations through the real store", () => {
   it.skipIf(engine.missing)(
+    "journals out-of-app and in-app edits for the same submit lane",
+    async () => {
+      const view = await harness("dohc-share-outside-edit-", "edit");
+      const outsidePath = "docs/outside.md";
+      const inAppPath = "docs/in-app.md";
+      await seedSharedFiles(view, [
+        { path: outsidePath, text: "outside before\n" },
+        { path: inAppPath, text: "in-app before\n" },
+      ]);
+      await writeFile(join(view.rootPath, outsidePath), "outside after\n", "utf8");
+
+      const beforeOutside = replicationLogRows(view.rootPath);
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 1,
+        collisionRecordQuarantined: false,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      const afterOutside = replicationLogRows(view.rootPath);
+      const outsideRows = afterOutside - beforeOutside;
+      expect(outsideRows).toBeGreaterThan(0);
+      const outsideSummary = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments.find(
+        (moment) =>
+          moment.path === outsidePath && moment.metadata.origin === "local-file",
+      );
+      expect(outsideSummary?.metadata.origin).toBe("local-file");
+      const outsideMoment = outsideSummary
+        ? await view.store.getMoment({
+            workspaceId: view.workspaceId,
+            momentId: outsideSummary.id,
+          })
+        : null;
+      expect(outsideMoment?.payload.after.text).toBe("outside after\n");
+
+      const result = await routeWorkspaceTextWrite({
+        ...scope(view),
+        relativePath: inAppPath,
+        text: "in-app after\n",
+        expectedContentHash: createHash("sha256")
+          .update("in-app before\n")
+          .digest("hex"),
+      });
+      expect(result.status).toBe("written");
+      const inAppRows = replicationLogRows(view.rootPath) - afterOutside;
+      expect(inAppRows).toBe(outsideRows);
+      const inAppSummary = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments.find(
+        (moment) =>
+          moment.path === inAppPath && moment.metadata.origin === "local-file",
+      );
+      expect(inAppSummary?.metadata.origin).toBe("local-file");
+      const inAppMoment = inAppSummary
+        ? await view.store.getMoment({
+            workspaceId: view.workspaceId,
+            momentId: inAppSummary.id,
+          })
+        : null;
+      expect(inAppMoment?.payload.after.text).toBe("in-app after\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "makes a recipient's new file a proposable moment, not just a file",
     async () => {
       const view = await harness("dohc-share-create-", "edit");
@@ -233,6 +315,51 @@ describe("share-view file operations through the real store", () => {
       await expect(
         readFile(join(view.rootPath, "docs", "added.md"), "utf8"),
       ).resolves.toBe("recipient\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "repairs a create interrupted after the store write instead of journaling a delete",
+    async () => {
+      const view = await harness("dohc-share-interrupted-create-", "edit");
+      const path = "docs/added.md";
+      const failingStore: CaptureVersionedTextStore = {
+        ...view.store,
+        async writeTextFile(input) {
+          await view.store.writeTextFile(input);
+          throw new Error("simulated crash after store write");
+        },
+      };
+
+      await expect(
+        routeWorkspaceFileCreate({
+          ...scope(view),
+          relativePath: path,
+          initialText: "recipient\n",
+          shareViewStore: () => failingStore,
+        }),
+      ).rejects.toThrow("simulated crash after store write");
+
+      const pathsBeforeRecovery = await storePaths(view);
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      expect(await storePaths(view)).toEqual(pathsBeforeRecovery);
+      await expect(readFile(join(view.rootPath, path), "utf8")).resolves.toBe(
+        "recipient\n",
+      );
     },
     60_000,
   );
@@ -286,6 +413,100 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "renamed.md"), "utf8"),
       ).resolves.toBe("granter\n");
       expect(await exists(join(view.rootPath, "docs", "note.md"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "keeps refresh capture outside a rename's store-to-projection gap",
+    async () => {
+      const view = await harness("dohc-share-rename-capture-race-", "edit");
+      const fromPath = "docs/note.md";
+      const toPath = "docs/renamed.md";
+      await seedSharedFiles(view, [{ path: fromPath, text: "granter\n" }]);
+
+      let signalStoreRenamed!: () => void;
+      const storeRenamed = new Promise<void>((resolve) => {
+        signalStoreRenamed = resolve;
+      });
+      let releaseRename!: () => void;
+      const holdRename = new Promise<void>((resolve) => {
+        releaseRename = resolve;
+      });
+      const pausedStore = new Proxy(view.store, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (property !== "renameTextFile" || typeof value !== "function") {
+            return value;
+          }
+          return async (...args: unknown[]) => {
+            const result = await (value as (...inner: unknown[]) => unknown).apply(
+              target,
+              args,
+            );
+            signalStoreRenamed();
+            await holdRename;
+            return result;
+          };
+        },
+      }) as CaptureVersionedTextStore;
+
+      const moving = routeWorkspacePathMove({
+        ...scope(view),
+        fromPath,
+        toPath,
+        shareViewStore: () => pausedStore,
+      });
+      await storeRenamed;
+
+      let captureEnteredGap = false;
+      const capturing = withShareViewRefreshLifecycleLock(view.rootPath, async () => {
+        captureEnteredGap = true;
+        return captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+          true,
+          SHARE_ID,
+        );
+      });
+      for (let turn = 0; turn < 20 && !captureEnteredGap; turn += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const captureStartedBeforeProjection = captureEnteredGap;
+
+      releaseRename();
+      await moving;
+      const captured = await capturing;
+
+      expect(
+        captureStartedBeforeProjection,
+        "MUTATION: removing the mutation's lifecycle lock lets capture observe the renamed store before its projection",
+      ).toBe(false);
+      expect(captured).toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 0,
+        unjournalablePaths: [],
+      });
+      expect(await storePaths(view)).toEqual([toPath]);
+      expect(await exists(join(view.rootPath, fromPath))).toBe(false);
+      await expect(readFile(join(view.rootPath, toPath), "utf8")).resolves.toBe(
+        "granter\n",
+      );
+
+      const destinationMoments = (
+        await view.store.listMoments({ workspaceId: view.workspaceId, limit: 200 })
+      ).moments
+        .filter(
+          (moment) =>
+            moment.path === toPath && moment.metadata.origin === "local-file",
+        )
+        .map((moment) => moment.operation);
+      expect(
+        destinationMoments,
+        "MUTATION: capture in the rename gap journals a delete on top of the destination",
+      ).toEqual(["rename"]);
     },
     60_000,
   );
@@ -461,6 +682,49 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
+    "reserves an absent projection's store name without regard to case",
+    async () => {
+      const view = await harness("dohc-share-import-store-case-", "edit");
+      const main = await view.store.ensureMainVersion({
+        workspaceId: view.workspaceId,
+      });
+      await view.store.writeTextFile({
+        workspaceId: view.workspaceId,
+        versionId: main.id,
+        path: "docs/Note.md",
+        text: "granter\n",
+        metadata: { origin: "sync" },
+      });
+      await mkdir(join(view.rootPath, "docs"), { recursive: true });
+      const sourceDir = await createTestScratch("dohc-share-import-store-case-src-");
+      roots.push(sourceDir);
+      const source = join(sourceDir, "note.md");
+      await writeFile(source, "imported\n", "utf8");
+
+      const outcome = await routeWorkspaceFileImport({
+        ...scope(view),
+        absolutePaths: [source],
+        screenAgainstRoots: null,
+        targetDir: "docs",
+      });
+
+      expect(
+        outcome,
+        "MUTATION: exact-case store lookup accepts a second engine path for the same physical name",
+      ).toEqual({ imported: ["docs/note (2).md"], skipped: 0 });
+      expect(await storePaths(view)).toEqual([
+        "docs/Note.md",
+        "docs/note (2).md",
+      ]);
+      expect(await exists(join(view.rootPath, "docs", "Note.md"))).toBe(false);
+      await expect(
+        readFile(join(view.rootPath, "docs", "note (2).md"), "utf8"),
+      ).resolves.toBe("imported\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "refuses to move a folder onto one that holds files no moment describes",
     async () => {
       const view = await harness("dohc-share-move-into-", "edit");
@@ -552,6 +816,182 @@ describe("share-view file operations through the real store", () => {
         "docs/plans/one.md",
         "docs/plans/two.md",
       ]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to delete a tracked file something outside dohc replaced with a directory",
+    async () => {
+      const view = await harness("dohc-share-delete-dir-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await mkdir(join(view.rootPath, "docs", "notes.md"));
+      await writeFile(
+        join(view.rootPath, "docs", "notes.md", "inside.txt"),
+        "recipient file\n",
+        "utf8",
+      );
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/notes.md",
+          trashItem: async () => {
+            throw new Error("a refused delete must not reach the trash");
+          },
+        }),
+        "MUTATION: deleting over a directory that replaced a tracked file recursively removes the directory and everything in it",
+      ).rejects.toThrow(
+        "dohc did not delete docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
+        "MUTATION: the recipient-owned directory must survive a refused delete",
+      ).toBe(true);
+      await expect(
+        readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
+      ).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+      await expect(
+        readPendingMaterializationPaths(view.rootPath),
+        "MUTATION: a refused delete that still marked the path pending leaves recovery believing a materialization is owed",
+      ).resolves.toEqual(new Set());
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to rename a tracked file something outside dohc replaced with a directory",
+    async () => {
+      const view = await harness("dohc-share-rename-dir-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await mkdir(join(view.rootPath, "docs", "notes.md"));
+      await writeFile(
+        join(view.rootPath, "docs", "notes.md", "inside.txt"),
+        "recipient file\n",
+        "utf8",
+      );
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/notes.md",
+          toPath: "docs/renamed.md",
+        }),
+        "MUTATION: renaming over a directory that replaced a tracked file recursively removes the directory and everything in it",
+      ).rejects.toThrow(
+        "dohc did not rename docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
+        "MUTATION: the recipient-owned directory must survive a refused rename",
+      ).toBe(true);
+      await expect(
+        readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
+      ).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+      expect(await exists(join(view.rootPath, "docs", "renamed.md"))).toBe(false);
+      await expect(
+        readPendingMaterializationPaths(view.rootPath),
+        "MUTATION: a refused rename that still marked the path pending leaves recovery believing a materialization is owed",
+      ).resolves.toEqual(new Set());
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to delete a tracked file something outside dohc replaced with a symlink",
+    async () => {
+      const view = await harness("dohc-share-delete-symlink-replacement-", "edit");
+      await seedSharedFiles(view, [{ path: "docs/notes.md", text: "granter\n" }]);
+      const outside = join(view.rootPath, "outside.md");
+      await writeFile(outside, "recipient file\n", "utf8");
+      await rm(join(view.rootPath, "docs", "notes.md"));
+      await symlink(outside, join(view.rootPath, "docs", "notes.md"), "file");
+
+      await expect(
+        routeWorkspacePathDelete({
+          ...scope(view),
+          relativePath: "docs/notes.md",
+          trashItem: async () => {
+            throw new Error("a refused delete must not reach the trash");
+          },
+        }),
+        "MUTATION: deleting over a symlink that replaced a tracked file follows it and destroys what it points at",
+      ).rejects.toThrow(
+        "dohc did not delete docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "notes.md"))).isSymbolicLink(),
+        "MUTATION: the symlink must survive a refused delete",
+      ).toBe(true);
+      await expect(readFile(outside, "utf8")).resolves.toBe("recipient file\n");
+      expect(await storePaths(view)).toEqual(["docs/notes.md"]);
+      await expect(readPendingMaterializationPaths(view.rootPath)).resolves.toEqual(
+        new Set(),
+      );
+    },
+    60_000,
+  );
+
+  // #861's escape: the earlier pins replace a tracked LEAF with something
+  // else, which the per-leaf lstat catches directly. A tracked FOLDER has no
+  // leaf of its own — only the files under it are tracked — so a symlink
+  // standing in for the FOLDER itself needs its own check. Without it, a
+  // RENAME materializes each leaf as its own delete, and each one resolves
+  // through the link (an ancestor symlink, not the final component held
+  // back) — landing `rm` on files at the link's target and destroying the
+  // RECIPIENT's own content there, not the ones the store lost. (A delete
+  // over the same setup only unlinks the junction itself — `rm` never
+  // recurses through a symlink at its own target — so rename is where this
+  // actually destroys data; the fix still refuses both, from the same
+  // folder-level check.)
+  it.skipIf(engine.missing)(
+    "refuses to rename a tracked folder something outside dohc replaced with a symlink to another directory",
+    async () => {
+      const view = await harness("dohc-share-rename-folder-symlink-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/plans/two.md", text: "two\n" },
+      ]);
+      const linkTarget = join(view.rootPath, "elsewhere");
+      await mkdir(linkTarget);
+      await writeFile(join(linkTarget, "one.md"), "recipient one\n", "utf8");
+      await writeFile(join(linkTarget, "two.md"), "recipient two\n", "utf8");
+      await rm(join(view.rootPath, "docs", "plans"), { recursive: true, force: true });
+      await symlink(linkTarget, join(view.rootPath, "docs", "plans"), "junction");
+
+      await expect(
+        routeWorkspacePathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+        }),
+        "MUTATION: renaming a folder a symlink replaced follows the link per leaf and destroys the recipient's files at its target",
+      ).rejects.toThrow(
+        "dohc did not rename docs/plans. docs/plans replaces this shared folder with a link or another entry. Restore the folder or move the conflicting entry.",
+      );
+
+      expect(
+        (await lstat(join(view.rootPath, "docs", "plans"))).isSymbolicLink(),
+        "MUTATION: the symlink standing in for the folder must survive a refused rename",
+      ).toBe(true);
+      await expect(readFile(join(linkTarget, "one.md"), "utf8")).resolves.toBe(
+        "recipient one\n",
+      );
+      await expect(readFile(join(linkTarget, "two.md"), "utf8")).resolves.toBe(
+        "recipient two\n",
+      );
+      expect(await storePaths(view)).toEqual(["docs/plans/one.md", "docs/plans/two.md"]);
+      expect(await exists(join(view.rootPath, "docs", "roadmap"))).toBe(false);
+      await expect(readPendingMaterializationPaths(view.rootPath)).resolves.toEqual(
+        new Set(),
+      );
     },
     60_000,
   );
@@ -660,6 +1100,9 @@ describe("share-view file operations through the real store", () => {
       await expect(
         readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
       ).resolves.toBe("one\n");
+      await expect(readPendingMaterializationPaths(view.rootPath)).resolves.toEqual(
+        new Set(),
+      );
     },
     60_000,
   );
@@ -696,6 +1139,9 @@ describe("share-view file operations through the real store", () => {
         "docs/plans/two.md",
         "docs/roadmap/one.md",
       ]);
+      const pending = await readPendingMaterializationPaths(view.rootPath);
+      expect(pending).toContain("docs/plans/one.md");
+      expect(pending).toContain("docs/roadmap/one.md");
     },
     60_000,
   );
@@ -921,6 +1367,54 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "picture.png")),
       ).resolves.toEqual(Buffer.from([0x89, 0x50, 0x00, 0x01]));
       expect(await exists(join(view.rootPath, "docs", "folder"))).toBe(false);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "repairs an import whose store write landed before materialization failed",
+    async () => {
+      const view = await harness("dohc-share-import-repair-", "edit");
+      const sourceDir = await createTestScratch("dohc-share-import-repair-src-");
+      roots.push(sourceDir);
+      const source = join(sourceDir, "interrupted.md");
+      await writeFile(source, "imported body\n", "utf8");
+      await mkdir(join(view.rootPath, "docs"), { recursive: true });
+      const failingStore: CaptureVersionedTextStore = {
+        ...view.store,
+        async readTextFile() {
+          throw new Error("projection materialization failed");
+        },
+      };
+
+      await expect(
+        routeWorkspaceFileImport({
+          ...scope(view),
+          shareViewStore: () => failingStore,
+          absolutePaths: [source],
+          screenAgainstRoots: null,
+          targetDir: "docs",
+        }),
+      ).rejects.toThrow("projection materialization failed");
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          view.rootPath,
+          view.workspaceId,
+          view.store,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      await expect(
+        readFile(join(view.rootPath, "docs", "interrupted.md"), "utf8"),
+      ).resolves.toBe("imported body\n");
+      expect(await storePaths(view)).toContain("docs/interrupted.md");
     },
     60_000,
   );

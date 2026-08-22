@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import {
+  DEFAULT_USER_SETTINGS,
+  type DesktopUserSettingsResult,
+} from "../../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
@@ -143,6 +146,19 @@ const bridge = {
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
   writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
   setTitlebarTheme: vi.fn(async () => undefined),
+  onUserSettingsChanged: vi.fn(
+    (_listener: (result: DesktopUserSettingsResult) => void) => () => undefined,
+  ),
+  stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
+    settings: {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: {
+        ...DEFAULT_USER_SETTINGS.appearance,
+        zoomLevel: payload.step === "in" ? 1 : payload.step === "out" ? -1 : 0,
+      },
+    },
+    source: "stored" as const,
+  })),
 };
 
 const writeText = vi.fn(async () => {});
@@ -239,6 +255,148 @@ describe("DesktopSettings", () => {
     });
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
+  });
+
+  it("shows the window zoom as a percentage and steps it through settings", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    expect(row.textContent).toContain("100%");
+
+    await user.click(within(row).getByRole("button", { name: "Zoom in" }));
+    // The stepper goes through main's one zoom mutation — never a full-file
+    // save — and paints the level main answered with.
+    expect(bridge.stepWindowZoom).toHaveBeenCalledWith({ step: "in" });
+    expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    await waitFor(() => expect(row.textContent).toContain("120%"));
+  });
+
+  it("repaints the window zoom when main reports changed user settings", async () => {
+    let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
+    bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
+      pushUserSettings = listener;
+      return () => undefined;
+    });
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    expect(row.textContent).toContain("100%");
+    if (!pushUserSettings) {
+      throw new Error("User settings subscription was not registered.");
+    }
+    pushUserSettings({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 },
+      },
+      source: "stored",
+    });
+
+    await waitFor(() => expect(row.textContent).toContain("144%"));
+  });
+
+  it("a zoom broadcast during the initial load is not painted over by it", async () => {
+    // The initial Promise.all retains a user-settings snapshot; a zoom pushed
+    // while it is in flight is NEWER and must survive the load resolving.
+    let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
+    bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
+      pushUserSettings = listener;
+      return () => undefined;
+    });
+    const load = deferred<Awaited<ReturnType<typeof bridge.getUserSettings>>>();
+    bridge.getUserSettings.mockImplementationOnce(() => load.promise);
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      if (!pushUserSettings) {
+        throw new Error("User settings subscription was not registered.");
+      }
+    });
+    pushUserSettings?.({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 },
+      },
+      source: "stored",
+    });
+    load.resolve({ settings: DEFAULT_USER_SETTINGS, source: "default" });
+
+    const row = await screen.findByTestId("settings-row-zoom");
+    await waitFor(() => expect(row.textContent).toContain("144%"));
+    // The load's callback proves it ran to completion through its
+    // applyAppearanceSettings side effect — the titlebar mirror fires
+    // unconditionally right after the guarded repaint line. Waiting on it
+    // (not a timer) guarantees the stale repaint had its chance.
+    await waitFor(() => expect(bridge.setTitlebarTheme).toHaveBeenCalled());
+    expect(row.textContent).toContain("144%");
+  });
+
+  it("an in-flight save's response cannot overwrite a newer zoom broadcast", async () => {
+    const user = userEvent.setup();
+    let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
+    bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
+      pushUserSettings = listener;
+      return () => undefined;
+    });
+    const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
+    bridge.setUserSettings.mockImplementationOnce(() => save.promise);
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="appearance"
+        onClose={() => {}}
+      />,
+    );
+
+    // A full save is now awaiting main's response…
+    await user.click(await screen.findByRole("radio", { name: "Dark" }));
+    // …when a zoom broadcast lands with a newer result.
+    pushUserSettings?.({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 2 },
+      },
+      source: "stored",
+    });
+    const row = await screen.findByTestId("settings-row-zoom");
+    await waitFor(() => expect(row.textContent).toContain("144%"));
+
+    // The older response arrives; awaiting its own promise (not a timer)
+    // guarantees the component's continuation ran before the assertion.
+    await act(async () => {
+      save.resolve({
+        settings: {
+          ...DEFAULT_USER_SETTINGS,
+          appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
+        },
+        source: "stored",
+      });
+      await save.promise;
+    });
+    expect(row.textContent).toContain("144%");
   });
 
   it("saves a preferred name and previews agent attribution", async () => {

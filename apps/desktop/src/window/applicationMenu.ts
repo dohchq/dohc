@@ -1,6 +1,7 @@
 import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
+import type { ZoomStep } from "../settings/userSettings";
 
 // Real application menu (File/Edit/View/Go/Help). Custom items SEND a
 // MenuCommand to the focused window's renderer, where the shell routes it
@@ -19,6 +20,9 @@ export function buildMenuTemplate(options: {
   recentWorkspaces?: WorkspaceSummary[];
   canInstallUpdate?: boolean;
   sendCommand: (window: BrowserWindow | undefined, command: MenuCommand) => void;
+  // Zoom is main-owned so its accelerators keep working on windows that
+  // never mount the workspace shell (first run, a broken registry).
+  stepZoom: (step: ZoomStep) => void;
   openRecentWorkspace?: (
     window: BrowserWindow | undefined,
     workspace: WorkspaceSummary,
@@ -120,9 +124,28 @@ export function buildMenuTemplate(options: {
         ),
         command("Toggle Theme", "toggle-theme"),
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        // Main-owned zoom, not the Electron zoom roles: the zoomIn role only
+        // answers CommandOrControl+Plus, which needs Shift on most layouts —
+        // plain Ctrl+= (the chord keyboards label "+") did nothing while
+        // Ctrl+- zoomed out. These accelerators register natively (no
+        // registerAccelerator:false), so zoom works on windows that never
+        // mount the workspace shell, and every path persists the level. The
+        // hidden items keep the shifted and numpad chords live.
+        ...([
+          { label: "Reset Zoom", accelerator: "CommandOrControl+0", step: "reset" },
+          { label: "Zoom In", accelerator: "CommandOrControl+=", step: "in" },
+          { label: "Zoom In", accelerator: "CommandOrControl+Plus", step: "in", hidden: true },
+          { label: "Zoom In", accelerator: "CommandOrControl+numadd", step: "in", hidden: true },
+          { label: "Zoom Out", accelerator: "CommandOrControl+-", step: "out" },
+          { label: "Zoom Out", accelerator: "CommandOrControl+numsub", step: "out", hidden: true },
+        ] as const).map(
+          (zoom): MenuItemConstructorOptions => ({
+            label: zoom.label,
+            accelerator: zoom.accelerator,
+            ...("hidden" in zoom && zoom.hidden ? { visible: false } : {}),
+            click: () => options.stepZoom(zoom.step),
+          }),
+        ),
         // Dev only: a packaged everyday-people app has no devtools menu item.
         ...(options.isDev
           ? [{ type: "separator" }, { role: "toggleDevTools" }] as const
