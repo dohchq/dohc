@@ -506,6 +506,50 @@ describe("plugin panel main-process wiring", () => {
     // key stops the wrong host (round-15 finding 2).
     expect(resetAt).toBeGreaterThan(drainCallAt);
     expect(resetCallAt).toBeGreaterThan(resetAt);
+
+    // A command's own isDraining check above only runs once, before it
+    // claims and before its lifecycle-lock wait — a stopping action can
+    // still raise its own barrier and enqueue in that gap. ensurePluginStarted
+    // rechecks the same barrier immediately before the pipeline's own
+    // enqueue call, with no `await` between the check and the call, so
+    // nothing can interleave between them (round-17 finding 2).
+    const ensureStartedFn = functionSource("async function ensurePluginStarted(");
+    const refuseParamAt = ensureStartedFn.indexOf("refuseIfClaimsBarrierRaised?: () => boolean;");
+    const refuseCheckAt = ensureStartedFn.indexOf(
+      "if (options.refuseIfClaimsBarrierRaised?.())",
+      refuseParamAt,
+    );
+    const throwAt = ensureStartedFn.indexOf(
+      "throw new PluginClaimsDrainingError(",
+      refuseCheckAt,
+    );
+    const pipelineEnsureStartedAt = ensureStartedFn.indexOf(
+      "return pipeline.ensureStarted(plugin.manifest.name);",
+      throwAt,
+    );
+    // MUTATION (TOCTOU stall): a recheck that runs anywhere but immediately
+    // before this exact call leaves a window where a racing action's own
+    // enqueue still lands ahead of this one on the same per-plugin queue —
+    // this call's own claim is then the exact thing that action's later
+    // stopOldRuntime wait stalls on.
+    expect(refuseParamAt).toBeGreaterThan(-1);
+    expect(refuseCheckAt).toBeGreaterThan(refuseParamAt);
+    expect(throwAt).toBeGreaterThan(refuseCheckAt);
+    expect(pipelineEnsureStartedAt).toBeGreaterThan(throwAt);
+
+    const wireAt = invoke.indexOf(
+      "refuseIfClaimsBarrierRaised: () =>",
+      claimAt,
+    );
+    const wireCallAt = invoke.indexOf(
+      "activeCommandClaims.isDraining(claimKey)",
+      wireAt,
+    );
+    // MUTATION (no recheck): a command path that never supplies this hook
+    // leaves ensurePluginStarted's own recheck permanently a no-op — the
+    // exact TOCTOU this round closes never gets checked at all.
+    expect(wireAt).toBeGreaterThan(-1);
+    expect(wireCallAt).toBeGreaterThan(wireAt);
   });
 
   it("revokes a plugin's panel authorities before disable and uninstall take its process (#779 round 12 A4)", () => {

@@ -3929,7 +3929,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
     }, 60_000);
 
-    it("marks the drain barrier for a watcher-driven identity removal while it still sits queued behind another job, not only once it reaches its own stopOldRuntime (round-16 finding 2)", async () => {
+    it("keeps the drain barrier up across a door-write reconcile and the watcher-driven identity removal queued behind it, clearing only once both settle (round-16 finding 2, round-17 finding 4)", async () => {
       const setup = await setupEstablishedPlugin();
       let buildGate: ReturnType<typeof setup.gateNextBuild> | undefined;
       try {
@@ -3938,7 +3938,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
         // Occupy the plugin's own per-plugin job queue with a door-write
         // reconcile — an internal, background refresh (enqueueSourceRefresh)
-        // that raises no barrier of its own — held mid-build.
+        // that now raises its own barrier too (round-17 finding 4) — held
+        // mid-build.
         buildGate = setup.gateNextBuild();
         const driftedText = [
           'export const marker = "door-written drift";',
@@ -3951,23 +3952,20 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           text: driftedText,
         });
         await buildGate.entered.promise;
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
 
         // The plugin's whole root vanishes — a real departure — while that
         // reconcile is still gated mid-build. removeOldIdentity's own job
         // cannot have started yet: it is still queued behind the reconcile
-        // job on the same per-plugin queue, so isDraining becoming true
-        // here can only be this round's own pre-enqueue raise — not
-        // stopOldRuntime's separate, pre-existing inner hold, which nothing
-        // has reached yet.
+        // job on the same per-plugin queue. isDraining stays true
+        // regardless — both holds compose — so a command racing in right
+        // now still refuses instead of enqueuing its own start behind
+        // either job.
         await rm(setup.fixture.pluginRoot, { recursive: true, force: true });
         const watching = setup.pipeline.handleWatcherEvents([
           { path: "plugins/example-plugin", operation: "delete" },
         ]);
-        await waitFor(
-          () => setup.commandClaims.isDraining(key),
-          "removeOldIdentity never marked the drain barrier while still queued.",
-        );
+        expect(setup.commandClaims.isDraining(key)).toBe(true);
 
         buildGate.release.resolve();
         await watching;

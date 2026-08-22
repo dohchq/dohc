@@ -39,12 +39,11 @@ export function raceWithTimeout<T>(
 
 // A budget, not a work-rejection limit — new commands are already refused
 // once the barrier is up, so AGENTS.md's "measure limits that reject work"
-// rule does not cover this constant. Measured evidence all the same: the
-// hello fixture's command round-trips in 0.1-0.5 ms over a real subprocess
-// host (20 runs); PluginHost's own PLUGIN_ACTIVATION_TIMEOUT_MS already
-// treats 30 s as this same host's line between "still working" and "never
-// will" — reused here so a legitimately slower handler keeps that same
-// headroom before its host is stopped out from under it.
+// rule does not cover this constant. Commands carry no duration contract,
+// so any grace here can still interrupt a legitimately slow one; this is
+// the grace a user-initiated stop grants in-flight work before it proceeds
+// anyway. Set to PluginHost's own PLUGIN_ACTIVATION_TIMEOUT_MS — the same
+// order this host already uses for "still working" vs. "never will".
 export const COMMAND_CLAIMS_DRAIN_DEADLINE_MS = 30_000;
 
 /**

@@ -615,7 +615,10 @@ import {
   type StaticDirectoryPreview,
 } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
-import { invokeRegisteredPluginCommand } from "./plugins/pluginCommandInvocation";
+import {
+  invokeRegisteredPluginCommand,
+  PluginClaimsDrainingError,
+} from "./plugins/pluginCommandInvocation";
 import { PluginCommandHostClaims } from "./plugins/pluginCommandHostClaims";
 import { awaitCommandClaimsDrainedWithDeadline } from "./plugins/pluginShared";
 import {
@@ -2951,7 +2954,21 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
 async function ensurePluginStarted(
   workspace: CreatedWorkspace,
   plugin: RegisteredPlugin,
-  options: { claim?: boolean; onColdStartWithoutClaim?: () => void } = {},
+  options: {
+    claim?: boolean;
+    onColdStartWithoutClaim?: () => void;
+    /**
+     * Rechecked immediately before the pipeline enqueue call below — the
+     * exact point a command's own earlier isDraining check (before it
+     * claimed, before this call's own lifecycle-lock wait) can no longer
+     * see: a stopping action can raise its own barrier and enqueue in that
+     * gap. Only a command claim holds anything that action's own later
+     * wait could stall on, so only the command path supplies this; a panel
+     * open holds no claim and is left to queue normally (round-17
+     * finding 2).
+     */
+    refuseIfClaimsBarrierRaised?: () => boolean;
+  } = {},
 ): Promise<PluginHost> {
   const pipeline = await ensurePluginPipeline(workspace);
   await startPluginForPanel({
@@ -2961,7 +2978,12 @@ async function ensurePluginStarted(
     claim: options.claim,
     onColdStartWithoutClaim: options.onColdStartWithoutClaim,
     hostActivation: () => pipeline.host.activationOf(plugin.manifest.name),
-    ensureStarted: () => pipeline.ensureStarted(plugin.manifest.name),
+    ensureStarted: () => {
+      if (options.refuseIfClaimsBarrierRaised?.()) {
+        throw new PluginClaimsDrainingError(plugin.manifest.name);
+      }
+      return pipeline.ensureStarted(plugin.manifest.name);
+    },
   });
   return pipeline.host;
 }
@@ -6874,6 +6896,8 @@ function registerIpcHandlers(
                 claim: false,
                 onColdStartWithoutClaim: () =>
                   activeCommandClaims.markStartedHost(claimKey),
+                refuseIfClaimsBarrierRaised: () =>
+                  activeCommandClaims.isDraining(claimKey),
               }),
             );
           },

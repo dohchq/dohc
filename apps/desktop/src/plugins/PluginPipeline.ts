@@ -2680,38 +2680,36 @@ export class PluginPipeline {
     const queue = this.queueFor(pluginId);
     if (queue.sourceRefreshQueued) return;
     queue.sourceRefreshQueued = true;
+    // Raised inline rather than through withCommandClaimsBarrier: this
+    // method returns void (fire-and-forget, deduped), so there is no
+    // caller-held promise to lower on — the job's own closure below is the
+    // only thing that outlives this call. reconcileApprovedCandidate can
+    // reach stopOldRuntime the same way every other queued action can, so
+    // it shares the same rule (round-17 finding 4).
+    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
     queue.jobs.push({
       sourceRefresh: true,
       run: async () => {
         queue.sourceRefreshQueued = false;
-        await run();
+        try {
+          await run();
+        } finally {
+          lowerBarrier?.();
+        }
       },
     });
     this.drain(pluginId, queue);
   }
 
   /**
-   * Raises this plugin's command claims barrier before `run` — typically an
-   * enqueueAction/enqueueActionValue call — is even enqueued, and lowers it
-   * once whatever that call started fully settles. A command racing in
-   * while the action still sits queued must see the barrier already up and
-   * refuse, rather than claim a plugin whose queue it could then be stuck
-   * behind: install, enable, disable, approve, rebuild, and uninstall all
-   * share this, uniformly, because runFullBuild, holdForApproval, and
-   * stopOldRuntime itself all wait on those same claims, and any of the six
-   * can reach one of those three under the right — even rare, even
-   * crash-loop-only — conditions. Applied here rather than argued
-   * case by case, so a future branch added to any of them inherits the
-   * same protection instead of needing its own audit.
-   *
-   * ensureStarted is the one enqueued caller that does not use this. A
-   * command already checks this exact barrier, against this exact key,
-   * before it ever calls ensureStarted (main.ts refuses at invocation, the
-   * moment the barrier is up, before it claims); raising it again from
-   * inside ensureStarted would not protect that command — it would only
-   * refuse a second, unrelated command racing an ordinary cold start, which
-   * today is legitimate and unclaimed by anything this barrier means to
-   * guard.
+   * Raises this plugin's command claims barrier before `run` enqueues, and
+   * lowers it once that call fully settles. Every queued job able to reach
+   * stopOldRuntime — directly, or via runFullBuild/holdForApproval — uses
+   * this uniformly: install, enable, disable, approve, rebuild, uninstall,
+   * the watcher's identity removal, and enqueueSourceRefresh's own
+   * reconciles (which raise inline, since their enqueue returns void).
+   * ensureStarted is the one exception: a command rechecks this same
+   * barrier at its own enqueue point instead (round-17 finding 2).
    */
   private withCommandClaimsBarrier<T>(
     pluginId: string,

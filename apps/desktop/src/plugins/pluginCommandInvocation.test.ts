@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { invokeRegisteredPluginCommand } from "./pluginCommandInvocation";
+import {
+  invokeRegisteredPluginCommand,
+  PluginClaimsDrainingError,
+} from "./pluginCommandInvocation";
 
 const input = {
   workspaceId: "ws-plugins",
@@ -75,6 +78,32 @@ describe("invokeRegisteredPluginCommand", () => {
     ).resolves.toEqual({
       status: "command-failed",
       message: "Plugin build failed.",
+    });
+    expect(invokeCommand).not.toHaveBeenCalled();
+  });
+
+  it("reports the retryable plugin-rebuilding status, not a generic failure, when ensureStarted rechecks the barrier and finds it raised (round-17 finding 2)", async () => {
+    const invokeCommand = vi.fn(async () => null);
+    const ensureStarted = vi.fn(async () => {
+      // What ensurePluginStarted throws once it rechecks the barrier right
+      // at its own pipeline-enqueue point and finds a stopping action
+      // raised it in the gap this call's own lifecycle-lock wait opened.
+      throw new PluginClaimsDrainingError("hello-plugin");
+    });
+
+    await expect(
+      invokeRegisteredPluginCommand({
+        input,
+        plugin: {
+          manifest: {
+            commands: [{ id: "hello.write", title: "Write hello note" }],
+          },
+        },
+        ensureStarted,
+      }),
+    ).resolves.toEqual({
+      status: "plugin-rebuilding",
+      message: 'Plugin "hello-plugin" isn\'t available right now. Try the command again in a moment.',
     });
     expect(invokeCommand).not.toHaveBeenCalled();
   });
