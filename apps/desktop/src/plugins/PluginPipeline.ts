@@ -1118,7 +1118,13 @@ export class PluginPipeline {
         dohcDir: this.dohcDir,
         pluginId,
         pluginRoot: candidate.rootPath,
-        stateRoot: pluginStateRoot(this.dohcDir, pluginId),
+        // Same trace-to-directory rule cleanupIds and the top-level
+        // uninstallPreflight() already apply: pluginId's own state can
+        // genuinely belong to an unrelated survivor sharing this id, and
+        // naming that survivor's stateRoot here would fold its data into
+        // a recheck this candidate's confirmation never covered
+        // (#779-offers round 21 finding 2).
+        stateRoot: pluginIdTracesHere ? pluginStateRoot(this.dohcDir, pluginId) : null,
         // Only .liveHash is read below — this call's stateData/warning are
         // discarded, so there is nothing for additional identities to add.
         additionalStateRoots: [],
@@ -1187,7 +1193,10 @@ export class PluginPipeline {
           dohcDir: this.dohcDir,
           pluginId,
           pluginRoot: candidate.rootPath,
-          stateRoot: pluginStateRoot(this.dohcDir, pluginId),
+          // Same as currentPreflight above: the trace-to-directory rule
+          // applies at every recheck, not only the first (#779-offers
+          // round 21 finding 2).
+          stateRoot: pluginIdTracesHere ? pluginStateRoot(this.dohcDir, pluginId) : null,
           // Same as currentPreflight above: only .liveHash is read.
           additionalStateRoots: [],
           installedBaselineHash: record?.installedBaselineHash,

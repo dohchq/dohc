@@ -541,6 +541,45 @@ describe("PluginDetailsPage", () => {
     expect(screen.queryByText("New Occupant")).toBeNull();
   });
 
+  // Round 21 finding 1: a rename has temporal continuity — the id-only
+  // fallback's candidate appears in the SAME transition where the tab's
+  // own exact row vanishes. A same-id row that only lands in some LATER,
+  // separate refresh — after the tab has already shown "removed" for at
+  // least one render in between — is an unrelated plugin that happened to
+  // install under that id afterward, never a rename target.
+  it("stays on removed when a same-id plugin is added later, elsewhere, after a genuine remove", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [plugin("foo", { directoryName: "old-folder", displayName: "Original" })],
+    });
+
+    renderPage("foo", "ws-1", "old-folder");
+    expect(await screen.findByText("Original")).toBeTruthy();
+
+    // A genuine, unambiguous remove: the tab's own row leaves with nothing
+    // else naming this id.
+    act(() => {
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "foo" });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-details-missing")).toBeTruthy(),
+    );
+
+    // A separate, LATER install lands under the same id at a different
+    // directory — a distinct transition from the remove above, not the
+    // same update renaming the original row.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("foo", { directoryName: "elsewhere", displayName: "Unrelated Later" }),
+      });
+    });
+
+    expect(screen.getByTestId("plugin-details-missing")).toBeTruthy();
+    expect(screen.queryByText("Unrelated Later")).toBeNull();
+  });
+
   it("offers Remove for a plugin that was added but never installed, and restores its offer on confirm", async () => {
     // What Add's own result looks like: discovered, never approved.
     // isInstalled (approvedHash !== null) is false, so Uninstall never

@@ -99,16 +99,46 @@ function readmePath(directoryName: string): string {
 // other row still naming the same id, and no way to tell that survivor
 // apart from a genuine rename target by row count alone (#779-offers round
 // 16 finding 2).
+//
+// A rename has temporal continuity: the SAME update that removes the old
+// entry adds the new one, so a genuine rename target is a row `previous`
+// (the list one render/refresh ago) never had, appearing in the very
+// transition where the tab's own exact row disappeared. A row that only
+// shows up in some LATER, separate refresh is a different plugin that
+// merely landed under the same id afterward — a real Remove followed,
+// independently, by an unrelated later Add. Without this, a tab left open
+// on a removed plugin would silently adopt whatever next happened to
+// install under that id, arbitrarily far in the future (#779-offers round
+// 21 finding 1).
 function findTabPlugin(
   plugins: PluginStatusRecord[],
   pluginId: string,
   directoryName: string,
   knownCollisions: ReadonlySet<string>,
+  previous: readonly PluginStatusRecord[],
 ): PluginStatusRecord | null {
   const exact = plugins.find(
     (entry) => entry.id === pluginId && entry.directoryName === directoryName,
   );
   if (exact) return exact;
+  // The id-only fallback below only ever means "this is a rename" while
+  // the transition it fires on is the SAME one that took the tab's own
+  // exact row away — proven by that row still being there one snapshot
+  // ago. Once a render has already shown "removed" (this row absent from
+  // `previous` too), any later same-id arrival is a separate, unrelated
+  // plugin that happened to land under that id afterward, not a rename
+  // this tab should follow (#779-offers round 21 finding 1).
+  // The id-only fallback below only ever means "this is a rename" while
+  // the transition it fires on is the SAME one that took the tab's own
+  // exact row away — proven by that row still being there one snapshot
+  // ago. Once a render has already shown "removed" (this row absent from
+  // `previous` too), any later same-id arrival is a separate, unrelated
+  // plugin that happened to land under that id afterward, not a rename
+  // this tab should follow (#779-offers round 21 finding 1).
+  const wasExactBefore = previous.some(
+    (entry) => entry.id === pluginId && entry.directoryName === directoryName,
+  );
+  if (!wasExactBefore) return null;
   const byId = plugins.filter(
     (entry) => entry.id === pluginId && !knownCollisions.has(entry.directoryName),
   );
@@ -705,6 +735,18 @@ export function PluginDetailsPage(props: {
   // genuinely new tab, so a previous tab's own in-flight rename can never
   // reach a DIFFERENT tab this instance goes on to show.
   const pendingRenameRef = useRef<{ from: string; to: string } | null>(null);
+  // The list findTabPlugin last saw, one render/refresh behind
+  // catalog.load.plugins. A genuine rename is one continuous update: the
+  // old row leaves and the new one arrives in the SAME transition, so the
+  // new row is absent from this previous snapshot while the old row was
+  // still present in it. A same-id row that only shows up in some LATER,
+  // separate refresh — after this snapshot has already stopped naming the
+  // tab's own row — is an unrelated plugin that happened to land under the
+  // same id afterward, never a rename target. Reset alongside the tracking
+  // above so a previous tab's history can never let a different tab this
+  // instance goes on to show adopt a stranger (#779-offers round 21
+  // finding 1).
+  const previousPluginsRef = useRef<readonly PluginStatusRecord[]>([]);
   if (
     knownCollisionsOwnerRef.current?.pluginId !== props.pluginId ||
     knownCollisionsOwnerRef.current?.directoryName !== props.directoryName
@@ -716,6 +758,7 @@ export function PluginDetailsPage(props: {
     };
     trackedDirectoryNameRef.current = props.directoryName;
     pendingRenameRef.current = null;
+    previousPluginsRef.current = [];
   }
   useEffect(() => {
     if (catalog.load.status !== "ready") return;
@@ -737,6 +780,7 @@ export function PluginDetailsPage(props: {
         props.pluginId,
         trackedDirectoryNameRef.current,
         knownCollisionsRef.current,
+        previousPluginsRef.current,
       )
       : null;
   if (plugin && plugin.directoryName !== trackedDirectoryNameRef.current) {
@@ -745,6 +789,9 @@ export function PluginDetailsPage(props: {
       to: plugin.directoryName,
     };
     trackedDirectoryNameRef.current = plugin.directoryName;
+  }
+  if (catalog.load.status === "ready") {
+    previousPluginsRef.current = catalog.load.plugins;
   }
 
   // Held in a ref so a new callback identity never re-reports, and written

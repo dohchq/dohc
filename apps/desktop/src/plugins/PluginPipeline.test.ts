@@ -872,6 +872,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     );
 
     let pipeline: PluginPipeline;
+    // Round 21 finding 2: uninstall() re-verifies immediately before
+    // stopping the process AND immediately before the actual delete, each
+    // through the same operations.uninstallPreflight() this records here —
+    // every stateRoot it names must apply the same trace-to-directory rule
+    // the initial uninstallPreflight() action already does, not only the
+    // first check.
+    const preflightStateRoots: (string | null)[] = [];
     const newHost = () =>
       new PluginHost({
         stateDir,
@@ -892,6 +899,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+          uninstallPreflight: async (input) => {
+            preflightStateRoots.push(input.stateRoot);
+            return pluginUninstallPreflight(input);
+          },
         },
       });
 
@@ -966,6 +977,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       const removed = await pipeline.uninstall("target-dir", preflight.confirmationToken);
       expect(removed.ok).toBe(true);
+
+      // Round 21 finding 2: uninstall()'s own two internal rechecks —
+      // immediately before stopping the process, and immediately before
+      // the actual delete — must apply the same trace-to-directory rule
+      // as the initial preflight above, not fall back to naming the
+      // survivor's real state directory unconditionally. Three total
+      // calls: the uninstallPreflight() action itself, then the two
+      // rechecks inside uninstall().
+      expect(preflightStateRoots).toEqual([null, null, null]);
 
       // The invalid directory is gone...
       await expect(lstat(invalidRoot)).rejects.toMatchObject({ code: "ENOENT" });
