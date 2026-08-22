@@ -3261,9 +3261,7 @@ describe("CLI socket server", () => {
 
 describe("resolveCliWorkspace", () => {
   it("resolves a cwd under a '..'-prefixed directory NAME inside the root", () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this cwd stops resolving — "..cache" is a real
-    // contained name, not traversal.
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const workspace: CliRegistryWorkspace = {
       workspaceId: "ws-1",
       rootPath: join(process.cwd(), "cli-root"),

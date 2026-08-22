@@ -29,9 +29,7 @@ describe("verifyPluginIcon", () => {
   });
 
   it("accepts an icon under a '..'-prefixed directory NAME inside the root", async () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this contained icon is refused as an escape —
-    // "..cache" is a real contained name, not traversal.
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     await mkdir(join(pluginRoot, "..cache"));
     await writeFile(join(pluginRoot, "..cache", "icon.png"), "png bytes");
 

@@ -5532,9 +5532,7 @@ describe("shareViewIdentitySelector", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("resolves a shared-view target under a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this target is refused as an escape — "..cache"
-    // is a real contained name, not traversal.
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const root = await createTestScratch("dohc-shared-view-dotdot-");
     await mkdir(join(root, "..cache"), { recursive: true });
     await writeFile(join(root, "..cache", "x.md"), "cached");

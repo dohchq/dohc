@@ -83,9 +83,9 @@ describe("plugin panel registration", () => {
   });
 
   it("loads a plugin whose directory NAME starts with '..' from its absolute root", async () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this contained root is refused as an escape —
-    // "..cache" is a real contained name, not traversal.
+    // A ".."-prefixed plugin directory is a real contained name, not traversal.
+    // (The ..-segment mutation is unreachable here: every root this module
+    // resolves is under plugins/, so relative() starts with that segment.)
     const workspace = await scratch("dohc-plugin-panel-dotdot-");
     const pluginRoot = join(workspace, "plugins", "..cache");
     await writePlugin(pluginRoot);

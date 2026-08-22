@@ -1063,9 +1063,7 @@ describe("mediaTypeForExtension", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("writes an asset into a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this write is refused as an escape — "..cache"
-    // is a real contained name, not traversal.
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const root = await makeWorkspace();
     await writeWorkspaceAsset(root, "..cache/pixel.png", new Uint8Array([1, 2, 3]));
     expect(

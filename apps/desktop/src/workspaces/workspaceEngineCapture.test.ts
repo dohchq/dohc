@@ -2935,9 +2935,7 @@ describe("createDefaultDiskWriter symlink containment", () => {
   });
 
   it("writes into a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this write is refused as an escape — "..cache"
-    // is a real contained name, not traversal.
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const root = await tempRoot();
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "..cache", "c.md"), "cached\n");

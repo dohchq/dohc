@@ -91,9 +91,6 @@ export function mountRootFor(hostRoot: string, label: string): string {
   if (!isInside(container, target)) {
     throw new Error(`Share mount escapes shared-with-me: ${label}`);
   }
-  if (target === container) {
-    throw new Error(`Share mount label resolves to shared-with-me itself: ${label}`);
-  }
   return target;
 }
 

@@ -166,9 +166,7 @@ describe("applyDatabaseEdit", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("materializes a database under a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this import is refused as an escape — "..cache"
-    // is a real contained name, not traversal.
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const result = await importToDatabase(
       root,
       "imports/wallet.csv",

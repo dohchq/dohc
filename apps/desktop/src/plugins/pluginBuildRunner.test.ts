@@ -377,9 +377,7 @@ describe("buildPluginBundle", () => {
   });
 
   it("accepts an entry under a '..'-prefixed directory NAME inside the snapshot", async () => {
-    // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-    // "..-prefix" test and this contained entry is refused as invalid-entry —
-    // "..cache" is a real contained name, not traversal.
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const fixture = await createBuildFixture({
       entry: "..cache/index.ts",
       entrySource: 'export const marker = "dot-dot-run";\nexport default { marker };\n',

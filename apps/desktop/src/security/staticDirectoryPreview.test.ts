@@ -243,9 +243,7 @@ describe("startStaticDirectoryPreview", () => {
 });
 
 describe("containment of '..'-prefixed names", () => {
-  // MUTATION (..-segment): weaken isInside's whole-segment test to a bare
-  // "..-prefix" test and both of these go red — "..cache" is a real
-  // contained name, not traversal.
+  // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
   it("serves a root whose own directory NAME starts with '..'", async () => {
     const containment = join(root, "plugin");
     const served = join(containment, "..cache");
