@@ -273,6 +273,57 @@ describe("site preview lifecycle", () => {
     }
   });
 
+  it("still calls the process handle's stop() for an exited record", async () => {
+    // A wrapper that backgrounds its real server and exits right after
+    // reporting the ready URL flips the record to "exited" — but
+    // handle.stop() (stopChild) is specifically built to still reach a
+    // descendant it captured while the wrapper was alive. Skipping it for
+    // an exited record left a successfully captured background server
+    // running forever after the tab, workspace, or app closes.
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const server = fakeProcessHandle("http://127.0.0.1:4173/");
+    previews.remember("workspace-1", "site", server.handle);
+
+    server.exit();
+    expect(previews.isRunning("workspace-1", "site")).toBe(false);
+    expect(server.handle.stop).not.toHaveBeenCalled();
+
+    await previews.stop("workspace-1", "site");
+
+    expect(server.handle.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes an exited record in previewsForWorkspace so workspace close still reaches it", () => {
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const server = fakeProcessHandle("http://127.0.0.1:4173/");
+    previews.remember("workspace-1", "site", server.handle);
+
+    server.exit();
+
+    const listed = previews.previewsForWorkspace("workspace-1");
+    expect(listed).toEqual([{ siteRoot: "site", handle: server.handle }]);
+  });
+
+  it("stopAll calls stop() for an exited record too", async () => {
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
+    });
+    const running = fakeProcessHandle("http://127.0.0.1:4175/");
+    const exited = fakeProcessHandle("http://127.0.0.1:4176/");
+    previews.remember("workspace-1", "site-a", running.handle);
+    previews.remember("workspace-1", "site-b", exited.handle);
+    exited.exit();
+
+    await previews.stopAll();
+
+    expect(running.handle.stop).toHaveBeenCalledTimes(1);
+    expect(exited.handle.stop).toHaveBeenCalledTimes(1);
+  });
+
   it("rechecks the active workspace after a queued stop obtains the lock", async () => {
     let activeWorkspaceId: string | undefined = "workspace-1";
     let releaseLock: () => void = () => undefined;

@@ -6,7 +6,7 @@ import {
   Globe2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { SitePackageInfo, WorkspaceFileEntry } from "../../ipc/bridgeContract";
+import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { siteTabPath } from "./workbenchState";
 
@@ -17,7 +17,7 @@ type SitesLoadState =
 
 function useSites(
   workspaceId: string,
-  filesRevision: string,
+  filesSettledRevision: number,
   refreshKey = 0,
 ): SitesLoadState {
   const [state, setState] = useState<SitesLoadState>({ status: "loading" });
@@ -41,22 +41,9 @@ function useSites(
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, filesRevision, refreshKey]);
+  }, [workspaceId, filesSettledRevision, refreshKey]);
 
   return state;
-}
-
-function workspaceFilesRevision(files: WorkspaceFileEntry[]): string {
-  let hash = 0x811c9dc5;
-  for (const file of files) {
-    const value =
-      file.path + "\0" + file.kind + "\0" + (file.icon ?? "") + "\0";
-    for (let index = 0; index < value.length; index += 1) {
-      hash ^= value.charCodeAt(index);
-      hash = Math.imul(hash, 0x01000193);
-    }
-  }
-  return String(files.length) + ":" + (hash >>> 0).toString(36);
 }
 
 function siteDiagnosticLabel(site: SitePackageInfo): string | null {
@@ -71,13 +58,19 @@ function siteDiagnosticLabel(site: SitePackageInfo): string | null {
 
 export function SitesView(props: {
   workspaceId: string;
-  files: WorkspaceFileEntry[];
+  // Bumped once per settled workspace file listing — including a
+  // content-only edit to an EXISTING file (e.g. dohc.json, package.json),
+  // not just an add/remove. A structural hash over path/kind/icon alone
+  // produces the SAME value for a content edit, so the effect would never
+  // rerun and the Sites view would keep stale titles, diagnostics,
+  // scripts, and preview modes until the user manually refreshed it.
+  filesSettledRevision: number;
   refreshKey?: number;
   onOpenPath: (path: string) => void;
 }) {
   const state = useSites(
     props.workspaceId,
-    workspaceFilesRevision(props.files),
+    props.filesSettledRevision,
     props.refreshKey,
   );
   const sites = state.status === "ready" ? state.sites : [];

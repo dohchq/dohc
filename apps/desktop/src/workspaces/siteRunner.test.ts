@@ -535,6 +535,20 @@ describe("package manager helpers", () => {
       assertLoopbackOnlyDevServerCommand("env", ["--split-string", "HOST=0.0.0.0 vite"]),
     ).toThrow(/env/);
   });
+
+  it("accepts env's -- end-of-options marker and keeps scanning the assignment after it", () => {
+    // GNU env's synopsis is `env [OPTION]... [-] [NAME=VALUE]...
+    // [COMMAND [ARG]...]` — "--" is the standard end-of-options marker
+    // (distinct from a bare "-", which resets the environment); a safe
+    // `env -- HOST=127.0.0.1 vite` must not be rejected as an unrecognized
+    // option, or a legitimate dev command is refused outright.
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["--", "HOST=0.0.0.0", "vite"]),
+    ).toThrow(/loopback/);
+    expect(() =>
+      assertLoopbackOnlyDevServerCommand("env", ["--", "HOST=127.0.0.1", "vite"]),
+    ).not.toThrow();
+  });
 });
 
 describe("startSiteDevServer", () => {

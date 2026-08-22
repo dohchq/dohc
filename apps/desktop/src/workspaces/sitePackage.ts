@@ -119,7 +119,13 @@ export function shareMountRootForSite(root: string): string | null {
   ) {
     return null;
   }
-  return `shared-with-me/${parts[1]}`;
+  // isSharedWithMePath recognizes case variants and Windows aliases (a
+  // trailing dot, etc.) as the SAME reserved segment — but the returned
+  // mount root must still be a literal PREFIX of the original root string,
+  // or downstream validation that checks root.startsWith(mountRoot) rejects
+  // an otherwise-legitimate site. Preserve parts[0]'s own spelling instead
+  // of reconstructing a canonical lowercase literal.
+  return `${parts[0]}/${parts[1]}`;
 }
 
 function pathRelativeToArtifact(artifactRoot: string, path: string): string | null {
@@ -290,6 +296,27 @@ function isSubmitControlElement(tagName: string, attrs: ReadonlyMap<string, stri
   if (tagName === "button") return !type || type === "submit";
   if (tagName === "input") return type === "submit" || type === "image";
   return false;
+}
+
+/** Being a submit control isn't enough on its own — activating one with no
+ * owner form performs no navigation at all, so `formaction` is inert on
+ * it. A control owns a form either by DESCENDING from one, or by a
+ * `form="id"` attribute naming one anywhere in the document (the HTML
+ * spec's form-association rule isn't limited to ancestors). Ids can be
+ * declared AFTER the control that references them, so every `<form id>`
+ * in the document is collected in its own pass before the main walk
+ * needs to check any of them. */
+function collectFormIds(document: Html5Node): Set<string> {
+  const ids = new Set<string>();
+  const visit = (node: Html5Node): void => {
+    if (isHtml5Element(node) && node.tagName === "form") {
+      const id = node.attrs.find((attribute) => attribute.name === "id")?.value;
+      if (id) ids.add(id);
+    }
+    for (const child of html5ChildNodes(node)) visit(child);
+  };
+  visit(document);
+  return ids;
 }
 
 // <meta http-equiv="refresh" content="0;url=target.html"> navigates the
@@ -503,7 +530,7 @@ function htmlBaseDirectoryFromDocument(
     : { kind: "external" };
 }
 
-function referencesFromWebManifest(text: string): string[] {
+function referencesFromWebManifest(text: string): Array<{ value: string; documentDestination: boolean }> {
   let manifest: unknown;
   try {
     manifest = JSON.parse(text);
@@ -512,27 +539,31 @@ function referencesFromWebManifest(text: string): string[] {
   }
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return [];
   const record = manifest as Record<string, unknown>;
-  const references: string[] = [];
-  const add = (value: unknown) => {
-    if (typeof value === "string" && value.trim()) references.push(value);
+  const references: Array<{ value: string; documentDestination: boolean }> = [];
+  const add = (value: unknown, documentDestination: boolean) => {
+    if (typeof value === "string" && value.trim()) references.push({ value, documentDestination });
   };
   const addImages = (value: unknown) => {
     if (!Array.isArray(value)) return;
     for (const image of value) {
       if (image && typeof image === "object" && !Array.isArray(image)) {
-        add((image as Record<string, unknown>).src);
+        add((image as Record<string, unknown>).src, false);
       }
     }
   };
 
-  add(record.start_url);
+  // start_url is where the browser NAVIGATES when the installed PWA
+  // launches, and a shortcut's own url navigates there the same way when
+  // its menu item is activated — both are document destinations, the
+  // same as an <a href>, not merely fetched bytes.
+  add(record.start_url, true);
   addImages(record.icons);
   addImages(record.screenshots);
   if (Array.isArray(record.shortcuts)) {
     for (const shortcut of record.shortcuts) {
       if (!shortcut || typeof shortcut !== "object" || Array.isArray(shortcut)) continue;
       const shortcutRecord = shortcut as Record<string, unknown>;
-      add(shortcutRecord.url);
+      add(shortcutRecord.url, true);
       addImages(shortcutRecord.icons);
     }
   }
@@ -653,6 +684,20 @@ const CSS_STRING_PATTERN = /"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'/g;
 const CSS_URL_PATTERN =
   /url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)/gi;
 const CSS_IMPORT_PATTERN = /@import\s+(?:url\(\s*)?["']([^"']{1,2048})["']/gi;
+// A bare url() destination depends on the CSS property it sits in —
+// img-src for most (background-image, list-style-image, ...), but
+// font-src for an @font-face block's own src. A font-face body never
+// legitimately nests another {}, so a flat (non-balanced) match is safe.
+const CSS_FONT_FACE_BLOCK_PATTERN = /@font-face\s*\{[^}]*\}/gi;
+
+function fontFaceBlockSpans(cssText: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const match of cssText.matchAll(CSS_FONT_FACE_BLOCK_PATTERN)) {
+    const start = match.index ?? 0;
+    spans.push([start, start + match[0].length]);
+  }
+  return spans;
+}
 
 function blankCssStrings(cssText: string): string {
   return cssText.replace(CSS_STRING_PATTERN, (match, offset: number, full: string) => {
@@ -670,11 +715,6 @@ function blankCssStrings(cssText: string): string {
 // resource-free CSS string.
 const CSS_IMAGE_SET_OPEN_PATTERN = /(?:-webkit-)?image-set\(/gi;
 const CSS_IMAGE_SET_CANDIDATE_PATTERN = /"([^"]{1,2048})"|'([^']{1,2048})'/g;
-// A candidate can carry an explicit type("<mime>") — a hint the browser uses
-// to pick the candidate, not a second image to fetch. Its string argument
-// looks identical to a real quoted candidate to the pattern above, so it is
-// blanked out of the body BEFORE candidate extraction runs.
-const CSS_IMAGE_SET_TYPE_PATTERN = /type\(\s*(?:"[^"]*"|'[^']*')\s*\)/gi;
 
 /** Every image-set(...) call's FULL, balanced body — a candidate list like
  * `url("one.png") 1x, "two.png" 2x` can itself contain a nested url(...)
@@ -698,13 +738,26 @@ function imageSetBodies(cssText: string): string[] {
   return bodies;
 }
 
+// A candidate can carry an explicit type("<mime>") — a hint the browser
+// uses to pick the candidate, not a second image to fetch. Its string
+// argument looks identical to a real quoted candidate to
+// CSS_IMAGE_SET_CANDIDATE_PATTERN — blanking type(...) text out of the
+// body BEFORE matching (the earlier approach) has no notion of "inside a
+// string": a REAL candidate whose own text happens to contain the
+// substring "type(...)" (e.g. `"icons/type('dark').png"`) gets corrupted
+// before extraction, same as blankCssStrings would corrupt an
+// unrelated string if it didn't check what precedes a match. Checking
+// what immediately PRECEDES each already-matched quoted string — the
+// same technique blankCssStrings already uses — distinguishes a real
+// type() hint (preceded by "type(") from a candidate whose own content
+// merely contains that text, without needing to blank anything first.
 function imageSetStringCandidates(cssText: string): string[] {
   const values: string[] = [];
   for (const body of imageSetBodies(cssText)) {
-    const withoutTypeHints = body.replace(CSS_IMAGE_SET_TYPE_PATTERN, (match) =>
-      match.replace(/[^\r\n]/g, " "),
-    );
-    for (const candidate of withoutTypeHints.matchAll(CSS_IMAGE_SET_CANDIDATE_PATTERN)) {
+    for (const candidate of body.matchAll(CSS_IMAGE_SET_CANDIDATE_PATTERN)) {
+      const start = candidate.index ?? 0;
+      const before = body.slice(Math.max(0, start - 16), start);
+      if (/type\(\s*$/i.test(before)) continue;
       const value = (candidate[1] ?? candidate[2])?.trim();
       if (value) values.push(value);
     }
@@ -721,13 +774,25 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
     references.push({ value, documentRelative: false, appliesAsStylesheet: true, cspClass: "img" });
   }
   const cssText = blankCssStrings(withoutComments);
+  const fontFaceSpans = fontFaceBlockSpans(cssText);
   for (const match of cssText.matchAll(CSS_URL_PATTERN)) {
     const value = (match[1] ?? match[2] ?? match[3])?.trim();
-    // A bare url() can be an image OR a font (img-src vs font-src) — this
-    // scanner doesn't track which CSS property it sits in, so it's
-    // classified img-src, the more common case and the one of the two
-    // inside this scan's bounded CSP set (see blockedCspClasses).
-    if (value) references.push({ value, documentRelative: false, appliesAsStylesheet: true, cspClass: "img" });
+    if (!value) continue;
+    // A bare url() inside an @font-face block's own src is font-src, not
+    // img-src — font-src isn't in this scan's bounded CSP set (see
+    // blockedCspClasses), so it's left unclassified rather than
+    // misclassified img-src, which would let an img-src 'none' policy
+    // wrongly remove a font a real browser is still allowed to fetch.
+    // Everywhere else a bare url() is img-src, the more common case and
+    // the one of the two actually in the bounded set.
+    const start = match.index ?? 0;
+    const inFontFace = fontFaceSpans.some(([spanStart, spanEnd]) => start >= spanStart && start < spanEnd);
+    references.push({
+      value,
+      documentRelative: false,
+      appliesAsStylesheet: true,
+      ...(inFontFace ? {} : { cspClass: "img" as const }),
+    });
   }
   for (const match of cssText.matchAll(CSS_IMPORT_PATTERN)) {
     const value = match[1]?.trim();
@@ -826,8 +891,9 @@ function isImportMetaUrl(node: unknown): boolean {
 type DomProducingTag = string | "unknown";
 
 // Finding 3: the browser globals this scanner trusts by identifier name —
-// document, fetch, Worker, SharedWorker, URL, importScripts — must be the
-// REAL globals, not a same-named local. Over-conservative by design: if the
+// document, fetch, Worker, SharedWorker, URL, importScripts,
+// XMLHttpRequest — must be the REAL globals, not a same-named local.
+// Over-conservative by design: if the
 // program declares ANY binding for the name anywhere (a function, a var/
 // let/const, a parameter, a class, or an import specifier), the whole file
 // treats that name as shadowed and excludes every use of it, rather than
@@ -842,6 +908,7 @@ const TRUSTED_GLOBAL_NAMES = new Set([
   "window",
   "globalThis",
   "navigator",
+  "XMLHttpRequest",
 ]);
 // window.X / globalThis.X are the same real global as bare X — an object
 // merely NAMED "window" that isn't provably the browser global proves
@@ -1111,18 +1178,81 @@ function collectDomProducingTags(
   return tags;
 }
 
+// Knowing an expression CREATES a script/link/etc. element doesn't prove
+// assigning its src/href performs a request — `document.createElement
+// ("script")` alone never connects it to the document; only an insertion
+// call does, and only THEN does a later src/href assignment (or one that
+// already ran before insertion — order doesn't matter, the request fires
+// once BOTH have happened) actually fetch anything.
+const DOM_INSERTION_METHOD_NAMES = new Set([
+  "appendChild",
+  "insertBefore",
+  "append",
+  "prepend",
+  "replaceWith",
+  "replaceChildren",
+]);
+
+/** Every identifier name EVER passed as an argument to a DOM insertion
+ * call (appendChild/insertBefore/append/prepend/replaceWith/
+ * replaceChildren) whose RECEIVER is itself a proven DOM node — a plain,
+ * non-fixed-point pass over the already-resolved provenTags map, since
+ * insertion is a terminal fact (not something that itself needs to
+ * propagate through further chained assignments the way a DOM tag does).
+ * Like provenTags itself, this is a flat, name-keyed check with the same
+ * residual cross-scope imprecision the whole file already accepts: an
+ * unrelated function's own same-named variable passed to some OTHER
+ * insertion call can't be told apart from ours without real lexical
+ * scoping, which this heuristic scanner deliberately doesn't build. */
+function collectInsertedIdentifierNames(
+  program: AstNode,
+  provenTags: ReadonlyMap<string, DomProducingTag>,
+  shadowedGlobals: ReadonlySet<string>,
+): Set<string> {
+  const inserted = new Set<string>();
+  walkAst(program, (node) => {
+    if (node.type !== "CallExpression") return;
+    const callee = astChild(node, "callee");
+    if (!isAstNode(callee) || callee.type !== "MemberExpression") return;
+    const property = astChild(callee, "property");
+    const methodName = isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
+    if (!methodName || !DOM_INSERTION_METHOD_NAMES.has(methodName)) return;
+    const receiver = astChild(callee, "object");
+    if (domProducingTag(receiver, provenTags, shadowedGlobals) === undefined) return;
+    for (const argument of astChildren(node, "arguments")) {
+      if (isAstNode(argument) && argument.type === "Identifier") {
+        const name = astString(argument, "name");
+        if (name) inserted.add(name);
+      }
+    }
+  });
+  return inserted;
+}
+
 /** Whether `object.property = lit` or `object.setAttribute("property", lit)`
  * is a proven, resource-consuming (tag, property) pair — reuses
  * URL_ATTRIBUTE_ELEMENTS, the SAME allowlist markup attributes already go
- * through, so a DOM element's real tag is held to the identical rule. */
+ * through, so a DOM element's real tag is held to the identical rule.
+ * Also requires proof the element was actually INSERTED somewhere in the
+ * document — an unattached `document.createElement("script")` never
+ * connects to anything, and assigning its src is inert until it does. */
 function isProvenUrlReceiver(
   object: unknown,
   propertyName: string,
   provenTags: ReadonlyMap<string, DomProducingTag>,
+  insertedIdentifierNames: ReadonlySet<string>,
   shadowedGlobals: ReadonlySet<string>,
 ): boolean {
   const tag = domProducingTag(object, provenTags, shadowedGlobals);
-  return tag !== undefined && tag !== "unknown" && (URL_ATTRIBUTE_ELEMENTS[propertyName]?.has(tag) ?? false);
+  if (tag === undefined || tag === "unknown" || !(URL_ATTRIBUTE_ELEMENTS[propertyName]?.has(tag) ?? false)) {
+    return false;
+  }
+  // document.body/document.head are ALWAYS already in the document — only
+  // an identifier-bound element (document.createElement(...) or a chain
+  // resolving to one) needs its OWN insertion proven.
+  if (!isAstNode(object) || object.type !== "Identifier") return true;
+  const name = astString(object, "name");
+  return !!name && insertedIdentifierNames.has(name);
 }
 
 // A worker script (reached via Worker/SharedWorker/serviceWorker.register)
@@ -1473,18 +1603,25 @@ function jsReferencesFromCode(
   if (!program) return [];
   const shadowedGlobals = collectShadowedGlobalNames(program);
   const provenDomTags = collectDomProducingTags(program, shadowedGlobals);
+  const insertedIdentifierNames = collectInsertedIdentifierNames(program, provenDomTags, shadowedGlobals);
   const urlLiteralNames = collectUrlLiteralNames(program, shadowedGlobals);
   const provenXhrNames = collectXhrInstanceNames(program, shadowedGlobals);
   // XMLHttpRequest.open(method, url, ...) only initializes a request — no
-  // network request happens until .send() is called on the SAME instance.
-  // walkAst is a single PRE-ORDER pass over the source text's own shape,
-  // not runtime order — send() can appear (and be visited) textually
-  // BEFORE the open() it actually follows at runtime, e.g. a function
-  // declared first but called after a later open() statement. Recording
-  // every open() target per receiver and every receiver that ever calls
-  // send(), then joining the two AFTER the walk finishes, makes this
-  // independent of which one the walk happens to reach first.
-  const xhrOpenTargets = new Map<string, Array<{ value: string | undefined; scriptRelative: boolean }>>();
+  // network request happens until .send() is called on the SAME instance,
+  // and re-opening BEFORE sending discards the prior configuration (only
+  // the LAST open() before send() is ever actually requested). walkAst is
+  // a single PRE-ORDER pass over the source text's own shape, not runtime
+  // order — send() can appear (and be visited) textually BEFORE the open()
+  // it actually follows at runtime, e.g. a function declared first but
+  // called after a later open() statement. Recording the MOST RECENTLY
+  // VISITED open() target per receiver (overwriting, not accumulating —
+  // straight-line code visits opens in the same order it runs them, so the
+  // last one visited is the one a real send() would actually use) and
+  // every receiver that ever calls send(), then joining the two AFTER the
+  // walk finishes, keeps the join independent of which one the walk
+  // happens to reach first while never widening the share to an open()
+  // target a re-open has since superseded.
+  const xhrOpenTargets = new Map<string, { value: string | undefined; scriptRelative: boolean }>();
   const xhrSendReceivers = new Set<string>();
   const references: BrowserTextReference[] = [];
   const addReference = (
@@ -1523,7 +1660,7 @@ function jsReferencesFromCode(
       : { value: stringLiteralValue(node), scriptRelative: false };
   };
   const addUrlAttributeReference = (object: unknown, propertyName: string, valueNode: unknown) => {
-    if (!isProvenUrlReceiver(object, propertyName, provenDomTags, shadowedGlobals)) return;
+    if (!isProvenUrlReceiver(object, propertyName, provenDomTags, insertedIdentifierNames, shadowedGlobals)) return;
     const { value, scriptRelative } = consumedValue(valueNode);
     if (propertyName === "srcset") {
       const trimmed = value?.trim();
@@ -1610,14 +1747,11 @@ function jsReferencesFromCode(
             provenXhrNames.has(astString(object, "name") ?? "")
           ) {
             // Record the target rather than minting a reference — open()
-            // alone never fetches (see xhrOpenTargets above). A receiver can
-            // legitimately re-open before it sends; every distinct target
-            // recorded is a plausible candidate once source order can't
-            // prove which open() actually preceded the send().
-            const openName = astString(object, "name") ?? "";
-            const targets = xhrOpenTargets.get(openName) ?? [];
-            targets.push(consumedValue(args[1]));
-            xhrOpenTargets.set(openName, targets);
+            // alone never fetches (see xhrOpenTargets above). Overwrites
+            // any earlier recorded target for this receiver: a re-open
+            // discards the prior configuration for real, so only the most
+            // recently visited one stays a candidate.
+            xhrOpenTargets.set(astString(object, "name") ?? "", consumedValue(args[1]));
           } else if (
             propertyName === "send" &&
             isAstNode(object) &&
@@ -1625,8 +1759,8 @@ function jsReferencesFromCode(
             provenXhrNames.has(astString(object, "name") ?? "")
           ) {
             // send() is what actually issues the request — record that this
-            // receiver sends at all; its open() target(s) are joined in
-            // after the walk (see xhrOpenTargets above).
+            // receiver sends at all; its open() target is joined in after
+            // the walk (see xhrOpenTargets above).
             xhrSendReceivers.add(astString(object, "name") ?? "");
           }
         }
@@ -1653,9 +1787,8 @@ function jsReferencesFromCode(
   // receiver that ever calls send(), regardless of the walk's source
   // order relative to its open() call(s).
   for (const receiverName of xhrSendReceivers) {
-    for (const opened of xhrOpenTargets.get(receiverName) ?? []) {
-      addReference(opened.value, !opened.scriptRelative, false, undefined, "connect");
-    }
+    const opened = xhrOpenTargets.get(receiverName);
+    if (opened) addReference(opened.value, !opened.scriptRelative, false, undefined, "connect");
   }
   return references;
 }
@@ -1668,6 +1801,14 @@ interface HtmlDocumentReferences {
   // for a plain document (never inherited: each HTML document is a fresh
   // realm, and only the module scripts IT loads share this map).
   importMap: ImportMapResolution | undefined;
+  // The FINAL (whole-document) set of CSP classes this document's own
+  // meta policies rule out — carried onto the scan queue so an external
+  // script/stylesheet THIS document references is scanned under the SAME
+  // policy, not treated as if the document had no CSP at all. A resource
+  // reached only via such an external file is requested by the browser
+  // under the referring document's policy, the same way document-level
+  // CSP applies to everything it loads.
+  blockedCspClasses: ReadonlySet<CspClass>;
 }
 
 /** Wraps one inline on* handler's value as a function body before parsing —
@@ -1797,8 +1938,32 @@ function htmlReferencesFromDocument(
   const importMapTexts: string[] = [];
   const nestedReferences: BrowserTextReference[] = [];
   const cspPolicyContents: string[] = [];
+  const formIds = collectFormIds(document);
+  // Grows as visit() encounters each <meta> CSP in DOCUMENT order — a real
+  // browser only starts enforcing a policy once it's actually parsed a
+  // meta tag declaring it, so a reference collected BEFORE that point
+  // (e.g. <script src="early.js"></script> ahead of the policy that would
+  // otherwise block script-src) was already requested and must not be
+  // retroactively removed. Markup references (attributeReferences,
+  // nestedReferences) are filtered AT PUSH TIME against this running
+  // state below. CSS/JS TEXT content is collected as raw strings during
+  // the walk and only turned into references AFTER it finishes — applying
+  // per-block document-order precision there would mean tracking a
+  // snapshot per <style>/<script> block instead of one joined string per
+  // kind; the far more common case in practice (a page with a meta CSP
+  // has it in <head>, before any meaningful inline block) is captured by
+  // applying the FINAL state to all of those collectively.
+  let blockedSoFar: ReadonlySet<CspClass> = new Set();
+  const pushAttributeReference = (reference: BrowserTextReference): void => {
+    if (reference.cspClass && blockedSoFar.has(reference.cspClass)) return;
+    attributeReferences.push(reference);
+  };
+  const pushNestedReference = (reference: BrowserTextReference): void => {
+    if (reference.cspClass && blockedSoFar.has(reference.cspClass)) return;
+    nestedReferences.push(reference);
+  };
 
-  const visit = (node: Html5Node, parentTagName?: string): void => {
+  const visit = (node: Html5Node, parentTagName?: string, insideForm = false): void => {
     if (isHtml5Element(node)) {
       const tagName = node.tagName;
       const attrs = new Map(node.attrs.map((attribute) => [attribute.name, attribute.value]));
@@ -1847,24 +2012,36 @@ function htmlReferencesFromDocument(
           // "/", or the next resolution pass joins artifactRoot onto itself.
           const artifactRelative = resolvedPath ? pathRelativeToArtifact(artifactRoot, resolvedPath) : null;
           if (artifactRelative !== null) {
-            nestedReferences.push({ ...reference, value: `/${artifactRelative}`, documentRelative: false });
+            pushNestedReference({ ...reference, value: `/${artifactRelative}`, documentRelative: false });
           }
         }
       }
       if (tagName === "meta" && attrs.get("http-equiv")?.toLowerCase() === "refresh") {
         const refreshTarget = metaRefreshTarget(attrs.get("content") ?? "");
-        if (refreshTarget) attributeReferences.push({ value: refreshTarget, documentRelative: true });
+        if (refreshTarget) pushAttributeReference({ value: refreshTarget, documentRelative: true });
       }
       if (tagName === "meta" && attrs.get("http-equiv")?.toLowerCase() === "content-security-policy") {
         const policyContent = attrs.get("content");
-        if (policyContent) cspPolicyContents.push(policyContent);
+        if (policyContent) {
+          cspPolicyContents.push(policyContent);
+          // Takes effect from THIS point in document order onward — grows
+          // the running state rather than replacing it, the same
+          // union-of-all-policies reasoning blockedCspClasses itself uses.
+          blockedSoFar = new Set([...blockedSoFar, ...blockedCspClasses([policyContent])]);
+        }
       }
       const scriptKind: ScriptKind = attrs.get("type")?.toLowerCase() === "module" ? "module" : "classic";
       for (const attribute of node.attrs) {
         const attributeName = attribute.name;
         if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
         if (attributeName === "src" && tagName === "input" && !isImageInputElement(attrs)) continue;
-        if (attributeName === "formaction" && !isSubmitControlElement(tagName, attrs)) continue;
+        if (
+          attributeName === "formaction" &&
+          !(
+            isSubmitControlElement(tagName, attrs) &&
+            (insideForm || (attrs.get("form") !== undefined && formIds.has(attrs.get("form")!)))
+          )
+        ) continue;
         // <source src> only fires a request inside <audio>/<video> — a
         // <picture><source> uses srcset instead (src there is inert), and a
         // detached/otherwise-parented <source> performs no request at all.
@@ -1906,12 +2083,15 @@ function htmlReferencesFromDocument(
         const isStylesheet =
           attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("stylesheet");
         // <object data>/<embed src>/<iframe src> load their target AS A
-        // NESTED DOCUMENT (a plugin/browsing context) — an SVG reached this
-        // way is itself parsed for its own references, the same way a real
-        // browser resolves them. <img src>/CSS url() never do this for SVG.
+        // NESTED DOCUMENT (a plugin/browsing context), and <a href>/
+        // <area href> NAVIGATE the browser there — an SVG or HTML page
+        // reached either way is itself parsed for its own references, the
+        // same way a real browser resolves them once it's the active
+        // document. <img src>/CSS url() never do this.
         const isDocumentDestination =
           (attributeName === "data" && tagName === "object") ||
-          (attributeName === "src" && (tagName === "embed" || tagName === "iframe"));
+          (attributeName === "src" && (tagName === "embed" || tagName === "iframe")) ||
+          (attributeName === "href" && (tagName === "a" || tagName === "area"));
         // The bounded CSP classes (see blockedCspClasses): icon-family
         // rel tokens, <img>/<video poster>/image-input src, and SVG
         // <image>/<use> href are all img-src; everything else this
@@ -1935,7 +2115,7 @@ function htmlReferencesFromDocument(
                 ? "img"
                 : undefined;
         if (attributeName !== "srcset") {
-          attributeReferences.push({
+          pushAttributeReference({
             value: attribute.value,
             documentRelative: true,
             isManifest,
@@ -1951,7 +2131,7 @@ function htmlReferencesFromDocument(
           // srcset only fires on <img>/<source> (URL_ATTRIBUTE_ELEMENTS),
           // and a <source srcset> reaching here already passed the
           // <picture>-parent guard above — every candidate is img-src.
-          attributeReferences.push({ value: srcsetValue, documentRelative: true, cspClass: "img" });
+          pushAttributeReference({ value: srcsetValue, documentRelative: true, cspClass: "img" });
         }
       }
       if (tagName === "script") {
@@ -1968,7 +2148,8 @@ function htmlReferencesFromDocument(
       }
     }
     const childParentTagName = isHtml5Element(node) ? node.tagName : parentTagName;
-    for (const child of html5ChildNodes(node)) visit(child, childParentTagName);
+    const childInsideForm = insideForm || (isHtml5Element(node) && node.tagName === "form");
+    for (const child of html5ChildNodes(node)) visit(child, childParentTagName, childInsideForm);
   };
   visit(document);
 
@@ -1980,9 +2161,19 @@ function htmlReferencesFromDocument(
     ? resolveImportMapAddresses(rawImportMap, documentPath, documentBase, artifactRoot)
     : undefined;
 
-  const allReferences = [
-    ...attributeReferences,
-    ...nestedReferences,
+  // A resource a document's own declared CSP rules out entirely is one a
+  // real browser never requests — approving it into the share manifest
+  // anyway would disclose a file the policy excludes. attributeReferences/
+  // nestedReferences are ALREADY filtered — pushAttributeReference/
+  // pushNestedReference applied the running blockedSoFar state at the
+  // point each was collected, so an early reference ahead of the meta tag
+  // that would otherwise block it stays approved, matching document
+  // order. CSS/JS/handler text is only turned into references AFTER the
+  // walk finishes, so the FINAL (whole-document) state is the closest
+  // approximation available for those — see blockedSoFar's own comment
+  // above for why per-block precision isn't worth chasing there.
+  const blockedClasses = blockedCspClasses(cspPolicyContents);
+  const deferredReferences = [
     ...cssReferences(cssTexts.join("\n")),
     // Each <script> element parses on its OWN — the same way a browser runs
     // each script tag independently — so a syntax error in one script never
@@ -1997,20 +2188,14 @@ function htmlReferencesFromDocument(
       jsReferencesFromEventHandler(handler, context, documentPath, documentBase, artifactRoot, importMap),
     ),
   ];
-  // A resource a document's own declared CSP rules out entirely is one a
-  // real browser never requests — approving it into the share manifest
-  // anyway would disclose a file the policy excludes. Applied to every
-  // reference this document itself produced (including srcdoc's, already
-  // filtered by ITS OWN meta CSP inside that recursive call) as if the
-  // policy took effect for the whole document — the overwhelmingly common
-  // case, since a meta CSP is conventionally declared in <head> before any
-  // resource-loading markup in <body>.
-  const blockedClasses = blockedCspClasses(cspPolicyContents);
-  const references =
-    blockedClasses.size === 0
-      ? allReferences
-      : allReferences.filter((reference) => !reference.cspClass || !blockedClasses.has(reference.cspClass));
-  return { references, importMap };
+  const references = [
+    ...attributeReferences,
+    ...nestedReferences,
+    ...(blockedClasses.size === 0
+      ? deferredReferences
+      : deferredReferences.filter((reference) => !reference.cspClass || !blockedClasses.has(reference.cspClass))),
+  ];
+  return { references, importMap, blockedCspClasses: blockedClasses };
 }
 
 /** Every reference in a non-HTML file — HTML is scanned from its already-
@@ -2035,7 +2220,11 @@ function referencesFromNonHtmlFile(
     // A web app manifest's URLs (icons, start_url, ...) resolve relative to
     // the MANIFEST file itself, not the document that links it — the same
     // rule CSS's url()/@import already follow. Not document-relative.
-    return referencesFromWebManifest(text).map((value) => ({ value, documentRelative: false }));
+    return referencesFromWebManifest(text).map(({ value, documentDestination }) => ({
+      value,
+      documentRelative: false,
+      documentDestination,
+    }));
   }
   if (/\.css$/i.test(sourcePath)) {
     // Bytes the browser only ever FETCHES (fetch(), an asset-style URL
@@ -2194,6 +2383,12 @@ async function shareManifestForSite(
     // internal references when it loads the SVG as a document.
     documentDestination: boolean;
     importMap: ImportMapResolution | undefined;
+    // The referring document's OWN final set of blocked CSP classes,
+    // inherited by whatever it references — an external stylesheet/script
+    // is requested (and, if it in turn references further files, THOSE
+    // are too) under the referring document's policy, not the empty
+    // policy this field would default to if it weren't carried forward.
+    blockedCspClasses: ReadonlySet<CspClass>;
   }> = [
     {
       path: entryPath,
@@ -2203,8 +2398,11 @@ async function shareManifestForSite(
       executesAsCode: true,
       appliesAsStylesheet: true,
       isManifest: false,
-      documentDestination: false,
+      // The entry path IS the document the preview loads — the same
+      // status object/embed/iframe/anchor targets get once reached.
+      documentDestination: true,
       importMap: undefined,
+      blockedCspClasses: new Set(),
     },
   ];
   let scannedBytes = 0;
@@ -2219,6 +2417,7 @@ async function shareManifestForSite(
       isManifest,
       documentDestination,
       importMap: inheritedImportMap,
+      blockedCspClasses: inheritedBlockedCspClasses,
     } = queue.shift()!;
     const scanKey = `${current}::${documentBaseKey(inheritedDocumentBase)}::${context}::${scriptKind}::${executesAsCode}::${appliesAsStylesheet}::${isManifest}::${documentDestination}::${importMapKey(inheritedImportMap)}`;
     const isSvgDocument = documentDestination && /\.svg$/i.test(current);
@@ -2247,7 +2446,11 @@ async function shareManifestForSite(
       // normalized to a plain href) correctly — reuse the SAME document
       // scan path for an SVG reached as a document destination instead of
       // writing a second, separate XML extractor for it.
-      const isHtmlFile = /\.html?$/i.test(current) || isSvgDocument;
+      // A .html/.htm target reached ONLY as bytes (fetch(), an asset-style
+      // attribute) is never parsed or rendered by a real browser as a
+      // document — same reasoning as isSvgDocument above, applied to HTML.
+      const isHtmlDocument = documentDestination && /\.html?$/i.test(current);
+      const isHtmlFile = isHtmlDocument || isSvgDocument;
       // Parse each HTML file exactly once — both its <base> and its
       // reference scan read the same tree.
       const htmlDocument = isHtmlFile ? parseHtml(text) : null;
@@ -2268,21 +2471,36 @@ async function shareManifestForSite(
       const htmlResult = htmlDocument
         ? htmlReferencesFromDocument(htmlDocument, context, documentBase, current, artifactRoot)
         : null;
-      const references = htmlResult
-        ? htmlResult.references
-        : referencesFromNonHtmlFile(
-            text,
-            current,
-            scriptKind,
-            context,
-            base,
-            artifactRoot,
-            executesAsCode,
-            isManifest,
-            inheritedImportMap,
-            appliesAsStylesheet,
-          );
       const documentImportMap = htmlResult ? htmlResult.importMap : inheritedImportMap;
+      const documentBlockedCspClasses = htmlResult ? htmlResult.blockedCspClasses : inheritedBlockedCspClasses;
+      const references = htmlResult
+        ? // Already filtered internally against ITS OWN document-order CSP
+          // state (see htmlReferencesFromDocument) — filtering it again
+          // here, against the whole-document state, would retroactively
+          // remove a reference collected before its own blocking meta tag.
+          htmlResult.references
+        : (() => {
+            const nonHtmlReferences = referencesFromNonHtmlFile(
+              text,
+              current,
+              scriptKind,
+              context,
+              base,
+              artifactRoot,
+              executesAsCode,
+              isManifest,
+              inheritedImportMap,
+              appliesAsStylesheet,
+            );
+            // A .css/.js file has no CSP of its own to declare — it's
+            // requested (and its own further references are too) under
+            // the referring document's policy, inherited via the queue.
+            return documentBlockedCspClasses.size === 0
+              ? nonHtmlReferences
+              : nonHtmlReferences.filter(
+                  (reference) => !reference.cspClass || !documentBlockedCspClasses.has(reference.cspClass),
+                );
+          })();
       for (const reference of references) {
         const referenceBase = reference.documentRelative ? documentBase : base;
         for (const target of localReferenceCandidates(
@@ -2311,6 +2529,7 @@ async function shareManifestForSite(
             isManifest: reference.isManifest ?? false,
             documentDestination: reference.documentDestination === true,
             importMap: documentImportMap,
+            blockedCspClasses: documentBlockedCspClasses,
           });
         }
       }

@@ -5280,7 +5280,7 @@ export function DesktopWorkspaceShell(props: {
               <Suspense fallback={<PanelLoading label="sites" />}>
                 <LazySitesView
                   workspaceId={workspaceId}
-                  files={files}
+                  filesSettledRevision={listingsSettled}
                   refreshKey={sitesRefreshKey}
                   onOpenPath={openPathWithHeading}
                 />

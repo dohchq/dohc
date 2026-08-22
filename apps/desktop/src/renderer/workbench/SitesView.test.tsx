@@ -49,7 +49,7 @@ describe("SitesView", () => {
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[]}
+        filesSettledRevision={0}
         onOpenPath={onOpenPath}
       />,
     );
@@ -60,11 +60,15 @@ describe("SitesView", () => {
     expect(onOpenPath).toHaveBeenCalledWith(siteTabPath("client-portal"));
   });
 
-  it("reloads detected sites when workspace file content changes", async () => {
+  it("reloads detected sites when the settled files revision bumps, including a content-only edit", async () => {
+    // filesSettledRevision bumps on every settled workspace file listing,
+    // including a content-only edit to an EXISTING file (e.g. dohc.json) —
+    // not just an add/remove. A structural path/kind/icon hash would
+    // produce the SAME value for that case and never rerun this effect.
     const view = render(
       <SitesView
         workspaceId="ws-sites"
-        files={[{ path: "notes.md", kind: "file" }]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -74,10 +78,7 @@ describe("SitesView", () => {
     view.rerender(
       <SitesView
         workspaceId="ws-sites"
-        files={[
-          { path: "notes.md", kind: "file" },
-          { path: "report/index.html", kind: "file" },
-        ]}
+        filesSettledRevision={1}
         onOpenPath={vi.fn()}
       />,
     );
@@ -85,11 +86,11 @@ describe("SitesView", () => {
     await vi.waitFor(() => expect(bridgeMock.listSites).toHaveBeenCalledTimes(2));
   });
 
-  it("does not reload detected sites for a content-identical files array", async () => {
+  it("does not reload detected sites for an unchanged settled files revision", async () => {
     const view = render(
       <SitesView
         workspaceId="ws-sites"
-        files={[{ path: "notes.md", kind: "file" }]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -98,7 +99,7 @@ describe("SitesView", () => {
     view.rerender(
       <SitesView
         workspaceId="ws-sites"
-        files={[{ path: "notes.md", kind: "file" }]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -112,7 +113,7 @@ describe("SitesView", () => {
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[{ path: "report/index.html", kind: "file" }]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -127,7 +128,7 @@ describe("SitesView", () => {
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -141,7 +142,7 @@ describe("SitesView", () => {
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -166,7 +167,7 @@ describe("SitesView", () => {
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -194,7 +195,7 @@ describe("SitesView", () => {
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );
@@ -213,7 +214,7 @@ describe("SitesView", () => {
     render(
       <SitesView
         workspaceId="ws-sites"
-        files={[]}
+        filesSettledRevision={0}
         onOpenPath={vi.fn()}
       />,
     );

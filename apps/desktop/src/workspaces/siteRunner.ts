@@ -114,6 +114,19 @@ async function resolveContainedDir(rootPath: string, relativePath: string): Prom
   return realSite;
 }
 
+// Signal 0 sends nothing but still validates the pid — ESRCH means it no
+// longer names any running process. Used to prune a captured descendant
+// pid the instant it's confirmed dead, so it can't linger in a long-lived
+// tracking set until the OS reuses that pid for an unrelated process.
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: string): void {
   const at = Date.now();
   for (const chunk of text.split(/\r?\n/)) {
@@ -301,6 +314,14 @@ function explicitHostEnvironmentAssignments(tokens: string[], isEnvWrapper: bool
       index += 1;
       continue;
     }
+    // "--" is the standard end-of-options marker: it consumes no value and
+    // does not itself reset the environment (unlike "-"), it just says no
+    // further env OPTIONs follow — the standard `NAME=VALUE`/command scan
+    // resumes right after it either way, so it's handled the same as "-".
+    if (token === "--") {
+      index += 1;
+      continue;
+    }
     const longOptionName = token.startsWith("--") && token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
     if (ENV_OPTIONS_WITHOUT_VALUE.has(longOptionName)) {
       index += 1;
@@ -480,13 +501,30 @@ export async function startSiteDevServer(input: {
   // must not drop a pid an earlier poll already found — union every poll's
   // result instead of replacing it. A stale pid costs nothing:
   // killProcessTreePosix already treats ESRCH as success.
+  // A session left open for a long time (the wrapper itself never exits,
+  // just repeatedly forks and reaps short-lived helpers) would otherwise
+  // retain every helper's pid forever — POSIX pids get REUSED once a
+  // process fully exits, so a stale captured pid could eventually name a
+  // completely unrelated, currently-running process. Pruning a pid the
+  // instant it's confirmed dead (not merely "not currently a descendant",
+  // which a reparented-but-still-alive orphan also looks like) keeps the
+  // set to only pids that are actually still worth being able to reach.
   const capturedDescendantSet = new Set<number>();
   let capturedDescendants: number[] = [];
-  const captureDescendantsOnce = (pid: number) => {
-    void processDescendantsPosix(pid).then((pids) => {
+  // The latest in-flight capture, so a caller that needs the FRESHEST
+  // possible snapshot (stopChild, once the wrapper has already exited) can
+  // await it instead of racing its own async ps read.
+  let pendingCapture: Promise<void> = Promise.resolve();
+  const captureDescendantsOnce = (pid: number): Promise<void> => {
+    const capture = processDescendantsPosix(pid).then((pids) => {
       for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
+      for (const capturedPid of capturedDescendantSet) {
+        if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
+      }
       capturedDescendants = [...capturedDescendantSet];
     });
+    pendingCapture = capture;
+    return capture;
   };
   const descendantCaptureTimer =
     process.platform !== "win32" && child.pid !== undefined
@@ -523,7 +561,7 @@ export async function startSiteDevServer(input: {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void stopChild(child, () => capturedDescendants).finally(() => {
+      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).finally(() => {
         reject(new Error("Site dev server start was cancelled."));
       });
     }
@@ -538,7 +576,7 @@ export async function startSiteDevServer(input: {
       // site dir. stopChild also sequences the Windows tree kill BEFORE the
       // wrapper signal; signalling first would let the taskkill race a dead
       // wrapper pid and orphan the real dev server.
-      void stopChild(child, () => capturedDescendants).finally(() => {
+      void stopChild(child, () => capturedDescendants, undefined, () => pendingCapture).finally(() => {
         reject(
           new Error(
             `Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
@@ -615,8 +653,9 @@ async function stopChild(
   child: ChildProcess,
   capturedDescendants: () => readonly number[] = () => [],
   beforeKill?: () => void,
+  awaitPendingCapture: () => Promise<void> = () => Promise.resolve(),
 ): Promise<void> {
-  const alreadyExited = child.exitCode !== null || child.signalCode !== null;
+  let alreadyExited = child.exitCode !== null || child.signalCode !== null;
   // A wrapper that backgrounds the real dev server and exits right after
   // printing its URL (e.g. `node server.js & echo http://127.0.0.1:3000`)
   // leaves `child` exited long before stop() is ever called, with the real
@@ -629,6 +668,18 @@ async function stopChild(
   // reachable directly even after the wrapper's own exit reparents them
   // away from its pid in the process table — proceed using those even
   // though the wrapper itself is already gone.
+  //
+  // captureDescendantsOnce is itself fire-and-forget from its OWN callers
+  // (an async `ps` read a caller doesn't block startup or readiness on) —
+  // a capture triggered right before the wrapper exits can still be
+  // IN FLIGHT the instant stop() runs. Give it a chance to land before
+  // deciding there's nothing to reach; only worth the wait once the
+  // wrapper is already gone (the common still-running stop() path has no
+  // reason to pay for it).
+  if (alreadyExited) {
+    await awaitPendingCapture();
+    alreadyExited = child.exitCode !== null || child.signalCode !== null;
+  }
   if (alreadyExited && capturedDescendants().length === 0) return;
   beforeKill?.();
   if (process.platform === "win32") {

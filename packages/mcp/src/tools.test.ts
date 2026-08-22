@@ -1532,14 +1532,55 @@ describe("mcp tools operate on allowed paths", () => {
       const result = await detectSites(ctx);
       expect(result).toMatchObject({ ok: true, detector: "mcp-local", count: 3 });
       if (!result.ok) return;
+      // Matches workspace-core's siteKind/siteConfidence exactly: a real
+      // index.html is a high-confidence static site, and a framework
+      // config file (vite.config.ts) makes a site "configured"/"high" the
+      // same way a dohc.json does — even with a package.json alongside it.
       expect(result.sites.map((site) => [site.root, site.kind, site.confidence])).toEqual([
         ["configured", "configured", "high"],
-        ["static", "static", "medium"],
-        ["vitey", "package", "medium"],
+        ["static", "static", "high"],
+        ["vitey", "configured", "high"],
       ]);
       expect(result.sites.find((site) => site.root === "vitey")).toMatchObject({
         scripts: { dev: "vite", build: "vite build" },
       });
+    });
+  });
+
+  it("detect_sites classifies a framework-config-only folder the same way workspace-core does", async () => {
+    await withWorkspace(async (ctx) => {
+      // No dohc.json, no package.json, no index.html — the config file
+      // alone is the only signal.
+      await mkdir(join(ctx.root, "framework-only"), { recursive: true });
+      await writeFile(join(ctx.root, "framework-only/vite.config.ts"), "export default {};");
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "framework-only");
+      expect(site).toMatchObject({ kind: "configured", confidence: "high" });
+    });
+  });
+
+  it("detect_sites flags an invalid preview.mode the same way workspace-core's shared validator would", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "bad-preview-mode"), { recursive: true });
+      await writeFile(join(ctx.root, "bad-preview-mode/index.html"), "<h1>Site</h1>");
+      await writeFile(
+        join(ctx.root, "bad-preview-mode/dohc.json"),
+        JSON.stringify({ type: "site", preview: { mode: "invalid" } }),
+      );
+
+      const result = await detectSites(ctx);
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) return;
+      const site = result.sites.find((candidate) => candidate.root === "bad-preview-mode");
+      expect(site?.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "invalid-preview-mode",
+          message: "dohc.json preview.mode must be static, dev, or build.",
+        }),
+      );
     });
   });
 

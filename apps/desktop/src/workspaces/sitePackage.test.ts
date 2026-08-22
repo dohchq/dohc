@@ -31,8 +31,13 @@ describe("shareMountRootForSite", () => {
       "shared-with-me/alex",
     );
     expect(shareMountRootForSite("shared-with-me/alex")).toBe("shared-with-me/alex");
+    // isSharedWithMePath recognizes "Shared-With-Me." as the same reserved
+    // segment (a case/Windows-alias variant), but the returned mount root
+    // must stay a literal PREFIX of the original root string — a canonical
+    // lowercase reconstruction would no longer prefix it, and downstream
+    // authority validation checks root.startsWith(mountRoot).
     expect(shareMountRootForSite("Shared-With-Me./alex/portal")).toBe(
-      "shared-with-me/alex",
+      "Shared-With-Me./alex",
     );
     expect(shareMountRootForSite("sites/shared-with-me/alex")).toBeNull();
     expect(shareMountRootForSite("shared-with-me")).toBeNull();
@@ -820,15 +825,19 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "prop-assign", "app.js"),
       [
-        // Provable, matching (tag, property): img.src.
+        // Provable, matching (tag, property), and actually INSERTED: img.src.
         'const img = document.createElement("img");',
+        "document.body.appendChild(img);",
         'img.src = "img.png";',
-        // Provable, matching (tag, property): a.href via setAttribute.
+        // Provable, matching (tag, property), and actually INSERTED: a.href
+        // via setAttribute.
         'const link = document.createElement("a");',
+        "document.body.appendChild(link);",
         'link.setAttribute("href", "linked.html");',
         // Provable receiver, WRONG property for the tag — div.src is an
         // inert expando, not a request (finding 2).
         'const div = document.createElement("div");',
+        "document.body.appendChild(div);",
         'div.src = "wrong-tag.png";',
         // Provably a DOM element, but querySelector's tag is UNKNOWN — an
         // unknowable tag can never satisfy the (tag, property) check.
@@ -1656,7 +1665,7 @@ describe("listSitePackages", () => {
       [
         '<input type="text" formaction="private-text.html">',
         '<button type="button" formaction="private-button.html">Go</button>',
-        '<input type="submit" formaction="real-submit.html">',
+        '<form><input type="submit" formaction="real-submit.html"></form>',
       ].join(""),
     );
     await writeFile(join(root, "formaction-not-submit", "private-text.html"), "<h1>Private</h1>");
@@ -2871,5 +2880,245 @@ describe("listSitePackages", () => {
     const site = (await listSitePackages(root)).find((candidate) => candidate.root === "no-csp");
 
     expect(manifestOf(site)?.assets).toContain("no-csp/a.js");
+  });
+
+  // ---- round-19 review pins ----
+
+  it("keeps only the most recently opened XHR target when a receiver re-opens before it sends", async () => {
+    await mkdir(join(root, "xhr-reopen"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-reopen", "index.html"),
+      [
+        "<script>",
+        "var xhr = new XMLHttpRequest();",
+        'xhr.open("GET", "private.json");',
+        'xhr.open("GET", "public.json");',
+        "xhr.send();",
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-reopen", "private.json"), "secret");
+    await writeFile(join(root, "xhr-reopen", "public.json"), "public");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "xhr-reopen");
+
+    expect(manifestOf(site)?.assets).toContain("xhr-reopen/public.json");
+    expect(manifestOf(site)?.assets).not.toContain("xhr-reopen/private.json");
+  });
+
+  it("does not treat a class named XMLHttpRequest as the real global", async () => {
+    await mkdir(join(root, "xhr-shadowed"), { recursive: true });
+    await writeFile(
+      join(root, "xhr-shadowed", "index.html"),
+      [
+        "<script>",
+        "class XMLHttpRequest { open() {} send() {} }",
+        "var xhr = new XMLHttpRequest();",
+        'xhr.open("GET", "private.json");',
+        "xhr.send();",
+        "</script>",
+      ].join(""),
+    );
+    await writeFile(join(root, "xhr-shadowed", "private.json"), "secret");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "xhr-shadowed");
+
+    expect(manifestOf(site)?.assets).not.toContain("xhr-shadowed/private.json");
+  });
+
+  it("leaves an @font-face url() unclassified so an img-src 'none' policy does not remove it", async () => {
+    await mkdir(join(root, "css-font-face"), { recursive: true });
+    await writeFile(
+      join(root, "css-font-face", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'; font-src \'self\'">',
+        '<style>@font-face { font-family: "Body"; src: url("font.woff2"); }</style>',
+      ].join(""),
+    );
+    await writeFile(join(root, "css-font-face", "font.woff2"), "font");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "css-font-face");
+
+    expect(manifestOf(site)?.assets).toContain("css-font-face/font.woff2");
+  });
+
+  it("does not corrupt an image-set() candidate whose own text contains type(", async () => {
+    await mkdir(join(root, "image-set-type-in-candidate"), { recursive: true });
+    await writeFile(
+      join(root, "image-set-type-in-candidate", "index.html"),
+      "<style>div { background: image-set(\"icons/type('dark').png\" 1x); }</style>",
+    );
+    await mkdir(join(root, "image-set-type-in-candidate", "icons"), { recursive: true });
+    await writeFile(
+      join(root, "image-set-type-in-candidate", "icons", "type('dark').png"),
+      "public",
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "image-set-type-in-candidate",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("image-set-type-in-candidate/icons/type('dark').png");
+  });
+
+  it("does not parse fetch-only HTML as an active document", async () => {
+    await mkdir(join(root, "fetch-only-html"), { recursive: true });
+    await writeFile(
+      join(root, "fetch-only-html", "index.html"),
+      '<script>fetch("template.html");</script>',
+    );
+    await writeFile(
+      join(root, "fetch-only-html", "template.html"),
+      '<img src="private.png">',
+    );
+    await writeFile(join(root, "fetch-only-html", "private.png"), "secret");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "fetch-only-html");
+
+    expect(manifestOf(site)?.assets).toContain("fetch-only-html/template.html");
+    expect(manifestOf(site)?.assets).not.toContain("fetch-only-html/private.png");
+  });
+
+  it("still expands an HTML page reached via <a href> navigation", async () => {
+    await mkdir(join(root, "anchor-navigation"), { recursive: true });
+    await writeFile(
+      join(root, "anchor-navigation", "index.html"),
+      '<a href="page.html">Go</a>',
+    );
+    await writeFile(
+      join(root, "anchor-navigation", "page.html"),
+      '<img src="asset.png">',
+    );
+    await writeFile(join(root, "anchor-navigation", "asset.png"), "public");
+
+    const site = (await listSitePackages(root)).find((candidate) => candidate.root === "anchor-navigation");
+
+    expect(manifestOf(site)?.assets).toContain("anchor-navigation/asset.png");
+  });
+
+  it("does not follow formaction on a submit control with no owning form", async () => {
+    await mkdir(join(root, "formaction-no-owner"), { recursive: true });
+    await writeFile(
+      join(root, "formaction-no-owner", "index.html"),
+      '<button type="submit" formaction="private.html">Send</button>',
+    );
+    await writeFile(join(root, "formaction-no-owner", "private.html"), "<h1>Private</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "formaction-no-owner",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("formaction-no-owner/private.html");
+  });
+
+  it("follows formaction on a submit control owned via a form= attribute naming a form declared later", async () => {
+    await mkdir(join(root, "formaction-form-attr"), { recursive: true });
+    await writeFile(
+      join(root, "formaction-form-attr", "index.html"),
+      [
+        '<button type="submit" form="checkout" formaction="confirm.html">Send</button>',
+        '<form id="checkout"></form>',
+      ].join(""),
+    );
+    await writeFile(join(root, "formaction-form-attr", "confirm.html"), "<h1>Confirm</h1>");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "formaction-form-attr",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("formaction-form-attr/confirm.html");
+  });
+
+  it("does not approve a detached script's src before it is inserted into the document", async () => {
+    await mkdir(join(root, "detached-script"), { recursive: true });
+    await writeFile(
+      join(root, "detached-script", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "detached-script", "app.js"),
+      [
+        'const script = document.createElement("script");',
+        'script.src = "private.js";',
+        // Never inserted anywhere — document.createElement alone never
+        // connects it to the document, so this request never fires.
+      ].join("\n"),
+    );
+    await writeFile(join(root, "detached-script", "private.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "detached-script",
+    );
+
+    expect(manifestOf(site)?.assets).not.toContain("detached-script/private.js");
+  });
+
+  it("approves a script's src once it is proven inserted into the document", async () => {
+    await mkdir(join(root, "inserted-script"), { recursive: true });
+    await writeFile(
+      join(root, "inserted-script", "index.html"),
+      '<script src="app.js"></script>',
+    );
+    await writeFile(
+      join(root, "inserted-script", "app.js"),
+      [
+        'const script = document.createElement("script");',
+        "document.body.appendChild(script);",
+        'script.src = "loaded.js";',
+      ].join("\n"),
+    );
+    await writeFile(join(root, "inserted-script", "loaded.js"), "console.log(1)");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "inserted-script",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("inserted-script/loaded.js");
+  });
+
+  it("applies the document's CSP to an external stylesheet's own url() references", async () => {
+    await mkdir(join(root, "csp-external-stylesheet"), { recursive: true });
+    await writeFile(
+      join(root, "csp-external-stylesheet", "index.html"),
+      [
+        '<meta http-equiv="Content-Security-Policy" content="img-src \'none\'; style-src \'self\'">',
+        '<link rel="stylesheet" href="style.css">',
+      ].join(""),
+    );
+    await writeFile(
+      join(root, "csp-external-stylesheet", "style.css"),
+      'body { background: url("private.png"); }',
+    );
+    await writeFile(join(root, "csp-external-stylesheet", "private.png"), "secret");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-external-stylesheet",
+    );
+
+    expect(manifestOf(site)?.assets).toContain("csp-external-stylesheet/style.css");
+    expect(manifestOf(site)?.assets).not.toContain("csp-external-stylesheet/private.png");
+  });
+
+  it("does not retroactively remove a reference requested before its own blocking meta CSP", async () => {
+    await mkdir(join(root, "csp-document-order"), { recursive: true });
+    await writeFile(
+      join(root, "csp-document-order", "index.html"),
+      [
+        '<script src="early.js"></script>',
+        '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'">',
+        '<script src="late.js"></script>',
+      ].join(""),
+    );
+    await writeFile(join(root, "csp-document-order", "early.js"), "console.log('early')");
+    await writeFile(join(root, "csp-document-order", "late.js"), "console.log('late')");
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "csp-document-order",
+    );
+
+    // Chromium already requested early.js before it ever saw the policy —
+    // the published artifact must not omit a resource the preview used.
+    expect(manifestOf(site)?.assets).toContain("csp-document-order/early.js");
+    expect(manifestOf(site)?.assets).not.toContain("csp-document-order/late.js");
   });
 });

@@ -171,14 +171,16 @@ export function createSitePreviewLifecycle(input: {
       );
     },
 
+    // Includes "exited" records too: a wrapper backgrounding its real
+    // server and exiting right after reporting the ready URL leaves the
+    // RECORD "exited" while the real server (or its captured descendants)
+    // can still be running — stop() (below) still needs to reach it, and
+    // that only happens if this list doesn't filter it out first.
     previewsForWorkspace(
       workspaceId: string,
     ): Array<{ siteRoot: string; handle: SitePreviewHandle }> {
       return [...activePreviews.values()]
-        .filter(
-          (active): active is RunningPreview =>
-            active.workspaceId === workspaceId && active.state === "running",
-        )
+        .filter((active) => active.workspaceId === workspaceId)
         .map(({ siteRoot, handle }) => ({ siteRoot, handle }));
     },
 
@@ -194,11 +196,18 @@ export function createSitePreviewLifecycle(input: {
         (active?.state !== "running" || active.handle !== expected)
       ) return;
       activePreviews.delete(key);
-      if (!active || active.state === "exited") return;
+      if (!active) return;
+      // An "exited" record's own wrapper process is already gone, but
+      // handle.stop() (stopChild) is specifically built to still reach a
+      // descendant it captured while the wrapper was alive — skipping it
+      // here left a successfully captured background server running
+      // forever after the tab, workspace, or app closes. releaseOrigin
+      // already ran once, in markExitedIfCurrent, for an exited record —
+      // running it again would double-release.
       try {
         await active.handle.stop();
       } finally {
-        active.releaseOrigin();
+        if (active.state === "running") active.releaseOrigin();
       }
     },
 
@@ -209,10 +218,8 @@ export function createSitePreviewLifecycle(input: {
       const stops: Promise<void>[] = [];
       for (const [key, active] of [...activePreviews]) {
         activePreviews.delete(key);
-        if (active.state === "running") {
-          active.releaseOrigin();
-          stops.push(active.handle.stop().catch(() => undefined));
-        }
+        if (active.state === "running") active.releaseOrigin();
+        stops.push(active.handle.stop().catch(() => undefined));
       }
       await Promise.all(stops);
     },

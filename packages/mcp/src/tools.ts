@@ -1904,6 +1904,19 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     configPreviewMode === "build"
       ? configPreviewMode
       : undefined;
+  // Same code and message as workspace-core's parseDohcSiteConfig (packages/
+  // workspace-core/src/sites.ts) for the identical malformed input — a
+  // dohc.json preview.mode that isn't one of the three valid values must
+  // surface the SAME diagnostic here as it does for the desktop detector,
+  // or test_site can silently pass a config the desktop Sites view flags.
+  if (configPreviewMode !== undefined && configuredPreviewMode === undefined) {
+    diagnostics.push({
+      severity: "warning",
+      code: "invalid-preview-mode",
+      path: configPath ?? relativeJoin(root, "dohc.json"),
+      message: "dohc.json preview.mode must be static, dev, or build.",
+    });
+  }
   if (configPreviewCommand) {
     if (configPreviewMode === "static" || configPreviewMode === "build") {
       diagnostics.push({
@@ -2020,13 +2033,19 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     return null;
   }
 
-  const kind: SiteKind = configPath ? "configured" : hasPackageSignal || frameworkConfig ? "package" : "static";
+  // Mirrors workspace-core's siteKind/siteConfidence (packages/workspace-
+  // core/src/sites.ts) branch-for-branch: a dohc.json config OR a
+  // framework config file (vite.config.ts, ...) is "configured", and
+  // either one is a high-confidence signal on its own, same as an actual
+  // index.html file — the desktop Sites view and MCP's detect_sites must
+  // describe the same project the same way.
+  const kind: SiteKind = configPath || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   const confidence: SiteConfidence =
     configPath && diagnostics.every((diagnostic) => diagnostic.severity !== "error")
       ? "high"
-      : hasIndex && (hasPackageSignal || frameworkConfig)
+      : hasIndex || frameworkConfig
         ? "high"
-        : hasIndex || hasPackageSignal || frameworkConfig
+        : hasPackageSignal
           ? "medium"
           : "low";
   const configuredTitle = typeof config?.title === "string" && config.title.trim() ? config.title : undefined;
