@@ -19,7 +19,7 @@ import {
   isAllowedLoopbackFrameUrl,
 } from "../window/createMainWindow";
 import {
-  assertActiveWorkspaceForSitePreviewStop,
+  assertActiveWorkspaceForSite,
   createSitePreviewLifecycle,
   createSitePreviewStartRegistry,
 } from "./sitePreviewLifecycle";
@@ -349,18 +349,26 @@ describe("site preview lifecycle", () => {
 
   it("rechecks the active workspace after a queued stop obtains the lock", async () => {
     let activeWorkspaceId: string | undefined = "workspace-1";
-    let releaseLock: () => void = () => undefined;
-    const lock = new Promise<void>((resolve) => {
-      releaseLock = resolve;
+    let releaseFirst: () => void = () => undefined;
+    const firstHold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const previews = createSitePreviewLifecycle({
+      allowOrigin: allowLoopbackFrameOrigin,
     });
     const stop = vi.fn(async () => undefined);
-    const queuedStop = lock.then(async () => {
-      assertActiveWorkspaceForSitePreviewStop(activeWorkspaceId, "workspace-1");
+
+    // Occupy the lock for "workspace-1"/"site" first, so the recheck below
+    // is genuinely queued behind it rather than running immediately.
+    const holding = previews.withStartLock("workspace-1", "site", () => firstHold);
+    const queuedStop = previews.withStartLock("workspace-1", "site", async () => {
+      assertActiveWorkspaceForSite(activeWorkspaceId, "workspace-1", "Site preview stop request");
       await stop();
     });
 
     activeWorkspaceId = "workspace-2";
-    releaseLock();
+    releaseFirst();
+    await holding;
 
     await expect(queuedStop).rejects.toThrow(/active workspace/i);
     expect(stop).not.toHaveBeenCalled();

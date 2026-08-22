@@ -3,11 +3,11 @@ import { isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { killProcessTreePosix, processDescendantsPosix } from "../process/posixSpawn";
+import { killProcessTreePosix, processDescendants, readProcessTableWithPs } from "../process/posixSpawn";
 import {
   killChildTreeWin32,
   killProcessTreeWin32,
-  processDescendantsWin32,
+  readProcessTableWithPowershell,
   resolveSpawnCommand,
 } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
@@ -66,12 +66,12 @@ const DESCENDANT_CAPTURE_INTERVAL_MS = 5000;
 // The will-quit teardown's own budget must cover this site-preview stop
 // path's worst case (SIGTERM, then this grace, then the SIGKILL
 // round-trip) or an unref'd preview process can survive with no kill
-// signal ever sent (round-15 finding 7). Computed HERE, not duplicated as
+// signal ever sent. Computed HERE, not duplicated as
 // an independent literal in main.ts — a hard-coded, independently-drifting
 // duplicate is exactly how the two fell out of sync before. Never shorter
 // than the ORIGINAL 3 s budget the other, unrelated teardown tasks in
 // main.ts's will-quit handler were sized against.
-export const WILL_QUIT_BUDGET_MS = Math.max(3000, BUILD_HARD_KILL_GRACE_MS + 1000);
+export const WILL_QUIT_BUDGET_MS = BUILD_HARD_KILL_GRACE_MS + 1000;
 const DEV_URL_RE =
   /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|[\s.)"'`,\]>])/i;
 const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;
@@ -143,8 +143,85 @@ function isPidAlive(pid: number): boolean {
 // orphan behind on Windows exactly as it does on POSIX, and taskkill /T
 // needs a live root pid to walk — a snapshot taken while the wrapper was
 // still running is the only way to reach it once that wrapper is gone.
-function processDescendants(pid: number): Promise<number[]> {
-  return process.platform === "win32" ? processDescendantsWin32(pid) : processDescendantsPosix(pid);
+function defaultDescendantsReader(pid: number): Promise<number[]> {
+  return processDescendants(
+    pid,
+    process.platform === "win32" ? readProcessTableWithPowershell : readProcessTableWithPs,
+  );
+}
+
+interface DescendantCapture {
+  /** The freshest known snapshot, updated as captures resolve. */
+  captured(): readonly number[];
+  /** Takes one snapshot right now, in addition to the periodic poll. */
+  captureNow(): Promise<void>;
+  /**
+   * Every capture CURRENTLY in flight, so a caller that needs the FRESHEST
+   * possible snapshot (stopChild, once the wrapper has already exited) can
+   * await ALL of them instead of racing its own async ps read. A single
+   * "latest" promise isn't enough: an interval tick that started SLOW and
+   * one that started later but finishes FAST would otherwise have the fast
+   * one overwrite it, so a caller awaiting only the fast one would decide
+   * the set is empty and return before the slow one's own descendant lands.
+   */
+  awaitAll(): Promise<void>;
+}
+
+// Shared by startSiteDevServer and buildSite: both poll a spawned child's
+// descendant tree on an interval so stopChild can still reach a descendant
+// the child later backgrounds even after the child itself has exited and
+// reparenting has moved that descendant out of the child's own subtree —
+// best-effort, since a descendant forked and orphaned between two polls is
+// still missed, a known, accepted residual gap. setInterval's first tick
+// only fires after a full interval, so an immediate snapshot is taken too:
+// a wrapper that backgrounds its real server and exits well inside that
+// window would otherwise never get captured at all. A poll that returns
+// fewer pids than an earlier one (a transient read failure, or a descendant
+// that hadn't forked yet on an earlier tick) must not drop a pid an earlier
+// poll already found — union every poll's result instead of replacing it. A
+// session left open for a long time would otherwise retain every helper's
+// pid forever, and POSIX/Windows pids get REUSED once a process fully
+// exits — pruning a pid the instant it's confirmed dead (isPidAlive) keeps
+// the set to only pids still worth being able to reach.
+function createDescendantCapture(
+  child: ChildProcess,
+  options: {
+    intervalMs?: number;
+    reader?: (pid: number) => Promise<number[]>;
+  } = {},
+): DescendantCapture {
+  const capturedDescendantSet = new Set<number>();
+  let capturedDescendants: number[] = [];
+  const inFlightCaptures = new Set<Promise<void>>();
+  const readDescendants = options.reader ?? defaultDescendantsReader;
+  const captureOnce = (pid: number): Promise<void> => {
+    const capture = readDescendants(pid).then((pids) => {
+      for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
+      for (const capturedPid of capturedDescendantSet) {
+        if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
+      }
+      capturedDescendants = [...capturedDescendantSet];
+    });
+    inFlightCaptures.add(capture);
+    void capture.finally(() => inFlightCaptures.delete(capture));
+    return capture;
+  };
+  const captureNow = (): Promise<void> =>
+    child.pid !== undefined ? captureOnce(child.pid) : Promise.resolve();
+  const timer =
+    child.pid !== undefined
+      ? setInterval(() => captureOnce(child.pid!), options.intervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS)
+      : undefined;
+  void captureNow();
+  timer?.unref?.();
+  child.once("exit", () => {
+    if (timer) clearInterval(timer);
+  });
+  return {
+    captured: () => capturedDescendants,
+    captureNow,
+    awaitAll: () => Promise.all([...inFlightCaptures]).then(() => undefined),
+  };
 }
 
 function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: string): void {
@@ -714,7 +791,7 @@ export async function startSiteDevServer(input: {
   // earlier one that resolves SLOW, a later one that resolves FAST) via
   // controlled promises, instead of depending on real ps/PowerShell
   // subprocess timing. Production always gets the real, platform-
-  // dispatched processDescendants.
+  // dispatched defaultDescendantsReader.
   descendantsReader?: (pid: number) => Promise<number[]>;
 }): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
@@ -733,73 +810,14 @@ export async function startSiteDevServer(input: {
   });
   child.unref();
 
-  // A dev server session can run for a long time after its wrapper exits
-  // (see stopChild's comment on the backgrounded-wrapper case) — poll the
-  // live tree on POSIX while the wrapper is confirmed still running so a
-  // descendant it later backgrounds stays reachable by pid even once the
-  // wrapper itself is gone and reparenting has moved it out of the
-  // wrapper's own subtree. Best-effort: a descendant forked and orphaned
-  // between two polls is still missed, the same residual #857 accepted.
-  // A poll that returns fewer pids than an earlier one (a transient `ps`
-  // failure, or a descendant that hadn't forked yet on an earlier tick)
-  // must not drop a pid an earlier poll already found — union every poll's
-  // result instead of replacing it. A stale pid costs nothing:
-  // killProcessTreePosix already treats ESRCH as success.
-  // A session left open for a long time (the wrapper itself never exits,
-  // just repeatedly forks and reaps short-lived helpers) would otherwise
-  // retain every helper's pid forever — POSIX pids get REUSED once a
-  // process fully exits, so a stale captured pid could eventually name a
-  // completely unrelated, currently-running process. Pruning a pid the
-  // instant it's confirmed dead (not merely "not currently a descendant",
-  // which a reparented-but-still-alive orphan also looks like) keeps the
-  // set to only pids that are actually still worth being able to reach.
-  const capturedDescendantSet = new Set<number>();
-  let capturedDescendants: number[] = [];
-  // Every capture CURRENTLY in flight, so a caller that needs the FRESHEST
-  // possible snapshot (stopChild, once the wrapper has already exited) can
-  // await ALL of them instead of racing its own async ps read. A single
-  // "latest" promise isn't enough: an interval tick that started SLOW and
-  // one that started later but finishes FAST would otherwise have the fast
-  // one overwrite it, so stopChild awaits only the fast one, decides the
-  // set is empty, and returns — the slow one's own descendant then lands
-  // too late to be reached at all.
-  const inFlightCaptures = new Set<Promise<void>>();
-  const readDescendants = input.descendantsReader ?? processDescendants;
-  const captureDescendantsOnce = (pid: number): Promise<void> => {
-    const capture = readDescendants(pid).then((pids) => {
-      for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
-      for (const capturedPid of capturedDescendantSet) {
-        if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
-      }
-      capturedDescendants = [...capturedDescendantSet];
-    });
-    inFlightCaptures.add(capture);
-    void capture.finally(() => inFlightCaptures.delete(capture));
-    return capture;
-  };
-  // Snapshots inFlightCaptures at CALL time — evaluated fresh each time a
-  // caller needs it, so it always awaits whatever is actually still
-  // outstanding at that instant, not whichever capture happened to start
-  // (or finish) last.
-  const awaitAllCaptures = (): Promise<void> => Promise.all([...inFlightCaptures]).then(() => undefined);
-  const descendantCaptureTimer =
-    child.pid !== undefined
-      ? setInterval(
-          () => captureDescendantsOnce(child.pid!),
-          input.descendantCaptureIntervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS,
-        )
-      : undefined;
-  // setInterval's first tick only fires after a full interval — a wrapper
-  // that backgrounds its real server and exits well inside that window
-  // (the documented `server & echo URL` case) would otherwise never get
-  // captured at all. Take one snapshot immediately too — best-effort only,
-  // since spawn() returning is not proof the shell has executed anything
-  // yet; maybeResolve (below) takes a second, more reliable one once the
-  // wrapper's own ready output proves it already ran everything before it.
-  if (child.pid !== undefined) captureDescendantsOnce(child.pid);
-  descendantCaptureTimer?.unref?.();
-  child.once("exit", () => {
-    if (descendantCaptureTimer) clearInterval(descendantCaptureTimer);
+  // See createDescendantCapture for why this polls the live tree and unions
+  // every poll's result — a dev server session can run for a long time
+  // after its wrapper exits (see stopChild's comment on the backgrounded-
+  // wrapper case), so a descendant it later backgrounds must stay reachable
+  // by pid even once the wrapper itself is gone.
+  const descendants = createDescendantCapture(child, {
+    intervalMs: input.descendantCaptureIntervalMs,
+    reader: input.descendantsReader,
   });
 
   let resolved = false;
@@ -817,7 +835,7 @@ export async function startSiteDevServer(input: {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).finally(() => {
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
         reject(new Error("Site dev server start was cancelled."));
       });
     }
@@ -832,7 +850,7 @@ export async function startSiteDevServer(input: {
       // site dir. stopChild also sequences the Windows tree kill BEFORE the
       // wrapper signal; signalling first would let the taskkill race a dead
       // wrapper pid and orphan the real dev server.
-      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).finally(() => {
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
         reject(
           new Error(
             `Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
@@ -861,7 +879,7 @@ export async function startSiteDevServer(input: {
       // printing that line (backgrounding included) has already run, so
       // this is a far more reliable synchronization point for a second
       // snapshot than an arbitrary short delay would be.
-      if (child.pid !== undefined) captureDescendantsOnce(child.pid);
+      void descendants.captureNow();
       resolve({
         url,
         command: input.command,
@@ -878,11 +896,11 @@ export async function startSiteDevServer(input: {
         stop: () =>
           stopChild(
             child,
-            () => capturedDescendants,
+            descendants.captured,
             () => {
               stopped = true;
             },
-            () => awaitAllCaptures(),
+            descendants.awaitAll,
           ),
       });
     }
@@ -924,14 +942,14 @@ async function stopChild(
   // POSIX process-group equivalent) needs the wrapper's pid to still be a
   // live process to walk its tree from — a dead pid gives it nothing to
   // reach either way, on EITHER platform. capturedDescendants (see
-  // startSiteDevServer's/buildSite's periodic poll, platform-dispatched via
-  // processDescendants) carries pids enumerated WHILE the wrapper was still
+  // createDescendantCapture, shared by startSiteDevServer's/buildSite's
+  // periodic poll) carries pids enumerated WHILE the wrapper was still
   // alive, so they stay reachable directly by pid even after the wrapper's
   // own exit reparents them away from its pid in the process table —
   // proceed using those even though the wrapper itself is already gone.
   //
-  // captureDescendantsOnce is itself fire-and-forget from its OWN callers
-  // (an async `ps` read a caller doesn't block startup or readiness on) —
+  // Each capture is itself fire-and-forget from its OWN caller (an async
+  // `ps`/PowerShell read a caller doesn't block startup or readiness on) —
   // a capture triggered right before the wrapper exits can still be
   // IN FLIGHT the instant stop() runs. Give it a chance to land before
   // deciding there's nothing to reach; only worth the wait once the
@@ -1073,38 +1091,12 @@ export async function buildSite(input: {
   // A build command that backgrounds a helper or server (a watcher, a
   // local verification server) and lets its own shell wrapper exit
   // successfully once the configured output is written leaves that
-  // descendant running — same reasoning, same POSIX-only mechanism, as
-  // startSiteDevServer's own capture. A build normally runs and exits on
-  // its own quickly, so this poll rarely needs more than its immediate
-  // and ready-adjacent snapshots, but the interval still covers a longer
-  // one.
-  const capturedDescendantSet = new Set<number>();
-  let capturedDescendants: number[] = [];
-  // See startSiteDevServer's own inFlightCaptures for why this tracks
-  // every capture CURRENTLY outstanding instead of only the latest one.
-  const inFlightCaptures = new Set<Promise<void>>();
-  const captureDescendantsOnce = (pid: number): Promise<void> => {
-    const capture = processDescendants(pid).then((pids) => {
-      for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
-      for (const capturedPid of capturedDescendantSet) {
-        if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
-      }
-      capturedDescendants = [...capturedDescendantSet];
-    });
-    inFlightCaptures.add(capture);
-    void capture.finally(() => inFlightCaptures.delete(capture));
-    return capture;
-  };
-  const awaitAllCaptures = (): Promise<void> => Promise.all([...inFlightCaptures]).then(() => undefined);
-  const descendantCaptureTimer =
-    child.pid !== undefined
-      ? setInterval(() => captureDescendantsOnce(child.pid!), DESCENDANT_CAPTURE_INTERVAL_MS)
-      : undefined;
-  if (child.pid !== undefined) captureDescendantsOnce(child.pid);
-  descendantCaptureTimer?.unref?.();
-  child.once("exit", () => {
-    if (descendantCaptureTimer) clearInterval(descendantCaptureTimer);
-  });
+  // descendant running — same reasoning, same mechanism, as
+  // startSiteDevServer's own capture (see createDescendantCapture). A build
+  // normally runs and exits on its own quickly, so this poll rarely needs
+  // more than its immediate and exit-adjacent snapshots, but the interval
+  // still covers a longer one.
+  const descendants = createDescendantCapture(child);
 
   const exitCode = await new Promise<number | null>((resolve) => {
     let settled = false;
@@ -1121,7 +1113,7 @@ export async function buildSite(input: {
     function abortBuild() {
       if (settled) return;
       pushLog(logs, "system", "Build cancelled.");
-      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).then(() => finish(null));
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => finish(null));
     }
 
     timer = setTimeout(() => {
@@ -1129,7 +1121,7 @@ export async function buildSite(input: {
       pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
       // stopChild sequences the Windows tree kill BEFORE the wrapper signal
       // and resolves once the child exits (or the kill grace lapses).
-      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).then(() => finish(null));
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => finish(null));
     }, timeoutMs);
     if (input.signal?.aborted) abortBuild();
     else input.signal?.addEventListener("abort", abortBuild, { once: true });
@@ -1146,7 +1138,7 @@ export async function buildSite(input: {
       // (and its awaiting every in-flight capture) makes this a no-op
       // unless a descendant was actually captured while the wrapper was
       // alive.
-      void stopChild(child, () => capturedDescendants, undefined, () => awaitAllCaptures()).then(() =>
+      void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() =>
         finish(timedOut ? null : code),
       );
     });

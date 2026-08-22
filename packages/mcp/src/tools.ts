@@ -1730,46 +1730,12 @@ function configString(value: unknown, key: string): string | undefined {
   return typeof found === "string" && found.trim() ? found : undefined;
 }
 
-// Mirrors workspace-core's safeRelativeConfigPath (packages/workspace-core/src/sites.ts):
-// a configured dohc.json path must be relative, not escape its own segments
-// with "..", and not embed a NUL byte. The two detectors read the same
-// dohc.json field, so an invalid value must be rejected the same way in both
-// (#853 round-10 finding 10) — even though safeResolve is the real boundary
-// once the value is joined with the site root and read from disk.
-// Windows silently drops a segment's trailing dots/spaces, so "foo/.. " reads
-// as "foo/..". Compare the alias, not the literal, or that spelling would
-// pass this check yet still walk out of the site root once resolved.
-function stripConfigPathAliasSuffix(segment: string): string {
-  return segment.replace(/[. ]+$/, "");
-}
-
-function isSafeRelativeConfigPath(value: string): boolean {
-  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\")) {
-    return false;
-  }
-  if (value.includes("\0")) return false;
-  const segments = value
-    .replaceAll("\\", "/")
-    .replace(/^\/+/, "")
-    .split("/")
-    .filter((segment) => segment !== "" && segment !== ".");
-  if (segments.length === 0) return false;
-  const aliasSegments = segments.map(stripConfigPathAliasSuffix);
-  return !aliasSegments.some((segment) => segment === "" || segment === "." || segment === "..");
-}
-
-function normalizedConfigPath(value: string): string {
-  return value
-    .replaceAll("\\", "/")
-    .replace(/^\/+/, "")
-    .split("/")
-    .filter((segment) => segment !== "" && segment !== ".")
-    .join("/");
-}
-
 // Reads and validates config.preview.entry the same way workspace-core's
 // parsePreview does, so a site with a configured entry is detected with the
-// same value regardless of which detector runs.
+// same value regardless of which detector runs — safeRelativeConfigPath is
+// the same relative/no-traversal/no-NUL/no-Windows-alias-suffix validator
+// build.output uses below, so the two dohc.json fields are rejected on the
+// same unsafe input the same way.
 function configuredPreviewEntry(
   config: RawDohcSiteConfig | null,
   path: string,
@@ -1778,8 +1744,8 @@ function configuredPreviewEntry(
   const preview = config?.preview;
   if (!isRecord(preview) || preview.entry === undefined) return undefined;
   const raw = preview.entry;
-  const valid = typeof raw === "string" && raw.trim() !== "" && isSafeRelativeConfigPath(raw);
-  if (!valid) {
+  const normalized = typeof raw === "string" ? safeRelativeConfigPath(raw) : undefined;
+  if (normalized === undefined) {
     diagnostics.push({
       severity: "warning",
       code: "invalid-preview-entry",
@@ -1791,7 +1757,7 @@ function configuredPreviewEntry(
     });
     return undefined;
   }
-  return normalizedConfigPath(raw);
+  return normalized;
 }
 
 // Joins a configured entry under the site root, mirroring desktop's
@@ -1829,7 +1795,11 @@ async function readJsonDetailed<T>(
   }
 }
 
-async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): Promise<WorkspaceSite | null> {
+async function detectSiteAt(
+  ctx: ToolContext,
+  absolute: string,
+  root: string,
+): Promise<{ site: WorkspaceSite; realBuildOutputs: readonly string[] } | null> {
   let dirents;
   try {
     dirents = await readdir(absolute, { withFileTypes: true });
@@ -1857,9 +1827,9 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
     } else if (!isRecord(parsed.value)) {
       // Valid JSON, but not an object (e.g. `[]`) — matches workspace-core's
       // parseDohcSiteConfig shape check (packages/workspace-core/src/sites.ts),
-      // same code and message, so both detectors agree on this input (#853
-      // round-11 finding 14). A bare JSON.parse cast would otherwise accept
-      // this as a well-formed config with no diagnostic at all.
+      // same code and message, so both detectors agree on this input. A bare
+      // JSON.parse cast would otherwise accept this as a well-formed config
+      // with no diagnostic at all.
       diagnostics.push({
         severity: "error",
         code: "invalid-config",
@@ -1883,7 +1853,7 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
       });
     } else if (!isRecord(parsed.value)) {
       // Mirrors workspace-core's parsePackageJson shape check — same code and
-      // message as the shared parser's non-object case (#853 round-11 finding 14).
+      // message as the shared parser's non-object case.
       diagnostics.push({
         severity: "error",
         code: "invalid-package-json",
@@ -2001,10 +1971,17 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   // test_site/build_site acting on) a stale conventional artifact left
   // over from an earlier build. So this check is unconditional, and its
   // result OVERRIDES whatever the conventional loop already set.
+  // Every entry `detectedBuildOutputs` already required a passing isFile()
+  // check above; a configured output only joins them once its own check
+  // here passes too — so realBuildOutputs never needs a second stat of a
+  // path this function already confirmed. detectSites' own walk used to
+  // re-stat each of these itself to learn the same thing.
+  const realBuildOutputs = [...detectedBuildOutputs];
   if (configuredBuildOutput) {
     const configuredIndexInfo = await stat(join(absolute, configuredBuildOutput, "index.html")).catch(() => null);
     if (configuredIndexInfo?.isFile()) {
       builtEntry = relativeJoin(relativeJoin(root, configuredBuildOutput), "index.html");
+      realBuildOutputs.push(configuredBuildOutput);
     }
   }
   const buildOutputs = [configuredBuildOutput, ...detectedBuildOutputs].filter(
@@ -2086,17 +2063,20 @@ async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): P
   const packageManager = packageManagerFromFiles(allNames, pkg);
 
   return {
-    root,
-    title: configuredTitle ?? packageTitle ?? siteTitleFromPath(root),
-    kind,
-    confidence,
-    ...(entry ? { entry } : {}),
-    ...(packageManager ? { packageManager } : {}),
-    scripts,
-    ...(configuredPreviewMode ? { configuredPreviewMode } : {}),
-    buildOutputs: uniqueBuildOutputs,
-    ...(configPath ? { configPath } : {}),
-    diagnostics,
+    site: {
+      root,
+      title: configuredTitle ?? packageTitle ?? siteTitleFromPath(root),
+      kind,
+      confidence,
+      ...(entry ? { entry } : {}),
+      ...(packageManager ? { packageManager } : {}),
+      scripts,
+      ...(configuredPreviewMode ? { configuredPreviewMode } : {}),
+      buildOutputs: uniqueBuildOutputs,
+      ...(configPath ? { configPath } : {}),
+      diagnostics,
+    },
+    realBuildOutputs: [...new Set(realBuildOutputs)],
   };
 }
 
@@ -2132,23 +2112,21 @@ export async function detectSites(
   // sibling's dohc.json only claims as a future build output, and
   // workspace-core's own configuredOutputArtifacts crediting is likewise
   // gated on a real index.html existing at the exact claimed path, never
-  // on the claim alone. site.buildOutputs mixes both detected-real and
-  // configured-only entries, so each candidate is independently verified
-  // against the filesystem here rather than trusted from the claim. The
-  // walk visits a parent before its children, so a site's real outputs are
-  // always known before recursion reaches them.
+  // on the claim alone. detectSiteAt already confirmed each of its own
+  // realBuildOutputs against the filesystem (a configured-only claim with
+  // no real artifact never joins that list), so nothing here re-stats a
+  // path detectSiteAt already checked. The walk visits a parent before its
+  // children, so a site's real outputs are always known before recursion
+  // reaches them.
   const knownBuildOutputPaths = new Set<string>();
   async function walk(absolute: string, root: string, depth: number): Promise<void> {
     if (isIgnoredSitePath(root)) return;
     if (!knownBuildOutputPaths.has(root)) {
-      const site = await detectSiteAt(ctx, absolute, root);
-      if (site) {
-        sites.push(site);
-        for (const output of site.buildOutputs) {
-          const hasRealArtifact = await stat(join(absolute, output, "index.html"))
-            .then((outputInfo) => outputInfo.isFile())
-            .catch(() => false);
-          if (hasRealArtifact) knownBuildOutputPaths.add(relativeJoin(root, output));
+      const detected = await detectSiteAt(ctx, absolute, root);
+      if (detected) {
+        sites.push(detected.site);
+        for (const output of detected.realBuildOutputs) {
+          knownBuildOutputPaths.add(relativeJoin(root, output));
         }
       }
     }
@@ -2411,8 +2389,9 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
 export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
   const root = await resolveSiteRoot(ctx, args.siteRoot);
   if (!root.ok) return root;
-  const site = await detectSiteAt(ctx, root.absolute, root.normalized);
-  if (!site) return { ok: false as const, reason: `not a detected site: ${root.normalized}` };
+  const detected = await detectSiteAt(ctx, root.absolute, root.normalized);
+  if (!detected) return { ok: false as const, reason: `not a detected site: ${root.normalized}` };
+  const { site } = detected;
 
   const checks: SiteCheck[] = [];
   checks.push({

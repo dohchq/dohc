@@ -5,8 +5,8 @@
 // The negated "-pid" process-group form cannot do this job here: the callers
 // fork children through Electron's utilityProcess.fork, which has no
 // `detached` option, so a child never becomes its own group leader and "-pid"
-// would signal this app's own group (CodeRabbit #779 R10). Enumerate the tree
-// from the process table instead and signal each pid.
+// would signal this app's own group. Enumerate the tree from the process
+// table instead and signal each pid.
 import { execFile } from "node:child_process";
 
 export interface ProcessTableEntry {
@@ -79,10 +79,16 @@ export interface KillProcessTreePosixOptions {
  * reparented away from `rootPid` in the process table. Excludes `rootPid`
  * itself. An unreadable process table degrades to an empty list, the same
  * way killProcessTreePosix degrades to signalling only its known pids.
+ *
+ * Platform-agnostic: `readProcessTable` supplies the platform-specific text
+ * source (POSIX `ps`, here; Windows Get-CimInstance, windowsSpawn.ts's own
+ * readProcessTableWithPowershell) in the SAME "pid ppid" shape
+ * parseProcessTable expects, so the tree-walk itself needs only this one
+ * implementation for both platforms — the caller picks which reader to pass.
  */
-export async function processDescendantsPosix(
+export async function processDescendants(
   rootPid: number,
-  readProcessTable: () => Promise<string> = readProcessTableWithPs,
+  readProcessTable: () => Promise<string>,
 ): Promise<number[]> {
   try {
     const table = parseProcessTable(await readProcessTable());
@@ -92,7 +98,7 @@ export async function processDescendantsPosix(
   }
 }
 
-function readProcessTableWithPs(): Promise<string> {
+export function readProcessTableWithPs(): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile("ps", ["-A", "-o", "pid=,ppid="], (error, stdout) => {
       if (error) reject(error);

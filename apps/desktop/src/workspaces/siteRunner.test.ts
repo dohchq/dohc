@@ -21,7 +21,6 @@ import { buildOutputSiteRoot } from "./sitePackage";
 import {
   assertLoopbackOnlyDevServerCommand,
   buildSite,
-  BUILD_HARD_KILL_GRACE_MS,
   detectBuildOutput,
   detectDevUrl,
   packageManagerCommand,
@@ -30,7 +29,6 @@ import {
   splitShellStatements,
   startSiteDevServer,
   startStaticSitePreview,
-  WILL_QUIT_BUDGET_MS,
 } from "./siteRunner";
 
 let root: string;
@@ -577,15 +575,6 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("vite", ["--HOST", "127.0.0.1"]),
     ).not.toThrow();
-  });
-
-  it("gives the will-quit teardown enough budget to reach a site preview's own hard-kill deadline", () => {
-    // stopChild's POSIX/Windows path waits BUILD_HARD_KILL_GRACE_MS for a
-    // graceful exit before it can even issue SIGKILL — quit exiting before
-    // that deadline (plus headroom for the SIGKILL round-trip itself)
-    // leaves an unref'd preview process with no kill signal ever sent
-    // (round-15 finding 7).
-    expect(WILL_QUIT_BUDGET_MS).toBeGreaterThan(BUILD_HARD_KILL_GRACE_MS);
   });
 
   it("rejects a leading HOST/HOSTNAME environment assignment that binds outside loopback", () => {

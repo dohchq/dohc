@@ -18,7 +18,6 @@ type SitesLoadState =
 function useSites(
   workspaceId: string,
   filesSettledRevision: number,
-  refreshKey = 0,
 ): SitesLoadState {
   const [state, setState] = useState<SitesLoadState>({ status: "loading" });
 
@@ -41,7 +40,7 @@ function useSites(
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, filesSettledRevision, refreshKey]);
+  }, [workspaceId, filesSettledRevision]);
 
   return state;
 }
@@ -65,14 +64,9 @@ export function SitesView(props: {
   // rerun and the Sites view would keep stale titles, diagnostics,
   // scripts, and preview modes until the user manually refreshed it.
   filesSettledRevision: number;
-  refreshKey?: number;
   onOpenPath: (path: string) => void;
 }) {
-  const state = useSites(
-    props.workspaceId,
-    props.filesSettledRevision,
-    props.refreshKey,
-  );
+  const state = useSites(props.workspaceId, props.filesSettledRevision);
   const sites = state.status === "ready" ? state.sites : [];
 
   return (

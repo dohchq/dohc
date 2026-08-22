@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   killProcessTreePosix,
   parseProcessTable,
-  processDescendantsPosix,
+  processDescendants,
   processTreePids,
 } from "./posixSpawn";
 
@@ -200,16 +200,22 @@ describe("killProcessTreePosix", () => {
   });
 });
 
-describe("processDescendantsPosix", () => {
+// Platform-agnostic: processDescendants takes its process-table reader as
+// an argument, so this same arithmetic (parseProcessTable + processTreePids,
+// minus the root) is exercised once here for both the POSIX `ps` shape and
+// the Windows Get-CimInstance shape (windowsSpawn.ts's own
+// readProcessTableWithPowershell) — a fake reader proves the tree-walk
+// either way, with no need for a second, platform-named describe block.
+describe("processDescendants", () => {
   it("returns every descendant, excluding the root itself", async () => {
     await expect(
-      processDescendantsPosix(
+      processDescendants(
         100,
         async () => "  100     1\n  200   100\n  300   200\n",
       ),
     ).resolves.toEqual(expect.arrayContaining([200, 300]));
     await expect(
-      processDescendantsPosix(
+      processDescendants(
         100,
         async () => "  100     1\n  200   100\n  300   200\n",
       ).then((pids) => pids.includes(100)),
@@ -218,13 +224,13 @@ describe("processDescendantsPosix", () => {
 
   it("returns an empty list when the process table cannot be read", async () => {
     await expect(
-      processDescendantsPosix(100, () => Promise.reject(new Error("ps: not found"))),
+      processDescendants(100, () => Promise.reject(new Error("ps: not found"))),
     ).resolves.toEqual([]);
   });
 
   it("returns an empty list for a root with no children", async () => {
     await expect(
-      processDescendantsPosix(100, async () => "  100     1\n"),
+      processDescendants(100, async () => "  100     1\n"),
     ).resolves.toEqual([]);
   });
 
@@ -235,7 +241,7 @@ describe("processDescendantsPosix", () => {
     // its own root) still finds it, which is why stopChild re-enumerates
     // from each previously captured pid too, not just the original root.
     await expect(
-      processDescendantsPosix(300, async () => "  300     1\n  400   300\n"),
+      processDescendants(300, async () => "  300     1\n  400   300\n"),
     ).resolves.toEqual([400]);
   });
 });

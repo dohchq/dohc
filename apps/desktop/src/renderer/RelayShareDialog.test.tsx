@@ -33,7 +33,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ paths: ["docs/plan.md"] }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -61,7 +61,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ paths: [], versionId: "version-7", versionName: "review" }}
+        target={{ kind: "version", versionId: "version-7", versionName: "review" }}
         onClose={() => {}}
       />,
     );
@@ -84,7 +84,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ paths: ["docs/plan.md"] }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -135,7 +135,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ paths: ["docs/plan.md"] }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -148,7 +148,7 @@ describe("RelayShareDialog", () => {
     render(
       <RelayShareDialog
         workspaceId="ws-1"
-        target={{ paths: ["docs/plan.md"] }}
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
         onClose={() => {}}
       />,
     );
@@ -161,6 +161,7 @@ describe("RelayShareDialog", () => {
       <RelayShareDialog
         workspaceId="ws-1"
         target={{
+          kind: "paths",
           paths: ["index.html", "assets/logo.png"],
           label: "Workspace Site",
         }}
@@ -187,7 +188,7 @@ describe("RelayShareDialog", () => {
     );
     const user = userEvent.setup();
     render(
-      <RelayShareDialog workspaceId="ws-1" target={{ paths: [".env"] }} onClose={() => {}} />,
+      <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: [".env"] }} onClose={() => {}} />,
     );
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));

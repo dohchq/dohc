@@ -2,7 +2,12 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { assertActiveWorkspaceForSiteRead } from "./workspaces/sitePreviewLifecycle";
+import {
+  createSitePreviewLifecycle,
+  createSitePreviewStartRegistry,
+  stopSitePreviewForRequest,
+  withActiveWorkspaceForSiteRead,
+} from "./workspaces/sitePreviewLifecycle";
 import { getSitePackage, requireExactSiteRoot } from "./workspaces/sitePackage";
 import { createTestScratch } from "./workspaces/testTemp";
 
@@ -28,13 +33,61 @@ afterEach(async () => {
 });
 
 describe("site preview main-process wiring", () => {
-  it("aborts the matching pending start before stop waits for its site lock", () => {
+  it("wires stopSitePreview to call stopSitePreviewForRequest", () => {
+    // The ordering this used to pin (abort the pending start, THEN take
+    // the lock) is now internal to stopSitePreviewForRequest itself and
+    // proven directly, below, by calling the real function — this only
+    // pins that main.ts's handler routes through it rather than
+    // reimplementing the sequence inline (main.ts cannot be imported
+    // directly under Vitest, so routing is checked against its source —
+    // the established pattern for this file's IPC handlers, e.g.
+    // main.pluginPanelWiring.test.ts).
     const handler = handlerSource("stopSitePreview");
-    const abortAt = handler.indexOf("abortSitePreviewStartsForSite(");
-    const lockAt = handler.indexOf("await withSitePreviewStartLock(");
+    expect(handler).toContain("await stopSitePreviewForRequest(");
+  });
 
-    expect(abortAt).toBeGreaterThanOrEqual(0);
-    expect(lockAt).toBeGreaterThan(abortAt);
+  it("stopSitePreviewForRequest aborts a pending start for the same site before it stops", async () => {
+    const starts = createSitePreviewStartRegistry();
+    const previews = createSitePreviewLifecycle({ allowOrigin: () => () => undefined });
+    const pending = starts.begin(7, "workspace-1", "site");
+    expect(pending.controller.signal.aborted).toBe(false);
+
+    await stopSitePreviewForRequest({
+      getActiveWorkspaceId: () => "workspace-1",
+      workspaceId: "workspace-1",
+      siteRoot: "site",
+      starts,
+      previews,
+    });
+
+    expect(pending.controller.signal.aborted).toBe(true);
+  });
+
+  it("stopSitePreviewForRequest rechecks the active workspace after queueing behind another operation for the same site", async () => {
+    let activeWorkspaceId: string | undefined = "workspace-1";
+    let releaseFirst: () => void = () => undefined;
+    const firstHold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const starts = createSitePreviewStartRegistry();
+    const previews = createSitePreviewLifecycle({ allowOrigin: () => () => undefined });
+    const stop = vi.spyOn(previews, "stop");
+
+    const holding = previews.withStartLock("workspace-1", "site", () => firstHold);
+    const queuedStop = stopSitePreviewForRequest({
+      getActiveWorkspaceId: () => activeWorkspaceId,
+      workspaceId: "workspace-1",
+      siteRoot: "site",
+      starts,
+      previews,
+    });
+
+    activeWorkspaceId = "workspace-2";
+    releaseFirst();
+    await holding;
+
+    await expect(queuedStop).rejects.toThrow(/active workspace/i);
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it("wires startSitePreview to call requireExactSiteRoot before starting", () => {
@@ -46,6 +99,15 @@ describe("site preview main-process wiring", () => {
     // inline (main.ts cannot be imported directly under Vitest, so wiring
     // order is checked against its source — the established pattern for
     // this file's IPC handlers, e.g. main.pluginPanelWiring.test.ts).
+    //
+    // Not extracted like stopSitePreview and the sites-read handlers below:
+    // this handler's own body is threaded through sender/generation/abort-
+    // controller state (isCurrent) that only makes sense inside a live IPC
+    // request, so pulling it out would drag most of the handler's Electron-
+    // specific plumbing along with it for little real gain — the underlying
+    // "a stale nested root never starts" invariant already has direct
+    // behavioral coverage below, in "rejects a stale nested root before
+    // starting its detected ancestor".
     const handler = handlerSource("startSitePreview");
     const lookupAt = handler.indexOf(
       "const site = requireExactSiteRoot(",
@@ -89,41 +151,40 @@ describe("site preview main-process wiring", () => {
     );
   });
 
-  it("wires listSites and getSitePackage to call assertActiveWorkspaceForSiteRead before reading", () => {
+  it("wires listSites and getSitePackage to call withActiveWorkspaceForSiteRead", () => {
     // requireWorkspace alone only proves workspaceId names a workspace
     // REGISTERED somewhere in this app instance — not that it's the one
     // THIS sender's own window is currently showing. Without the active-
     // workspace check, a stale or compromised renderer could read another
     // workspace's site paths, titles, diagnostics, and full package-script
-    // bodies just by naming its id. main.ts cannot be imported directly
-    // under Vitest, so wiring ORDER is checked against its source text —
-    // the established pattern this file already uses above — but the
-    // guard's own authorized/unauthorized behavior is proven directly
-    // below by importing and calling the real, shared function instead of
-    // reimplementing it inline here (a rename, reformat, or extraction
-    // that keeps calling the same helper leaves this test correct; only
-    // main.ts routing around the call would break it).
+    // bodies just by naming its id. The guard-then-read sequence itself is
+    // now proven directly below, by calling the real function; main.ts
+    // cannot be imported directly under Vitest, so this only pins that
+    // each handler routes its actual read through that function rather
+    // than reimplementing the guard inline.
     for (const channel of ["listSites", "getSitePackage"]) {
       const handler = handlerSource(channel);
-      const workspaceAt = handler.indexOf("const workspace = requireWorkspace(");
-      const guardAt = handler.indexOf("assertActiveWorkspaceForSiteRead(", workspaceAt);
-      const readAt = handler.indexOf(
-        channel === "listSites" ? "await listSitePackages(" : "await getSitePackage(",
-        workspaceAt,
-      );
-      expect(workspaceAt).toBeGreaterThanOrEqual(0);
-      expect(guardAt).toBeGreaterThan(workspaceAt);
-      expect(readAt).toBeGreaterThan(guardAt);
+      expect(handler).toContain("await withActiveWorkspaceForSiteRead(");
     }
   });
 
-  it("assertActiveWorkspaceForSiteRead permits a matching sender and rejects a mismatched one", () => {
-    expect(() => assertActiveWorkspaceForSiteRead("workspace-1", "workspace-1")).not.toThrow();
-    expect(() => assertActiveWorkspaceForSiteRead("workspace-2", "workspace-1")).toThrow(
-      /active workspace/i,
-    );
-    expect(() => assertActiveWorkspaceForSiteRead(undefined, "workspace-1")).toThrow(
-      /active workspace/i,
-    );
+  it("withActiveWorkspaceForSiteRead only runs the read when the sender's active workspace matches", async () => {
+    const read = vi.fn(async () => "ok" as const);
+    await expect(
+      withActiveWorkspaceForSiteRead("workspace-1", "workspace-1", read),
+    ).resolves.toBe("ok");
+    expect(read).toHaveBeenCalledTimes(1);
+
+    read.mockClear();
+    await expect(
+      withActiveWorkspaceForSiteRead("workspace-2", "workspace-1", read),
+    ).rejects.toThrow(/active workspace/i);
+    expect(read).not.toHaveBeenCalled();
+
+    read.mockClear();
+    await expect(
+      withActiveWorkspaceForSiteRead(undefined, "workspace-1", read),
+    ).rejects.toThrow(/active workspace/i);
+    expect(read).not.toHaveBeenCalled();
   });
 });

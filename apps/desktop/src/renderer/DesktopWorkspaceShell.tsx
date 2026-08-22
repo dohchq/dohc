@@ -56,6 +56,7 @@ import {
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
+import type { RelayShareTarget } from "./RelayShareDialog";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
 import { CloudLogin } from "./CloudLogin";
@@ -1424,7 +1425,6 @@ export function DesktopWorkspaceShell(props: {
   // identifiable and filtered out of "others". Lazily minted ONCE — a fresh id
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
-  const [sitesRefreshKey, setSitesRefreshKey] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
@@ -1432,13 +1432,8 @@ export function DesktopWorkspaceShell(props: {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
   const [agentSetup, setAgentSetup] = useState<AgentSetupSummary | null>(null);
   const agentSetupRequestRef = useRef(0);
-  // Relay-share dialog target (PR 18): paths, or a version with an empty path list.
-  const [shareTarget, setShareTarget] = useState<{
-    paths: string[];
-    label?: string;
-    versionId?: string;
-    versionName?: string;
-  } | null>(null);
+  // Relay-share dialog target (PR 18): paths, or a version.
+  const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
   // The banner carries its own way out. An error that names a value the user
   // can see and gives no way to ask again leaves them with a stale reading and
@@ -2320,7 +2315,9 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const refreshSites = useCallback(() => {
-    setSitesRefreshKey((key) => key + 1);
+    // refreshFiles's own settle bumps listingsSettled, which SitesView
+    // already keys its refetch off of (as filesSettledRevision) — nothing
+    // else needs to signal that refresh separately.
     void refreshFiles().catch((error) =>
       reportShellError("Could not refresh workspace files.", error),
     );
@@ -4872,7 +4869,7 @@ export function DesktopWorkspaceShell(props: {
         shareView={shareView}
         onRefreshShareMounts={() => void refreshShareMounts(true)}
         onUnmountShare={(path) => void unmountShare(path)}
-        onShare={(path) => setShareTarget({ paths: [path] })}
+        onShare={(path) => setShareTarget({ kind: "paths", paths: [path] })}
         onRefresh={() =>
           void refreshFiles().catch((error) =>
             reportShellError("Could not refresh workspace files.", error),
@@ -5281,7 +5278,6 @@ export function DesktopWorkspaceShell(props: {
                 <LazySitesView
                   workspaceId={workspaceId}
                   filesSettledRevision={listingsSettled}
-                  refreshKey={sitesRefreshKey}
                   onOpenPath={openPathWithHeading}
                 />
               </Suspense>
@@ -5360,7 +5356,7 @@ export function DesktopWorkspaceShell(props: {
                     : {
                         onShareVersion: (version: { id: string; name: string }) =>
                           setShareTarget({
-                            paths: [],
+                            kind: "version",
                             versionId: version.id,
                             versionName: version.name,
                           }),
@@ -5710,7 +5706,7 @@ export function DesktopWorkspaceShell(props: {
                     siteRoot={groupSiteRoot}
                     sharedView={!!shareView}
                     onShareSite={(target) =>
-                      setShareTarget({ paths: target.paths, label: target.label })
+                      setShareTarget({ kind: "paths", paths: target.paths, label: target.label })
                     }
                   />
                 </Suspense>
@@ -5761,7 +5757,7 @@ export function DesktopWorkspaceShell(props: {
                 }
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
-                  : { onSharePath: (path: string) => setShareTarget({ paths: [path] }) })}
+                  : { onSharePath: (path: string) => setShareTarget({ kind: "paths", paths: [path] }) })}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">

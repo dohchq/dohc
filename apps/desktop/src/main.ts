@@ -634,10 +634,10 @@ import {
 } from "./workspaces/siteRunner";
 import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
-  assertActiveWorkspaceForSiteRead,
-  assertActiveWorkspaceForSitePreviewStop,
   createSitePreviewLifecycle,
   createSitePreviewStartRegistry,
+  stopSitePreviewForRequest,
+  withActiveWorkspaceForSiteRead,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
 import {
@@ -887,6 +887,7 @@ function assertSitePreviewMode(
 
 const sitePreviews = createSitePreviewLifecycle({
   allowOrigin: allowLoopbackFrameOrigin,
+  withKeyedStartLock,
 });
 const pluginPipelines = new Map<string, PluginPipeline>();
 const pluginPipelineDisposals = new Map<string, Promise<void>>();
@@ -895,7 +896,6 @@ const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
 // Also one per workspace, so one workspace's settled batch can only ever
 // reach the plugins running in that workspace.
 const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>();
-const sitePreviewStartLocks = new Map<string, Promise<void>>();
 const sitePreviewStarts = createSitePreviewStartRegistry();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
@@ -1148,32 +1148,6 @@ function advanceRendererGeneration(senderId: number): void {
   rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
 }
 
-function beginSitePreviewStart(
-  senderId: number,
-  workspaceId: string,
-  siteRoot: string,
-): {
-  controller: AbortController;
-  finish: () => void;
-} {
-  return sitePreviewStarts.begin(senderId, workspaceId, siteRoot);
-}
-
-function abortSitePreviewStartsForSender(senderId: number): void {
-  sitePreviewStarts.abortForSender(senderId);
-}
-
-function abortSitePreviewStartsForSite(
-  workspaceId: string,
-  siteRoot: string,
-): void {
-  sitePreviewStarts.abortForSite(workspaceId, siteRoot);
-}
-
-function sitePreviewKey(workspaceId: string, siteRoot: string): string {
-  return `${workspaceId}\0${siteRoot}`;
-}
-
 async function withKeyedStartLock<T>(
   locks: Map<string, Promise<void>>,
   key: string,
@@ -1196,26 +1170,14 @@ async function withKeyedStartLock<T>(
   }
 }
 
-const withSitePreviewStartLock = <T>(key: string, operation: () => Promise<T>) =>
-  withKeyedStartLock(sitePreviewStartLocks, key, operation);
-
-function stopSitePreviewsForQuit(): Promise<void> {
-  // Runs once, from the will-quit teardown — the first moment a quit can no
-  // longer be cancelled. Idempotent. The caller awaits it inside
-  // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
-  // hard-kill path.
-  return sitePreviews.stopAll();
-}
-
 async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
   await Promise.all(
     sitePreviews.previewsForWorkspace(workspaceId).map(({ siteRoot, handle }) =>
-      withSitePreviewStartLock(
-        sitePreviewKey(workspaceId, siteRoot),
-        () => sitePreviews.stop(workspaceId, siteRoot, handle),
-      ).catch((error) => {
-        console.warn("[desktop] failed to stop site preview during workspace switch", error);
-      }),
+      sitePreviews
+        .withStartLock(workspaceId, siteRoot, () => sitePreviews.stop(workspaceId, siteRoot, handle))
+        .catch((error) => {
+          console.warn("[desktop] failed to stop site preview during workspace switch", error);
+        }),
     ),
   );
 }
@@ -1276,8 +1238,9 @@ type StartedSitePreview = Omit<StartSitePreviewResult, "exited"> & {
 async function startPreviewForSite(
   input: SitePreviewStartInput,
 ): Promise<StartedSitePreview> {
-  const key = sitePreviewKey(input.workspaceId, input.site.root);
-  return withSitePreviewStartLock(key, async () => startPreviewForSiteUnlocked(input));
+  return sitePreviews.withStartLock(input.workspaceId, input.site.root, () =>
+    startPreviewForSiteUnlocked(input),
+  );
 }
 
 async function startPreviewForSiteUnlocked(
@@ -3317,7 +3280,11 @@ async function stopPluginWorkspace(workspaceId: string): Promise<void> {
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
-  const sitePreviewStop = stopSitePreviewsForQuit();
+  // Runs once, from the will-quit teardown — the first moment a quit can no
+  // longer be cancelled. Idempotent. The caller awaits it inside
+  // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
+  // hard-kill path.
+  const sitePreviewStop = sitePreviews.stopAll();
   pluginPanelSdkAuthorities.revokeAll();
   destroyPluginWebAppViews(pluginWebAppViews.removeAll());
   await Promise.allSettled([
@@ -3718,7 +3685,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
-  abortSitePreviewStartsForSender(senderId);
+  sitePreviewStarts.abortForSender(senderId);
   pluginPanelSdkAuthorities.revokeSender(senderId);
   destroyPluginWebAppViews(pluginWebAppViews.removeForSender(senderId));
   searchRegistry.disposeOwner(senderId);
@@ -6860,8 +6827,13 @@ function registerIpcHandlers(
     // site paths, titles, diagnostics, and dependency manifests just by
     // naming its id, the same gap startSitePreview/getSitePreviewLogs
     // below already guard against.
-    assertActiveWorkspaceForSiteRead(activeWorkspaceIdBySender.get(event.sender.id), workspace.workspaceId);
-    return ListSitesResult.parse({ sites: await listSitePackages(workspace.rootPath) });
+    return ListSitesResult.parse({
+      sites: await withActiveWorkspaceForSiteRead(
+        activeWorkspaceIdBySender.get(event.sender.id),
+        workspace.workspaceId,
+        () => listSitePackages(workspace.rootPath),
+      ),
+    });
   });
 
   ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
@@ -6871,9 +6843,12 @@ function registerIpcHandlers(
     // Same active-workspace check as listSites just above — without it, a
     // stale or compromised renderer can read another workspace's full
     // package-script bodies and share manifest by naming its id.
-    assertActiveWorkspaceForSiteRead(activeWorkspaceIdBySender.get(event.sender.id), workspace.workspaceId);
     return SitePackageResult.parse(
-      await getSitePackage(workspace.rootPath, input.path, undefined, input.effectivePreviewMode),
+      await withActiveWorkspaceForSiteRead(
+        activeWorkspaceIdBySender.get(event.sender.id),
+        workspace.workspaceId,
+        () => getSitePackage(workspace.rootPath, input.path, undefined, input.effectivePreviewMode),
+      ),
     );
   });
 
@@ -6882,7 +6857,7 @@ function registerIpcHandlers(
     const input = StartSitePreviewPayload.parse(payload);
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
-    const pendingStart = beginSitePreviewStart(
+    const pendingStart = sitePreviewStarts.begin(
       sender.id,
       input.workspaceId,
       input.siteRoot,
@@ -6979,21 +6954,13 @@ function registerIpcHandlers(
     const input = StopSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const senderId = event.sender.id;
-    assertActiveWorkspaceForSitePreviewStop(
-      activeWorkspaceIdBySender.get(senderId),
-      workspace.workspaceId,
-    );
-    abortSitePreviewStartsForSite(workspace.workspaceId, input.siteRoot);
-    await withSitePreviewStartLock(
-      sitePreviewKey(workspace.workspaceId, input.siteRoot),
-      async () => {
-        assertActiveWorkspaceForSitePreviewStop(
-          activeWorkspaceIdBySender.get(senderId),
-          workspace.workspaceId,
-        );
-        await sitePreviews.stop(workspace.workspaceId, input.siteRoot);
-      },
-    );
+    await stopSitePreviewForRequest({
+      getActiveWorkspaceId: () => activeWorkspaceIdBySender.get(senderId),
+      workspaceId: workspace.workspaceId,
+      siteRoot: input.siteRoot,
+      starts: sitePreviewStarts,
+      previews: sitePreviews,
+    });
   });
 
   ipcMain.handle(CHANNELS.openPluginPanel, async (event, payload) => {
@@ -7762,7 +7729,7 @@ function registerIpcHandlers(
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
         const activeWorkspaceId = activeWorkspaceIdBySender.get(senderId);
-        abortSitePreviewStartsForSender(senderId);
+        sitePreviewStarts.abortForSender(senderId);
         pluginPanelSdkAuthorities.revokeSender(senderId);
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
@@ -7773,7 +7740,7 @@ function registerIpcHandlers(
       });
     }
     if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
-      abortSitePreviewStartsForSender(senderId);
+      sitePreviewStarts.abortForSender(senderId);
       await stopSitePreviewsForWorkspace(previousWorkspaceId);
       await stopPluginWorkspace(previousWorkspaceId);
     }

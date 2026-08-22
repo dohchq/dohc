@@ -6,35 +6,43 @@ import type {
 
 export type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 
-export function assertActiveWorkspaceForSitePreviewStop(
-  activeWorkspaceId: string | undefined,
-  workspaceId: string,
-): void {
-  if (activeWorkspaceId === workspaceId) return;
-  throw new Error(
-    "The Site preview request does not target the active workspace. Open the workspace and stop the preview again.",
-  );
-}
-
 // requireWorkspace alone only proves a workspaceId is REGISTERED somewhere
 // in this app instance, not that it's the one THIS sender's own window is
-// currently showing — reading another workspace's site paths, titles,
-// diagnostics, or full package-script bodies needs the same active-
-// workspace guard startSitePreview/getSitePreviewLogs/stop already apply,
-// just for a request that reads instead of starts or stops one.
-export function assertActiveWorkspaceForSiteRead(
+// currently showing — every site-preview and sites-read IPC handler needs
+// the same active-workspace guard, naming what it was trying to do so the
+// message stays specific to the request that actually failed.
+export function assertActiveWorkspaceForSite(
   activeWorkspaceId: string | undefined,
   workspaceId: string,
+  subject: string,
 ): void {
   if (activeWorkspaceId === workspaceId) return;
   throw new Error(
-    "The sites request does not target the active workspace. Open the workspace and try again.",
+    `The ${subject} does not target the active workspace. Open the workspace and try again.`,
   );
 }
 
 function previewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
 }
+
+// The shared shape every sites-read IPC handler (listSites, getSitePackage)
+// uses: guard, then read. Extracted so the guard's actual gating behavior
+// is provable by calling this directly — main.ts cannot be imported under
+// Vitest, so its own test only pins that the handler's source calls this
+// function at all.
+export async function withActiveWorkspaceForSiteRead<T>(
+  activeWorkspaceId: string | undefined,
+  workspaceId: string,
+  read: () => Promise<T>,
+): Promise<T> {
+  assertActiveWorkspaceForSite(activeWorkspaceId, workspaceId, "sites request");
+  return read();
+}
+
+// One less than siteRunner's own MAX_LOG_ENTRIES (500) — see the comment
+// where this is used.
+const EXITED_LOG_ENTRY_BUDGET = 499;
 
 export function createSitePreviewStartRegistry() {
   type PendingStart = {
@@ -91,9 +99,46 @@ export function createSitePreviewStartRegistry() {
   };
 }
 
+// The queued-lock algorithm itself is app-wide — main.ts reuses the exact
+// same shape for plugin panel/web-app/host-lifecycle locks too, each with
+// its own Map — so it's injected here rather than duplicated. Defaults to
+// this private equivalent so a caller that doesn't care about locking
+// (most tests) doesn't need to supply one.
+async function defaultWithKeyedStartLock<T>(
+  locks: Map<string, Promise<void>>,
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = locks.get(key) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.catch(() => undefined).then(() => current);
+  locks.set(key, queued);
+
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (locks.get(key) === queued) locks.delete(key);
+  }
+}
+
 export function createSitePreviewLifecycle(input: {
   allowOrigin: (url: string) => () => void;
+  withKeyedStartLock?: <T>(
+    locks: Map<string, Promise<void>>,
+    key: string,
+    operation: () => Promise<T>,
+  ) => Promise<T>;
 }) {
+  const withKeyedStartLock = input.withKeyedStartLock ?? defaultWithKeyedStartLock;
+  // Own start-lock map, keyed by the same previewKey() every other method
+  // here already uses — the key format now has exactly one home instead of
+  // main.ts keeping a second copy just to build the same string.
+  const startLocks = new Map<string, Promise<void>>();
   type RunningPreview = {
     state: "running";
     workspaceId: string;
@@ -119,7 +164,11 @@ export function createSitePreviewLifecycle(input: {
     const key = previewKey(workspaceId, siteRoot);
     const active = activePreviews.get(key);
     if (active?.state !== "running" || active.handle !== expected) return;
-    const logs = active.handle.logs().slice(-499);
+    // Matches siteRunner's own MAX_LOG_ENTRIES (500): slicing to one less
+    // here leaves room for the synthetic "exited unexpectedly" entry this
+    // appends next, so the exited record's log list still tops out at
+    // exactly 500 entries instead of growing past the cap by one.
+    const logs = active.handle.logs().slice(-EXITED_LOG_ENTRY_BUDGET);
     logs.push({
       stream: "system",
       text: "Dev server exited unexpectedly.",
@@ -245,5 +294,54 @@ export function createSitePreviewLifecycle(input: {
       }
       await Promise.all(stops);
     },
+
+    // Serializes concurrent start/stop attempts for the SAME workspace+site
+    // so a queued stop still sees whatever the operation ahead of it just
+    // did, instead of racing it.
+    withStartLock<T>(
+      workspaceId: string,
+      siteRoot: string,
+      operation: () => Promise<T>,
+    ): Promise<T> {
+      return withKeyedStartLock(startLocks, previewKey(workspaceId, siteRoot), operation);
+    },
   };
+}
+
+// The stopSitePreview IPC handler's own body: guard, abort any pending
+// start for this exact site, then take the lock and recheck before
+// actually stopping. Extracted so main.ts's own test can call this
+// directly instead of only pinning the ORDER of the calls inside the
+// handler's source text — main.ts cannot be imported under Vitest, so its
+// own test only pins that the handler routes through this function at all.
+//
+// getActiveWorkspaceId is a thunk, not a snapshotted value: the active
+// workspace can change while this request is queued behind another
+// start/stop for the same site, so the recheck after the lock is obtained
+// must read the CURRENT value, not the one captured before queueing.
+export async function stopSitePreviewForRequest(input: {
+  getActiveWorkspaceId: () => string | undefined;
+  workspaceId: string;
+  siteRoot: string;
+  starts: ReturnType<typeof createSitePreviewStartRegistry>;
+  previews: ReturnType<typeof createSitePreviewLifecycle>;
+}): Promise<void> {
+  assertActiveWorkspaceForSite(
+    input.getActiveWorkspaceId(),
+    input.workspaceId,
+    "Site preview stop request",
+  );
+  // Aborting the pending start BEFORE taking the lock matters: a start
+  // still in flight when the lock is acquired would otherwise finish,
+  // register itself as the running preview, and race the stop this
+  // request is trying to perform.
+  input.starts.abortForSite(input.workspaceId, input.siteRoot);
+  await input.previews.withStartLock(input.workspaceId, input.siteRoot, async () => {
+    assertActiveWorkspaceForSite(
+      input.getActiveWorkspaceId(),
+      input.workspaceId,
+      "Site preview stop request",
+    );
+    await input.previews.stop(input.workspaceId, input.siteRoot);
+  });
 }

@@ -132,16 +132,21 @@ export interface SiteShareTarget {
   label: string;
 }
 
-/** Produces a relay selector containing the runnable browser artifact only. */
+/**
+ * Produces a relay selector containing the runnable browser artifact only.
+ *
+ * A manifest's paths are already required non-empty (entryPath), capped at
+ * 100 (assets.max(99) plus entryPath), and unique — bridgeContract's
+ * SiteShareManifest schema enforces all three, and main.ts's getSitePackage
+ * handler parses every result through it before the renderer ever sees this
+ * site. Nothing here needs to re-check what the IPC boundary already
+ * guarantees.
+ */
 export function shareTargetForSite(site: SitePackageInfo): SiteShareTarget | null {
   if (site.authority.kind === "share") return null;
   if (!site.shareManifest.ok) return null;
   const manifest = site.shareManifest.manifest;
-  const paths = [manifest.entryPath, ...manifest.assets];
-  if (paths.length === 0 || paths.length > 100 || new Set(paths).size !== paths.length) {
-    return null;
-  }
-  return { paths, label: site.title };
+  return { paths: [manifest.entryPath, ...manifest.assets], label: site.title };
 }
 
 function formatMiB(bytes: number): string {
@@ -184,8 +189,12 @@ export function SitePreviewPage(props: {
   const [logsOpen, setLogsOpen] = useState(false);
   const [runningMode, setRunningMode] = useState<SitePreviewMode | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [stoppedByUser, setStoppedByUser] = useState(false);
-  const [previewExited, setPreviewExited] = useState(false);
+  // Why the preview isn't currently running, when it isn't: the dev server
+  // process exited on its own, or the user clicked Stop. The two are
+  // mutually exclusive at any moment (starting a new preview clears
+  // whichever one is set), so one field is the whole state instead of two
+  // booleans that can only ever disagree by construction.
+  const [idleReason, setIdleReason] = useState<"exited" | "stopped" | null>(null);
   const autoStartKeyRef = useRef<string | null>(null);
   const loadRequestRef = useRef(0);
   const previewStartRequestRef = useRef(0);
@@ -208,8 +217,7 @@ export function SitePreviewPage(props: {
     previewStartRequestRef.current += 1;
     logsRequestRef.current += 1;
     setRunningMode(null);
-    setStoppedByUser(false);
-    setPreviewExited(false);
+    setIdleReason(null);
     autoStartKeyRef.current = null;
     try {
       const [site, workspaceResult] = await Promise.all([
@@ -285,8 +293,7 @@ export function SitePreviewPage(props: {
     setPreviewLogs([]);
     setRunningMode(mode);
     setActionError(null);
-    setStoppedByUser(false);
-    setPreviewExited(false);
+    setIdleReason(null);
     try {
       const result = await bridge().startSitePreview({
         workspaceId: props.workspaceId,
@@ -298,7 +305,7 @@ export function SitePreviewPage(props: {
       rememberMode(props.workspaceId, props.siteRoot, mode);
       if (result.exited) {
         setPreview(null);
-        setPreviewExited(true);
+        setIdleReason("exited");
         setLogsOpen(result.logs.length > 0);
         return result;
       }
@@ -318,14 +325,13 @@ export function SitePreviewPage(props: {
     }
   }, [props.siteRoot, props.workspaceId, siteContext]);
 
-  const prepareShare = useCallback(async (site: SitePackageInfo) => {
+  const prepareShare = useCallback(async () => {
     const request = ++shareRequestRef.current;
     const requestContext = siteContext;
     const isCurrent = () =>
       request === shareRequestRef.current &&
       requestContext === siteContextRef.current;
     try {
-      let latest = site;
       // Share-what-you-previewed: this tab's own current mode — a stored
       // per-tab choice or the automatic pick, either way something main.ts
       // has no other way to see — decides which artifact (source entry vs.
@@ -346,7 +352,7 @@ export function SitePreviewPage(props: {
         setActionError("This site is no longer part of the workspace.");
         return;
       }
-      latest = fresh;
+      let latest = fresh;
       let target = shareTargetForSite(latest);
       if (
         !target &&
@@ -415,7 +421,7 @@ export function SitePreviewPage(props: {
       setPreviewLogs(result.logs);
       if (result.exited) {
         setPreview(null);
-        setPreviewExited(true);
+        setIdleReason("exited");
         setLogsOpen(true);
       }
     } catch {
@@ -440,8 +446,7 @@ export function SitePreviewPage(props: {
       load.status !== "ready" ||
       load.site.root !== props.siteRoot ||
       preview ||
-      previewExited ||
-      stoppedByUser
+      idleReason !== null
     ) return;
     const mode = preferredMode(
       load.site,
@@ -457,15 +462,14 @@ export function SitePreviewPage(props: {
     autoStartKeyRef.current = autoStartKey;
     void start(mode);
   }, [
+    idleReason,
     load,
     modes,
     preview,
-    previewExited,
     props.sharedView,
     props.siteRoot,
     props.workspaceId,
     start,
-    stoppedByUser,
   ]);
 
   async function stop() {
@@ -484,8 +488,7 @@ export function SitePreviewPage(props: {
       if (!isCurrent()) return;
       setPreview(null);
       setPreviewLogs([]);
-      setStoppedByUser(true);
-      setPreviewExited(false);
+      setIdleReason("stopped");
     } catch (error) {
       if (!isCurrent()) return;
       setActionError(error instanceof Error ? error.message : "Could not stop preview.");
@@ -556,7 +559,7 @@ export function SitePreviewPage(props: {
               aria-label="Share site"
               title="Share site"
               disabled={runningMode !== null}
-              onClick={() => site && void prepareShare(site)}
+              onClick={() => site && void prepareShare()}
               className="size-7"
             >
               <Share2 size={13} aria-hidden />
@@ -671,16 +674,12 @@ export function SitePreviewPage(props: {
                 className="min-h-0 flex-1 border-0 bg-bg"
               />
               {preview.mode === "dev" || previewLogs.length > 0 ? (
-                <details
+                <LogsDetails
+                  logs={previewLogs}
                   open={logsOpen}
-                  onToggle={(event) => setLogsOpen(event.currentTarget.open)}
+                  onToggle={setLogsOpen}
                   className="max-h-36 shrink-0 overflow-auto border-t border-line bg-panel px-3 py-2 text-[11px]"
-                >
-                  <summary className="cursor-pointer text-muted">Logs</summary>
-                  <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
-                    {previewLogs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
-                  </pre>
-                </details>
+                />
               ) : null}
             </div>
           ) : null}
@@ -690,32 +689,52 @@ export function SitePreviewPage(props: {
               <Globe2 size={24} aria-hidden className="text-subtle" />
               <div className="max-w-sm text-sm text-muted">
                 {modes.length > 0
-                  ? previewExited
+                  ? idleReason === "exited"
                     ? "Dev server exited. Use Preview options to run it again."
-                    : stoppedByUser
+                    : idleReason === "stopped"
                     ? "Preview stopped. Use Preview options to run it again."
                     : runningMode
                     ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
                     : "This site did not start automatically. Choose another mode in Preview options."
                   : "This site has no previewable entry, dev script, or build output yet."}
               </div>
-              {previewExited && previewLogs.length > 0 ? (
-                <details
+              {idleReason === "exited" && previewLogs.length > 0 ? (
+                <LogsDetails
+                  logs={previewLogs}
                   open={logsOpen}
-                  onToggle={(event) => setLogsOpen(event.currentTarget.open)}
+                  onToggle={setLogsOpen}
                   className="max-h-36 w-full max-w-3xl overflow-auto border-t border-line bg-panel px-3 py-2 text-left text-[11px]"
-                >
-                  <summary className="cursor-pointer text-muted">Logs</summary>
-                  <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
-                    {previewLogs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
-                  </pre>
-                </details>
+                />
               ) : null}
             </div>
           ) : null}
         </>
       ) : null}
     </div>
+  );
+}
+
+// The two places this page shows preview logs (beside a running dev-mode
+// frame, and under the idle empty state after the dev server exits) render
+// the identical collapsible <details> — only its placement in the
+// surrounding layout differs, via className.
+function LogsDetails(props: {
+  logs: StartSitePreviewResult["logs"];
+  open: boolean;
+  onToggle: (open: boolean) => void;
+  className: string;
+}) {
+  return (
+    <details
+      open={props.open}
+      onToggle={(event) => props.onToggle(event.currentTarget.open)}
+      className={props.className}
+    >
+      <summary className="cursor-pointer text-muted">Logs</summary>
+      <pre className="m-0 mt-2 whitespace-pre-wrap font-mono text-subtle">
+        {props.logs.map((log) => `[${log.stream}] ${log.text}`).join("\n")}
+      </pre>
+    </details>
   );
 }
 

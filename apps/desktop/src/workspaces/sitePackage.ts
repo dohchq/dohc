@@ -83,10 +83,6 @@ function normalizeRoot(root: string): string {
   return root === "" ? "." : root;
 }
 
-function denormalizeRoot(root: string): string {
-  return root === "." ? "" : root;
-}
-
 const MAX_SHARE_MANIFEST_FILES = 100;
 const MAX_SHARE_MANIFEST_SCAN_BYTES = 4 * 1024 * 1024;
 
@@ -136,6 +132,20 @@ function pathRelativeToArtifact(artifactRoot: string, path: string): string | nu
     : null;
 }
 
+// The core join both resolveArtifactRelativePath (an ordinary reference) and
+// htmlBaseDirectoryFromDocument (a <base href>) share: a browser resolves a
+// root-absolute reference ("/x") against the SERVED root (artifactRoot), and
+// a document-relative one against whichever directory the referring
+// document's own base names.
+function joinAgainstArtifact(artifactRoot: string, decoded: string, directory: string): string {
+  const artifactBase = artifactRoot === "." ? "" : artifactRoot;
+  return posix.normalize(
+    decoded.startsWith("/")
+      ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
+      : posix.join(directory, decoded),
+  );
+}
+
 // RFC 3986's scheme grammar — the one name every "is this value an absolute
 // URL, not a local path" check in this file shares. A narrower allowlist
 // (data|https?|javascript|mailto|tel|...) always misses some real scheme
@@ -175,14 +185,10 @@ function resolveArtifactRelativePath(
     return null;
   }
   if (base.kind === "external") return null;
-  const artifactBase = artifactRoot === "." ? "" : artifactRoot;
-  const candidate = posix.normalize(
-    decoded.startsWith("/")
-      ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
-      : posix.join(
-          base.kind === "local" ? base.directory : posix.dirname(fromPath),
-          decoded,
-        ),
+  const candidate = joinAgainstArtifact(
+    artifactRoot,
+    decoded,
+    base.kind === "local" ? base.directory : posix.dirname(fromPath),
   );
   if (
     !pathRelativeToArtifact(artifactRoot, candidate) ||
@@ -191,16 +197,16 @@ function resolveArtifactRelativePath(
   return candidate;
 }
 
-function localReferenceCandidates(
+function resolveExistingReference(
   rawReference: string,
   fromPath: string,
   artifactRoot: string,
   available: ReadonlySet<string>,
   base: HtmlBaseResolution = { kind: "none" },
-): string[] {
+): string | null {
   const candidate = resolveArtifactRelativePath(rawReference, fromPath, artifactRoot, base);
-  if (!candidate) return [];
-  return available.has(candidate) ? [candidate] : [];
+  if (!candidate) return null;
+  return available.has(candidate) ? candidate : null;
 }
 
 type HtmlBaseResolution =
@@ -263,9 +269,9 @@ function isExecutableScriptType(attrs: ReadonlyMap<string, string>): boolean {
   const trimmed = type.trim();
   // The exact keyword check runs BEFORE MIME parsing, on the whole trimmed
   // value — `type="module;foo"` is neither this keyword nor a MIME
-  // essence, so it's a data block, not a module (round-15 finding 3: a
-  // prior essence-first version wrongly reduced "module;foo" to essence
-  // "module" and matched it here).
+  // essence, so it's a data block, not a module. An essence-first check
+  // would wrongly reduce "module;foo" to essence "module" and match it
+  // here.
   if (trimmed.toLowerCase() === "module") return true;
   // A `type` is otherwise a MIME type — only its ESSENCE (the type/subtype
   // before any `;parameter=value`) is what a browser compares against the
@@ -633,14 +639,10 @@ function htmlBaseDirectoryFromDocument(
     return { kind: "external" };
   }
   if (!decoded) return { kind: "none" };
-  const artifactBase = artifactRoot === "." ? "" : artifactRoot;
-  const resolved = posix.normalize(
-    decoded.startsWith("/")
-      ? posix.join(artifactBase, decoded.replace(/^\/+/, ""))
-      : posix.join(
-          contextBase.kind === "local" ? contextBase.directory : posix.dirname(fromPath),
-          decoded,
-        ),
+  const resolved = joinAgainstArtifact(
+    artifactRoot,
+    decoded,
+    contextBase.kind === "local" ? contextBase.directory : posix.dirname(fromPath),
   );
   const directory = decoded.endsWith("/") ? resolved : posix.dirname(resolved);
   return (directory === artifactRoot ||
@@ -1303,13 +1305,34 @@ function collectFunctionParameterNames(program: AstNode): Set<string> {
   return names;
 }
 
-function collectDomProducingTags(
+/**
+ * Shared skeleton behind collectDomProducingTags/collectUrlLiteralNames/
+ * collectXhrInstanceNames: every name bound by `identifier = source` (a
+ * declarator's init or a plain `=` assignment), classified by `proveValue`.
+ * A function parameter's value is never provable statically, so its name is
+ * invalidated up front and can never re-enter `proven`. A bare declaration
+ * (`let x;`, source null/undefined) proves nothing but doesn't invalidate
+ * either — only an ACTUAL, differently-classified value does. Two DIFFERENT
+ * proven values for the same name is the same cross-scope collision, just
+ * between two proven bindings instead of one proven and one not — neither
+ * is trustworthy, so both classifiers that carry more than one possible
+ * proven value rely on this check (a classifier with exactly one possible
+ * value, like collectXhrInstanceNames', can never trigger it: re-proving the
+ * same value twice is not a conflict).
+ *
+ * `maxPasses` > 1 lets `proveValue` read the accumulator being built, for a
+ * classifier (collectDomProducingTags': `let a = document.createElement(
+ * "img"); let b = a;`) whose own proof can depend on an EARLIER proof from
+ * the same walk. Passes stop as soon as one makes no further change.
+ */
+function collectProvenBindings<T>(
   program: AstNode,
-  shadowedGlobals: ReadonlySet<string>,
-): Map<string, DomProducingTag> {
-  const tags = new Map<string, DomProducingTag>();
+  proveValue: (source: unknown, proven: ReadonlyMap<string, T>) => T | undefined,
+  maxPasses = 1,
+): Map<string, T> {
+  const proven = new Map<string, T>();
   const invalidated = new Set<string>(collectFunctionParameterNames(program));
-  for (let pass = 0; pass < 3; pass += 1) {
+  for (let pass = 0; pass < maxPasses; pass += 1) {
     let changed = false;
     walkAst(program, (node) => {
       let target: unknown;
@@ -1326,31 +1349,37 @@ function collectDomProducingTags(
       if (!isAstNode(target) || target.type !== "Identifier") return;
       const name = astString(target, "name");
       if (!name || invalidated.has(name)) return;
-      const tag = domProducingTag(source, tags, shadowedGlobals);
-      if (tag === undefined) {
-        // No real initializer (a bare `let img;`) proves nothing either
-        // way — only an ACTUAL non-DOM-producing value invalidates.
+      const value = proveValue(source, proven);
+      if (value === undefined) {
         if (source === null || source === undefined) return;
-        if (tags.delete(name)) changed = true;
+        if (proven.delete(name)) changed = true;
         invalidated.add(name);
         return;
       }
-      const existing = tags.get(name);
-      if (existing !== undefined && existing !== tag) {
-        // Two DIFFERENT DOM tags for the same name is exactly the same
-        // cross-scope collision, just between two DOM-producing bindings
-        // instead of one DOM and one not — neither tag is trustworthy.
-        tags.delete(name);
+      const existing = proven.get(name);
+      if (existing !== undefined && existing !== value) {
+        proven.delete(name);
         invalidated.add(name);
         changed = true;
         return;
       }
-      tags.set(name, tag);
+      proven.set(name, value);
       changed = true;
     });
     if (!changed) break;
   }
-  return tags;
+  return proven;
+}
+
+function collectDomProducingTags(
+  program: AstNode,
+  shadowedGlobals: ReadonlySet<string>,
+): Map<string, DomProducingTag> {
+  return collectProvenBindings(
+    program,
+    (source, tags) => domProducingTag(source, tags, shadowedGlobals),
+    3,
+  );
 }
 
 // Knowing an expression CREATES a script/link/etc. element doesn't prove
@@ -1777,48 +1806,7 @@ function newUrlLiteral(node: unknown, shadowedGlobals: ReadonlySet<string>): str
  * technique collectDomProducingTags uses: `const u = new URL(lit,
  * import.meta.url); fetch(u);` still counts once `u` reaches a consumer. */
 function collectUrlLiteralNames(program: AstNode, shadowedGlobals: ReadonlySet<string>): Map<string, string> {
-  const names = new Map<string, string>();
-  // Same unprovable-stays-out conservative kill as collectDomProducingTags
-  // (round-15 finding 4): a function parameter's value is never provable
-  // statically, and a name later assigned something ELSE (or a DIFFERENT
-  // URL literal) anywhere in the file can no longer be trusted anywhere
-  // either — this flat, name-keyed map has no real scope resolver to tell
-  // an unrelated same-named binding apart from the one that's really a URL
-  // literal.
-  const invalidated = new Set<string>(collectFunctionParameterNames(program));
-  walkAst(program, (node) => {
-    let target: unknown;
-    let source: unknown;
-    if (node.type === "VariableDeclarator") {
-      target = astChild(node, "id");
-      source = astChild(node, "init");
-    } else if (node.type === "AssignmentExpression" && node.operator === "=") {
-      target = astChild(node, "left");
-      source = astChild(node, "right");
-    } else {
-      return;
-    }
-    if (!isAstNode(target) || target.type !== "Identifier") return;
-    const name = astString(target, "name");
-    if (!name || invalidated.has(name)) return;
-    const literal = newUrlLiteral(source, shadowedGlobals);
-    if (literal === undefined) {
-      // No real initializer (a bare `let target;`) proves nothing either
-      // way — only an ACTUAL non-URL-literal value invalidates.
-      if (source === null || source === undefined) return;
-      names.delete(name);
-      invalidated.add(name);
-      return;
-    }
-    const existing = names.get(name);
-    if (existing !== undefined && existing !== literal) {
-      names.delete(name);
-      invalidated.add(name);
-      return;
-    }
-    names.set(name, literal);
-  });
-  return names;
+  return collectProvenBindings(program, (source) => newUrlLiteral(source, shadowedGlobals));
 }
 
 function isNewXhrExpression(node: unknown, shadowedGlobals: ReadonlySet<string>): boolean {
@@ -1837,32 +1825,11 @@ function isNewXhrExpression(node: unknown, shadowedGlobals: ReadonlySet<string>)
  * a function parameter's value is never provable, and a name later bound
  * to something else anywhere in the file is untrustworthy everywhere. */
 function collectXhrInstanceNames(program: AstNode, shadowedGlobals: ReadonlySet<string>): Set<string> {
-  const proven = new Set<string>();
-  const invalidated = new Set<string>(collectFunctionParameterNames(program));
-  walkAst(program, (node) => {
-    let target: unknown;
-    let source: unknown;
-    if (node.type === "VariableDeclarator") {
-      target = astChild(node, "id");
-      source = astChild(node, "init");
-    } else if (node.type === "AssignmentExpression" && node.operator === "=") {
-      target = astChild(node, "left");
-      source = astChild(node, "right");
-    } else {
-      return;
-    }
-    if (!isAstNode(target) || target.type !== "Identifier") return;
-    const name = astString(target, "name");
-    if (!name || invalidated.has(name)) return;
-    if (!isNewXhrExpression(source, shadowedGlobals)) {
-      if (source === null || source === undefined) return;
-      proven.delete(name);
-      invalidated.add(name);
-      return;
-    }
-    proven.add(name);
-  });
-  return proven;
+  return new Set(
+    collectProvenBindings(program, (source) =>
+      isNewXhrExpression(source, shadowedGlobals) ? true : undefined,
+    ).keys(),
+  );
 }
 
 /** The `new URL(lit, import.meta.url)` literal a CONSUMED expression
@@ -1933,15 +1900,15 @@ function jsReferencesFromCode(
   //
   // A capture that comes up empty means no open() had been visited yet
   // for that receiver AT THAT POINT — e.g. a function DECLARED before a
-  // later open() and CALLED after it (round 18's finding): walk order
-  // proves nothing there. Falling back to the receiver's fully-resolved
-  // open target is only SOUND when that receiver only ever opens ONE
-  // distinct target in the whole file — with two or more distinct opens
-  // (`function issue(){ xhr.send() } xhr.open(a); issue(); xhr.open(b);`,
-  // round 21's finding), no amount of walk-order bookkeeping proves which
-  // one this particular unresolved send() paired with at runtime, so it's
-  // declined rather than guessed — approving the wrong file, or omitting
-  // the right one, are both worse than a conservative miss here.
+  // later open() and CALLED after it: walk order proves nothing there.
+  // Falling back to the receiver's fully-resolved open target is only
+  // SOUND when that receiver only ever opens ONE distinct target in the
+  // whole file — with two or more distinct opens (`function issue(){
+  // xhr.send() } xhr.open(a); issue(); xhr.open(b);`), no amount of
+  // walk-order bookkeeping proves which one this particular unresolved
+  // send() paired with at runtime, so it's declined rather than guessed
+  // — approving the wrong file, or omitting the right one, are both
+  // worse than a conservative miss here.
   const xhrOpenTargets = new Map<string, { value: string | undefined; scriptRelative: boolean }>();
   const xhrDistinctOpenTargets = new Map<string, Set<string>>();
   const xhrSendCaptures: Array<{ name: string; target: { value: string | undefined; scriptRelative: boolean } | undefined }> = [];
@@ -2012,10 +1979,7 @@ function jsReferencesFromCode(
     switch (node.type) {
       case "ImportDeclaration":
       case "ExportNamedDeclaration":
-      case "ExportAllDeclaration": {
-        addModuleSpecifier(stringLiteralValue(astChild(node, "source")));
-        break;
-      }
+      case "ExportAllDeclaration":
       case "ImportExpression": {
         addModuleSpecifier(stringLiteralValue(astChild(node, "source")));
         break;
@@ -2143,11 +2107,11 @@ function jsReferencesFromCode(
   for (const capture of xhrSendCaptures) {
     // A capture that came up empty means no open() had been visited yet
     // for this receiver AT THAT POINT in the walk — walk order can't
-    // resolve it (the round-18 case). Falling back to the receiver's
-    // fully-resolved open target is only sound when it's the ONLY
-    // distinct target that receiver ever opens — with two or more, no
-    // walk-order bookkeeping proves which one this send() paired with at
-    // runtime (round 21's finding), so it's declined rather than guessed.
+    // resolve it. Falling back to the receiver's fully-resolved open
+    // target is only sound when it's the ONLY distinct target that
+    // receiver ever opens — with two or more, no walk-order bookkeeping
+    // proves which one this send() paired with at runtime, so it's
+    // declined rather than guessed.
     const unambiguous = (xhrDistinctOpenTargets.get(capture.name)?.size ?? 0) <= 1;
     const opened = capture.target ?? (unambiguous ? xhrOpenTargets.get(capture.name) : undefined);
     if (opened) addReference(opened.value, !opened.scriptRelative, false, undefined, "connect");
@@ -2297,16 +2261,24 @@ function htmlReferencesFromDocument(
   // was collected — a real browser starts running/applying a block (and
   // whatever it goes on to request) the instant it's parsed, so a LATER
   // meta CSP must not retroactively remove a dependency the block's OWN
-  // execution already requested before that policy took effect.
-  const cssTexts: Array<{ text: string; blocked: ReadonlySet<CspClass> }> = [];
-  // JS/handler blocks ALSO carry the import map that was ACTIVE at the
-  // moment they were collected — a module graph that already started
-  // before a later <script type="importmap"> doesn't retroactively pick
-  // it up either (a real browser only ever resolves specifiers against
-  // whichever map was already parsed when that graph began).
-  const classicJsTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
-  const moduleJsTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
-  const handlerTexts: Array<{ text: string; blocked: ReadonlySet<CspClass>; importMap: ImportMapResolution | undefined }> = [];
+  // execution already requested before that policy took effect. JS/handler
+  // blocks ALSO carry the import map that was ACTIVE at the moment they
+  // were collected — a module graph that already started before a later
+  // <script type="importmap"> doesn't retroactively pick it up either (a
+  // real browser only ever resolves specifiers against whichever map was
+  // already parsed when that graph began). One tagged array instead of one
+  // per kind: each push site already knows what it's collecting, and the
+  // consuming flatMap below dispatches on that tag instead of running once
+  // per kind's own separately-typed array.
+  const deferredTexts: Array<
+    | { kind: "css"; text: string; blocked: ReadonlySet<CspClass> }
+    | {
+        kind: "classicJs" | "moduleJs" | "handler";
+        text: string;
+        blocked: ReadonlySet<CspClass>;
+        importMap: ImportMapResolution | undefined;
+      }
+  > = [];
   // The HTML standard (and Chromium/WebKit's own current support) merges
   // EVERY <script type="importmap"> into one global map, in document
   // order, as each is parsed — grown via mergeImportMapResolutions
@@ -2371,7 +2343,7 @@ function htmlReferencesFromDocument(
       // inline', or a hash of its OWN value alongside 'unsafe-hashes',
       // can permit it.
       if (styleAttribute && isInlineBlockPermitted(cspPolicyContentsSoFar, "style", undefined, styleAttribute, true)) {
-        cssTexts.push({ text: styleAttribute, blocked: blockedSoFar });
+        deferredTexts.push({ kind: "css", text: styleAttribute, blocked: blockedSoFar });
       }
       for (const attribute of node.attrs) {
         // Inline on* handlers hold real JS the browser executes, same as a
@@ -2395,7 +2367,7 @@ function htmlReferencesFromDocument(
           )) {
             lockedSpecifierKeys.add(key);
           }
-          handlerTexts.push({ text: attribute.value, blocked: blockedSoFar, importMap: activeImportMap });
+          deferredTexts.push({ kind: "handler", text: attribute.value, blocked: blockedSoFar, importMap: activeImportMap });
         }
       }
       // A browser parses `srcdoc` as a nested HTML document; nothing else
@@ -2641,7 +2613,8 @@ function htmlReferencesFromDocument(
             )) {
               lockedSpecifierKeys.add(key);
             }
-            (scriptKind === "module" ? moduleJsTexts : classicJsTexts).push({
+            deferredTexts.push({
+              kind: scriptKind === "module" ? "moduleJs" : "classicJs",
               text: scriptText,
               blocked: blockedSoFar,
               importMap: activeImportMap,
@@ -2653,7 +2626,7 @@ function htmlReferencesFromDocument(
       if (tagName === "style") {
         const styleText = html5TextContent(node);
         if (isInlineBlockPermitted(cspPolicyContentsSoFar, "style", attrs.get("nonce"), styleText, false)) {
-          cssTexts.push({ text: styleText, blocked: blockedSoFar });
+          deferredTexts.push({ kind: "css", text: styleText, blocked: blockedSoFar });
         }
         return;
       }
@@ -2677,34 +2650,37 @@ function htmlReferencesFromDocument(
   const blockedClasses = blockedCspClasses(cspPolicyContents);
   const filterByBlock = <T extends BrowserTextReference>(refs: T[], blocked: ReadonlySet<CspClass>): T[] =>
     blocked.size === 0 ? refs : refs.filter((reference) => !reference.cspClass || !blocked.has(reference.cspClass));
-  const deferredReferences = [
-    ...cssTexts.flatMap(({ text, blocked }) => filterByBlock(cssReferences(text), blocked)),
-    // Each <script> element parses on its OWN — the same way a browser runs
-    // each script tag independently — so a syntax error in one script never
-    // discards a later, syntactically valid script's own references.
-    // Each block resolves bare specifiers against the import map that was
-    // ACTIVE when Chromium reached it, not the document's final one — a
-    // module graph that started before a later <script type="importmap">
-    // never sees that map.
-    ...classicJsTexts.flatMap(({ text, blocked, importMap: blockImportMap }) =>
-      filterByBlock(
-        jsReferencesFromCode(text, "classic", context, documentPath, documentBase, artifactRoot, blockImportMap),
-        blocked,
-      ),
-    ),
-    ...moduleJsTexts.flatMap(({ text, blocked, importMap: blockImportMap }) =>
-      filterByBlock(
-        jsReferencesFromCode(text, "module", context, documentPath, documentBase, artifactRoot, blockImportMap),
-        blocked,
-      ),
-    ),
-    ...handlerTexts.flatMap(({ text, blocked, importMap: blockImportMap }) =>
-      filterByBlock(
-        jsReferencesFromEventHandler(text, context, documentPath, documentBase, artifactRoot, blockImportMap),
-        blocked,
-      ),
-    ),
-  ];
+  // Each <script> element parses on its OWN — the same way a browser runs
+  // each script tag independently — so a syntax error in one script never
+  // discards a later, syntactically valid script's own references. Each
+  // block resolves bare specifiers against the import map that was ACTIVE
+  // when Chromium reached it, not the document's final one — a module graph
+  // that started before a later <script type="importmap"> never sees that
+  // map.
+  const deferredReferences = deferredTexts.flatMap((entry) => {
+    const refs =
+      entry.kind === "css"
+        ? cssReferences(entry.text)
+        : entry.kind === "handler"
+          ? jsReferencesFromEventHandler(
+              entry.text,
+              context,
+              documentPath,
+              documentBase,
+              artifactRoot,
+              entry.importMap,
+            )
+          : jsReferencesFromCode(
+              entry.text,
+              entry.kind === "moduleJs" ? "module" : "classic",
+              context,
+              documentPath,
+              documentBase,
+              artifactRoot,
+              entry.importMap,
+            );
+    return filterByBlock(refs, entry.blocked);
+  });
   const references = [...attributeReferences, ...nestedReferences, ...deferredReferences];
   return { references, importMap: activeImportMap, blockedCspClasses: blockedClasses };
 }
@@ -3028,13 +3004,14 @@ async function shareManifestForSite(
           })();
       for (const reference of references) {
         const referenceBase = reference.documentRelative ? documentBase : base;
-        for (const target of localReferenceCandidates(
+        const target = resolveExistingReference(
           reference.value,
           current,
           artifactRoot,
           available,
           referenceBase,
-        )) {
+        );
+        if (target) {
           approved.add(target);
           // A Worker/service-worker target runs in its own global scope with
           // its own location, so what IT references resolves against ITS OWN
@@ -3085,10 +3062,9 @@ async function shareManifestForSite(
     }
   }
 
+  // `approved` is seeded with entryPath (a confirmed non-null string, per the
+  // guard above) and only ever grows from there, so it can never be empty.
   const files = [...approved].sort((a, b) => a.localeCompare(b));
-  if (files.length === 0) {
-    return { ok: false, reason: "no-runnable-artifact" };
-  }
   if (files.length > MAX_SHARE_MANIFEST_FILES) {
     return {
       ok: false,
@@ -3396,11 +3372,10 @@ export async function getSitePackage(
   // for callers that pass no mode, is unaffected.
   effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SitePackageInfo | null> {
-  const root = denormalizeRoot(anyPath);
   const sites = knownSites ?? await listSitePackages(rootPath);
   const matched =
     sites
-      .filter((site) => anyPath === site.root || root === site.root || isUnder(site.root, anyPath))
+      .filter((site) => anyPath === site.root || isUnder(site.root, anyPath))
       .sort((a, b) => b.root.length - a.root.length)[0] ?? null;
   if (!matched || effectiveMode === undefined) return matched;
   const { shareManifest: _staleShareManifest, ...packageInfo } = matched;
@@ -3464,5 +3439,5 @@ export function buildOutputSiteRoot(
   site: Pick<SitePackageInfo, "root">,
   output: string,
 ): string {
-  return site.root === "." ? output : `${site.root}/${output}`;
+  return joinSitePath(site.root, output);
 }

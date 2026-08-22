@@ -144,10 +144,10 @@ const PluginPanel = z.object({
  * left for plugins at the smallest window.
  *
  * Four sits under that five: one plugin can never fill the rail on its own.
- * It is also well past the measured healthy shape. The sites plugin measured
- * before it returned to core used one view. A suite with two or three still
- * fits. Nothing is rejected
- * for lack of room: past what one window shows, the rail scrolls.
+ * It is also well past the measured healthy shape — a plugin that manages a
+ * single kind of workspace object typically needs one view, and a suite that
+ * splits related work into two or three still fits. Nothing is rejected for
+ * lack of room: past what one window shows, the rail scrolls.
  */
 export const MAX_PLUGIN_VIEW_PANELS = 4;
 
@@ -163,14 +163,14 @@ const PluginCommand = z.object({
 // (PluginHandler.startWebApp), not the manifest, because it exists only once
 // the plugin's server is ready.
 // An instanced web app opens one tab per runtime instance instead of one tab
-// for the whole manifest id. The sites plugin measured before it returned to
-// core previewed each site in its own tab over its own loopback origin. dohc
-// holds no opinion about what an instance
-// is — the plugin names it with an instance key, gets that key back in
-// startWebApp, and serves whatever origin that instance needs. The flag is
-// what tells dohc which of the two shapes an id uses, so an open that carries
-// no key (the plugin page's Open button) and an open that carries one are each
-// refused for the wrong id instead of quietly serving the wrong app.
+// for the whole manifest id — a database browser plugin, say, opening one tab
+// per connection rather than one tab for the whole plugin. dohc holds no
+// opinion about what an instance is: the plugin names it with an instance
+// key, gets that key back in startWebApp, and serves whatever origin that
+// instance needs. The flag is what tells dohc which of the two shapes an id
+// uses, so an open that carries no key (the plugin page's Open button) and an
+// open that carries one are each refused for the wrong id instead of quietly
+// serving the wrong app.
 const PluginWebApp = z.object({
   id: z.string().min(1).max(120).refine(
     (value) => !value.includes("\0"),

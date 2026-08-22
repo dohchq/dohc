@@ -9,12 +9,9 @@ import { IconButton, PrimaryButton } from "./ui/controls";
 // or a version) was made where the user clicked — this dialog only confirms
 // and addresses it.
 
-export interface RelayShareTarget {
-  paths: string[];
-  label?: string;
-  versionId?: string;
-  versionName?: string;
-}
+export type RelayShareTarget =
+  | { kind: "paths"; paths: string[]; label?: string }
+  | { kind: "version"; versionId: string; versionName?: string };
 
 function errorMessage(cause: unknown): string {
   const text = cause instanceof Error ? cause.message : String(cause);
@@ -62,9 +59,10 @@ export function RelayShareDialog(props: {
   } | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const subject = props.target.versionId
-    ? `version “${props.target.versionName ?? props.target.versionId}”`
-    : (props.target.label ?? props.target.paths[0] ?? "this selection");
+  const subject =
+    props.target.kind === "version"
+      ? `version “${props.target.versionName ?? props.target.versionId}”`
+      : (props.target.label ?? props.target.paths[0] ?? "this selection");
 
   const canSubmit = useMemo(() => email.trim().length > 2 && !busy, [busy, email]);
 
@@ -77,9 +75,10 @@ export function RelayShareDialog(props: {
         workspaceId: props.workspaceId,
         recipientEmail: email.trim(),
         access,
-        ...(props.target.versionId ? { versionId: props.target.versionId } : {}),
+        ...(props.target.kind === "version"
+          ? { versionId: props.target.versionId }
+          : { paths: props.target.paths }),
       };
-      if (props.target.paths.length > 0) payload.paths = props.target.paths;
       const result = await bridge().createRelayShare(payload);
       setCreated({ shareCode: result.shareCode, recipientEmail: result.recipientEmail });
     } catch (cause) {
@@ -113,7 +112,7 @@ export function RelayShareDialog(props: {
       </div>
 
       <p className="m-0 text-xs leading-relaxed text-muted">
-        {props.target.versionId ? (
+        {props.target.kind === "version" ? (
           <>Share {subject}.</>
         ) : (
           <>
