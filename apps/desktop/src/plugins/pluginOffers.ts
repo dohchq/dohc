@@ -191,15 +191,25 @@ async function ensureContainedDirectory(
  * `false` means the claim lost that race; `target` is left exactly as this
  * call found it, for the caller to refuse over.
  *
- * A successful claim still has to be freed before the rename lands: Windows
- * refuses rename() onto ANY existing directory, even an empty one this call
- * just created and exclusively owns (verified empirically — MoveFileEx's
- * REPLACE_EXISTING flag is documented not to accept a directory name, and
- * throws EPERM in practice for both an empty and a populated destination).
- * Freeing the claim with rmdir immediately before the rename keeps one
- * sequence on every platform, at the cost of a narrow window between the
- * free and the rename that is far smaller than, and never silently
- * destructive like, the unconditional replace this replaces.
+ * What happens to a successful claim before the rename lands is platform-
+ * specific:
+ *
+ * - POSIX: rename() replacing an existing EMPTY directory is exactly the
+ *   safe case — and this call is the only one that could have created
+ *   target, since mkdir() above is the atomic fail-on-exist claim. Renaming
+ *   `staged` directly onto the still-held claim keeps a concurrent
+ *   creator's own mkdir(target) failing for as long as this claim stands,
+ *   never racing this rename for the slot.
+ * - Windows: rename() refuses to land on ANY existing directory, even an
+ *   empty one this call just created and exclusively owns (verified
+ *   empirically — MoveFileEx's REPLACE_EXISTING flag is documented not to
+ *   accept a directory name, and throws EPERM in practice for both an
+ *   empty and a populated destination) — so the claim has to be freed with
+ *   rmdir first. That reopens a narrow window a concurrent creator could
+ *   land in, but the rename that follows FAILS LOUD when it does (the same
+ *   EPERM, now because a real directory sits where an empty one was) —
+ *   this reads as the claim having been lost, the same refusal as an
+ *   outright EEXIST, never a silent clobber.
  */
 async function publishStaged(staged: string, target: string): Promise<boolean> {
   try {
@@ -208,8 +218,17 @@ async function publishStaged(staged: string, target: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
   }
+  if (process.platform !== "win32") {
+    await renameWithWindowsRetry(staged, target, (error) => error);
+    return true;
+  }
   await rmdir(target);
-  await renameWithWindowsRetry(staged, target, (error) => error);
+  try {
+    await renameWithWindowsRetry(staged, target, (error) => error);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return false;
+    throw error;
+  }
   return true;
 }
 
@@ -324,9 +343,16 @@ async function targetIdentity(target: string): Promise<OfferedPluginIdentity> {
  * `target` into `.dohc`'s own contained staging area is one atomic syscall
  * that only ever touches the directory ENTRY currently there — not a
  * symlink's target, and not wherever a parent swap redirects to once the
- * syscall has already completed. Only after that move does this verify the
- * STAGED item's device+inode against `identity` (captured the instant
- * addOfferedPlugin's own rename landed); a mismatch renames it straight
+ * syscall has already completed. Node has no dirfd-relative rename, so this
+ * move still resolves `plugins/` by path rather than a handle verified at
+ * the top of this function — a parent swap in that specific window is a
+ * platform floor this cannot close, bounded because the harm is only ever
+ * relocation into this module's own contained staging (never deletion, and
+ * the identity check below still refuses to delete a mismatch). Only after
+ * the move does this verify the STAGED item's device+inode against
+ * `identity` (captured from the staging directory before addOfferedPlugin's
+ * own publish rename, so it stays valid without ever being read off a path
+ * anything else could still race into); a mismatch renames it straight
  * back to where it was and refuses, never deleting it. Only a confirmed
  * match is ever deleted, and always from the staging path this module
  * already verified — never from the original, still-swappable one.

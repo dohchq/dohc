@@ -34,6 +34,10 @@ const raceState = vi.hoisted(() => ({
   mkdirTrap: null as null | { path: string; run: () => Promise<void> },
   lstatTrap: null as null | { path: string; afterCall: number; run: () => Promise<void> },
   lstatCallCounts: new Map<string, number>(),
+  // Fires AFTER the real rmdir completes, not before: this models a
+  // competitor claiming the slot in the window this call's own reservation
+  // just freed, which only exists once the free has actually happened.
+  rmdirTrap: null as null | { path: string; run: () => Promise<void> },
 }));
 
 vi.mock("node:fs/promises", async () => {
@@ -65,6 +69,18 @@ vi.mock("node:fs/promises", async () => {
         }
       }
       return actual.lstat(path, options);
+    },
+    rmdir: async (
+      path: Parameters<typeof actual.rmdir>[0],
+      options?: Parameters<typeof actual.rmdir>[1],
+    ) => {
+      const result = await actual.rmdir(path, options);
+      const trap = raceState.rmdirTrap;
+      if (trap && path === trap.path) {
+        raceState.rmdirTrap = null;
+        await trap.run();
+      }
+      return result;
     },
   };
 });
@@ -111,6 +127,7 @@ afterEach(async () => {
   raceState.mkdirTrap = null;
   raceState.lstatTrap = null;
   raceState.lstatCallCounts.clear();
+  raceState.rmdirTrap = null;
   await Promise.all(
     roots.splice(0).map((root) =>
       rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
@@ -401,6 +418,45 @@ describe("addOfferedPlugin", () => {
     await expect(readFile(join(target, "concurrent.txt"), "utf8")).resolves.toBe("raced");
     await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  // Windows-only: rename() there refuses to land on ANY existing directory,
+  // so publishStaged frees its own mkdir() claim with rmdir() before the
+  // rename — reopening a window a concurrent creator could land in. The
+  // rename that follows must fail loud when that happens (a real directory
+  // now sits where the freed claim was) rather than silently replace it —
+  // this pin only means something on the platform that takes this branch.
+  it.runIf(process.platform === "win32")(
+    "[Windows] refuses without clobbering when a competitor claims the slot the instant the reservation is freed",
+    async () => {
+      const fixture = await createFixture();
+      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      raceState.rmdirTrap = {
+        path: target,
+        run: async () => {
+          await mkdir(target, { recursive: true });
+          await writeFile(join(target, "raced.txt"), "raced");
+        },
+      };
+
+      await expect(
+        addOfferedPlugin({
+          builtinPluginsRoot: fixture.builtinPluginsRoot,
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+        }),
+      ).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof OfferedPluginAddError &&
+          error.message.includes("plugins/codex"),
+      );
+
+      // The competitor's directory survived, untouched — never clobbered
+      // by this call's own rename.
+      await expect(readFile(join(target, "raced.txt"), "utf8")).resolves.toBe("raced");
+      await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
 });
 
 describe("removeAddedOfferedPlugin", () => {

@@ -517,6 +517,56 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.uninstallPlugin).not.toHaveBeenCalled();
   });
 
+  // The interleaving the test above cannot reach: the install lands WHILE
+  // the preflight request for Remove is still in flight, before
+  // confirmation exists for the event-driven clear (the test above) to act
+  // on. The preflight response must not install a dialog built from a
+  // snapshot that stopped being true before it ever arrived.
+  it("never opens the Remove confirmation when the plugin was installed while its preflight was in flight", async () => {
+    const added = plugin("codex", {
+      status: "discovered",
+      runtimeStatus: null,
+      sourceHash: null,
+      approvedHash: null,
+      installedBaselineHash: null,
+    });
+    bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [added] });
+    const slowPreflight = deferred<{
+      ok: true;
+      confirmationToken: string;
+      preflight: PluginUninstallPreflightRecord;
+    }>();
+    bridgeMock.pluginUninstallPreflight.mockImplementation(() => slowPreflight.promise);
+
+    renderPage("codex");
+    await userEvent.click(await screen.findByTestId("plugin-remove"));
+    // Nothing to show yet — the preflight request is still pending.
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+
+    // Installed elsewhere while Remove's own preflight was still in flight —
+    // confirmation is still null here, so the event-driven clear above has
+    // nothing to act on.
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex"), // default status "ready", approved
+      });
+    });
+
+    await act(async () => {
+      slowPreflight.resolve({
+        ok: true,
+        confirmationToken: "00000000-0000-4000-8000-000000000001",
+        preflight: cleanPreflight,
+      });
+      await slowPreflight.promise;
+    });
+
+    expect(screen.queryByTestId("plugin-uninstall-dialog")).toBeNull();
+    expect(bridgeMock.uninstallPlugin).not.toHaveBeenCalled();
+  });
+
   // MUTATION (offer Open for a per-instance app too): this page has no
   // instance to name, so the open would be refused — and a user would be
   // handed a button that never works. The plugin's own panel opens these.

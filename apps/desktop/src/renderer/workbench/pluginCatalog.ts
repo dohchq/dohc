@@ -648,6 +648,7 @@ export function usePluginCatalog(
 
   async function prepareUninstall(plugin: PluginStatusRecord) {
     const epoch = workspaceEpoch.current;
+    const revisionAtStart = statusRevision.current;
     setBusy((current) => ({ ...current, [plugin.id]: "preflight" }));
     setErrors((current) => ({ ...current, [plugin.id]: undefined }));
     try {
@@ -663,6 +664,24 @@ export function usePluginCatalog(
         }));
         return;
       }
+      // The same never-was-installed → now-is-installed transition the
+      // event listener above drops an OPEN confirmation for can land
+      // while this request is still in flight, before `confirmation`
+      // exists for that guard to act on. Installing this response now
+      // would open a Remove dialog — "just a copy, nothing installed to
+      // lose" — for a plugin that IS installed; refuse instead of
+      // building a dialog from a snapshot that stopped being true before
+      // this response ever arrived. The live status listener already
+      // applied the newer event to the row itself, so the row already
+      // shows the truth — nothing further to do here but not proceed.
+      const newer = pendingStatusEvents.current.get(plugin.id);
+      const staleInstall =
+        newer &&
+        newer.revision > revisionAtStart &&
+        newer.event.kind === "changed" &&
+        !isInstalled(plugin) &&
+        isInstalled(newer.event.plugin);
+      if (staleInstall) return;
       setConfirmation({
         plugin,
         confirmationToken: result.confirmationToken,

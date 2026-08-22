@@ -971,11 +971,23 @@ export class PluginPipeline {
         );
       }
 
-      const record = await this.localRecord(pluginId);
+      const state = await this.localState();
+      const record = state.plugins[pluginId];
       if (confirmation.pluginRoot === null) {
         return this.finishSourcelessUninstall(pluginId);
       }
       const candidate = this.requireUninstallableCandidate(pluginId, record);
+      // State/artifacts might be filed under the id the record was
+      // ORIGINALLY installed under, not pluginId: a broken manifest gives
+      // discovery a directory-derived fallback id (#779 round 8 finding 4),
+      // and installedRecord's own directoryName join is what already finds
+      // the persisted record across that mismatch. Deleting only under
+      // pluginId strands the other key's state and plugin data forever —
+      // nothing else ever visits it again once the discovery entry for
+      // this directory is gone (#779-offers round 9 finding 3).
+      const cleanupIds = new Set([pluginId]);
+      const installedIdentity = this.installedRecord(state, candidate);
+      if (installedIdentity) cleanupIds.add(installedIdentity.pluginId);
       if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
         return this.failure(
           pluginId,
@@ -1061,27 +1073,33 @@ export class PluginPipeline {
           return this.failure(pluginId, detail);
         }
 
-        // Both deletes are attempted even if one rejects (round 4 finding 2)
-        // — skipping the live bundle because the source delete failed, or
-        // vice versa, would silently leave the other one behind with no
-        // record that cleanup is still owed.
-        const [rootDeleted, liveDeleted] = await Promise.allSettled([
+        // Every delete is attempted even if another rejects (round 4 finding
+        // 2; extended round 9 finding 3 to every cleanup identity) —
+        // skipping one because another failed would silently leave it
+        // behind with no record that cleanup is still owed.
+        const [rootDeleted, ...dataDeleted] = await Promise.allSettled([
           this.operations.removePath(candidate.rootPath, {
             recursive: true,
             force: true,
             maxRetries: 5,
             retryDelay: 200,
           }),
-          this.removePluginData(pluginId),
+          ...[...cleanupIds].map((id) => this.removePluginData(id)),
         ]);
         if (rootDeleted.status === "rejected") throw rootDeleted.reason;
-        if (liveDeleted.status === "rejected") throw liveDeleted.reason;
+        for (const result of dataDeleted) {
+          if (result.status === "rejected") throw result.reason;
+        }
 
-        await this.operations.mutateRecord(
-          this.options.stateDir,
-          this.workspaceRoot,
-          pluginId,
-          () => undefined,
+        await Promise.all(
+          [...cleanupIds].map((id) =>
+            this.operations.mutateRecord(
+              this.options.stateDir,
+              this.workspaceRoot,
+              id,
+              () => undefined,
+            )
+          ),
         );
         this.statuses.delete(pluginId);
         this.doorWrittenDeltas.delete(pluginId);

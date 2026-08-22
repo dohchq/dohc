@@ -715,6 +715,98 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  // Round 9 finding 3: a directory installed as "codex" whose install never
+  // finished (no approvedHash) can still have left state and plugin data
+  // filed under "codex" before its manifest broke. A broken manifest gives
+  // discovery a directory-derived fallback id — "my-codex-copy" here, never
+  // "codex" — and uninstall used to derive every cleanup path from THAT id
+  // alone: it deleted the source correctly (the candidate's rootPath is
+  // resolved by directory) but found nothing to delete under the fallback
+  // key, silently stranding the real state and data under "codex" forever.
+  it("clears source AND the originally-keyed state when a never-approved install's manifest breaks under a different directory name", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-stranded-state-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const pluginRoot = join(workspaceRoot, "plugins", "my-codex-copy");
+    await mkdir(join(pluginRoot, "src"), { recursive: true });
+    await writeFile(
+      join(pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(pluginRoot, "src", "main.ts"), "export default {};\n");
+
+    // A partial install left state under the manifest id "codex" —
+    // directoryName is the join #779 round 9 B3 already relies on to find
+    // it again once the manifest breaks — but approval never completed.
+    await mutatePluginRecord(stateDir, workspaceRoot, "codex", () => ({
+      directoryName: "my-codex-copy",
+    }));
+    const dohcDir = pluginDataDir(stateDir, workspaceRoot);
+    const strandedStateRoot = pluginStateRoot(dohcDir, "codex");
+    await mkdir(strandedStateRoot, { recursive: true });
+    await writeFile(join(strandedStateRoot, "session.json"), "{}");
+
+    // Broken before the pipeline ever discovers it — id falls back to the
+    // directory name, which does not match the "codex" key above.
+    await writeFile(join(pluginRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const row = pipeline.list()[0];
+      expect(row).toMatchObject({
+        directoryName: "my-codex-copy",
+        id: "my-codex-copy",
+        valid: false,
+        approvedHash: null,
+      });
+
+      const preflight = await pipeline.uninstallPreflight(row!.id);
+      if (!preflight.ok) {
+        throw new Error(`${preflight.error.stage}/${preflight.error.code}: ${preflight.error.message}`);
+      }
+      const removed = await pipeline.uninstall(row!.id, preflight.confirmationToken);
+      expect(removed.ok).toBe(true);
+
+      // The source directory is gone.
+      await expect(lstat(pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      // The state stranded under the ORIGINAL "codex" key is gone too, not
+      // silently left behind under a key nothing will ever visit again.
+      await expect(lstat(strandedStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      const state = await readPluginLocalState(stateDir, workspaceRoot);
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["codex"]).toBeUndefined();
+      expect(state.state.plugins["my-codex-copy"]).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   // Conflict detection has to be side-agnostic: !plugin.valid alone only
   // catches THIS request's copy losing the tie-break. When the copy sorts
   // first and WINS instead, its own record stays valid and reads as a
