@@ -534,6 +534,80 @@ describe("Codex chat web app", () => {
     await after.close();
   });
 
+  it("carries a long streamed reply whole through a reload, never starting mid-delta", async () => {
+    // A single streamed reply can easily outnumber the log cap in deltas.
+    // The log coalesces them into one entry per item, so overflowing the
+    // log with a long streamed turn can never leave a replay that starts
+    // mid-sentence.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    await post(url, "message", { text: "Question", clientId: "c1" }, token);
+
+    let full = "";
+    for (let index = 0; index < 600; index += 1) {
+      const text = "word" + index + " ";
+      full += text;
+      fake.startInputs[0]?.onEvent({ kind: "text-delta", itemId: "i1", stream: "assistant", text });
+    }
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({
+      kind: "user-message",
+      text: "Question",
+      clientId: "c1",
+    });
+    expect(await reattached.next()).toEqual({
+      kind: "text-delta",
+      itemId: "i1",
+      stream: "assistant",
+      text: full,
+    });
+    expect(await reattached.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "completed",
+    });
+    await reattached.close();
+  });
+
+  it("evicts whole turns on overflow, so a replay starts at a turn boundary", async () => {
+    // Eviction used to drop oldest events one by one, which could keep a
+    // turn's reply while dropping the question that caused it. The cut now
+    // extends to the next user-message: what remains replays from a turn's
+    // own start.
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+
+    for (const [turn, text] of [
+      [1, "one"],
+      [2, "two"],
+    ] as const) {
+      await post(url, "message", { text }, token);
+      for (let index = 0; index < 300; index += 1) {
+        fake.startInputs[0]?.onEvent({
+          kind: "item",
+          phase: "completed",
+          item: { id: `t${turn}-${index}`, type: "command", title: "Run", status: "completed" },
+        });
+      }
+      fake.startInputs[0]?.onEvent({
+        kind: "turn-completed",
+        turnId: `turn-${turn}`,
+        status: "completed",
+      });
+    }
+
+    // 604 entries were published; the overflow cut extended through the
+    // whole first turn, so the replay opens with the second turn's own
+    // user-message -- never an orphaned mid-turn event.
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toMatchObject({ kind: "user-message", text: "two" });
+    await reattached.close();
+  });
+
   it("a Stop before the turn is accepted cancels it the moment it is accepted", async () => {
     // In the window between /message reaching the driver and the driver
     // accepting the prompt, no turn id exists yet -- Stop's cancel() is a

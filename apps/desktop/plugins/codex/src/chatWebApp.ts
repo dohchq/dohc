@@ -18,10 +18,12 @@ import type {
 
 const CHAT_WEB_APP_ID = "chat";
 // A memory guard, not a measured retention target -- no healthy turn size
-// was measured before choosing 500. A turn longer than this replays
-// starting mid-turn on reconnect, not from the beginning: ui/chat.js resets
-// its transcript on every EventSource open and rebuilds it purely from
-// what this log currently holds.
+// was measured before choosing 500. ui/chat.js resets its transcript on
+// every EventSource open and rebuilds it purely from what this log
+// currently holds, so what the log evicts decides what a reload can still
+// replay coherently: streamed text coalesces into one entry per item (see
+// publish), and eviction drops whole turns (see trimLog), so a replay
+// starts at a turn boundary instead of mid-sentence.
 const MAX_BUFFERED_EVENTS = 500;
 
 type SessionStateEvent = Extract<PluginAgentEvent, { kind: "session-state" }>;
@@ -244,6 +246,13 @@ export function createChatWebApp(
   // that connection to ever mark it failed if the driver goes on to reject
   // it. Live clients still see it normally, once it's actually confirmed.
   const eventLog: Array<{ event: ChatStreamEvent; at: number; provisional?: boolean }> = [];
+  // The log entry currently accumulating each item's streamed text, keyed
+  // by "stream:itemId". Live clients still get every delta as its own
+  // frame; only the log coalesces, so a single long streamed reply is one
+  // entry the log keeps or evicts whole -- a replay can never start
+  // mid-delta. Cleared when its turn settles, and pruned when eviction
+  // drops the entry it points at.
+  const openDeltas = new Map<string, { event: ChatStreamEvent; at: number }>();
   const clients = new Set<ServerResponse>();
   const pendingPermissions = new Set<string>();
   // A request permission() has claimed (removed from pendingPermissions, so
@@ -269,9 +278,24 @@ export function createChatWebApp(
     return "data: " + JSON.stringify({ ...state, snapshot: true }) + "\n\n";
   }
 
+  /** Evicts oldest entries once the log exceeds its cap -- in whole turns:
+   * the cut extends forward to the next user-message, so a replay starts
+   * at a turn boundary rather than with an answer whose question is gone.
+   * When no boundary remains ahead of the cut (a single turn larger than
+   * the whole cap), it falls back to the bare cap; entries are whole cards
+   * either way, never a fragment of one. */
   function trimLog(): void {
-    if (eventLog.length > MAX_BUFFERED_EVENTS) {
-      eventLog.splice(0, eventLog.length - MAX_BUFFERED_EVENTS);
+    if (eventLog.length <= MAX_BUFFERED_EVENTS) return;
+    let cut = eventLog.length - MAX_BUFFERED_EVENTS;
+    let boundary = cut;
+    while (boundary < eventLog.length && eventLog[boundary].event.kind !== "user-message") {
+      boundary += 1;
+    }
+    if (boundary < eventLog.length) cut = boundary;
+    for (const dropped of eventLog.splice(0, cut)) {
+      if (dropped.event.kind !== "text-delta") continue;
+      const key = dropped.event.stream + ":" + dropped.event.itemId;
+      if (openDeltas.get(key) === dropped) openDeltas.delete(key);
     }
   }
 
@@ -287,12 +311,29 @@ export function createChatWebApp(
     // later message refused with a stale 409 forever.
     if (event.kind === "turn-completed" || (event.kind !== "user-message" && sessionEnded(event))) {
       turnActive = false;
+      openDeltas.clear();
     }
     if (event.kind === "permission-request") pendingPermissions.add(event.requestId);
     if (event.kind === "permission-resolved") pendingPermissions.delete(event.requestId);
     const at = Date.now();
-    eventLog.push({ event, at });
-    trimLog();
+    if (event.kind === "text-delta") {
+      // The log coalesces streamed text into one entry per item; the live
+      // broadcast below still carries just this delta. The stored copy is
+      // this server's own object -- never the driver's, which must not be
+      // mutated as later deltas append.
+      const open = openDeltas.get(event.stream + ":" + event.itemId);
+      if (open && open.event.kind === "text-delta") {
+        open.event.text += event.text;
+      } else {
+        const entry = { event: { ...event }, at };
+        eventLog.push(entry);
+        openDeltas.set(event.stream + ":" + event.itemId, entry);
+        trimLog();
+      }
+    } else {
+      eventLog.push({ event, at });
+      trimLog();
+    }
     const encoded = frame(event, at);
     for (const client of clients) client.write(encoded);
   }
@@ -322,6 +363,7 @@ export function createChatWebApp(
     const generation = ++sessionGeneration;
     settlePendingPermissions();
     turnActive = false;
+    openDeltas.clear();
     // Set once this driver.startSession call itself ends before it even
     // resolves (a session that fails during its own handshake).
     let ended = false;
@@ -707,6 +749,7 @@ export function createChatWebApp(
     for (const client of clients) client.end();
     clients.clear();
     eventLog.length = 0;
+    openDeltas.clear();
     state = { kind: "session-state", state: "closed" };
     const runningServer = server;
     server = null;
