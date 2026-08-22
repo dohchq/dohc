@@ -1274,7 +1274,7 @@ describe("plugin activity-bar views", () => {
 });
 
 describe("plugin details tabs", () => {
-  const detailsPath = pluginDetailsTabPath("t3-code");
+  const detailsPath = pluginDetailsTabPath("t3-code", "t3-code");
 
   function withPlugins(
     bridge: ReturnType<typeof makeBridge>,
@@ -1332,6 +1332,59 @@ describe("plugin details tabs", () => {
         screen.getByTestId("plugin-row").getAttribute("data-selected"),
       ).toBe("true"),
     );
+  });
+
+  // A discovered row's id is only ever a broken manifest's directory-
+  // derived fallback, which can coincide with some OTHER, unrelated
+  // plugin's real id — two rows sharing one id string is a real, reachable
+  // state, not a hypothetical. Before carrying directoryName through
+  // open-details and the tab path, clicking the second-sorting row always
+  // reopened whichever row `.find((entry) => entry.id === pluginId)` hit
+  // first (#779-offers round 14 finding 1).
+  it("opens the exact row clicked, not the first one sharing its id, when two rows collide", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const rowFields = {
+      rootPath: "/workspace/plugins/x",
+      valid: true,
+      status: "ready" as const,
+      disabledReason: null,
+      runtimeStatus: "ready" as const,
+      sourceHash: "a".repeat(64),
+      approvedHash: "a".repeat(64),
+      installedBaselineHash: "a".repeat(64),
+      description: null,
+      publisher: null,
+      pluginVersion: null,
+      repository: null,
+      issues: null,
+      license: null,
+      icon: null,
+      settings: [],
+      panels: [],
+      webApps: [],
+      diagnostics: [],
+      warnings: [],
+      error: null,
+    };
+    bridge.listPlugins = vi.fn(async () => ({
+      ok: true as const,
+      plugins: [
+        { ...rowFields, id: "codex", directoryName: "codex-a", displayName: "Codex A" },
+        { ...rowFields, id: "codex", directoryName: "codex-b", displayName: "Codex B" },
+      ] as PluginStatusRecord[],
+    }));
+    renderShell(bridge);
+
+    await userEvent.click(await screen.findByTestId("activity-plugins"));
+    const rows = await screen.findAllByTestId("plugin-row");
+    expect(rows).toHaveLength(2);
+    const rowB = rows.find((row) => within(row).queryByText("Codex B"));
+    if (!rowB) throw new Error("Codex B row not found among the rendered rows.");
+    await userEvent.click(within(rowB).getByTestId("plugin-open-details"));
+
+    const page = await screen.findByTestId("plugin-details-page");
+    expect(page.getAttribute("data-directory-name")).toBe("codex-b");
+    expect(within(page).getByText("Codex B")).toBeTruthy();
   });
 
   it("restores a plugin's details tab and mounts its page", async () => {

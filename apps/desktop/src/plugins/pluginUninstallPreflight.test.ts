@@ -195,6 +195,42 @@ describe("plugin uninstall preflight", () => {
     expect(result.stateData).toMatchObject({ path: otherStateRoot, fileCount: 1 });
   });
 
+  // Two different cleanup identities can trace to the SAME physical state
+  // directory — pluginStateRoot is deterministic per id, and PluginPipeline
+  // callers can legitimately pass the same resolved root as both stateRoot
+  // and (via additionalCleanupIds) an entry in additionalStateRoots.
+  // Measuring it twice would double the file count and byte total the
+  // warning reports (#779-offers round 14 finding 7).
+  it("measures a state root shared by stateRoot and additionalStateRoots only once", async () => {
+    const fixture = await createFixture();
+    await writeSourceFile(fixture, "dohc-plugin.json", "{}\n");
+    const baseline = await saveBaseline(fixture);
+
+    const sharedStateRoot = pluginStateRoot(fixture.dohcDir, pluginId);
+    await mkdir(sharedStateRoot, { recursive: true });
+    await writeFile(join(sharedStateRoot, "session.json"), "{}");
+
+    const distinctStateRoot = pluginStateRoot(fixture.dohcDir, "other-plugin-id");
+    await mkdir(distinctStateRoot, { recursive: true });
+    await writeFile(join(distinctStateRoot, "cache.json"), "{}");
+
+    const result = await pluginUninstallPreflight({
+      dohcDir: fixture.dohcDir,
+      pluginId,
+      pluginRoot: fixture.pluginRoot,
+      stateRoot: sharedStateRoot,
+      // The same root as `stateRoot`, plus one genuinely distinct one.
+      additionalStateRoots: [sharedStateRoot, distinctStateRoot],
+      installedBaselineHash: baseline,
+      engineCaptureAvailable: true,
+    });
+
+    // MUTATION (measure every listed root, including duplicates): fileCount
+    // would read 3 (session.json counted twice, cache.json once) instead of
+    // the real, deduplicated total of 2.
+    expect(result.stateData).toMatchObject({ fileCount: 2 });
+  });
+
   it("warns instead of reporting a clean tree when a symlink was dropped into the source", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");

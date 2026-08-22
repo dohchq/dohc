@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { workspaceWriteRefusal } from "./workspaces/shareWriteGate";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
@@ -45,5 +46,32 @@ describe("main-process offer-plugin authorization", () => {
         ).toBeLessThan(addOfferedPluginCallAt);
       }
     }
+  });
+
+  // The source-order pin above proves each handler STATES
+  // assertWritableWorkspace(workspace) before any read or write.
+  // assertWritableWorkspace is itself one line over workspaceWriteRefusal
+  // (shareWriteGate.ts's own doc comment), so this runs THAT real,
+  // unmocked decision against a shared view shaped exactly as a share-view
+  // workspace's registry entry actually carries it — the runtime half of
+  // the proof a source scan alone cannot give: not only does the call
+  // appear in the right place, but calling it for a shared view genuinely
+  // refuses, worded the way the handler's caller will see it.
+  it("refuses a shared view at the exact gate both offer handlers state (runtime, not only source)", () => {
+    const refusal = workspaceWriteRefusal({
+      shareId: "share-1",
+      granterEmail: "owner@example.com",
+      relayUrl: "https://relay.test",
+      ended: false,
+      grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+    });
+    expect(refusal).not.toBeNull();
+    expect(refusal).toContain("shared view");
+
+    // An ordinary workspace (no share view marker at all) is exactly what
+    // both handlers require before they touch pipeline.list() or the
+    // filesystem: refusal here would break every real workspace's Plugins
+    // view, not only a shared one.
+    expect(workspaceWriteRefusal(undefined)).toBeNull();
   });
 });

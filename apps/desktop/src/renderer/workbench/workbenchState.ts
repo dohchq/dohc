@@ -130,19 +130,36 @@ export function pluginWebAppTabPath(
   return instanceKey === null ? base : `${base}/${encodeURIComponent(instanceKey)}`;
 }
 
-export function pluginDetailsTabPath(pluginId: string): string {
-  return `${PLUGIN_DETAILS_TAB_PREFIX}${encodeURIComponent(pluginId)}`;
+/**
+ * Both id and directory, the same shape pluginPanelTabPath already carries:
+ * a row's own id is not unique on its own — a discovered, never-installed
+ * row's id is only ever a broken manifest's directory-derived fallback,
+ * which can coincide with some OTHER, unrelated plugin's real id (#779-
+ * offers round 11 finding 3's own collision). Keying the tab by id alone
+ * collapsed two different rows into one tab and made the second-sorting
+ * one unreachable — its own click always reopened the first one's tab
+ * instead (#779-offers round 14).
+ */
+export function pluginDetailsTabPath(pluginId: string, directoryName: string): string {
+  return `${PLUGIN_DETAILS_TAB_PREFIX}${encodeURIComponent(pluginId)}/${encodeURIComponent(directoryName)}`;
 }
 
 export function isPluginDetailsTabPath(path: string | null): boolean {
   return typeof path === "string" && path.startsWith(PLUGIN_DETAILS_TAB_PREFIX);
 }
 
-export function parsePluginDetailsTabPath(path: string | null): string | null {
+export function parsePluginDetailsTabPath(
+  path: string | null,
+): { pluginId: string; directoryName: string } | null {
   if (typeof path !== "string" || !isPluginDetailsTabPath(path)) return null;
+  const parts = path.slice(PLUGIN_DETAILS_TAB_PREFIX.length).split("/");
+  if (parts.length !== 2 || parts.some((part) => part.length === 0)) return null;
   try {
-    const pluginId = decodeURIComponent(path.slice(PLUGIN_DETAILS_TAB_PREFIX.length));
-    return pluginId.length > 0 ? pluginId : null;
+    const pluginId = decodeURIComponent(parts[0]!);
+    const directoryName = decodeURIComponent(parts[1]!);
+    return pluginId.length > 0 && directoryName.length > 0
+      ? { pluginId, directoryName }
+      : null;
   } catch {
     return null;
   }

@@ -193,19 +193,25 @@ async function ensureContainedDirectory(
  * delete something it cannot account for; the caller's own error still
  * propagates either way, so a genuinely stray claim is at worst inert,
  * never silently swallowed as success.
+ *
+ * `identity` is null only when targetIdentity() itself refused to capture
+ * one (a filesystem reporting no real device/inode) — the "not symlink, is
+ * a directory, is empty" checks below are what this call still has to lean
+ * on in that case, weaker than a dev+ino match but still real evidence,
+ * never a blind delete.
  */
 async function removeOwnedEmptyClaim(
   target: string,
-  identity: OfferedPluginIdentity,
+  identity: OfferedPluginIdentity | null,
 ): Promise<void> {
   let stats;
   try {
-    stats = await lstat(target);
+    stats = await lstat(target, { bigint: true });
   } catch {
     return;
   }
   if (stats.isSymbolicLink() || !stats.isDirectory()) return;
-  if (stats.dev !== identity.dev || stats.ino !== identity.ino) return;
+  if (identity && (stats.dev !== identity.dev || stats.ino !== identity.ino)) return;
   let entries;
   try {
     entries = await readdir(target);
@@ -262,6 +268,12 @@ async function removeOwnedEmptyClaim(
  * removes it before this rethrows, verifying first that it is still exactly
  * what this call created rather than removing it unconditionally.
  */
+// Node has no dirfd-relative mkdir/rename, so this still names `target` by
+// path rather than a handle bound to the `plugins/` this call's caller
+// already verified — the same platform floor as the rollback's move-into-
+// staging and the claim's own rmdir. Bounded here too: the worst case
+// publishes dohc's own packaged plugin bytes at wherever a swapped-in
+// junction points, never workspace content lost or private data disclosed.
 async function publishStaged(staged: string, target: string): Promise<boolean> {
   try {
     await mkdir(target);
@@ -272,8 +284,17 @@ async function publishStaged(staged: string, target: string): Promise<boolean> {
   // Captured the instant the claim lands, before anything else can ever
   // observe it — removeOwnedEmptyClaim's own failure-path cleanup verifies
   // against this rather than trusting that whatever sits at `target` later
-  // is still the same entry this mkdir() created.
-  const claimIdentity = await targetIdentity(target);
+  // is still the same entry this mkdir() created. targetIdentity() can
+  // itself refuse (an unverifiable filesystem identity) — the claim it was
+  // reading already landed by then, so that failure gets the exact same
+  // cleanup as a rejected rename, not a silently leaked claim.
+  let claimIdentity: OfferedPluginIdentity;
+  try {
+    claimIdentity = await targetIdentity(target);
+  } catch (error) {
+    await removeOwnedEmptyClaim(target, null);
+    throw error;
+  }
   if (process.platform !== "win32") {
     try {
       await renameWithWindowsRetry(staged, target, (error) => error);
@@ -380,12 +401,29 @@ export async function addOfferedPlugin(params: {
 /** Device + inode: the filesystem's own answer to "is this the same
  * directory entry", independent of what the path currently resolves to. */
 export interface OfferedPluginIdentity {
-  dev: number;
-  ino: number;
+  dev: bigint;
+  ino: bigint;
 }
 
+/**
+ * The moment this identity is captured is the ONLY point this module can
+ * ever refuse an unverifiable one — every later comparison only ever
+ * checks equality against what was captured here, so a bad value here
+ * would make every later check vacuous rather than protective. bigint
+ * stats avoid the precision loss plain Number stats risk for a large
+ * inode number; dev or ino reading as zero means this filesystem is not
+ * giving this module a real device/inode identity to track at all (some
+ * network shares and virtual filesystems), and a zeroed identity would
+ * match any other zeroed identity — the opposite of what this exists to
+ * detect. Refusing here, not silently proceeding, is the whole point.
+ */
 async function targetIdentity(target: string): Promise<OfferedPluginIdentity> {
-  const stats = await lstat(target);
+  const stats = await lstat(target, { bigint: true });
+  if (stats.dev === 0n || stats.ino === 0n) {
+    throw new OfferedPluginAddError(
+      `${target} has no verifiable device or inode identity on this filesystem; refusing to continue without one.`,
+    );
+  }
   return { dev: stats.dev, ino: stats.ino };
 }
 
@@ -472,7 +510,7 @@ export async function removeAddedOfferedPlugin(params: {
 
   let stagedStats;
   try {
-    stagedStats = await lstat(staged);
+    stagedStats = await lstat(staged, { bigint: true });
   } catch (error) {
     throw new OfferedPluginAddError(
       `plugins/${directoryName} could not be inspected after staging: ${errorMessage(error)}`,

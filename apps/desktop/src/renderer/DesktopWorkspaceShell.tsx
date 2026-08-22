@@ -1897,8 +1897,9 @@ export function DesktopWorkspaceShell(props: {
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
   // The plugins list marks the row whose details tab the user is looking at,
-  // the way the explorer marks the open file.
-  const activePluginDetailsId = parsePluginDetailsTabPath(focusedTabPath);
+  // the way the explorer marks the open file. Directory, not only id: an
+  // id can collide between two discovered rows (#779-offers round 14).
+  const activePluginDetails = parsePluginDetailsTabPath(focusedTabPath);
   const openTabs = useMemo(() => allTabs(wb), [wb.editorGroups]);
   const dirtyPaths = useMemo(
     () =>
@@ -1946,8 +1947,8 @@ export function DesktopWorkspaceShell(props: {
     [rememberPluginTabTitle],
   );
   const rememberPluginDetailsTitle = useCallback(
-    (pluginId: string, title: string) =>
-      rememberPluginTabTitle(pluginDetailsTabPath(pluginId), title),
+    (pluginId: string, directoryName: string, title: string) =>
+      rememberPluginTabTitle(pluginDetailsTabPath(pluginId, directoryName), title),
     [rememberPluginTabTitle],
   );
   const tabLabels =
@@ -3214,8 +3215,8 @@ export function DesktopWorkspaceShell(props: {
   // A plugin row opens its details tab the same way every other virtual tab
   // opens, so the tab limit refuses it out loud rather than doing nothing.
   const openPluginDetailsTab = useCallback(
-    (pluginId: string) => {
-      openVirtualTab(pluginDetailsTabPath(pluginId));
+    (pluginId: string, directoryName: string) => {
+      openVirtualTab(pluginDetailsTabPath(pluginId, directoryName));
     },
     [openVirtualTab],
   );
@@ -5353,7 +5354,8 @@ export function DesktopWorkspaceShell(props: {
             ) : wb.activeView === "plugins" ? (
               <PluginsView
                 workspaceId={workspaceId}
-                activePluginId={activePluginDetailsId}
+                activePluginId={activePluginDetails?.pluginId ?? null}
+                activePluginDirectoryName={activePluginDetails?.directoryName ?? null}
                 onOpenDetails={openPluginDetailsTab}
               />
             ) : selectedPluginViewState?.status === "ready" ? (
@@ -5462,7 +5464,7 @@ export function DesktopWorkspaceShell(props: {
                 : null;
               const groupPluginPanel = parsePluginPanelTabPath(tabPath);
               const groupPluginWebApp = parsePluginWebAppTabPath(tabPath);
-              const groupPluginDetailsId = parsePluginDetailsTabPath(tabPath);
+              const groupPluginDetails = parsePluginDetailsTabPath(tabPath);
               const groupScrollTarget =
                 searchScrollTarget?.groupId === editorGroup.id &&
                 searchScrollTarget.path === tabPath
@@ -5739,11 +5741,12 @@ export function DesktopWorkspaceShell(props: {
                 </div>
               )
             ) : isPluginDetailsTabPath(tabPath) ? (
-              groupPluginDetailsId ? (
+              groupPluginDetails ? (
                 <Suspense fallback={<PanelLoading label="plugin details" />}>
                   <LazyPluginDetailsPage
                     workspaceId={workspaceId}
-                    pluginId={groupPluginDetailsId}
+                    pluginId={groupPluginDetails.pluginId}
+                    directoryName={groupPluginDetails.directoryName}
                     onTitle={rememberPluginDetailsTitle}
                   />
                 </Suspense>

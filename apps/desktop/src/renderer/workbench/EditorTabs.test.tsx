@@ -71,7 +71,7 @@ describe("EditorTabs strip scrolling", () => {
   // declares. The tab is the third surface showing the same plugin, and it
   // reads from the same map the web app tabs take their titles from.
   it("names a plugin details tab with the display name the shell knows", () => {
-    const path = pluginDetailsTabPath("hello-plugin");
+    const path = pluginDetailsTabPath("hello-plugin", "hello-plugin");
     render(
       <EditorTabs
         groupId="left"
@@ -97,7 +97,7 @@ describe("EditorTabs strip scrolling", () => {
   });
 
   it("falls back to the plugin id until the shell knows a display name", () => {
-    const path = pluginDetailsTabPath("hello-plugin");
+    const path = pluginDetailsTabPath("hello-plugin", "hello-plugin");
     render(
       <EditorTabs
         groupId="left"

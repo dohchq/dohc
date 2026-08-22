@@ -928,8 +928,6 @@ export class PluginPipeline {
       try {
         const state = await this.localState();
         const record = state.plugins[pluginId];
-        const pluginRoot = this.uninstallRootPath(directoryName, pluginId, record);
-        const sourcePresent = await this.sourceRootPresent(pluginRoot);
         // The confirmation this produces has to report every identity
         // cleanup will touch, not only pluginId's own — durable state
         // filed under a record's ORIGINAL id (the same directoryName join
@@ -943,6 +941,16 @@ export class PluginPipeline {
         // round 11 finding 1).
         const candidate = this.uninstallableCandidate(directoryName, pluginId, record)
           ?? this.sourcelessCandidate(pluginId);
+        // Reject an arbitrary or stale (pluginId, directoryName) pair
+        // before ANY side effect runs, resolved from it — no preflight
+        // report, no confirmation token, nothing (#779-offers round 14).
+        if (candidate && !this.pluginIdMatchesDirectory(pluginId, record, candidate)) {
+          throw new Error(
+            `Plugin "${pluginId}" does not match directory "${directoryName}".`,
+          );
+        }
+        const pluginRoot = this.uninstallRootPath(directoryName, pluginId, record);
+        const sourcePresent = await this.sourceRootPresent(pluginRoot);
         const additionalStateRoots = candidate
           ? this.additionalCleanupStateRoots(candidate, state)
           : [];
@@ -1102,9 +1110,9 @@ export class PluginPipeline {
       try {
         // Guarded the same way cleanupIds is: pluginId's own record here
         // can genuinely belong to a different, unrelated installation
-        // (#779-offers round 12 finding 1) — marking IT disabled and
-        // stopping ITS running process would be exactly the harm this
-        // fix closes, done a step earlier than the delete itself.
+        // (#779-offers round 12 finding 1) — marking IT disabled would be
+        // exactly the harm this fix closes, done a step earlier than the
+        // delete itself.
         if (pluginIdTracesHere) {
           await this.operations.mutateRecord(
             this.options.stateDir,
@@ -1112,8 +1120,13 @@ export class PluginPipeline {
             pluginId,
             (existing) => ({ ...existing, disabled: true }),
           );
-          await this.options.pluginHost.stop(pluginId);
         }
+        // Every cleanup identity's own process is stopped before its data
+        // is deleted, not only pluginId's — cleanupIds is already scoped
+        // to identities that trace to this exact directory, so stopping
+        // every one of them can never reach a process an unrelated
+        // installation owns (#779-offers round 14).
+        await Promise.all([...cleanupIds].map((id) => this.options.pluginHost.stop(id)));
 
         // Re-verify immediately before the actual delete: pluginHost.stop()
         // can take real wall-clock time (a grace period, then signal
@@ -1291,22 +1304,27 @@ export class PluginPipeline {
   }
 
   /**
-   * Every id besides a candidate's own that cleanup should also touch — any
-   * record filed under a directoryName matching this candidate's, however
-   * many there are. Deliberately its own scan, not installedRecord's:
-   * installedRecord returns the FIRST match by id-then-directory, correct
-   * for seeding one status from one installation, but uninstall()'s own
-   * "mark disabled before delete" step (a crash-safety marker, run at the
-   * very start of every attempt) writes a bare record under the candidate's
-   * OWN id with no directoryName at all — installedRecord's byId branch
-   * would match that marker on a RETRY and stop there, never reaching the
-   * real record a partially-failed first attempt left behind under the
-   * ORIGINAL id. Every directoryName match still gets cleaned up regardless
-   * of how many there are. Shared by uninstallPreflight (what the
-   * confirmation reports), uninstall (what actually gets deleted), and
-   * finishSourcelessUninstall (the same join against a synthetic candidate
-   * once discovery has nothing left) so all three agree on the same
-   * identities (#779-offers round 9 finding 3, round 10 findings 1 and 2).
+   * Every id whose OWN persisted record traces to this candidate's
+   * directory — including candidate.id itself, when a record happens to be
+   * filed under exactly that key. Deliberately its own scan, not
+   * installedRecord's: installedRecord returns the FIRST match by
+   * id-then-directory, correct for seeding one status from one
+   * installation, but uninstall()'s own "mark disabled before delete" step
+   * (a crash-safety marker, run at the very start of every attempt) writes
+   * a bare record under the candidate's OWN id with no directoryName at
+   * all — installedRecord's byId branch would match that marker on a RETRY
+   * and stop there, never reaching the real record a partially-failed
+   * first attempt left behind under the ORIGINAL id.
+   *
+   * candidate.id is deliberately NOT excluded here: a broken manifest's
+   * discovery id (candidate.id) and the caller's pluginId can differ (a
+   * row installed under one id, later discovered by its directory-derived
+   * fallback), and a genuine record filed under candidate.id's own key —
+   * distinct from both pluginId and every other match — must still be
+   * found, not silently skipped because it happens to equal candidate.id
+   * (#779-offers round 14). The Set the caller builds from this already
+   * dedupes any overlap with pluginId, so including it here is never
+   * redundant work, only ever a correctness gap when omitted.
    */
   private additionalCleanupIds(
     candidate: InstalledPluginRecord,
@@ -1314,9 +1332,7 @@ export class PluginPipeline {
   ): string[] {
     const ids: string[] = [];
     for (const [id, record] of Object.entries(state.plugins)) {
-      if (id !== candidate.id && record.directoryName === candidate.directoryName) {
-        ids.push(id);
-      }
+      if (record.directoryName === candidate.directoryName) ids.push(id);
     }
     return ids;
   }
@@ -1338,6 +1354,29 @@ export class PluginPipeline {
   ): boolean {
     return record?.directoryName === undefined ||
       record.directoryName === candidate.directoryName;
+  }
+
+  /**
+   * Whether a caller-supplied (pluginId, directoryName) pair names a
+   * genuine relationship, checked BEFORE any side effect runs — stricter
+   * than pluginIdTracesDirectory, which defaults to true on no evidence
+   * (right for deciding whether an ALREADY-accepted pluginId also gets
+   * touched by cleanup, wrong for deciding whether to accept the pair at
+   * all). A pair is valid when pluginId is exactly the row's own current
+   * id (candidate.id, resolved by directory — the ordinary case), or
+   * pluginId's own persisted record positively names this exact directory
+   * (a broken manifest's ORIGINAL id, #779 round 9 B3 — still valid even
+   * though it differs from candidate.id). Anything else — an arbitrary or
+   * stale combination naming two unrelated rows — is rejected outright,
+   * before uninstallRootPath or any cleanup identity is resolved from it
+   * (#779-offers round 14).
+   */
+  private pluginIdMatchesDirectory(
+    pluginId: string,
+    record: PluginRecordShape | undefined,
+    candidate: InstalledPluginRecord,
+  ): boolean {
+    return pluginId === candidate.id || record?.directoryName === candidate.directoryName;
   }
 
   /**

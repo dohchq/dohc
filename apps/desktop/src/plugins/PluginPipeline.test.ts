@@ -995,6 +995,167 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  // Round 14 finding 5: the row-resolution fix above protects a pair the
+  // renderer would ACTUALLY send (a row's own id with its own directory,
+  // even when that id happens to collide with an unrelated plugin's real
+  // one). A pair that names two genuinely UNRELATED rows — this plugin's
+  // real, installed id paired with some other directory it was never
+  // installed at — must be refused outright, before uninstallRootPath or
+  // any cleanup identity is even resolved from it.
+  it("refuses a pluginId/directoryName pair that names two unrelated rows, before anything is touched", async () => {
+    const fixture = await createPluginWorkspace();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    // A second, unrelated directory this "example-plugin" id was never
+    // installed at — the arbitrary combination a buggy or hostile caller
+    // could send.
+    const unrelatedRoot = join(fixture.workspaceRoot, "plugins", "unrelated-dir");
+    await mkdir(join(unrelatedRoot, "src"), { recursive: true });
+    await writeFile(
+      join(unrelatedRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "unrelated-id", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(unrelatedRoot, "src", "main.ts"), "export default {};\n");
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list().find((row) => row.directoryName === "example-plugin")?.status
+          === "ready",
+        "example-plugin did not reach ready.",
+      );
+
+      const preflight = await pipeline.uninstallPreflight("example-plugin", "unrelated-dir");
+      expect(preflight.ok).toBe(false);
+      if (preflight.ok) throw new Error("unreachable");
+      expect(preflight.error.stage).toBe("uninstall");
+
+      // Nothing touched: both directories survive, and no confirmation
+      // token exists for uninstall() to act on.
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+      await expect(lstat(unrelatedRoot)).resolves.toBeDefined();
+      expect(pipeline.list().find((row) => row.directoryName === "example-plugin"))
+        .toMatchObject({ status: "ready", approvedHash: expect.any(String) });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Round 14 finding 6: additionalCleanupIds used to exclude candidate.id
+  // from its own scan — meant to avoid double-adding it when it equals
+  // pluginId, but pluginId and candidate.id can genuinely differ (a broken
+  // manifest's fallback id vs. the ORIGINAL id its record is filed under,
+  // #779 round 9 B3), and a SEPARATE, real record filed directly under
+  // candidate.id's own key was silently skipped either way it happened to
+  // sit. The cleanupIds Set already dedupes any overlap, so including
+  // candidate.id unconditionally is never redundant work, only ever a
+  // correctness gap when omitted.
+  it("cleans up a record filed under candidate.id's own key, distinct from pluginId", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-candidate-id-edge-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const pluginRoot = join(workspaceRoot, "plugins", "mixed-dir");
+    await mkdir(join(pluginRoot, "src"), { recursive: true });
+    // Broken from the start: discovery never has a manifest to name this
+    // directory by, so its id is always its own directory-derived
+    // fallback — "mixed-dir".
+    await writeFile(join(pluginRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
+    await writeFile(join(pluginRoot, "src", "main.ts"), "export default {};\n");
+
+    // Two SEPARATE persisted records both trace to "mixed-dir" by
+    // directoryName: the ORIGINAL id this row was installed under (what
+    // the renderer actually passes as pluginId), and a second, genuine
+    // record filed directly under the id "mixed-dir" itself — candidate.id,
+    // once discovery falls back to it.
+    await mutatePluginRecord(stateDir, workspaceRoot, "original-id", () => ({
+      directoryName: "mixed-dir",
+    }));
+    await mutatePluginRecord(stateDir, workspaceRoot, "mixed-dir", () => ({
+      directoryName: "mixed-dir",
+    }));
+    const dohcDir = pluginDataDir(stateDir, workspaceRoot);
+    const originalStateRoot = pluginStateRoot(dohcDir, "original-id");
+    const candidateIdStateRoot = pluginStateRoot(dohcDir, "mixed-dir");
+    await mkdir(originalStateRoot, { recursive: true });
+    await writeFile(join(originalStateRoot, "session.json"), "{}");
+    await mkdir(candidateIdStateRoot, { recursive: true });
+    await writeFile(join(candidateIdStateRoot, "session.json"), "{}");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      // "original-id" is a valid pair for "mixed-dir": its own record
+      // positively names this directory (#779 round 9 B3's own preserved
+      // case, restated in round 14 finding 5's mismatch gate).
+      const preflight = await pipeline.uninstallPreflight("original-id", "mixed-dir");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      const removed = await pipeline.uninstall("original-id", preflight.confirmationToken);
+      expect(removed.ok).toBe(true);
+
+      await expect(lstat(pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      // Both identities' state are gone — not only pluginId's own.
+      await expect(lstat(originalStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(candidateIdStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      const state = await readPluginLocalState(stateDir, workspaceRoot);
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["original-id"]).toBeUndefined();
+      expect(state.state.plugins["mixed-dir"]).toBeUndefined();
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   // Conflict detection has to be side-agnostic: !plugin.valid alone only
   // catches THIS request's copy losing the tie-break. When the copy sorts
   // first and WINS instead, its own record stays valid and reads as a
@@ -1071,15 +1232,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // clean, successful add.
       expect(copied?.valid).toBe(true);
 
-      // The fixed handler's side-agnostic scan: some OTHER directory now
-      // carries the duplicate-id diagnostic naming "codex".
-      const conflictingDiagnostic = 'duplicate plugin id "codex"';
-      const displaced = pipeline.list().find(
-        (entry) =>
-          entry.directoryName !== "codex" &&
-          entry.diagnostics.some((diagnostic) => diagnostic.includes(conflictingDiagnostic)),
-      );
-      expect(displaced?.directoryName).toBe("z-codex");
+      // The fixed handler's side-agnostic detection: the structured
+      // supersededPluginId marker, never diagnostic prose (that text is
+      // bounded and re-worded for display, not a stable machine-checked
+      // signal — #779-offers round 8 finding 5).
+      const displaced = pipeline.findDirectorySupersededBy("codex");
+      expect(displaced).toBe("z-codex");
 
       // The handler's cleanup fires on that signal alone, even though
       // copied.valid was true.

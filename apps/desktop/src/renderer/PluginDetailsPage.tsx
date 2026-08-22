@@ -85,6 +85,25 @@ function readmePath(directoryName: string): string {
   return `plugins/${directoryName}/README.md`;
 }
 
+// A tab opened for one exact row (#779-offers round 14: id alone can name two
+// unrelated rows). Prefer that exact (id, directoryName) pair so a collision
+// never repaints the wrong one. A rename moves the row this tab is tracking
+// to a new directoryName with no row left at the old one, so fall back to id
+// alone — but only when it names a single row; a rename that lands ON a
+// collision is genuine ambiguity, not a case to guess through.
+function findTabPlugin(
+  plugins: PluginStatusRecord[],
+  pluginId: string,
+  directoryName: string,
+): PluginStatusRecord | null {
+  const exact = plugins.find(
+    (entry) => entry.id === pluginId && entry.directoryName === directoryName,
+  );
+  if (exact) return exact;
+  const byId = plugins.filter((entry) => entry.id === pluginId);
+  return byId.length === 1 ? byId[0] : null;
+}
+
 function useReadme(workspaceId: string, directoryName: string): ReadmeState {
   const [state, setState] = useState<ReadmeState>({ status: "loading" });
   // The request token is the whole guard: this effect re-runs for every
@@ -600,16 +619,22 @@ function PluginDetailsRail(props: {
 export function PluginDetailsPage(props: {
   workspaceId: string;
   pluginId: string;
+  /** The exact row this tab opened for. A discovered row's id is only ever
+   * a broken manifest's directory-derived fallback, which can coincide
+   * with some OTHER, unrelated plugin's real id — matching by id alone
+   * found whichever row sorted first, never the second-sorting one a user
+   * actually clicked (#779-offers round 14). */
+  directoryName: string;
   /** Reports what this plugin calls itself, so its tab can carry the name the
    * user installed instead of the raw plugin id. This page is the only surface
    * that reads the plugin's manifest, the same way the web app page is the
    * only one that hears its app's title. */
-  onTitle?: (pluginId: string, title: string) => void;
+  onTitle?: (pluginId: string, directoryName: string, title: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
   const plugin =
     catalog.load.status === "ready"
-      ? (catalog.load.plugins.find((entry) => entry.id === props.pluginId) ?? null)
+      ? findTabPlugin(catalog.load.plugins, props.pluginId, props.directoryName)
       : null;
 
   // Held in a ref so a new callback identity never re-reports, and written
@@ -621,8 +646,8 @@ export function PluginDetailsPage(props: {
   });
   const title = plugin ? pluginTitle(plugin) : null;
   useEffect(() => {
-    if (title !== null) onTitleRef.current?.(props.pluginId, title);
-  }, [props.pluginId, title]);
+    if (title !== null) onTitleRef.current?.(props.pluginId, props.directoryName, title);
+  }, [props.pluginId, props.directoryName, title]);
 
   if (catalog.load.status === "loading") {
     return (
@@ -670,6 +695,7 @@ export function PluginDetailsPage(props: {
     <div
       data-testid="plugin-details-page"
       data-plugin-id={plugin.id}
+      data-directory-name={plugin.directoryName}
       className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg"
     >
       {/* The rail sits beside the content on a wide window and drops below it

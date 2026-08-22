@@ -563,7 +563,15 @@ export async function pluginUninstallPreflight(
   const stateRoots = input.stateRoot === null
     ? input.additionalStateRoots
     : [input.stateRoot, ...input.additionalStateRoots];
-  const stateSizes = await Promise.all(stateRoots.map(measurePluginDirectory));
+  // Two different cleanup identities can resolve to the SAME physical
+  // state directory (pluginStateRoot is deterministic per id, and more
+  // than one id can genuinely trace to one directory) — measuring the
+  // same path twice would double the file count and byte total the
+  // warning reports. The raw path string is already the right identity:
+  // it is exactly what measurePluginDirectory resolves from, so two equal
+  // strings always describe the same directory.
+  const uniqueStateRoots = [...new Set(stateRoots)];
+  const stateSizes = await Promise.all(uniqueStateRoots.map(measurePluginDirectory));
   return withStateData(
     await sourceUninstallPreflight(input),
     combineDirectorySizes(stateSizes),

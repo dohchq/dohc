@@ -39,9 +39,13 @@ const retryButton =
 export function PluginsView(props: {
   workspaceId: string;
   /** The plugin whose details tab is the active editor tab, so the list can
-   * carry the same selected read-out the explorer gives the open file. */
+   * carry the same selected read-out the explorer gives the open file.
+   * Directory, not only id: a discovered row's id can coincide with some
+   * OTHER, unrelated plugin's real id, so id alone cannot tell two rows
+   * apart (#779-offers round 14). */
   activePluginId: string | null;
-  onOpenDetails: (pluginId: string) => void;
+  activePluginDirectoryName: string | null;
+  onOpenDetails: (pluginId: string, directoryName: string) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
   const offersLoad = catalog.offersLoad;
@@ -63,10 +67,11 @@ export function PluginsView(props: {
   function renderRow(plugin: PluginStatusRecord) {
     const busyAction = catalog.busy[plugin.id];
     const disabled = busyAction !== undefined || isPipelineBusy(plugin);
-    const selected = props.activePluginId === plugin.id;
+    const selected = props.activePluginId === plugin.id &&
+      props.activePluginDirectoryName === plugin.directoryName;
     const error = catalog.errors[plugin.id];
     return (
-      <li key={plugin.id} className="list-none">
+      <li key={plugin.directoryName} className="list-none">
         {/* The row's two controls are siblings, never nested: the name area
             opens the details tab and Install acts in place. Nesting them
             would need a click to be swallowed on its way out. */}
@@ -82,7 +87,7 @@ export function PluginsView(props: {
             type="button"
             data-testid="plugin-open-details"
             aria-current={selected ? "page" : undefined}
-            onClick={() => props.onOpenDetails(plugin.id)}
+            onClick={() => props.onOpenDetails(plugin.id, plugin.directoryName)}
             className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ink/30"
           >
             <PluginIcon

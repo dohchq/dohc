@@ -86,13 +86,15 @@ function renderList(
   overrides: {
     workspaceId?: string;
     activePluginId?: string | null;
-    onOpenDetails?: (pluginId: string) => void;
+    activePluginDirectoryName?: string | null;
+    onOpenDetails?: (pluginId: string, directoryName: string) => void;
   } = {},
 ) {
   return render(
     <PluginsView
       workspaceId={overrides.workspaceId ?? "ws-1"}
       activePluginId={overrides.activePluginId ?? null}
+      activePluginDirectoryName={overrides.activePluginDirectoryName ?? null}
       onOpenDetails={overrides.onOpenDetails ?? noop}
     />,
   );
@@ -178,7 +180,7 @@ describe("PluginsView", () => {
 
     const view = renderList({ workspaceId: "ws-old" });
     view.rerender(
-      <PluginsView workspaceId="ws-new" activePluginId={null} onOpenDetails={noop} />,
+      <PluginsView workspaceId="ws-new" activePluginId={null} activePluginDirectoryName={null} onOpenDetails={noop} />,
     );
     // Synchronously after the switch, before either bridge call resolves:
     // neither workspace's offers show. usePluginCatalog tags every non-
@@ -538,7 +540,7 @@ describe("PluginsView", () => {
     expect(bridgeMock.listPlugins).toHaveBeenCalledWith({ workspaceId: "ws-old" });
 
     view.rerender(
-      <PluginsView workspaceId="ws-new" activePluginId={null} onOpenDetails={noop} />,
+      <PluginsView workspaceId="ws-new" activePluginId={null} activePluginDirectoryName={null} onOpenDetails={noop} />,
     );
     expect(bridgeMock.listPlugins).toHaveBeenCalledWith({ workspaceId: "ws-new" });
 
@@ -575,7 +577,7 @@ describe("PluginsView", () => {
     renderList({ onOpenDetails });
     await userEvent.click(await screen.findByTestId("plugin-open-details"));
 
-    expect(onOpenDetails).toHaveBeenCalledWith("t3-code");
+    expect(onOpenDetails).toHaveBeenCalledWith("t3-code", "t3-code");
   });
 
   it("installs from the row without opening the details tab", async () => {
@@ -622,6 +624,7 @@ describe("PluginsView", () => {
       <PluginsView
         workspaceId="ws-1"
         activePluginId="t3-code"
+        activePluginDirectoryName="t3-code"
         onOpenDetails={noop}
       />,
     );

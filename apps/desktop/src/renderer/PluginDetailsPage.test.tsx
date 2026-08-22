@@ -111,9 +111,17 @@ function enoent(relativePath: string): Error {
   );
 }
 
-function renderPage(pluginId: string, workspaceId = "ws-1") {
+function renderPage(
+  pluginId: string,
+  workspaceId = "ws-1",
+  directoryName = pluginId,
+) {
   return render(
-    <PluginDetailsPage workspaceId={workspaceId} pluginId={pluginId} />,
+    <PluginDetailsPage
+      workspaceId={workspaceId}
+      pluginId={pluginId}
+      directoryName={directoryName}
+    />,
   );
 }
 
@@ -159,7 +167,7 @@ describe("PluginDetailsPage", () => {
       plugins: [plugin("t3-code", { directoryName: "t3-code-src" })],
     });
 
-    renderPage("t3-code");
+    renderPage("t3-code", "ws-1", "t3-code-src");
 
     const page = await screen.findByTestId("plugin-details-page");
     expect(page.getAttribute("data-plugin-id")).toBe("t3-code");
@@ -184,7 +192,8 @@ describe("PluginDetailsPage", () => {
       <PluginDetailsPage
         workspaceId="ws-1"
         pluginId="hello-plugin"
-        onTitle={(pluginId, title) => titles.push([pluginId, title])}
+        directoryName="hello-plugin"
+        onTitle={(pluginId, _directoryName, title) => titles.push([pluginId, title])}
       />,
     );
 
@@ -203,7 +212,8 @@ describe("PluginDetailsPage", () => {
       <PluginDetailsPage
         workspaceId="ws-1"
         pluginId="hello-plugin"
-        onTitle={(_pluginId, title) => titles.push(title)}
+        directoryName="hello-plugin"
+        onTitle={(_pluginId, _directoryName, title) => titles.push(title)}
       />,
     );
 
@@ -225,7 +235,7 @@ describe("PluginDetailsPage", () => {
       ],
     });
 
-    renderPage("t3-code");
+    renderPage("t3-code", "ws-1", "t3-code-src");
 
     expect(await screen.findByRole("heading", { name: "T3 Code" })).toBeTruthy();
     expect(screen.getByTestId("plugin-description").textContent).toBe(
@@ -654,7 +664,7 @@ describe("PluginDetailsPage", () => {
       webAppId: "app",
     });
     view.rerender(
-      <PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" directoryName="t3-code" />,
     );
 
     // MUTATION (leave openingWebApp alone across the switch): the stale
@@ -1149,29 +1159,32 @@ describe("PluginDetailsPage", () => {
         workspaceId === "ws-old" ? oldList.promise : newList.promise,
     );
 
+    // The open tab is the SAME (pluginId, directoryName) throughout — a
+    // workspace switch changes which workspace answers for it, never the
+    // row identity the tab itself was opened for.
     const view = renderPage("t3-code", "ws-old");
-    view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" />);
+    view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" directoryName="t3-code" />);
 
     await act(async () => {
       newList.resolve({
         ok: true,
-        plugins: [plugin("t3-code", { directoryName: "new-workspace-copy" })],
+        plugins: [plugin("t3-code", { displayName: "New Workspace Copy" })],
       });
       await newList.promise;
     });
-    expect(await screen.findByText("plugins/new-workspace-copy")).toBeTruthy();
+    expect(await screen.findByText("New Workspace Copy")).toBeTruthy();
 
     // The workspace the user left finally answers. Its plugin carries the
     // same id, so only the epoch guard keeps it off this page.
     await act(async () => {
       oldList.resolve({
         ok: true,
-        plugins: [plugin("t3-code", { directoryName: "old-workspace-copy" })],
+        plugins: [plugin("t3-code", { displayName: "Old Workspace Copy" })],
       });
       await oldList.promise;
     });
-    expect(screen.queryByText("plugins/old-workspace-copy")).toBeNull();
-    expect(screen.getByText("plugins/new-workspace-copy")).toBeTruthy();
+    expect(screen.queryByText("Old Workspace Copy")).toBeNull();
+    expect(screen.getByText("New Workspace Copy")).toBeTruthy();
   });
 
   it("surfaces the real reason and offers a retry when the plugin cannot load", async () => {
@@ -1210,7 +1223,7 @@ describe("PluginDetailsPage", () => {
         contentHash: HASH_A,
       });
 
-      renderPage("t3-code");
+      renderPage("t3-code", "ws-1", "t3-code-src");
 
       expect(await screen.findByTestId("plugin-readme")).toBeTruthy();
       // The folder names the file, never the plugin id: the two differ here.
@@ -1349,7 +1362,7 @@ describe("PluginDetailsPage", () => {
               }),
       );
 
-      renderPage("t3-code");
+      renderPage("t3-code", "ws-1", "old-folder");
       await screen.findByTestId("plugin-readme-loading");
 
       act(() => {
@@ -1397,7 +1410,7 @@ describe("PluginDetailsPage", () => {
 
       const view = renderPage("t3-code", "ws-old");
       await screen.findByTestId("plugin-details-page");
-      view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" />);
+      view.rerender(<PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" directoryName="t3-code" />);
       expect(await screen.findByText("The new workspace README.")).toBeTruthy();
 
       await act(async () => {
@@ -1674,12 +1687,12 @@ describe("PluginDetailsPage", () => {
       );
 
       const view = render(
-        <PluginDetailsPage workspaceId="ws-old" pluginId="hello-plugin" />,
+        <PluginDetailsPage workspaceId="ws-old" pluginId="hello-plugin" directoryName="hello-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Hello"));
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-new" pluginId="hello-plugin" />,
+        <PluginDetailsPage workspaceId="ws-new" pluginId="hello-plugin" directoryName="hello-plugin" />,
       );
 
       await waitFor(() => expect(greetingField().value).toBe("New"));
@@ -1713,7 +1726,7 @@ describe("PluginDetailsPage", () => {
       );
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Other"));
       expect(screen.getByTestId("plugin-settings")).toBe(section);
@@ -1747,7 +1760,7 @@ describe("PluginDetailsPage", () => {
       const section = screen.getByTestId("plugin-settings");
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Other"));
       expect(screen.getByTestId("plugin-settings")).toBe(section);
@@ -1785,7 +1798,7 @@ describe("PluginDetailsPage", () => {
       await userEvent.click(screen.getByRole("switch", { name: "Shout" }));
 
       view.rerender(
-        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+        <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
       );
       await waitFor(() => expect(greetingField().value).toBe("Other"));
 
@@ -1992,12 +2005,12 @@ describe("the details rail", () => {
     });
 
     const view = render(
-      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" directoryName="t3-code" />,
     );
     const rail = await screen.findByTestId("plugin-details-rail");
 
     view.rerender(
-      <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" />,
+      <PluginDetailsPage workspaceId="ws-1" pluginId="other-plugin" directoryName="other-plugin" />,
     );
     await waitFor(() =>
       expect(railRow("plugin-rail-installed-size")!.textContent).toContain(
@@ -2038,12 +2051,12 @@ describe("the details rail", () => {
     });
 
     const view = render(
-      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-1" pluginId="t3-code" directoryName="t3-code" />,
     );
     await screen.findByTestId("plugin-details-rail");
 
     view.rerender(
-      <PluginDetailsPage workspaceId="ws-2" pluginId="t3-code" />,
+      <PluginDetailsPage workspaceId="ws-2" pluginId="t3-code" directoryName="t3-code" />,
     );
 
     await waitFor(() =>

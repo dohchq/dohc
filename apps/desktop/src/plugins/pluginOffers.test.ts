@@ -44,6 +44,11 @@ const raceState = vi.hoisted(() => ({
   // the synthetic throw — used to replace whatever sits at the destination
   // in the same window a real race would.
   renameFailureTrap: null as null | { path: string; code: string; run?: () => Promise<void> },
+  // Simulates a filesystem that reports no real device/inode identity for
+  // one specific bigint lstat — some network shares and virtual
+  // filesystems do this. Fires once; every other lstat call, bigint or
+  // not, still resolves to the real stats.
+  zeroIdentityTrap: null as null | { path: string },
 }));
 
 vi.mock("node:fs/promises", async () => {
@@ -74,7 +79,20 @@ vi.mock("node:fs/promises", async () => {
           await trap.run();
         }
       }
-      return actual.lstat(path, options);
+      const stats = await actual.lstat(path, options);
+      const zeroed = raceState.zeroIdentityTrap;
+      if (
+        zeroed &&
+        path === zeroed.path &&
+        (options as { bigint?: boolean } | undefined)?.bigint
+      ) {
+        raceState.zeroIdentityTrap = null;
+        return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, {
+          dev: 0n,
+          ino: 0n,
+        });
+      }
+      return stats;
     },
     rmdir: async (
       path: Parameters<typeof actual.rmdir>[0],
@@ -147,6 +165,7 @@ afterEach(async () => {
   raceState.lstatCallCounts.clear();
   raceState.rmdirTrap = null;
   raceState.renameFailureTrap = null;
+  raceState.zeroIdentityTrap = null;
   await Promise.all(
     roots.splice(0).map((root) =>
       rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
@@ -588,6 +607,42 @@ describe("addOfferedPlugin", () => {
       NO_EXISTING_PLUGIN_IDS,
     );
     expect(offers.map((offer) => offer.directoryName)).not.toContain("codex");
+  });
+
+  // Round 14: dev/ino can read as 0 on some Windows filesystems and network
+  // shares — an unverifiable identity, not proof of anything. Trusting it
+  // anyway would make targetIdentity's whole purpose vacuous: a zeroed
+  // "captured" identity would match any OTHER zeroed identity later, the
+  // opposite of what dev+ino comparison exists to catch.
+  it("refuses to publish when the claim's own identity cannot be verified (zeroed dev/ino)", async () => {
+    const fixture = await createFixture();
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    raceState.zeroIdentityTrap = { path: target };
+
+    await expect(
+      addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    // The claim this call's own mkdir() made is cleaned up rather than
+    // leaked as a permanently "occupied" empty directory — its identity
+    // could not be verified, but "not a symlink, is a directory, is
+    // empty" was still real evidence, not a blind delete.
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+
+    // A retry (once the filesystem answers normally, as it does here) can
+    // still succeed — the refusal did not strand the offer.
+    const added = await addOfferedPlugin({
+      builtinPluginsRoot: fixture.builtinPluginsRoot,
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+    });
+    expect(added.rootPath).toBe(target);
   });
 });
 

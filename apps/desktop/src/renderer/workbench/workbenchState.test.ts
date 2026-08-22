@@ -700,12 +700,15 @@ describe("tabs", () => {
     expect(activeTabPath(restored)).toBe(b);
   });
 
-  it("recognizes a plugin's details page as a virtual tab keyed by the plugin id", () => {
-    const path = pluginDetailsTabPath("@dohc/acme plugin");
-    expect(path).toBe("dohc://plugin-details/%40dohc%2Facme%20plugin");
+  it("recognizes a plugin's details page as a virtual tab keyed by the plugin id and its directory", () => {
+    const path = pluginDetailsTabPath("@dohc/acme plugin", "acme-dir");
+    expect(path).toBe("dohc://plugin-details/%40dohc%2Facme%20plugin/acme-dir");
     expect(isPluginDetailsTabPath(path)).toBe(true);
     expect(isVirtualTabPath(path)).toBe(true);
-    expect(parsePluginDetailsTabPath(path)).toBe("@dohc/acme plugin");
+    expect(parsePluginDetailsTabPath(path)).toEqual({
+      pluginId: "@dohc/acme plugin",
+      directoryName: "acme-dir",
+    });
     // A details page reads a file; it owns no process, so it is not a
     // singleton and may sit in two editor groups like any other document.
     expect(isSingletonEditorTabPath(path)).toBe(false);
@@ -717,6 +720,11 @@ describe("tabs", () => {
       "dohc://plugin-details/",
       "dohc://plugin-details/%ZZ",
       "dohc://plugin-detail/t3-code",
+      // The old single-segment form: no directory, so the id alone can no
+      // longer disambiguate a collision (#779-offers round 14).
+      "dohc://plugin-details/t3-code",
+      "dohc://plugin-details/t3-code/",
+      "dohc://plugin-details/t3-code/extra/segment",
       null,
     ]) {
       expect(parsePluginDetailsTabPath(path)).toBeNull();
@@ -724,7 +732,7 @@ describe("tabs", () => {
   });
 
   it("keeps a plugin's details tab across a restore round-trip", () => {
-    const path = pluginDetailsTabPath("t3-code");
+    const path = pluginDetailsTabPath("t3-code", "t3-code");
     const opened = openTab(defaultWorkbenchState(), path);
     const restored = parseUiState(serializeUiState(opened));
     expect(allTabs(restored).map((tab) => tab.path)).toContain(path);
@@ -747,13 +755,13 @@ describe("tabs", () => {
     };
     expect(allTabs(full)).toHaveLength(MAX_OPEN_TABS);
 
-    const path = pluginDetailsTabPath("t3-code");
+    const path = pluginDetailsTabPath("t3-code", "t3-code");
     expect(openTab(full, path)).toBe(full);
   });
 
   it("opens one details tab per plugin and reactivates the one already open", () => {
-    const first = pluginDetailsTabPath("t3-code");
-    const second = pluginDetailsTabPath("notes-widget");
+    const first = pluginDetailsTabPath("t3-code", "t3-code");
+    const second = pluginDetailsTabPath("notes-widget", "notes-widget");
     let state = openTab(defaultWorkbenchState(), first);
     state = openTab(state, second);
     state = openTab(state, first);
