@@ -1694,6 +1694,13 @@ function applyZoomLevelToWindows(zoomLevel: number): void {
   for (const window of workspaceWindows.allLive()) {
     window.webContents.setZoomLevel(zoomLevel);
   }
+  // Embedded plugin content follows the window zoom (#875): the person who
+  // zoomed because text was too small is usually working IN the panel. Only
+  // embedded guests — the same app opened by URL keeps the browser's zoom.
+  for (const record of pluginWebAppViews.all()) {
+    const guest = record.view.view.webContents;
+    if (!guest.isDestroyed()) guest.setZoomLevel(zoomLevel);
+  }
 }
 
 const enqueueUserSettingsWrite = createUserSettingsWriteQueue();
@@ -7959,6 +7966,17 @@ function registerIpcHandlers(
                 view: { view, window: win },
               });
               if (displaced) destroyPluginWebAppViews([displaced]);
+              // Embedded plugin content follows the window zoom (#875).
+              // Chromium scopes zoom per origin, so the level is re-applied
+              // on every load — a level set before the first navigation
+              // would not survive it.
+              const applyGuestZoom = () => {
+                if (knownZoomLevel !== null && !view.webContents.isDestroyed()) {
+                  view.webContents.setZoomLevel(knownZoomLevel);
+                }
+              };
+              applyGuestZoom();
+              view.webContents.on("did-finish-load", applyGuestZoom);
             },
             onLoadFailure: () => {
               // The load error's message can embed the URL, credential

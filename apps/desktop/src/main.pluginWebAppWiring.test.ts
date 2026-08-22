@@ -124,6 +124,29 @@ describe("plugin web app main-process wiring", () => {
     expect(closePath).not.toContain("recoverConsumedWebAppCredential");
   });
 
+  it("embedded guests follow the window zoom (#875)", () => {
+    // At attach: the current level applies immediately and re-applies on
+    // every load — Chromium scopes zoom per origin, so a level set before
+    // the first navigation would not survive it.
+    const start = handler("startPluginWebApp");
+    const registerAt = start.indexOf("pluginWebAppViews.register({");
+    const applyAt = start.indexOf("applyGuestZoom();", registerAt);
+    const reapplyAt = start.indexOf(
+      'view.webContents.on("did-finish-load", applyGuestZoom);',
+      applyAt,
+    );
+    expect(registerAt).toBeGreaterThan(-1);
+    expect(applyAt).toBeGreaterThan(registerAt);
+    expect(reapplyAt).toBeGreaterThan(applyAt);
+
+    // On every zoom change: the window-wide apply reaches each live guest.
+    const apply = functionSource("function applyZoomLevelToWindows(");
+    expect(squeeze(apply)).toContain(
+      "for(constrecordofpluginWebAppViews.all()){",
+    );
+    expect(squeeze(apply)).toContain("guest.setZoomLevel(zoomLevel);");
+  });
+
   it("applies bounds only through the registry's sender-and-generation guard", () => {
     const bounds = handler("setPluginWebAppBounds");
     const authorizeAt = bounds.indexOf("pluginWebAppViews.authorizeBounds({");
