@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
@@ -21,12 +21,16 @@ export interface PluginWebAppRegistration {
 export interface RegisteredPlugin {
   pluginRoot: string;
   manifest: DohcPluginManifest;
-  // Derived from pluginRoot, which loadPluginPanelRegistration/
-  // loadPluginWebAppRegistration always resolve from the plugin's actual
-  // discovered SOURCE root — never a built snapshot the way PluginHost's
-  // own directoryName had to stop deriving in round 20 finding 1. This id's
-  // own claim on this workspace is only ever THIS directory's to forget
-  // (#779-offers round 24 finding 4).
+  // The pipeline's own discovered directoryName for this id — never
+  // re-derived from pluginRoot's basename, which an in-workspace symlink
+  // can resolve to a different final segment than the plugin's actual
+  // discovered directory (CodeRabbit on #779-offers round 24: a
+  // basename-derived name silently stopped matching the pipeline's own
+  // directoryName, so the round 24 finding 4 forget gate never matched and
+  // a stale registration survived uninstall). Explicit, the same way
+  // PluginHost.start's own directoryName stopped being derived in round 20
+  // finding 1 — this id's own claim on this workspace is only ever THIS
+  // directory's to forget.
   directoryName: string;
 }
 
@@ -41,7 +45,7 @@ export interface RegisteredPlugin {
 export function rememberPluginRegistration(
   registrations: Map<string, Map<string, RegisteredPlugin>>,
   workspaceId: string,
-  registration: { pluginRoot: string; manifest: DohcPluginManifest },
+  registration: { pluginRoot: string; manifest: DohcPluginManifest; directoryName: string },
 ): RegisteredPlugin {
   const forWorkspace = registrations.get(workspaceId) ??
     new Map<string, RegisteredPlugin>();
@@ -57,7 +61,7 @@ export function rememberPluginRegistration(
   const remembered: RegisteredPlugin = {
     pluginRoot: registration.pluginRoot,
     manifest: registration.manifest,
-    directoryName: basename(registration.pluginRoot),
+    directoryName: registration.directoryName,
   };
   forWorkspace.set(registration.manifest.name, remembered);
   registrations.set(workspaceId, forWorkspace);

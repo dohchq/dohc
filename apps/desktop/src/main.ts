@@ -6659,10 +6659,23 @@ function registerIpcHandlers(
       isCurrent,
     );
     assertWritableWorkspace(workspace);
+    // Never re-derived from a path — an in-workspace symlink can resolve
+    // pluginRoot to a final segment that differs from the pipeline's own
+    // discovered directoryName, silently breaking the trace-to-directory
+    // rule every consumer of this registration relies on (CodeRabbit on
+    // #779-offers round 24). The pipeline's own discovery is the one
+    // source of truth; nothing here is worth guessing when it disagrees.
+    const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
+    const discoveredDirectoryName = pipeline.pluginRegistration(input.pluginId)?.directoryName;
+    if (discoveredDirectoryName === undefined) {
+      throw new Error(
+        `Plugin "${input.pluginId}" is not currently discovered in this workspace.`,
+      );
+    }
     const plugin = rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,
-      registration,
+      { ...registration, directoryName: discoveredDirectoryName },
     );
     await withPluginPanelStartLock(
       pluginPanelKey(workspace.workspaceId, input.pluginId, input.panelId),
@@ -6930,10 +6943,23 @@ function registerIpcHandlers(
       isCurrent,
     );
     assertWritableWorkspace(workspace);
+    // Never re-derived from a path — an in-workspace symlink can resolve
+    // pluginRoot to a final segment that differs from the pipeline's own
+    // discovered directoryName, silently breaking the trace-to-directory
+    // rule every consumer of this registration relies on (CodeRabbit on
+    // #779-offers round 24). The pipeline's own discovery is the one
+    // source of truth; nothing here is worth guessing when it disagrees.
+    const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
+    const discoveredDirectoryName = pipeline.pluginRegistration(input.pluginId)?.directoryName;
+    if (discoveredDirectoryName === undefined) {
+      throw new Error(
+        `Plugin "${input.pluginId}" is not currently discovered in this workspace.`,
+      );
+    }
     const plugin = rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,
-      registration,
+      { ...registration, directoryName: discoveredDirectoryName },
     );
     // The open's shape must match the id it names before a tab appears for
     // it: a keyless open of a per-instance app would otherwise reach start

@@ -237,7 +237,11 @@ describe("plugin panel registration", () => {
         panelId,
       });
 
-    rememberPluginRegistration(registrations, "workspace-1", await load("main"));
+    rememberPluginRegistration(
+      registrations,
+      "workspace-1",
+      { ...await load("main"), directoryName: "hello-plugin" },
+    );
 
     // The plugin author adds a panel and the user approves it. Serving the
     // first registration's manifest forever left the new panel unstartable.
@@ -258,7 +262,7 @@ describe("plugin panel registration", () => {
     const remembered = rememberPluginRegistration(
       registrations,
       "workspace-1",
-      await load("second"),
+      { ...await load("second"), directoryName: "hello-plugin" },
     );
 
     expect(remembered.manifest.panels?.map((panel) => panel.id))
@@ -492,6 +496,45 @@ describe("plugin panel registration", () => {
     expect(panelStartedHosts.size).toBe(0);
   });
 
+  // CodeRabbit on #779-offers round 24: directoryName used to be derived
+  // via basename(pluginRoot) — but pluginRoot passes through
+  // resolveWorkspaceFile, which follows an in-workspace symlink to its
+  // real target. A symlinked plugin root's basename can then differ from
+  // the pipeline's own discovered directoryName, silently breaking every
+  // trace-to-directory check this field exists for. Registration must
+  // carry the pipeline's discovered name explicitly, never re-derive it.
+  it("carries the discovered directoryName through registration, even when it differs from pluginRoot's own basename", () => {
+    const registrations = new Map<string, Map<string, RegisteredPlugin>>();
+    const panelStartedHosts = new Set([
+      pluginLifecycleKey("workspace-1", "hello-plugin"),
+    ]);
+
+    // A symlinked plugin root's REAL target has a different final path
+    // segment than the directory the pipeline actually discovered this
+    // plugin under.
+    const remembered = rememberPluginRegistration(registrations, "workspace-1", {
+      pluginRoot: "plugins/symlink-target-name",
+      manifest: { version: 1, name: "hello-plugin", entry: "plugin.mjs" },
+      directoryName: "real-discovered-name",
+    });
+    expect(remembered.directoryName).toBe("real-discovered-name");
+    expect(registrations.get("workspace-1")?.get("hello-plugin")?.directoryName)
+      .toBe("real-discovered-name");
+
+    // The pipeline's own removed event names its own discovered
+    // directory — the one that must match for this to forget correctly.
+    forgetUninstalledPlugin({
+      registrations,
+      panelStartedHosts,
+      workspaceId: "workspace-1",
+      pluginId: "hello-plugin",
+      directoryName: "real-discovered-name",
+      uninstalled: true,
+    });
+    expect(registrations.get("workspace-1")?.get("hello-plugin")).toBeUndefined();
+    expect(panelStartedHosts.size).toBe(0);
+  });
+
   it("forgets the registrations of a closing workspace and no others", () => {
     const registration: RegisteredPlugin = {
       pluginRoot: "plugins/hello-plugin",
@@ -521,12 +564,17 @@ describe("plugin panel registration", () => {
       panelId: "main",
     });
     const registrations = new Map<string, Map<string, RegisteredPlugin>>();
-    rememberPluginRegistration(registrations, "workspace-1", registration);
+    rememberPluginRegistration(
+      registrations,
+      "workspace-1",
+      { ...registration, directoryName: "hello-plugin" },
+    );
 
     expect(() =>
       rememberPluginRegistration(registrations, "workspace-1", {
         ...registration,
         pluginRoot: join(workspace, "plugins", "elsewhere"),
+        directoryName: "elsewhere",
       })
     ).toThrow(/already running from another root/);
   });
@@ -548,7 +596,7 @@ describe("plugin panel registration", () => {
     const remembered = rememberPluginRegistration(
       registrations,
       "workspace-1",
-      registration,
+      { ...registration, directoryName: "foo" },
     );
 
     // Ordinary status traffic changes nothing.
@@ -610,7 +658,11 @@ describe("plugin panel registration", () => {
       panelId: "main",
     });
     expect(
-      rememberPluginRegistration(registrations, "workspace-1", reinstalled),
+      rememberPluginRegistration(
+        registrations,
+        "workspace-1",
+        { ...reinstalled, directoryName: "bar" },
+      ),
     ).toMatchObject({ pluginRoot: newRoot });
   });
 });
