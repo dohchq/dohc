@@ -305,6 +305,39 @@ describe("PluginsView", () => {
     expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
   });
 
+  // Round 23 finding 3: an invalid, never-installed candidate (a broken
+  // manifest, or none at all) gets no status entry of its own, so its own
+  // arrival or departure names no pluginId a "changed"/"removed" event
+  // could carry — creating or deleting plugins/codex with a broken
+  // manifest never fires either kind. discovery-changed is the honest
+  // signal instead: discovery itself moved, so offers re-check.
+  it("hides an offer once an invalid directory occupies it, and returns it once that directory is gone", async () => {
+    bridgeMock.listOfferedPlugins
+      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] })
+      .mockResolvedValueOnce({ ok: true, offers: [] })
+      .mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
+
+    renderList();
+    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
+
+    act(() => {
+      // A broken manifest just landed at plugins/codex — invalid, so
+      // discovery never seeds a status for it, and no "changed"/"removed"
+      // event names it either.
+      statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" });
+    });
+    await waitFor(() => expect(screen.queryByTestId("plugin-offer-row")).toBeNull());
+    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      // The invalid directory is deleted — the offer's own directory is
+      // free again.
+      statusListener?.({ kind: "discovery-changed", workspaceId: "ws-1" });
+    });
+    expect(await screen.findByTestId("plugin-offer-row")).toBeTruthy();
+    expect(bridgeMock.listOfferedPlugins).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps the Built in section on screen while a background refresh is in flight", async () => {
     bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [offers[0]] });
 

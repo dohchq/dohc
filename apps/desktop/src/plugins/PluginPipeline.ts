@@ -134,7 +134,16 @@ export interface PluginPipelinePluginStatus extends PluginMetadata {
 
 export type PluginPipelineStatusEvent =
   | { kind: "changed"; plugin: PluginPipelinePluginStatus }
-  | { kind: "removed"; pluginId: string };
+  | { kind: "removed"; pluginId: string }
+  // An invalid, never-installed candidate (a broken manifest, or none at
+  // all) never gets a status entry of its own (#779 round 8 D2's seeding
+  // only fires for one that was already installed) — so its arrival or
+  // departure names no pluginId either "changed" or "removed" could carry.
+  // list() still shows it directly from discovery either way, and an
+  // offer still has to hide behind or return to it, so this names the
+  // one honest fact available: discovery itself changed, not which
+  // plugin (#779-offers round 23 finding 3).
+  | { kind: "discovery-changed" };
 
 export type PluginPipelineActionResult =
   | { ok: true; plugin: PluginPipelinePluginStatus }
@@ -1337,6 +1346,35 @@ export class PluginPipeline {
         if (!candidate.valid || !candidate.manifest) continue;
         const record = await this.localRecord(candidate.id);
         if (!record?.approvedHash) continue;
+        // Startup just associated this persisted install with candidate by
+        // id alone — the ordinary join, and the only one an offline rename
+        // (the directory moved while dohc was closed, nothing to watch it
+        // happen) ever reaches. The record's own directoryName is still
+        // whatever it was before the move; left uncorrected,
+        // pluginIdTracesDirectory reads that stale value as proof this
+        // plugin's own data belongs to someone else, and cleanup disowns
+        // all of it. The record follows the plugin, not the other way
+        // around — migrate its settings through the same boundary an
+        // online rename already uses (#779-offers round 23 finding 4).
+        if (
+          record.directoryName !== undefined &&
+          record.directoryName !== candidate.directoryName
+        ) {
+          const fromDirectoryName = record.directoryName;
+          const toDirectoryName = candidate.directoryName;
+          await this.operations.mutateRecord(
+            this.options.stateDir,
+            this.workspaceRoot,
+            candidate.id,
+            (existing) =>
+              existing ? { ...existing, directoryName: toDirectoryName } : existing,
+          );
+          await renamePluginSettingsEntry(
+            this.workspaceRoot,
+            fromDirectoryName,
+            toDirectoryName,
+          );
+        }
         this.enqueueSourceRefresh(candidate.id, () =>
           this.reconcileApprovedCandidate(candidate.id, true));
       }
@@ -1597,7 +1635,17 @@ export class PluginPipeline {
       }
 
       departing.push(oldCandidate);
-      if (sameId && sameId.directoryName !== oldCandidate.directoryName) {
+      // Not a rename when sameId's directory already existed as SOME
+      // candidate before this batch (valid or not) — that is a duplicate
+      // this id was already sharing, now promoted into the vacancy
+      // oldCandidate's own departure just opened, never oldCandidate's own
+      // content arriving there. A genuine rename's target directory is
+      // brand new to discovery this batch (#779-offers round 23 finding 1).
+      if (
+        sameId &&
+        sameId.directoryName !== oldCandidate.directoryName &&
+        !previous.some((entry) => entry.directoryName === sameId.directoryName)
+      ) {
         renamedDirectory.set(oldCandidate.id, sameId.directoryName);
       }
       const replacement = sameRoot ?? sameId;
@@ -1655,6 +1703,24 @@ export class PluginPipeline {
       this.enqueueSourceRefresh(candidate.id, () =>
         this.reconcileApprovedCandidate(candidate.id, false));
     }
+
+    // An invalid candidate (a broken manifest, or none at all) that was
+    // never installed gets no status entry and so no "changed"/"removed"
+    // event of its own above — the only signal left honest enough to name
+    // is that discovery's invalid set itself moved, not which directory
+    // (#779-offers round 23 finding 3).
+    const invalidDirectoryNames = (candidates: readonly InstalledPluginRecord[]) =>
+      new Set(
+        candidates
+          .filter((candidate) => !candidate.valid || candidate.manifest === null)
+          .map((candidate) => candidate.directoryName),
+      );
+    const previousInvalid = invalidDirectoryNames(previous);
+    const nextInvalid = invalidDirectoryNames(next);
+    const invalidSetChanged =
+      previousInvalid.size !== nextInvalid.size ||
+      [...previousInvalid].some((directoryName) => !nextInvalid.has(directoryName));
+    if (invalidSetChanged) this.emit({ kind: "discovery-changed" });
   }
 
   private async seedStatusesForNewCandidates(

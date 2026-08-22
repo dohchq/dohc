@@ -58,7 +58,10 @@ export type PluginUninstallConfirmation = {
 
 type PendingStatusEvent = {
   revision: number;
-  event: PluginStatusChangedEvent;
+  // Never "discovery-changed": that kind names no pluginId and is handled,
+  // and returned from, before a pending event is ever recorded here
+  // (#779-offers round 23 finding 3).
+  event: Exclude<PluginStatusChangedEvent, { kind: "discovery-changed" }>;
 };
 
 // Replaces the row this update is about — its own directoryName, always —
@@ -546,6 +549,18 @@ export function usePluginCatalog(
     void loadOffers();
     const unsubscribe = bridge().onPluginStatusChanged((event) => {
       if (epoch !== workspaceEpoch.current || event.workspaceId !== workspaceId) {
+        return;
+      }
+      if (event.kind === "discovery-changed") {
+        // An invalid, never-installed candidate names no pluginId a
+        // "changed"/"removed" event could carry, so it never joins
+        // pendingStatusEvents/applyStatusEvents — those exist to merge one
+        // plugin's own transition, and this names no plugin at all.
+        // Discovery itself moved; both surfaces that read it directly
+        // (list() shows an invalid row, offers hide behind or return to
+        // one) re-check (#779-offers round 23 finding 3).
+        void loadPlugins(true);
+        void loadOffers();
         return;
       }
       const pending = {

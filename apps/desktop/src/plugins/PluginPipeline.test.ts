@@ -3816,6 +3816,134 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 120_000);
 
+  // Round 23 finding 4: startup associates a renamed directory with its
+  // persisted record by id alone (installedRecord's ordinary join) — it
+  // never corrected the record's OWN stale directoryName field to match.
+  // pluginIdTracesDirectory compares that stale field against the
+  // candidate's real, current directoryName and reads the mismatch as
+  // proof this id's own data belongs to some OTHER, unrelated
+  // installation — disowning everything a Remove would otherwise clean
+  // up, and leaving settings stranded under the vacated key the same way
+  // a live watcher rename would without round 22 finding 1's fix.
+  it("owns its data and carries its settings across an offline directory rename", async () => {
+    const fixture = await createNamedPluginWorkspace("old-dir", "offline-rename-id");
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "offline-rename-id",
+        displayName: "offline-rename-id",
+        entry: "src/index.ts",
+        settings: [
+          { key: "greeting", type: "string", label: "Greeting", default: "Hello" },
+        ],
+      }, null, 2)}\n`,
+    );
+    let pipeline: PluginPipeline;
+    const newHost = () =>
+      new PluginHost({
+        stateDir: fixture.stateDir,
+        workspaceRoot: fixture.workspaceRoot,
+        spawnTransport: fakeSpawnTransport(),
+        routeSdkRequest: async () => ({}),
+        onStatusChange: (pluginId, status) => {
+          pipeline.noteRuntimeStatus(pluginId, status);
+        },
+      });
+    const newPipeline = (host: PluginHost) =>
+      new PluginPipeline({
+        workspaceRoot: fixture.workspaceRoot,
+        stateDir: fixture.stateDir,
+        pluginHost: host,
+        resourcesBasePath,
+        pnpmRunnerEntry,
+        operations: {
+          install: (input) =>
+            installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        },
+      });
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("offline-rename-id");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+      const saved = await pipeline.setPluginSettings("old-dir", "offline-rename-id", {
+        greeting: "Howdy",
+      });
+      expect(saved).toEqual({ greeting: "Howdy" });
+    } finally {
+      await pipeline.dispose();
+    }
+
+    // The plugin's own stored data, genuinely filed under its id.
+    const ownStateRoot = pluginStateRoot(
+      pluginDataDir(fixture.stateDir, fixture.workspaceRoot),
+      "offline-rename-id",
+    );
+    await mkdir(join(ownStateRoot, "t3"), { recursive: true });
+    await writeFile(join(ownStateRoot, "t3", "session.sqlite"), "session-bytes");
+
+    // The directory moves while dohc is closed — no watcher, no batch,
+    // nothing but a fresh start() to notice it next.
+    const renamedRoot = join(fixture.workspaceRoot, "plugins", "new-dir");
+    await rename(fixture.pluginRoot, renamedRoot);
+
+    pipeline = newPipeline(newHost());
+    try {
+      await pipeline.start();
+      const row = pipeline.list()[0];
+      expect(row).toMatchObject({
+        id: "offline-rename-id",
+        directoryName: "new-dir",
+        rootPath: renamedRoot,
+        valid: true,
+      });
+      expect(row?.approvedHash).not.toBeNull();
+
+      // The record follows the plugin: its own persisted directoryName is
+      // corrected, not left pointing at the vacated directory.
+      const state = await readPluginLocalState(fixture.stateDir, fixture.workspaceRoot);
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["offline-rename-id"]).toMatchObject({
+        directoryName: "new-dir",
+      });
+
+      // Settings carried through the same boundary as an online rename.
+      expect(await pipeline.getPluginSettings("new-dir")).toEqual({
+        greeting: "Howdy",
+      });
+
+      // Remove preflight/cleanup own this plugin's own stored data — the
+      // stale directoryName no longer reads it as belonging to someone
+      // else.
+      const preflight = await pipeline.uninstallPreflight("offline-rename-id", "new-dir");
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      expect(preflight.preflight.stateData).toMatchObject({
+        path: ownStateRoot,
+        fileCount: 1,
+      });
+      const uninstalled = await pipeline.uninstall(
+        "offline-rename-id",
+        "new-dir",
+        preflight.confirmationToken,
+      );
+      expect(uninstalled.ok).toBe(true);
+      await expect(lstat(renamedRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(ownStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 120_000);
+
   // Round 22 finding 1: settings are keyed by directoryName. A genuine
   // rename — this exact id reappearing, in one watcher batch, at a new
   // directory — is the one case the pipeline itself can prove; without
@@ -3901,6 +4029,176 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const stored = await readPluginSettingsFile(fixture.workspaceRoot);
       expect(stored["old-dir"]).toBeUndefined();
       expect(stored["new-dir"]).toEqual({ greeting: "Howdy" });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Round 23 finding 1: sameId reappearing under a new directoryName is
+  // only ever a rename when that directory is NEW to discovery this batch.
+  // A duplicate that already existed — a second directory declaring the
+  // SAME manifest name, demoted to its own directoryName as id by
+  // discovery's tie-break — getting PROMOTED into the id its winner just
+  // vacated is a completely different plugin taking over an id, never the
+  // winner's own content arriving there. Settings must not follow.
+  it("does not carry settings to a duplicate promoted by the installed winner's removal", async () => {
+    const fixture = await createNamedPluginWorkspace("aaa-dir", "foo");
+    await writeFile(
+      join(fixture.pluginRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "foo",
+        displayName: "foo",
+        entry: "src/index.ts",
+        settings: [
+          { key: "greeting", type: "string", label: "Greeting", default: "Hello" },
+        ],
+      }, null, 2)}\n`,
+    );
+
+    // A second directory declaring the SAME manifest name — lexically
+    // AFTER "aaa-dir", so discovery's tie-break demotes it: it starts
+    // life as an already-known, invalid duplicate under its own
+    // directoryName as id, never "foo" itself, while "aaa-dir" is running.
+    const duplicateRoot = join(fixture.workspaceRoot, "plugins", "zzz-dir");
+    await mkdir(join(duplicateRoot, "src"), { recursive: true });
+    await writeFile(
+      join(duplicateRoot, "dohc-plugin.json"),
+      `${JSON.stringify({
+        version: 1,
+        name: "foo",
+        displayName: "foo",
+        entry: "src/index.ts",
+        settings: [
+          { key: "greeting", type: "string", label: "Greeting", default: "Hello" },
+        ],
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(duplicateRoot, "src", "index.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("foo");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list().some((p) => p.directoryName === "aaa-dir" && p.status === "ready"),
+        "The winner did not reach ready.",
+      );
+      // The collision itself, from the very start: both directories
+      // declare "foo", and the duplicate is already known to discovery.
+      expect(pipeline.list().find((p) => p.directoryName === "zzz-dir"))
+        .toMatchObject({ id: "zzz-dir", valid: false });
+
+      const saved = await pipeline.setPluginSettings("aaa-dir", "foo", {
+        greeting: "Howdy",
+      });
+      expect(saved).toEqual({ greeting: "Howdy" });
+
+      // The winner is deleted outright — freeing "foo" for the duplicate
+      // discovery already knew about to be promoted into.
+      await rm(fixture.pluginRoot, { recursive: true, force: true });
+      pipeline.handleWatcherEvents([
+        { path: "plugins/aaa-dir", operation: "delete" },
+      ]);
+
+      await waitFor(
+        () => pipeline.list().some((p) => p.directoryName === "zzz-dir" && p.id === "foo"),
+        "The duplicate was never promoted to the vacated id.",
+      );
+
+      // The promoted duplicate reads its own manifest's default — never
+      // the departed winner's saved answer, which named a plugin that
+      // never actually moved here.
+      expect(await pipeline.getPluginSettings("zzz-dir")).toEqual({
+        greeting: "Hello",
+      });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Round 23 finding 3: an invalid, never-installed candidate (a broken
+  // manifest, or none at all) gets no status entry — seedCandidateStatus
+  // returns early with nothing to set — so its own arrival or departure
+  // fires no "changed"/"removed" event either. Anything reading discovery
+  // (offers, the plugin list) is stale until this fires.
+  it("emits discovery-changed when an invalid, never-installed candidate's directory appears or disappears", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dohc-plugin-discovery-changed-"));
+    roots.push(root);
+    const workspaceRoot = join(root, "workspace");
+    const stateDir = join(root, "state");
+    await mkdir(join(workspaceRoot, "plugins"), { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const events: PluginPipelineStatusEvent[] = [];
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      onStatusChange: (event) => events.push(event),
+    });
+
+    try {
+      await pipeline.start();
+
+      // A broken manifest lands at plugins/broken — invalid, never
+      // installed, no status entry of its own.
+      const brokenRoot = join(workspaceRoot, "plugins", "broken");
+      await mkdir(join(brokenRoot, "src"), { recursive: true });
+      await writeFile(join(brokenRoot, "dohc-plugin.json"), "{ not valid json\n");
+      pipeline.handleWatcherEvents([{ path: "plugins/broken", operation: "create" }]);
+      await waitFor(
+        () => pipeline.list().some((p) => p.directoryName === "broken"),
+        "The invalid candidate was never discovered.",
+      );
+      expect(events).toContainEqual({ kind: "discovery-changed" });
+
+      events.length = 0;
+      await rm(brokenRoot, { recursive: true, force: true });
+      pipeline.handleWatcherEvents([{ path: "plugins/broken", operation: "delete" }]);
+      await waitFor(
+        () => !pipeline.list().some((p) => p.directoryName === "broken"),
+        "The invalid candidate's departure was never discovered.",
+      );
+      expect(events).toContainEqual({ kind: "discovery-changed" });
     } finally {
       await pipeline.dispose();
     }

@@ -7474,47 +7474,37 @@ function registerIpcHandlers(
     const input = UninstallPluginPayload.parse(payload);
     try {
       const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
-      // Uninstall stops the plugin's process on its way to deleting the
-      // source, so no panel authority over it survives the attempt whether
-      // or not the delete succeeds (#779 round 12 A4) — but only when this
-      // id names a single row. A collision's invalid, never-installed side
-      // has no panel or web app of its own to revoke, and the SAME id's
-      // installed side is a completely different row this action was never
-      // asked to touch: revoking pre-emptively here, before the pipeline
-      // even resolves which row confirmationToken actually names, would
-      // reach into that survivor's live authority (#779-offers round 17
-      // finding 2). Ambiguous here defers to the settled outcome below,
-      // once it is known for certain which row actually left.
-      const collisionAtStart =
-        pipeline.list().filter((entry) => entry.id === input.pluginId).length > 1;
-      if (!collisionAtStart) {
-        revokePluginPanels(input.workspaceId, input.pluginId);
-        stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
-      }
+      // Revoked only once the settled outcome PROVES pluginHost.stop() was
+      // genuinely called for this attempt — never eagerly, before
+      // pipeline.uninstall even validates the confirmation. A stale dialog
+      // or an expired token fails "confirmation-required" or an early
+      // "confirmation-stale" before uninstall ever reaches its own stop()
+      // call; tearing surfaces down ahead of that destroys a still-running
+      // plugin's panel and web app views for an action that never actually
+      // touched it (#779-offers round 23 finding 2).
       const result = PluginActionResult.parse(
         await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),
       );
-      // Settled: whether the row confirmationToken actually named WAS this
-      // id's installed claimant, now decided for certain instead of
-      // guessed up front. A SUCCESSFUL removal always reflects it
-      // (result.plugin.status is "disabled" the instant uninstall()
-      // returns ok). A FAILED one can too: the preflight-stale-after-stop
-      // and delete-failed paths both explicitly mark the row disabled or
-      // disabled-pending-repair only AFTER pluginHost.stop() already ran —
-      // its process is just as dead as a successful removal's would be,
-      // and leaving main's surfaces pointed at it would be stale, not
-      // safe. An EARLIER failure (a stale confirmation caught before the
-      // pipeline ever touches the process) never reaches that stop, and
-      // the status this action reads back is whatever it already was —
-      // never one of those two — so the claimant is still genuinely
-      // running and its surfaces correctly stay untouched (#779-offers
-      // round 18 finding 1).
+      // A SUCCESSFUL removal always stopped the process on its way to
+      // deleting the source (#779 round 12 A4) — result.ok alone proves it.
+      // A FAILED one can too: the preflight-stale-after-stop and
+      // delete-failed paths both explicitly mark the row disabled or
+      // disabled-pending-repair only AFTER pluginHost.stop() already ran,
+      // merging that onto the row's own pre-existing status — which is why
+      // this also proves it for a collision's SURVIVING claimant, not only
+      // the row that actually left: whichever row this id names once the
+      // dust settles, its own approvedHash and disabled status say plainly
+      // whether its process was just stopped. An EARLIER failure (a stale
+      // confirmation caught before the pipeline ever reaches that stop)
+      // never reaches either shape, and the claimant is still genuinely
+      // running — its surfaces correctly stay untouched (#779-offers round
+      // 18 finding 1, tightened round 23 finding 2 to run only post-settle).
       const claimantStoppedBySettledResult =
         result.plugin !== null &&
         result.plugin.approvedHash !== null &&
         (result.plugin.status === "disabled" ||
           result.plugin.status === "disabled-pending-repair");
-      if (collisionAtStart && claimantStoppedBySettledResult) {
+      if (result.ok || claimantStoppedBySettledResult) {
         revokePluginPanels(input.workspaceId, input.pluginId);
         stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);
       }

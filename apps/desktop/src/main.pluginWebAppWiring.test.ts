@@ -283,71 +283,61 @@ describe("plugin web app main-process wiring", () => {
     expect(squeeze(forgetCall)).toContain("uninstalled:result.ok&&!idStillOwned,");
   });
 
-  // #779-offers round 17 finding 2: revoking a panel or stopping a web app
-  // by id alone, before the pipeline even resolves which row
-  // confirmationToken names, reaches into a survivor's live authority the
-  // same way an unguarded post-remove clear would.
-  it("defers the panel and web app teardown when this id names more than one row at the start", () => {
+  // #779-offers round 17 finding 2, tightened round 23 finding 2: revoking
+  // a panel or stopping a web app before the pipeline even validates
+  // confirmationToken reaches into whatever row is currently running under
+  // this id — a stale dialog or an expired token fails before
+  // pipeline.uninstall ever calls pluginHost.stop(), and teardown ahead of
+  // that would destroy a still-running plugin's surfaces for an action
+  // that never touched it. There is exactly one teardown site, entirely
+  // after the settled result.
+  it("defers all panel and web app teardown until after pipeline.uninstall settles", () => {
     const uninstall = handler("uninstallPlugin");
-    const collisionAt = uninstall.indexOf(
-      "pipeline.list().filter((entry) => entry.id === input.pluginId).length > 1",
-    );
-    const firstGuardAt = uninstall.indexOf("if (!collisionAtStart) {", collisionAt);
-    const firstRevokeAt = uninstall.indexOf(
-      "revokePluginPanels(input.workspaceId, input.pluginId);",
-      firstGuardAt,
-    );
-    const firstStopAt = uninstall.indexOf(
-      "stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);",
-      firstRevokeAt,
-    );
     const uninstallCallAt = uninstall.indexOf(
       "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
-      firstStopAt,
     );
     const settledGuardAt = uninstall.indexOf(
-      "if (collisionAtStart && claimantStoppedBySettledResult) {",
+      "if (result.ok || claimantStoppedBySettledResult) {",
       uninstallCallAt,
     );
-    const secondRevokeAt = uninstall.indexOf(
+    const revokeAt = uninstall.indexOf(
       "revokePluginPanels(input.workspaceId, input.pluginId);",
       settledGuardAt,
     );
-    const secondStopAt = uninstall.indexOf(
+    const stopAt = uninstall.indexOf(
       "stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);",
-      secondRevokeAt,
+      revokeAt,
     );
 
-    // MUTATION (drop collisionAtStart, revoke unconditionally up front): an
-    // ambiguous id would have its teardown fire before uninstall even
-    // resolves which row is actually leaving, reaching into whichever row
-    // happens to share the id right now.
-    expect(collisionAt).toBeGreaterThan(-1);
-    expect(firstGuardAt).toBeGreaterThan(collisionAt);
-    expect(firstRevokeAt).toBeGreaterThan(firstGuardAt);
-    expect(firstStopAt).toBeGreaterThan(firstRevokeAt);
-    expect(uninstallCallAt).toBeGreaterThan(firstStopAt);
-    // MUTATION (drop the settled re-run, or gate it on result.ok alone):
-    // an ambiguous id whose confirmed row turned out to BE the installed
-    // claimant must still have its authority revoked, once that is known
-    // for certain rather than guessed up front.
+    // MUTATION (revoke/stop before the settled guard, or before
+    // uninstallCallAt at all): a stale dialog or expired token would then
+    // have its surfaces torn down before pipeline.uninstall ever proves
+    // this attempt actually reached pluginHost.stop().
+    expect(uninstallCallAt).toBeGreaterThan(-1);
     expect(settledGuardAt).toBeGreaterThan(uninstallCallAt);
-    expect(secondRevokeAt).toBeGreaterThan(settledGuardAt);
-    expect(secondStopAt).toBeGreaterThan(secondRevokeAt);
+    expect(revokeAt).toBeGreaterThan(settledGuardAt);
+    expect(stopAt).toBeGreaterThan(revokeAt);
+    // No earlier, unconditional revoke/stop pair exists before the call at
+    // all — the only occurrences are the ones just found, after settling.
+    expect(uninstall.indexOf("revokePluginPanels(input.workspaceId, input.pluginId);"))
+      .toBe(revokeAt);
+    expect(uninstall.indexOf("stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);"))
+      .toBe(stopAt);
   });
 
-  // #779-offers round 18 finding 1: a FAILED uninstall can still have
-  // stopped the installed claimant's process before the failure that
-  // followed — the preflight-stale-after-stop and delete-failed paths both
-  // mark the row disabled or disabled-pending-repair only AFTER
-  // pluginHost.stop() already ran, so its main-process surfaces are just as
-  // dead as a successful removal's would be. An earlier failure (caught
-  // before the pipeline ever touches the process) never reaches that
-  // status, and the claimant is still genuinely running.
-  it("revokes a collision's authority on a failed uninstall too, only once the settled status proves the process was actually stopped", () => {
+  // #779-offers round 18 finding 1, tightened round 23 finding 2: a FAILED
+  // uninstall can still have stopped the installed claimant's process
+  // before the failure that followed — the preflight-stale-after-stop and
+  // delete-failed paths both mark the row disabled or disabled-pending-
+  // repair only AFTER pluginHost.stop() already ran, so its main-process
+  // surfaces are just as dead as a successful removal's would be. An
+  // earlier failure (caught before the pipeline ever touches the process)
+  // never reaches that status, and the claimant is still genuinely
+  // running. A full SUCCESS proves it too, on its own (result.ok).
+  it("revokes authority on a failed uninstall too, only once the settled status proves the process was actually stopped", () => {
     const uninstall = handler("uninstallPlugin");
     const settledGuardAt = uninstall.indexOf(
-      "if (collisionAtStart && claimantStoppedBySettledResult) {",
+      "if (result.ok || claimantStoppedBySettledResult) {",
     );
     const predicateAt = uninstall.indexOf(
       "const claimantStoppedBySettledResult =",

@@ -2580,6 +2580,15 @@ export const PluginStatusChangedEvent = z.discriminatedUnion("kind", [
     workspaceId: WORKSPACE_ID,
     pluginId: PLUGIN_ID,
   }).strict(),
+  // An invalid, never-installed candidate's arrival or departure names no
+  // pluginId "changed"/"removed" could carry — this is the one honest fact
+  // discovery has to offer instead: something in this workspace's invalid
+  // candidates moved, so anything reading discovery (offers, the plugin
+  // list) should re-check (#779-offers round 23 finding 3).
+  z.object({
+    kind: z.literal("discovery-changed"),
+    workspaceId: WORKSPACE_ID,
+  }).strict(),
 ]);
 export type PluginStatusChangedEvent = z.infer<typeof PluginStatusChangedEvent>;
 
