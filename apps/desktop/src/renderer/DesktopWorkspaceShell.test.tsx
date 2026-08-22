@@ -385,6 +385,17 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     writeClipboardText: vi.fn(async () => undefined),
     setTitlebarTheme: vi.fn(async () => undefined),
+    onUserSettingsChanged: vi.fn(() => () => {}),
+    stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: {
+          ...DEFAULT_USER_SETTINGS.appearance,
+          zoomLevel: payload.step === "in" ? 1 : payload.step === "out" ? -1 : 0,
+        },
+      },
+      source: "stored" as const,
+    })),
     probeAgentDrivers: vi.fn(async () => ({
       drivers: [],
       session: null,

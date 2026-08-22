@@ -4339,6 +4339,9 @@ export function DesktopWorkspaceShell(props: {
         }
         return;
       }
+      // Zoom chords are deliberately absent here: they are native menu
+      // accelerators (applicationMenu.ts), so they work on windows that
+      // never mount this shell.
       // This handler owns main-frame shortcuts. On Windows/Linux the menu only
       // displays them. On macOS it is the unhandled fallback, so preventing a
       // claimed keydown also prevents a duplicate menu command. Shift and Caps
@@ -4526,6 +4529,30 @@ export function DesktopWorkspaceShell(props: {
         id: "toggle-theme",
         label: "Toggle light/dark theme",
         run: toggleTheme,
+      },
+      {
+        id: "zoom-in",
+        label: "Zoom in",
+        run: () =>
+          void bridge().stepWindowZoom({ step: "in" }).catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
+      },
+      {
+        id: "zoom-out",
+        label: "Zoom out",
+        run: () =>
+          void bridge().stepWindowZoom({ step: "out" }).catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
+      },
+      {
+        id: "zoom-reset",
+        label: "Reset zoom",
+        run: () =>
+          void bridge().stepWindowZoom({ step: "reset" }).catch((error) =>
+            reportShellError("Could not change the window zoom.", error),
+          ),
       },
     ],
     [

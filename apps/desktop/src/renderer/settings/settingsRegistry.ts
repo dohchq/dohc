@@ -33,7 +33,7 @@ export const SETTINGS_SECTIONS = [
     id: "appearance",
     label: "Appearance",
     scope: "User",
-    keywords: ["theme", "density", "motion", "light", "dark", "system"],
+    keywords: ["theme", "density", "motion", "light", "dark", "system", "zoom"],
     Icon: MonitorCog,
   },
   {

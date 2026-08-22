@@ -73,6 +73,7 @@ import { isLoopbackHostname } from "../security/loopback";
 import {
   DesktopUserSettings as DesktopUserSettingsSchema,
   DesktopUserSettingsResult as DesktopUserSettingsResultSchema,
+  ZOOM_STEPS,
 } from "../settings/userSettings";
 import type {
   DesktopUserSettings as DesktopUserSettingsType,
@@ -3686,6 +3687,16 @@ export const SetTitlebarThemePayload = z.object({
 });
 export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 
+// One zoom mutation, owned by main: it persists appearance.zoomLevel before
+// applying it to the windows, and answers with the settings now on disk so
+// the caller can paint the level in effect. The menu accelerators call the
+// same mutation directly in main; this channel is for the palette and the
+// Settings stepper.
+export const StepWindowZoomPayload = z.object({
+  step: z.enum(ZOOM_STEPS),
+}).strict();
+export type StepWindowZoomPayload = z.infer<typeof StepWindowZoomPayload>;
+
 // Application-menu commands. One closed set (channels.ts owns the tuple; the
 // sandboxed preload validates against it as a plain value): the menu sends
 // these names and the shell routes them through the SAME command registry the
@@ -4474,6 +4485,12 @@ export interface DohcDesktopBridge {
   ): Promise<WorkspaceSettingsResult>;
   writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
+  onUserSettingsChanged(
+    listener: (result: DesktopUserSettingsResult) => void,
+  ): () => void;
+  stepWindowZoom(
+    payload: StepWindowZoomPayload,
+  ): Promise<DesktopUserSettingsResult>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
     payload: ListWorkspaceFilesPayload,
