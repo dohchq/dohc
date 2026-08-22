@@ -681,7 +681,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
 
   const manifest = await readPluginManifestFile(helloPluginRoot);
   if (!manifest.ok) throw new Error(manifest.diagnostics.join("; "));
-  await host.start(helloPluginRoot, manifest.manifest);
+  await host.start(helloPluginRoot, "hello-plugin", manifest.manifest);
   await until(
     () => (host.getStatus("hello-plugin") === "ready" ? true : undefined),
     "the watching plugin to activate",

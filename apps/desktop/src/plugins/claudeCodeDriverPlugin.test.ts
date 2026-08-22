@@ -161,7 +161,7 @@ async function startClaudePlugin(
     target: "node22",
     logLevel: "silent",
   });
-  await host.start(pluginRoot, { ...manifest.manifest, entry: "bundle.mjs" });
+  await host.start(pluginRoot, "claude-code", { ...manifest.manifest, entry: "bundle.mjs" });
   await until(
     () => (host?.getStatus("claude-code") === "ready" ? true : undefined),
     `the claude-code plugin to activate (${host.getStderrLog("claude-code").join(" | ")})`,

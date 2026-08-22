@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import {
   mutatePluginRecord,
@@ -124,10 +123,12 @@ interface PluginSpawn {
 interface PluginRecord {
   pluginId: string;
   pluginRoot: string;
-  /** One directory is one discovery entry, so this is basename(pluginRoot)
-   * — the identity a manifest's own declared name cannot stand in for when
-   * it differs from the folder it was found in (#779-offers round 19
-   * finding 1/2). */
+  /** The discovered SOURCE directory's own name, passed explicitly into
+   * start() — never derived from pluginRoot, which production starts a
+   * plugin from as its BUILT root, not its source folder. The identity a
+   * manifest's own declared name cannot stand in for when it differs from
+   * the folder it was found in (#779-offers round 19 finding 1/2, round 20
+   * finding 1). */
   directoryName: string;
   manifest: DohcPluginManifest;
   status: PluginRuntimeStatus;
@@ -227,6 +228,14 @@ export class PluginHost {
 
   async start(
     pluginRoot: string,
+    // The discovered SOURCE directory's own name under plugins/ — never
+    // derived from pluginRoot. Production starts a plugin from its BUILT
+    // root (dohc's own .dohc/plugins/<safe-path> staging, not the source
+    // folder discovery found it at), so basename(pluginRoot) would read
+    // dohc's internal build-path segment instead of the actual directory a
+    // settings read or a sizes report needs to name (#779-offers round 20
+    // finding 1).
+    directoryName: string,
     manifest: DohcPluginManifest,
   ): Promise<void> {
     // The manifest name is the plugin's identity — one identity, so state
@@ -257,7 +266,7 @@ export class PluginHost {
       const record: PluginRecord = {
         pluginId,
         pluginRoot,
-        directoryName: basename(pluginRoot),
+        directoryName,
         manifest,
         status: "starting",
         stderr: [],

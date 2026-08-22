@@ -2085,6 +2085,24 @@ export function DesktopWorkspaceShell(props: {
     [],
   );
 
+  // A details tab that followed a rename (an id-only fallback, since a
+  // discovered row's id alone can never disambiguate two rows) only tracks
+  // that rename in memory — nothing else ever hears about it. A later tab
+  // switch remounts the page, whose tracking ref reseeds from THIS tab's own
+  // virtual path, still naming the ORIGINAL, now-vacated directory. The same
+  // remap onExplorerPathsChanged already applies for a file rename retargets
+  // the tab's own path here too, so a remount reads the directory the plugin
+  // actually renamed to, not the one it left (#779-offers round 20 finding
+  // 2).
+  const retargetPluginDetailsTab = useCallback(
+    (pluginId: string, fromDirectoryName: string, toDirectoryName: string) => {
+      const from = pluginDetailsTabPath(pluginId, fromDirectoryName);
+      const to = pluginDetailsTabPath(pluginId, toDirectoryName);
+      mutateWb((state) => remapWorkbenchPaths(state, (path) => (path === from ? to : path)));
+    },
+    [mutateWb],
+  );
+
   // Plugin-contributed views (P6). The catalog is the same guarded data layer
   // the Plugins panel uses, so the rail follows an install, an enable, and an
   // uninstall without its own listener.
@@ -5748,6 +5766,7 @@ export function DesktopWorkspaceShell(props: {
                     pluginId={groupPluginDetails.pluginId}
                     directoryName={groupPluginDetails.directoryName}
                     onTitle={rememberPluginDetailsTitle}
+                    onDirectoryRenamed={retargetPluginDetailsTab}
                   />
                 </Suspense>
               ) : (

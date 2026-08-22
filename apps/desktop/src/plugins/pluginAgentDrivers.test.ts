@@ -154,7 +154,7 @@ async function startDriverPlugin(
   const manifest = await readPluginManifestFile(pluginRoot);
   if (!manifest.ok) throw new Error(manifest.diagnostics.join("; "));
   if (options.start !== false) {
-    await host.start(pluginRoot, manifest.manifest);
+    await host.start(pluginRoot, "driver-plugin", manifest.manifest);
     await until(
       () => (host?.getStatus("driver-plugin") === "ready" ? true : undefined),
       `the plugin to activate (${host.getStderrLog("driver-plugin").join(" | ")})`,
@@ -472,6 +472,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
       if (!manifest.ok) throw new Error(manifest.diagnostics.join("; "));
       await fixture.host.start(
         join(fixture.workspaceRoot, "..", "plugins", "driver-plugin"),
+        "driver-plugin",
         manifest.manifest,
       );
 
@@ -502,7 +503,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
       );
       const manifest = await readPluginManifestFile(pluginRoot);
       if (!manifest.ok) throw new Error(manifest.diagnostics.join("; "));
-      await fixture.host.start(pluginRoot, manifest.manifest);
+      await fixture.host.start(pluginRoot, "driver-plugin", manifest.manifest);
 
       await until(
         () =>
@@ -530,7 +531,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
       );
       const manifest = await readPluginManifestFile(pluginRoot);
       if (!manifest.ok) throw new Error(manifest.diagnostics.join("; "));
-      await fixture.host.start(pluginRoot, manifest.manifest);
+      await fixture.host.start(pluginRoot, "driver-plugin", manifest.manifest);
 
       await until(
         () =>

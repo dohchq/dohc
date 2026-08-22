@@ -6130,6 +6130,94 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  // Round 20 finding 1: PluginHost.start() used to derive directoryName from
+  // basename(pluginRoot) — correct for a test that passes the SOURCE
+  // directory straight in, wrong for production, which starts a plugin
+  // from its BUILT root (dohc's own .dohc/plugins/<safe-path> staging).
+  // basename(builtRoot) reads pluginIdToSafePath(pluginId) — the id, not
+  // the folder discovery found it at — so a plugin whose manifest name
+  // differs from its folder got the wrong directoryName at every real
+  // activation. Pinned through a REAL build and start, where the built
+  // root's own basename ("foo") and the source folder ("my-copy") visibly
+  // differ.
+  it("activates with the source directory's own name, never the built root's basename", async () => {
+    const fixture = await createPluginWorkspace();
+    await rm(fixture.pluginRoot, { recursive: true, force: true });
+    const myCopyRoot = join(fixture.workspaceRoot, "plugins", "my-copy");
+    await mkdir(join(myCopyRoot, "src"), { recursive: true });
+    await writeFile(
+      join(myCopyRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "foo", entry: "src/index.ts" }, null, 2)}\n`,
+    );
+    await writeFile(
+      join(myCopyRoot, "package.json"),
+      `${JSON.stringify({
+        name: "foo",
+        version: "1.0.0",
+        private: true,
+        type: "module",
+        packageManager: "pnpm@11.20.0",
+      }, null, 2)}\n`,
+    );
+    await writeFile(join(myCopyRoot, "pnpm-lock.yaml"), [
+      "lockfileVersion: '9.0'",
+      "settings:",
+      "  autoInstallPeers: true",
+      "  excludeLinksFromLockfile: false",
+      "importers:",
+      "  .: {}",
+      "",
+    ].join("\n"));
+    await writeFile(
+      join(myCopyRoot, "src", "index.ts"),
+      'export default { activate() {} };\n',
+    );
+
+    const readPluginSettings = vi.fn(async () => ({}));
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      readPluginSettings,
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("foo");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list().find((row) => row.id === "foo")?.status === "ready",
+        "foo did not reach ready.",
+      );
+
+      // Asked for the SOURCE folder's settings — never "foo", the built
+      // root's own basename.
+      expect(readPluginSettings).toHaveBeenCalledWith("my-copy");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   it("advertises no icon, and says why, when the declared file is missing", async () => {
     const fixture = await createPluginWorkspace();
     await writeFile(

@@ -658,6 +658,15 @@ export function PluginDetailsPage(props: {
    * that reads the plugin's manifest, the same way the web app page is the
    * only one that hears its app's title. */
   onTitle?: (pluginId: string, directoryName: string, title: string) => void;
+  /** Reports a rename this page followed by id, so the tab's own virtual
+   * path can retarget to it — otherwise only this page's in-memory tracking
+   * knows, and a remount (a tab switch away and back) reseeds from the
+   * tab's original, now-vacated directory (#779-offers round 20 finding 2). */
+  onDirectoryRenamed?: (
+    pluginId: string,
+    fromDirectoryName: string,
+    toDirectoryName: string,
+  ) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
   // Every OTHER directoryName ever seen sharing props.pluginId while the
@@ -690,6 +699,12 @@ export function PluginDetailsPage(props: {
   // of staying on the plugin that actually renamed (#779-offers round 19
   // finding 4).
   const trackedDirectoryNameRef = useRef(props.directoryName);
+  // A rename this render just detected, queued for the effect below to
+  // report to onDirectoryRenamed — reporting it directly here would call a
+  // parent setter mid-render. Cleared alongside the tracking above on a
+  // genuinely new tab, so a previous tab's own in-flight rename can never
+  // reach a DIFFERENT tab this instance goes on to show.
+  const pendingRenameRef = useRef<{ from: string; to: string } | null>(null);
   if (
     knownCollisionsOwnerRef.current?.pluginId !== props.pluginId ||
     knownCollisionsOwnerRef.current?.directoryName !== props.directoryName
@@ -700,6 +715,7 @@ export function PluginDetailsPage(props: {
       directoryName: props.directoryName,
     };
     trackedDirectoryNameRef.current = props.directoryName;
+    pendingRenameRef.current = null;
   }
   useEffect(() => {
     if (catalog.load.status !== "ready") return;
@@ -724,6 +740,10 @@ export function PluginDetailsPage(props: {
       )
       : null;
   if (plugin && plugin.directoryName !== trackedDirectoryNameRef.current) {
+    pendingRenameRef.current = {
+      from: trackedDirectoryNameRef.current,
+      to: plugin.directoryName,
+    };
     trackedDirectoryNameRef.current = plugin.directoryName;
   }
 
@@ -738,6 +758,22 @@ export function PluginDetailsPage(props: {
   useEffect(() => {
     if (title !== null) onTitleRef.current?.(props.pluginId, props.directoryName, title);
   }, [props.pluginId, props.directoryName, title]);
+
+  // Same ref-and-effect shape as onTitle above, for the same reason: reports
+  // a rename outward without calling a parent setter mid-render. Runs every
+  // commit (no deps) — pendingRenameRef itself is the guard, consumed and
+  // cleared the first time this fires after the render that queued it, so a
+  // later re-render with nothing new queued reports nothing again.
+  const onDirectoryRenamedRef = useRef(props.onDirectoryRenamed);
+  useEffect(() => {
+    onDirectoryRenamedRef.current = props.onDirectoryRenamed;
+  });
+  useEffect(() => {
+    const pending = pendingRenameRef.current;
+    if (!pending) return;
+    pendingRenameRef.current = null;
+    onDirectoryRenamedRef.current?.(props.pluginId, pending.from, pending.to);
+  });
 
   if (catalog.load.status === "loading") {
     return (

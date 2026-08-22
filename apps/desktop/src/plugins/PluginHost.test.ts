@@ -301,7 +301,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -339,7 +339,7 @@ describe("PluginHost", () => {
         ),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -389,7 +389,7 @@ describe("PluginHost", () => {
         ),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -445,7 +445,7 @@ describe("PluginHost", () => {
         ),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -469,7 +469,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -521,7 +521,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await expect(
       host.invokeCommand("hello-plugin", "hello.write"),
     ).rejects.toThrow('Plugin "hello-plugin" is still starting.');
@@ -546,7 +546,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
 
     // The spawn id already exists — this is what a panel or web-app open used
     // to read as "running" — and every request in this window is refused.
@@ -580,7 +580,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
 
     await expect(host.activationOf("hello-plugin")).rejects.toThrow(
       "fixture activation failed",
@@ -611,7 +611,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     const activation = host.activationOf("hello-plugin");
     expect(activation).toBeDefined();
 
@@ -635,9 +635,9 @@ describe("PluginHost", () => {
     });
     const manifest = await fixtureManifest();
 
-    const firstStart = host.start(helloPluginRoot, manifest);
+    const firstStart = host.start(helloPluginRoot, "hello-plugin", manifest);
     await expect(
-      host.start(helloPluginRoot, manifest),
+      host.start(helloPluginRoot, "hello-plugin", manifest),
     ).rejects.toThrow('Plugin "hello-plugin" is already running.');
     await firstStart;
     await waitFor(
@@ -660,6 +660,7 @@ describe("PluginHost", () => {
 
     const start = host.start(
       helloPluginRoot,
+      "hello-plugin",
       await fixtureManifest(),
     );
     await host.stop("hello-plugin");
@@ -681,6 +682,7 @@ describe("PluginHost", () => {
 
     const start = host.start(
       helloPluginRoot,
+      "hello-plugin",
       await fixtureManifest(),
     );
     const stopAll = host.stopAll();
@@ -705,7 +707,7 @@ describe("PluginHost", () => {
     });
 
     await expect(
-      host.start(helloPluginRoot, await fixtureManifest()),
+      host.start(helloPluginRoot, "hello-plugin", await fixtureManifest()),
     ).rejects.toThrow(
       'Plugin "hello-plugin" is disabled. Re-enabling it is not yet available in the app.',
     );
@@ -734,7 +736,7 @@ describe("PluginHost", () => {
     });
 
     await expect(
-      host.start(helloPluginRoot, {
+      host.start(helloPluginRoot, "hello-plugin", {
         ...(await fixtureManifest()),
         name: "another-plugin",
       }),
@@ -756,7 +758,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => statuses.includes("failed"),
       "Plugin did not report its activation failure.",
@@ -795,7 +797,7 @@ describe("PluginHost", () => {
 
     process.on("unhandledRejection", onUnhandledRejection);
     try {
-      await host.start(helloPluginRoot, await fixtureManifest());
+      await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
       const reachedFailed = await waitFor(
         () => statuses.includes("failed"),
         "Malformed activation result did not fail the plugin.",
@@ -830,7 +832,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => statuses.includes("failed") || statuses.includes("ready"),
       "Duplicate command activation did not settle.",
@@ -857,7 +859,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => statuses.includes("ready"),
       "Plugin did not become ready before the asynchronous error.",
@@ -886,7 +888,7 @@ describe("PluginHost", () => {
       routeSdkRequest,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     const callbacks = harness.getCallbacks();
 
     await expect(
@@ -938,7 +940,7 @@ describe("PluginHost", () => {
       },
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     if (!callbacks) throw new Error("Plugin transport did not spawn.");
     await callbacks.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
       method: "childProcesses.output.subscribe",
@@ -985,7 +987,7 @@ describe("PluginHost", () => {
       routeSdkRequest,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     const request = Promise.resolve(
       harness.getCallbacks().onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
         method: "files.read",
@@ -1018,7 +1020,7 @@ describe("PluginHost", () => {
       routeSdkRequest,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await expect(
       harness.getCallbacks().onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
         method: "files.read",
@@ -1075,7 +1077,7 @@ describe("PluginHost", () => {
       }),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     if (!callbacks) throw new Error("Plugin transport did not spawn.");
     await callbacks.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
       method: "capabilities",
@@ -1123,7 +1125,7 @@ describe("PluginHost", () => {
       routeSdkRequest,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await callbacks[0]?.onRequest(PLUGIN_HOST_METHODS.sdkRequest, {
       method: "capabilities",
     });
@@ -1157,7 +1159,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     harness.getCallbacks().onNotification(PLUGIN_HOST_METHODS.log, {
       level: "debug",
       message: 42,
@@ -1180,7 +1182,7 @@ describe("PluginHost", () => {
     });
     const startedAt = Date.now();
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Healthy plugin missed the test activation deadline.",
@@ -1205,7 +1207,7 @@ describe("PluginHost", () => {
     });
     const startedAt = Date.now();
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => statuses.includes("failed"),
       "Plugin activation did not fail at the deadline.",
@@ -1229,7 +1231,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Crash loop did not disable the plugin.",
@@ -1262,7 +1264,7 @@ describe("PluginHost", () => {
       activationTimeoutMs: 150,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Timeout loop did not disable the plugin.",
@@ -1287,7 +1289,7 @@ describe("PluginHost", () => {
     });
     const manifest = await fixtureManifest();
 
-    await host.start(helloPluginRoot, manifest);
+    await host.start(helloPluginRoot, "hello-plugin", manifest);
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Initial crash loop did not disable the plugin.",
@@ -1298,7 +1300,7 @@ describe("PluginHost", () => {
     await mutateDisabledState(localStateDir, root, "hello-plugin", false);
     harness.beginFreshCode();
     host.resetCrashAccounting("hello-plugin");
-    await host.start(helloPluginRoot, manifest);
+    await host.start(helloPluginRoot, "hello-plugin", manifest);
     await waitFor(
       () =>
         vi.mocked(harness.spawnTransport).mock.calls.length === 6 &&
@@ -1326,7 +1328,7 @@ describe("PluginHost", () => {
     });
     const manifest = await fixtureManifest();
 
-    await host.start(helloPluginRoot, manifest);
+    await host.start(helloPluginRoot, "hello-plugin", manifest);
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Initial crash loop did not disable the plugin.",
@@ -1335,7 +1337,7 @@ describe("PluginHost", () => {
     await mutateDisabledState(localStateDir, root, "hello-plugin", false);
     harness.beginFreshCode();
 
-    await host.start(helloPluginRoot, manifest);
+    await host.start(helloPluginRoot, "hello-plugin", manifest);
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Preserved crash accounting did not disable the plugin.",
@@ -1379,7 +1381,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "disabled",
       "Fast crashes after activation did not disable the plugin.",
@@ -1410,7 +1412,7 @@ describe("PluginHost", () => {
       },
       routeSdkRequest: defaultRouter,
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     const originalSpawnId = host.getSpawnId("hello-plugin");
     if (!originalSpawnId) throw new Error("Plugin did not expose its first spawn id.");
 
@@ -1534,7 +1536,7 @@ describe("PluginHost", () => {
           revokePanel: registry.revokePanel,
         }),
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -1633,7 +1635,7 @@ describe("PluginHost", () => {
       }),
       routeSdkRequest: defaultRouter,
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -1703,7 +1705,7 @@ describe("PluginHost", () => {
       }),
       routeSdkRequest: defaultRouter,
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -1766,7 +1768,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
     const manifest = await fixtureManifest();
-    await host.start(helloPluginRoot, manifest);
+    await host.start(helloPluginRoot, "hello-plugin", manifest);
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -1813,7 +1815,7 @@ describe("PluginHost", () => {
       withPluginLock,
       async () => {
         if (!host.getSpawnId("hello-plugin")) {
-          await host.start(helloPluginRoot, manifest);
+          await host.start(helloPluginRoot, "hello-plugin", manifest);
         }
         return host;
       },
@@ -1882,7 +1884,7 @@ describe("PluginHost", () => {
       },
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -1923,7 +1925,7 @@ describe("PluginHost", () => {
     });
     const startedAt = Date.now();
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     // disposedPluginIds only proves shutdown() STARTED disposing — the real
     // process kill it awaits can still be in flight. Wait for the record to
     // actually be gone, which only happens once shutdown() fully completes.
@@ -1959,7 +1961,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -1993,8 +1995,8 @@ describe("PluginHost", () => {
     const manifest = await fixtureManifest();
 
     await Promise.all([
-      host.start(helloPluginRoot, { ...manifest, name: "broken-plugin" }),
-      host.start(helloPluginRoot, { ...manifest, name: "healthy-plugin" }),
+      host.start(helloPluginRoot, "hello-plugin", { ...manifest, name: "broken-plugin" }),
+      host.start(helloPluginRoot, "hello-plugin", { ...manifest, name: "healthy-plugin" }),
     ]);
     await waitFor(
       () => host.getStatus("healthy-plugin") === "ready",
@@ -2037,6 +2039,7 @@ describe("PluginHost", () => {
 
     const start = host.start(
       helloPluginRoot,
+      "hello-plugin",
       await fixtureManifest(),
     );
     await waitFor(
@@ -2066,7 +2069,7 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2101,7 +2104,7 @@ describe("PluginHost", () => {
       },
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready before the crash.",
@@ -2132,7 +2135,7 @@ describe("PluginHost", () => {
     });
     const heartbeatPath = join(root, "grandchild-heartbeat.txt");
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Heartbeat plugin did not become ready.",
@@ -2165,7 +2168,7 @@ describe("PluginHost", () => {
       activationTimeoutMs: 2_000,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     host.bumpGeneration();
     await waitFor(
       () => harness.disposedPluginIds.includes("hello-plugin"),
@@ -2190,7 +2193,7 @@ describe("PluginHost", () => {
       onStatusChange: (_pluginId, status) => statuses.push(status),
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     host.bumpGeneration();
     await waitFor(
       () => harness.disposedPluginIds.includes("hello-plugin"),
@@ -2218,7 +2221,7 @@ describe("PluginHost", () => {
       routeSdkRequest,
     });
 
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2274,7 +2277,7 @@ describe("PluginHost", () => {
     });
 
     try {
-      await host.start(helloPluginRoot, await fixtureManifest());
+      await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
       harness.getCallbacks();
 
       host.bumpGeneration();
@@ -2313,7 +2316,7 @@ describe("PluginHost web apps", () => {
       routeSdkRequest: defaultRouter,
       webAppStartTimeoutMs: options.webAppStartTimeoutMs,
     });
-    await host.start(helloPluginRoot, await webAppManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await webAppManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2434,7 +2437,7 @@ describe("PluginHost web apps", () => {
       spawnTransport: harness.spawnTransport,
       routeSdkRequest: defaultRouter,
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2476,7 +2479,7 @@ describe("PluginHost web apps", () => {
     // exactly what a name-differs-from-folder plugin looks like.
     const manifest = { ...await fixtureManifest(), name: "renamed-plugin" };
 
-    await host.start(helloPluginRoot, manifest);
+    await host.start(helloPluginRoot, "hello-plugin", manifest);
     await waitFor(
       () => host.getStatus("renamed-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2504,7 +2507,7 @@ describe("PluginHost web apps", () => {
       routeSdkRequest: defaultRouter,
       readPluginSettings: async () => ({ greeting: "Hei", shout: false }),
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2582,7 +2585,7 @@ describe("PluginHost web apps", () => {
       routeSdkRequest: defaultRouter,
       readPluginSettings: async () => ({ greeting: "Hei", shout: false }),
     });
-    await host.start(helloPluginRoot, await fixtureManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -2632,7 +2635,7 @@ describe("PluginHost instanced web apps", () => {
       spawnTransport: harness.spawnTransport,
       routeSdkRequest: defaultRouter,
     });
-    await host.start(helloPluginRoot, await instancedManifest());
+    await host.start(helloPluginRoot, "hello-plugin", await instancedManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",

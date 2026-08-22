@@ -2032,6 +2032,7 @@ export class PluginPipeline {
         }
         await this.options.pluginHost.start(
           built.liveRoot,
+          candidate.directoryName,
           generatedManifest(manifest),
         );
       }
@@ -2621,6 +2622,7 @@ export class PluginPipeline {
       if (!this.options.pluginHost.getStatus(pluginId)) {
         await this.options.pluginHost.start(
           liveRoot,
+          candidate.directoryName,
           generatedManifest(candidate.manifest),
         );
       }
