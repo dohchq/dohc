@@ -7304,6 +7304,7 @@ function registerIpcHandlers(
           workspaceRoot: workspace.rootPath,
           directoryName: input.directoryName,
           identity: added.identity,
+          contentHash: added.contentHash,
         });
         await pipeline.handleWatcherEvents([rediscoveryEvent]);
         throw new Error(

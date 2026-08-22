@@ -944,7 +944,24 @@ export class PluginPipeline {
         // Reject an arbitrary or stale (pluginId, directoryName) pair
         // before ANY side effect runs, resolved from it — no preflight
         // report, no confirmation token, nothing (#779-offers round 14).
-        if (candidate && !this.pluginIdMatchesDirectory(pluginId, record, candidate)) {
+        // A candidate whose OWN directoryName differs from the one this
+        // call was actually asked about names a DIFFERENT row: byDirectory
+        // above failed to find "directoryName" at all — the invalid row
+        // this preflight described has vanished or been renamed — and one
+        // of uninstallableCandidate's id-keyed fallbacks resolved some
+        // other, unrelated installation whose real id only happens to
+        // collide with the vanished row's fallback id. pluginId trivially
+        // equals candidate.id in that case, so pluginIdMatchesDirectory's
+        // own check would pass it; only the requested directory itself
+        // proves this candidate is who this call is actually about. No
+        // match means the honest refusal, never a silent fallback onto
+        // whichever row an id happened to name (#779-offers round 15
+        // finding 1).
+        if (
+          candidate &&
+          (candidate.directoryName !== directoryName ||
+            !this.pluginIdMatchesDirectory(pluginId, record, candidate))
+        ) {
           throw new Error(
             `Plugin "${pluginId}" does not match directory "${directoryName}".`,
           );

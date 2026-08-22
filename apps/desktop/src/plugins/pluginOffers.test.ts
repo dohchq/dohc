@@ -675,6 +675,7 @@ describe("removeAddedOfferedPlugin", () => {
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
 
@@ -705,6 +706,7 @@ describe("removeAddedOfferedPlugin", () => {
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
 
@@ -743,6 +745,7 @@ describe("removeAddedOfferedPlugin", () => {
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
 
@@ -800,6 +803,7 @@ describe("removeAddedOfferedPlugin", () => {
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
 
@@ -847,6 +851,7 @@ describe("removeAddedOfferedPlugin", () => {
         workspaceRoot: fixture.workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
 
@@ -859,6 +864,45 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(
       readFile(join(stagingParent, entries[0], "keep.txt"), "utf8"),
     ).resolves.toBe("keep");
+  });
+
+  // Round 15 finding 3: identity alone answers "is this the same directory
+  // entry", never "does it still hold what this request put there" — a
+  // directory's own inode does not change when a file inside it is edited.
+  // A rollback can land well after publish (this pins it through the exact
+  // path that reaches it: a conflict detected on a slow rescan), and real
+  // work can happen inside that window.
+  it("refuses to delete an edited copy, even though its identity still matches", async () => {
+    const fixture = await createFixture();
+    const added = await addOfferedPlugin({
+      builtinPluginsRoot: fixture.builtinPluginsRoot,
+      workspaceRoot: fixture.workspaceRoot,
+      directoryName: "codex",
+      existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+    });
+
+    // Real work landing inside the SAME directory entry — its own identity
+    // is untouched by this, which is exactly what makes it distinct from
+    // every other case in this file.
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    await writeFile(join(target, "NOTES.md"), "left after publish");
+
+    await expect(
+      removeAddedOfferedPlugin({
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        identity: added.identity,
+        contentHash: added.contentHash,
+      }),
+    ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+    // Restored to plugins/, not lost: the same "target is a real, safely
+    // contained directory" recheck the other mismatch cases already use
+    // finds it can put this back, so the edit survives right where it was
+    // made rather than stranded in staging.
+    await expect(
+      readFile(join(target, "NOTES.md"), "utf8"),
+    ).resolves.toBe("left after publish");
   });
 
   it("removes exactly what it was told to, when the identity still matches", async () => {
@@ -874,6 +918,7 @@ describe("removeAddedOfferedPlugin", () => {
       workspaceRoot: fixture.workspaceRoot,
       directoryName: "codex",
       identity: added.identity,
+      contentHash: added.contentHash,
     });
 
     await expect(

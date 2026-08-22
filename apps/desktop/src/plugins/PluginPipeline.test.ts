@@ -595,6 +595,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       });
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
 
@@ -1067,6 +1068,123 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  // Round 15 finding 1: the pair check above only ever verified that
+  // pluginId belongs to whatever candidate got resolved — never that the
+  // resolved candidate is even the row this call was actually asked about.
+  // A directory that vanishes between the click and this call makes
+  // byDirectory fail, and uninstallableCandidate's own id-keyed fallback
+  // can then resolve a completely different, genuinely installed plugin
+  // whose real id only happens to collide with the vanished row's
+  // directory-derived fallback id — pluginId === candidate.id trivially,
+  // so the old check passed it straight through to a real confirmation
+  // token for a plugin the dialog never named.
+  it("refuses a directoryName that names no row, even when it collides with an unrelated installed plugin's id", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-vanished-directory-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    // Broken from the start: its fallback id is its own directory name,
+    // "collide".
+    const invalidRoot = join(workspaceRoot, "plugins", "collide");
+    await mkdir(join(invalidRoot, "src"), { recursive: true });
+    await writeFile(join(invalidRoot, "dohc-plugin.json"), "{ this is not valid JSON\n");
+    await writeFile(join(invalidRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+
+      // The invalid row is removed for real: its directory and discovery
+      // entry both go away, exactly like the race this pins.
+      const removePreflight = await pipeline.uninstallPreflight("collide", "collide");
+      if (!removePreflight.ok) throw new Error(removePreflight.error.message);
+      const removed = await pipeline.uninstall("collide", removePreflight.confirmationToken);
+      expect(removed.ok).toBe(true);
+      await expect(lstat(invalidRoot)).rejects.toMatchObject({ code: "ENOENT" });
+
+      // A separate, genuinely installed plugin whose real manifest name
+      // collides with the vanished row's old fallback id — at a completely
+      // different directory.
+      const installedRoot = join(workspaceRoot, "plugins", "installed-dir");
+      await mkdir(join(installedRoot, "src"), { recursive: true });
+      await writeFile(
+        join(installedRoot, "dohc-plugin.json"),
+        `${JSON.stringify({ version: 1, name: "collide", entry: "src/main.ts" }, null, 2)}\n`,
+      );
+      await writeFile(
+        join(installedRoot, "package.json"),
+        `${JSON.stringify({
+          name: "collide",
+          version: "1.0.0",
+          private: true,
+          type: "module",
+          packageManager: "pnpm@11.20.0",
+        }, null, 2)}\n`,
+      );
+      await writeFile(join(installedRoot, "pnpm-lock.yaml"), [
+        "lockfileVersion: '9.0'",
+        "settings:",
+        "  autoInstallPeers: true",
+        "  excludeLinksFromLockfile: false",
+        "importers:",
+        "  .: {}",
+        "",
+      ].join("\n"));
+      await writeFile(join(installedRoot, "src", "main.ts"), "export default {};\n");
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+      const installed = await pipeline.install("collide");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+      await waitFor(
+        () => pipeline.list().find((row) => row.directoryName === "installed-dir")?.status
+          === "ready",
+        "installed-dir did not reach ready.",
+      );
+
+      // The stale directoryName from the vanished row — the exact request
+      // a delayed retry or a leftover dialog would still send.
+      const stalePreflight = await pipeline.uninstallPreflight("collide", "collide");
+      expect(stalePreflight.ok).toBe(false);
+      if (stalePreflight.ok) throw new Error("unreachable");
+      expect(stalePreflight.error.stage).toBe("uninstall");
+
+      // The installed plugin never entered the confirmation: it survives,
+      // untouched, and uninstall() has no token to act on for it.
+      await expect(lstat(installedRoot)).resolves.toBeDefined();
+      expect(pipeline.list().find((row) => row.directoryName === "installed-dir"))
+        .toMatchObject({ status: "ready", approvedHash: expect.any(String) });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   // Round 14 finding 6: additionalCleanupIds used to exclude candidate.id
   // from its own scan — meant to avoid double-adding it when it equals
   // pluginId, but pluginId and candidate.id can genuinely differ (a broken
@@ -1245,6 +1363,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       });
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
 
@@ -1261,6 +1380,99 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
       const survivor = pipeline.list().find((entry) => entry.directoryName === "z-codex");
       expect(survivor).toMatchObject({ id: "codex", valid: true });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  // Round 15 finding 3, through the real conflict path this rollback
+  // actually runs on: a slow rescan is exactly the window real work can
+  // land in — an agent or a user editing the copy's README, say — before
+  // the conflict this test sets up is even detected. The rollback's own
+  // identity check passes regardless (a directory's inode does not change
+  // when a file inside it is edited), so only a content check catches it.
+  it("preserves a post-publish edit instead of deleting it, when a conflict rolls the add back", async () => {
+    const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-offer-conflict-edit-"));
+    roots.push(targetRoot);
+    const workspaceRoot = join(targetRoot, "workspace");
+    const stateDir = join(targetRoot, "state");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(stateDir, { recursive: true });
+
+    const builtinPluginsRoot = join(targetRoot, "builtin-plugins");
+    const builtinCodexRoot = join(builtinPluginsRoot, "codex");
+    await mkdir(join(builtinCodexRoot, "src"), { recursive: true });
+    await writeFile(
+      join(builtinCodexRoot, "dohc-plugin.json"),
+      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+    );
+    await writeFile(join(builtinCodexRoot, "src", "main.ts"), "export default {};\n");
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot,
+      stateDir,
+      pluginHost: host,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
+      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
+
+      const added = await addOfferedPlugin({
+        builtinPluginsRoot,
+        workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds,
+      });
+
+      // The conflict this rollback is about to act on.
+      const concurrentRoot = join(workspaceRoot, "plugins", "z-codex");
+      await mkdir(join(concurrentRoot, "src"), { recursive: true });
+      await writeFile(
+        join(concurrentRoot, "dohc-plugin.json"),
+        `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      );
+      await writeFile(join(concurrentRoot, "src", "main.ts"), "export default {};\n");
+
+      // Real work landing in the copy's own directory before the conflict
+      // is even detected — its identity is untouched by this.
+      const target = join(workspaceRoot, "plugins", "codex");
+      await writeFile(join(target, "NOTES.md"), "left before the conflict was seen");
+
+      await pipeline.handleWatcherEvents([{ operation: "create", path: "plugins/codex" }]);
+      expect(pipeline.findDirectorySupersededBy("codex")).toBe("z-codex");
+
+      await expect(
+        removeAddedOfferedPlugin({
+          workspaceRoot,
+          directoryName: "codex",
+          identity: added.identity,
+          contentHash: added.contentHash,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+      // Nothing deleted: the edit survives, restored right back where it
+      // was made rather than lost to the rollback.
+      await expect(
+        readFile(join(target, "NOTES.md"), "utf8"),
+      ).resolves.toBe("left before the conflict was seen");
     } finally {
       await pipeline.dispose();
     }
@@ -1333,6 +1545,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         workspaceRoot,
         directoryName: "codex",
         identity: added.identity,
+        contentHash: added.contentHash,
       });
       await pipeline.handleWatcherEvents([{ operation: "update", path: "plugins" }]);
 

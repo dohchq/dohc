@@ -81,7 +81,17 @@ function applyStatusEvents(
   return events.reduce<PluginStatusRecord[]>((current, pending) => {
     if (pending.event.kind === "removed") {
       const { pluginId } = pending.event;
-      return current.filter((plugin) => plugin.id !== pluginId);
+      // A "removed" event carries only an id, and two rows can share one
+      // (a broken manifest's directory-derived fallback colliding with
+      // some other, unrelated plugin's real id). Filtering by id alone
+      // would then drop the survivor right along with the row that
+      // actually left. Leaving both untouched when the id is ambiguous
+      // costs nothing real: the row that left has nothing pointing at it
+      // once discovery moves on, and the caller that owns this merge
+      // reloads the authoritative list right after (#779-offers round 15
+      // finding 2).
+      const matches = current.filter((plugin) => plugin.id === pluginId);
+      return matches.length > 1 ? current : current.filter((plugin) => plugin.id !== pluginId);
     }
     return upsertPlugin(current, pending.event.plugin);
   }, [...plugins]);
@@ -357,6 +367,14 @@ export function usePluginCatalog(
   enabled: boolean = true,
 ): PluginCatalog {
   const [load, setLoad] = useState<PluginLoadState>({ status: "loading" });
+  // Mirrors `load`, written on every render rather than through an effect —
+  // synchronously current the moment a later event fires, unlike the
+  // closure a status listener set up in an earlier effect would otherwise
+  // read stale. Only ever read outside React's own update cycle, where
+  // functional setState updaters give no ordering guarantee about when
+  // they actually run relative to the code right after the setState call.
+  const loadRef = useRef(load);
+  loadRef.current = load;
   const [busy, setBusy] = useState<Record<string, PluginAction | undefined>>({});
   const [openingWebApp, setOpeningWebApp] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
@@ -386,11 +404,16 @@ export function usePluginCatalog(
   // that no longer exists to show it against.
   const offeredDirectoryNames = useRef<ReadonlySet<string>>(new Set());
 
-  async function loadPlugins() {
+  // silent keeps whatever is already on screen while the fresh list is in
+  // flight instead of resetting to "loading" first — an ambiguous removal
+  // reload's whole point is that the survivor stays visible, which a
+  // loading reset would undo for the one render this fetch takes
+  // (#779-offers round 15 finding 2).
+  async function loadPlugins(silent = false) {
     const requestToken = ++listRequestToken.current;
     const epoch = workspaceEpoch.current;
     const revisionAtStart = statusRevision.current;
-    setLoad({ status: "loading" });
+    if (!silent) setLoad({ status: "loading" });
     try {
       const result = await bridge().listPlugins({ workspaceId });
       if (
@@ -514,6 +537,20 @@ export function usePluginCatalog(
       const pluginId =
         event.kind === "changed" ? event.plugin.id : event.pluginId;
       pendingStatusEvents.current.set(pluginId, pending);
+      // An ambiguous "removed" event names no single row — two rows can
+      // share an id (a broken manifest's directory-derived fallback
+      // colliding with some other, unrelated plugin's real id) — so
+      // applyStatusEvents (below) leaves both untouched rather than guess
+      // which one left. The survivor only stops looking like it is also
+      // leaving once the authoritative list confirms it stayed. Checked
+      // against loadRef, not a setLoad updater's own "current" — a
+      // functional updater's ordering against the code right after this
+      // setLoad call is not guaranteed, and reading it correctly matters
+      // here (#779-offers round 15 finding 2).
+      const priorPlugins = loadRef.current.status === "ready" ? loadRef.current.plugins : [];
+      const ambiguousRemoval =
+        event.kind === "removed" &&
+        priorPlugins.filter((plugin) => plugin.id === event.pluginId).length > 1;
       setLoad((current) => {
         if (current.status !== "ready") return current;
         return {
@@ -521,6 +558,7 @@ export function usePluginCatalog(
           plugins: applyStatusEvents(current.plugins, [pending]),
         };
       });
+      if (ambiguousRemoval) void loadPlugins(true);
       if (event.kind === "removed" || event.kind === "changed") {
         // A plugin's identity can move either direction: an uninstall frees
         // a directory (removed) an offer might now fit again, and a fresh
@@ -732,11 +770,23 @@ export function usePluginCatalog(
       if (epoch !== workspaceEpoch.current) return;
       setConfirmation(null);
       if (result.ok) {
+        // Scoped to the exact row this confirmation named, not id alone —
+        // two rows can share an id (a broken manifest's directory-derived
+        // fallback colliding with some other, unrelated plugin's real id),
+        // and dropping every row with this id would take the survivor down
+        // with it. currentConfirmation.plugin already carries the
+        // directoryName that names this one row precisely (#779-offers
+        // round 15 finding 2).
+        const removedDirectoryName = currentConfirmation.plugin.directoryName;
         setLoad((current) =>
           current.status === "ready"
             ? {
                 status: "ready",
-                plugins: current.plugins.filter((plugin) => plugin.id !== pluginId),
+                plugins: current.plugins.filter(
+                  (plugin) =>
+                    !(plugin.id === pluginId
+                      && plugin.directoryName === removedDirectoryName),
+                ),
               }
             : current,
         );

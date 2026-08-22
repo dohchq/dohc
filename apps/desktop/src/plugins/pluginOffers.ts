@@ -9,7 +9,7 @@ import {
   removeStaging,
   renameWithWindowsRetry,
 } from "./pluginShared";
-import { EXCLUDED_SOURCE_NAMES } from "./pluginSourceSnapshot";
+import { EXCLUDED_SOURCE_NAMES, hashPluginSourceFiles } from "./pluginSourceSnapshot";
 
 export interface OfferedPluginSource {
   directoryName: (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number];
@@ -328,7 +328,7 @@ export async function addOfferedPlugin(params: {
   workspaceRoot: string;
   directoryName: string;
   existingPluginIds: ReadonlySet<string>;
-}): Promise<{ rootPath: string; identity: OfferedPluginIdentity }> {
+}): Promise<{ rootPath: string; identity: OfferedPluginIdentity; contentHash: string }> {
   const { builtinPluginsRoot, workspaceRoot, directoryName, existingPluginIds } = params;
   if (!isBuiltinDriverPlugin(directoryName)) {
     throw new OfferedPluginAddError(
@@ -388,10 +388,18 @@ export async function addOfferedPlugin(params: {
     // removeAddedOfferedPlugin later trusts; staging is private to this call
     // the entire time it is being read, so nothing else can ever race it.
     const identity = await targetIdentity(staging);
+    // The same reasoning as identity, for a question dev+ino cannot answer:
+    // a directory's own inode never changes when a file inside it is
+    // edited, so identity alone still matches an edited tree. Hashed from
+    // staging for the same private-until-published reason identity is —
+    // this is what the published copy looked like at the instant it became
+    // real, so a later rollback can tell "unchanged" from "someone's real
+    // work landed on it since" (#779-offers round 15 finding 3).
+    const contentHash = (await hashPluginSourceFiles(staging)).sourceHash;
     if (!(await publishStaged(staging, target))) {
       throw existingTargetError(directoryName);
     }
-    return { rootPath: target, identity };
+    return { rootPath: target, identity, contentHash };
   } catch (error) {
     await removeStaging(staging).catch(() => undefined);
     throw toOfferedPluginAddError(error);
@@ -460,8 +468,9 @@ export async function removeAddedOfferedPlugin(params: {
   workspaceRoot: string;
   directoryName: string;
   identity: OfferedPluginIdentity;
+  contentHash: string;
 }): Promise<void> {
-  const { workspaceRoot, directoryName, identity } = params;
+  const { workspaceRoot, directoryName, identity, contentHash } = params;
   const realWorkspaceRoot = await realpath(workspaceRoot);
   const pluginsPath = join(workspaceRoot, "plugins");
   let pluginsStats;
@@ -516,36 +525,60 @@ export async function removeAddedOfferedPlugin(params: {
       `plugins/${directoryName} could not be inspected after staging: ${errorMessage(error)}`,
     );
   }
-  if (
-    stagedStats.isSymbolicLink() ||
-    stagedStats.dev !== identity.dev ||
-    stagedStats.ino !== identity.ino
-  ) {
-    // Not what this request created. Putting it back is itself a write
-    // through the same swappable `plugins/` path the forward move already
-    // grabbed one entry away from — plugins/ could have been replaced with
-    // a symlink/junction in the window since the check at the top of this
-    // function ran, and the exact target slot could have been reoccupied in
-    // the window since that forward move landed. Re-verifying containment,
-    // and using the same claim-then-rename publish `addOfferedPlugin` uses
-    // rather than a bare rename, catches both without narrowing either gap
-    // to zero. Either failure leaves the content exactly where it safely
-    // sits — staged, inside this module's own contained area — rather than
-    // write it somewhere this call can no longer vouch for, or silently
-    // replace whatever now occupies target.
+  // Restores `reason` fails on: putting it back is itself a write through
+  // the same swappable `plugins/` path the forward move already grabbed one
+  // entry away from — plugins/ could have been replaced with a
+  // symlink/junction in the window since the check at the top of this
+  // function ran, and the exact target slot could have been reoccupied in
+  // the window since that forward move landed. Re-verifying containment,
+  // and using the same claim-then-rename publish `addOfferedPlugin` uses
+  // rather than a bare rename, catches both without narrowing either gap to
+  // zero. Either failure leaves the content exactly where it safely sits —
+  // staged, inside this module's own contained area — rather than write it
+  // somewhere this call can no longer vouch for, or silently replace
+  // whatever now occupies target.
+  const restoreOrStrand = async (reason: string): Promise<never> => {
     const strandedError = new OfferedPluginAddError(
-      `plugins/${directoryName} no longer matches what this request created; its ` +
-        `previous contents are stranded at ${relative(workspaceRoot, staged)} in ` +
-        "this workspace rather than restored.",
+      `plugins/${directoryName} ${reason}; its previous contents are stranded at ` +
+        `${relative(workspaceRoot, staged)} in this workspace rather than restored.`,
     );
     const stillContained = await pluginsPathStillContained(pluginsPath, realWorkspaceRoot);
     if (!stillContained) throw strandedError;
     const restored = await publishStaged(staged, target).catch(() => false);
     if (!restored) throw strandedError;
-    throw new OfferedPluginAddError(
-      `plugins/${directoryName} no longer matches what this request created; refusing to remove it.`,
-    );
+    throw new OfferedPluginAddError(`plugins/${directoryName} ${reason}; refusing to remove it.`);
+  };
+
+  if (
+    stagedStats.isSymbolicLink() ||
+    stagedStats.dev !== identity.dev ||
+    stagedStats.ino !== identity.ino
+  ) {
+    // Not what this request created.
+    await restoreOrStrand("no longer matches what this request created");
   }
+
+  // Identity alone answers "is this the same directory entry", never "does
+  // it still hold what this request put there" — a directory's own inode
+  // does not change when a file inside it is edited. A rollback can land
+  // well after publish (a conflict detected on a slow rescan, a user still
+  // deciding whether to keep it), and real work — a settings edit, a note
+  // left in the README — can happen inside that window. Deleting it because
+  // an unrelated identity check happened to pass would be exactly the harm
+  // the identity check itself exists to prevent, just for a different
+  // question (#779-offers round 15 finding 3).
+  const currentContentHash = await hashPluginSourceFiles(staged)
+    .then((digest) => digest.sourceHash)
+    .catch(
+      async (error) =>
+        await restoreOrStrand(
+          `could not be verified unchanged since it was added: ${errorMessage(error)}`,
+        ),
+    );
+  if (currentContentHash !== contentHash) {
+    await restoreOrStrand("was edited since it was added");
+  }
+
   await removeStaging(staged);
 }
 

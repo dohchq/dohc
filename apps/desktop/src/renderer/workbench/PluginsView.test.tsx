@@ -1119,6 +1119,48 @@ describe("PluginsView", () => {
     expect(screen.getByText("staying-plugin")).toBeTruthy();
   });
 
+  // Round 15 finding 2: a "removed" event carries only an id, and two rows
+  // can share one (a broken manifest's directory-derived fallback colliding
+  // with some other, unrelated plugin's real id). Dropping every row with
+  // that id used to take the survivor down with it, even if only for one
+  // render before the next full list arrived.
+  it("keeps a survivor visible when a removed event's id names two rows, then reconciles for real", async () => {
+    bridgeMock.listPlugins
+      .mockResolvedValueOnce({
+        ok: true,
+        plugins: [
+          plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
+          plugin("codex", { directoryName: "codex-b", displayName: "Codex B" }),
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        plugins: [plugin("codex", { directoryName: "codex-b", displayName: "Codex B" })],
+      });
+
+    renderList();
+    await screen.findByText("Codex A");
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
+
+    act(() => {
+      statusListener?.({ kind: "removed", workspaceId: "ws-1", pluginId: "codex" });
+    });
+
+    // Ambiguous id: nothing is dropped locally, so the survivor — and, for
+    // this one render, the row that actually left too — both stay exactly
+    // as they were. Never a bare loading state either: the whole point is
+    // that nothing already on screen disappears while this settles.
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
+    expect(screen.getByText("Codex A")).toBeTruthy();
+    expect(screen.getByText("Codex B")).toBeTruthy();
+
+    // The reload it triggers reconciles for real, without a manual refresh.
+    await waitFor(() => expect(screen.getAllByTestId("plugin-row")).toHaveLength(1));
+    expect(screen.getByText("Codex B")).toBeTruthy();
+    expect(screen.queryByText("Codex A")).toBeNull();
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
+  });
+
   it("never repaints one workspace's rows from another workspace's status event", async () => {
     bridgeMock.listPlugins.mockResolvedValue({
       ok: true,
