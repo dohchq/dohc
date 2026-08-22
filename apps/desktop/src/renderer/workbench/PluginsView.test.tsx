@@ -1205,6 +1205,42 @@ describe("PluginsView", () => {
     expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
   });
 
+  // A standing collision (two rows genuinely sharing this id, at two real,
+  // permanently different directories) must not re-trigger a reload on
+  // every ordinary "changed" event for either row — only the single-row
+  // case upsertPlugin's own migration logic can actually get wrong.
+  // Checking "does ANY row with this id have a different directory" would
+  // read every one of these as ambiguous forever; checking the exact row
+  // upsertPlugin would migrate (matchingId.length === 1) does not.
+  it("does not reload on an ordinary changed event for either row of a standing collision", async () => {
+    bridgeMock.listPlugins.mockResolvedValue({
+      ok: true,
+      plugins: [
+        plugin("codex", { directoryName: "codex-a", displayName: "Codex A" }),
+        plugin("codex", { directoryName: "codex-b", displayName: "Codex B" }),
+      ],
+    });
+
+    renderList();
+    await screen.findByText("Codex A");
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      statusListener?.({
+        kind: "changed",
+        workspaceId: "ws-1",
+        plugin: plugin("codex", { directoryName: "codex-a", displayName: "Codex A, updated" }),
+      });
+    });
+
+    await screen.findByText("Codex A, updated");
+    expect(screen.getByText("Codex B")).toBeTruthy();
+    expect(screen.getAllByTestId("plugin-row")).toHaveLength(2);
+    // No reload — the local merge already applied it correctly, and this is
+    // the case upsertPlugin was never going to get wrong.
+    expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(1);
+  });
+
   // Round 16 finding 1: with no prior ready list, the ambiguity check has
   // nothing to count rows in — the naive read is "not ambiguous", so the
   // initial request's OWN merge (once it lands) re-applies the removed

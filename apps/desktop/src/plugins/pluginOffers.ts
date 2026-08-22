@@ -4,6 +4,7 @@ import { basename, join, relative } from "node:path";
 import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
 import { readPluginManifestFile } from "./pluginManifest";
 import {
+  delay,
   errorMessage,
   isInside,
   removeStaging,
@@ -21,6 +22,11 @@ export interface OfferedPluginSource {
 function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
+
+// removeOwnedEmptyClaim's own bounded retry budget for a transient hold on
+// its final rmdir() — short, since by that point every other check has
+// already verified the claim is real, empty, and this call's own.
+const REMOVE_CLAIM_RETRY_DELAYS_MS = [50, 100, 150] as const;
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -186,11 +192,11 @@ async function ensureContainedDirectory(
  * POSIX-only: this is the atomic claim's own cleanup, and only POSIX still
  * holds a claim rename() can fail to release (Windows's own rename()
  * already refuses to land on any existing directory, so it never needs
- * one). A delete that fails once every check above has passed is real
- * evidence, not something to walk away from quietly — it throws a named
- * refusal naming the leftover path, rather than leave a permanently
- * "occupied" claim for every later listOfferedPlugins call and Add attempt
- * to silently trip over.
+ * one). A delete that fails once every check above has passed, and its own
+ * bounded retry exhausts, is real evidence, not something to walk away from
+ * quietly — it throws a named refusal naming the leftover path, rather
+ * than leave a permanently "occupied" claim for every later
+ * listOfferedPlugins call and Add attempt to silently trip over.
  */
 async function removeOwnedEmptyClaim(
   target: string,
@@ -211,13 +217,27 @@ async function removeOwnedEmptyClaim(
     return;
   }
   if (entries.length > 0) return;
-  try {
-    await rmdir(target);
-  } catch (error) {
-    throw new OfferedPluginAddError(
-      `A claim at ${target} could not be removed after a publish failure; ` +
-        `remove it manually before retrying. ${errorMessage(error)}`,
-    );
+  // A transient hold (an antivirus scan, an indexer) can fail rmdir() even
+  // after every check above already verified there is nothing real left to
+  // protect. This logic only ever RUNS on POSIX in production, but a test
+  // process can still exercise it against a real Windows disk (platform
+  // stubbed at the JS layer, the filesystem underneath is not) — a small
+  // bounded retry inline absorbs exactly that, without resurrecting a
+  // generalized cross-operation retry helper for one narrow call site.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rmdir(target);
+      return;
+    } catch (error) {
+      const retryDelay = REMOVE_CLAIM_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined) {
+        throw new OfferedPluginAddError(
+          `A claim at ${target} could not be removed after a publish failure; ` +
+            `remove it manually before retrying. ${errorMessage(error)}`,
+        );
+      }
+      await delay(retryDelay);
+    }
   }
 }
 
@@ -226,15 +246,20 @@ async function removeOwnedEmptyClaim(
  * already there. `false` means the publish lost that race; `target` is
  * left exactly as this call found it, for the caller to refuse over.
  *
- * Windows: rename() refuses to land on ANY existing directory, empty or
- * not (verified empirically — MoveFileEx's REPLACE_EXISTING flag is
- * documented not to accept a directory name, and throws EPERM in practice
- * either way). That IS the no-clobber property; nothing else is needed.
- * EPERM after the retry exhausts does not by itself distinguish "target is
- * genuinely occupied" from "a transient lock outlived the retry with
- * nothing really there" — re-checking target tells them apart, so a
- * transient hold is named for what it is rather than misreported as an
- * existing plugin.
+ * Windows: rename() refuses to land on an existing DIRECTORY, empty or not
+ * (verified empirically — MoveFileEx's REPLACE_EXISTING flag is documented
+ * not to accept a directory name, and throws EPERM in practice either way).
+ * Onto an existing FILE or symlink, though, it SUCCEEDS and replaces it —
+ * also verified empirically — which would silently destroy whatever a user
+ * or agent had placed at target. An upfront check refuses on ANY existing
+ * entry, of any kind, before ever attempting the rename; the rename's own
+ * EPERM stays the backstop for the directory case, for whatever a
+ * concurrent creator lands in the gap between this check and the rename
+ * actually running. EPERM after the retry exhausts does not by itself
+ * distinguish "target is genuinely occupied" from "a transient lock
+ * outlived the retry with nothing really there" — re-checking target tells
+ * them apart, so a transient hold is named for what it is rather than
+ * misreported as an existing plugin.
  *
  * POSIX: a bare rename() cannot tell "nothing at target" from "something
  * raced this call here" — rename() atomically REPLACES an existing empty
@@ -256,6 +281,7 @@ async function removeOwnedEmptyClaim(
  */
 async function publishStaged(staged: string, target: string): Promise<boolean> {
   if (process.platform === "win32") {
+    if (await pathExists(target)) return false;
     try {
       await renameWithWindowsRetry(staged, target, (error) => error);
     } catch (error) {
@@ -330,6 +356,11 @@ export async function addOfferedPlugin(params: {
     "Plugins directory",
   );
   const target = join(pluginsRoot, directoryName);
+  // A fast-path courtesy only — publishStaged is what actually decides,
+  // atomically, once the copy is staged. This just skips the staging copy
+  // and the retry budget for the ordinary case: something already sits at
+  // target right now.
+  if (await pathExists(target)) throw existingTargetError(directoryName);
 
   // Staged under .dohc, never under plugins/: a mid-copy watcher batch would
   // otherwise list the staging directory itself as a phantom plugin

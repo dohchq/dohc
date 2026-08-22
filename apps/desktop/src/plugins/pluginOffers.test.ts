@@ -304,6 +304,12 @@ describe("listOfferedPlugins", () => {
   // directoryName, trusting the two to name the same thing for a shipped
   // built-in. Nothing else pins that trust; a packaged manifest whose name
   // drifted from its own directory would silently break both.
+  //
+  // The same pass also pins packagedBuiltinDisplayName's own invariant (main
+  // resolves it as `manifest.displayName ?? manifest.name`, never a bare
+  // displayName): null on that field must mean ONLY "not a built-in", never
+  // "a built-in whose packaged manifest has nothing to call itself" — the
+  // uninstall dialog reads that field's nullness as exactly that signal.
   it("declares a manifest name matching its own packaged directory, for every built-in driver", async () => {
     for (const directoryName of BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES) {
       const manifestPath = new URL(
@@ -312,8 +318,10 @@ describe("listOfferedPlugins", () => {
       );
       const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
         name?: string;
+        displayName?: string;
       };
       expect(manifest.name).toBe(directoryName);
+      expect(manifest.displayName ?? manifest.name).toBeTruthy();
     }
   });
 });
@@ -404,6 +412,36 @@ describe("addOfferedPlugin", () => {
     await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  // On win32, rename() onto an existing FILE (unlike a directory) SUCCEEDS
+  // and replaces it — verified empirically. publishStaged's own upfront
+  // check has to refuse on ANY existing entry, not only a directory, or an
+  // agent's own stub file sitting at plugins/codex gets silently destroyed.
+  // POSIX already refuses this through mkdir()'s EEXIST regardless of what
+  // occupies the name, so this pin holds on both platforms.
+  it("refuses without clobbering a plain file sitting at the target", async () => {
+    const fixture = await createFixture();
+    await mkdir(join(fixture.workspaceRoot, "plugins"), { recursive: true });
+    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    await writeFile(target, "a stray file, not a plugin directory");
+
+    await expect(
+      addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof OfferedPluginAddError &&
+        error.message.includes("plugins/codex"),
+    );
+
+    await expect(readFile(target, "utf8")).resolves.toBe(
+      "a stray file, not a plugin directory",
+    );
+  });
+
   // Identity is the manifest id, not the directory: a plugin can be
   // discovered under a DIFFERENT directory between an offer showing and
   // this call landing (a rename, a second copy racing this one). The
@@ -467,11 +505,12 @@ describe("addOfferedPlugin", () => {
     await expect(readdir(outside)).resolves.toEqual([]);
   });
 
-  // Nothing checks target's existence before the copy starts — a
-  // concurrent creator landing DURING the copy has to be caught by the
-  // publish step itself, right where it claims target. POSIX-only: this
-  // races the mkdir() claim specifically; the Windows equivalent races the
-  // rename() below instead, since only POSIX claims via mkdir().
+  // The fast-path check at the top only catches what's already there before
+  // the copy starts — a concurrent creator landing DURING the copy still has
+  // to be caught by the publish step itself, right where it claims target.
+  // POSIX-only: this races the mkdir() claim specifically; the Windows
+  // equivalent races the rename() below instead, since only POSIX claims via
+  // mkdir().
   it.runIf(process.platform !== "win32")(
     "refuses without clobbering a target directory created after the copy started",
     async () => {
@@ -965,12 +1004,63 @@ describe("removeAddedOfferedPlugin", () => {
     },
   );
 
-  // Round 15 finding 3: identity alone answers "is this the same directory
-  // entry", never "does it still hold what this request put there" — a
-  // directory's own inode does not change when a file inside it is edited.
-  // A rollback can land well after publish (this pins it through the exact
-  // path that reaches it: a conflict detected on a slow rescan), and real
-  // work can happen inside that window.
+  // The Windows analogue of the reoccupied-slot race above: a FILE, not a
+  // directory, lands in the vacated slot in the exact window the restore's
+  // own upfront check runs — the scenario publishStaged's file-vs-directory
+  // fix exists to close. This proves the fix reaches the rollback path too,
+  // not only the add path.
+  it.runIf(process.platform === "win32")(
+    "[Windows] strands the mismatched copy in staging when a file occupies the restore's target",
+    async () => {
+      const fixture = await createFixture();
+      const added = await addOfferedPlugin({
+        builtinPluginsRoot: fixture.builtinPluginsRoot,
+        workspaceRoot: fixture.workspaceRoot,
+        directoryName: "codex",
+        existingPluginIds: NO_EXISTING_PLUGIN_IDS,
+      });
+
+      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      await rm(target, { recursive: true, force: true });
+      await mkdir(target, { recursive: true });
+      await writeFile(join(target, "keep.txt"), "keep");
+
+      raceState.lstatTrap = {
+        path: target,
+        afterCall: 1,
+        run: async () => {
+          await writeFile(target, "raced file");
+        },
+      };
+
+      await expect(
+        removeAddedOfferedPlugin({
+          workspaceRoot: fixture.workspaceRoot,
+          directoryName: "codex",
+          identity: added.identity,
+          contentHash: added.contentHash,
+        }),
+      ).rejects.toBeInstanceOf(OfferedPluginAddError);
+
+      // The file a concurrent actor planted survived untouched, never
+      // replaced by the restore's own write.
+      await expect(readFile(target, "utf8")).resolves.toBe("raced file");
+      // The mismatched copy this call had staged is stranded, not lost.
+      const stagingParent = join(fixture.workspaceRoot, ".dohc", "plugin-offer-staging");
+      const entries = await readdir(stagingParent);
+      expect(entries).toHaveLength(1);
+      await expect(
+        readFile(join(stagingParent, entries[0], "keep.txt"), "utf8"),
+      ).resolves.toBe("keep");
+    },
+  );
+
+  // Identity alone answers "is this the same directory entry", never "does
+  // it still hold what this request put there" — a directory's own inode
+  // does not change when a file inside it is edited. A rollback can land
+  // well after publish (this pins it through the exact path that reaches
+  // it: a conflict detected on a slow rescan), and real work can happen
+  // inside that window.
   it("refuses to delete an edited copy, even though its identity still matches", async () => {
     const fixture = await createFixture();
     const added = await addOfferedPlugin({

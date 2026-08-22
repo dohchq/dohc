@@ -647,19 +647,25 @@ export function usePluginCatalog(
           priorLoad.plugins.filter((plugin) => plugin.id === event.pluginId).length > 1);
       // A genuine rename now always arrives as its own "renamed" event
       // (handled above, before reaching here), so a "changed" event whose
-      // directoryName disagrees with an existing row's own id can no longer
-      // be trusted as that same row moving — upsertPlugin's single-match
-      // migration is then just as much a guess as an ambiguous removal, and
-      // gets the same correction: apply it optimistically, then reconcile
-      // against the authoritative list.
+      // directoryName disagrees with the ONE existing row sharing its id can
+      // no longer be trusted as that same row moving — upsertPlugin's
+      // single-match migration is then just as much a guess as an ambiguous
+      // removal, and gets the same correction: apply it optimistically,
+      // then reconcile against the authoritative list. Mirrors
+      // upsertPlugin's own condition exactly — matchingId.length === 1 is
+      // what decides whether it runs the migration branch at all — so a
+      // standing collision (two or more rows genuinely sharing this id)
+      // never re-triggers a reload on every ordinary "changed" event for
+      // either of them: upsertPlugin does nothing ambiguous in that case
+      // either, since matchingId.length > 1 already keeps both rows.
+      const matchingId =
+        event.kind === "changed" && priorLoad.status === "ready"
+          ? priorLoad.plugins.filter((plugin) => plugin.id === event.plugin.id)
+          : [];
       const ambiguousChange =
         event.kind === "changed" &&
-        priorLoad.status === "ready" &&
-        priorLoad.plugins.some(
-          (plugin) =>
-            plugin.id === event.plugin.id &&
-            plugin.directoryName !== event.plugin.directoryName,
-        );
+        matchingId.length === 1 &&
+        matchingId[0].directoryName !== event.plugin.directoryName;
       setLoad((current) => {
         if (current.status !== "ready") return current;
         return {

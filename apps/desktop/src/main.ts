@@ -897,11 +897,14 @@ function builtinPluginsRoot(): string {
 }
 
 /**
- * The packaged built-in's own manifest displayName, read fresh — never a
- * workspace copy's, which can be hand-edited or too broken to read. Null for
- * a directoryName no built-in ships under, or if the packaged manifest
- * itself cannot be read (a broken dohc install the uninstall dialog's
- * wording is not the place to surface).
+ * The packaged built-in's own manifest name — displayName if it declared
+ * one, its manifest name otherwise — read fresh, never a workspace copy's,
+ * which can be hand-edited or too broken to read. Null means ONLY "this
+ * directoryName is not a built-in dohc ships", never "a built-in with
+ * nothing to call itself": every readable built-in manifest has a name,
+ * even without a displayName. Still null if the packaged manifest itself
+ * cannot be read (a broken dohc install the uninstall dialog's wording is
+ * not the place to surface).
  */
 async function packagedBuiltinDisplayName(directoryName: string): Promise<string | null> {
   if (
@@ -910,7 +913,7 @@ async function packagedBuiltinDisplayName(directoryName: string): Promise<string
     return null;
   }
   const manifest = await readPluginManifestFile(join(builtinPluginsRoot(), directoryName));
-  return manifest.ok ? manifest.manifest.displayName ?? null : null;
+  return manifest.ok ? manifest.manifest.displayName ?? manifest.manifest.name : null;
 }
 
 function notifyPluginStatusChanged(
