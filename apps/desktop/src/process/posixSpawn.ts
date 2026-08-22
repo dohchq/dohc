@@ -9,21 +9,80 @@
 // from the process table instead and signal each pid.
 import { execFile } from "node:child_process";
 
+// The nominal read cap equals the default total shutdown budget. A stopped
+// tree clamps each read to the time left in that budget. On WSL/Ubuntu, 20-run
+// idle (~89 processes) and loaded (~145, four CPU loops) samples of
+// `ps -A -o pid=,ppid=,lstart=` took 5-10 ms.
+const PROCESS_TABLE_READ_TIMEOUT_MS = 2_000;
+
+// Reserved out of the total settleMs budget so a SIGTERM-ignoring root that
+// exhausts the whole grace period still leaves the force round enough to
+// read the table and confirm the kill. Otherwise a full-grace holdout starves
+// the exact round that has to finish the job. Small relative to
+// PROCESS_TABLE_READ_TIMEOUT_MS/settleMs's defaults; measure local `ps` timing
+// before choosing different values, as with the read timeout above.
+const FORCE_READ_RESERVE_MS = 300;
+const FINAL_WAIT_RESERVE_MS = 300;
+
+// Limits ps stdout to 8 MiB, above execFile's 1 MiB default. At 41 measured
+// bytes per row, 64k rows need 2.6 MiB; this leaves about 3x headroom.
+const PROCESS_TABLE_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+
+function unrefDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+function neverRejects(promise: Promise<unknown>): Promise<void> {
+  return new Promise((resolve) => {
+    promise.then(
+      () => resolve(),
+      () => {
+        // A rejection did not confirm settlement. The grace timeout remains
+        // responsible for advancing teardown to the force round.
+      },
+    );
+  });
+}
+
+function resolveSettled(
+  settled: Promise<unknown> | (() => Promise<unknown>),
+): Promise<void> {
+  try {
+    const result = typeof settled === "function" ? settled() : settled;
+    return neverRejects(Promise.resolve(result));
+  } catch {
+    return new Promise<void>(() => {
+      // A synchronous throw also did not confirm settlement. Grace bounds it.
+    });
+  }
+}
+
 export interface ProcessTableEntry {
   pid: number;
   ppid: number;
+  startedAt: string;
 }
 
-/** Parses `ps -A -o pid=,ppid=` output. Ignores lines it cannot read. */
+export interface ProcessIdentity {
+  pid: number;
+  startedAt: string;
+}
+
+/** Parses `ps -A -o pid=,ppid=,lstart=` output. Ignores unreadable lines. */
 export function parseProcessTable(output: string): ProcessTableEntry[] {
   const entries: ProcessTableEntry[] = [];
   for (const line of output.split("\n")) {
-    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
-    if (!match?.[1] || !match[2]) continue;
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S(?:.*\S)?)\s*$/.exec(
+      line,
+    );
+    if (!match?.[1] || !match[2] || !match[3]) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
     if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) continue;
-    entries.push({ pid, ppid });
+    entries.push({ pid, ppid, startedAt: match[3] });
   }
   return entries;
 }
@@ -34,9 +93,15 @@ export function parseProcessTable(output: string): ProcessTableEntry[] {
  * enumeration would no longer link to this tree.
  */
 export function processTreePids(
-  table: readonly ProcessTableEntry[],
+  table: readonly Pick<ProcessTableEntry, "pid" | "ppid">[],
   rootPid: number,
 ): number[] {
+  return collectTreePidsForRoots(buildChildrenByParent(table), [rootPid]);
+}
+
+function buildChildrenByParent(
+  table: readonly Pick<ProcessTableEntry, "pid" | "ppid">[],
+): Map<number, number[]> {
   const childrenByParent = new Map<number, number[]>();
   for (const entry of table) {
     if (entry.pid === entry.ppid) continue;
@@ -44,8 +109,20 @@ export function processTreePids(
     if (siblings) siblings.push(entry.pid);
     else childrenByParent.set(entry.ppid, [entry.pid]);
   }
-  const ordered: number[] = [rootPid];
-  const seen = new Set<number>([rootPid]);
+  return childrenByParent;
+}
+
+function collectTreePidsForRoots(
+  childrenByParent: ReadonlyMap<number, number[]>,
+  rootPids: readonly number[],
+): number[] {
+  const ordered: number[] = [];
+  const seen = new Set<number>();
+  for (const rootPid of rootPids) {
+    if (seen.has(rootPid)) continue;
+    seen.add(rootPid);
+    ordered.push(rootPid);
+  }
   for (let index = 0; index < ordered.length; index += 1) {
     const pid = ordered[index];
     if (pid === undefined) continue;
@@ -63,48 +140,134 @@ export interface KillProcessTreePosixOptions {
   readProcessTable?: () => Promise<string>;
   sendSignal?: (pid: number, signal: NodeJS.Signals) => void;
   /**
-   * Pids an earlier round already enumerated. Each one is signalled and its
-   * own subtree is enumerated again, so a descendant whose parent has since
-   * exited — leaving it linked to init rather than to `rootPid` — is still
-   * reachable in this round.
+   * Pids an earlier round already enumerated. The next round enumerates each
+   * surviving pid's subtree, including descendants reparented to init.
    */
   alsoSignal?: readonly number[];
+  /** When present, a fresh process-table row must match before reuse. */
+  alsoSignalIdentities?: readonly ProcessIdentity[];
+  /** Bounds this round's process-table read. */
+  readTimeoutMs?: number;
 }
 
-function readProcessTableWithPs(): Promise<string> {
+export interface StopProcessTreePosixOptions extends Pick<
+  KillProcessTreePosixOptions,
+  "readProcessTable" | "sendSignal"
+> {
+  isAlive?: (pid: number) => boolean;
+}
+
+function readProcessTableWithPs(readTimeoutMs: number): Promise<string> {
   return new Promise((resolveOutput, reject) => {
-    execFile("ps", ["-A", "-o", "pid=,ppid="], (error, stdout) => {
-      if (error) reject(error);
-      else resolveOutput(stdout);
-    });
+    execFile(
+      "ps",
+      ["-A", "-o", "pid=,ppid=,lstart="],
+      {
+        maxBuffer: PROCESS_TABLE_MAX_BUFFER_BYTES,
+        timeout: readTimeoutMs,
+      },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolveOutput(stdout);
+      },
+    );
   });
 }
 
-/**
- * Signals `rootPid`, every pid in `options.alsoSignal`, and every descendant
- * of them. Enumerates the process table on every call, so a child started
- * after an earlier round still gets signalled. An unreadable process table
- * degrades to signalling those pids alone. Rejects only when the root pid
- * itself could not be signalled. Returns every pid it signalled, which the
- * next round takes as its `alsoSignal` set.
- */
-export async function killProcessTreePosix(
+function readProcessTableWithTimeout(
+  readProcessTable: () => Promise<string>,
+  readTimeoutMs: number,
+): Promise<string> {
+  if (readTimeoutMs <= 0) {
+    return Promise.reject(
+      new Error(`Process table read exceeded ${readTimeoutMs} ms.`),
+    );
+  }
+  return new Promise((resolveOutput, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(
+        new Error(
+          `Process table read exceeded ${readTimeoutMs} ms.`,
+        ),
+      );
+    }, readTimeoutMs);
+    timer.unref?.();
+    Promise.resolve().then(readProcessTable).then(
+      (output) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolveOutput(output);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+interface ProcessTreeSignalResult {
+  pids: number[];
+  identities: ProcessIdentity[];
+  tableReadFailed: boolean;
+}
+
+async function signalProcessTreePosix(
   rootPid: number,
   signal: NodeJS.Signals,
-  options: KillProcessTreePosixOptions = {},
-): Promise<number[]> {
-  const readProcessTable = options.readProcessTable ?? readProcessTableWithPs;
+  options: KillProcessTreePosixOptions,
+): Promise<ProcessTreeSignalResult> {
+  const readTimeoutMs = options.readTimeoutMs ?? PROCESS_TABLE_READ_TIMEOUT_MS;
+  const readProcessTable = options.readProcessTable ??
+    (() => readProcessTableWithPs(readTimeoutMs));
   const sendSignal = options.sendSignal ??
     ((pid, pidSignal) => process.kill(pid, pidSignal));
-  const roots = [rootPid, ...(options.alsoSignal ?? [])];
+  const isForceRound = options.alsoSignalIdentities !== undefined;
+  const capturedIdentities = new Map(
+    options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
+  );
+  // capturedIdentities is empty on the non-force path, so the filter was a no-op.
+  const initialPids = isForceRound
+    ? []
+    : [...new Set([rootPid, ...(options.alsoSignal ?? [])])];
 
-  let pids = [...new Set(roots)];
+  let pids = initialPids;
+  let identities: ProcessIdentity[] = [];
+  let tableReadFailed = false;
   try {
-    const table = parseProcessTable(await readProcessTable());
-    pids = [...new Set(roots.flatMap((pid) => processTreePids(table, pid)))];
+    const table = parseProcessTable(
+      await readProcessTableWithTimeout(readProcessTable, readTimeoutMs),
+    );
+    const entriesByPid = new Map(table.map((entry) => [entry.pid, entry]));
+    const childrenByParent = buildChildrenByParent(table);
+    const identityMatches = (pid: number): boolean => {
+      const captured = capturedIdentities.get(pid);
+      if (captured === undefined) {
+        // A process alive during round one would have supplied an identity.
+        // Without one, the force round cannot distinguish an exited process
+        // from an unrelated process that reused its pid, so signalling is unsafe.
+        return !isForceRound;
+      }
+      return entriesByPid.get(pid)?.startedAt === captured.startedAt;
+    };
+    const roots = [rootPid, ...(options.alsoSignal ?? [])].filter(
+      identityMatches,
+    );
+    pids = collectTreePidsForRoots(childrenByParent, roots);
+    identities = pids.flatMap((pid) => {
+      const entry = entriesByPid.get(pid);
+      return entry ? [{ pid, startedAt: entry.startedAt }] : [];
+    });
   } catch {
-    // The process table is unavailable. The known pids are still worth
-    // signalling.
+    tableReadFailed = true;
+    // The process table is unavailable. Signal only roots that do not need an
+    // identity check; a captured pid is unsafe without a fresh table row.
   }
 
   let rootFailure: unknown;
@@ -120,5 +283,132 @@ export async function killProcessTreePosix(
     }
   }
   if (rootFailure !== undefined) throw rootFailure;
-  return pids;
+  return { pids, identities, tableReadFailed };
+}
+
+/**
+ * Signals `rootPid`, eligible `alsoSignal` pids, and their descendants. A pid
+ * with a captured identity is eligible only when the fresh table row matches.
+ * Without a process table, the function skips identity-bound pids. It rejects
+ * only when signalling `rootPid` fails, and returns every pid it signalled.
+ */
+export async function killProcessTreePosix(
+  rootPid: number,
+  signal: NodeJS.Signals,
+  options: KillProcessTreePosixOptions = {},
+): Promise<number[]> {
+  return (await signalProcessTreePosix(rootPid, signal, options)).pids;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForProcessExit(
+  pids: readonly number[],
+  budgetMs: number,
+  isAlive: (pid: number) => boolean,
+): Promise<void> {
+  if (budgetMs <= 0) return;
+  const deadline = Date.now() + budgetMs;
+  let remaining = [...new Set(pids)];
+  while (remaining.length > 0) {
+    remaining = remaining.filter(isAlive);
+    if (remaining.length === 0) return;
+    const waitMs = Math.min(50, deadline - Date.now());
+    if (waitMs <= 0) return;
+    await unrefDelay(waitMs);
+  }
+}
+
+/**
+ * SIGTERM the whole POSIX process tree rooted at `pid`, then wait concurrently
+ * for `settled` to resolve and every captured pid to exit. Both process-table
+ * reads, the grace wait, and the final confirmation share one `settleMs`
+ * budget. The force round reuses a captured pid only when its start time
+ * still matches, so it reaches a reparented descendant without signalling a
+ * process that reused the pid. A child forked inside the grace window whose
+ * own parent also exits and gets reparented to init before the force round's
+ * table read escapes both rounds' walks entirely — the same documented
+ * full-trust limit as JsonRpcTransport's setsid caveat, recovered only by the
+ * wrapper plugin's own next-launch orphan sweep.
+ */
+export async function stopProcessTreePosix(
+  pid: number,
+  settled: Promise<unknown> | (() => Promise<unknown>),
+  settleMs = 2_000,
+  onTreeKillFailure?: () => void,
+  options: StopProcessTreePosixOptions = {},
+): Promise<void> {
+  const isAlive = options.isAlive ?? isProcessAlive;
+  const deadline = Date.now() + settleMs;
+  const remaining = (): number => Math.max(0, deadline - Date.now());
+  const phaseBudget = (ownCapMs: number, reserveForLaterMs: number): number =>
+    Math.min(ownCapMs, Math.max(0, remaining() - reserveForLaterMs));
+  let captured: readonly number[] = [];
+  let capturedIdentities: readonly ProcessIdentity[] = [];
+  let unverifiable = false;
+  try {
+    const result = await signalProcessTreePosix(pid, "SIGTERM", {
+      ...options,
+      readTimeoutMs: phaseBudget(
+        PROCESS_TABLE_READ_TIMEOUT_MS,
+        FORCE_READ_RESERVE_MS + FINAL_WAIT_RESERVE_MS,
+      ),
+    });
+    captured = result.pids;
+    capturedIdentities = result.identities;
+    unverifiable = result.tableReadFailed;
+  } catch {
+    unverifiable = true;
+  }
+
+  const graceMs = phaseBudget(
+    Number.POSITIVE_INFINITY,
+    FORCE_READ_RESERVE_MS + FINAL_WAIT_RESERVE_MS,
+  );
+  await Promise.all([
+    Promise.race([resolveSettled(settled), unrefDelay(graceMs)]),
+    waitForProcessExit(captured, graceMs, isAlive),
+  ]);
+
+  let forceResultPids: readonly number[] = [];
+  try {
+    const result = await signalProcessTreePosix(pid, "SIGKILL", {
+      ...options,
+      alsoSignal: captured,
+      alsoSignalIdentities: capturedIdentities,
+      readTimeoutMs: phaseBudget(
+        PROCESS_TABLE_READ_TIMEOUT_MS,
+        FINAL_WAIT_RESERVE_MS,
+      ),
+    });
+    forceResultPids = result.pids;
+    unverifiable ||= result.tableReadFailed;
+    await waitForProcessExit(
+      forceResultPids,
+      phaseBudget(Number.POSITIVE_INFINITY, 0),
+      isAlive,
+    );
+  } catch {
+    unverifiable = true;
+  }
+
+  // A failed table read prevents identity verification. A surviving verified
+  // SIGKILL target also proves the tree did not stop. The caller's owned
+  // process handle cannot target an unrelated process through pid reuse.
+  // A root omitted from the first table has no identity; if it is still alive,
+  // only the caller's owned process handle can stop it without pid-reuse risk.
+  const rootIdentityCaptured = capturedIdentities.some(
+    (identity) => identity.pid === pid,
+  );
+  const omittedLiveRoot = !rootIdentityCaptured && isAlive(pid);
+  if (unverifiable || forceResultPids.some(isAlive) || omittedLiveRoot) {
+    onTreeKillFailure?.();
+  }
 }

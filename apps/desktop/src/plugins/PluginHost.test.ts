@@ -12,6 +12,7 @@ import { databaseOpLogPath } from "@dohc/workspace-core";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
+import { stopProcessTreePosix } from "../process/posixSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -207,7 +208,12 @@ function createProcessHarness(options: {
       },
       async dispose() {
         disposedPluginIds.push(params.pluginId);
-        await transport.dispose();
+        const pid = transport.pid;
+        if (process.platform !== "win32" && pid !== undefined) {
+          await stopProcessTreePosix(pid, () => transport.dispose());
+        } else {
+          await transport.dispose();
+        }
       },
     };
   });

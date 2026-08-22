@@ -141,6 +141,27 @@ async function flushMicrotasks(times = 5): Promise<void> {
   for (let index = 0; index < times; index += 1) await Promise.resolve();
 }
 
+/**
+ * Waits, one microtask at a time, until `condition` holds — the honest form
+ * of "flush enough microtasks": it stops the instant the awaited chain has
+ * actually settled instead of guessing a tick count, and fails fast with a
+ * clear message if the condition never holds within the cap.
+ */
+async function waitForMicrotaskCondition(
+  condition: () => boolean,
+  maxTicks = 50,
+): Promise<void> {
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    if (condition()) return;
+    await Promise.resolve();
+  }
+  if (!condition()) {
+    throw new Error(
+      `Condition did not hold within ${maxTicks} microtask ticks.`,
+    );
+  }
+}
+
 function requireFailure(
   result: PluginInstallResult,
 ): Extract<PluginInstallResult, { ok: false }> {
@@ -443,11 +464,22 @@ describe("installPluginDependencies", () => {
     const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     // pnpm (4242) shelled out to git (4243), which shelled out to its own
     // helper (4244). 4242 is the only pid this runner was ever told about.
-    const liveTable = [" 4242     1", " 4243  4242", " 4244  4243", " 5000     1", ""]
-      .join("\n");
+    const startedAt = "Fri Aug 21 10:00:05 2026";
+    const liveTable = [
+      ` 4242     1 ${startedAt}`,
+      ` 4243  4242 ${startedAt}`,
+      ` 4244  4243 ${startedAt}`,
+      ` 5000     1 ${startedAt}`,
+      "",
+    ].join("\n");
     // By the force round the root is gone and its descendants are reparented
     // to init, so no ppid walk from 4242 can find them any more.
-    const orphanedTable = [" 4243     1", " 4244     1", " 5000     1", ""].join("\n");
+    const orphanedTable = [
+      ` 4243     1 ${startedAt}`,
+      ` 4244     1 ${startedAt}`,
+      ` 5000     1 ${startedAt}`,
+      "",
+    ].join("\n");
     let tableReads = 0;
 
     let settled = false;
@@ -475,7 +507,7 @@ describe("installPluginDependencies", () => {
     });
     await started.promise;
     controller.abort();
-    await flushMicrotasks();
+    await waitForMicrotaskCondition(() => signalled.length >= 3);
 
     // Children before parents, so a signalled parent cannot leave a child
     // behind — and the whole tree is reached before the child is terminated.
@@ -484,6 +516,9 @@ describe("installPluginDependencies", () => {
       { pid: 4_243, signal: "SIGTERM" },
       { pid: 4_242, signal: "SIGTERM" },
     ]);
+    await waitForMicrotaskCondition(
+      () => child.terminate.mock.calls.length >= 1,
+    );
     expect(child.terminate).toHaveBeenCalledTimes(1);
 
     // pnpm itself is gone, but the git and tar processes it left are not, so
