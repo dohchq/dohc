@@ -737,7 +737,7 @@ describe("PluginHost", () => {
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
   });
 
-  it("does not spawn when stop races a pending start", async () => {
+  it("rejects a pending start that stop aborts before spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
     const host = trackHost({
@@ -753,13 +753,15 @@ describe("PluginHost", () => {
       await fixtureManifest(),
     );
     await host.stop("hello-plugin");
-    await start;
+    await expect(start).rejects.toThrow(
+      'Plugin "hello-plugin" was stopped before it started.',
+    );
 
     expect(harness.spawnedPluginIds).toEqual([]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
 
-  it("does not spawn when stopAll races a pending start", async () => {
+  it("rejects a pending start that stopAll aborts before spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
     const host = trackHost({
@@ -775,7 +777,12 @@ describe("PluginHost", () => {
       await fixtureManifest(),
     );
     const stopAll = host.stopAll();
-    await Promise.all([start, stopAll]);
+    await Promise.all([
+      expect(start).rejects.toThrow(
+        'Plugin "hello-plugin" was stopped before it started.',
+      ),
+      stopAll,
+    ]);
 
     expect(harness.spawnedPluginIds).toEqual([]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();

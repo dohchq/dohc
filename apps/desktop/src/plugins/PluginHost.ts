@@ -245,7 +245,11 @@ export class PluginHost {
         this.options.stateDir,
         this.options.workspaceRoot,
       );
-      if (this.abortedStarts.delete(pluginId)) return;
+      if (this.abortedStarts.delete(pluginId)) {
+        throw new Error(
+          `Plugin "${pluginId}" was stopped before it started.`,
+        );
+      }
       if (!localState.ok) {
         throw new Error(
           `Plugin "${pluginId}" was not started. ${localState.warning}`,
