@@ -6206,12 +6206,20 @@ export function DesktopWorkspaceShell(props: {
         >
           <div
             data-testid="engine-rebuild-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="engine-rebuild-title"
             className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel"
           >
             <div className="p-4">
               {engineRebuild.phase === "moved" ? (
                 <>
-                  <p className="m-0 text-sm text-ink">Data store moved</p>
+                  <p
+                    id="engine-rebuild-title"
+                    className="m-0 text-sm text-ink"
+                  >
+                    Data store moved
+                  </p>
                   <p className="mb-0 mt-2 text-xs text-muted">
                     The old data store is at{" "}
                     <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
@@ -6222,7 +6230,10 @@ export function DesktopWorkspaceShell(props: {
                 </>
               ) : engineRebuild.phase === "backup-exists" ? (
                 <>
-                  <p className="m-0 text-sm text-ink">
+                  <p
+                    id="engine-rebuild-title"
+                    className="m-0 text-sm text-ink"
+                  >
                     dohc did not move the data store
                   </p>
                   <p className="mb-0 mt-2 text-xs text-muted">
@@ -6238,7 +6249,10 @@ export function DesktopWorkspaceShell(props: {
                 </>
               ) : (
                 <>
-                  <p className="m-0 text-sm text-ink">
+                  <p
+                    id="engine-rebuild-title"
+                    className="m-0 text-sm text-ink"
+                  >
                     Move the old data store aside and rebuild?
                   </p>
                   <p className="mb-0 mt-2 text-xs text-muted">

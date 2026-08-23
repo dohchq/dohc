@@ -449,6 +449,63 @@ describe("moveEngineStoreAside", () => {
     );
   });
 
+  it("recovers a failed partial move before an already-locked reopen opens the store", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-wal": "wal",
+      "engine.db-shm": "shm",
+    });
+    const locks = new Map<string, Promise<void>>();
+    const workspace = { workspaceId: "workspace", rootPath: root };
+    const moveError = new Error("host crash");
+    let renames = 0;
+    let stateAtOpen:
+      | { backupFiles: string[]; liveFiles: string[] }
+      | undefined;
+    const openActivity = vi.fn(async () => {
+      stateAtOpen = {
+        backupFiles: (await readdir(backupDir)).sort(),
+        liveFiles: (await readdir(engineDir)).sort(),
+      };
+      await writeFile(join(engineDir, "engine.db"), "rebuilt-store");
+    });
+
+    const rebuilding = withKeyedStartLock(
+      locks,
+      workspace.workspaceId,
+      () =>
+        rebuildEngineStore(root, {
+          closeActivity: async () => undefined,
+          probeStoreRefusal: async () => "foreign-database",
+          moveStoreAside: (rootPath) =>
+            moveEngineStoreAside(rootPath, {
+              rename: async (from, to) => {
+                renames += 1;
+                if (renames === 3) throw moveError;
+                await rename(from, to);
+              },
+            }),
+          reopenActivity: () =>
+            withEngineStoreRecovered(locks, workspace, true, openActivity),
+        }),
+    );
+
+    await expect(rebuilding).rejects.toBe(moveError);
+    expect(openActivity).toHaveBeenCalledOnce();
+    expect(stateAtOpen).toEqual({
+      backupFiles: [
+        "MOVE_COMPLETE",
+        "engine.db",
+        "engine.db-shm",
+        "engine.db-wal",
+      ],
+      liveFiles: ["pre-v2-backup"],
+    });
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
+      "rebuilt-store",
+    );
+  });
+
   it("holds the workspace lock through an ordinary activity open before rebuilding", async () => {
     const locks = new Map<string, Promise<void>>();
     const workspace = {
@@ -620,6 +677,22 @@ describe("rebuildEngineStore", () => {
       outcome: "moved",
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
+    });
+  });
+
+  it("surfaces the recovery failure details when reopening fails", async () => {
+    const recoveryError = new EngineStoreRecoveryFailedError(
+      new Error("rename denied"),
+    );
+    const d = deps({
+      reopenActivity: vi.fn(async () => {
+        throw recoveryError;
+      }),
+    });
+
+    await expect(rebuildEngineStore(root, d)).resolves.toEqual({
+      outcome: "moved",
+      reopenFailed: recoveryError.message,
     });
   });
 

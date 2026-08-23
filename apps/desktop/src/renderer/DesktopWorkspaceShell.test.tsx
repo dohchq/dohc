@@ -6007,6 +6007,12 @@ describe("engine store recovery", () => {
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     const { user, dialog } = await openRebuildDialog(bridge);
 
+    expect(
+      screen.getByRole("dialog", {
+        name: "Move the old data store aside and rebuild?",
+      }),
+    ).toBe(dialog);
+
     // The user learns what moves, where it goes, and what does NOT come
     // back, before anything moves.
     expect(dialog.textContent).toContain(
@@ -6026,11 +6032,14 @@ describe("engine store recovery", () => {
     });
     // The reverse path, named in the success copy (product invariant: every
     // reversible state change shows its reverse).
-    await waitFor(() =>
+    await waitFor(() => {
+      expect(
+        screen.getByRole("dialog", { name: "Data store moved" }),
+      ).toBe(dialog);
       expect(
         screen.getByTestId("engine-rebuild-dialog").textContent,
-      ).toContain("The old data store is at .dohc/engine/pre-v2-backup"),
-    );
+      ).toContain("The old data store is at .dohc/engine/pre-v2-backup");
+    });
   });
 
   it("refuses to write over an existing backup and says what to do", async () => {

@@ -177,11 +177,12 @@ export async function withEngineStoreRecovered<T>(
     rootPath: string,
   ) => Promise<void> = completePendingEngineStoreMove,
 ): Promise<T> {
-  if (alreadySerialized) return body();
-  return withKeyedStartLock(locks, workspace.workspaceId, async () => {
+  const recovered = async () => {
     await completePendingMove(workspace.rootPath);
     return body();
-  });
+  };
+  if (alreadySerialized) return recovered();
+  return withKeyedStartLock(locks, workspace.workspaceId, recovered);
 }
 
 export async function moveEngineStoreAside(
@@ -298,10 +299,12 @@ export async function rebuildEngineStore(
   } finally {
     try {
       await deps.reopenActivity();
-    } catch {
+    } catch (error) {
       if (outcome) {
         reopenFailed =
-          "dohc could not finish rebuilding this workspace's data store.";
+          error instanceof EngineStoreRecoveryFailedError
+            ? error.message
+            : "dohc could not finish rebuilding this workspace's data store.";
       }
     }
   }
