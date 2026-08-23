@@ -425,6 +425,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
 
     settleFetch(new Response(null, { status: 500 }));
     await pending;
+    await flushMicrotasks();
 
     // The exact same node comes back, now carrying the failure notice --
     // not a lookalike, and not silently lost. Without the fix,
@@ -437,6 +438,36 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(restored?.querySelector(".send-failed")?.textContent).toBe(
       "This message was not sent. Send it again.",
     );
+  });
+
+  it("shows restart-only guidance on the optimistic message when the launcher is unavailable", async () => {
+    await loadChatModule();
+    const messageEntered = deferred();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/message") throw new Error(`Unexpected fetch: ${url}`);
+      messageEntered.resolve();
+      return messageResponse.promise;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    await messageEntered.promise;
+
+    messageResponse.resolve(
+      new Response(
+        JSON.stringify({
+          message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+          kind: "restartOnly",
+        }),
+        { status: 503 },
+      ),
+    );
+    await flushMicrotasks();
+
+    expect(textOf(".message.user .send-failed")).toBe("Restart dohc to try again.");
   });
 
   it("re-enables Stop after a successful cancel, with no turn-completed event of its own to bring it back", async () => {
@@ -485,11 +516,13 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     sendEvent(eventSource, { kind: "session-state", state: "ready" });
     expect(sendButton.disabled).toBe(true);
 
-    messageResponse.resolve(new Response(null, { status: 202 }));
+    messageResponse.resolve(
+      new Response(JSON.stringify({ turnId: 1 }), { status: 202 }),
+    );
     await flushMicrotasks();
     expect(sendButton.disabled).toBe(true);
 
-    sendEvent(eventSource, { kind: "turn-completed" });
+    sendEvent(eventSource, { kind: "turn-completed", turnId: 1 });
     expect(sendButton.disabled).toBe(false);
   });
 
@@ -514,15 +547,81 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
 
     sendEvent(eventSource, {
       kind: "session-state",
-      state: "closed",
+      state: "ready",
       snapshot: true,
     });
     expect(sendButton.disabled).toBe(true);
 
-    messageResponse.resolve(new Response(null, { status: 202 }));
+    messageResponse.resolve(
+      new Response(JSON.stringify({ turnId: 1 }), { status: 202 }),
+    );
     await flushMicrotasks();
-    sendEvent(eventSource, { kind: "session-state", state: "running" });
-    sendEvent(eventSource, { kind: "turn-completed" });
+    sendEvent(eventSource, { kind: "session-state", state: "running", turnId: 1 });
+    sendEvent(eventSource, { kind: "turn-completed", turnId: 1 });
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it("clears a pending send when its turn settled entirely while disconnected, reported only by the reconnect snapshot", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageEntered = deferred();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/message") throw new Error(`Unexpected fetch: ${url}`);
+      messageEntered.resolve();
+      return messageResponse.promise;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    await messageEntered.promise;
+
+    messageResponse.resolve(
+      new Response(JSON.stringify({ turnId: 1 }), { status: 202 }),
+    );
+    await flushMicrotasks();
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "ready",
+      snapshot: true,
+      turnId: 1,
+    });
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it("clears a pending send when a closed reconnect snapshot is the only settlement report", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageEntered = deferred();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/message") throw new Error(`Unexpected fetch: ${url}`);
+      messageEntered.resolve();
+      return messageResponse.promise;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    await messageEntered.promise;
+
+    messageResponse.resolve(
+      new Response(JSON.stringify({ turnId: 1 }), { status: 202 }),
+    );
+    await flushMicrotasks();
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "closed",
+      snapshot: true,
+      turnId: 1,
+    });
     expect(sendButton.disabled).toBe(false);
   });
 
@@ -545,13 +644,15 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     await messageEntered.promise;
     expect(sendButton.disabled).toBe(true);
 
-    messageResponse.resolve(new Response(null, { status: 202 }));
+    messageResponse.resolve(
+      new Response(JSON.stringify({ turnId: 1 }), { status: 202 }),
+    );
     await flushMicrotasks();
     sendEvent(eventSource, { kind: "session-state", state: "starting" });
     expect(sendButton.disabled).toBe(true);
 
-    sendEvent(eventSource, { kind: "session-state", state: "running" });
-    sendEvent(eventSource, { kind: "turn-completed" });
+    sendEvent(eventSource, { kind: "session-state", state: "running", turnId: 1 });
+    sendEvent(eventSource, { kind: "turn-completed", turnId: 1 });
     expect(sendButton.disabled).toBe(false);
   });
 
@@ -614,6 +715,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     }) as typeof fetch;
 
     const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    sendEvent(eventSource, { kind: "session-state", state: "running", turnId: 2 });
     stopButton.click();
     await stopEntered.promise;
     expect(stopButton.disabled).toBe(true);
@@ -623,6 +725,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
       message: "An old, unrelated failure.",
       fatal: true,
       replay: true,
+      turnId: 1,
     });
     const errorCardsBefore = document.querySelectorAll(".error-card").length;
 
@@ -630,6 +733,36 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     await flushMicrotasks();
     expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore + 1);
     expect(stopButton.disabled).toBe(false);
+  });
+
+  it("retires a pending Stop when its turn's natural completion is only ever reported after a disconnect", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopEntered = deferred();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/stop") throw new Error(`Unexpected fetch: ${url}`);
+      stopEntered.resolve();
+      return stopResponse.promise;
+    }) as typeof fetch;
+
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    sendEvent(eventSource, { kind: "session-state", state: "running", turnId: 1 });
+    stopButton.click();
+    await stopEntered.promise;
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "ready",
+      snapshot: true,
+      turnId: 1,
+    });
+    const disabledAfterSnapshot = stopButton.disabled;
+    const errorCardsBefore = document.querySelectorAll(".error-card").length;
+
+    stopResponse.resolve(new Response(null, { status: 500 }));
+    await flushMicrotasks();
+    expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore);
+    expect(stopButton.disabled).toBe(disabledAfterSnapshot);
   });
 
   it("discards a Stop failure that lands after the turn already completed naturally", async () => {
@@ -644,12 +777,12 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
 
     const stopButton = document.querySelector("#stop") as HTMLButtonElement;
     const sendButton = document.querySelector("#send") as HTMLButtonElement;
-    sendEvent(eventSource, { kind: "session-state", state: "running" });
+    sendEvent(eventSource, { kind: "session-state", state: "running", turnId: 1 });
     expect(sendButton.disabled).toBe(true);
     stopButton.click();
     await stopEntered.promise;
 
-    sendEvent(eventSource, { kind: "turn-completed" });
+    sendEvent(eventSource, { kind: "turn-completed", turnId: 1 });
     const errorCardsBefore = document.querySelectorAll(".error-card").length;
     expect(sendButton.disabled).toBe(false);
     expect(stopButton.disabled).toBe(false);
@@ -683,7 +816,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(stopButton.disabled).toBe(false);
   });
 
-  it("keeps Send enabled when a stopped turn completes before its delayed acceptance arrives", async () => {
+  it("re-enables Send when a stopped turn completed before its delayed acceptance arrives", async () => {
     const { eventSource } = await loadChatModule();
     const messageEntered = deferred();
     const stopEntered = deferred();
@@ -711,19 +844,22 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     await messageEntered.promise;
     expect(sendButton.disabled).toBe(true);
 
+    sendEvent(eventSource, { kind: "session-state", state: "running", turnId: 1 });
     stopButton.click();
     await stopEntered.promise;
 
     // Stop can complete the turn while /message still awaits cancellation.
     // Round 15 made failures derive Send from turnActive, but a late 202
     // still set turnActive back to true and left Send disabled forever.
-    sendEvent(eventSource, { kind: "turn-completed" });
-    expect(sendButton.disabled).toBe(false);
+    sendEvent(eventSource, { kind: "turn-completed", turnId: 1 });
+    expect(sendButton.disabled).toBe(true);
 
     stopResponse.resolve(new Response(null, { status: 200 }));
     await stopResponse.promise;
 
-    messageResponse.resolve(new Response(null, { status: 202 }));
+    messageResponse.resolve(
+      new Response(JSON.stringify({ turnId: 1 }), { status: 202 }),
+    );
     await flushMicrotasks();
     expect(sendButton.disabled).toBe(false);
   });
@@ -772,7 +908,13 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     composer.requestSubmit();
     await enteredSecond.promise;
     expect(sendButton.disabled).toBe(true);
-    sendEvent(eventSource, { kind: "session-state", state: "running" });
+    sendEvent(eventSource, { kind: "session-state", state: "running", turnId: 2 });
+    expect(sendButton.disabled).toBe(true);
+
+    settleSecond(
+      new Response(JSON.stringify({ turnId: 2 }), { status: 202 }),
+    );
+    await flushMicrotasks();
     expect(sendButton.disabled).toBe(true);
 
     // The abandoned first request finally settles with the 503 the
@@ -783,10 +925,8 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(sendButton.disabled).toBe(true);
 
     // The second turn actually settling is what correctly restores Send.
-    sendEvent(eventSource, { kind: "session-state", state: "ready" });
+    sendEvent(eventSource, { kind: "session-state", state: "ready", turnId: 2 });
     expect(sendButton.disabled).toBe(false);
-    settleSecond(new Response(null, { status: 202 }));
-    await pendingSecond;
   });
 
   it("keeps Send enabled when retry rejection and stale failure follow a fatal event", async () => {

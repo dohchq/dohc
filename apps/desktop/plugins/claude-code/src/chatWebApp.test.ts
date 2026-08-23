@@ -223,8 +223,9 @@ function fakeDriver(
 
 interface EventStream {
   /** The event with its wire metadata stripped -- `at` (publish time),
-   * `snapshot` (the initial connection-state frame's own marker), and
-   * `replay` (a frame rebuilt from the log rather than happening now) --
+   * `snapshot` (the initial connection-state frame's own marker), `replay`
+   * (a frame rebuilt from the log rather than happening now), and the
+   * server's `turnId` on events that do not already define that field --
    * for every assertion that only cares about semantic content. */
   next(): Promise<PluginAgentEvent | { kind: "user-message"; text: string; clientId: string }>;
   /** The exact wire object, `at`/`snapshot` included -- for the tests that
@@ -268,7 +269,11 @@ async function eventStream(url: string, token: string): Promise<EventStream> {
   return {
     async next() {
       const { at: _at, snapshot: _snapshot, replay: _replay, ...rest } = await nextRaw();
-      return rest as PluginAgentEvent | { kind: "user-message"; text: string; clientId: string };
+      if (rest.kind === "turn-completed") {
+        return rest as PluginAgentEvent;
+      }
+      const { turnId: _turnId, ...event } = rest;
+      return event as PluginAgentEvent | { kind: "user-message"; text: string; clientId: string };
     },
     nextRaw,
     async close() {
@@ -439,7 +444,7 @@ describe("Claude Code chat web app", () => {
     fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
     expect(await live.next()).toEqual({
       kind: "turn-completed",
-      turnId: "turn-1",
+      turnId: 1,
       status: "completed",
     });
     await live.close();
@@ -459,7 +464,7 @@ describe("Claude Code chat web app", () => {
     expect(await replay.next()).toEqual({ kind: "history-trimmed" });
     expect(await replay.next()).toEqual({
       kind: "turn-completed",
-      turnId: "turn-1",
+      turnId: 1,
       status: "completed",
     });
     await replay.close();
@@ -701,7 +706,7 @@ describe("Claude Code chat web app", () => {
     });
     expect(await reattached.next()).toEqual({
       kind: "turn-completed",
-      turnId: "turn-1",
+      turnId: 1,
       status: "completed",
     });
     await reattached.close();
@@ -907,7 +912,7 @@ describe("Claude Code chat web app", () => {
     fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "cancelled" });
     expect(await stream.next()).toEqual({
       kind: "turn-completed",
-      turnId: "turn-1",
+      turnId: 1,
       status: "cancelled",
     });
 
@@ -1353,14 +1358,24 @@ describe("Claude Code chat web app", () => {
     const stream = await eventStream(url, token);
     expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
 
-    expect((await post(url, "message", { text: "Hello" }, token)).status).toBe(503);
+    const firstResponse = await post(url, "message", { text: "Hello" }, token);
+    expect(firstResponse.status).toBe(503);
+    expect(await firstResponse.json()).toEqual({
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      kind: "restartOnly",
+    });
     expect(await stream.next()).toEqual({
       kind: "error",
       message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       fatal: true,
       restartOnly: true,
     });
-    expect((await post(url, "message", { text: "Hello again" }, token)).status).toBe(503);
+    const secondResponse = await post(url, "message", { text: "Hello again" }, token);
+    expect(secondResponse.status).toBe(503);
+    expect(await secondResponse.json()).toEqual({
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      kind: "restartOnly",
+    });
     expect(await stream.next()).toEqual({
       kind: "error",
       message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",

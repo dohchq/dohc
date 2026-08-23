@@ -263,6 +263,15 @@ export function createChatWebApp(
   let sessionStart: Promise<PluginAgentSession> | null = null;
   let sessionGeneration = 0;
   let processSession: PluginAgentSession | null = null;
+  let turnSequence = 0;
+  // This server's own monotonic turn identity -- assigned once per accepted
+  // prompt, independent of whatever opaque turnId the underlying driver
+  // generates internally (that one is not guaranteed comparable across
+  // drivers). Stamped on every published frame and returned in /message's
+  // 202 body, so a client that reconnects after a turn settled entirely
+  // while it was disconnected can still prove that, by identity, from the
+  // snapshot or a replayed history frame alone -- not only from a live tail.
+  let currentTurnId: number | undefined;
   // True from the moment a prompt is accepted until its turn settles
   // (turn-completed, or a fatal error). /message refuses a second prompt
   // while this is true instead of overlapping it on the single active turn
@@ -309,7 +318,11 @@ export function createChatWebApp(
    * failures quietly (role="status") instead of re-alerting a screen
    * reader to history it already heard. */
   function frame(event: ChatStreamEvent, at: number, replay?: boolean): string {
-    return "data: " + JSON.stringify({ ...event, at, ...(replay ? { replay: true } : {}) }) + "\n\n";
+    return (
+      "data: " +
+      JSON.stringify({ ...event, at, turnId: currentTurnId, ...(replay ? { replay: true } : {}) }) +
+      "\n\n"
+    );
   }
 
   /** The current-state snapshot every new connection gets first, marked so
@@ -319,7 +332,7 @@ export function createChatWebApp(
    * "closed" with reason "Stopped") renders its card twice: once from this
    * snapshot, once from the same transition's own entry in the replay. */
   function snapshotFrame(): string {
-    return "data: " + JSON.stringify({ ...state, snapshot: true }) + "\n\n";
+    return "data: " + JSON.stringify({ ...state, snapshot: true, turnId: currentTurnId }) + "\n\n";
   }
 
   /** Evicts oldest entries once the log exceeds its cap -- in whole turns:
@@ -470,20 +483,27 @@ export function createChatWebApp(
         },
       });
     } catch (error) {
+      const restartOnly =
+        error instanceof Error && "restartOnly" in error && error.restartOnly === true;
       // Both concrete drivers publish "starting" synchronously before this
       // can reject (a spawn failure, an init or handshake error). Without a
       // terminal event here, the pill would sit on Starting forever with
       // Stop still enabled and no session behind it to stop.
       if (generation === sessionGeneration) {
-        const restartOnly =
-          error instanceof Error && "restartOnly" in error && error.restartOnly === true;
         publish(
           restartOnly
             ? { kind: "error", message: errorMessage(error), fatal: true, restartOnly: true }
             : { kind: "error", message: errorMessage(error), fatal: true },
         );
       }
-      throw requestError(503, errorMessage(error));
+      // Carried onward on the thrown error too: the outer request handler
+      // (not this function) is what actually shapes the HTTP response
+      // body, and needs to know this failure's kind to give the fetch
+      // path the same truthful action the SSE path already renders.
+      throw Object.assign(
+        requestError(503, errorMessage(error)),
+        restartOnly ? { restartOnly: true } : {},
+      );
     } finally {
       starting = false;
     }
@@ -617,6 +637,11 @@ export function createChatWebApp(
           if (openDeltas.get(key) === entry) openDeltas.delete(key);
         }
       };
+      // Assigned before the call, not after it resolves: prompt() can
+      // itself publish events (through onEvent) while it is still
+      // pending, and those must carry this turn's real identity, not a
+      // stale leftover from whatever the previous turn was.
+      currentTurnId = ++turnSequence;
       try {
         await live.prompt({ text: body.text });
       } catch (error) {
@@ -667,7 +692,12 @@ export function createChatWebApp(
       if (inFlight.stopRequested) {
         await Promise.resolve(live.cancel()).catch(() => undefined);
       }
-      writeEmpty(response, 202);
+      response.writeHead(202, {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(JSON.stringify({ turnId: currentTurnId }));
     } finally {
       if (pendingPrompt === inFlight) pendingPrompt = null;
     }
@@ -848,10 +878,22 @@ export function createChatWebApp(
       // body, a missing static asset, an unauthorized caller -- is a
       // transport problem, not a session problem, so it 4xx/5xx's the
       // request without touching session state.
-      const failure = error as Partial<RequestError>;
+      const failure = error as Partial<RequestError> & { restartOnly?: boolean };
       const message = errorMessage(error);
-      if (!response.headersSent) writeError(response, failure.statusCode ?? 500, message);
-      else response.end();
+      if (!response.headersSent) {
+        if (failure.restartOnly) {
+          response.writeHead(failure.statusCode ?? 500, {
+            "cache-control": "no-store",
+            "content-type": "application/json; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          });
+          response.end(JSON.stringify({ message, kind: "restartOnly" }));
+        } else {
+          writeError(response, failure.statusCode ?? 500, message);
+        }
+      } else {
+        response.end();
+      }
     }
   }
 
