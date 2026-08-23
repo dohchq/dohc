@@ -128,9 +128,7 @@ describe("shareMountRootForSite", () => {
     });
     const target = staticPreviewTargetForSite(site!);
     const ownerFiles = staticPreviewOwnerFiles(site!, target);
-    expect(ownerFiles.get("index.html")).toBe(
-      "shared-with-me/alex/portal/dist/index.html",
-    );
+    expect(ownerFiles.has("index.html")).toBe(true);
     expect(ownerFiles.has("recipient-only.js")).toBe(false);
     const preview = await startStaticSitePreview(root, target.root, {
         authority: site!.authority,

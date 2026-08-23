@@ -3135,11 +3135,11 @@ export function staticPreviewTargetForSite(
 export function staticPreviewOwnerFiles(
   site: SitePackageInfo,
   target: ReturnType<typeof staticPreviewTargetForSite>,
-): ReadonlyMap<string, string> {
-  const files = new Map<string, string>();
+): ReadonlySet<string> {
+  const files = new Set<string>();
   for (const workspacePath of site.sourceFiles) {
     const servedPath = pathRelativeToArtifact(target.root, workspacePath);
-    if (servedPath) files.set(servedPath, workspacePath);
+    if (servedPath) files.add(servedPath);
   }
   return files;
 }

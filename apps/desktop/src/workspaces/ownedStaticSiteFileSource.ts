@@ -78,7 +78,7 @@ export async function prepareOwnedStaticSitePreview(input: {
     root: target.root,
     entry,
     fileSource: createOwnedStaticSiteFileSource({
-      servedPaths: ownerFiles.keys(),
+      servedPaths: ownerFiles,
       target: ownerRoot.target,
       ownerRootPath: ownerRoot.path,
       read: input.readOwner,
