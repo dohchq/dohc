@@ -443,6 +443,51 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(stopButton.disabled).toBe(false);
   });
 
+  it("keeps Send enabled when a stopped turn completes before its delayed acceptance arrives", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageEntered = deferred();
+    const stopEntered = deferred();
+    const messageResponse = deferred<Response>();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url === "/message") {
+        messageEntered.resolve();
+        return messageResponse.promise;
+      }
+      if (url === "/stop") {
+        stopEntered.resolve();
+        return stopResponse.promise;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    messageInput.value = "Stop this";
+    composer.requestSubmit();
+    await messageEntered.promise;
+    expect(sendButton.disabled).toBe(true);
+
+    stopButton.click();
+    await stopEntered.promise;
+
+    // Stop can complete the turn while /message still awaits cancellation.
+    // Round 15 made failures derive Send from turnActive, but a late 202
+    // still set turnActive back to true and left Send disabled forever.
+    sendEvent(eventSource, { kind: "turn-completed" });
+    expect(sendButton.disabled).toBe(false);
+
+    stopResponse.resolve(new Response(null, { status: 200 }));
+    await stopResponse.promise;
+
+    messageResponse.resolve(new Response(null, { status: 202 }));
+    await messageResponse.promise;
+    expect(sendButton.disabled).toBe(false);
+  });
+
   it("keeps Send disabled for a newer turn when a stale, stop-abandoned request's late failure arrives", async () => {
     const { eventSource } = await loadChatModule();
     const enteredFirst = deferred();

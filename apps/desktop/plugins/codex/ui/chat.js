@@ -50,6 +50,13 @@ const pendingMessages = new Map();
 // sets it optimistically to bridge the gap before its running event arrives.
 // Failed requests leave it untouched because they did not start a turn.
 let turnActive = false;
+// Bumped by every setSessionState call (any state). A /message accept can
+// land asynchronously behind a Stop's cancellation, after the turn it
+// started has already completed (or the session has already closed or
+// failed) -- captured at send time and compared when that request's
+// response lands, so a late accept can no longer resurrect `turnActive`
+// once a fresher session-state fact has already superseded it.
+let stateVersion = 0;
 
 // `submitting` is a one-call admission guard, not another stored state. It
 // blocks duplicate submits only while /message has not settled.
@@ -116,6 +123,7 @@ function messageCard(author, text, className, at) {
 }
 
 function setSessionState(state, reason, options = {}) {
+  stateVersion += 1;
   const labels = {
     starting: "Starting",
     ready: "Ready",
@@ -513,6 +521,7 @@ composer.addEventListener("submit", async (event) => {
   pendingMessages.set(clientId, card);
   messageInput.value = "";
   updateSendAvailability(true);
+  const stateVersionAtSend = stateVersion;
   try {
     const response = await fetch("/message", {
       method: "POST",
@@ -528,9 +537,13 @@ composer.addEventListener("submit", async (event) => {
           : "This message was not sent. Send it again.",
       );
     } else {
-      // The accepted request owns an active turn before its running event
-      // arrives. Recording it here keeps Send disabled through that gap.
-      turnActive = true;
+      // Only mark the turn active if no session-state fact -- this turn
+      // completing, the session closing, a fatal error, or even a fresher
+      // running confirmation -- has landed since this request was sent. A
+      // late accept behind a Stop's cancellation must only annotate its own
+      // card; it never gets to resurrect Send once something fresher already
+      // settled it.
+      if (stateVersion === stateVersionAtSend) turnActive = true;
       updateSendAvailability();
     }
   } catch {
