@@ -780,7 +780,10 @@ import {
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
 import { importOwnedWorkspaceDatabase } from "./workspaces/ownedWorkspaceDatabaseImport";
-import { applyDatabaseEdit } from "./workspaces/workspaceDatabase";
+import {
+  applyDatabaseEdit,
+  readDatabaseSnapshotFromBytes,
+} from "./workspaces/workspaceDatabase";
 import {
   readWorkspaceGraph,
   readWorkspaceBacklinks,
@@ -4573,6 +4576,10 @@ async function listOwnedWorkspaceFiles(
 function ownedWorkspaceReads(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
 ) {
+  const fileReader = createOwnedWorkspaceFileReader({
+    workspace,
+    files: shareViewFiles,
+  });
   const mounts = storedShareMounts(workspace);
   const searchSources = shareViewIsPresent(workspace.shareView)
     ? [
@@ -4594,12 +4601,12 @@ function ownedWorkspaceReads(
           prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
         }));
   return createOwnedWorkspaceSdkReadPort({
-    workspaceRoot: workspace.rootPath,
-    readText: (path) => readOwnedWorkspaceText(workspace, path),
+    readText: (path) => fileReader.readText(path),
     listFiles: () => listOwnedWorkspaceFiles(workspace),
-    resolveShare: (path) => shareViewFilesTargetForPath(workspace, path),
-    readShareAsset: (target, path) =>
-      shareViewFiles.read(target, { kind: "asset", path }),
+    readDatabase: async (path) => {
+      const source = await fileReader.readCompleteSource(path);
+      return readDatabaseSnapshotFromBytes(source.path, source.bytes);
+    },
     hasShareState: workspaceHasReceivedShareState(workspace),
     searchSources,
     repairProjection: (target) =>

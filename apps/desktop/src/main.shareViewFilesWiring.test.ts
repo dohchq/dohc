@@ -112,10 +112,13 @@ describe("ShareViewFiles main-process wiring", () => {
     const reads = functionSource("function ownedWorkspaceReads(");
     const invoke = functionSource("async function invokeWorkspacePluginSdk(");
 
-    expect(reads).toContain("readOwnedWorkspaceText(workspace, path)");
+    expect(reads).toContain("fileReader.readText(path)");
     expect(reads).toContain("listOwnedWorkspaceFiles(workspace)");
     expect(reads).toContain("createOwnedWorkspaceSdkReadPort({");
-    expect(reads).toContain("shareViewFiles.read(target, { kind: \"asset\", path })");
+    expect(reads).toContain("fileReader.readCompleteSource(path)");
+    expect(reads).toContain(
+      "readDatabaseSnapshotFromBytes(source.path, source.bytes)",
+    );
     expect(invoke).toContain("reads: ownedWorkspaceReads(workspace)");
 
     const database = handlerSource("readWorkspaceDatabase");

@@ -1,13 +1,7 @@
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import type { WorkspaceTextReadResult } from "./workspaceAssets";
-import {
-  readDatabaseSnapshot,
-  readDatabaseSnapshotFromBytes,
-} from "./workspaceDatabase";
-import type {
-  ShareViewFileReadOutcome,
-  ShareViewFilesTarget,
-} from "./shareViewFiles";
+import type { DatabaseSnapshotView } from "./workspaceDatabase";
+import type { ShareViewFilesTarget } from "./shareViewFiles";
 import type {
   WorkspaceSdkReadPort,
   WorkspaceSdkSearchView,
@@ -21,17 +15,9 @@ export interface OwnedWorkspaceSearchSource {
 }
 
 export interface OwnedWorkspaceSdkReadPortInput {
-  workspaceRoot: string;
   readText(path: string): Promise<WorkspaceTextReadResult>;
   listFiles(): Promise<ListWorkspaceFilesResult>;
-  resolveShare(path: string): Promise<{
-    target: ShareViewFilesTarget;
-    path: string;
-  } | null>;
-  readShareAsset(
-    target: ShareViewFilesTarget,
-    path: string,
-  ): Promise<ShareViewFileReadOutcome>;
+  readDatabase(path: string): Promise<DatabaseSnapshotView>;
   hasShareState: boolean;
   searchSources: readonly OwnedWorkspaceSearchSource[];
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
@@ -89,6 +75,7 @@ export function createOwnedWorkspaceSdkReadPort(
   return {
     readText: input.readText,
     listFiles: input.listFiles,
+    readDatabase: input.readDatabase,
 
     async prepareSearch(requestedPath): Promise<OwnedWorkspaceSearchView> {
       if (!input.hasShareState && requestedPath === undefined) {
@@ -127,18 +114,6 @@ export function createOwnedWorkspaceSdkReadPort(
         ...(includeGlob !== undefined ? { includeGlob } : {}),
         allowPath: (path) => allowed.has(pathKey(path)),
       };
-    },
-
-    async readDatabase(path) {
-      const routed = await input.resolveShare(path);
-      if (routed === null) {
-        return readDatabaseSnapshot(input.workspaceRoot, path);
-      }
-      const read = await input.readShareAsset(routed.target, routed.path);
-      if (read.kind !== "asset") {
-        throw new Error("Shared database read returned an invalid result.");
-      }
-      return readDatabaseSnapshotFromBytes(path, read.bytes);
     },
   };
 }

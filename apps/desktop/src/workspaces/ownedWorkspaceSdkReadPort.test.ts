@@ -12,13 +12,18 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
-import { overlayCanonicalShareMountFiles, resolveShareMountPath } from "./shareMounts";
+import { overlayCanonicalShareMountFiles } from "./shareMounts";
 import type {
-  ShareViewFileReadOutcome,
+  ShareViewFileReadRequest,
   ShareViewFilesTarget,
 } from "./shareViewFiles";
+import {
+  createOwnedWorkspaceFileReader,
+  type OwnedWorkspaceFileReader,
+} from "./ownedWorkspaceFileReader";
 import { createOwnedWorkspaceSdkReadPort } from "./ownedWorkspaceSdkReadPort";
 import { invokeWorkspaceSdkHost } from "./workspaceSdkHost";
+import { PreparedWorkspaceFileRead } from "./workspaceAssets";
 import {
   readDatabaseSnapshot,
   readDatabaseSnapshotFromBytes,
@@ -71,19 +76,26 @@ function shareId(target: ShareViewFilesTarget): string {
   return target.shareId;
 }
 
+function readDatabaseThroughOwner(reader: OwnedWorkspaceFileReader) {
+  return async (path: string) => {
+    const source = await reader.readCompleteSource(path);
+    return readDatabaseSnapshotFromBytes(source.path, source.bytes);
+  };
+}
+
+async function unusedDatabaseRead(): Promise<never> {
+  throw new Error("unused");
+}
+
 describe("createOwnedWorkspaceSdkReadPort", () => {
   it("skips a full owner listing for an unrestricted local search", async () => {
     const listOwnedFiles = vi.fn(async () => ({ files: [] }));
     const port = createOwnedWorkspaceSdkReadPort({
-      workspaceRoot: "unused",
       readText: async () => {
         throw new Error("unused");
       },
       listFiles: listOwnedFiles,
-      resolveShare: async () => null,
-      readShareAsset: async () => {
-        throw new Error("unused");
-      },
+      readDatabase: unusedDatabaseRead,
       hasShareState: false,
       searchSources: [],
       repairProjection: async () => {
@@ -103,15 +115,11 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       folders: ["notes"],
     }));
     const port = createOwnedWorkspaceSdkReadPort({
-      workspaceRoot: "unused",
       readText: async () => {
         throw new Error("unused");
       },
       listFiles: listOwnedFiles,
-      resolveShare: async () => null,
-      readShareAsset: async () => {
-        throw new Error("unused");
-      },
+      readDatabase: unusedDatabaseRead,
       hasShareState: true,
       searchSources: [],
       repairProjection: async () => {
@@ -152,7 +160,6 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
     const repaired: string[] = [];
     const failures: string[] = [];
     const port = createOwnedWorkspaceSdkReadPort({
-      workspaceRoot: root,
       readText: async () => {
         throw new Error("unused");
       },
@@ -162,15 +169,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           mounts,
           listCanonical,
         }),
-      resolveShare: async (path) => {
-        const routed = await resolveShareMountPath(root, path, mounts, true);
-        return routed === null
-          ? null
-          : { target: shareTarget(routed.mount.shareId), path: routed.path };
-      },
-      readShareAsset: async () => {
-        throw new Error("unused");
-      },
+      readDatabase: unusedDatabaseRead,
       hasShareState: true,
       searchSources: mounts.map((mount) => ({
         target: shareTarget(mount.shareId),
@@ -244,7 +243,6 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       folders: [] as string[],
     };
     const port = createOwnedWorkspaceSdkReadPort({
-      workspaceRoot: root,
       readText: async () => {
         throw new Error("unused");
       },
@@ -254,15 +252,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           mounts: [mount],
           listCanonical: async () => canonical,
         }),
-      resolveShare: async (path) => {
-        const routed = await resolveShareMountPath(root, path, [mount], true);
-        return routed === null
-          ? null
-          : { target: shareTarget(mount.shareId), path: routed.path };
-      },
-      readShareAsset: async () => {
-        throw new Error("unused");
-      },
+      readDatabase: unusedDatabaseRead,
       hasShareState: true,
       searchSources: [
         {
@@ -332,30 +322,36 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       ],
     });
 
-    const readShareAsset = vi.fn(
-      async (_target: ShareViewFilesTarget, path: string) => {
-        if (path !== "canonical.sqlite") throw new Error(`Shared file not found: ${path}`);
+    const readOwner = vi.fn(
+      async (
+        _target: ShareViewFilesTarget,
+        request: ShareViewFileReadRequest,
+      ) => {
+        if (request.kind !== "asset" || request.path !== "canonical.sqlite") {
+          throw new Error(`Shared file not found: ${request.path}`);
+        }
         return {
           kind: "asset" as const,
           bytes: canonicalBytes,
           mediaType: "application/octet-stream",
-        } satisfies ShareViewFileReadOutcome;
+        };
       },
     );
     const mount = mounts[0]!;
+    const reader = createOwnedWorkspaceFileReader({
+      workspace: {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        shareMounts: [mount],
+      },
+      files: { read: readOwner },
+    });
     const port = createOwnedWorkspaceSdkReadPort({
-      workspaceRoot: root,
       readText: async () => {
         throw new Error("unused");
       },
       listFiles: () => listFiles(root),
-      resolveShare: async (path) => {
-        const routed = await resolveShareMountPath(root, path, [mount], true);
-        return routed === null
-          ? null
-          : { target: shareTarget(mount.shareId), path: routed.path };
-      },
-      readShareAsset,
+      readDatabase: readDatabaseThroughOwner(reader),
       hasShareState: true,
       searchSources: [
         {
@@ -377,7 +373,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
         path: "shared-with-me/healthy/canonical.sqlite",
       });
       expect(snapshot).toMatchObject({
-        path: "shared-with-me/healthy/canonical.sqlite",
+        path: "canonical.sqlite",
         tables: [
           {
             name: "sentinel",
@@ -385,7 +381,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           },
         ],
       });
-      expect(readShareAsset).toHaveBeenCalledTimes(1);
+      expect(readOwner).toHaveBeenCalledTimes(1);
 
       const aliasSnapshot = await invokeWorkspaceSdkHost(
         context,
@@ -393,7 +389,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
         { path: "shared-alias.sqlite" },
       );
       expect(aliasSnapshot).toMatchObject({
-        path: "shared-alias.sqlite",
+        path: "canonical.sqlite",
         tables: [
           {
             name: "sentinel",
@@ -407,9 +403,86 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           path: "shared-with-me/healthy/recipient-only.sqlite",
         }),
       ).rejects.toThrow(/shared file not found/i);
-      expect(readShareAsset).toHaveBeenCalledTimes(3);
+      expect(readOwner).toHaveBeenCalledTimes(3);
     } finally {
       projection.close();
+    }
+  });
+
+  it("keeps an SDK database read with its prepared local owner after alias retargeting", async () => {
+    const root = await createTestScratch("dohc-sdk-database-retarget-");
+    roots.push(root);
+    const localPath = join(root, "data", "local.sqlite");
+    const cachePath = join(
+      root,
+      "shared-with-me",
+      "owner",
+      "cache.sqlite",
+    );
+    const aliasPath = join(root, "source.sqlite");
+    await mkdir(join(root, "data"), { recursive: true });
+    await mkdir(join(root, "shared-with-me", "owner"), { recursive: true });
+    seedDatabase(localPath, "local owner");
+    seedDatabase(cachePath, "recipient cache");
+    await symlink(localPath, aliasPath, "file");
+
+    const unexpectedOwnerRead = vi.fn(async () => {
+      throw new Error("An unowned projection must not become local bytes.");
+    });
+    const reader = createOwnedWorkspaceFileReader({
+      workspace: {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        shareMounts: [],
+      },
+      files: { read: unexpectedOwnerRead },
+    });
+    const port = createOwnedWorkspaceSdkReadPort({
+      readText: async () => {
+        throw new Error("unused");
+      },
+      listFiles: () => listFiles(root),
+      readDatabase: readDatabaseThroughOwner(reader),
+      hasShareState: true,
+      searchSources: [],
+      repairProjection: async () => {},
+    });
+
+    const originalReadAsset = PreparedWorkspaceFileRead.prototype.readAsset;
+    const retarget = vi
+      .spyOn(PreparedWorkspaceFileRead.prototype, "readAsset")
+      .mockImplementation(async function (this: PreparedWorkspaceFileRead) {
+        await rm(aliasPath);
+        await symlink(cachePath, aliasPath, "file");
+        return originalReadAsset.call(this);
+      });
+    try {
+      await expect(
+        invokeWorkspaceSdkHost(
+          {
+            workspaceRoot: root,
+            writable: false,
+            author: USER_AUTHOR,
+            reads: port,
+          },
+          "databases.read",
+          { path: "source.sqlite" },
+        ),
+      ).resolves.toMatchObject({
+        path: "data/local.sqlite",
+        tables: [
+          {
+            name: "sentinel",
+            rows: [expect.objectContaining({ marker: "local owner" })],
+          },
+        ],
+      });
+      expect(unexpectedOwnerRead).not.toHaveBeenCalled();
+      await expect(reader.readCompleteSource("source.sqlite")).rejects.toThrow(
+        /no share owns it/i,
+      );
+    } finally {
+      retarget.mockRestore();
     }
   });
 
