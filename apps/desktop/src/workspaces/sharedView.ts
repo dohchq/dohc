@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
@@ -309,12 +309,13 @@ export function shareViewIdentitySelector(input: {
 // validated workspace-relative ones, but a defense layer this close to
 // fs writes is cheap and permanent.
 function containedTarget(rootDir: string, relativePath: string): string {
-  const target = resolve(rootDir, relativePath);
-  const root = resolve(rootDir);
-  if (!isInside(root, target)) {
+  if (
+    isAbsolute(relativePath) ||
+    relativePath.split(/[\\/]/u).some((segment) => segment === "..")
+  ) {
     throw new Error(`Shared view path escapes the workspace: ${relativePath}`);
   }
-  return target;
+  return resolve(rootDir, ...relativePath.split("/"));
 }
 
 // Exported so a caller that must ask "what is at this path?" BEFORE it acts

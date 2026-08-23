@@ -670,12 +670,14 @@ export async function screenDroppedPaths(
   if (absolutePaths.length > MAX_IMPORT_PATHS) {
     throw new Error(`Too many files dropped at once (max ${MAX_IMPORT_PATHS})`);
   }
-  const realRoots: string[] = [];
+  const realMetadataRoots: string[] = [];
   for (const root of registeredRoots) {
     try {
-      realRoots.push(await realpath(root));
+      const realRoot = await realpath(root);
+      realMetadataRoots.push(await realpath(join(realRoot, ".dohc")));
     } catch {
-      // A registered-but-deleted workspace can't contain a source.
+      // A deleted workspace or missing metadata directory cannot contain a
+      // metadata source.
     }
   }
   const usable: string[] = [];
@@ -697,9 +699,7 @@ export async function screenDroppedPaths(
     } catch {
       continue;
     }
-    const insideMetadata = realRoots.some((root) =>
-      isInside(join(root, ".dohc"), real),
-    );
+    const insideMetadata = realMetadataRoots.some((root) => isInside(root, real));
     if (insideMetadata) continue;
     usable.push(real);
   }

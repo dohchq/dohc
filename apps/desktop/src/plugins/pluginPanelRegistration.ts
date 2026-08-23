@@ -266,15 +266,19 @@ export function forgetWorkspaceRegistrations(
   registrations.delete(workspaceId);
 }
 
-function workspaceRelativePluginRoot(
+async function workspaceRelativePluginRoot(
   workspaceRoot: string,
   pluginRoot: string,
-): string {
+): Promise<string> {
   if (!isAbsolute(pluginRoot)) return pluginRoot;
-  if (!isInside(workspaceRoot, pluginRoot)) {
+  const [realWorkspaceRoot, realPluginRoot] = await Promise.all([
+    realpath(workspaceRoot),
+    realpath(pluginRoot),
+  ]);
+  if (!isInside(realWorkspaceRoot, realPluginRoot)) {
     throw new Error(`Plugin root escapes the workspace: ${pluginRoot}.`);
   }
-  const resolved = relative(workspaceRoot, pluginRoot);
+  const resolved = relative(realWorkspaceRoot, realPluginRoot);
   if (resolved.length === 0) return ".";
   return resolved.replaceAll("\\", "/");
 }
@@ -285,7 +289,7 @@ async function loadValidatedPluginManifest(input: {
   pluginId: string;
   pluginRegistration?: PluginRegistrationSource;
 }): Promise<{ pluginRoot: string; manifest: DohcPluginManifest }> {
-  const requestedRoot = workspaceRelativePluginRoot(
+  const requestedRoot = await workspaceRelativePluginRoot(
     input.workspaceRoot,
     input.pluginRoot,
   );

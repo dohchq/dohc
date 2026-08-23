@@ -39,6 +39,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
   mkdir,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -50,6 +51,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import {
+  basename,
+  dirname,
   join,
   relative,
   resolve,
@@ -253,14 +256,23 @@ function nodeSqlite(): SqliteModule {
   return requireModule("node:sqlite") as SqliteModule;
 }
 
-export function resolveCliWorkspace(
+export async function resolveCliWorkspace(
   cwd: string,
   workspaces: readonly CliRegistryWorkspace[],
-): CliRegistryWorkspace | null {
-  const absoluteCwd = resolve(cwd);
-  const candidates = workspaces
-    .map((workspace) => ({ workspace, root: resolve(workspace.rootPath) }))
-    .filter(({ root }) => isInside(root, absoluteCwd))
+): Promise<CliRegistryWorkspace | null> {
+  const absoluteCwd = await realpath(resolve(cwd)).catch(() => null);
+  if (absoluteCwd === null) return null;
+  const candidates = (
+    await Promise.all(
+      workspaces.map(async (workspace) => {
+        const root = await realpath(resolve(workspace.rootPath)).catch(() => null);
+        return root === null ? null : { workspace, root };
+      }),
+    )
+  )
+    .filter((candidate): candidate is { workspace: CliRegistryWorkspace; root: string } =>
+      candidate !== null && isInside(candidate.root, absoluteCwd)
+    )
     .sort((left, right) => right.root.length - left.root.length);
   return candidates[0]?.workspace ?? null;
 }
@@ -686,17 +698,36 @@ async function markShownThreadRead(
   });
 }
 
-function workspaceRelativePath(
+async function workspaceRelativePath(
   context: CliWorkspaceContext,
   cwd: string,
   path: string,
-): string {
+): Promise<string> {
   const absolute = resolve(cwd, path);
-  const root = resolve(context.rootPath);
-  if (!isInside(root, absolute)) {
-    throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+  const root = await realpath(resolve(context.rootPath));
+  let canonical: string;
+  try {
+    canonical = await realpath(absolute);
+    if (!isInside(root, canonical)) {
+      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    const realParent = await realpath(dirname(absolute)).catch(() => {
+      throw new CliCommandError(`attachment is not a tracked workspace file: ${path}`);
+    });
+    if (!isInside(root, realParent)) {
+      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+    }
+    const suppliedName = basename(path);
+    const unresolved = join(realParent, basename(absolute));
+    if (basename(unresolved) !== suppliedName) {
+      throw new CliCommandError(`attachment is outside this workspace: ${path}`);
+    }
+    canonical = unresolved;
   }
-  return relative(root, absolute).split(sep).join("/");
+  return relative(root, canonical).split(sep).join("/");
 }
 
 async function resolveAttachments(
@@ -706,7 +737,7 @@ async function resolveAttachments(
 ): Promise<Array<{ objectId: string; pathHint: string }>> {
   return Promise.all(
     paths.map(async (path) => {
-      const pathHint = workspaceRelativePath(context, cwd, path);
+      const pathHint = await workspaceRelativePath(context, cwd, path);
       const objectId = await context.fileObjectIdForPath(pathHint);
       if (!objectId) {
         throw new CliCommandError(
@@ -2297,7 +2328,7 @@ async function workspaceContextForRequest(
   request: CliRequest,
   options: CliServerOptions,
 ): Promise<CliWorkspaceContext> {
-  const workspace = resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
+  const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
   const writeRequest =
     request.verb === "post" ||

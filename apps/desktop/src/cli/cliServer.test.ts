@@ -3260,21 +3260,37 @@ describe("CLI socket server", () => {
 });
 
 describe("resolveCliWorkspace", () => {
-  it("resolves a cwd under a '..'-prefixed directory NAME inside the root", () => {
+  it("resolves a cwd under a '..'-prefixed directory NAME inside the root", async () => {
     // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
+    const scratch = await createTestScratch("dohc-cli-containment-");
     const workspace: CliRegistryWorkspace = {
       workspaceId: "ws-1",
-      rootPath: join(process.cwd(), "cli-root"),
+      rootPath: join(scratch, "cli-root"),
     };
     const cwd = join(workspace.rootPath, "..cache", "deep");
-    expect(resolveCliWorkspace(cwd, [workspace])).toBe(workspace);
+    await mkdir(cwd, { recursive: true });
+    try {
+      await expect(resolveCliWorkspace(cwd, [workspace])).resolves.toBe(workspace);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 
-  it("does not resolve a sibling that only shares the root as a name prefix", () => {
+  it("does not resolve a sibling that only shares the root as a name prefix", async () => {
+    const scratch = await createTestScratch("dohc-cli-sibling-");
     const workspace: CliRegistryWorkspace = {
       workspaceId: "ws-1",
-      rootPath: join(process.cwd(), "cli-root"),
+      rootPath: join(scratch, "cli-root"),
     };
-    expect(resolveCliWorkspace(`${workspace.rootPath}-sibling`, [workspace])).toBeNull();
+    const sibling = `${workspace.rootPath}-sibling`;
+    await Promise.all([
+      mkdir(workspace.rootPath, { recursive: true }),
+      mkdir(sibling, { recursive: true }),
+    ]);
+    try {
+      await expect(resolveCliWorkspace(sibling, [workspace])).resolves.toBeNull();
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 });

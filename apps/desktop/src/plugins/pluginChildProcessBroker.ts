@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, normalize, resolve, sep } from "node:path";
 import {
   PLUGIN_CHILD_PROCESS_METHODS,
   type PluginChildProcessExit,
@@ -1253,19 +1253,19 @@ export class PluginChildProcessBroker {
     rootLabel: string,
   ): Promise<string> {
     const candidate = resolve(root, requested);
-    if (!isInside(root, candidate)) {
-      throw new Error(
-        `${method} ${label} "${requested}" escapes ${rootLabel} "${root}".`,
-      );
-    }
     const contained = await realpath(candidate).catch((error: unknown) => {
       throw new Error(
         `${method} ${label} "${requested}" is unavailable: ${errorMessage(error)}`,
       );
     });
     if (!isInside(root, contained)) {
+      const normalizedRequested = normalize(requested);
+      const lexicalEscape = normalizedRequested === ".." ||
+        normalizedRequested.startsWith(`..${sep}`);
       throw new Error(
-        `${method} ${label} "${requested}" resolves outside ${rootLabel} "${root}" to "${contained}".`,
+        lexicalEscape
+          ? `${method} ${label} "${requested}" escapes ${rootLabel} "${root}".`
+          : `${method} ${label} "${requested}" resolves outside ${rootLabel} "${root}" to "${contained}".`,
       );
     }
     return contained;

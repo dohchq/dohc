@@ -38,15 +38,22 @@ describe("isInside", () => {
     expect(isInside(root, join(root, "..cache", "server.mjs"))).toBe(true);
   });
 
+  // MUTATION (case-fold): restore case folding and this pin goes red.
+  it("rejects a case-distinct POSIX sibling", () => {
+    expect(isInside("/work/WS", "/work/ws/file")).toBe(false);
+    expect(isInside("/work/WS", "/work/WS/file")).toBe(true);
+  });
+
   if (process.platform === "win32") {
-    it("rejects a child on another drive (relative() yields an absolute path)", () => {
+    it("rejects a child on another drive", () => {
       expect(isInside("C:\\ws", "D:\\evil")).toBe(false);
       expect(isInside("C:\\ws", "D:\\evil\\x")).toBe(false);
     });
 
-    it("folds case like the filesystem does", () => {
-      expect(isInside(root.toUpperCase(), join(root, "child"))).toBe(true);
-      expect(isInside(root.toUpperCase(), root.toLowerCase())).toBe(true);
+    // MUTATION (case-fold): restore case folding and this pin goes red.
+    it("rejects a case-distinct Windows sibling", () => {
+      expect(isInside("C:\\work\\WS", "C:\\work\\ws\\file")).toBe(false);
+      expect(isInside("C:\\work\\WS", "C:\\work\\WS\\file")).toBe(true);
     });
   }
 });

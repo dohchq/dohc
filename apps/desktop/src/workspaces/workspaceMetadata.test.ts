@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -29,18 +29,16 @@ describe("resolveWorkspaceMetadataDir", () => {
   });
 
   if (process.platform === "win32") {
-    it("accepts a metadata dir whose resolution differs from the spelling only by case", async () => {
-      // A resolution that names the same on-disk directory in different case
-      // is the same directory. The pre-consolidation guard compared it with a
-      // case-sensitive prefix and refused it; the canonical isInside folds
-      // case the way the filesystem does.
+    it("refuses a metadata dir that resolves under a case-distinct sibling", async () => {
+      // Exact canonical comparison puts a case-distinct sibling outside the
+      // workspace. The old pin asserted folding, which was wrong: two
+      // realpath calls for the same on-disk entry cannot return different case.
       const root = await createTestScratch("dohc-metadata-case-");
+      const sibling = join(dirname(root), basename(root).toUpperCase());
       realpathOverride.current = (path) =>
-        path.endsWith(".dohc") ? Promise.resolve(path.toLowerCase()) : null;
+        path.endsWith(".dohc") ? Promise.resolve(join(sibling, ".dohc")) : null;
       try {
-        await expect(resolveWorkspaceMetadataDir(root)).resolves.toBe(
-          join(root, ".dohc"),
-        );
+        await expect(resolveWorkspaceMetadataDir(root)).rejects.toThrow(/outside/i);
       } finally {
         realpathOverride.current = null;
       }
