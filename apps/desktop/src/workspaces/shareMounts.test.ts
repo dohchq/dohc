@@ -23,6 +23,7 @@ import {
   mountStoreWorkspaceIdFor,
   removeMountFolder,
   removeShareMountProjection,
+  reservedShareMountLabels,
   refuseMoveAcrossShareMount,
   resolveShareMountPath,
   resolveShareProjectionPath,
@@ -229,6 +230,23 @@ describe("mount labels", () => {
     // classifier would suppress (prod.env -> secret).
     expect(mountLabelFor("prod.env@example.com", [])).toBe("prod-env");
     expect(mountLabelFor(".env@example.com", [])).toBe("env");
+  });
+
+  it("reserves labels held by duplicate damaged records", () => {
+    const damaged = [
+      { shareId: SHARE_ID, label: "alex" },
+      { shareId: SHARE_ID, label: "sam" },
+      { shareId: "missing-label", label: null },
+    ];
+    expect(usableShareMountRecord(damaged, damaged[0]!)).toBe(false);
+    expect(usableShareMountRecord(damaged, damaged[1]!)).toBe(false);
+
+    expect(
+      mountLabelFor(
+        "alex@example.com",
+        reservedShareMountLabels(damaged),
+      ),
+    ).toBe("alex (2)");
   });
 
   it("refuses traversal, separators, reserved and secret-shaped labels", () => {

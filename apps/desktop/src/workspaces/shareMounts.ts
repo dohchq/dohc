@@ -114,6 +114,18 @@ function storedMountLabel(mount: unknown): string | null {
   return typeof label === "string" ? label : null;
 }
 
+// Allocation reserves every stored string, not only records healthy enough
+// to use. A damaged record still claims its spelling until it is removed;
+// reusing that label would make two registry records name one projection.
+export function reservedShareMountLabels<Mount>(
+  mounts: readonly Mount[],
+): string[] {
+  return mounts.flatMap((mount) => {
+    const label = storedMountLabel(mount);
+    return label === null ? [] : [label];
+  });
+}
+
 // Mount labels are allocated case-insensitively on every platform. Keep the
 // authority check equally conservative: default macOS filesystems alias case
 // just like Windows, and a hand-edited registry must not let two owners claim

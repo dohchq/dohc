@@ -527,6 +527,7 @@ import {
   refuseMoveAcrossShareMount,
   removeMountFolder,
   removeShareMountProjection,
+  reservedShareMountLabels,
   resolveShareMountPath,
   resolveShareProjectionPath,
   shareMountRecordsForId,
@@ -7604,11 +7605,7 @@ function registerIpcHandlers(
     const mount = {
       shareId: parsed.shareId,
       label: mountLabelFor(info.granterEmail, [
-        ...existing
-          .filter((candidate) =>
-            usableShareMountRecord(existing, candidate),
-          )
-          .map((candidate) => candidate.label),
+        ...reservedShareMountLabels(existing),
         ...onDisk,
       ]),
       granterEmail: info.granterEmail,
