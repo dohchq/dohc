@@ -4869,6 +4869,27 @@ async function ensureAllOwnedProjectionsCurrent(
   }
 }
 
+function searchPathKey(path: string): string {
+  return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
+async function shareSearchAllowPath(
+  sources: readonly {
+    target: ShareViewFilesTarget;
+    prefix?: string;
+  }[],
+): Promise<(path: string) => boolean> {
+  const allowedPaths = new Set<string>();
+  for (const { target, prefix } of sources) {
+    const listed = await shareViewFiles.list(target);
+    for (const file of listed.files) {
+      const path = prefix ? `${prefix}/${file.path}` : file.path;
+      allowedPaths.add(searchPathKey(path));
+    }
+  }
+  return (path) => allowedPaths.has(searchPathKey(path));
+}
+
 async function syncStatusWithOwnedProjection(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
   status: SyncStatusResult,
@@ -11676,6 +11697,17 @@ function registerIpcHandlers(
       latestSearchIdBySender.get(sender.id) === input.searchId;
     await ensureAllOwnedProjectionsCurrent(workspace);
     if (!isCurrentSearch()) return;
+    const standaloneAllowPath = shareViewIsPresent(workspace.shareView)
+      ? await shareSearchAllowPath([
+          {
+            target: {
+              kind: "standalone",
+              workspaceId: workspace.workspaceId,
+            },
+          },
+        ])
+      : undefined;
+    if (!isCurrentSearch()) return;
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (capture) {
       // Read-your-writes: the batch whose capture triggered this search must
@@ -11741,8 +11773,23 @@ function registerIpcHandlers(
         // capture ignores mounts), so mounted content searches through the
         // rg path, streamed AFTER the engine results under the SAME
         // searchId. Skipped when the workspace has no mounts.
-        const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+        const mounts = (
+          findWorkspace(workspace.workspaceId)?.shareMounts ?? []
+        ).filter((mount) => validMountLabel(mount.label));
         const searchMounts = mounts.length > 0;
+        const mountAllowPath = searchMounts
+          ? await shareSearchAllowPath(
+              mounts.map((mount) => ({
+                target: {
+                  kind: "mount" as const,
+                  workspaceId: workspace.workspaceId,
+                  shareId: mount.shareId,
+                },
+                prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
+              })),
+            )
+          : undefined;
+        if (!isCurrentSearch()) return;
         if (isCurrentSearch()) {
           sender.send(
             CHANNELS.searchResults,
@@ -11814,7 +11861,10 @@ function registerIpcHandlers(
                 console.error("[desktop] mount search batch dropped:", error);
               }
             },
-            isCurrentSearch,
+            {
+              isCurrent: isCurrentSearch,
+              allowPath: mountAllowPath,
+            },
           );
         }
       }
@@ -11848,7 +11898,10 @@ function registerIpcHandlers(
           // batch still arrives and settles the renderer.
         }
       },
-      isCurrentSearch,
+      {
+        isCurrent: isCurrentSearch,
+        allowPath: standaloneAllowPath,
+      },
     );
   });
 

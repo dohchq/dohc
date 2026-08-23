@@ -67,4 +67,42 @@ describe("ShareViewFiles main-process wiring", () => {
     );
     expect(all).toContain("assertOwnedProjectionRepair(repaired);");
   });
+
+  it("limits received-share ripgrep passes to canonical share files", () => {
+    const allowance = functionSource("async function shareSearchAllowPath(");
+    const handler = handlerSource("searchWorkspace");
+    const repairedAt = handler.indexOf(
+      "await ensureAllOwnedProjectionsCurrent(workspace);",
+    );
+    const standaloneAllowanceAt = handler.indexOf(
+      "await shareSearchAllowPath([",
+      repairedAt,
+    );
+    const mountStartAt = handler.indexOf("await searchRegistry.startSearch(");
+    const fallbackStartAt = handler.indexOf(
+      "await searchRegistry.startSearch(",
+      mountStartAt + 1,
+    );
+    const mountPredicateAt = handler.indexOf(
+      "allowPath: mountAllowPath,",
+      mountStartAt,
+    );
+    const standalonePredicateAt = handler.indexOf(
+      "allowPath: standaloneAllowPath,",
+      fallbackStartAt,
+    );
+
+    expect(allowance).toContain("await shareViewFiles.list(target)");
+    expect(allowance).toContain("allowedPaths.add(searchPathKey(path))");
+    expect(repairedAt).toBeGreaterThan(-1);
+    expect(standaloneAllowanceAt).toBeGreaterThan(repairedAt);
+    expect(handler).toContain(
+      "prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`",
+    );
+    expect(mountStartAt).toBeGreaterThan(standaloneAllowanceAt);
+    expect(fallbackStartAt).toBeGreaterThan(mountStartAt);
+    expect(mountPredicateAt).toBeGreaterThan(mountStartAt);
+    expect(mountPredicateAt).toBeLessThan(fallbackStartAt);
+    expect(standalonePredicateAt).toBeGreaterThan(fallbackStartAt);
+  });
 });

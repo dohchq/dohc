@@ -12,7 +12,8 @@ import {
   toSearchEntries,
   type SearchBatch,
   type SearchHandle,
- mountScopedIncludeGlob,} from "./workspaceSearch";
+  mountScopedIncludeGlob,
+} from "./workspaceSearch";
 import { createTestScratch } from "./testTemp";
 
 describe("buildRipgrepArgs", () => {
@@ -246,6 +247,7 @@ describe("startRipgrepSearch (real rg)", () => {
   function runSearch(
     root: string,
     request: Parameters<typeof buildRipgrepArgs>[0],
+    allowPath?: (path: string) => boolean,
   ): Promise<SearchBatch[]> {
     return new Promise((resolve) => {
       const batches: SearchBatch[] = [];
@@ -254,6 +256,7 @@ describe("startRipgrepSearch (real rg)", () => {
         realRoot: root,
         searchId: "test-1",
         request,
+        allowPath,
         onBatch: (batch) => {
           batches.push(batch);
           if (batch.done) resolve(batches);
@@ -359,6 +362,31 @@ describe("startRipgrepSearch (real rg)", () => {
     expect(batches.at(-1)!.done).toBe(true);
   });
 
+  it("filters disallowed paths before they can consume the total-match cap", async () => {
+    const root = await makeRoot();
+    const body = Array.from(
+      { length: 300 },
+      (_, i) => `line ${i} capmatch`,
+    ).join("\n");
+    await Promise.all(
+      Array.from({ length: 15 }, (_, i) =>
+        writeFile(join(root, `recipient-${i}.md`), body),
+      ),
+    );
+    await writeFile(join(root, "canonical.md"), "one capmatch\n");
+
+    const batches = await runSearch(
+      root,
+      { query: "capmatch" },
+      (path) => path === "canonical.md",
+    );
+
+    expect(
+      batches.flatMap((batch) => batch.entries).map((entry) => entry.path),
+    ).toEqual(["canonical.md"]);
+    expect(batches.at(-1)).toMatchObject({ done: true, limitHit: false });
+  });
+
   it("streams results in bounded batches (entries cap per batch)", async () => {
     const root = await makeRoot();
     const body = Array.from({ length: 120 }, (_, i) => `row ${i} streamtok`).join("\n");
@@ -404,6 +432,34 @@ describe("createSearchRegistry", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("passes a path allowance to the local runner", async () => {
+    let received: ((path: string) => boolean) | undefined;
+    const registry = createSearchRegistry({
+      rgPath: "/unused",
+      start: ((options: {
+        searchId: string;
+        allowPath?: (path: string) => boolean;
+      }) => {
+        received = options.allowPath;
+        return { searchId: options.searchId, kill: () => {} };
+      }) as never,
+    });
+    const root = await createTestScratch("dohc-reg-");
+    const allowPath = (path: string) => path === "canonical.md";
+
+    await registry.startSearch(
+      1,
+      root,
+      "s1",
+      { query: "a" },
+      () => {},
+      { allowPath },
+    );
+
+    expect(received).toBe(allowPath);
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("does not replace the active search when startup became stale", async () => {
     const killed: string[] = [];
     const started: string[] = [];
@@ -425,7 +481,7 @@ describe("createSearchRegistry", () => {
       "stale",
       { query: "b" },
       () => {},
-      () => false,
+      { isCurrent: () => false },
     );
     expect(started).toEqual(["current"]);
     expect(killed).toEqual([]);
