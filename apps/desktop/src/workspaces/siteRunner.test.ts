@@ -1297,9 +1297,13 @@ describe("buildSite", () => {
       // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
       // real attempts to observe the descendant Start-Process just created,
       // instead of racing the wrapper's own spawn with a single shot.
+      // PROCESS_DEATH_TIMEOUT_MS gives real headroom on top: stopChild
+      // already awaits taskkill to completion before buildSite returns, but
+      // taskkill itself is a real spawned process, and an already-loaded
+      // 8-worker suite can delay it.
       const CAPTURE_INTERVAL_MS = 100;
       const WRAPPER_LIFETIME_MS = 2_000;
-      const PROCESS_DEATH_TIMEOUT_MS = 5_000;
+      const PROCESS_DEATH_TIMEOUT_MS = 8_000;
       const BUILD_TIMEOUT_MS = 15_000;
       await mkdir(join(root, "site"), { recursive: true });
       const script = [
