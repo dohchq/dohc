@@ -4605,7 +4605,7 @@ function ownedWorkspaceReads(
     listFiles: () => listOwnedWorkspaceFiles(workspace),
     readDatabase: async (path) => {
       const source = await fileReader.readCompleteSource(path);
-      return readDatabaseSnapshotFromBytes(source.path, source.bytes);
+      return readDatabaseSnapshotFromBytes(path, source.bytes);
     },
     hasShareState: workspaceHasReceivedShareState(workspace),
     searchSources,

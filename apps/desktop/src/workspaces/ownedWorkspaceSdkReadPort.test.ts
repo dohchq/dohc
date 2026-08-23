@@ -79,7 +79,7 @@ function shareId(target: ShareViewFilesTarget): string {
 function readDatabaseThroughOwner(reader: OwnedWorkspaceFileReader) {
   return async (path: string) => {
     const source = await reader.readCompleteSource(path);
-    return readDatabaseSnapshotFromBytes(source.path, source.bytes);
+    return readDatabaseSnapshotFromBytes(path, source.bytes);
   };
 }
 
@@ -373,7 +373,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
         path: "shared-with-me/healthy/canonical.sqlite",
       });
       expect(snapshot).toMatchObject({
-        path: "canonical.sqlite",
+        path: "shared-with-me/healthy/canonical.sqlite",
         tables: [
           {
             name: "sentinel",
@@ -389,7 +389,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
         { path: "shared-alias.sqlite" },
       );
       expect(aliasSnapshot).toMatchObject({
-        path: "canonical.sqlite",
+        path: "shared-alias.sqlite",
         tables: [
           {
             name: "sentinel",
@@ -469,7 +469,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           { path: "source.sqlite" },
         ),
       ).resolves.toMatchObject({
-        path: "data/local.sqlite",
+        path: "source.sqlite",
         tables: [
           {
             name: "sentinel",

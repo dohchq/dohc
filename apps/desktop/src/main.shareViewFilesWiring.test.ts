@@ -117,7 +117,7 @@ describe("ShareViewFiles main-process wiring", () => {
     expect(reads).toContain("createOwnedWorkspaceSdkReadPort({");
     expect(reads).toContain("fileReader.readCompleteSource(path)");
     expect(reads).toContain(
-      "readDatabaseSnapshotFromBytes(source.path, source.bytes)",
+      "readDatabaseSnapshotFromBytes(path, source.bytes)",
     );
     expect(invoke).toContain("reads: ownedWorkspaceReads(workspace)");
 
