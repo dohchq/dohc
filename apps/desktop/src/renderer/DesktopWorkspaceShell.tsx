@@ -2594,7 +2594,7 @@ export function DesktopWorkspaceShell(props: {
   }
   useEffect(() => {
     if (captureDecidedFor !== workspaceId || syncStatus === null) return;
-    const next = syncStatus.liveSessionsGeneration ?? 0;
+    const next = syncStatus.liveSessionsGeneration;
     const previous = liveSessionsGenerationRef.current.generation;
     liveSessionsGenerationRef.current.generation = next;
     if (previous !== null && previous !== next) {

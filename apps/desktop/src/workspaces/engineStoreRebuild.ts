@@ -209,6 +209,21 @@ async function writeMoveManifest(
   await fileSystem.syncDirectory(backupDir);
 }
 
+async function assertNoUnlistedStoreFiles(
+  engineDir: string,
+  manifest: EngineStoreMoveManifest,
+  fileSystem: EngineStoreMoveFileSystem,
+): Promise<void> {
+  const listedNames = new Set(manifest.files.map(({ name }) => name));
+  for (const name of ENGINE_STORE_FILES) {
+    if (listedNames.has(name)) continue;
+    const path = join(engineDir, name);
+    if ((await lstatIfExists(path, fileSystem)) !== null) {
+      throw new EngineStoreManifestDriftError(path);
+    }
+  }
+}
+
 async function completeManifestMove(
   engineDir: string,
   backupDir: string,
@@ -218,6 +233,7 @@ async function completeManifestMove(
   fileSystem: EngineStoreMoveFileSystem,
   onMoved?: () => void,
 ): Promise<void> {
+  await assertNoUnlistedStoreFiles(engineDir, manifest, fileSystem);
   for (const name of ENGINE_STORE_FILES) {
     const entry = manifest.files.find((candidate) => candidate.name === name);
     if (!entry) continue;
@@ -254,6 +270,7 @@ async function completeManifestMove(
   }
   await fileSystem.syncDirectory(backupDir);
   await fileSystem.syncDirectory(engineDir);
+  await assertNoUnlistedStoreFiles(engineDir, manifest, fileSystem);
   await fileSystem.rename(inProgressMarker, completeMarker);
   await fileSystem.syncDirectory(backupDir);
 }

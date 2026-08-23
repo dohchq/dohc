@@ -7,6 +7,7 @@ import {
   rename,
   stat,
   symlink,
+  unlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -599,6 +600,62 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
+  it("releases a fresh reservation when an unlisted sidecar appears before the first store rename", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const database = join(engineDir, "engine.db");
+    const sidecar = join(engineDir, "engine.db-wal");
+    let sidecarCreated = false;
+
+    await expect(
+      moveEngineStoreAside(root, {
+        syncDirectory: async (path) => {
+          if (path !== backupDir || sidecarCreated) return;
+          sidecarCreated = true;
+          await writeFile(sidecar, "new-wal");
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "EngineStoreManifestDriftError",
+      message: expect.stringContaining(sidecar),
+    });
+
+    expect(await readFile(database, "utf8")).toBe("refused-store");
+    expect(await readFile(sidecar, "utf8")).toBe("new-wal");
+    await expect(readdir(backupDir)).rejects.toMatchObject({ code: "ENOENT" });
+
+    await unlink(sidecar);
+    await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+    ]);
+  });
+
+  it("keeps a fresh partial move when an unlisted sidecar appears before completion", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const sidecar = join(engineDir, "engine.db-wal");
+    let backupSyncs = 0;
+
+    await expect(
+      moveEngineStoreAside(root, {
+        syncDirectory: async (path) => {
+          if (path !== backupDir) return;
+          backupSyncs += 1;
+          if (backupSyncs === 2) await writeFile(sidecar, "new-wal");
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "EngineStoreManifestDriftError",
+      message: expect.stringContaining(sidecar),
+    });
+
+    expect(await readFile(sidecar, "utf8")).toBe("new-wal");
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
+      "engine.db",
+    ]);
+  });
+
   it("keeps a partial backup when a resumed move fails", async () => {
     await seedStore({
       "engine.db": "refused-store",
@@ -683,20 +740,25 @@ describe("moveEngineStoreAside", () => {
     });
   });
 
-  it("leaves a new sidecar omitted from the manifest at the live location", async () => {
+  it("refuses to complete recovery around a sidecar omitted from the manifest", async () => {
     await seedStore({ "engine.db": "refused-store" });
     await mkdir(backupDir);
     await writeMoveManifest(["engine.db"]);
     await rename(join(engineDir, "engine.db"), join(backupDir, "engine.db"));
-    await writeFile(join(engineDir, "engine.db-wal"), "new-wal");
+    const sidecar = join(engineDir, "engine.db-wal");
+    await writeFile(sidecar, "new-wal");
 
-    await completePendingEngineStoreMove(root);
+    await expect(completePendingEngineStoreMove(root)).rejects.toMatchObject({
+      name: "EngineStoreRecoveryFailedError",
+      cause: expect.objectContaining({
+        name: "EngineStoreManifestDriftError",
+        message: expect.stringContaining(sidecar),
+      }),
+    });
 
-    expect(await readFile(join(engineDir, "engine.db-wal"), "utf8")).toBe(
-      "new-wal",
-    );
+    expect(await readFile(sidecar, "utf8")).toBe("new-wal");
     expect((await readdir(backupDir)).sort()).toEqual([
-      "MOVE_COMPLETE",
+      "MOVE_IN_PROGRESS",
       "engine.db",
     ]);
   });

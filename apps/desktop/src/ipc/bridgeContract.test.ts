@@ -1830,6 +1830,7 @@ describe("sync status IPC contract (#505, #540)", () => {
       lastSyncedAtMs: null,
       historyRecordingUnavailable: false,
       historyShareView: false,
+      liveSessionsGeneration: 0,
       sharingDeclined: [
         {
           path: "notes/large.md",
@@ -1850,7 +1851,9 @@ describe("sync status IPC contract (#505, #540)", () => {
       SyncStatusResult.safeParse({ ...status, liveSessionsGeneration: -1 })
         .success,
     ).toBe(false);
-    expect(SyncStatusResult.safeParse(status).success).toBe(true);
+    const { liveSessionsGeneration: _generationDropped, ...withoutGeneration } =
+      status;
+    expect(SyncStatusResult.safeParse(withoutGeneration).success).toBe(false);
     // The recorder cause fields are required because omission would claim the
     // user chose the failure or that this is not a shared view.
     const { historyRecordingUnavailable: _dropped, ...withoutFailureCause } = status;

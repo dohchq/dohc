@@ -137,6 +137,7 @@ const SYNC_STATUS: SyncStatusResult = {
   // and whether the engine refused the workspace's data store.
   historyRecordingUnavailable: false,
   historyShareView: false,
+  liveSessionsGeneration: 0,
 };
 
 const IDLE_UPDATE_STATE: UpdateStateEvent = {
@@ -12752,6 +12753,7 @@ describe("version-compare off copy", () => {
     state: "synced" as const,
     pendingChangeCount: 0,
     lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
     historyRecordingUnavailable: false,
     historyShareView: false,
   };
@@ -12815,6 +12817,7 @@ describe("chats off copy", () => {
     state: "synced" as const,
     pendingChangeCount: 0,
     lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
     historyRecordingUnavailable: false,
     historyShareView: false,
   };
