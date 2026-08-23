@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import { createTestScratch } from "./testTemp";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
@@ -3123,6 +3124,7 @@ describe("workspaceEngineCapture agent attribution", () => {
       {
         pluginId: "hello-plugin",
         workspaceRoot: root,
+        reads: localWorkspaceSdkReads(root),
         spawnId,
         requestPath: "plugin-process",
         isWritable: () => true,

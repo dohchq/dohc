@@ -5,6 +5,7 @@ import { databaseOpLogPath } from "@dohc/workspace-core";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "../workspaces/testTemp";
+import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import {
   invokePluginSdkHost,
   type PluginSdkHostContext,
@@ -55,6 +56,7 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
     requestPath: "plugin-process",
     isWritable: () => true,
     writeAvailable: async () => true,
+    reads: localWorkspaceSdkReads(root),
     signal: controller.signal,
     invokeChildProcess: vi.fn(async () => ({})),
     writeAuthoredText: vi.fn<PluginSdkHostContext["writeAuthoredText"]>(

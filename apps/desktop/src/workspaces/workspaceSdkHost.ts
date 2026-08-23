@@ -8,10 +8,9 @@ import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-document
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { rgPath } from "@vscode/ripgrep";
 import { basename, join } from "node:path";
-import { realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import {
   createWorkspaceTextExclusive,
-  readWorkspaceText,
   restoreWorkspaceText,
   type WorkspaceTextReadResult,
 } from "./workspaceAssets";
@@ -21,7 +20,7 @@ import {
   type DatabaseEdit,
   type DatabaseSnapshotView,
 } from "./workspaceDatabase";
-import { listFiles } from "./workspaceFiles";
+import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import {
   SEARCH_MAX_TOTAL_MATCHES,
   startRipgrepSearch,
@@ -49,7 +48,9 @@ export interface WorkspaceSdkHostContext {
   // today's behavior.
   now?: () => number;
   createId?: () => string;
-  reads?: WorkspaceSdkReadPort;
+  // Host-derived owner authority. Required so a caller cannot regain raw-disk
+  // reads by omitting the adapter.
+  reads: WorkspaceSdkReadPort;
 }
 
 export type SdkSearchStarter = typeof startRipgrepSearch;
@@ -57,7 +58,7 @@ export type SdkSearchStarter = typeof startRipgrepSearch;
 export interface WorkspaceSdkReadPort {
   readText(path: string): Promise<WorkspaceTextReadResult>;
   listFiles(): Promise<{
-    files: Awaited<ReturnType<typeof listFiles>>["files"];
+    files: ListWorkspaceFilesResult["files"];
     folders?: readonly string[];
   }>;
   prepareSearch(path?: string): Promise<WorkspaceSdkSearchView>;
@@ -153,9 +154,7 @@ async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknow
   const requestedRoot =
     input.path === undefined || input.path === "." ? "." : sdkWorkspacePath(input.path);
   const recursive = input.recursive !== false;
-  const listed = context.reads
-    ? await context.reads.listFiles()
-    : await listFiles(context.workspaceRoot);
+  const listed = await context.reads.listFiles();
   const files = [];
   for (const entry of listed.files) {
     const path = entry.path;
@@ -171,20 +170,6 @@ async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknow
   return files;
 }
 
-async function requestedIncludeGlob(
-  workspaceRoot: string,
-  requestedPath: string | undefined,
-): Promise<string | undefined> {
-  if (requestedPath === undefined) return undefined;
-  const literalGlob = requestedPath.replace(/([*?[\]{}!\\])/g, "\\$1");
-  try {
-    if ((await stat(join(workspaceRoot, requestedPath))).isFile()) return literalGlob;
-  } catch {
-    // A missing path simply produces no rg matches through the directory glob.
-  }
-  return `${literalGlob}/**`;
-}
-
 async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: unknown) {
   const input = record(params);
   const query = text(input.query, "query", 2_000);
@@ -192,15 +177,7 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
     input.path === undefined || input.path === "."
       ? undefined
       : sdkWorkspacePath(input.path);
-  const searchView = context.reads
-    ? await context.reads.prepareSearch(requestedPath)
-    : {
-        includeGlob: await requestedIncludeGlob(
-          context.workspaceRoot,
-          requestedPath,
-        ),
-        allowPath: undefined,
-      };
+  const searchView = await context.reads.prepareSearch(requestedPath);
   const requestedLimit =
     typeof input.limit === "number" && Number.isInteger(input.limit)
       ? input.limit
@@ -303,9 +280,7 @@ export async function invokeWorkspaceSdkHost(
     case "files.read": {
       const input = record(params);
       const path = sdkWorkspacePath(input.path);
-      return context.reads
-        ? context.reads.readText(path)
-        : readWorkspaceText(context.workspaceRoot, path);
+      return context.reads.readText(path);
     }
     case "files.list":
       return listVisibleFiles(context, params);
@@ -350,9 +325,7 @@ export async function invokeWorkspaceSdkHost(
         );
       }
       const path = sdkWorkspacePath(input.path);
-      return context.reads
-        ? context.reads.readDatabase(path)
-        : readDatabaseSnapshot(context.workspaceRoot, path);
+      return context.reads.readDatabase(path);
     }
     case "databases.edit": {
       if (!context.writable) {

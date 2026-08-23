@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
+import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import { createTestScratch } from "../workspaces/testTemp";
 import {
@@ -427,6 +428,7 @@ describe("the plugin SDK host's files.watch route", () => {
     return {
       pluginId: "sites",
       workspaceRoot: "C:/workspace",
+      reads: localWorkspaceSdkReads("C:/workspace"),
       spawnId: "spawn-1",
       requestPath: "plugin-process",
       isWritable: () => true,
@@ -652,6 +654,7 @@ async function startWatchingPlugin(prefix: string): Promise<WatchingPlugin> {
         {
           pluginId,
           workspaceRoot: root,
+          reads: localWorkspaceSdkReads(root),
           spawnId,
           requestPath: "plugin-process",
           isWritable: () => true,
