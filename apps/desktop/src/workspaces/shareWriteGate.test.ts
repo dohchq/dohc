@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { shareViewTakesLocalWrites, workspaceWriteRefusal } from "./shareWriteGate";
+import {
+  SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
+  shareViewTakesLocalWrites,
+  workspaceWriteRefusal,
+} from "./shareWriteGate";
 
 // A registry entry's share-view marker, in the shape the registry stores it:
 // the pinned grant under `grantedSelector`, which is where the level lives.
@@ -56,6 +60,12 @@ describe("shareViewTakesLocalWrites", () => {
 // share view admits is routed to the engine through `ShareViewFiles.change`,
 // which asks `shareViewTakesLocalWrites` instead.
 describe("workspaceWriteRefusal", () => {
+  it("gives the action that can represent a folder in a shared view", () => {
+    expect(SHARE_VIEW_EMPTY_FOLDER_REFUSAL).toBe(
+      "A shared view can't hold an empty folder. Make a file in the folder you want.",
+    );
+  });
+
   it("lets an ordinary workspace write", () => {
     expect(workspaceWriteRefusal(undefined)).toBeNull();
   });

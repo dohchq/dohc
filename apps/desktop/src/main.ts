@@ -406,6 +406,7 @@ import {
 } from "./workspaces/shareViewMarker";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaces/workspaceTextLimits";
 import {
+  SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
   shareViewTakesLocalWrites,
   workspaceWriteRefusal,
 } from "./workspaces/shareWriteGate";
@@ -5413,6 +5414,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CreateWorkspaceFolderPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    if (sharedViewOf(workspace.workspaceId) !== null) {
+      throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
+    }
     assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
       const path = await createFolder(workspace.rootPath, input.relativePath);

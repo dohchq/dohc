@@ -411,7 +411,6 @@ interface CanonicalFileState {
   objectId: string;
   contentKind: "text" | "binary";
   sha256: string | null;
-  latestMomentId: string;
 }
 
 type CanonicalSnapshot = Map<string, CanonicalFileState>;
@@ -441,7 +440,6 @@ async function canonicalSnapshot(
           objectId: file.objectId,
           contentKind: file.contentKind === "binary" ? "binary" : "text",
           sha256: file.sha256 ?? null,
-          latestMomentId: file.latestMomentId,
         },
       ],
     ]);
@@ -457,7 +455,6 @@ async function canonicalSnapshot(
         objectId: file.objectId,
         contentKind: file.contentKind,
         sha256: file.sha256,
-        latestMomentId: file.latestMomentId,
       },
     ]),
   );
@@ -473,8 +470,7 @@ function sameCanonicalState(
       right !== undefined &&
       left.objectId === right.objectId &&
       left.contentKind === right.contentKind &&
-      left.sha256 === right.sha256 &&
-      left.latestMomentId === right.latestMomentId)
+      left.sha256 === right.sha256)
   );
 }
 

@@ -26,6 +26,9 @@ export interface ShareViewWriteScope {
   ended: boolean;
 }
 
+export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
+  "A shared view can't hold an empty folder. Make a file in the folder you want.";
+
 /**
  * Whether a share view may take the recipient's own local writes.
  *

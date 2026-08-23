@@ -1132,6 +1132,55 @@ describe("ShareViewFiles", () => {
     ).resolves.toMatchObject({ text: "b\n" });
   });
 
+  it("rethrows a failed folder move after every landed rename is put back", async () => {
+    const rootPath = await workspaceRoot();
+    await mkdir(join(rootPath, "docs", "plans"), { recursive: true });
+    await writeFile(join(rootPath, "docs", "plans", "a.md"), "a\n", "utf8");
+    await writeFile(join(rootPath, "docs", "plans", "b.md"), "b\n", "utf8");
+    let renames = 0;
+    const store = mutableTextStore({
+      initial: [
+        { path: "docs/plans/a.md", text: "a\n" },
+        { path: "docs/plans/b.md", text: "b\n" },
+      ],
+      afterRename: () => {
+        renames += 1;
+        if (renames === 2) throw new Error("engine refused the folder move");
+      },
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "move",
+            fromPath: "docs/plans",
+            toPath: "docs/roadmap",
+          },
+        ),
+      ),
+    ).rejects.toThrow("engine refused the folder move");
+    await expect(
+      files.read(
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "text", path: "docs/plans/a.md" },
+      ),
+    ).resolves.toMatchObject({ text: "a\n" });
+    await expect(
+      files.read(
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "text", path: "docs/plans/b.md" },
+      ),
+    ).resolves.toMatchObject({ text: "b\n" });
+  });
+
   it("does not compensate a rename after an indeterminate daemon response", async () => {
     const rootPath = await workspaceRoot();
     await mkdir(join(rootPath, "docs"), { recursive: true });

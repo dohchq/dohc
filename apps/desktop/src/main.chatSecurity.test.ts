@@ -954,6 +954,9 @@ describe("main-process chat authorization", () => {
     // Folder creation has no canonical shared-file operation. It stays behind
     // the blanket gate and never enters the received-share owner.
     const folder = handlerSource("createWorkspaceFolder");
+    expect(folder).toContain(
+      "throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);",
+    );
     expect(
       folder,
       "MUTATION: a folder create that asks the level lets an edit share view make a folder no moment can state",
