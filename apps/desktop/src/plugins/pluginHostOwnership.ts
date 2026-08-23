@@ -7,6 +7,7 @@ import { COMMAND_CLAIMS_DRAIN_DEADLINE_MS } from "./pluginShared";
 export interface OwnedPluginHost {
   currentRecord(pluginId: string): PluginHostRecordToken | undefined;
   stop(pluginId: string): Promise<void>;
+  stopRecord(pluginId: string, record: PluginHostRecordToken): Promise<void>;
   bumpGeneration(): void;
   stopAll(): Promise<void>;
 }
@@ -43,6 +44,12 @@ const commandAuthorityBrand: unique symbol = Symbol(
   "PluginHostCommandAuthority",
 );
 const surfaceLeaseBrand: unique symbol = Symbol("PluginHostSurfaceLease");
+const surfaceStartAuthorityBrand: unique symbol = Symbol(
+  "PluginHostSurfaceStartAuthority",
+);
+const changeReservationBrand: unique symbol = Symbol(
+  "PluginHostChangeReservation",
+);
 const changeAuthorityBrand: unique symbol = Symbol(
   "PluginHostChangeAuthority",
 );
@@ -68,10 +75,33 @@ export interface PluginHostSurfaceLease {
   readonly [surfaceLeaseBrand]: true;
 
   start<T>(
-    enqueue: () => Promise<PluginHostStartResult<T>>,
+    enqueue: (
+      authority: PluginHostSurfaceStartAuthority,
+    ) => Promise<PluginHostStartResult<T>>,
   ): Promise<PluginHostStartOutcome<T>>;
 
   release(): Promise<void>;
+}
+
+export interface PluginHostSurfaceStartAuthority {
+  readonly [surfaceStartAuthorityBrand]: true;
+
+  runChange<T>(
+    operation: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostChangeCompletion<T>>,
+  ): Promise<T>;
+}
+
+export interface PluginHostChangeReservation {
+  readonly [changeReservationBrand]: true;
+
+  run<T>(
+    operation: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostChangeCompletion<T>>,
+  ): Promise<T>;
+  cancel(): Promise<void>;
 }
 
 export interface PluginHostChangeAuthority {
@@ -92,6 +122,7 @@ interface PluginOwnershipState {
   epoch: number;
   readonly commands: Set<CommandAuthority>;
   readonly surfaces: Set<SurfaceLease>;
+  readonly pendingChanges: Set<ChangeReservation>;
   readonly changes: Set<ChangeAuthority>;
   onDemand: {
     readonly epoch: number;
@@ -155,7 +186,7 @@ function snapshotDrained(
 }
 
 function admissionOpen(state: PluginOwnershipState): boolean {
-  if (state.changes.size > 0) return false;
+  if (state.pendingChanges.size > 0 || state.changes.size > 0) return false;
   for (const command of state.commands) {
     if (command.overranDrain) return false;
   }
@@ -169,6 +200,7 @@ function idle(state: PluginOwnershipState): boolean {
   return (
     state.commands.size === 0 &&
     state.surfaces.size === 0 &&
+    state.pendingChanges.size === 0 &&
     state.changes.size === 0 &&
     state.stopInFlight === null
   );
@@ -177,7 +209,10 @@ function idle(state: PluginOwnershipState): boolean {
 const startCommand = Symbol("startCommand");
 const runCommandChange = Symbol("runCommandChange");
 const startSurface = Symbol("startSurface");
+const runSurfaceChange = Symbol("runSurfaceChange");
 const releaseSurface = Symbol("releaseSurface");
+const runReservedChange = Symbol("runReservedChange");
+const cancelReservedChange = Symbol("cancelReservedChange");
 const stopChange = Symbol("stopChange");
 const completeChange = Symbol("completeChange");
 
@@ -230,6 +265,77 @@ class CommandAuthority implements PluginHostCommandAuthority {
   }
 }
 
+class SurfaceStartAuthority implements PluginHostSurfaceStartAuthority {
+  readonly [surfaceStartAuthorityBrand] = true;
+  active = true;
+  readonly changePromises: Promise<unknown>[] = [];
+
+  constructor(
+    readonly owner: PluginHostOwnership,
+    readonly lease: SurfaceLease,
+  ) {}
+
+  runChange<T>(
+    operation: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostChangeCompletion<T>>,
+  ): Promise<T> {
+    if (!this.active) {
+      return Promise.reject(
+        new Error("Surface start authority is no longer active."),
+      );
+    }
+    const changed = this.owner[runSurfaceChange](this, operation);
+    this.changePromises.push(changed);
+    return changed;
+  }
+
+  invalidate(): void {
+    this.active = false;
+  }
+}
+
+class ChangeReservation implements PluginHostChangeReservation {
+  readonly [changeReservationBrand] = true;
+  readonly released = signal();
+  active = true;
+  runUsed = false;
+  cancelPromise: Promise<void> | null = null;
+
+  constructor(
+    readonly owner: PluginHostOwnership,
+    readonly state: PluginOwnershipState,
+  ) {}
+
+  run<T>(
+    operation: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostChangeCompletion<T>>,
+  ): Promise<T> {
+    if (!this.active) {
+      return Promise.reject(
+        new Error("Change reservation is no longer active."),
+      );
+    }
+    if (this.runUsed) {
+      return Promise.reject(new Error("Change reservation has already run."));
+    }
+    this.runUsed = true;
+    return this.owner[runReservedChange](this, operation);
+  }
+
+  cancel(): Promise<void> {
+    this.cancelPromise ??= this.owner[cancelReservedChange](this);
+    return this.cancelPromise;
+  }
+
+  invalidate(): void {
+    if (!this.active) return;
+    this.active = false;
+    this.released.resolve();
+  }
+}
+
 class SurfaceLease implements PluginHostSurfaceLease {
   readonly [surfaceLeaseBrand] = true;
   readonly startSettled = signal();
@@ -252,7 +358,9 @@ class SurfaceLease implements PluginHostSurfaceLease {
   }
 
   start<T>(
-    enqueue: () => Promise<PluginHostStartResult<T>>,
+    enqueue: (
+      authority: PluginHostSurfaceStartAuthority,
+    ) => Promise<PluginHostStartResult<T>>,
   ): Promise<PluginHostStartOutcome<T>> {
     if (this.startUsed) {
       return Promise.reject(new Error("Surface start has already been used."));
@@ -309,7 +417,7 @@ class ChangeAuthority implements PluginHostChangeAuthority {
     readonly owner: PluginHostOwnership,
     readonly state: PluginOwnershipState,
     readonly epoch: number,
-    readonly origin: CommandAuthority | undefined,
+    readonly origin: CommandAuthority | SurfaceStartAuthority | undefined,
     readonly preserveOnDemand: boolean,
   ) {}
 
@@ -394,8 +502,15 @@ export class PluginHostOwnership {
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
+    return this.reserveChange(pluginId).run(operation);
+  }
+
+  reserveChange(pluginId: string): PluginHostChangeReservation {
     if (this.#closed) throw new Error("Plugin host ownership is closed");
-    return this.#beginChange(this.#state(pluginId), undefined, operation);
+    const state = this.#state(pluginId);
+    const reservation = new ChangeReservation(this, state);
+    state.pendingChanges.add(reservation);
+    return reservation;
   }
 
   close(): Promise<void> {
@@ -403,6 +518,8 @@ export class PluginHostOwnership {
     this.#closed = true;
     const releases: Promise<void>[] = [];
     for (const state of this.#states.values()) {
+      for (const reservation of state.pendingChanges) reservation.invalidate();
+      state.pendingChanges.clear();
       for (const command of state.commands) {
         if (!command.overranDrain) releases.push(command.released.promise);
       }
@@ -435,7 +552,12 @@ export class PluginHostOwnership {
 
     authority.epoch = authority.state.epoch;
     const result = await enqueue();
-    this.#acceptStartEvidence(authority.state, authority.epoch, result.evidence);
+    const refusal = await this.#acceptStartEvidence(
+      authority.state,
+      authority.epoch,
+      result.evidence,
+    );
+    if (refusal) return refusal;
     return { kind: "admitted", value: result.value };
   }
 
@@ -448,9 +570,20 @@ export class PluginHostOwnership {
     return this.#beginChange(authority.state, authority, operation);
   }
 
+  [runSurfaceChange]<T>(
+    authority: SurfaceStartAuthority,
+    operation: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostChangeCompletion<T>>,
+  ): Promise<T> {
+    return this.#beginChange(authority.lease.state, authority, operation);
+  }
+
   async [startSurface]<T>(
     lease: SurfaceLease,
-    enqueue: () => Promise<PluginHostStartResult<T>>,
+    enqueue: (
+      authority: PluginHostSurfaceStartAuthority,
+    ) => Promise<PluginHostStartResult<T>>,
   ): Promise<PluginHostStartOutcome<T>> {
     for (;;) {
       if (!lease.active || lease.releaseRequested || this.#closed) {
@@ -458,6 +591,9 @@ export class PluginHostOwnership {
       }
       const waits: Promise<unknown>[] = [];
       if (lease.state.stopInFlight) waits.push(lease.state.stopInFlight);
+      for (const reservation of lease.state.pendingChanges) {
+        waits.push(reservation.released.promise);
+      }
       for (const change of lease.state.changes) {
         waits.push(change.released.promise);
       }
@@ -474,13 +610,54 @@ export class PluginHostOwnership {
     }
     lease.epoch = lease.state.epoch;
     lease.startEnqueued = true;
-    const result = await enqueue();
-    this.#acceptStartEvidence(lease.state, lease.epoch, result.evidence);
+    const authority = new SurfaceStartAuthority(this, lease);
+    let result!: PluginHostStartResult<T>;
+    let operationError: unknown;
+    let failed = false;
+    try {
+      result = await enqueue(authority);
+    } catch (error) {
+      failed = true;
+      operationError = error;
+    }
+    await this.#settleChanges(authority.changePromises);
+    authority.invalidate();
+    if (failed) throw operationError;
+    if (!lease.overranStart) lease.epoch = lease.state.epoch;
+    const refusal = await this.#acceptStartEvidence(
+      lease.state,
+      lease.epoch,
+      result.evidence,
+    );
+    if (refusal) return refusal;
     return { kind: "admitted", value: result.value };
   }
 
   [releaseSurface](lease: SurfaceLease): Promise<void> {
     return this.#finishSurfaceRelease(lease);
+  }
+
+  [runReservedChange]<T>(
+    reservation: ChangeReservation,
+    operation: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostChangeCompletion<T>>,
+  ): Promise<T> {
+    if (!reservation.active || this.#closed) {
+      return Promise.reject(
+        new Error("Change reservation is no longer active."),
+      );
+    }
+    reservation.invalidate();
+    reservation.state.pendingChanges.delete(reservation);
+    return this.#beginChange(reservation.state, undefined, operation);
+  }
+
+  [cancelReservedChange](reservation: ChangeReservation): Promise<void> {
+    if (!reservation.active) return Promise.resolve();
+    reservation.invalidate();
+    reservation.state.pendingChanges.delete(reservation);
+    return this.#cleanup(this.#stopOpportunity(reservation.state));
   }
 
   async [stopChange](
@@ -489,11 +666,15 @@ export class PluginHostOwnership {
     if (!change.active || this.#closed) {
       return { kind: "superseded", drained: true };
     }
-    if (change.origin?.active) {
+    if (change.origin instanceof CommandAuthority && change.origin.active) {
       return { kind: "refused", reason: "self-drain" };
     }
 
-    const members = this.#drainMembers(change.state);
+    const excludedSurface =
+      change.origin instanceof SurfaceStartAuthority && change.origin.active
+        ? change.origin.lease
+        : undefined;
+    const members = this.#drainMembers(change.state, excludedSurface);
     const drained = await snapshotDrained(members, this.#drainTimeoutMs);
     if (!drained) {
       for (const member of members) {
@@ -554,12 +735,7 @@ export class PluginHostOwnership {
       operationError = error;
     }
     if (authority.startPromise) await authority.startPromise.catch(() => undefined);
-    let settledChanges = 0;
-    while (settledChanges < authority.changePromises.length) {
-      const pending = authority.changePromises.slice(settledChanges);
-      settledChanges = authority.changePromises.length;
-      await Promise.allSettled(pending);
-    }
+    await this.#settleChanges(authority.changePromises);
     authority.invalidate();
     authority.state.commands.delete(authority);
     await this.#cleanup(this.#stopOpportunity(authority.state));
@@ -569,7 +745,7 @@ export class PluginHostOwnership {
 
   #beginChange<T>(
     state: PluginOwnershipState,
-    origin: CommandAuthority | undefined,
+    origin: CommandAuthority | SurfaceStartAuthority | undefined,
     operation: (
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
@@ -583,6 +759,15 @@ export class PluginHostOwnership {
     );
     state.changes.add(change);
     return this.#executeChange(change, operation);
+  }
+
+  async #settleChanges(changes: ReadonlyArray<Promise<unknown>>): Promise<void> {
+    let settled = 0;
+    while (settled < changes.length) {
+      const pending = changes.slice(settled);
+      settled = changes.length;
+      await Promise.allSettled(pending);
+    }
   }
 
   async #executeChange<T>(
@@ -642,7 +827,10 @@ export class PluginHostOwnership {
     await this.#cleanup(this.#stopOpportunity(lease.state));
   }
 
-  #drainMembers(state: PluginOwnershipState): DrainMember[] {
+  #drainMembers(
+    state: PluginOwnershipState,
+    excludedSurface?: SurfaceLease,
+  ): DrainMember[] {
     const members: DrainMember[] = [];
     for (const command of state.commands) {
       if (command.overranDrain) continue;
@@ -655,7 +843,13 @@ export class PluginHostOwnership {
       });
     }
     for (const surface of state.surfaces) {
-      if (!surface.startEnqueued || surface.overranStart) continue;
+      if (
+        surface === excludedSurface ||
+        !surface.startEnqueued ||
+        surface.overranStart
+      ) {
+        continue;
+      }
       members.push({
         released: surface.startSettled.promise,
         active: () => surface.active && surface.startEnqueued,
@@ -667,23 +861,52 @@ export class PluginHostOwnership {
     return members;
   }
 
-  #acceptStartEvidence(
+  async #acceptStartEvidence(
     state: PluginOwnershipState,
     epoch: number,
     evidence: PluginHostStartEvidence | undefined,
-  ): void {
-    if (!evidence || this.#consumedStartEvidence.has(evidence)) return;
+  ): Promise<PluginHostAdmissionRefusal | undefined> {
+    const refusal: PluginHostAdmissionRefusal | undefined = this.#closed
+      ? { kind: "refused", reason: "closed" }
+      : state.epoch !== epoch
+        ? { kind: "refused", reason: "change-in-progress" }
+        : undefined;
+    if (!evidence || this.#consumedStartEvidence.has(evidence)) return refusal;
     this.#consumedStartEvidence.add(evidence);
     if (
-      this.#closed ||
       evidence.pluginId !== state.pluginId ||
-      state.epoch !== epoch ||
       this.#host.currentRecord(state.pluginId) !== evidence.record ||
       state.adoptedRecord === evidence.record
     ) {
-      return;
+      return refusal;
+    }
+    if (refusal) {
+      await this.#discardStartEvidence(state.pluginId, evidence.record);
+      return refusal;
     }
     state.onDemand = { epoch, record: evidence.record };
+    return undefined;
+  }
+
+  async #discardStartEvidence(
+    pluginId: string,
+    record: PluginHostRecordToken,
+  ): Promise<void> {
+    if (this.#host.currentRecord(pluginId) !== record) return;
+    try {
+      await this.#host.stopRecord(pluginId, record);
+    } catch (error) {
+      this.#onCleanupError(pluginId, error);
+      return;
+    }
+    if (this.#host.currentRecord(pluginId) === record) {
+      this.#onCleanupError(
+        pluginId,
+        new Error(
+          `Plugin "${pluginId}" kept a late host record after stop resolved`,
+        ),
+      );
+    }
   }
 
   #state(pluginId: string): PluginOwnershipState {
@@ -694,6 +917,7 @@ export class PluginHostOwnership {
       epoch: newEpoch(),
       commands: new Set(),
       surfaces: new Set(),
+      pendingChanges: new Set(),
       changes: new Set(),
       onDemand: null,
       adoptedRecord: null,
@@ -826,9 +1050,11 @@ export class PluginHostOwnership {
     for (const state of this.#states.values()) {
       for (const command of state.commands) command.invalidate();
       for (const surface of state.surfaces) surface.invalidate();
+      for (const reservation of state.pendingChanges) reservation.invalidate();
       for (const change of state.changes) change.invalidate();
       state.commands.clear();
       state.surfaces.clear();
+      state.pendingChanges.clear();
       state.changes.clear();
       state.onDemand = null;
       state.adoptedRecord = null;

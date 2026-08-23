@@ -313,10 +313,25 @@ export class PluginHost {
     }
     const record = this.plugins.get(pluginId);
     if (!record) return;
+    await this.stopPluginRecord(record);
+  }
+
+  async stopRecord(
+    pluginId: string,
+    expected: PluginHostRecordToken,
+  ): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    if (!record || record.ownershipToken !== expected) return;
+    await this.stopPluginRecord(record);
+  }
+
+  private async stopPluginRecord(record: PluginRecord): Promise<void> {
     const spawn = record.current;
     if (!spawn?.transport) {
       if (spawn) await this.endSpawn(record, spawn);
-      this.plugins.delete(pluginId);
+      if (this.plugins.get(record.pluginId) === record) {
+        this.plugins.delete(record.pluginId);
+      }
       return;
     }
     if (spawn.shutdown) {

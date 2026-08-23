@@ -7,6 +7,7 @@ import {
   PluginHostOwnership,
   type OwnedPluginHost,
   type PluginHostCommandAuthority,
+  type PluginHostChangeReservation,
   type PluginHostSurfaceLease,
 } from "./pluginHostOwnership";
 
@@ -51,6 +52,15 @@ class FakePluginHost implements OwnedPluginHost {
     await this.stopImpl(pluginId);
   }
 
+  async stopRecord(
+    pluginId: string,
+    record: PluginHostRecordToken,
+  ): Promise<void> {
+    this.calls.push(`stop-record:${pluginId}`);
+    if (this.records.get(pluginId) !== record) return;
+    await this.stopImpl(pluginId);
+  }
+
   bumpGeneration(): void {
     this.calls.push("bump-generation");
   }
@@ -77,6 +87,93 @@ function coldStart<T>(host: FakePluginHost, pluginId: string, value: T) {
 }
 
 describe("PluginHostOwnership", () => {
+  it("binds a reserved change to the epoch when its queued work begins", async () => {
+    const host = new FakePluginHost();
+    host.start("example-plugin");
+    const owner = new PluginHostOwnership(host);
+    const first = owner.reserveChange("example-plugin");
+    const second = owner.reserveChange("example-plugin");
+
+    await first.run(async (change) => {
+      expect(await change.stop()).toEqual({ kind: "stopped", drained: true });
+      host.start("example-plugin");
+      return change.preserve(undefined);
+    });
+    await expect(
+      second.run(async (change) => change.preserve(await change.stop())),
+    ).resolves.toEqual({ kind: "stopped", drained: true });
+
+    expect(host.calls).toEqual([
+      "stop:example-plugin",
+      "stop:example-plugin",
+    ]);
+  });
+
+  it("blocks command admission for a pending reservation and cancels once", async () => {
+    const owner = new PluginHostOwnership(new FakePluginHost());
+    const reservation: PluginHostChangeReservation =
+      owner.reserveChange("example-plugin");
+
+    await expect(
+      owner.runCommand("example-plugin", async () => undefined),
+    ).resolves.toEqual({ kind: "refused", reason: "change-in-progress" });
+    const firstCancel = reservation.cancel();
+    const secondCancel = reservation.cancel();
+    expect(firstCancel).toBe(secondCancel);
+    await firstCancel;
+    await expect(
+      reservation.run(async (change) => change.preserve(undefined)),
+    ).rejects.toThrow(/reservation is no longer active/i);
+    await expect(
+      owner.runCommand("example-plugin", async () => "ready"),
+    ).resolves.toEqual({ kind: "completed", value: "ready" });
+  });
+
+  it("runs a change reservation only once", async () => {
+    const owner = new PluginHostOwnership(new FakePluginHost());
+    const reservation = owner.reserveChange("example-plugin");
+
+    await reservation.run(async (change) => change.preserve(undefined));
+    await expect(
+      reservation.run(async (change) => change.preserve(undefined)),
+    ).rejects.toThrow(/reservation is no longer active/i);
+  });
+
+  it("parks a surface start behind a pending change reservation", async () => {
+    const owner = new PluginHostOwnership(new FakePluginHost());
+    const reservation = owner.reserveChange("example-plugin");
+    const surface = surfaceLease(owner);
+    let began = false;
+    const start = surface.start(async () => {
+      began = true;
+      return { value: "ready" };
+    });
+
+    await Promise.resolve();
+    expect(began).toBe(false);
+    await reservation.cancel();
+    await expect(start).resolves.toEqual({ kind: "admitted", value: "ready" });
+    await surface.release();
+  });
+
+  it("cancels a queued reservation synchronously when ownership closes", async () => {
+    const host = new FakePluginHost();
+    const owner = new PluginHostOwnership(host);
+    const reservation = owner.reserveChange("example-plugin");
+    const close = owner.close();
+    let began = false;
+
+    await expect(
+      reservation.run(async (change) => {
+        began = true;
+        return change.preserve(undefined);
+      }),
+    ).rejects.toThrow(/reservation is no longer active/i);
+    expect(began).toBe(false);
+    await close;
+    expect(host.calls).toEqual(["bump-generation", "stop-all"]);
+  });
+
   it("raises change admission synchronously and composes nested holds", async () => {
     const owner = new PluginHostOwnership(new FakePluginHost());
     const outerDone = deferred<void>();
@@ -376,6 +473,67 @@ describe("PluginHostOwnership", () => {
     expect(host.calls).toEqual(["stop:example-plugin"]);
   });
 
+  it("lets a surface start change the old runtime without draining itself", async () => {
+    const host = new FakePluginHost();
+    host.start("example-plugin");
+    const owner = new PluginHostOwnership(host);
+    const surface = surfaceLease(owner);
+
+    await expect(
+      surface.start(async (start) => {
+        const stopped = await start.runChange(async (change) =>
+          change.preserve(await change.stop()),
+        );
+        return {
+          value: stopped,
+          evidence: host.start("example-plugin"),
+        };
+      }),
+    ).resolves.toEqual({
+      kind: "admitted",
+      value: { kind: "stopped", drained: true },
+    });
+
+    await surface.release();
+    expect(host.calls).toEqual([
+      "stop:example-plugin",
+      "stop:example-plugin",
+    ]);
+  });
+
+  it("drains another surface start while excluding the change origin", async () => {
+    const host = new FakePluginHost();
+    host.start("example-plugin");
+    const owner = new PluginHostOwnership(host);
+    const first = surfaceLease(owner);
+    const second = surfaceLease(owner);
+    const firstDone = deferred<{ value: undefined }>();
+    const firstStart = first.start(() => firstDone.promise);
+    let stopSettled = false;
+
+    const secondStart = second.start(async (start) => {
+      const stop = start.runChange(async (change) =>
+        change.preserve(await change.stop()),
+      );
+      void stop.then(() => {
+        stopSettled = true;
+      });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      firstDone.resolve({ value: undefined });
+      return { value: await stop };
+    });
+
+    await firstStart;
+    await expect(secondStart).resolves.toEqual({
+      kind: "admitted",
+      value: { kind: "stopped", drained: true },
+    });
+    await first.release();
+    await second.release();
+    expect(host.calls).toEqual(["stop:example-plugin"]);
+  });
+
   it("allows only one start call per surface lease", async () => {
     const owner = new PluginHostOwnership(new FakePluginHost());
     const surface = surfaceLease(owner);
@@ -600,6 +758,43 @@ describe("PluginHostOwnership", () => {
       expect(host.calls).toEqual(["bump-generation", "stop-all"]);
       commandDone.resolve();
       await command;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes an exact host record started after close reaches its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakePluginHost();
+      const owner = new PluginHostOwnership(host, { drainTimeoutMs: 25 });
+      const startAllowed = deferred<void>();
+      const command = owner.runCommand("example-plugin", async (authority) =>
+        authority.start(async () => {
+          await startAllowed.promise;
+          return {
+            value: "late",
+            evidence: host.start("example-plugin"),
+          };
+        }),
+      );
+      const close = owner.close();
+
+      await vi.advanceTimersByTimeAsync(25);
+      await close;
+      expect(host.calls).toEqual(["bump-generation", "stop-all"]);
+
+      startAllowed.resolve();
+      await expect(command).resolves.toEqual({
+        kind: "completed",
+        value: { kind: "refused", reason: "closed" },
+      });
+      expect(host.currentRecord("example-plugin")).toBeUndefined();
+      expect(host.calls).toEqual([
+        "bump-generation",
+        "stop-all",
+        "stop-record:example-plugin",
+      ]);
     } finally {
       vi.useRealTimers();
     }

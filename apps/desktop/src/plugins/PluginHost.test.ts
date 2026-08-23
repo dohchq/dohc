@@ -758,6 +758,9 @@ describe("PluginHost", () => {
     const second = await host.start(helloPluginRoot, "hello-plugin", manifest);
     expect(host.currentRecord("hello-plugin")).toBe(second.record);
     expect(second.record).not.toBe(first.record);
+
+    await host.stopRecord("hello-plugin", first.record);
+    expect(host.currentRecord("hello-plugin")).toBe(second.record);
   });
 
   it("rejects a pending start that stop aborts before spawn", async () => {
