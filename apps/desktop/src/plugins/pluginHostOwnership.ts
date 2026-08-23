@@ -22,10 +22,9 @@ export type PluginHostAdmissionRefusal = {
   reason: "change-in-progress" | "closed";
 };
 
-export interface PluginHostStartResult<T> {
-  value: T;
-  evidence?: PluginHostStartEvidence;
-}
+export type PluginHostStartResult<T> =
+  | { kind: "existing"; value: T }
+  | { kind: "started"; value: T; evidence: PluginHostStartEvidence };
 
 export type PluginHostStartOutcome<T> =
   | { kind: "admitted"; value: T }
@@ -108,7 +107,7 @@ export interface PluginHostChangeAuthority {
   readonly [changeAuthorityBrand]: true;
 
   stop(): Promise<PluginHostChangeStopOutcome>;
-  adopt<T>(value: T): PluginHostChangeCompletion<T>;
+  adopt<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
   preserve<T>(value: T): PluginHostChangeCompletion<T>;
 }
 
@@ -399,6 +398,7 @@ class ChangeCompletion<T> implements PluginHostChangeCompletion<T> {
     readonly change: ChangeAuthority,
     readonly disposition: "adopt" | "preserve",
     readonly value: T,
+    readonly startEvidence: PluginHostStartEvidence | null,
   ) {}
 }
 
@@ -406,27 +406,38 @@ class ChangeAuthority implements PluginHostChangeAuthority {
   readonly [changeAuthorityBrand] = true;
   readonly released = signal();
   active = true;
+  // Close can revoke runtime authority before an overdue operation returns.
+  // Its completion must still surrender exact evidence for a late start.
+  operationPending = true;
   stopPromise: Promise<PluginHostChangeStopOutcome> | null = null;
+  epoch: number;
 
   constructor(
     readonly owner: PluginHostOwnership,
     readonly state: PluginOwnershipState,
-    readonly epoch: number,
+    epoch: number,
     readonly origin: CommandAuthority | SurfaceStartAuthority | undefined,
     readonly preserveOnDemand: boolean,
-  ) {}
+  ) {
+    this.epoch = epoch;
+  }
 
   stop(): Promise<PluginHostChangeStopOutcome> {
     this.stopPromise ??= this.owner[stopChange](this);
     return this.stopPromise;
   }
 
-  adopt<T>(value: T): PluginHostChangeCompletion<T> {
-    return this.owner[completeChange](this, "adopt", value);
+  adopt<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T> {
+    return this.owner[completeChange](
+      this,
+      "adopt",
+      result.value,
+      result.kind === "started" ? result.evidence : null,
+    );
   }
 
   preserve<T>(value: T): PluginHostChangeCompletion<T> {
-    return this.owner[completeChange](this, "preserve", value);
+    return this.owner[completeChange](this, "preserve", value, null);
   }
 
   invalidate(): void {
@@ -547,10 +558,10 @@ export class PluginHostOwnership {
 
     authority.epoch = authority.state.epoch;
     const result = await enqueue();
-    const refusal = await this.#acceptStartEvidence(
+    const refusal = await this.#acceptStartResult(
       authority.state,
       authority.epoch,
-      result.evidence,
+      result,
     );
     if (refusal) return refusal;
     return { kind: "admitted", value: result.value };
@@ -619,10 +630,10 @@ export class PluginHostOwnership {
     authority.invalidate();
     if (failed) throw operationError;
     if (!lease.overranStart) lease.epoch = lease.state.epoch;
-    const refusal = await this.#acceptStartEvidence(
+    const refusal = await this.#acceptStartResult(
       lease.state,
       lease.epoch,
-      result.evidence,
+      result,
     );
     if (refusal) return refusal;
     return { kind: "admitted", value: result.value };
@@ -694,6 +705,8 @@ export class PluginHostOwnership {
 
     const attempt = await this.#runHostStop(change.state, change.epoch);
     if (attempt.kind === "failed") throw attempt.error;
+    // This change owns the stop, so its replacement belongs to the new epoch.
+    change.epoch = change.state.epoch;
     return attempt.stopError === undefined
       ? { kind: "stopped", drained }
       : { kind: "stopped", drained, stopError: attempt.stopError };
@@ -703,9 +716,12 @@ export class PluginHostOwnership {
     change: ChangeAuthority,
     disposition: "adopt" | "preserve",
     value: T,
+    startEvidence: PluginHostStartEvidence | null,
   ): PluginHostChangeCompletion<T> {
-    if (!change.active) throw new Error("Change authority is no longer active.");
-    return new ChangeCompletion(change, disposition, value);
+    if (!change.operationPending) {
+      throw new Error("Change authority is no longer active.");
+    }
+    return new ChangeCompletion(change, disposition, value, startEvidence);
   }
 
   async #executeCommand<T>(
@@ -779,16 +795,14 @@ export class PluginHostOwnership {
       if (!(completion instanceof ChangeCompletion) || completion.change !== change) {
         throw new Error("Change completed with another authority's decision.");
       }
-      if (completion.disposition === "adopt" && change.active && !this.#closed) {
-        change.state.adoptedRecord = this.#host.currentRecord(
-          change.state.pluginId,
-        ) ?? null;
-        change.state.onDemand = null;
+      if (completion.disposition === "adopt") {
+        await this.#adoptChangeCompletion(change, completion.startEvidence);
       } else if (
         completion.disposition === "preserve" &&
         change.preserveOnDemand &&
         change.active &&
-        !this.#closed
+        !this.#closed &&
+        change.state.epoch === change.epoch
       ) {
         const record = this.#host.currentRecord(change.state.pluginId);
         change.state.onDemand = record
@@ -801,6 +815,7 @@ export class PluginHostOwnership {
       operationError = error;
     }
 
+    change.operationPending = false;
     change.invalidate();
     change.state.changes.delete(change);
     await this.#cleanup(this.#stopOpportunity(change.state));
@@ -856,31 +871,88 @@ export class PluginHostOwnership {
     return members;
   }
 
-  async #acceptStartEvidence(
+  async #acceptStartResult<T>(
     state: PluginOwnershipState,
     epoch: number,
-    evidence: PluginHostStartEvidence | undefined,
+    result: PluginHostStartResult<T>,
   ): Promise<PluginHostAdmissionRefusal | undefined> {
     const refusal: PluginHostAdmissionRefusal | undefined = this.#closed
       ? { kind: "refused", reason: "closed" }
       : state.epoch !== epoch
         ? { kind: "refused", reason: "change-in-progress" }
         : undefined;
-    if (!evidence || this.#consumedStartEvidence.has(evidence)) return refusal;
-    this.#consumedStartEvidence.add(evidence);
-    if (
-      evidence.pluginId !== state.pluginId ||
-      this.#host.currentRecord(state.pluginId) !== evidence.record ||
-      state.adoptedRecord === evidence.record
-    ) {
-      return refusal;
-    }
+    if (result.kind === "existing") return refusal;
+    return this.#acceptStartEvidence(state, epoch, result.evidence, refusal);
+  }
+
+  async #acceptStartEvidence(
+    state: PluginOwnershipState,
+    epoch: number,
+    evidence: PluginHostStartEvidence,
+    refusal: PluginHostAdmissionRefusal | undefined,
+  ): Promise<PluginHostAdmissionRefusal | undefined> {
+    this.#consumeStartEvidence(state.pluginId, evidence);
     if (refusal) {
       await this.#discardStartEvidence(state.pluginId, evidence.record);
       return refusal;
     }
+    if (this.#host.currentRecord(state.pluginId) !== evidence.record) {
+      throw new Error(
+        `Plugin host start evidence does not name the current "${state.pluginId}" record.`,
+      );
+    }
+    if (state.adoptedRecord === evidence.record) return undefined;
     state.onDemand = { epoch, record: evidence.record };
     return undefined;
+  }
+
+  async #adoptChangeCompletion(
+    change: ChangeAuthority,
+    evidence: PluginHostStartEvidence | null,
+  ): Promise<void> {
+    const superseded =
+      this.#closed ||
+      !change.active ||
+      change.state.epoch !== change.epoch;
+    if (evidence !== null) {
+      this.#consumeStartEvidence(change.state.pluginId, evidence);
+      if (superseded) {
+        await this.#discardStartEvidence(
+          change.state.pluginId,
+          evidence.record,
+        );
+        return;
+      }
+      if (
+        this.#host.currentRecord(change.state.pluginId) !== evidence.record
+      ) {
+        throw new Error(
+          `Plugin host start evidence does not name the current "${change.state.pluginId}" record.`,
+        );
+      }
+      change.state.adoptedRecord = evidence.record;
+      change.state.onDemand = null;
+      return;
+    }
+    if (superseded) return;
+    change.state.adoptedRecord =
+      this.#host.currentRecord(change.state.pluginId) ?? null;
+    change.state.onDemand = null;
+  }
+
+  #consumeStartEvidence(
+    pluginId: string,
+    evidence: PluginHostStartEvidence,
+  ): void {
+    if (this.#consumedStartEvidence.has(evidence)) {
+      throw new Error("Plugin host start evidence has already been used.");
+    }
+    this.#consumedStartEvidence.add(evidence);
+    if (evidence.pluginId !== pluginId) {
+      throw new Error(
+        `Plugin host start evidence belongs to "${evidence.pluginId}", not "${pluginId}".`,
+      );
+    }
   }
 
   async #discardStartEvidence(

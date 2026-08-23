@@ -2,7 +2,7 @@ import { databaseOpLogPath } from "@dohc/workspace-core";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   invokeWorkspaceSdkHost,
   sdkWorkspacePath,
@@ -381,6 +381,32 @@ describe("workspace SDK host authority", () => {
         { query: "literal glob sentinel", path: "notes/[draft].txt" },
       ),
     ).resolves.toContainEqual(expect.objectContaining({ path: "notes/[draft].txt" }));
+  });
+
+  it("rejects a malformed search owner before starting ripgrep", async () => {
+    const root = await workspace();
+    const searchStarter = vi.fn<SdkSearchStarter>((options) => {
+      options.onBatch({
+        searchId: options.searchId,
+        entries: [],
+        done: true,
+        limitHit: false,
+      });
+      return { searchId: options.searchId, kill: vi.fn() };
+    });
+    const reads: WorkspaceSdkReadPort = {
+      ...localWorkspaceSdkReads(root),
+      prepareSearch: async () => ({ allowPath: null }) as never,
+    };
+
+    await expect(
+      invokeWorkspaceSdkHost(
+        hostContext(root, { reads, searchStarter }),
+        "workspace.search",
+        { query: "hello" },
+      ),
+    ).rejects.toThrow(/allowPath must be a function/i);
+    expect(searchStarter).not.toHaveBeenCalled();
   });
 
   it("kills an in-flight search when surface authority is revoked", async () => {

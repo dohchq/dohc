@@ -178,6 +178,9 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
       ? undefined
       : sdkWorkspacePath(input.path);
   const searchView = await context.reads.prepareSearch(requestedPath);
+  if (typeof searchView.allowPath !== "function") {
+    throw new Error("Workspace search allowPath must be a function.");
+  }
   const requestedLimit =
     typeof input.limit === "number" && Number.isInteger(input.limit)
       ? input.limit
@@ -218,7 +221,7 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
       realRoot: root,
       searchId: `workspace-sdk-${Date.now()}`,
       request,
-      ...(searchView.allowPath ? { allowPath: searchView.allowPath } : {}),
+      allowPath: searchView.allowPath,
       onBatch(batch) {
         for (const entry of batch.entries) {
           entries.push(entry);

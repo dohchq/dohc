@@ -8,6 +8,7 @@ import {
   type OwnedPluginHost,
   type PluginHostCommandAuthority,
   type PluginHostChangeReservation,
+  type PluginHostStartResult,
   type PluginHostSurfaceLease,
 } from "./pluginHostOwnership";
 
@@ -83,7 +84,11 @@ function surfaceLease(
 }
 
 function coldStart<T>(host: FakePluginHost, pluginId: string, value: T) {
-  return Promise.resolve({ value, evidence: host.start(pluginId) });
+  return Promise.resolve({
+    kind: "started" as const,
+    value,
+    evidence: host.start(pluginId),
+  });
 }
 
 describe("PluginHostOwnership", () => {
@@ -146,7 +151,7 @@ describe("PluginHostOwnership", () => {
     let began = false;
     const start = surface.start(async () => {
       began = true;
-      return { value: "ready" };
+      return { kind: "existing", value: "ready" };
     });
 
     await Promise.resolve();
@@ -245,7 +250,7 @@ describe("PluginHostOwnership", () => {
     await owner.runCommand("example-plugin", async (command) => {
       const start = command.start(async () => {
         enqueued = true;
-        return { value: "started" };
+        return { kind: "existing", value: "started" };
       });
       expect(enqueued).toBe(true);
       await expect(start).resolves.toEqual({
@@ -257,14 +262,14 @@ describe("PluginHostOwnership", () => {
 
   it("allows only one admitted start call per command authority", async () => {
     const owner = new PluginHostOwnership(new FakePluginHost());
-    const firstStart = deferred<{ value: string }>();
+    const firstStart = deferred<PluginHostStartResult<string>>();
 
     await owner.runCommand("example-plugin", async (command) => {
       const first = command.start(() => firstStart.promise);
       await expect(
-        command.start(async () => ({ value: "second" })),
+        command.start(async () => ({ kind: "existing", value: "second" })),
       ).rejects.toThrow(/already been used/i);
-      firstStart.resolve({ value: "first" });
+      firstStart.resolve({ kind: "existing", value: "first" });
       await expect(first).resolves.toEqual({
         kind: "admitted",
         value: "first",
@@ -433,10 +438,7 @@ describe("PluginHostOwnership", () => {
     const host = new FakePluginHost();
     const owner = new PluginHostOwnership(host);
     const surface = surfaceLease(owner);
-    const startDone = deferred<{
-      value: string;
-      evidence: PluginHostStartEvidence;
-    }>();
+    const startDone = deferred<PluginHostStartResult<string>>();
     const start = surface.start(() => startDone.promise);
 
     const firstRelease = surface.release();
@@ -446,6 +448,7 @@ describe("PluginHostOwnership", () => {
     expect(host.calls).toEqual([]);
 
     startDone.resolve({
+      kind: "started",
       value: "started",
       evidence: host.start("example-plugin"),
     });
@@ -463,6 +466,7 @@ describe("PluginHostOwnership", () => {
     const start = surface.start(async () => {
       release = surface.release();
       return {
+        kind: "started",
         value: "started",
         evidence: host.start("example-plugin"),
       };
@@ -485,6 +489,7 @@ describe("PluginHostOwnership", () => {
           change.preserve(await change.stop()),
         );
         return {
+          kind: "started",
           value: stopped,
           evidence: host.start("example-plugin"),
         };
@@ -507,7 +512,7 @@ describe("PluginHostOwnership", () => {
     const owner = new PluginHostOwnership(host);
     const first = surfaceLease(owner);
     const second = surfaceLease(owner);
-    const firstDone = deferred<{ value: undefined }>();
+    const firstDone = deferred<PluginHostStartResult<undefined>>();
     const firstStart = first.start(() => firstDone.promise);
     let stopSettled = false;
 
@@ -520,8 +525,8 @@ describe("PluginHostOwnership", () => {
       });
       await Promise.resolve();
       expect(stopSettled).toBe(false);
-      firstDone.resolve({ value: undefined });
-      return { value: await stop };
+      firstDone.resolve({ kind: "existing", value: undefined });
+      return { kind: "existing", value: await stop };
     });
 
     await firstStart;
@@ -538,26 +543,46 @@ describe("PluginHostOwnership", () => {
     const owner = new PluginHostOwnership(new FakePluginHost());
     const surface = surfaceLease(owner);
 
-    await surface.start(async () => ({ value: "first" }));
+    await surface.start(async () => ({ kind: "existing", value: "first" }));
     await expect(
-      surface.start(async () => ({ value: "second" })),
+      surface.start(async () => ({ kind: "existing", value: "second" })),
     ).rejects.toThrow(/already been used/i);
     await surface.release();
   });
 
-  it("ignores start evidence when the exact host record was replaced", async () => {
+  it("rejects start evidence when the exact host record was replaced", async () => {
     const host = new FakePluginHost();
     const owner = new PluginHostOwnership(host);
     const surface = surfaceLease(owner);
-    await surface.start(async () => {
-      const evidence = host.start("example-plugin");
-      host.replace("example-plugin");
-      return { value: undefined, evidence };
-    });
+    let replacement!: PluginHostRecordToken;
+    await expect(
+      surface.start(async () => {
+        const evidence = host.start("example-plugin");
+        replacement = host.replace("example-plugin");
+        return { kind: "started", value: undefined, evidence };
+      }),
+    ).rejects.toThrow(/does not name the current.*example-plugin/i);
 
     await surface.release();
     expect(host.calls).toEqual([]);
-    expect(host.currentRecord("example-plugin")).toBeDefined();
+    expect(host.currentRecord("example-plugin")).toBe(replacement);
+  });
+
+  it("rejects start evidence for another plugin", async () => {
+    const host = new FakePluginHost();
+    const owner = new PluginHostOwnership(host);
+    const surface = surfaceLease(owner);
+
+    await expect(
+      surface.start(async () => ({
+        kind: "started",
+        value: undefined,
+        evidence: host.start("other-plugin"),
+      })),
+    ).rejects.toThrow(/start evidence.*other-plugin.*example-plugin/i);
+
+    await surface.release();
+    expect(host.currentRecord("other-plugin")).toBeDefined();
   });
 
   it("does not stop a replacement record after accepting older start evidence", async () => {
@@ -573,22 +598,32 @@ describe("PluginHostOwnership", () => {
     expect(host.currentRecord("example-plugin")).toBe(replacement);
   });
 
-  it("does not accept the same host start evidence twice", async () => {
+  it("rejects the same host start evidence twice", async () => {
     const host = new FakePluginHost();
     const owner = new PluginHostOwnership(host);
     const evidence = host.start("example-plugin");
     const first = surfaceLease(owner);
     const second = surfaceLease(owner);
 
-    await first.start(async () => ({ value: undefined, evidence }));
-    await second.start(async () => ({ value: undefined, evidence }));
+    await first.start(async () => ({
+      kind: "started",
+      value: undefined,
+      evidence,
+    }));
+    await expect(
+      second.start(async () => ({
+        kind: "started",
+        value: undefined,
+        evidence,
+      })),
+    ).rejects.toThrow(/already been used/i);
     await first.release();
     await second.release();
 
     expect(host.calls).toEqual(["stop:example-plugin"]);
   });
 
-  it("adopts before lowering the change hold and suppresses late start evidence", async () => {
+  it("adopts exact start evidence before lowering the change hold", async () => {
     const host = new FakePluginHost();
     const owner = new PluginHostOwnership(host);
 
@@ -596,9 +631,9 @@ describe("PluginHostOwnership", () => {
       command.start(async () => {
         const evidence = host.start("example-plugin");
         await command.runChange(async (change) =>
-          change.adopt(undefined),
+          change.adopt({ kind: "started", value: undefined, evidence }),
         );
-        return { value: undefined, evidence };
+        return { kind: "existing", value: undefined };
       }),
     );
 
@@ -606,11 +641,109 @@ describe("PluginHostOwnership", () => {
     expect(host.currentRecord("example-plugin")).toBeDefined();
   });
 
+  it("adopts the exact replacement started after its own stop", async () => {
+    const host = new FakePluginHost();
+    host.start("example-plugin");
+    const owner = new PluginHostOwnership(host);
+
+    const replacement = await owner.runChange(
+      "example-plugin",
+      async (change) => {
+        expect(await change.stop()).toEqual({
+          kind: "stopped",
+          drained: true,
+        });
+        const evidence = host.start("example-plugin");
+        return change.adopt({
+          kind: "started",
+          value: evidence.record,
+          evidence,
+        });
+      },
+    );
+
+    expect(host.currentRecord("example-plugin")).toBe(replacement);
+    expect(host.calls).toEqual(["stop:example-plugin"]);
+    await owner.close();
+    expect(host.calls).toEqual([
+      "stop:example-plugin",
+      "bump-generation",
+      "stop-all",
+    ]);
+  });
+
+  it("does not discard a newer record when a change adoption is superseded", async () => {
+    const host = new FakePluginHost();
+    const owner = new PluginHostOwnership(host);
+    const outerStarted = deferred<void>();
+    const outerMayAdopt = deferred<void>();
+    const outer = owner.runChange("example-plugin", async (change) => {
+      const evidence = host.start("example-plugin");
+      outerStarted.resolve();
+      await outerMayAdopt.promise;
+      return change.adopt({ kind: "started", value: "outer", evidence });
+    });
+    await outerStarted.promise;
+
+    const replacement = await owner.runChange(
+      "example-plugin",
+      async (change) => {
+        expect(await change.stop()).toEqual({
+          kind: "stopped",
+          drained: true,
+        });
+        const evidence = host.start("example-plugin");
+        return change.adopt({
+          kind: "started",
+          value: evidence.record,
+          evidence,
+        });
+      },
+    );
+    outerMayAdopt.resolve();
+    await expect(outer).resolves.toBe("outer");
+
+    expect(host.currentRecord("example-plugin")).toBe(replacement);
+    expect(host.calls).toEqual(["stop:example-plugin"]);
+  });
+
+  it("rejects wrong-plugin evidence during change adoption", async () => {
+    const host = new FakePluginHost();
+    const owner = new PluginHostOwnership(host);
+
+    await expect(
+      owner.runChange("example-plugin", async (change) =>
+        change.adopt({
+          kind: "started",
+          value: undefined,
+          evidence: host.start("other-plugin"),
+        }),
+      ),
+    ).rejects.toThrow(/start evidence.*other-plugin.*example-plugin/i);
+    expect(host.currentRecord("other-plugin")).toBeDefined();
+  });
+
+  it("rejects reused evidence during change adoption", async () => {
+    const host = new FakePluginHost();
+    const owner = new PluginHostOwnership(host);
+    const evidence = host.start("example-plugin");
+    await owner.runChange("example-plugin", async (change) =>
+      change.adopt({ kind: "started", value: undefined, evidence }),
+    );
+
+    await expect(
+      owner.runChange("example-plugin", async (change) =>
+        change.adopt({ kind: "started", value: undefined, evidence }),
+      ),
+    ).rejects.toThrow(/already been used/i);
+    expect(host.currentRecord("example-plugin")).toBe(evidence.record);
+  });
+
   it("does not let an empty adoption claim a host record started later", async () => {
     const host = new FakePluginHost();
     const owner = new PluginHostOwnership(host);
     await owner.runChange("example-plugin", async (change) =>
-      change.adopt(undefined),
+      change.adopt({ kind: "existing", value: undefined }),
     );
     const surface = surfaceLease(owner);
 
@@ -737,8 +870,41 @@ describe("PluginHostOwnership", () => {
     await close;
     expect(host.calls).toEqual(["bump-generation", "stop-all"]);
     await expect(
-      authority.start(async () => ({ value: undefined })),
+      authority.start(async () => ({ kind: "existing", value: undefined })),
     ).rejects.toThrow(/no longer active/i);
+  });
+
+  it("removes an exact host record started by a change after close reaches its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakePluginHost();
+      const owner = new PluginHostOwnership(host, { drainTimeoutMs: 25 });
+      const startAllowed = deferred<void>();
+      const change = owner.runChange("example-plugin", async (authority) => {
+        await startAllowed.promise;
+        return authority.adopt({
+          kind: "started",
+          value: "late",
+          evidence: host.start("example-plugin"),
+        });
+      });
+      const close = owner.close();
+
+      await vi.advanceTimersByTimeAsync(25);
+      await close;
+      expect(host.calls).toEqual(["bump-generation", "stop-all"]);
+
+      startAllowed.resolve();
+      await expect(change).resolves.toBe("late");
+      expect(host.currentRecord("example-plugin")).toBeUndefined();
+      expect(host.calls).toEqual([
+        "bump-generation",
+        "stop-all",
+        "stop-record:example-plugin",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lets close proceed at its deadline when a command never exits", async () => {
@@ -773,6 +939,7 @@ describe("PluginHostOwnership", () => {
         authority.start(async () => {
           await startAllowed.promise;
           return {
+            kind: "started",
             value: "late",
             evidence: host.start("example-plugin"),
           };
