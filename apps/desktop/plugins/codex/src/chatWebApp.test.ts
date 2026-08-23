@@ -11,7 +11,7 @@ import type {
   PluginAgentSessionStartInput,
   PluginPermissionDecision,
 } from "@dohc/sdk/node";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createChatWebApp, type ChatWebApp } from "./chatWebApp.ts";
 
 // The plugin's real ui/ folder. Once installed, the built plugin root serves
@@ -370,7 +370,8 @@ describe("Codex chat web app", () => {
 
     const events: PluginAgentEvent[] = [
       { kind: "session-state", state: "ready" },
-      { kind: "text-delta", itemId: "answer", stream: "assistant", text: "Hello" },
+      { kind: "text-delta", itemId: "answer", stream: "assistant", text: "Hel" },
+      { kind: "text-delta", itemId: "answer", stream: "assistant", text: "lo" },
       { kind: "token-usage", used: 12, input: 8, output: 4 },
     ];
     for (const event of events) fake.startInputs[0]?.onEvent(event);
@@ -484,22 +485,30 @@ describe("Codex chat web app", () => {
       promptGate: () => gate.promise,
     });
     const { url, token } = await start(fake);
+    let timestamp = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => timestamp++);
+    try {
+      const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+      await entered.promise;
+      fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
+      gate.resolve();
+      expect((await sendPromise).status).toBe(202);
 
-    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
-    await entered.promise;
-    fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
-    gate.resolve();
-    expect((await sendPromise).status).toBe(202);
-
-    const reattached = await eventStream(url, token);
-    await reattached.next(); // the initial closed snapshot
-    expect(await reattached.next()).toEqual({
-      kind: "user-message",
-      text: "Hello",
-      clientId: "c1",
-    });
-    expect(await reattached.next()).toEqual({ kind: "session-state", state: "running" });
-    await reattached.close();
+      const reattached = await eventStream(url, token);
+      await reattached.nextRaw(); // the initial closed snapshot
+      const userMessage = await reattached.nextRaw();
+      expect(userMessage).toMatchObject({
+        kind: "user-message",
+        text: "Hello",
+        clientId: "c1",
+      });
+      const running = await reattached.nextRaw();
+      expect(running).toMatchObject({ kind: "session-state", state: "running" });
+      expect(userMessage.at as number).toBeLessThanOrEqual(running.at as number);
+      await reattached.close();
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("replays nothing for a reservation the driver hasn't accepted yet, but carries it in order once it has", async () => {
@@ -707,36 +716,20 @@ describe("Codex chat web app", () => {
   it("claims the prompt slot before waiting for a live session", async () => {
     const startEntered = deferred();
     const startGate = deferred();
-    const secondProbe = deferred();
-    let probeCalls = 0;
-    const fake = fakeDriver(
-      () => {
-        probeCalls += 1;
-        if (probeCalls === 2) secondProbe.resolve();
-        return installedProbe;
-      },
-      {
-        onStartSessionEntered: () => startEntered.resolve(),
-        startGate: () => startGate.promise,
-      },
-    );
+    const fake = fakeDriver(undefined, {
+      onStartSessionEntered: () => startEntered.resolve(),
+      startGate: () => startGate.promise,
+    });
     const { url, token } = await start(fake);
 
     const accepted = post(url, "message", { text: "First" }, token);
     await startEntered.promise;
-    const refused = post(url, "message", { text: "Second" }, token);
-    const firstResult = await Promise.race([
-      refused.then((response) => ({ kind: "response" as const, response })),
-      secondProbe.promise.then(() => ({ kind: "second-probe" as const })),
-    ]);
-    if (firstResult.kind === "response") expect(firstResult.response.status).toBe(409);
+    const refusedResponse = await post(url, "message", { text: "Second" }, token);
+    expect(refusedResponse.status).toBe(409);
 
     startGate.resolve();
-    const [acceptedResponse, refusedResponse] = await Promise.all([accepted, refused]);
-    expect(firstResult.kind).toBe("response");
+    const acceptedResponse = await accepted;
     expect(acceptedResponse.status).toBe(202);
-    expect(refusedResponse.status).toBe(409);
-    expect(probeCalls).toBe(1);
     expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
 
     expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });

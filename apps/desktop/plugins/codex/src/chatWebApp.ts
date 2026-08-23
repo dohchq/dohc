@@ -554,12 +554,12 @@ export function createChatWebApp(
       // submitting page's own optimistic card must never be told "not sent"
       // for one that in fact was.
       turnActive = true;
-      reserved.at = Date.now();
       reserved.provisional = false;
       // The reservation can have aged out of the buffer's cap while prompt()
       // was still pending (a very active turn ahead of it) -- put it back at
       // the end rather than lose the confirmation entirely.
       if (!eventLog.includes(reserved)) {
+        reserved.at = Date.now();
         eventLog.push(reserved);
         trimLog();
       }
