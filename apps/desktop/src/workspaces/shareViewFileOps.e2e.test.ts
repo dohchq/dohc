@@ -19,17 +19,19 @@ import {
   readPendingMaterializationPaths,
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
-import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
-import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
+import {
+  createCaptureLiveStores,
+  type CaptureVersionedTextStore,
+} from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 import {
   applyShareViewFileCreate,
   applyShareViewFileImport,
   applyShareViewPathDelete,
   applyShareViewPathMove,
+  applyShareViewTextWrite,
 } from "./shareViewFileChanges";
-import { applyShareViewTextWrite } from "./shareViewTextChange";
-import { createShareViewFiles } from "./shareViewFiles";
+import { createShareViewFiles, shareViewFilesStore } from "./shareViewFiles";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import { createFile, movePath } from "./workspaceFiles";
 
@@ -176,7 +178,7 @@ function shareViewFilesOwner(
         candidate.workspaceId === requested.workspaceId
           ? resolved
           : null,
-      openStore: () => store,
+      openStore: () => shareViewFilesStore(store),
       resolveRelay: async () => null,
       pull: async () => {
         throw new Error("Unexpected pull");

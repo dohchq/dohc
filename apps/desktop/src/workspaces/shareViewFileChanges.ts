@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -24,6 +25,7 @@ import {
   screenDroppedPaths,
   type ImportCopyOutcome,
 } from "./workspaceFiles";
+import type { WorkspaceTextWriteResult } from "./workspaceAssets";
 import { readDiskContent } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
@@ -102,6 +104,65 @@ async function markMutateMaterializeAndClear(
     await materializeSharedViewPaths(rootPath, workspaceId, changed, store);
   }
   if (paths.length > 0) await clearPendingMaterializationPaths(rootPath, paths);
+}
+
+/**
+ * A received share's store is canonical, so its hash decides whether a text
+ * save still targets the version the editor read. The projection follows the
+ * moment through the same debt record and materializer as every other change.
+ */
+export async function applyShareViewTextWrite(input: {
+  workspaceId: string;
+  rootPath: string;
+  relativePath: string;
+  text: string;
+  expectedContentHash: string;
+  shareViewStore: () => CaptureVersionedTextStore;
+}): Promise<WorkspaceTextWriteResult> {
+  const path = requireValidPath(
+    validateUserWritePath(input.relativePath),
+    "write path",
+    input.relativePath,
+  );
+  const store = input.shareViewStore();
+  const main = await store.ensureMainVersion({
+    workspaceId: input.workspaceId,
+  });
+  const snapshot = await store.readTextFile({
+    workspaceId: input.workspaceId,
+    versionId: main.id,
+    path,
+  });
+  const current =
+    snapshot === null
+      ? null
+      : (snapshot.sha256 ??
+        createHash("sha256").update(snapshot.text, "utf8").digest("hex"));
+  if (current !== input.expectedContentHash) {
+    return { status: "conflict", currentContentHash: current };
+  }
+  const changed = [
+    { path, operation: "write" as const, contentKind: "text" as const },
+  ];
+  await markMutateMaterializeAndClear(
+    input.rootPath,
+    input.workspaceId,
+    { paths: [path], changed },
+    store,
+    async () => {
+      await store.writeTextFile({
+        workspaceId: input.workspaceId,
+        versionId: main.id,
+        path,
+        text: input.text,
+        metadata: { origin: "local-file" },
+      });
+    },
+  );
+  return {
+    status: "written",
+    contentHash: createHash("sha256").update(input.text).digest("hex"),
+  };
 }
 
 /**

@@ -128,6 +128,28 @@ function hashContent(content: Uint8Array | string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+export function workspaceTextReadResultFromBytes(
+  bytes: Buffer,
+  totalByteLength = bytes.byteLength,
+): WorkspaceTextReadResult {
+  const truncated = totalByteLength > MAX_TEXT_BYTES;
+  const content = bytes.subarray(0, Math.min(bytes.byteLength, MAX_TEXT_BYTES));
+  if (truncated) {
+    return {
+      text: new TextDecoder("utf-8", { ignoreBOM: true }).decode(content, {
+        stream: true,
+      }),
+      truncated: true,
+      contentHash: null,
+    };
+  }
+  return {
+    text: content.toString("utf8"),
+    truncated: false,
+    contentHash: hashContent(content),
+  };
+}
+
 function isMissingTargetError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
@@ -456,19 +478,10 @@ async function readTextTarget(target: string): Promise<WorkspaceTextReadResult> 
       if (bytesRead === 0) break;
       totalBytesRead += bytesRead;
     }
-    const truncated = totalBytesRead > MAX_TEXT_BYTES || info.size > MAX_TEXT_BYTES;
-    const content = buffer.subarray(0, Math.min(totalBytesRead, MAX_TEXT_BYTES));
-    if (truncated) {
-      const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(content, {
-        stream: true,
-      });
-      return { text, truncated: true, contentHash: null };
-    }
-    return {
-      text: content.toString("utf8"),
-      truncated: false,
-      contentHash: hashContent(content),
-    };
+    return workspaceTextReadResultFromBytes(
+      buffer.subarray(0, totalBytesRead),
+      Math.max(totalBytesRead, info.size),
+    );
   } finally {
     await handle.close();
   }

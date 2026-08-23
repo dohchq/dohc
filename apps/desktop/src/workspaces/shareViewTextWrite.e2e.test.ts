@@ -20,7 +20,7 @@ import { readWorkspaceText, writeWorkspaceText } from "./workspaceAssets";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
-import { applyShareViewTextWrite } from "./shareViewTextChange";
+import { applyShareViewTextWrite } from "./shareViewFileChanges";
 
 // The seam the desktop e2e exposed and every unit test missed (#646 PR3a).
 //

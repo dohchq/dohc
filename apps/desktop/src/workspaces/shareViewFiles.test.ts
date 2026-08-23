@@ -7,6 +7,7 @@ import {
   createShareViewFiles,
   type ResolvedShareViewFilesTarget,
   type ShareViewFilesDependencies,
+  type ShareViewFilesStore,
 } from "./shareViewFiles";
 import {
   captureSharedViewLocalDivergence,
@@ -15,7 +16,7 @@ import {
 } from "./sharedView";
 import { SharePinInvalidError } from "./shareViewRecords";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
-import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { createTestScratch } from "./testTemp";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -63,7 +64,7 @@ function mountTarget(rootPath: string): ResolvedShareViewFilesTarget {
 function readStore(input: {
   text: string;
   paths?: Array<{ path: string; text: string }>;
-}): CaptureVersionedTextStore {
+}): ShareViewFilesStore {
   const rows = input.paths ?? [{ path: "notes/a.md", text: input.text }];
   return {
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
@@ -91,7 +92,7 @@ function readStore(input: {
         hasYdocMarker: false,
       })),
     ),
-  } as unknown as CaptureVersionedTextStore;
+  } as unknown as ShareViewFilesStore;
 }
 
 function mutableTextStore(input?: {
@@ -99,7 +100,7 @@ function mutableTextStore(input?: {
   afterWrite?: (path: string) => void;
   beforeDelete?: (path: string) => void;
   afterRename?: (fromPath: string, toPath: string) => void;
-}): CaptureVersionedTextStore {
+}): ShareViewFilesStore {
   const rows = new Map<
     string,
     {
@@ -172,7 +173,7 @@ function mutableTextStore(input?: {
         return {};
       },
     ),
-  } as unknown as CaptureVersionedTextStore;
+  } as unknown as ShareViewFilesStore;
 }
 
 const unusedReconcilePorts: Pick<
@@ -553,6 +554,31 @@ describe("ShareViewFiles", () => {
     expect(store.readTextFile).toHaveBeenCalledTimes(3);
     await files.list({ kind: "standalone", workspaceId: "workspace-a" });
     expect(store.readTextFile).toHaveBeenCalledTimes(3);
+  });
+
+  it("omits a partial trailing UTF-8 character from a truncated canonical read", async () => {
+    const rootPath = await workspaceRoot();
+    const prefix = "x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES - 1);
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => readStore({ text: `${prefix}😀tail` }),
+    });
+
+    const read = await files.read(
+      { kind: "standalone", workspaceId: "workspace-a" },
+      { kind: "text", path: "notes/a.md" },
+    );
+
+    expect(read).toMatchObject({
+      kind: "text",
+      truncated: true,
+      contentHash: null,
+    });
+    if (read.kind !== "text") throw new Error("expected a text read");
+    expect(read.text).toHaveLength(prefix.length);
+    expect(read.text.at(-1)).toBe("x");
+    expect(read.text).not.toContain("\uFFFD");
   });
 
   it("keeps canonical reads and listings on the shared-file security floor", async () => {

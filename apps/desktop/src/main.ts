@@ -758,6 +758,7 @@ import {
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
+  shareViewFilesStore,
   type ResolvedShareViewFilesTarget,
   type ShareViewFileChangeOutcome,
   type ShareViewFileChangeValue,
@@ -4411,11 +4412,13 @@ function resolveShareViewFilesTarget(
 const shareViewFiles = createShareViewFiles({
   resolveTarget: resolveShareViewFilesTarget,
   openStore: (target) =>
-    sharedViewStoreFor({
-      workspaceId: target.storeWorkspaceId,
-      rootPath: target.rootPath,
-      ...(target.kind === "mount" ? { shareMount: true as const } : {}),
-    }),
+    shareViewFilesStore(
+      sharedViewStoreFor({
+        workspaceId: target.storeWorkspaceId,
+        rootPath: target.rootPath,
+        ...(target.kind === "mount" ? { shareMount: true as const } : {}),
+      }),
+    ),
   resolveRelay: async (target) => {
     await warmCredentialCache().catch(() => undefined);
     const credentials = cachedCredentials;

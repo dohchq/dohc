@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { TextDecoder } from "node:util";
 import {
   classifyPath,
   validateUserMaterializePath,
@@ -24,6 +23,7 @@ import {
   type WorkspaceTextReadResult,
   type WorkspaceTextWriteResult,
   WORKSPACE_ASSET_MAX_BYTES,
+  workspaceTextReadResultFromBytes,
 } from "./workspaceAssets";
 import {
   extractFrontmatterIcon,
@@ -52,9 +52,8 @@ import {
   applyShareViewFileImport,
   applyShareViewPathDelete,
   applyShareViewPathMove,
+  applyShareViewTextWrite,
 } from "./shareViewFileChanges";
-import { applyShareViewTextWrite } from "./shareViewTextChange";
-import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 export type ShareViewFilesTarget =
@@ -203,12 +202,32 @@ export interface ShareViewFiles {
   ): Promise<{ folderLeft: boolean }>;
 }
 
+export type ShareViewFilesStore = CaptureVersionedTextStore & {
+  listTextFileMetadata: NonNullable<
+    CaptureVersionedTextStore["listTextFileMetadata"]
+  >;
+};
+
+export function shareViewFilesStore(
+  store: CaptureVersionedTextStore,
+): ShareViewFilesStore {
+  const listTextFileMetadata = store.listTextFileMetadata;
+  if (listTextFileMetadata === undefined) {
+    throw new Error(
+      "Received-share files require engine metadata listing support.",
+    );
+  }
+  return Object.assign(store, { listTextFileMetadata });
+}
+
 export interface ShareViewFilesDependencies {
   /** Synchronous and registry-derived. It is called again after lifecycle wait. */
   resolveTarget(
     target: ShareViewFilesTarget,
   ): ResolvedShareViewFilesTarget | null;
-  openStore(target: ResolvedShareViewFilesTarget): CaptureVersionedTextStore;
+  openStore(
+    target: ResolvedShareViewFilesTarget,
+  ): ShareViewFilesStore;
   resolveRelay(
     target: ActiveShareViewFilesTarget,
   ): Promise<SyncRelayConnection | null>;
@@ -398,7 +417,7 @@ interface CanonicalFileState {
 type CanonicalSnapshot = Map<string, CanonicalFileState>;
 
 async function canonicalSnapshot(
-  store: CaptureVersionedTextStore,
+  store: ShareViewFilesStore,
   workspaceId: string,
   change: ShareViewFileChange,
 ): Promise<CanonicalSnapshot> {
@@ -427,31 +446,17 @@ async function canonicalSnapshot(
       ],
     ]);
   }
-  if (store.listTextFileMetadata) {
-    const files = await store.listTextFileMetadata({
-      workspaceId,
-      versionId: main.id,
-    });
-    return new Map(
-      files.map((file) => [
-        file.path,
-        {
-          objectId: file.objectId,
-          contentKind: file.contentKind,
-          sha256: file.sha256,
-          latestMomentId: file.latestMomentId,
-        },
-      ]),
-    );
-  }
-  const files = await store.listTextFiles({ workspaceId, versionId: main.id });
+  const files = await store.listTextFileMetadata({
+    workspaceId,
+    versionId: main.id,
+  });
   return new Map(
     files.map((file) => [
       file.path,
       {
         objectId: file.objectId,
-        contentKind: file.contentKind === "binary" ? "binary" : "text",
-        sha256: file.sha256 ?? null,
+        contentKind: file.contentKind,
+        sha256: file.sha256,
         latestMomentId: file.latestMomentId,
       },
     ]),
@@ -637,7 +642,7 @@ export function createShareViewFiles(
 
   async function withStore<T>(
     target: ResolvedShareViewFilesTarget,
-    run: (store: CaptureVersionedTextStore) => Promise<T>,
+    run: (store: ShareViewFilesStore) => Promise<T>,
   ): Promise<T> {
     if (target.kind === "mount") {
       await dependencies.assertProjectionRoot(target);
@@ -841,29 +846,9 @@ export function createShareViewFiles(
             mediaType: mediaTypeForExtension(path),
           };
         }
-        const truncated = bytes.byteLength > WORKSPACE_TEXT_EDITOR_MAX_BYTES;
-        const content = bytes.subarray(
-          0,
-          Math.min(bytes.byteLength, WORKSPACE_TEXT_EDITOR_MAX_BYTES),
-        );
-        if (truncated) {
-          return {
-            kind: "text",
-            text: new TextDecoder("utf-8", { ignoreBOM: true }).decode(
-              content,
-              {
-                stream: true,
-              },
-            ),
-            truncated: true,
-            contentHash: null,
-          };
-        }
         return {
           kind: "text",
-          text: content.toString("utf8"),
-          truncated: false,
-          contentHash: createHash("sha256").update(content).digest("hex"),
+          ...workspaceTextReadResultFromBytes(bytes),
         };
       });
     },
@@ -874,11 +859,6 @@ export function createShareViewFiles(
           const main = await store.ensureMainVersion({
             workspaceId: target.storeWorkspaceId,
           });
-          if (!store.listTextFileMetadata) {
-            throw new Error(
-              "Shared file listing requires engine metadata listing support.",
-            );
-          }
           const metadata = await store.listTextFileMetadata({
             workspaceId: target.storeWorkspaceId,
             versionId: main.id,
@@ -1059,8 +1039,6 @@ export function createShareViewFiles(
             ? {
                 ok: true,
                 ...outcome,
-                collisionRecordQuarantined:
-                  recovered.collisionRecordQuarantined,
               }
             : outcome;
         };

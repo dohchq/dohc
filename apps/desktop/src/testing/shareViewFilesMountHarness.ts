@@ -7,6 +7,7 @@ import {
 import type { ShareMountRecord } from "../workspaces/registryStore";
 import {
   createShareViewFiles,
+  shareViewFilesStore,
   type ResolvedShareViewFilesTarget,
 } from "../workspaces/shareViewFiles";
 import {
@@ -65,11 +66,13 @@ export async function refreshShareMountThroughOwnerForTest(input: {
         ? target
         : null,
     openStore: (current) =>
-      input.openStore({
-        workspaceId: current.storeWorkspaceId,
-        rootPath: current.rootPath,
-        shareMount: true,
-      }),
+      shareViewFilesStore(
+        input.openStore({
+          workspaceId: current.storeWorkspaceId,
+          rootPath: current.rootPath,
+          shareMount: true,
+        }),
+      ),
     resolveRelay: async () => input.relay,
     pull: async (current, relay, pullInput) =>
       input.pull({

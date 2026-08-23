@@ -48,7 +48,7 @@ import {
   applyShareViewPathDelete,
   applyShareViewPathMove,
 } from "./shareViewFileChanges";
-import { applyShareViewTextWrite } from "./shareViewTextChange";
+import { applyShareViewTextWrite } from "./shareViewFileChanges";
 import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import {
