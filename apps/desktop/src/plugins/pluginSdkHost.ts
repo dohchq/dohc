@@ -34,6 +34,7 @@ export interface PluginSdkHostContext {
   requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   writeAvailable: () => Promise<boolean>;
+  /** Main-supplied owner-aware read authority; plugins cannot supply or widen it. */
   reads?: WorkspaceSdkHostContext["reads"];
   /**
    * The web apps this plugin's manifest declares, so `ui.openWebApp` can
