@@ -1298,11 +1298,9 @@ describe("buildSite", () => {
           "'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' " +
           "-PassThru -WindowStyle Hidden",
         "Write-Output ('CHILD:' + $proc.Id)",
-        // Keeps the wrapper alive long enough for the immediate post-spawn
-        // descendant snapshot (a second powershell.exe round trip reading
-        // Win32_Process) to land before this wrapper exits on its own —
-        // buildSite has no descendant-poll-interval override, so that
-        // immediate snapshot is the only capture this scenario can rely on.
+        // Keeps the wrapper alive long enough for a descendant snapshot (a
+        // separate powershell.exe round trip reading Win32_Process) to land
+        // before this wrapper exits on its own.
         "Start-Sleep -Milliseconds 2000",
       ].join("; ");
       const result = await buildSite({
@@ -1311,6 +1309,16 @@ describe("buildSite", () => {
         command: "powershell.exe",
         args: ["-NoProfile", "-NonInteractive", "-Command", script],
         timeoutMs: 15000,
+        // A single immediate snapshot races the wrapper's own Start-Process
+        // call under an already-loaded worker pool: whichever freshly
+        // spawned powershell.exe (the capture query vs. the wrapper's own
+        // child) actually runs first is real OS scheduling, not something a
+        // longer sleep can guarantee. buildSite has no descendant-poll
+        // interval by default (a build usually exits well inside it), so
+        // override it here the same way startSiteDevServer's own tests do —
+        // many real capture attempts across the wrapper's alive window,
+        // still reading the real process table, instead of one shot.
+        descendantCaptureIntervalMs: 100,
       });
       expect(result.exitCode).toBe(0);
       const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));

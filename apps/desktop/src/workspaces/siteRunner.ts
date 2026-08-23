@@ -1154,6 +1154,15 @@ export async function buildSite(input: {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   signal?: AbortSignal;
+  // Test-only override for the descendant-poll cadence — production always
+  // gets DESCENDANT_CAPTURE_INTERVAL_MS. See startSiteDevServer's own
+  // override for why a test needs this: a single immediate snapshot races
+  // the wrapper's own child spawn, and only a tighter interval turns that
+  // race into a real wait instead of a hardcoded sleep.
+  descendantCaptureIntervalMs?: number;
+  // Test-only override for the descendant reader itself, mirroring
+  // startSiteDevServer's own override.
+  descendantsReader?: (pid: number) => Promise<number[]>;
 }): Promise<BuildSiteResult> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
@@ -1176,7 +1185,10 @@ export async function buildSite(input: {
   // normally runs and exits on its own quickly, so this poll rarely needs
   // more than its immediate and exit-adjacent snapshots, but the interval
   // still covers a longer one.
-  const descendants = createDescendantCapture(child);
+  const descendants = createDescendantCapture(child, {
+    intervalMs: input.descendantCaptureIntervalMs,
+    reader: input.descendantsReader,
+  });
 
   const exitCode = await new Promise<number | null>((resolve) => {
     let settled = false;
