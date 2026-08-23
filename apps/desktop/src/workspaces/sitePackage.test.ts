@@ -4,14 +4,34 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
 import {
-  getSitePackage,
-  listSitePackages,
+  getSitePackage as getKnownSitePackage,
+  listSitePackages as listKnownSitePackages,
   sharedStaticEntryRelativeToSite,
   shareMountRootForSite,
+  type SitePackageInfo,
   staticPreviewOwnerFiles,
   staticPreviewTargetForSite,
 } from "./sitePackage";
 import { startStaticSitePreview } from "./siteRunner";
+import { listFiles } from "./workspaceFiles";
+
+async function listSitePackages(rootPath: string): Promise<SitePackageInfo[]> {
+  return listKnownSitePackages(rootPath, await listFiles(rootPath));
+}
+
+async function getSitePackage(
+  rootPath: string,
+  anyPath: string,
+  knownSites?: readonly SitePackageInfo[],
+  effectiveMode?: SitePackageInfo["configuredPreviewMode"],
+): Promise<SitePackageInfo | null> {
+  return getKnownSitePackage(
+    rootPath,
+    anyPath,
+    knownSites ?? (await listSitePackages(rootPath)),
+    effectiveMode,
+  );
+}
 
 let root: string;
 
@@ -185,7 +205,7 @@ describe("listSitePackages", () => {
       JSON.stringify({ scripts: { dev: "vite" } }),
     );
 
-    expect(await listSitePackages(root, { files: [], folders: [] })).toEqual(
+    expect(await listKnownSitePackages(root, { files: [] })).toEqual(
       [],
     );
   });

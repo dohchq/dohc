@@ -26,7 +26,7 @@ export function createOwnedSiteCatalog<Workspace extends { rootPath: string }>(
     const reads = input.reads(workspace);
     const searchView = await reads.prepareSearch();
     const listed = searchView.listing ?? (await reads.listFiles());
-    return listSitePackages(workspace.rootPath, { files: listed.files });
+    return listSitePackages(workspace.rootPath, listed);
   };
 
   return {

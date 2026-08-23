@@ -26,7 +26,6 @@ import {
   isPathAllowedForAuthority,
   splitCommandLine,
 } from "./siteRunner";
-import { listFiles } from "./workspaceFiles";
 
 export type SiteAuthority =
   | { kind: "workspace" }
@@ -3361,17 +3360,18 @@ async function sourceForFile(rootPath: string, path: string): Promise<string | W
 
 export async function listSitePackages(
   rootPath: string,
-  ownedListing?: ListWorkspaceFilesResult,
+  ownedListing: Pick<ListWorkspaceFilesResult, "files">,
 ): Promise<SitePackageInfo[]> {
-  const listed = ownedListing ?? (await listFiles(rootPath));
-  const sources = await Promise.all(listed.files.map((file) => sourceForFile(rootPath, file.path)));
+  const sources = await Promise.all(
+    ownedListing.files.map((file) => sourceForFile(rootPath, file.path)),
+  );
   const sites = discoverSites(sources);
   const mapped = await Promise.all(
     sites.map(async (site) =>
       mapWorkspaceSite(
         rootPath,
         site,
-        listed.files,
+        ownedListing.files,
         await configuredScriptsForSite(rootPath, site),
       ),
     ),
@@ -3382,7 +3382,7 @@ export async function listSitePackages(
 export async function getSitePackage(
   rootPath: string,
   anyPath: string,
-  knownSites?: SitePackageInfo[],
+  knownSites: readonly SitePackageInfo[],
   // See shareManifestForSite: overrides the matched site's own
   // shareManifest to select the artifact THIS specific request's caller
   // is actually previewing, instead of listSitePackages' batch
@@ -3391,9 +3391,8 @@ export async function getSitePackage(
   // for callers that pass no mode, is unaffected.
   effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SitePackageInfo | null> {
-  const sites = knownSites ?? await listSitePackages(rootPath);
   const matched =
-    sites
+    knownSites
       .filter((site) => anyPath === site.root || isUnder(site.root, anyPath))
       .sort((a, b) => b.root.length - a.root.length)[0] ?? null;
   if (!matched || effectiveMode === undefined) return matched;

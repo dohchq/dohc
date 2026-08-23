@@ -7,8 +7,13 @@ import {
   createSitePreviewStartRegistry,
   stopSitePreviewForRequest,
 } from "./workspaces/sitePreviewLifecycle";
-import { getSitePackage, requireExactSiteRoot } from "./workspaces/sitePackage";
+import {
+  getSitePackage,
+  listSitePackages,
+  requireExactSiteRoot,
+} from "./workspaces/sitePackage";
 import { createTestScratch } from "./workspaces/testTemp";
+import { listFiles } from "./workspaces/workspaceFiles";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
@@ -167,7 +172,8 @@ describe("site preview main-process wiring", () => {
     );
 
     const requestedRoot = "ancestor/stale-child";
-    const detected = await getSitePackage(root, requestedRoot);
+    const sites = await listSitePackages(root, await listFiles(root));
+    const detected = await getSitePackage(root, requestedRoot, sites);
     expect(detected?.root).toBe("ancestor");
 
     const startPreviewForSite = vi.fn();
@@ -178,7 +184,7 @@ describe("site preview main-process wiring", () => {
     expect(startPreviewForSite).not.toHaveBeenCalled();
 
     // The exact requested root, once genuinely detected, must still start.
-    const exact = await getSitePackage(root, "ancestor");
+    const exact = await getSitePackage(root, "ancestor", sites);
     expect(() => requireExactSiteRoot(exact, "ancestor")).not.toThrow();
   });
 
