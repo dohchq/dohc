@@ -140,7 +140,7 @@ function setSessionState(state, reason, options = {}) {
 // actually hears -- the status region above only ever speaks the state
 // label ("Error"), so without it the explanation and next step render
 // silently. A replayed card (a reconnect rebuilding history the reader
-// already heard) renders as quiet role="status" instead of re-alerting.
+// already heard) has no live-region semantics.
 // nextAction names what the user can do now, and it must be true for the
 // state the card reports: "start a new session" only when the session
 // actually ended, "try again" when only the turn failed.
@@ -148,7 +148,7 @@ function errorCard(message, nextAction, replay) {
   hideEmptyState();
   const card = document.createElement("section");
   card.className = "error-card";
-  card.setAttribute("role", replay ? "status" : "alert");
+  if (!replay) card.setAttribute("role", "alert");
   if (nextAction) {
     const heading = document.createElement("strong");
     heading.textContent = message;
@@ -436,7 +436,7 @@ function renderEvent(event) {
       break;
     case "error":
       if (event.fatal) {
-        setSessionState("error");
+        setSessionState("error", undefined, { silent: event.replay });
         recoveryCard(event.message, event.replay);
       } else {
         messageCard("Claude Code", event.message, "agent", event.at);

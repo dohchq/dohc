@@ -4,7 +4,7 @@
 // beside it. Run via `node --test` beside the desktop suite.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
@@ -42,6 +42,40 @@ const shPath = (() => {
 })();
 const cmdPath = process.env.ComSpec ?? "cmd.exe";
 
+// A stub `node` reporting a Node 20 version, so the launcher's version gate
+// can be exercised without an actual Node 20 install. POSIX gets a plain
+// shell script -- `command -v`/exec do not care that it isn't a real
+// interpreter, and the version gate refuses before anything tries to run
+// the bundle through it. Windows cannot use a .cmd/.bat stand-in here: the
+// launcher invokes `node` bare (no `call`), and chaining into another batch
+// file that way transfers control permanently instead of returning -- the
+// rest of dohc-mcp.cmd would never run. A byte-patched copy of the real
+// node.exe (with its embedded version string swapped for a same-length
+// Node 20 one) is a genuine PE binary, so `node --version` behaves exactly
+// like Node 20 while everything else about invoking it stays real.
+function oldNodeDir() {
+  const dir = mkdtempSync(join(tmpdir(), "dohc-mcp-old-node-"));
+  const version = process.version.replace(/^v\d+/, "v20");
+  if (isWindows) {
+    const binary = readFileSync(process.execPath);
+    const currentVersion = Buffer.from(process.version);
+    const oldVersion = Buffer.from(version);
+    assert.equal(oldVersion.length, currentVersion.length);
+    let offset = 0;
+    let replacements = 0;
+    while ((offset = binary.indexOf(currentVersion, offset)) !== -1) {
+      oldVersion.copy(binary, offset);
+      offset += oldVersion.length;
+      replacements += 1;
+    }
+    assert.ok(replacements > 0, "the Node executable did not contain its version string");
+    writeFileSync(join(dir, "node.exe"), binary, { mode: 0o755 });
+  } else {
+    writeFileSync(join(dir, "node"), `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 });
+  }
+  return { dir, version };
+}
+
 test("the sh launcher names the Node.js prerequisite when PATH has no node", { skip: !shPath }, () => {
   const dir = launcherDir();
   const result = spawnSync(shPath, [join(dir, "dohc-mcp").replaceAll("\\", "/"), "--workspace", "w"], {
@@ -51,6 +85,18 @@ test("the sh launcher names the Node.js prerequisite when PATH has no node", { s
   assert.equal(result.status, 127);
   assert.match(result.stderr, /Node\.js/);
   assert.ok(result.stderr.includes(NODE_MISSING_MESSAGE));
+});
+
+test("the sh launcher refuses Node.js 20 and names the found version", { skip: !shPath }, () => {
+  const dir = launcherDir();
+  const oldNode = oldNodeDir();
+  const result = spawnSync(shPath, [join(dir, "dohc-mcp").replaceAll("\\", "/")], {
+    env: { ...process.env, PATH: oldNode.dir },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 127);
+  assert.match(result.stderr, /Node\.js 22 or newer/);
+  assert.ok(result.stderr.includes(oldNode.version.slice(1)));
 });
 
 test("the sh launcher runs the bundle beside it when node is on PATH", { skip: !shPath }, () => {
@@ -71,6 +117,18 @@ test("the cmd launcher names the Node.js prerequisite when PATH has no node", { 
   });
   assert.equal(result.status, 127);
   assert.match(result.stderr, /Node\.js/);
+});
+
+test("the cmd launcher refuses Node.js 20 and names the found version", { skip: !isWindows }, () => {
+  const dir = launcherDir();
+  const oldNode = oldNodeDir();
+  const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd")], {
+    env: { ...process.env, PATH: oldNode.dir, Path: oldNode.dir },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 127);
+  assert.match(result.stderr, /Node\.js 22 or newer/);
+  assert.ok(result.stderr.includes(oldNode.version.slice(1)));
 });
 
 test("the cmd launcher runs the bundle beside it when node is on PATH", { skip: !isWindows }, () => {

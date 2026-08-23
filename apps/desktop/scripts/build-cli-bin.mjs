@@ -25,6 +25,13 @@ if ! command -v node >/dev/null 2>&1; then
   echo "${NODE_MISSING_MESSAGE}" >&2
   exit 127
 fi
+NODE_VERSION=$(node --version 2>/dev/null)
+NODE_RELEASE=\${NODE_VERSION#v}
+NODE_MAJOR=\${NODE_RELEASE%%.*}
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  echo "dohc-mcp needs Node.js 22 or newer; found Node.js $NODE_RELEASE." >&2
+  exit 127
+fi
 exec node "\${0%/*}/dohc-mcp.mjs" "$@"
 `;
 
@@ -36,6 +43,14 @@ export const WINDOWS_MCP_LAUNCHER =
   "node --version >nul 2>nul\r\n" +
   "if errorlevel 1 (\r\n" +
   `  echo ${NODE_MISSING_MESSAGE} 1>&2\r\n` +
+  "  exit /b 127\r\n" +
+  ")\r\n" +
+  "set \"NODE_VERSION=\"\r\n" +
+  "for /f \"delims=\" %%v in ('node --version 2^>nul') do set \"NODE_VERSION=%%v\"\r\n" +
+  "set \"NODE_RELEASE=%NODE_VERSION:~1%\"\r\n" +
+  "for /f \"tokens=1 delims=.\" %%v in (\"%NODE_RELEASE%\") do set \"NODE_MAJOR=%%v\"\r\n" +
+  "if %NODE_MAJOR% LSS 22 (\r\n" +
+  "  echo dohc-mcp needs Node.js 22 or newer; found Node.js %NODE_RELEASE%. 1>&2\r\n" +
   "  exit /b 127\r\n" +
   ")\r\n" +
   'node "%~dp0dohc-mcp.mjs" %*\r\n';

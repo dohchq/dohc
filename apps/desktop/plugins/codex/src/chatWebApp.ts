@@ -603,6 +603,8 @@ export function createChatWebApp(
         // bring it back.
         sessionGeneration += 1;
         sessionStart = null;
+        // message()'s identity guard keeps its cleanup from clearing a newer reservation.
+        pendingPrompt = null;
         publish({ kind: "session-state", state: "closed", reason: "Stopped" });
       }
       writeEmpty(response, 204);

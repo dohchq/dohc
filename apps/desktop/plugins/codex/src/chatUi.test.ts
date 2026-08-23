@@ -256,16 +256,19 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(status?.textContent).toBe("Failed");
   });
 
-  it("keeps replayed failures quiet -- a replayed error card is status, a live one alerts", async () => {
+  it("keeps replayed failures out of live regions while live failures alert", async () => {
     // A reconnect's replay rebuilds cards the reader already heard; only a
     // failure happening now may interrupt as an alert.
     const { eventSource } = await loadChatModule();
+    const priorStatus = textOf("#status");
     sendEvent(eventSource, { kind: "error", message: "Old failure.", fatal: true, replay: true });
+    expect(textOf("#status")).toBe(priorStatus);
     sendEvent(eventSource, { kind: "session-state", state: "closed", reason: "Stopped", replay: true });
     for (const card of document.querySelectorAll(".error-card")) {
-      expect(card.getAttribute("role")).toBe("status");
+      expect(card.getAttribute("role")).toBeNull();
     }
     sendEvent(eventSource, { kind: "error", message: "New failure.", fatal: true });
+    expect(textOf("#status")).toBe("Error");
     const cards = document.querySelectorAll(".error-card");
     expect(cards).toHaveLength(3);
     expect(cards[2]?.getAttribute("role")).toBe("alert");

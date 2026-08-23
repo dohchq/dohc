@@ -1524,12 +1524,16 @@ describe("Claude Code chat web app", () => {
       expect(fake.disposed).toEqual(["session-1"]);
     });
 
-    it("stop during a pending startup does not leave a later message reusing the doomed promise", async () => {
+    it("stop during startup releases the prompt slot before the abandoned start settles", async () => {
       const entered = deferred();
       const gate = deferred();
+      let starts = 0;
       const fake = fakeDriver(undefined, {
         onStartSessionEntered: () => entered.resolve(),
-        startGate: () => gate.promise,
+        startGate: () => {
+          starts += 1;
+          return starts === 1 ? gate.promise : Promise.resolve();
+        },
       });
       const { url, token } = await start(fake);
       const stream = await eventStream(url, token);
@@ -1550,18 +1554,16 @@ describe("Claude Code chat web app", () => {
         reason: "Stopped",
       });
 
-      // Sent before the doomed first attempt even settles. Without the
-      // fix, liveSession() reuses the same still-pending sessionStart
-      // promise instead of starting a fresh attempt, and this 503s along
-      // with the first one.
-      const secondMessage = post(url, "message", { text: "Fresh" }, token);
+      // The fresh request must be accepted while the abandoned handshake
+      // is still blocked.
+      const secondResponse = await post(url, "message", { text: "Fresh" }, token);
       gate.resolve();
-
-      const [firstResponse, secondResponse] = await Promise.all([firstMessage, secondMessage]);
-      expect(firstResponse.status).toBe(503);
       expect(secondResponse.status).toBe(202);
+
+      const firstResponse = await firstMessage;
+      expect(firstResponse.status).toBe(503);
       expect(fake.startInputs).toHaveLength(2);
-      expect(fake.disposed).toEqual(["session-1"]);
+      expect(fake.disposed).toEqual(["session-2"]);
       await stream.close();
     });
   });
