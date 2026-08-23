@@ -517,64 +517,66 @@ export function createChatWebApp(
     if (turnActive || pendingPrompt) {
       throw requestError(409, "Wait for the current response to finish.");
     }
-    const clientId =
-      typeof body.clientId === "string" && body.clientId ? body.clientId : randomUUID();
-    const live = await liveSession();
-    // Reserve this turn's own position in the replay log before invoking
-    // the driver: prompt() can itself publish turn events (through onEvent)
-    // before it resolves, and those must never replay ahead of the user's
-    // own message that caused them. Filled in on accept, dropped on
-    // rejection -- never broadcast live here, only once accepted below,
-    // same as before.
-    const reserved: { event: ChatStreamEvent; at: number; provisional?: boolean } = {
-      event: { kind: "user-message", text: body.text, clientId },
-      at: Date.now(),
-      provisional: true,
-    };
-    eventLog.push(reserved);
-    trimLog();
     const inFlight = { stopRequested: false };
     pendingPrompt = inFlight;
+    const clientId =
+      typeof body.clientId === "string" && body.clientId ? body.clientId : randomUUID();
     try {
-      await live.prompt({ text: body.text });
-    } catch (error) {
-      const index = eventLog.indexOf(reserved);
-      if (index !== -1) eventLog.splice(index, 1);
-      if (processSession === live) {
-        processSession = null;
-        settlePendingPermissions();
+      const live = await liveSession();
+      // Reserve this turn's own position in the replay log before invoking
+      // the driver: prompt() can itself publish turn events (through onEvent)
+      // before it resolves, and those must never replay ahead of the user's
+      // own message that caused them. Filled in on accept, dropped on
+      // rejection -- never broadcast live here, only once accepted below,
+      // same as before.
+      const reserved: { event: ChatStreamEvent; at: number; provisional?: boolean } = {
+        event: { kind: "user-message", text: body.text, clientId },
+        at: Date.now(),
+        provisional: true,
+      };
+      eventLog.push(reserved);
+      trimLog();
+      try {
+        await live.prompt({ text: body.text });
+      } catch (error) {
+        const index = eventLog.indexOf(reserved);
+        if (index !== -1) eventLog.splice(index, 1);
+        if (processSession === live) {
+          processSession = null;
+          settlePendingPermissions();
+        }
+        const message = errorMessage(error);
+        publish({ kind: "error", message, fatal: true });
+        await Promise.resolve(live.dispose()).catch(() => undefined);
+        throw requestError(500, message);
       }
-      const message = errorMessage(error);
-      publish({ kind: "error", message, fatal: true });
-      await Promise.resolve(live.dispose()).catch(() => undefined);
-      throw requestError(500, message);
+      // Published only now that the driver actually accepted it: a reconnect
+      // must never replay a message that was never really sent, and the
+      // submitting page's own optimistic card must never be told "not sent"
+      // for one that in fact was.
+      turnActive = true;
+      reserved.at = Date.now();
+      reserved.provisional = false;
+      // The reservation can have aged out of the buffer's cap while prompt()
+      // was still pending (a very active turn ahead of it) -- put it back at
+      // the end rather than lose the confirmation entirely.
+      if (!eventLog.includes(reserved)) {
+        eventLog.push(reserved);
+        trimLog();
+      }
+      const encoded = frame(reserved.event, reserved.at);
+      for (const client of clients) client.write(encoded);
+      // A Stop that arrived while the prompt was still awaiting acceptance:
+      // now that the driver holds the turn, the recorded intent becomes a
+      // real cancel. Best-effort like any cancel after Stop's own 204 -- a
+      // transport failure here must not fail the accepted /message.
+      if (inFlight.stopRequested) {
+        await Promise.resolve(live.cancel()).catch(() => undefined);
+      }
+      writeEmpty(response, 202);
     } finally {
       if (pendingPrompt === inFlight) pendingPrompt = null;
     }
-    // Published only now that the driver actually accepted it: a reconnect
-    // must never replay a message that was never really sent, and the
-    // submitting page's own optimistic card must never be told "not sent"
-    // for one that in fact was.
-    turnActive = true;
-    reserved.at = Date.now();
-    reserved.provisional = false;
-    // The reservation can have aged out of the buffer's cap while prompt()
-    // was still pending (a very active turn ahead of it) -- put it back at
-    // the end rather than lose the confirmation entirely.
-    if (!eventLog.includes(reserved)) {
-      eventLog.push(reserved);
-      trimLog();
-    }
-    const encoded = frame(reserved.event, reserved.at);
-    for (const client of clients) client.write(encoded);
-    // A Stop that arrived while the prompt was still awaiting acceptance:
-    // now that the driver holds the turn, the recorded intent becomes a
-    // real cancel. Best-effort like any cancel after Stop's own 204 -- a
-    // transport failure here must not fail the accepted /message.
-    if (inFlight.stopRequested) {
-      await Promise.resolve(live.cancel()).catch(() => undefined);
-    }
-    writeEmpty(response, 202);
   }
 
   async function stop(response: ServerResponse): Promise<void> {

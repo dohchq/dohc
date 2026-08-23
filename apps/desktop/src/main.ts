@@ -631,10 +631,12 @@ import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
+  resolveDohcCliBinDirectory,
   resolveDohcMcpCommand,
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { syncLinuxStableCliBin } from "./agents/linuxStableCliBin";
 import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
 import {
   createLiveAgentDispatchStore,
@@ -1037,6 +1039,8 @@ function notifyPluginPanelSdkEvent(event: unknown): void {
   }
 }
 
+let linuxStableCliBinDir: string | undefined;
+
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
@@ -1085,6 +1089,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
             DOHC_MCP_COMMAND: resolveDohcMcpCommand({
               isPackaged: app.isPackaged,
               resourcesPath: process.resourcesPath,
+              linuxStableCliBinDir,
             }),
           },
         },
@@ -2270,6 +2275,7 @@ function mcpConfigFor(
   const command = resolveDohcMcpCommand({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
+    linuxStableCliBinDir,
   });
   const home = stateDir();
   const args = ["--workspace", rootPath, "--home", home];
@@ -12137,6 +12143,23 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(async () => {
+    if (app.isPackaged && process.platform === "linux" && process.env.APPIMAGE) {
+      const targetDir = join(stateDir(), "cli-bin");
+      try {
+        await syncLinuxStableCliBin({
+          resourcesCliBinDir: resolveDohcCliBinDirectory({
+            appRoot: app.getAppPath(),
+            isPackaged: app.isPackaged,
+            resourcesPath: process.resourcesPath,
+          }),
+          targetDir,
+        });
+        linuxStableCliBinDir = targetDir;
+      } catch (error) {
+        // A failed refresh must not block startup; this boot uses the packaged mount.
+        console.error("[desktop] Stable Linux cli-bin refresh failed:", error);
+      }
+    }
     if (!(await startRustEngineDaemon())) return;
     // BrowserWindow and Dock APIs are only safe after Electron is ready.
     nativeTheme.on("updated", refreshSystemThemeDesktopIcons);

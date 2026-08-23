@@ -704,6 +704,45 @@ describe("Codex chat web app", () => {
     expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
   });
 
+  it("claims the prompt slot before waiting for a live session", async () => {
+    const startEntered = deferred();
+    const startGate = deferred();
+    const secondProbe = deferred();
+    let probeCalls = 0;
+    const fake = fakeDriver(
+      () => {
+        probeCalls += 1;
+        if (probeCalls === 2) secondProbe.resolve();
+        return installedProbe;
+      },
+      {
+        onStartSessionEntered: () => startEntered.resolve(),
+        startGate: () => startGate.promise,
+      },
+    );
+    const { url, token } = await start(fake);
+
+    const accepted = post(url, "message", { text: "First" }, token);
+    await startEntered.promise;
+    const refused = post(url, "message", { text: "Second" }, token);
+    const firstResult = await Promise.race([
+      refused.then((response) => ({ kind: "response" as const, response })),
+      secondProbe.promise.then(() => ({ kind: "second-probe" as const })),
+    ]);
+    if (firstResult.kind === "response") expect(firstResult.response.status).toBe(409);
+
+    startGate.resolve();
+    const [acceptedResponse, refusedResponse] = await Promise.all([accepted, refused]);
+    expect(firstResult.kind).toBe("response");
+    expect(acceptedResponse.status).toBe(202);
+    expect(refusedResponse.status).toBe(409);
+    expect(probeCalls).toBe(1);
+    expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
+
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(fake.sessions[0]?.cancelCalls).toBe(1);
+  });
+
   it("continues an oversized streamed reply in a fresh log entry, keeping replay content exact", async () => {
     // Coalescing must not turn the entry cap into no memory guard at all:
     // one entry stops growing at its own bound and the item continues in a

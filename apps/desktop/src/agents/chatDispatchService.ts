@@ -302,13 +302,20 @@ export function resolveDohcMcpCommand(input: {
   resourcesPath?: string;
   platform?: NodeJS.Platform;
   env?: Record<string, string | undefined>;
+  linuxStableCliBinDir?: string;
 }): string {
   const override = (input.env ?? process.env).DOHC_MCP_COMMAND?.trim();
   if (override) return override;
   if (!input.isPackaged) return "dohc-mcp";
   const platform = input.platform ?? process.platform;
+  const cliBinDir =
+    platform === "linux" &&
+    (input.env ?? process.env).APPIMAGE &&
+    input.linuxStableCliBinDir
+      ? input.linuxStableCliBinDir
+      : resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
   return join(
-    resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin"),
+    cliBinDir,
     platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp",
   );
 }
