@@ -15,7 +15,6 @@ import {
   readWorkspaceText,
   type WorkspaceTextReadResult,
 } from "./workspaceAssets";
-import { importToDatabase } from "./workspaceDatabase";
 
 export interface OwnedWorkspaceFileReader {
   resolveShare(path: string): Promise<{
@@ -27,11 +26,6 @@ export interface OwnedWorkspaceFileReader {
     path: string,
   ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>>;
   readCompleteText(path: string): Promise<string>;
-  importDatabase(input: {
-    sourcePath: string;
-    databasePath: string;
-    tableName: string;
-  }): Promise<{ path: string; tableName: string; rowCount: number }>;
 }
 
 /** Reads local files from disk and received-share files from their owner store. */
@@ -116,14 +110,5 @@ export function createOwnedWorkspaceFileReader(input: {
     readAsset,
 
     readCompleteText,
-
-    async importDatabase({ sourcePath, databasePath, tableName }) {
-      return importToDatabase(
-        input.workspace.rootPath,
-        { path: sourcePath, body: await readCompleteText(sourcePath) },
-        databasePath,
-        tableName,
-      );
-    },
   };
 }

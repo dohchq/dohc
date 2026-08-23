@@ -778,6 +778,7 @@ import {
 } from "./workspaces/shareViewFilesTarget";
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
+import { importOwnedWorkspaceDatabase } from "./workspaces/ownedWorkspaceDatabaseImport";
 import { applyDatabaseEdit } from "./workspaces/workspaceDatabase";
 import {
   readWorkspaceGraph,
@@ -4546,7 +4547,7 @@ async function listOwnedWorkspaceFiles(
   }
   const mounts = storedShareMounts(workspace);
   const disk = await listFiles(workspace.rootPath);
-  if (workspace.shareMounts === undefined) return disk;
+  if (!shareMountRegistryIsPresent(workspace)) return disk;
   return overlayCanonicalShareMountFiles({
     disk,
     mounts,
@@ -7726,10 +7727,9 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
     return ImportToDatabaseResult.parse(
-      await createOwnedWorkspaceFileReader({
+      await importOwnedWorkspaceDatabase({
         workspace,
         files: shareViewFiles,
-      }).importDatabase({
         sourcePath: input.sourceRelativePath,
         databasePath: input.databaseRelativePath,
         tableName: input.tableName,

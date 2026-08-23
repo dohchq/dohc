@@ -9,7 +9,7 @@ import {
   type ShareViewFilesStore,
 } from "./shareViewFiles";
 import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
-import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
+import { importOwnedWorkspaceDatabase } from "./ownedWorkspaceDatabaseImport";
 import { readDatabaseSnapshot } from "./workspaceDatabase";
 import { createTestScratch } from "./testTemp";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
@@ -89,17 +89,16 @@ describe("owned database import", () => {
     const unexpectedRead = vi.fn(async () => {
       throw new Error("Owner read should not run without a registered mount.");
     });
-    const reader = createOwnedWorkspaceFileReader({
-      workspace: {
-        workspaceId: "host-tombstone",
-        rootPath,
-        shareMounts: [],
-      },
-      files: { read: unexpectedRead },
-    });
+    const workspace = {
+      workspaceId: "host-tombstone",
+      rootPath,
+      shareMounts: [],
+    };
 
     await expect(
-      reader.importDatabase({
+      importOwnedWorkspaceDatabase({
+        workspace,
+        files: { read: unexpectedRead },
         sourcePath: SOURCE_PATH,
         databasePath: "data.sqlite",
         tableName: "rows",
@@ -128,9 +127,9 @@ describe("owned database import", () => {
       workspace,
       sourceText: "id,value\n1,canonical owner\n",
     });
-    const reader = createOwnedWorkspaceFileReader({ workspace, files });
-
-    await reader.importDatabase({
+    await importOwnedWorkspaceDatabase({
+      workspace,
+      files,
       sourcePath: SOURCE_PATH,
       databasePath: "data.sqlite",
       tableName: "rows",
@@ -152,18 +151,39 @@ describe("owned database import", () => {
     const unexpectedRead = vi.fn(async () => {
       throw new Error("Local imports must not ask the share owner.");
     });
-    const reader = createOwnedWorkspaceFileReader({
-      workspace: { workspaceId: "local-large", rootPath },
-      files: { read: unexpectedRead },
-    });
-
     await expect(
-      reader.importDatabase({
+      importOwnedWorkspaceDatabase({
+        workspace: { workspaceId: "local-large", rootPath },
+        files: { read: unexpectedRead },
         sourcePath,
         databasePath: "large.sqlite",
         tableName: "rows",
       }),
     ).resolves.toMatchObject({ path: "large.sqlite", rowCount: 2 });
     expect(unexpectedRead).not.toHaveBeenCalled();
+  });
+
+  it("imports a complete owner source larger than the text editor limit", async () => {
+    const rootPath = await createTestScratch("dohc-owned-db-large-share-");
+    const record = mount();
+    const workspace = {
+      workspaceId: "host-large-owner",
+      rootPath,
+      shareMounts: [record],
+    };
+    const files = ownerFiles({
+      workspace,
+      sourceText: `id,value\n1,${"x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1)}\n2,complete\n`,
+    });
+
+    await expect(
+      importOwnedWorkspaceDatabase({
+        workspace,
+        files,
+        sourcePath: SOURCE_PATH,
+        databasePath: "large.sqlite",
+        tableName: "rows",
+      }),
+    ).resolves.toMatchObject({ path: "large.sqlite", rowCount: 2 });
   });
 });
