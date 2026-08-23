@@ -76,8 +76,10 @@ const lstatOverride = vi.hoisted(() => ({
 }));
 // A path another process changes between the check and the rename. It happens
 // inside the rename call, which is the race itself. `replaceWith` names an
-// entry to move ON TOP of the path -- a real second file, so the replacement
-// carries its own inode and no test depends on a deleted one not being reused.
+// entry to move ON TOP of the path. The mock reports a distinct inode on the
+// next lstat because Windows exposes file IDs as numbers that can exceed the
+// safe-integer range; the host filesystem is not a deterministic identity
+// fixture for the replacement these tests arrange.
 // Without it the path is simply removed. `failWith` names an errno code the
 // mock throws INSTEAD of calling the real rename -- for a failure a real
 // filesystem will not reproduce on demand, such as a length rejection whose
@@ -135,8 +137,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         renameRace.path = null;
         renameRace.replaceWith = null;
         renameRace.failWith = null;
-        if (replaceWith) await actual.rename(replaceWith, from);
-        else await actual.rm(from);
+        if (replaceWith) {
+          await actual.rename(replaceWith, from);
+          lstatOverride.path = String(from);
+          lstatOverride.inodes = [-1];
+        } else {
+          await actual.rm(from);
+        }
         if (failWith) throw errnoError(failWith);
       }
       return actual.rename(from, to);
@@ -683,6 +690,8 @@ describe("mcp tool path containment", () => {
         renameRace.path = null;
         renameRace.replaceWith = null;
         renameRace.failWith = null;
+        lstatOverride.path = null;
+        lstatOverride.inodes = [];
       }
     });
   });
