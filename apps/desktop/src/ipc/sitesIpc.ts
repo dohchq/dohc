@@ -7,8 +7,6 @@ import {
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 
-type Awaitable<Value> = Value | Promise<Value>;
-
 type SitesIpcHandler<Event, Result = unknown> = (
   event: Event,
   payload: unknown,
@@ -18,15 +16,7 @@ type SitesIpcHandlerRecord<Event> = Readonly<
   Record<string, SitesIpcHandler<Event>>
 >;
 
-export interface SitesIpcWorkspace {
-  workspaceId: string;
-}
-
-export interface SitesIpcDependencies<
-  Event,
-  Sender,
-  Workspace extends SitesIpcWorkspace,
-> {
+export interface SitesIpcDependencies<Event, Sender, Workspace> {
   authority: {
     requireTrustedSender(event: Event): Sender;
     requireActiveWorkspace(
@@ -41,7 +31,7 @@ export interface SitesIpcDependencies<
 export function createSitesIpcHandlers<
   Event,
   Sender,
-  Workspace extends SitesIpcWorkspace,
+  Workspace,
 >(
   dependencies: SitesIpcDependencies<Event, Sender, Workspace>,
 ): SitesIpcHandlerRecord<Event> {
@@ -51,7 +41,7 @@ export function createSitesIpcHandlers<
     Result,
   >(input: {
     parse(payload: unknown): Payload;
-    run(workspace: Workspace, payload: Payload): Awaitable<RawResult>;
+    run(workspace: Workspace, payload: Payload): Promise<RawResult>;
     validate(result: RawResult): Result;
   }): SitesIpcHandler<Event, Result> =>
     async (event, rawPayload) => {

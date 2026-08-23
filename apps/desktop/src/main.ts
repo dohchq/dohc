@@ -4759,13 +4759,7 @@ function ownedWorkspaceReads(
 }
 
 const ownedSiteCatalog = createOwnedSiteCatalog({
-  async listOwnedFiles(
-    workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-  ) {
-    const reads = ownedWorkspaceReads(workspace);
-    const searchView = await reads.prepareSearch();
-    return searchView.listing ?? reads.listFiles();
-  },
+  reads: ownedWorkspaceReads,
 });
 
 function ownedWorkspaceGraphSource(
