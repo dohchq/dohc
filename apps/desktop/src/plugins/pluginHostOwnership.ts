@@ -299,7 +299,6 @@ class ChangeReservation implements PluginHostChangeReservation {
   readonly [changeReservationBrand] = true;
   readonly released = signal();
   active = true;
-  runUsed = false;
   cancelPromise: Promise<void> | null = null;
 
   constructor(
@@ -317,10 +316,6 @@ class ChangeReservation implements PluginHostChangeReservation {
         new Error("Change reservation is no longer active."),
       );
     }
-    if (this.runUsed) {
-      return Promise.reject(new Error("Change reservation has already run."));
-    }
-    this.runUsed = true;
     return this.owner[runReservedChange](this, operation);
   }
 
@@ -643,7 +638,7 @@ export class PluginHostOwnership {
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
-    if (!reservation.active || this.#closed) {
+    if (!reservation.active) {
       return Promise.reject(
         new Error("Change reservation is no longer active."),
       );
