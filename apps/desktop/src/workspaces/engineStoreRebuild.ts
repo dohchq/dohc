@@ -1,9 +1,13 @@
 import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
+import type { Stats } from "node:fs";
+import { z } from "zod";
 import {
   access,
   mkdir,
+  readFile,
   rename as renameFile,
   rmdir,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -15,8 +19,24 @@ import {
 
 const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
 const MOVE_COMPLETE = "MOVE_COMPLETE";
+const ENGINE_STORE_FILES = [
+  "engine.db-shm",
+  "engine.db-wal",
+  "engine.db",
+] as const;
 
 type MoveOutcome = RebuildEngineStoreResult["outcome"];
+type EngineStoreFileName = (typeof ENGINE_STORE_FILES)[number];
+const engineStoreMoveManifestSchema = z.object({
+  files: z.array(
+    z.object({
+      name: z.enum(ENGINE_STORE_FILES),
+      size: z.number().nonnegative(),
+      mtimeMs: z.number(),
+    }),
+  ),
+});
+type EngineStoreMoveManifest = z.infer<typeof engineStoreMoveManifestSchema>;
 
 function errorCode(error: unknown): string | null {
   return typeof error === "object" &&
@@ -35,6 +55,100 @@ async function exists(path: string): Promise<boolean> {
     if (errorCode(error) === "ENOENT") return false;
     throw error;
   }
+}
+
+async function statIfExists(
+  path: string,
+): Promise<Stats | null> {
+  try {
+    return await stat(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function parseMoveManifest(contents: string): EngineStoreMoveManifest {
+  const manifest = engineStoreMoveManifestSchema.parse(JSON.parse(contents));
+  const names = new Set<EngineStoreFileName>();
+  for (const entry of manifest.files) {
+    if (names.has(entry.name)) {
+      throw new Error("The engine store move manifest is invalid.");
+    }
+    names.add(entry.name);
+  }
+  return manifest;
+}
+
+async function captureMoveManifest(
+  engineDir: string,
+): Promise<EngineStoreMoveManifest> {
+  const files: EngineStoreMoveManifest["files"] = [];
+  for (const name of ENGINE_STORE_FILES) {
+    const metadata = await statIfExists(join(engineDir, name));
+    if (metadata) {
+      files.push({ name, size: metadata.size, mtimeMs: metadata.mtimeMs });
+    }
+  }
+  return { files };
+}
+
+async function readMoveManifest(path: string): Promise<EngineStoreMoveManifest> {
+  return parseMoveManifest(await readFile(path, "utf8"));
+}
+
+async function completeManifestMove(
+  engineDir: string,
+  backupDir: string,
+  inProgressMarker: string,
+  completeMarker: string,
+  manifest: EngineStoreMoveManifest,
+  rename: typeof renameFile,
+  onMoved?: () => void,
+): Promise<void> {
+  for (const name of ENGINE_STORE_FILES) {
+    const entry = manifest.files.find((candidate) => candidate.name === name);
+    if (!entry) continue;
+    const from = join(engineDir, entry.name);
+    const to = join(backupDir, entry.name);
+    if (await exists(to)) continue;
+
+    const live = await statIfExists(from);
+    if (
+      live === null ||
+      live.size !== entry.size ||
+      live.mtimeMs !== entry.mtimeMs
+    ) {
+      continue;
+    }
+
+    try {
+      await rename(from, to);
+      onMoved?.();
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+  }
+  await rename(inProgressMarker, completeMarker);
+}
+
+export async function completePendingEngineStoreMove(
+  rootPath: string,
+): Promise<void> {
+  const backupDir = join(rootPath, ENGINE_STORE_BACKUP_DIR);
+  const inProgressMarker = join(backupDir, MOVE_IN_PROGRESS);
+  const completeMarker = join(backupDir, MOVE_COMPLETE);
+  if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) return;
+
+  const manifest = await readMoveManifest(inProgressMarker);
+  await completeManifestMove(
+    join(rootPath, ".dohc", "engine"),
+    backupDir,
+    inProgressMarker,
+    completeMarker,
+    manifest,
+    renameFile,
+  );
 }
 
 export async function moveEngineStoreAside(
@@ -58,39 +172,41 @@ export async function moveEngineStoreAside(
       return "backup-exists";
     }
   }
+  let manifest: EngineStoreMoveManifest;
   if (freshReservation) {
     try {
-      await writeFile(inProgressMarker, "", { flag: "wx" });
+      manifest = await captureMoveManifest(engineDir);
+      if (!manifest.files.some(({ name }) => name === "engine.db")) {
+        const liveDatabase = join(engineDir, "engine.db");
+        throw Object.assign(
+          new Error(`ENOENT: no engine database at ${liveDatabase}`),
+          { code: "ENOENT" },
+        );
+      }
+      await writeFile(inProgressMarker, JSON.stringify(manifest), {
+        flag: "wx",
+      });
     } catch (error) {
       await rmdir(backupDir).catch(() => undefined);
       throw error;
     }
+  } else {
+    manifest = await readMoveManifest(inProgressMarker);
   }
 
   let movedAny = false;
   try {
-    const liveDatabase = join(engineDir, "engine.db");
-    const backupDatabase = join(backupDir, "engine.db");
-    if (!(await exists(liveDatabase)) && !(await exists(backupDatabase))) {
-      throw Object.assign(new Error(`ENOENT: no engine database at ${liveDatabase}`), {
-        code: "ENOENT",
-      });
-    }
-
-    // SHM is transient; move SHM, then the authoritative WAL, then the database.
-    for (const name of ["engine.db-shm", "engine.db-wal", "engine.db"] as const) {
-      const from = join(engineDir, name);
-      const to = join(backupDir, name);
-      if (await exists(to)) continue;
-      try {
-        await rename(from, to);
+    await completeManifestMove(
+      engineDir,
+      backupDir,
+      inProgressMarker,
+      completeMarker,
+      manifest,
+      rename,
+      () => {
         movedAny = true;
-      } catch (error) {
-        if (errorCode(error) !== "ENOENT") throw error;
-        if (name === "engine.db" && !(await exists(to))) throw error;
-      }
-    }
-    await renameFile(inProgressMarker, completeMarker);
+      },
+    );
     return "moved";
   } catch (error) {
     if (freshReservation && !movedAny) {
@@ -108,14 +224,16 @@ export class EngineStoreNotRefusedError extends Error {
   }
 }
 
+export interface RebuildEngineStoreDependencies {
+  probeStoreRefusal: () => Promise<EngineStoreRefusal | null>;
+  closeActivity: () => Promise<void>;
+  reopenActivity: () => Promise<void>;
+  moveStoreAside: (rootPath: string) => Promise<MoveOutcome>;
+}
+
 export async function rebuildEngineStore(
   rootPath: string,
-  deps: {
-    probeStoreRefusal: () => Promise<EngineStoreRefusal | null>;
-    closeActivity: () => Promise<void>;
-    reopenActivity: () => Promise<void>;
-    moveStoreAside: (rootPath: string) => Promise<MoveOutcome>;
-  },
+  deps: RebuildEngineStoreDependencies,
 ): Promise<RebuildEngineStoreResult> {
   let outcome: MoveOutcome | undefined;
   let operationError: unknown;
@@ -145,4 +263,30 @@ export async function rebuildEngineStore(
     throw new Error("The data store rebuild finished without an outcome.");
   }
   return { outcome, ...(reopenFailed ? { reopenFailed } : {}) };
+}
+
+export async function rebuildEngineStoreRequest(
+  rootPath: string,
+  deps: RebuildEngineStoreDependencies & {
+    isStoreRefused: () => boolean;
+    previousResult: () => RebuildEngineStoreResult | undefined;
+    rememberResult: (result: RebuildEngineStoreResult) => void;
+  },
+): Promise<RebuildEngineStoreResult> {
+  const previousResult = deps.previousResult();
+  if (!deps.isStoreRefused()) {
+    if (previousResult) return previousResult;
+    throw new EngineStoreNotRefusedError();
+  }
+
+  try {
+    const result = await rebuildEngineStore(rootPath, deps);
+    deps.rememberResult(result);
+    return result;
+  } catch (error) {
+    if (error instanceof EngineStoreNotRefusedError && previousResult) {
+      return previousResult;
+    }
+    throw error;
+  }
 }

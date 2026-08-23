@@ -27,6 +27,7 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
+  probeEngineStoreRefusal,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
@@ -126,6 +127,27 @@ function capture(root: string, options: CaptureOptions = {}) {
     ...rest,
   });
 }
+
+describe("probeEngineStoreRefusal", () => {
+  it("rethrows an unrecognized engine error", async () => {
+    const root = await tempRoot();
+    const probeError = Object.assign(new Error("permission denied"), {
+      code: "EACCES",
+    });
+    const sessions = mockLiveSessions(
+      new VersionedLoopbackEngine(),
+      undefined,
+      () => ({ settled: true, running: true, degraded: false }),
+      async () => {
+        throw probeError;
+      },
+    );
+
+    await expect(
+      probeEngineStoreRefusal(WORKSPACE_ID, root, sessions),
+    ).rejects.toBe(probeError);
+  });
+});
 
 // Daemon-path capture: `rustEngineSessions` selects the Rust engine, and the
 // VersionedLoopbackEngine behind it holds real state and real sha256 — so the

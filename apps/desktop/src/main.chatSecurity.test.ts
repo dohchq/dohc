@@ -820,7 +820,7 @@ describe("main-process chat authorization", () => {
       "withExclusiveWorkspaceOperation(",
       "withStaleSensitiveWorkspaceOperation(",
       "engineCaptureFor(",
-      "rebuildEngineStoreFiles(",
+      "rebuildEngineStoreRequest(",
     ];
 
     for (const channel of fileWrites) {
@@ -849,22 +849,15 @@ describe("main-process chat authorization", () => {
   });
 
   // #874: the rebuild moves a workspace's engine database aside. Main must
-  // derive the refusal from its OWN activity status before anything moves —
-  // a renderer that can trigger the move on a HEALTHY store would silently
-  // detach the workspace's history and chats.
-  it("gates the engine-store rebuild on main's own refusal fact, before the move", () => {
+  // derive the refusal from its OWN activity status. A renderer that can
+  // trigger the move on a HEALTHY store would silently detach the workspace's
+  // history and chats. engineStoreRebuild.test.ts behavior-tests ordering.
+  it("gates the engine-store rebuild on main's own refusal fact", () => {
     const handler = handlerSource("rebuildEngineStore");
-    const gateAt = handler.indexOf(
-      "!activity.getStatus(workspace.workspaceId).engineStoreRefused",
+    expect(handler).toContain("isStoreRefused: () =>");
+    expect(handler).toContain(
+      "activity.getStatus(workspace.workspaceId).engineStoreRefused",
     );
-    const moveAt = handler.indexOf("moveStoreAside: moveEngineStoreAside");
-    expect(
-      gateAt,
-      "MUTATION: without the gate, any renderer request moves a healthy store",
-    ).toBeGreaterThan(-1);
-    expect(moveAt).toBeGreaterThan(gateAt);
-    // The status read is main's own, never renderer input.
-    expect(handler).toContain("activity.getStatus(workspace.workspaceId)");
   });
 
   // The write gate's own shape, pinned where it is defined. Same split as

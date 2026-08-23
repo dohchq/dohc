@@ -1,17 +1,31 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import {
+  completePendingEngineStoreMove,
   EngineStoreNotRefusedError,
   moveEngineStoreAside,
   rebuildEngineStore,
+  rebuildEngineStoreRequest,
 } from "./engineStoreRebuild";
+import { withKeyedStartLock } from "./sitePreviewLifecycle";
 import { createTestScratch } from "./testTemp";
 
 let root: string;
 let engineDir: string;
 let backupDir: string;
+
+interface TestMoveManifest {
+  files: Array<{ name: string; size: number; mtimeMs: number }>;
+}
 
 beforeEach(async () => {
   root = join(await createTestScratch("dohc-rebuild-"), "workspace");
@@ -24,6 +38,25 @@ async function seedStore(files: Record<string, string>): Promise<void> {
   for (const [name, content] of Object.entries(files)) {
     await writeFile(join(engineDir, name), content);
   }
+}
+
+async function writeMoveManifest(names: string[]): Promise<void> {
+  const files = await Promise.all(
+    names.map(async (name) => {
+      const metadata = await stat(join(engineDir, name));
+      return { name, size: metadata.size, mtimeMs: metadata.mtimeMs };
+    }),
+  );
+  await writeFile(
+    join(backupDir, "MOVE_IN_PROGRESS"),
+    JSON.stringify({ files }),
+  );
+}
+
+async function readMoveManifest(): Promise<TestMoveManifest> {
+  return JSON.parse(
+    await readFile(join(backupDir, "MOVE_IN_PROGRESS"), "utf8"),
+  ) as TestMoveManifest;
 }
 
 async function expectCompleteStore(): Promise<void> {
@@ -124,6 +157,16 @@ describe("moveEngineStoreAside", () => {
       "MOVE_IN_PROGRESS",
       "engine.db-shm",
     ]);
+    const manifest = await readMoveManifest();
+    expect(manifest.files.map(({ name }) => name)).toEqual([
+      "engine.db-shm",
+      "engine.db-wal",
+      "engine.db",
+    ]);
+    expect(manifest.files.every(({ size }) => Number.isFinite(size))).toBe(true);
+    expect(manifest.files.every(({ mtimeMs }) => Number.isFinite(mtimeMs))).toBe(
+      true,
+    );
 
     await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
 
@@ -164,7 +207,11 @@ describe("moveEngineStoreAside", () => {
       "engine.db-shm": "shm",
     });
     await mkdir(backupDir);
-    await writeFile(join(backupDir, "MOVE_IN_PROGRESS"), "");
+    await writeMoveManifest([
+      "engine.db-shm",
+      "engine.db-wal",
+      "engine.db",
+    ]);
 
     await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
 
@@ -192,10 +239,18 @@ describe("moveEngineStoreAside", () => {
     await seedStore({
       "engine.db": "refused-store",
       "engine.db-wal": "wal",
+      "engine.db-shm": "shm",
     });
     await mkdir(backupDir);
-    await writeFile(join(backupDir, "MOVE_IN_PROGRESS"), "");
-    await writeFile(join(backupDir, "engine.db-shm"), "shm");
+    await writeMoveManifest([
+      "engine.db-shm",
+      "engine.db-wal",
+      "engine.db",
+    ]);
+    await rename(
+      join(engineDir, "engine.db-shm"),
+      join(backupDir, "engine.db-shm"),
+    );
 
     await expect(
       moveEngineStoreAside(root, {
@@ -214,6 +269,74 @@ describe("moveEngineStoreAside", () => {
   it("throws when there is no database to move", async () => {
     await expect(moveEngineStoreAside(root)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readdir(backupDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("completes a move after the database rename crashes before the marker rename", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-wal": "wal",
+      "engine.db-shm": "shm",
+    });
+    let renames = 0;
+    await expect(
+      moveEngineStoreAside(root, {
+        rename: async (from, to) => {
+          renames += 1;
+          if (renames === 4) throw new Error("host crash");
+          await rename(from, to);
+        },
+      }),
+    ).rejects.toThrow("host crash");
+    expect(await readdir(engineDir)).toEqual(["pre-v2-backup"]);
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
+      "engine.db",
+      "engine.db-shm",
+      "engine.db-wal",
+    ]);
+
+    await completePendingEngineStoreMove(root);
+
+    await expectCompleteStore();
+  });
+
+  it("leaves a new sidecar omitted from the manifest at the live location", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    await rename(join(engineDir, "engine.db"), join(backupDir, "engine.db"));
+    await writeFile(join(engineDir, "engine.db-wal"), "new-wal");
+
+    await completePendingEngineStoreMove(root);
+
+    expect(await readFile(join(engineDir, "engine.db-wal"), "utf8")).toBe(
+      "new-wal",
+    );
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+    ]);
+  });
+
+  it("leaves a same-name live file whose identity does not match the manifest", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-wal": "old-wal",
+    });
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db-wal", "engine.db"]);
+    await rename(join(engineDir, "engine.db"), join(backupDir, "engine.db"));
+    await writeFile(join(engineDir, "engine.db-wal"), "different-new-wal");
+
+    await completePendingEngineStoreMove(root);
+
+    expect(await readFile(join(engineDir, "engine.db-wal"), "utf8")).toBe(
+      "different-new-wal",
+    );
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+    ]);
   });
 });
 
@@ -236,6 +359,22 @@ describe("rebuildEngineStore", () => {
     );
 
     expect(d.closeActivity).toHaveBeenCalledOnce();
+    expect(d.moveStoreAside).not.toHaveBeenCalled();
+    expect(d.reopenActivity).toHaveBeenCalledOnce();
+  });
+
+  it("reopens and surfaces an unrecognized probe failure without moving", async () => {
+    const probeError = Object.assign(new Error("permission denied"), {
+      code: "EACCES",
+    });
+    const d = deps({
+      probeStoreRefusal: vi.fn(async () => {
+        throw probeError;
+      }),
+    });
+
+    await expect(rebuildEngineStore(root, d)).rejects.toBe(probeError);
+
     expect(d.moveStoreAside).not.toHaveBeenCalled();
     expect(d.reopenActivity).toHaveBeenCalledOnce();
   });
@@ -317,5 +456,83 @@ describe("rebuildEngineStore", () => {
 
     await expect(rebuildEngineStore(root, d)).rejects.toBe(moveError);
     expect(d.reopenActivity).toHaveBeenCalledOnce();
+  });
+
+  it("moves once and shares the result between concurrent rebuild requests", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const locks = new Map<string, Promise<void>>();
+    const results = new Map<string, Awaited<ReturnType<typeof rebuildEngineStore>>>();
+    let refused = true;
+    const probeStoreRefusal = vi.fn(async () => "foreign-database" as const);
+    const moveStoreAside = vi.fn(moveEngineStoreAside);
+    const closeActivity = vi.fn(async () => undefined);
+    const reopenActivity = vi.fn(async () => {
+      refused = false;
+    });
+    const request = () =>
+      withKeyedStartLock(locks, "workspace", () =>
+        rebuildEngineStoreRequest(root, {
+          isStoreRefused: () => refused,
+          previousResult: () => results.get("workspace"),
+          rememberResult: (result) => results.set("workspace", result),
+          closeActivity,
+          probeStoreRefusal,
+          moveStoreAside,
+          reopenActivity,
+        }),
+      );
+
+    await expect(Promise.all([request(), request()])).resolves.toEqual([
+      { outcome: "moved" },
+      { outcome: "moved" },
+    ]);
+
+    expect(moveStoreAside).toHaveBeenCalledOnce();
+    expect(closeActivity).toHaveBeenCalledOnce();
+    expect(probeStoreRefusal).toHaveBeenCalledOnce();
+    expect(reopenActivity).toHaveBeenCalledOnce();
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+    ]);
+  });
+
+  it("returns the prior result when a fresh probe finds a healthy store", async () => {
+    const previous = { outcome: "moved" } as const;
+    const moveStoreAside = vi.fn(async () => "moved" as const);
+
+    await expect(
+      rebuildEngineStoreRequest(root, {
+        isStoreRefused: () => true,
+        previousResult: () => previous,
+        rememberResult: vi.fn(),
+        closeActivity: vi.fn(async () => undefined),
+        probeStoreRefusal: vi.fn(async () => null),
+        moveStoreAside,
+        reopenActivity: vi.fn(async () => undefined),
+      }),
+    ).resolves.toBe(previous);
+
+    expect(moveStoreAside).not.toHaveBeenCalled();
+  });
+
+  it("rejects an uncached request before closing when the store is healthy", async () => {
+    const closeActivity = vi.fn(async () => undefined);
+    const moveStoreAside = vi.fn(async () => "moved" as const);
+
+    await expect(
+      rebuildEngineStoreRequest(root, {
+        isStoreRefused: () => false,
+        previousResult: () => undefined,
+        rememberResult: vi.fn(),
+        closeActivity,
+        probeStoreRefusal: vi.fn(async () => "foreign-database" as const),
+        moveStoreAside,
+        reopenActivity: vi.fn(async () => undefined),
+      }),
+    ).rejects.toBeInstanceOf(EngineStoreNotRefusedError);
+
+    expect(closeActivity).not.toHaveBeenCalled();
+    expect(moveStoreAside).not.toHaveBeenCalled();
   });
 });

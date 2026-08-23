@@ -103,7 +103,9 @@ export async function probeEngineStoreRefusal(
     ).store.ensureMainVersion({ workspaceId });
     return null;
   } catch (error) {
-    return engineStoreRefusalOf(error);
+    const refusal = engineStoreRefusalOf(error);
+    if (refusal !== null) return refusal;
+    throw error;
   }
 }
 

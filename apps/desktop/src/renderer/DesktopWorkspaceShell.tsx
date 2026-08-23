@@ -92,7 +92,11 @@ import {
 } from "./settings/settingsRegistry";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
-import { SectionLabel } from "./ui/controls";
+import {
+  PrimaryButton,
+  SecondaryButton,
+  SectionLabel,
+} from "./ui/controls";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
@@ -6200,7 +6204,7 @@ export function DesktopWorkspaceShell(props: {
         >
           <div
             data-testid="engine-rebuild-dialog"
-            className="flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-line bg-panel shadow-lg"
+            className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel"
           >
             <div className="p-4">
               {engineRebuild.phase === "moved" ? (
@@ -6252,34 +6256,26 @@ export function DesktopWorkspaceShell(props: {
               {engineRebuild.phase === "confirm" ||
               engineRebuild.phase === "moving" ? (
                 <>
-                  <button
-                    type="button"
+                  <SecondaryButton
                     disabled={engineRebuild.phase === "moving"}
                     onClick={() => setEngineRebuild(null)}
-                    className="rounded border border-line px-3 py-1 text-xs text-muted hover:text-ink disabled:opacity-50"
                   >
                     Cancel
-                  </button>
-                  <button
-                    type="button"
+                  </SecondaryButton>
+                  <PrimaryButton
                     data-testid="engine-rebuild-confirm"
                     disabled={engineRebuild.phase === "moving"}
                     onClick={() => void confirmEngineRebuild()}
-                    className="rounded bg-accent px-3 py-1 text-xs text-bg disabled:opacity-50"
                   >
                     {engineRebuild.phase === "moving"
                       ? "Moving"
                       : "Move and rebuild"}
-                  </button>
+                  </PrimaryButton>
                 </>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => setEngineRebuild(null)}
-                  className="rounded bg-accent px-3 py-1 text-xs text-bg"
-                >
+                <SecondaryButton onClick={() => setEngineRebuild(null)}>
                   {engineRebuild.phase === "moved" ? "Done" : "Close"}
-                </button>
+                </SecondaryButton>
               )}
             </div>
           </div>

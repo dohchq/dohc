@@ -383,8 +383,9 @@ import {
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
+  completePendingEngineStoreMove,
   moveEngineStoreAside,
-  rebuildEngineStore as rebuildEngineStoreFiles,
+  rebuildEngineStoreRequest,
 } from "./workspaces/engineStoreRebuild";
 import {
   completeWorkspaceJoinBootstrap,
@@ -2834,7 +2835,19 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
 
 async function ensureWorkspaceActivityOpen(
   workspace: CreatedWorkspace,
+  engineStoreMoveAlreadySerialized = false,
 ): Promise<SyncStatusResult> {
+  if (!engineStoreMoveAlreadySerialized) {
+    try {
+      await withKeyedStartLock(
+        engineStoreRebuildLocks,
+        workspace.workspaceId,
+        () => completePendingEngineStoreMove(workspace.rootPath),
+      );
+    } catch (error) {
+      console.error("[desktop] pending engine store move:", error);
+    }
+  }
   for (;;) {
     const scoped = dispatchScopedSyncs.get(workspace.workspaceId);
     if (scoped) {
@@ -3101,11 +3114,16 @@ const workspaceChatLifecycle = createWorkspaceChatLifecycle({
 async function openWorkspaceActivity(
   workspace: CreatedWorkspace,
   afterActivityOpen?: () => Promise<void>,
+  engineStoreMoveAlreadySerialized = false,
 ): Promise<SyncStatusResult> {
   retainedWorkspaceActivities.add(workspace.workspaceId);
   const result = await workspaceChatLifecycle.open(
     workspace,
-    () => ensureWorkspaceActivityOpen(workspace),
+    () =>
+      ensureWorkspaceActivityOpen(
+        workspace,
+        engineStoreMoveAlreadySerialized,
+      ),
     afterActivityOpen,
   );
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
@@ -3129,6 +3147,11 @@ const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
+const engineStoreRebuildLocks = new Map<string, Promise<void>>();
+const lastEngineStoreRebuildResult = new Map<
+  string,
+  RebuildEngineStoreResult
+>();
 
 /**
  * Registers a fresh SDK grant for one panel and wires its own file-watch
@@ -10848,30 +10871,39 @@ function registerIpcHandlers(
     const input = RebuildEngineStorePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    // Only a store main itself saw refused may be moved.
-    if (!activity.getStatus(workspace.workspaceId).engineStoreRefused) {
-      throw new Error(
-        "dohc can read this workspace's current data store. Nothing moved.",
-      );
-    }
-    return RebuildEngineStoreResult.parse(
-      await rebuildEngineStoreFiles(workspace.rootPath, {
-        closeActivity: () => closeDispatchRunActivity(workspace.workspaceId),
-        probeStoreRefusal: () =>
-          probeEngineStoreRefusal(
-            workspace.workspaceId,
-            workspace.rootPath,
-            requireEngineSessions(),
-          ),
-        moveStoreAside: moveEngineStoreAside,
-        reopenActivity: async () => {
-          try {
-            await openWorkspaceActivity(workspace);
-          } finally {
-            notifyRenderer();
-          }
-        },
-      }),
+    return withKeyedStartLock(
+      engineStoreRebuildLocks,
+      workspace.workspaceId,
+      async () => {
+        return RebuildEngineStoreResult.parse(
+          await rebuildEngineStoreRequest(workspace.rootPath, {
+            isStoreRefused: () =>
+              Boolean(
+                activity.getStatus(workspace.workspaceId).engineStoreRefused,
+              ),
+            previousResult: () =>
+              lastEngineStoreRebuildResult.get(workspace.workspaceId),
+            rememberResult: (result) =>
+              lastEngineStoreRebuildResult.set(workspace.workspaceId, result),
+            closeActivity: () =>
+              closeDispatchRunActivity(workspace.workspaceId),
+            probeStoreRefusal: () =>
+              probeEngineStoreRefusal(
+                workspace.workspaceId,
+                workspace.rootPath,
+                requireEngineSessions(),
+              ),
+            moveStoreAside: moveEngineStoreAside,
+            reopenActivity: async () => {
+              try {
+                await openWorkspaceActivity(workspace, undefined, true);
+              } finally {
+                notifyRenderer();
+              }
+            },
+          }),
+        );
+      },
     );
   });
 
