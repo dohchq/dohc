@@ -359,22 +359,21 @@ async function writeWorkspaceBytes(
 // materialization point) so the watcher only ever sees a complete database.
 export async function importToDatabase(
   rootPath: string,
-  sourceRelativePath: string,
+  source: { path: string; body: string },
   databaseRelativePath: string,
   tableName: string,
 ): Promise<{ path: string; tableName: string; rowCount: number }> {
-  const { realTarget } = await resolveWorkspaceFile(
-    rootPath,
-    sourceRelativePath,
-    "read",
-  );
-  const body = await readFile(realTarget, "utf8");
-  const mediaType = mediaTypeForPath(sourceRelativePath) ?? "text/plain";
+  const mediaType = mediaTypeForPath(source.path) ?? "text/plain";
 
   // Dynamic import keeps the engine (and node:sqlite) off the launch path.
   const { createSqliteEngine } = await import("@dohc/sqlite-worker");
   const engine = await createSqliteEngine();
-  const result = await engine.importData({ name: basename(sourceRelativePath), mediaType, body, tableName });
+  const result = await engine.importData({
+    name: basename(source.path),
+    mediaType,
+    body: source.body,
+    tableName,
+  });
   if (!result.ok) {
     throw new Error(`Import failed (${result.code}): ${result.message}`);
   }

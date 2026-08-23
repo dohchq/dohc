@@ -7,6 +7,10 @@ import { createTestScratch } from "./testTemp";
 
 let root: string;
 const AUTHOR = { kind: "user", userId: "local" } as const;
+const WALLET_SOURCE = {
+  path: "imports/wallet.csv",
+  body: "id,amount,category\ntxn_001,42,Food\ntxn_002,10,Transport\n",
+};
 
 beforeEach(async () => {
   root = await createTestScratch("dohc-db-");
@@ -14,13 +18,13 @@ beforeEach(async () => {
   await mkdir(join(root, "imports"), { recursive: true });
   await writeFile(
     join(root, "imports", "wallet.csv"),
-    "id,amount,category\ntxn_001,42,Food\ntxn_002,10,Transport\n",
+    WALLET_SOURCE.body,
   );
 });
 
 describe("importToDatabase", () => {
   it("refuses to replace an existing database (edits are never silently dropped)", async () => {
-    await importToDatabase(root, "imports/wallet.csv", "finance/wallet.sqlite", "transactions");
+    await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
     await applyDatabaseEdit(
       root,
       "finance/wallet.sqlite",
@@ -30,7 +34,7 @@ describe("importToDatabase", () => {
     );
     // Re-importing the same CSV over the canonical, user-edited file must fail…
     await expect(
-      importToDatabase(root, "imports/wallet.csv", "finance/wallet.sqlite", "transactions"),
+      importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions"),
     ).rejects.toThrow(/already exists/i);
     // …and the user's edit survives untouched.
     const snapshot = await readDatabaseSnapshot(root, "finance/wallet.sqlite");
@@ -41,7 +45,7 @@ describe("importToDatabase", () => {
   it("materializes a visible SQLite file from a CSV and makes it queryable", async () => {
     const result = await importToDatabase(
       root,
-      "imports/wallet.csv",
+      WALLET_SOURCE,
       "finance/wallet.sqlite",
       "transactions",
     );
@@ -61,7 +65,7 @@ describe("importToDatabase", () => {
 
 describe("applyDatabaseEdit", () => {
   it("edits a row in place and records the edit in an inspectable op log", async () => {
-    await importToDatabase(root, "imports/wallet.csv", "finance/wallet.sqlite", "transactions");
+    await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
 
     const after = await applyDatabaseEdit(
       root,
@@ -92,7 +96,7 @@ describe("applyDatabaseEdit", () => {
   });
 
   it("stamps the persisted operationId from an injected createId seam", async () => {
-    await importToDatabase(root, "imports/wallet.csv", "finance/wallet.sqlite", "transactions");
+    await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
     await applyDatabaseEdit(
       root,
       "finance/wallet.sqlite",
@@ -150,7 +154,7 @@ describe("applyDatabaseEdit", () => {
   });
 
   it("persists edits across reopen (the on-disk file is canonical)", async () => {
-    await importToDatabase(root, "imports/wallet.csv", "finance/wallet.sqlite", "transactions");
+    await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
     await applyDatabaseEdit(
       root,
       "finance/wallet.sqlite",
@@ -169,7 +173,7 @@ describe("containment of '..'-prefixed names", () => {
     // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const result = await importToDatabase(
       root,
-      "imports/wallet.csv",
+      WALLET_SOURCE,
       "..cache/wallet.sqlite",
       "transactions",
     );

@@ -182,7 +182,12 @@ describe("workspaceDatabase through an in-workspace alias", () => {
   it("refuses to materialize an imported database inside .dohc", async () => {
     await writeFile(join(root, "notes", "rows.csv"), "id,name\n1,a\n");
     await expect(
-      importToDatabase(root, "notes/rows.csv", "meta/rows.sqlite", "rows"),
+      importToDatabase(
+        root,
+        { path: "notes/rows.csv", body: "id,name\n1,a\n" },
+        "meta/rows.sqlite",
+        "rows",
+      ),
     ).rejects.toThrow(/Database path leads to a reserved area/);
     expect(existsSync(join(root, ".dohc", "rows.sqlite"))).toBe(false);
   });

@@ -782,6 +782,7 @@ import {
   workspaceHasReceivedShareState,
 } from "./workspaces/shareViewFilesTarget";
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
+import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
 import {
   applyDatabaseEdit,
   importToDatabase,
@@ -4549,46 +4550,20 @@ async function shareViewFilesTargetForPath(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
   relativePath: string,
 ): Promise<{ target: ShareViewFilesTarget; path: string } | null> {
-  if (shareViewIsPresent(workspace.shareView)) {
-    return {
-      target: { kind: "standalone", workspaceId: workspace.workspaceId },
-      path: relativePath,
-    };
-  }
-  const resolved = await resolveShareMountPath(
-    workspace.rootPath,
-    relativePath,
-    storedShareMounts(workspace),
-    workspace.shareMounts !== undefined,
-  );
-  return resolved === null
-    ? null
-    : {
-        target: {
-          kind: "mount",
-          workspaceId: workspace.workspaceId,
-          shareId: resolved.mount.shareId,
-        },
-        path: resolved.path,
-      };
+  return createOwnedWorkspaceFileReader({
+    workspace,
+    files: shareViewFiles,
+  }).resolveShare(relativePath);
 }
 
 async function readOwnedWorkspaceText(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
   relativePath: string,
 ) {
-  const routed = await shareViewFilesTargetForPath(workspace, relativePath);
-  if (routed === null) {
-    return readWorkspaceText(workspace.rootPath, relativePath);
-  }
-  const read = await shareViewFiles.read(routed.target, {
-    kind: "text",
-    path: routed.path,
-  });
-  if (read.kind !== "text") {
-    throw new Error("Shared text read returned an invalid result.");
-  }
-  return read;
+  return createOwnedWorkspaceFileReader({
+    workspace,
+    files: shareViewFiles,
+  }).readText(relativePath);
 }
 
 async function readOwnedWorkspaceAsset(
@@ -7890,10 +7865,19 @@ function registerIpcHandlers(
     const input = ImportToDatabasePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
+    const source = await readOwnedWorkspaceText(
+      workspace,
+      input.sourceRelativePath,
+    );
+    if (source.truncated) {
+      throw new Error(
+        "This file is too large to import. Choose a file smaller than 2 MB.",
+      );
+    }
     return ImportToDatabaseResult.parse(
       await importToDatabase(
         workspace.rootPath,
-        input.sourceRelativePath,
+        { path: input.sourceRelativePath, body: source.text },
         input.databaseRelativePath,
         input.tableName,
       ),
