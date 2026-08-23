@@ -790,6 +790,9 @@ describe("main-process chat authorization", () => {
   // history and chats. engineStoreRebuild.test.ts behavior-tests ordering.
   it("gates the engine-store rebuild on main's own refusal fact", () => {
     const handler = handlerSource("rebuildEngineStore");
+    const gateAt = handler.indexOf("assertWritableWorkspace(workspace);");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(handler.indexOf("await ")).toBeGreaterThan(gateAt);
     expect(handler).toContain("isStoreRefused: () =>");
     expect(handler).toContain(
       "activity.getStatus(workspace.workspaceId).engineStoreRefused",
