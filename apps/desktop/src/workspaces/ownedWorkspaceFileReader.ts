@@ -4,6 +4,7 @@ import type {
   ShareViewFilesTarget,
 } from "./shareViewFiles";
 import {
+  shareMountRegistryIsPresent,
   storedShareMounts,
   type ShareViewFilesWorkspaceRecord,
 } from "./shareViewFilesTarget";
@@ -55,7 +56,7 @@ export function createOwnedWorkspaceFileReader(input: {
       input.workspace.rootPath,
       path,
       storedShareMounts(input.workspace),
-      input.workspace.shareMounts !== undefined,
+      shareMountRegistryIsPresent(input.workspace),
     );
     return resolved === null
       ? null

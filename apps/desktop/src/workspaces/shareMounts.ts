@@ -275,7 +275,7 @@ export async function resolveShareMountPath<Mount>(
   hostRoot: string,
   relativePath: string,
   mounts: readonly Mount[],
-  hasMountRegistry = mounts.length > 0,
+  hasMountRegistry: boolean,
 ): Promise<{
   mount: Mount & { shareId: string; label: string };
   path: string;
@@ -296,10 +296,11 @@ export async function refuseMoveAcrossShareMount(
   fromPath: string,
   toPath: string,
   mounts: readonly Pick<ShareMountRecord, "shareId" | "label">[],
+  hasMountRegistry: boolean,
 ): Promise<void> {
   const [source, destination] = await Promise.all([
-    resolveShareMountPath(hostRoot, fromPath, mounts),
-    resolveShareMountPath(hostRoot, toPath, mounts),
+    resolveShareMountPath(hostRoot, fromPath, mounts, hasMountRegistry),
+    resolveShareMountPath(hostRoot, toPath, mounts, hasMountRegistry),
   ]);
   if (source === null && destination === null) return;
   throw new Error(

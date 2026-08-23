@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { mountRootFor, mountStoreWorkspaceIdFor } from "./shareMounts";
 import {
   resolveRegisteredShareViewFilesTarget,
+  shareMountRegistryIsPresent,
   storedShareMounts,
   workspaceHasReceivedShareState,
 } from "./shareViewFilesTarget";
@@ -23,6 +24,8 @@ function mount(label: string, shareId = "share-target-test"): ShareMountRecord {
 
 describe("resolveRegisteredShareViewFilesTarget", () => {
   it("distinguishes a damaged mount registry from a local-only workspace", () => {
+    expect(shareMountRegistryIsPresent({})).toBe(false);
+    expect(shareMountRegistryIsPresent({ shareMounts: [] })).toBe(true);
     expect(workspaceHasReceivedShareState({})).toBe(false);
     expect(workspaceHasReceivedShareState({ shareMounts: [] })).toBe(true);
     expect(

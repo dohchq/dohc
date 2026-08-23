@@ -163,7 +163,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           listCanonical,
         }),
       resolveShare: async (path) => {
-        const routed = await resolveShareMountPath(root, path, mounts);
+        const routed = await resolveShareMountPath(root, path, mounts, true);
         return routed === null
           ? null
           : { target: shareTarget(routed.mount.shareId), path: routed.path };
@@ -255,7 +255,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           listCanonical: async () => canonical,
         }),
       resolveShare: async (path) => {
-        const routed = await resolveShareMountPath(root, path, [mount]);
+        const routed = await resolveShareMountPath(root, path, [mount], true);
         return routed === null
           ? null
           : { target: shareTarget(mount.shareId), path: routed.path };
@@ -350,7 +350,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       },
       listFiles: () => listFiles(root),
       resolveShare: async (path) => {
-        const routed = await resolveShareMountPath(root, path, [mount]);
+        const routed = await resolveShareMountPath(root, path, [mount], true);
         return routed === null
           ? null
           : { target: shareTarget(mount.shareId), path: routed.path };

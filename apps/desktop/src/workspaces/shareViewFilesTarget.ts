@@ -39,8 +39,14 @@ export function workspaceHasReceivedShareState(
 ): boolean {
   return (
     shareViewIsPresent(workspace.shareView) ||
-    workspace.shareMounts !== undefined
+    shareMountRegistryIsPresent(workspace)
   );
+}
+
+export function shareMountRegistryIsPresent(
+  workspace: Pick<ShareViewFilesWorkspaceRecord, "shareMounts">,
+): boolean {
+  return workspace.shareMounts !== undefined;
 }
 
 function record(value: unknown): Record<string, unknown> {

@@ -772,6 +772,7 @@ import {
 } from "./workspaces/shareViewFiles";
 import {
   resolveRegisteredShareViewFilesTarget,
+  shareMountRegistryIsPresent,
   storedShareMounts,
   workspaceHasReceivedShareState,
 } from "./workspaces/shareViewFilesTarget";
@@ -5291,6 +5292,7 @@ function registerIpcHandlers(
             input.fromPath,
             input.toPath,
             storedShareMounts(workspace),
+            shareMountRegistryIsPresent(workspace),
           );
         }
         // Flagged workspaces coordinate single-file renames through the engine

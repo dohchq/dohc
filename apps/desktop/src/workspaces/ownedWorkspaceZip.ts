@@ -7,6 +7,7 @@ import {
 } from "./shareMounts";
 import type { ShareViewFilesTarget } from "./shareViewFiles";
 import {
+  shareMountRegistryIsPresent,
   storedShareMounts,
   type ShareViewFilesWorkspaceRecord,
 } from "./shareViewFilesTarget";
@@ -102,7 +103,7 @@ export async function collectOwnedWorkspaceZipEntries(input: {
   }
 
   const mounts = storedShareMounts(workspace);
-  const hasMountRegistry = workspace.shareMounts !== undefined;
+  const hasMountRegistry = shareMountRegistryIsPresent(workspace);
   let selection: OwnedZipSelection = {
     kind: "workspace-root",
     archiveRoot: null,

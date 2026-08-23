@@ -325,16 +325,16 @@ describe("mount labels", () => {
     const mount = { shareId: SHARE_ID, label: "alex" };
 
     await expect(
-      resolveShareMountPath(host, "shared-with-me/alex", [mount]),
+      resolveShareMountPath(host, "shared-with-me/alex", [mount], true),
     ).resolves.toEqual({ mount, path: "" });
     await expect(
-      resolveShareMountPath(host, "inbox", [mount]),
+      resolveShareMountPath(host, "inbox", [mount], true),
     ).resolves.toEqual({ mount, path: "" });
     await expect(
-      resolveShareMountPath(host, "inbox/docs/brief.md", [mount]),
+      resolveShareMountPath(host, "inbox/docs/brief.md", [mount], true),
     ).resolves.toEqual({ mount, path: "docs/brief.md" });
     await expect(
-      resolveShareMountPath(host, "notes/ordinary.md", [mount]),
+      resolveShareMountPath(host, "notes/ordinary.md", [mount], true),
     ).resolves.toBeNull();
   });
 
@@ -363,9 +363,12 @@ describe("mount labels", () => {
     });
 
     await expect(
-      resolveShareMountPath(host, "shared-with-me/.env/docs/brief.md", [
-        { shareId: SHARE_ID, label: ".env" },
-      ]),
+      resolveShareMountPath(
+        host,
+        "shared-with-me/.env/docs/brief.md",
+        [{ shareId: SHARE_ID, label: ".env" }],
+        true,
+      ),
       "MUTATION: skipping an invalid matching label lets the caller read the projection from disk",
     ).rejects.toThrow(/saved details are invalid/);
   });
@@ -400,6 +403,7 @@ describe("mount labels", () => {
           shareId: `share-${index + 1}`,
           label,
         })),
+        true,
       ),
       "MUTATION: first-match routing sends an ambiguous mount path to an arbitrary share",
     ).rejects.toThrow(/saved details are invalid/);
@@ -444,14 +448,49 @@ describe("mount labels", () => {
     const mounts = [{ shareId: SHARE_ID, label: "alex" }];
 
     await expect(
-      refuseMoveAcrossShareMount(host, "notes/local.md", "inbox/docs/local.md", mounts),
+      refuseMoveAcrossShareMount(
+        host,
+        "notes/local.md",
+        "inbox/docs/local.md",
+        mounts,
+        true,
+      ),
     ).rejects.toThrow(/mounted share is read-only/i);
     await expect(
-      refuseMoveAcrossShareMount(host, "inbox/docs/shared.md", "notes/shared.md", mounts),
+      refuseMoveAcrossShareMount(
+        host,
+        "inbox/docs/shared.md",
+        "notes/shared.md",
+        mounts,
+        true,
+      ),
     ).rejects.toThrow(/mounted share is read-only/i);
     await expect(
-      refuseMoveAcrossShareMount(host, "notes/a.md", "notes/b.md", mounts),
+      refuseMoveAcrossShareMount(
+        host,
+        "notes/a.md",
+        "notes/b.md",
+        mounts,
+        true,
+      ),
     ).resolves.toBeUndefined();
+  });
+
+  it("refuses a move into stale projection bytes after the final unmount", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan"), {
+      recursive: true,
+    });
+
+    await expect(
+      refuseMoveAcrossShareMount(
+        host,
+        "notes/local.md",
+        "shared-with-me/orphan/local.md",
+        [],
+        true,
+      ),
+    ).rejects.toThrow(/saved details are invalid/i);
   });
 
   it("isolates a failed canonical listing to its mount", async () => {
