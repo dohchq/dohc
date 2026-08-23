@@ -6,10 +6,14 @@ import {
   createSitePreviewLifecycle,
   createSitePreviewStartRegistry,
   stopSitePreviewForRequest,
-  withActiveWorkspaceForSiteRead,
 } from "./workspaces/sitePreviewLifecycle";
-import { getSitePackage, requireExactSiteRoot } from "./workspaces/sitePackage";
+import {
+  getSitePackage,
+  listSitePackages,
+  requireExactSiteRoot,
+} from "./workspaces/sitePackage";
 import { createTestScratch } from "./workspaces/testTemp";
+import { listFiles } from "./workspaces/workspaceFiles";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
@@ -19,14 +23,6 @@ function handlerSource(channel: string): string {
   if (start < 0) throw new Error(`Missing ${channel} handler`);
   const end = mainSource.indexOf("\n  });", start);
   if (end < 0) throw new Error(`Unterminated ${channel} handler`);
-  return mainSource.slice(start, end);
-}
-
-function functionSource(signature: string): string {
-  const start = mainSource.indexOf(signature);
-  if (start < 0) throw new Error(`Missing ${signature}`);
-  const end = mainSource.indexOf("\n}\n", start);
-  if (end < 0) throw new Error(`Unterminated ${signature}`);
   return mainSource.slice(start, end);
 }
 
@@ -155,16 +151,17 @@ describe("site preview main-process wiring", () => {
     const lookupAt = handler.indexOf(
       "const site = requireExactSiteRoot(",
     );
-    const ownedSitesAt = handler.indexOf(
-      "const sites = await listOwnedSitePackages(workspace);",
+    const ownedSiteAt = handler.indexOf(
+      "await ownedSiteCatalog.get(",
+      lookupAt,
     );
-    const getSitePackageAt = handler.indexOf("await getSitePackage(", lookupAt);
-    const startAt = handler.indexOf("const started = await startPreviewForSite({", lookupAt);
-    expect(ownedSitesAt).toBeGreaterThanOrEqual(0);
+    const startAt = handler.indexOf(
+      "const started = await startPreviewForSite({",
+      lookupAt,
+    );
     expect(lookupAt).toBeGreaterThanOrEqual(0);
-    expect(lookupAt).toBeGreaterThan(ownedSitesAt);
-    expect(getSitePackageAt).toBeGreaterThan(lookupAt);
-    expect(startAt).toBeGreaterThan(getSitePackageAt);
+    expect(ownedSiteAt).toBeGreaterThan(lookupAt);
+    expect(startAt).toBeGreaterThan(ownedSiteAt);
   });
 
   it("rejects a stale nested root before starting its detected ancestor", async () => {
@@ -175,7 +172,8 @@ describe("site preview main-process wiring", () => {
     );
 
     const requestedRoot = "ancestor/stale-child";
-    const detected = await getSitePackage(root, requestedRoot);
+    const sites = await listSitePackages(root, await listFiles(root));
+    const detected = await getSitePackage(root, requestedRoot, sites);
     expect(detected?.root).toBe("ancestor");
 
     const startPreviewForSite = vi.fn();
@@ -186,7 +184,7 @@ describe("site preview main-process wiring", () => {
     expect(startPreviewForSite).not.toHaveBeenCalled();
 
     // The exact requested root, once genuinely detected, must still start.
-    const exact = await getSitePackage(root, "ancestor");
+    const exact = await getSitePackage(root, "ancestor", sites);
     expect(() => requireExactSiteRoot(exact, "ancestor")).not.toThrow();
   });
 
@@ -196,48 +194,4 @@ describe("site preview main-process wiring", () => {
     );
   });
 
-  it("wires site reads through active-workspace and canonical-owner boundaries", () => {
-    // requireWorkspace alone only proves workspaceId names a workspace
-    // REGISTERED somewhere in this app instance — not that it's the one
-    // THIS sender's own window is currently showing. Without the active-
-    // workspace check, a stale or compromised renderer could read another
-    // workspace's site paths, titles, diagnostics, and full package-script
-    // bodies just by naming its id. The guard-then-read sequence itself is
-    // now proven directly below, by calling the real function; main.ts
-    // cannot be imported directly under Vitest, so this only pins that
-    // each handler routes its actual read through that function rather
-    // than reimplementing the guard inline.
-    for (const channel of ["listSites", "getSitePackage"] as const) {
-      const handler = handlerSource(channel);
-      const guardAt = handler.indexOf("await withActiveWorkspaceForSiteRead(");
-      const readAt = handler.indexOf("listOwnedSitePackages(workspace)");
-      expect(guardAt).toBeGreaterThanOrEqual(0);
-      expect(readAt).toBeGreaterThan(guardAt);
-    }
-
-    const ownedSites = functionSource("async function listOwnedSitePackages(");
-    expect(ownedSites).toContain("await reads.prepareSearch()");
-    expect(ownedSites).toContain("searchView.listing ?? undefined");
-    expect(ownedSites).not.toContain("await reads.listFiles()");
-  });
-
-  it("withActiveWorkspaceForSiteRead only runs the read when the sender's active workspace matches", async () => {
-    const read = vi.fn(async () => "ok" as const);
-    await expect(
-      withActiveWorkspaceForSiteRead("workspace-1", "workspace-1", read),
-    ).resolves.toBe("ok");
-    expect(read).toHaveBeenCalledTimes(1);
-
-    read.mockClear();
-    await expect(
-      withActiveWorkspaceForSiteRead("workspace-2", "workspace-1", read),
-    ).rejects.toThrow(/active workspace/i);
-    expect(read).not.toHaveBeenCalled();
-
-    read.mockClear();
-    await expect(
-      withActiveWorkspaceForSiteRead(undefined, "workspace-1", read),
-    ).rejects.toThrow(/active workspace/i);
-    expect(read).not.toHaveBeenCalled();
-  });
 });

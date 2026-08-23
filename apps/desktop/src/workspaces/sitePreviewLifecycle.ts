@@ -33,20 +33,6 @@ function previewKey(workspaceId: string, siteRoot: string): string {
   return `${workspaceId}\0${siteRoot}`;
 }
 
-// The shared shape every sites-read IPC handler (listSites, getSitePackage)
-// uses: guard, then read. Extracted so the guard's actual gating behavior
-// is provable by calling this directly — main.ts cannot be imported under
-// Vitest, so its own test only pins that the handler's source calls this
-// function at all.
-export async function withActiveWorkspaceForSiteRead<T>(
-  activeWorkspaceId: string | undefined,
-  workspaceId: string,
-  read: () => Promise<T>,
-): Promise<T> {
-  assertActiveWorkspaceForSite(activeWorkspaceId, workspaceId, "sites request");
-  return read();
-}
-
 // One less than siteRunner's own MAX_LOG_ENTRIES — see the comment where
 // this is used.
 const EXITED_LOG_ENTRY_BUDGET = MAX_LOG_ENTRIES - 1;

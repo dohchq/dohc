@@ -125,12 +125,8 @@ import {
   ListOfferedPluginsResult,
   AddOfferedPluginPayload,
   AddOfferedPluginResult,
-  ListSitesPayload,
-  ListSitesResult,
   GetSitePreviewLogsPayload,
   GetSitePreviewLogsResult,
-  SitePackagePayload,
-  SitePackageResult,
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
@@ -320,6 +316,7 @@ import {
   SEARCH_EVENT_MAX_ENTRIES,
   type EngineYDocSaveStateName,
 } from "./ipc/channels";
+import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -675,11 +672,10 @@ import {
 } from "./agents/liveAgentDispatchStore";
 import {
   buildOutputSiteRoot,
-  getSitePackage,
-  listSitePackages,
   requireExactSiteRoot,
   type SitePackageInfo,
 } from "./workspaces/sitePackage";
+import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
 import {
   buildSite,
   startSiteDevServer,
@@ -689,10 +685,10 @@ import {
 } from "./workspaces/siteRunner";
 import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
+  assertActiveWorkspaceForSite,
   createSitePreviewLifecycle,
   createSitePreviewStartRegistry,
   stopSitePreviewForRequest,
-  withActiveWorkspaceForSiteRead,
   withKeyedStartLock,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
@@ -4762,13 +4758,9 @@ function ownedWorkspaceReads(
   });
 }
 
-async function listOwnedSitePackages(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-) {
-  const reads = ownedWorkspaceReads(workspace);
-  const searchView = await reads.prepareSearch();
-  return listSitePackages(workspace.rootPath, searchView.listing ?? undefined);
-}
+const ownedSiteCatalog = createOwnedSiteCatalog({
+  reads: ownedWorkspaceReads,
+});
 
 function ownedWorkspaceGraphSource(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
@@ -5194,6 +5186,27 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
     throw new Error(`Untrusted IPC sender: ${frameUrl}`);
   }
 }
+
+const senderWorkspaceAuthority = {
+  requireTrustedSender(event: IpcMainInvokeEvent): number {
+    assertTrustedSender(event);
+    return event.sender.id;
+  },
+
+  requireActiveWorkspace(
+    senderId: number,
+    workspaceId: string,
+    subject: string,
+  ) {
+    const workspace = requireWorkspace(workspaceId);
+    assertActiveWorkspaceForSite(
+      activeWorkspaceIdBySender.get(senderId),
+      workspace.workspaceId,
+      subject,
+    );
+    return workspace;
+  },
+};
 
 function requireAuthorizedWorkspace(
   event: IpcMainInvokeEvent,
@@ -7892,51 +7905,12 @@ function registerIpcHandlers(
     );
   });
 
-  ipcMain.handle(CHANNELS.listSites, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListSitesPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // requireWorkspace only proves input.workspaceId is a REGISTERED
-    // workspace somewhere in this app instance, not that it's the one
-    // this sender's own window is currently showing — a stale or
-    // compromised renderer could otherwise enumerate another workspace's
-    // site paths, titles, diagnostics, and dependency manifests just by
-    // naming its id, the same gap startSitePreview/getSitePreviewLogs
-    // below already guard against.
-    return ListSitesResult.parse({
-      sites: await withActiveWorkspaceForSiteRead(
-        activeWorkspaceIdBySender.get(event.sender.id),
-        workspace.workspaceId,
-        async () => {
-          return listOwnedSitePackages(workspace);
-        },
-      ),
-    });
+  const siteIpcHandlers = createSitesIpcHandlers({
+    authority: senderWorkspaceAuthority,
+    catalog: ownedSiteCatalog,
   });
-
-  ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SitePackagePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // Same active-workspace check as listSites just above — without it, a
-    // stale or compromised renderer can read another workspace's full
-    // package-script bodies and share manifest by naming its id.
-    return SitePackageResult.parse(
-      await withActiveWorkspaceForSiteRead(
-        activeWorkspaceIdBySender.get(event.sender.id),
-        workspace.workspaceId,
-        async () => {
-          const sites = await listOwnedSitePackages(workspace);
-          return getSitePackage(
-            workspace.rootPath,
-            input.path,
-            sites,
-            input.effectivePreviewMode,
-          );
-        },
-      ),
-    );
-  });
+  ipcMain.handle(CHANNELS.listSites, siteIpcHandlers.listSites);
+  ipcMain.handle(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
 
   ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
     assertTrustedSender(event);
@@ -7970,12 +7944,10 @@ function registerIpcHandlers(
           "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
         );
       }
-      const sites = await listOwnedSitePackages(workspace);
       const site = requireExactSiteRoot(
-        await getSitePackage(
-          workspace.rootPath,
+        await ownedSiteCatalog.get(
+          workspace,
           input.siteRoot,
-          sites,
           input.mode,
         ),
         input.siteRoot,
