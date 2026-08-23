@@ -1958,8 +1958,11 @@ describe("editor groups", () => {
 
     const left = await screen.findByTestId("editor-group-left");
     const right = await screen.findByTestId("editor-group-right");
-    await user.click(within(left).getByTestId("markdown-edit-toggle"));
-    await user.type(within(left).getByTestId("markdown-editor"), " dirty");
+    await user.click(await within(left).findByTestId("markdown-edit-toggle"));
+    await user.type(
+      await within(left).findByTestId("markdown-editor"),
+      " dirty",
+    );
 
     fireEvent.pointerDown(right);
     await waitFor(() => expect(right.dataset.active).toBe("true"));
