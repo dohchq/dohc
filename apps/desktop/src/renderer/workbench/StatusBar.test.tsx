@@ -292,12 +292,24 @@ describe("notice center", () => {
     expect(onOpenHistory).toHaveBeenCalledOnce();
   });
 
-  // #874: a database the engine refuses is a designed recovery outcome, not
-  // a generic capture failure. The notice must say what was found in the
-  // user's nouns, state that files are untouched, and offer the rebuild —
-  // and it REPLACES the "History paused" copy, which says nothing is wrong
-  // with the store and offers no recovery.
-  it("explains an unreadable data store and offers the rebuild", async () => {
+  it.each([
+    {
+      cause: "unsupported-fingerprint" as const,
+      sentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+      otherSentence: "dohc cannot read this workspace's data store.",
+    },
+    {
+      cause: "foreign-database" as const,
+      sentence: "dohc cannot read this workspace's data store.",
+      otherSentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+    },
+  ])("explains the $cause refusal and offers the rebuild", async ({
+    cause,
+    sentence,
+    otherSentence,
+  }) => {
     const onRebuildEngineStore = vi.fn();
     renderBar({
       syncStatus: {
@@ -305,7 +317,7 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         historyCaptureFailed: true,
-        engineStoreRefused: "unsupported-fingerprint",
+        engineStoreRefused: cause,
         historyRecordingUnavailable: false,
         historyShareView: false,
       },
@@ -314,34 +326,16 @@ describe("notice center", () => {
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-engine-store-refused");
-    expect(notice.textContent).toContain("dohc can't read this data store");
+    expect(within(notice).getByText(sentence)).toBeTruthy();
+    expect(within(notice).queryByText(otherSentence)).toBeNull();
+    expect(notice.textContent).not.toContain("older");
+    expect(notice.textContent).not.toContain("not created by dohc");
     expect(notice.textContent).toContain("Your files are untouched.");
     expect(notice.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
 
     await userEvent.click(within(notice).getByRole("button", { name: "Rebuild" }));
     expect(onRebuildEngineStore).toHaveBeenCalledOnce();
-  });
-
-  it("uses the same facts for a foreign-database refusal", async () => {
-    renderBar({
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        historyCaptureFailed: true,
-        engineStoreRefused: "foreign-database",
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-      },
-      onRebuildEngineStore: vi.fn(),
-    });
-
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const notice = screen.getByTestId("notice-engine-store-refused");
-    expect(notice.textContent).toContain("dohc can't read this data store");
-    expect(notice.textContent).toContain("Your files are untouched.");
-    expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
   });
 
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {

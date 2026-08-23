@@ -707,6 +707,41 @@ describe("EngineWorkspaceSessions", () => {
     expect(requests).toHaveLength(2);
   });
 
+  it.each([
+    ["resolving", false],
+    ["rejecting", true],
+  ])("lowers a rebuild gate after a %s body", async (_name, rejectBody) => {
+    const workspace = await tempWorkspace();
+    const client = new MockClient("handle-rebuild-bracket");
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    const moveError = new Error("move failed");
+
+    const withRebuildBoundGate = async <T>(body: () => Promise<T>) => {
+      sessions.beginRebuild(workspace.workspaceId);
+      try {
+        return await body();
+      } finally {
+        sessions.endRebuild(workspace.workspaceId);
+      }
+    };
+    const body = rejectBody
+      ? async () => {
+          throw moveError;
+        }
+      : async () => "moved";
+
+    if (rejectBody) {
+      await expect(withRebuildBoundGate(body)).rejects.toBe(moveError);
+    } else {
+      await expect(withRebuildBoundGate(body)).resolves.toBe("moved");
+    }
+    await expect(
+      sessions.run(workspace, async () => "opened"),
+    ).resolves.toBe("opened");
+  });
+
   it("refuses a run that was waiting for close when rebuilding starts", async () => {
     const workspace = await tempWorkspace();
     const closeStarted = deferred<void>();

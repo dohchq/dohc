@@ -301,6 +301,19 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
+  it("uses the injected lstat when an existing backup path is reserved", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    await mkdir(backupDir);
+    const inspectBackup = vi.fn((path: string) => lstat(path));
+
+    await expect(
+      moveEngineStoreAside(root, { lstat: inspectBackup }),
+    ).resolves.toBe("backup-exists");
+
+    expect(inspectBackup).toHaveBeenCalledOnce();
+    expect(inspectBackup).toHaveBeenCalledWith(backupDir);
+  });
+
   it("refuses a symlink at the backup path without following it", async () => {
     await seedStore({ "engine.db": "refused-store" });
     const target = join(root, "other-backup");
@@ -677,7 +690,7 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
-  it("leaves a same-name live file whose identity does not match the manifest", async () => {
+  it("refuses repeated opens when a live file no longer matches the move manifest", async () => {
     await seedStore({
       "engine.db": "refused-store",
       "engine.db-wal": "old-wal",
@@ -686,14 +699,34 @@ describe("moveEngineStoreAside", () => {
     await writeMoveManifest(["engine.db-wal", "engine.db"]);
     await rename(join(engineDir, "engine.db"), join(backupDir, "engine.db"));
     await writeFile(join(engineDir, "engine.db-wal"), "different-new-wal");
+    const openActivity = vi.fn(async () => "opened");
+    const workspace = { workspaceId: "workspace", rootPath: root };
 
-    await completePendingEngineStoreMove(root);
+    await expect(completePendingEngineStoreMove(root)).rejects.toMatchObject({
+      message: expect.stringContaining("engine.db-wal"),
+    });
 
     expect(await readFile(join(engineDir, "engine.db-wal"), "utf8")).toBe(
       "different-new-wal",
     );
     expect((await readdir(backupDir)).sort()).toEqual([
-      "MOVE_COMPLETE",
+      "MOVE_IN_PROGRESS",
+      "engine.db",
+    ]);
+
+    await expect(
+      withEngineStoreRecovered(
+        new Map(),
+        workspace,
+        false,
+        openActivity,
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("engine.db-wal"),
+    });
+    expect(openActivity).not.toHaveBeenCalled();
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
       "engine.db",
     ]);
   });
@@ -1165,9 +1198,13 @@ describe("rebuildEngineStore", () => {
   });
 
   it("preserves a completed move when reopening fails", async () => {
+    const reopenError = new Error("daemon did not come back");
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const d = deps({
       reopenActivity: vi.fn(async () => {
-        throw new Error("daemon did not come back");
+        throw reopenError;
       }),
     });
 
@@ -1176,6 +1213,11 @@ describe("rebuildEngineStore", () => {
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
     });
+    expect(consoleError).toHaveBeenCalledWith(
+      "The engine store could not reopen after the rebuild.",
+      reopenError,
+    );
+    consoleError.mockRestore();
   });
 
   it("surfaces the recovery failure details when reopening fails", async () => {

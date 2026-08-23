@@ -34,6 +34,7 @@ import type {
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
+  EngineStoreRefusal,
   MyShareChangeRow,
   RefreshSharedViewResult,
   ShareProposalRow,
@@ -44,7 +45,10 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
-import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import {
+  ENGINE_STORE_BACKUP_DIR,
+  engineStoreRefusalSentence,
+} from "../ipc/bridgeContract";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -2420,13 +2424,13 @@ export function DesktopWorkspaceShell(props: {
 
   // The result keeps the move outcome visible even when reopening fails.
   const [engineRebuild, setEngineRebuild] = useState<
-    | { phase: "confirm" }
-    | { phase: "moving" }
+    | { phase: "confirm"; refusal: EngineStoreRefusal }
+    | { phase: "moving"; refusal: EngineStoreRefusal }
     | { phase: "moved"; reopenFailed?: string }
     | { phase: "backup-exists"; reopenFailed?: string }
     | null
   >(null);
-  // Bumped after an engine version operation or a store rebuild settles so
+  // Bumped after an engine version operation or a completed store move so
   // mounted editors release their old engine session before opening another.
   const [versionEpoch, setVersionEpoch] = useState(0);
   const engineRebuildReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -2446,29 +2450,31 @@ export function DesktopWorkspaceShell(props: {
     engineRebuildToken.current += 1;
     if (engineRebuild !== null) setEngineRebuild(null);
   }
-  const confirmEngineRebuild = useCallback(async () => {
-    const token = engineRebuildToken.current;
-    setEngineRebuild({ phase: "moving" });
-    try {
-      const result = await bridge().rebuildEngineStore({ workspaceId });
-      if (engineRebuildToken.current !== token) return;
-      setEngineRebuild({
-        phase: result.outcome,
-        ...(result.reopenFailed ? { reopenFailed: result.reopenFailed } : {}),
-      });
-    } catch (error) {
-      if (engineRebuildToken.current !== token) return;
-      setEngineRebuild(null);
-      reportShellError(
-        "dohc could not move this workspace's data store.",
-        error,
-      );
-    } finally {
-      if (engineRebuildToken.current === token) {
-        setVersionEpoch((epoch) => epoch + 1);
+  const confirmEngineRebuild = useCallback(
+    async (refusal: EngineStoreRefusal) => {
+      const token = engineRebuildToken.current;
+      setEngineRebuild({ phase: "moving", refusal });
+      try {
+        const result = await bridge().rebuildEngineStore({ workspaceId });
+        if (engineRebuildToken.current !== token) return;
+        setEngineRebuild({
+          phase: result.outcome,
+          ...(result.reopenFailed ? { reopenFailed: result.reopenFailed } : {}),
+        });
+        if (result.outcome === "moved") {
+          setVersionEpoch((epoch) => epoch + 1);
+        }
+      } catch (error) {
+        if (engineRebuildToken.current !== token) return;
+        setEngineRebuild(null);
+        reportShellError(
+          "dohc could not move this workspace's data store.",
+          error,
+        );
       }
-    }
-  }, [workspaceId, reportShellError]);
+    },
+    [workspaceId, reportShellError],
+  );
 
   // Quiet, self-dismissing status line for import/share-mount summaries
   // ("Imported 3 files into notes.") — informational, never the error banner.
@@ -6203,11 +6209,13 @@ export function DesktopWorkspaceShell(props: {
         onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
         onRebuildEngineStore={() => {
+          const refusal = syncStatus?.engineStoreRefused;
+          if (!refusal) return;
           engineRebuildReturnFocusRef.current =
             document.activeElement instanceof HTMLElement
               ? document.activeElement
               : null;
-          setEngineRebuild({ phase: "confirm" });
+          setEngineRebuild({ phase: "confirm", refusal });
         }}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
@@ -6273,8 +6281,8 @@ export function DesktopWorkspaceShell(props: {
                     Move the old data store aside and rebuild?
                   </p>
                   <p className="mb-0 mt-2 text-xs text-muted">
-                    dohc can't read this workspace's data store format.
-                    dohc moves it to{" "}
+                    {engineStoreRefusalSentence(engineRebuild.refusal)} dohc
+                    moves it to{" "}
                     <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>{" "}
                     and rebuilds history from your files.
                   </p>
@@ -6299,7 +6307,9 @@ export function DesktopWorkspaceShell(props: {
                   <PrimaryButton
                     data-testid="engine-rebuild-confirm"
                     disabled={engineRebuild.phase === "moving"}
-                    onClick={() => void confirmEngineRebuild()}
+                    onClick={() =>
+                      void confirmEngineRebuild(engineRebuild.refusal)
+                    }
                   >
                     {engineRebuild.phase === "moving"
                       ? "Moving"
@@ -6307,7 +6317,12 @@ export function DesktopWorkspaceShell(props: {
                   </PrimaryButton>
                 </>
               ) : (
-                <SecondaryButton onClick={() => setEngineRebuild(null)}>
+                // Force a mount so autoFocus runs instead of reusing Cancel.
+                <SecondaryButton
+                  key="engine-rebuild-result"
+                  autoFocus
+                  onClick={() => setEngineRebuild(null)}
+                >
                   {engineRebuild.phase === "moved" ? "Done" : "Close"}
                 </SecondaryButton>
               )}

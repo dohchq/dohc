@@ -51,10 +51,22 @@ type EngineStoreMoveFileSystem = {
 };
 type EngineStoreMoveDependencies = Partial<EngineStoreMoveFileSystem>;
 
+class EngineStoreManifestDriftError extends Error {
+  constructor(path: string, cause?: unknown) {
+    super(
+      `The data store file at ${path} changed or disappeared during the rebuild.`,
+      { cause },
+    );
+    this.name = "EngineStoreManifestDriftError";
+  }
+}
+
 export class EngineStoreRecoveryFailedError extends Error {
   constructor(cause: unknown) {
+    const driftDetail =
+      cause instanceof EngineStoreManifestDriftError ? ` ${cause.message}` : "";
     super(
-      `dohc could not finish rebuilding this workspace's data store. Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Open this workspace again to retry.`,
+      `dohc could not finish rebuilding this workspace's data store.${driftDetail} Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Open this workspace again to retry.`,
       { cause },
     );
     this.name = "EngineStoreRecoveryFailedError";
@@ -208,14 +220,17 @@ async function completeManifestMove(
       live.size !== entry.size ||
       live.mtimeMs !== entry.mtimeMs
     ) {
-      continue;
+      throw new EngineStoreManifestDriftError(from);
     }
 
     try {
       await fileSystem.rename(from, to);
       onMoved?.();
     } catch (error) {
-      if (errorCode(error) !== "ENOENT") throw error;
+      if (errorCode(error) === "ENOENT") {
+        throw new EngineStoreManifestDriftError(from, error);
+      }
+      throw error;
     }
   }
   await fileSystem.syncDirectory(backupDir);
@@ -284,7 +299,7 @@ export async function moveEngineStoreAside(
     freshReservation = true;
   } catch (error) {
     if (errorCode(error) !== "EEXIST") throw error;
-    const entry = await lstat(backupDir);
+    const entry = await fileSystem.lstat(backupDir);
     if (!entry.isDirectory()) return "backup-exists";
     // A completed or unmarked path is not ours to overwrite.
     if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) {
@@ -331,7 +346,11 @@ export async function moveEngineStoreAside(
     );
     return "moved";
   } catch (error) {
-    if (freshReservation && !movedAny) {
+    if (
+      freshReservation &&
+      !movedAny &&
+      !(error instanceof EngineStoreManifestDriftError)
+    ) {
       await unlink(inProgressMarker).catch(() => undefined);
       await rmdir(backupDir).catch(() => undefined);
     }
@@ -416,6 +435,15 @@ export async function rebuildEngineStore(
   }
   if (outcome === undefined) {
     throw new Error("The data store rebuild finished without an outcome.");
+  }
+  if (
+    reopenError !== undefined &&
+    !(reopenError instanceof EngineStoreRecoveryFailedError)
+  ) {
+    console.error(
+      "The engine store could not reopen after the rebuild.",
+      reopenError,
+    );
   }
   const reopenFailed =
     reopenError === undefined

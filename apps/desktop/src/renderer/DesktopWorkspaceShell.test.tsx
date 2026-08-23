@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
 import {
   act,
   cleanup,
@@ -6069,9 +6068,9 @@ describe("engine store recovery", () => {
       decision.resolve({ outcome: "moved" });
       await decision.promise;
     });
-    await user.click(
-      await within(dialog).findByRole("button", { name: "Done" }),
-    );
+    const done = await within(dialog).findByRole("button", { name: "Done" });
+    expect(document.activeElement).toBe(done);
+    await user.click(done);
 
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
@@ -6095,7 +6094,7 @@ describe("engine store recovery", () => {
     // The user learns what moves, where it goes, and what does NOT come
     // back, before anything moves.
     expect(dialog.textContent).toContain(
-      "dohc can't read this workspace's data store format.",
+      "This workspace's data store is not in the format this version of dohc uses.",
     );
     expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(dialog.textContent).toContain(
@@ -6119,6 +6118,37 @@ describe("engine store recovery", () => {
         screen.getByTestId("engine-rebuild-dialog").textContent,
       ).toContain(`The old data store is at ${ENGINE_STORE_BACKUP_DIR}`);
     });
+  });
+
+  it.each([
+    {
+      cause: "unsupported-fingerprint" as const,
+      sentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+      otherSentence: "dohc cannot read this workspace's data store.",
+    },
+    {
+      cause: "foreign-database" as const,
+      sentence: "dohc cannot read this workspace's data store.",
+      otherSentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+    },
+  ])("names the $cause refusal in the confirm dialog", async ({
+    cause,
+    sentence,
+    otherSentence,
+  }) => {
+    const status = { ...refusedStatus, engineStoreRefused: cause };
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+
+    const { dialog } = await openRebuildDialog(bridge);
+
+    expect(dialog.textContent).toContain(sentence);
+    expect(dialog.textContent).not.toContain(otherSentence);
+    expect(dialog.textContent).not.toContain("older");
+    expect(dialog.textContent).not.toContain("not created by dohc");
   });
 
   it("reopens a mounted live document and sends the next edit to the fresh session", async () => {
@@ -6182,6 +6212,48 @@ describe("engine store recovery", () => {
     expect(applyEngineYDocUpdate.mock.calls.at(-1)?.[0].sessionId).toBe(
       sessionIds[1],
     );
+  });
+
+  it("keeps a mounted live document on its current session when the rebuild rejects", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => {
+      throw new Error("The store was not refused");
+    });
+    const openEngineYDocSession = vi.fn(async () => {
+      const doc = markdownToYDoc("# Doc\n");
+      return {
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        lineageGeneration: 1,
+      };
+    });
+    const closeEngineYDocSession = vi.fn(async () => undefined);
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession,
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    });
+    const { user, dialog } = await openRebuildDialog(bridge);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("The store was not refused");
+    await waitFor(() => expect(closeEngineYDocSession).not.toHaveBeenCalled());
+    expect(openEngineYDocSession).toHaveBeenCalledOnce();
   });
 
   it("refuses to write over an existing backup and says what to do", async () => {
@@ -6297,22 +6369,6 @@ describe("engine store recovery", () => {
     expect(
       screen.queryByTestId("workspace-shell-error")?.textContent ?? "",
     ).not.toContain("Workspace A rebuild failed");
-
-    const source = readFileSync(
-      "src/renderer/DesktopWorkspaceShell.tsx",
-      "utf8",
-    );
-    const guard = source.slice(
-      source.indexOf("const engineRebuildToken = useRef(0);"),
-      source.indexOf(
-        "const confirmEngineRebuild = useCallback",
-        source.indexOf("const engineRebuildToken = useRef(0);"),
-      ),
-    );
-    expect(guard).toContain(
-      "if (engineRebuildWorkspaceIdRef.current !== workspaceId)",
-    );
-    expect(guard).not.toContain("useEffect");
   });
 });
 

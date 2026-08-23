@@ -52,6 +52,10 @@ describe("main-process engine store rebuild wiring", () => {
       "const engineStoreRebuildLocks = new Map<string, Promise<void>>();",
     );
     expect(dispatch).toContain("withEngineStoreRecovered(");
+    expect(dispatch).toContain("return coalesceDispatchScopedSync(");
+    expect(dispatch.indexOf("coalesceDispatchScopedSync(")).toBeLessThan(
+      dispatch.indexOf("withEngineStoreRecovered("),
+    );
     expect(dispatch).toContain("engineStoreRebuildLocks,");
     expect(dispatch).toMatch(
       /withEngineStoreRecovered\(\s*engineStoreRebuildLocks,\s*workspace,\s*false,/,

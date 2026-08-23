@@ -634,6 +634,7 @@ import {
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
 } from "./workspaces/engineCaptureGate";
+import { coalesceDispatchScopedSync } from "./workspaces/dispatchScopedSync";
 import {
   readWorkspaceEnginePolicy,
   resolveEngineSearchPolicy,
@@ -2792,77 +2793,71 @@ async function withRebuildBoundGate<T>(
 }
 
 async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
-  const closing = workspaceActivityClosePromises.get(workspaceId);
-  if (closing) await closing.catch(() => undefined);
-  const existing = dispatchScopedSyncs.get(workspaceId);
-  if (existing) return existing;
-  const workspace = findWorkspace(workspaceId);
-  if (!workspace || sharedViewOf(workspaceId)) return false;
-  try {
-    return await withEngineStoreRecovered(
-      engineStoreRebuildLocks,
-      workspace,
-      false,
-      async () => {
-        if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
-          activity.queueCloudSync(workspaceId);
-          return activity.engineCaptureFor(workspaceId) !== null;
-        }
-        const scoped = (async () => {
-          const { capture } = await captureForFlaggedWorkspace(
-            {
-              workspaceId: workspace.workspaceId,
-              rootPath: workspace.rootPath,
-              // Guarded above: a shared view already returned false.
-              shareView: false,
-            },
-            {
-              activeAgentRun: () => null,
-              onCaptureOutcome: () => undefined,
-            },
-            requireEngineSessions(),
-          );
-          if (!capture) return false;
-          try {
-            const engine = engineForWorkspace(workspace, capture);
-            if (!engine) return false;
-            try {
-              await engine.start();
-              return true;
-            } finally {
-              await engine.stop().catch(() => undefined);
-              const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
-              if (relayWorkspaceId) {
-                await closeRelayTransportWorkspace(relayWorkspaceId).catch(
-                  () => undefined,
-                );
-              }
+  return coalesceDispatchScopedSync(
+    dispatchScopedSyncs,
+    workspaceId,
+    async () => {
+      const closing = workspaceActivityClosePromises.get(workspaceId);
+      if (closing) await closing.catch(() => undefined);
+      const workspace = findWorkspace(workspaceId);
+      if (!workspace || sharedViewOf(workspaceId)) return false;
+      try {
+        return await withEngineStoreRecovered(
+          engineStoreRebuildLocks,
+          workspace,
+          false,
+          async () => {
+            if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+              activity.queueCloudSync(workspaceId);
+              return activity.engineCaptureFor(workspaceId) !== null;
             }
-          } finally {
-            await capture.stop().catch(() => undefined);
-          }
-        })();
-        dispatchScopedSyncs.set(workspaceId, scoped);
-        try {
-          return await scoped;
-        } finally {
-          if (dispatchScopedSyncs.get(workspaceId) === scoped) {
-            dispatchScopedSyncs.delete(workspaceId);
-          }
-        }
-      },
-      (rootPath) =>
-        withRebuildBoundGate(workspace.workspaceId, () =>
-          completePendingEngineStoreMove(rootPath),
-        ),
-    );
-  } catch (error) {
-    if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
-    // The dispatch pump stops on false. A thrown sync error is logged, then
-    // the pump scans anyway and can open the still-split store directly.
-    console.error("[desktop] pending engine store move:", error);
-    return false;
-  }
+            const { capture } = await captureForFlaggedWorkspace(
+              {
+                workspaceId: workspace.workspaceId,
+                rootPath: workspace.rootPath,
+                // Guarded above: a shared view already returned false.
+                shareView: false,
+              },
+              {
+                activeAgentRun: () => null,
+                onCaptureOutcome: () => undefined,
+              },
+              requireEngineSessions(),
+            );
+            if (!capture) return false;
+            try {
+              const engine = engineForWorkspace(workspace, capture);
+              if (!engine) return false;
+              try {
+                await engine.start();
+                return true;
+              } finally {
+                await engine.stop().catch(() => undefined);
+                const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
+                if (relayWorkspaceId) {
+                  await closeRelayTransportWorkspace(relayWorkspaceId).catch(
+                    () => undefined,
+                  );
+                }
+              }
+            } finally {
+              await capture.stop().catch(() => undefined);
+            }
+          },
+          (rootPath) =>
+            withRebuildBoundGate(workspace.workspaceId, () =>
+              completePendingEngineStoreMove(rootPath),
+            ),
+        );
+      } catch (error) {
+        if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
+        // The dispatch pump stops on false. A thrown sync error is logged, then
+        // the pump scans anyway and can open the still-split store directly.
+        console.error("[desktop] pending engine store move:", error);
+        return false;
+      }
+    },
+  );
 }
 
 async function ensureWorkspaceActivityOpen(

@@ -14,6 +14,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
+  engineStoreRefusalSentence,
   type SyncStatusResult,
   type UpdateStateEvent,
 } from "../../ipc/bridgeContract";
@@ -295,7 +296,7 @@ export function NoticeCenter(props: {
       next.push({
         id: "engine-store-refused",
         tone: "danger",
-        title: "dohc can't read this data store",
+        title: engineStoreRefusalSentence(props.syncStatus.engineStoreRefused),
         body: `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds history from your files.`,
         action: { label: "Rebuild", onClick: props.onRebuildEngineStore },
         Icon: AlertTriangle,

@@ -7,7 +7,11 @@ import {
 import { z } from "zod";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
-import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
+import type {
+  ArtifactAssetDescriptor,
+  EngineStoreRefusal,
+} from "@dohc/workspace-engine-client";
+export type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import {
   CHATS_TAB_PATH,
   canonicalSingletonEditorTabPath,
@@ -907,6 +911,15 @@ export const SyncStatusResult = z.union([
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
 export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
+
+export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
+  switch (cause) {
+    case "unsupported-fingerprint":
+      return "This workspace's data store is not in the format this version of dohc uses.";
+    case "foreign-database":
+      return "dohc cannot read this workspace's data store.";
+  }
+}
 
 export const RebuildEngineStorePayload = z.object({
   workspaceId: WORKSPACE_ID,
