@@ -173,7 +173,7 @@ export function readPreparedDatabaseSnapshot(
   requestedPath: string,
   source: PreparedWorkspaceFileRead,
 ): Promise<DatabaseSnapshotView> {
-  return source.withVerifiedPath((absolutePath) =>
+  return source.withVerifiedPathSync((absolutePath) =>
     readDatabaseSnapshotAtPath(absolutePath, requestedPath),
   );
 }

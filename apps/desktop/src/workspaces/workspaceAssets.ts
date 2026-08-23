@@ -19,6 +19,14 @@ import {
 import { dirname, join, relative } from "node:path";
 import { TextDecoder } from "node:util";
 import { isInside } from "../security/pathContainment";
+import {
+  BoundedFileReadChangedError,
+  BoundedFileReadNotFileError,
+  BoundedFileReadTooLargeError,
+  BoundedFileReadUnverifiableError,
+  readFileHandleExact,
+  readFileHandleTruncated,
+} from "./boundedFileRead";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
@@ -150,24 +158,17 @@ function assertSameFile(
   }
 }
 
-async function readHandleBounded(
-  handle: FileHandle,
-  maxBytes: number,
-): Promise<Buffer> {
-  const buffer = Buffer.allocUnsafe(maxBytes + 1);
-  let total = 0;
-  while (total < buffer.length) {
-    const { bytesRead } = await handle.read(
-      buffer,
-      total,
-      buffer.length - total,
-      total,
-    );
-    if (bytesRead === 0) break;
-    total += bytesRead;
+function throwWorkspaceBoundedReadError(error: unknown): never {
+  if (error instanceof BoundedFileReadChangedError) {
+    throw new Error(FILE_CHANGED_DURING_READ);
   }
-  const bytes = buffer.subarray(0, total);
-  return total < maxBytes / 2 ? Buffer.from(bytes) : bytes;
+  if (error instanceof BoundedFileReadUnverifiableError) {
+    throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+  }
+  if (error instanceof BoundedFileReadNotFileError) {
+    throw new Error("This path is not a file. Choose a file and try again.");
+  }
+  throw error;
 }
 
 /** A read bound to the file identity captured after owner classification. */
@@ -175,7 +176,11 @@ export interface PreparedWorkspaceFileRead {
   readonly path: string;
   readAsset(): Promise<WorkspaceAssetSource>;
   readText(): Promise<WorkspaceTextReadResult>;
-  withVerifiedPath<T>(run: (absolutePath: string) => T): Promise<T>;
+  withVerifiedPathSync<T>(
+    run: (
+      absolutePath: string,
+    ) => T extends PromiseLike<unknown> ? never : T,
+  ): Promise<T>;
 }
 
 export interface ResolvedWorkspaceFileRead {
@@ -255,11 +260,18 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
 
   readAsset(): Promise<WorkspaceAssetSource> {
     return this.#withVerifiedHandle(async (handle) => {
-      const bytes = await readHandleBounded(handle, WORKSPACE_ASSET_MAX_BYTES);
-      if (bytes.length > WORKSPACE_ASSET_MAX_BYTES) {
-        throw new Error(
-          `Asset too large to serve (more than ${WORKSPACE_ASSET_MAX_BYTES} bytes): ${this.#spelledPath}`,
-        );
+      let bytes: Buffer;
+      try {
+        bytes = (
+          await readFileHandleExact(handle, WORKSPACE_ASSET_MAX_BYTES)
+        ).bytes;
+      } catch (error) {
+        if (error instanceof BoundedFileReadTooLargeError) {
+          throw new Error(
+            `Asset too large to serve (${error.size} bytes): ${this.#spelledPath}`,
+          );
+        }
+        throwWorkspaceBoundedReadError(error);
       }
       return {
         path: this.#resolvedPath,
@@ -277,12 +289,29 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
     );
   }
 
-  withVerifiedPath<T>(run: (absolutePath: string) => T): Promise<T> {
+  withVerifiedPathSync<T>(
+    run: (
+      absolutePath: string,
+    ) => T extends PromiseLike<unknown> ? never : T,
+  ): Promise<T> {
     return this.#withVerifiedHandle(async (handle) => {
       await this.#assertCanonicalPathNamesHandle(handle);
-      const result = run(this.#realTarget);
-      await this.#assertCanonicalPathNamesHandle(handle);
-      return result;
+      try {
+        const result = run(this.#realTarget);
+        if (
+          (typeof result === "object" || typeof result === "function") &&
+          result !== null &&
+          "then" in result &&
+          typeof result.then === "function"
+        ) {
+          throw new Error(
+            "Verified file path operations must finish synchronously.",
+          );
+        }
+        return result;
+      } finally {
+        await this.#assertCanonicalPathNamesHandle(handle);
+      }
     });
   }
 
@@ -780,15 +809,15 @@ export function createOrderedWorkspaceTextAccess(deps: {
 async function readTextHandle(
   handle: FileHandle,
 ): Promise<WorkspaceTextReadResult> {
-  const info = await handle.stat();
-  if (!info.isFile()) {
-    throw new Error("This path is not a file. Choose a file and try again.");
+  try {
+    const result = await readFileHandleTruncated(handle, MAX_TEXT_BYTES);
+    return workspaceTextReadResultFromBytes(
+      result.bytes,
+      result.totalByteLength,
+    );
+  } catch (error) {
+    throwWorkspaceBoundedReadError(error);
   }
-  const buffer = await readHandleBounded(handle, MAX_TEXT_BYTES);
-  return workspaceTextReadResultFromBytes(
-    buffer,
-    Math.max(buffer.length, info.size),
-  );
 }
 
 async function readTextTarget(target: string): Promise<WorkspaceTextReadResult> {

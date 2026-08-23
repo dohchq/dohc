@@ -1,3 +1,4 @@
+import { rmSync, symlinkSync } from "node:fs";
 import {
   mkdir,
   readFile,
@@ -17,6 +18,7 @@ import {
   createWorkspaceOperationScheduler,
   createWorkspaceTextExclusive,
   mediaTypeForExtension,
+  prepareWorkspaceFileRead,
   readWorkspaceAsset,
   readWorkspaceAssetSource,
   readWorkspaceText,
@@ -96,6 +98,35 @@ describe("resolveWorkspaceFile containment", () => {
 
     expect(source.path).toBe("notes/blob");
     expect(source.mediaType).toBe("image/png");
+  });
+
+  it("keeps verified native-path operations synchronous", async () => {
+    const root = await makeWorkspace();
+    const prepared = await prepareWorkspaceFileRead(root, "notes/a.md");
+    if (false) {
+      // @ts-expect-error A verified path must not escape into async work.
+      prepared.withVerifiedPathSync(async () => "not allowed");
+    }
+
+    const thenable = { then: vi.fn() };
+    await expect(
+      (prepared.withVerifiedPathSync as unknown as (
+        run: () => unknown,
+      ) => Promise<unknown>)(() => thenable),
+    ).rejects.toThrow(/finish synchronously/i);
+    expect(thenable.then).not.toHaveBeenCalled();
+
+    const replacement = join(root, "notes", "replacement.md");
+    await writeFile(replacement, "replacement");
+    await expect(
+      (prepared.withVerifiedPathSync as unknown as (
+        run: () => unknown,
+      ) => Promise<unknown>)(() => {
+        rmSync(join(root, "notes", "a.md"));
+        symlinkSync(replacement, join(root, "notes", "a.md"));
+        return thenable;
+      }),
+    ).rejects.toThrow(/file changed/i);
   });
 });
 
