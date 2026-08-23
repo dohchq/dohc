@@ -20,6 +20,7 @@ import { createTestScratch } from "./testTemp";
 import { buildOutputSiteRoot } from "./sitePackage";
 import {
   assertLoopbackOnlyDevServerCommand,
+  BUILD_HARD_KILL_GRACE_MS,
   buildSite,
   detectBuildOutput,
   detectDevUrl,
@@ -1282,6 +1283,46 @@ describe("buildSite", () => {
     },
   );
 
+  // The wrapper stays alive for WRAPPER_LIFETIME_MS after echoing the
+  // descendant's pid, and buildSite takes a real Win32_Process snapshot
+  // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
+  // real attempts to observe the descendant Start-Process just created,
+  // instead of racing the wrapper's own spawn with a single shot.
+  //
+  // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild already
+  // awaits the taskkill subprocess to completion before buildSite returns,
+  // so by the time the test starts polling, that subprocess has already
+  // finished — it does not race a still-running taskkill. Measured
+  // 2026-08-23 under combined desktop+mcp 8-worker load (N=29 successful
+  // captures, one separate run's buildSite call itself hit its own
+  // BUILD_TIMEOUT_MS under the same load and never reached this wait — a
+  // different, unaddressed failure mode, not this one): the target process
+  // was confirmed absent on the very first check every time,
+  // min/median/p95/max all 0-1ms. 500ms is 500x that observed maximum, real
+  // headroom over the measured range and not a growing pad chasing a flake
+  // this wait was never the cause of — it does not claim the OS has
+  // finished all of a forced termination's own async teardown by then, only
+  // that the process stops answering process.kill(pid, 0) this fast in
+  // every run measured.
+  const CAPTURE_INTERVAL_MS = 100;
+  const WRAPPER_LIFETIME_MS = 2_000;
+  const PROCESS_DEATH_TIMEOUT_MS = 500;
+  const BUILD_TIMEOUT_MS = 15_000;
+  // Real-process spawn/kill overhead none of the numbers above cover:
+  // process creation, PowerShell startup, and OS scheduling jitter under an
+  // already-loaded suite.
+  const SPAWN_OVERHEAD_MS = 5_000;
+  // The worst case isn't the happy path (WRAPPER_LIFETIME_MS then a
+  // near-instant kill) — it's buildSite's own timeout path: BUILD_TIMEOUT_MS
+  // to fire, then stopChild's SIGTERM-then-SIGKILL sequence taking up to
+  // BUILD_HARD_KILL_GRACE_MS to finish, before buildSite even returns and
+  // this test reaches its own PROCESS_DEATH_TIMEOUT_MS wait.
+  const WIN32_DESCENDANT_TEST_TIMEOUT_MS =
+    BUILD_TIMEOUT_MS +
+    BUILD_HARD_KILL_GRACE_MS +
+    PROCESS_DEATH_TIMEOUT_MS +
+    SPAWN_OVERHEAD_MS;
+
   it.runIf(process.platform === "win32")(
     "stops a descendant a successful build wrapper backgrounds and leaves behind (win32)",
     async () => {
@@ -1298,19 +1339,15 @@ describe("buildSite", () => {
           "'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' " +
           "-PassThru -WindowStyle Hidden",
         "Write-Output ('CHILD:' + $proc.Id)",
-        // Keeps the wrapper alive long enough for the immediate post-spawn
-        // descendant snapshot (a second powershell.exe round trip reading
-        // Win32_Process) to land before this wrapper exits on its own —
-        // buildSite has no descendant-poll-interval override, so that
-        // immediate snapshot is the only capture this scenario can rely on.
-        "Start-Sleep -Milliseconds 2000",
+        `Start-Sleep -Milliseconds ${WRAPPER_LIFETIME_MS}`,
       ].join("; ");
       const result = await buildSite({
         workspaceRoot: root,
         siteRoot: "site",
         command: "powershell.exe",
         args: ["-NoProfile", "-NonInteractive", "-Command", script],
-        timeoutMs: 15000,
+        timeoutMs: BUILD_TIMEOUT_MS,
+        descendantCaptureIntervalMs: CAPTURE_INTERVAL_MS,
       });
       expect(result.exitCode).toBe(0);
       const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
@@ -1318,7 +1355,9 @@ describe("buildSite", () => {
       expect(descendantPid).toBeGreaterThan(0);
 
       try {
-        expect(await waitForProcessDeath(descendantPid, 5000)).toBe(true);
+        expect(
+          await waitForProcessDeath(descendantPid, PROCESS_DEATH_TIMEOUT_MS),
+        ).toBe(true);
       } finally {
         try {
           process.kill(descendantPid, "SIGKILL");
@@ -1327,7 +1366,7 @@ describe("buildSite", () => {
         }
       }
     },
-    20_000,
+    WIN32_DESCENDANT_TEST_TIMEOUT_MS,
   );
 
   it("reports failed builds without stale output", async () => {
@@ -1392,6 +1431,12 @@ describe("buildSite", () => {
     await mkdir(join(root, "site", "custom"), { recursive: true });
     await writeFile(join(root, "site", "custom", "index.html"), "<h1>Custom</h1>");
     expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(join(root, "site", "custom"));
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
+    await mkdir(join(root, "site", "..cache"), { recursive: true });
+    await writeFile(join(root, "site", "..cache", "index.html"), "<h1>Cache-built</h1>");
+    expect(await detectBuildOutput(join(root, "site"), "..cache")).toBe(
+      join(root, "site", "..cache"),
+    );
     await mkdir(join(root, "outside"), { recursive: true });
     expect(await detectBuildOutput(join(root, "site"), "../outside")).toBeNull();
     expect(await detectBuildOutput(join(root, "site"))).toBeNull();

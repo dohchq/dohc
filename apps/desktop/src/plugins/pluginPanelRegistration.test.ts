@@ -82,6 +82,24 @@ describe("plugin panel registration", () => {
     ).resolves.toMatchObject({ pluginRoot });
   });
 
+  it("loads a plugin whose directory NAME starts with '..' from its absolute root", async () => {
+    // A ".."-prefixed plugin directory is a real contained name, not traversal.
+    // (The ..-segment mutation is unreachable here: every root this module
+    // resolves is under plugins/, so relative() starts with that segment.)
+    const workspace = await scratch("dohc-plugin-panel-dotdot-");
+    const pluginRoot = join(workspace, "plugins", "..cache");
+    await writePlugin(pluginRoot);
+
+    await expect(
+      loadPluginPanelRegistration({
+        workspaceRoot: workspace,
+        pluginRoot,
+        pluginId: "hello-plugin",
+        panelId: "main",
+      }),
+    ).resolves.toMatchObject({ pluginRoot });
+  });
+
   it("refuses to open a view-placed panel as a tab", async () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const pluginRoot = join(workspace, "plugins", "hello-plugin");

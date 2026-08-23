@@ -1,6 +1,6 @@
 # dohc
 
-dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files and data across your devices and facilitates sharing and collaboration between you, your team and your agents.
+dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files and data across your devices and lets you share work with your team and your agents.
 
 We are building the MVP and have not launched with users.
 
@@ -109,6 +109,7 @@ Use one name for one thing. Check terms against the surrounding code before defi
 - `packages` contains shared TypeScript contracts, clients, tools, auth, and UI code.
 - `services` contains opt-in auth, sync relay, and SQLite services.
 - `crates` contains the Rust workspace engine and supporting crates. `dohc-workspace-engine` builds the daemon used by the desktop app.
+- `tools/rust-engine-program` contains the Rust gate scripts, fixture goldens, and evidence tools.
 
 ## Local development
 
@@ -136,7 +137,7 @@ Run the smallest check that proves the change.
 
 ### Select local gates
 
-Use the `rust` and `js` filters in the workflow's `changes` job to choose local gates for the exact PR head.
+Use the `rust` and `js` filters in the [`changes` job of `pr-checks.yml`](.github/workflows/pr-checks.yml) to choose local gates for the exact PR head.
 
 - Reproduce each matching workflow job locally, including its services, environment, prebuilds, and verdict checks.
 - Run both jobs when both filters match.

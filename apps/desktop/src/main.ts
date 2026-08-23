@@ -40,8 +40,8 @@ import {
 } from "electron";
 import * as Y from "yjs";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, readdir } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { mkdir, readdir, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -353,6 +353,7 @@ import {
   createWorkspaceWindowRegistry,
 } from "./quitGuard";
 import { decideNavigation, isSafeExternalUrl } from "./security/electronSecurity";
+import { isInside } from "./security/pathContainment";
 import {
   applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
@@ -1288,9 +1289,17 @@ async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> 
   );
 }
 
-function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): string {
-  const rel = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
-  if (rel === "" || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) {
+async function relativeWorkspacePath(
+  workspaceRoot: string,
+  absolutePath: string,
+): Promise<string> {
+  const [realWorkspaceRoot, realAbsolutePath] = await Promise.all([
+    realpath(workspaceRoot),
+    realpath(absolutePath),
+  ]);
+  const rel = relative(realWorkspaceRoot, realAbsolutePath).replaceAll("\\", "/");
+  // Strict on purpose: the workspace root itself is not a build output.
+  if (rel === "" || !isInside(realWorkspaceRoot, realAbsolutePath)) {
     throw new Error(`Build output escaped the workspace: ${absolutePath}`);
   }
   return rel;
@@ -1456,7 +1465,7 @@ async function startPreviewForSiteUnlocked(
     }
     outputRoot = buildOutputRelativeToSite(
       input.site.root,
-      relativeWorkspacePath(input.workspaceRoot, result.outputPath),
+      await relativeWorkspacePath(input.workspaceRoot, result.outputPath),
     );
   }
   if (!input.isCurrent()) {
@@ -4465,16 +4474,11 @@ function approveRoot(rootPath: string): void {
 
 function isApprovedRoot(normalized: string): boolean {
   for (const approved of approvedRoots) {
-    if (normalized === approved) return true;
-    const rel = relative(approved, normalized);
-    // On Windows, relative() across drives returns an absolute path
-    // (C:\ws -> D:\evil gives "D:\evil"), which is NOT a descendant.
-    if (
-      rel.length > 0 &&
-      !isAbsolute(rel) &&
-      !rel.startsWith("..") &&
-      !rel.startsWith(sep)
-    ) {
+    // This is an exact capability-spelling check, not filesystem containment:
+    // the approved root or requested workspace may not exist yet. The create
+    // path realpath-checks its existing parent before it writes.
+    const prefix = approved.endsWith("/") ? approved : `${approved}/`;
+    if (normalized === approved || normalized.startsWith(prefix)) {
       return true;
     }
   }

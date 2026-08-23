@@ -11,8 +11,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
+import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
@@ -310,7 +311,7 @@ export function shareViewIdentitySelector(input: {
 function containedTarget(rootDir: string, relativePath: string): string {
   const target = resolve(rootDir, relativePath);
   const root = resolve(rootDir);
-  if (target !== root && !target.startsWith(`${root}${sep}`)) {
+  if (!isInside(root, target)) {
     throw new Error(`Shared view path escapes the workspace: ${relativePath}`);
   }
   return target;
@@ -377,12 +378,12 @@ export async function materializeSharedViewPaths(
     // directories outside the projection before the post-check throws. The
     // deepest existing ancestor must already be inside the root.
     const realAncestor = await realpath(await existingAncestor(dirname(target)));
-    if (realAncestor !== realRoot && !realAncestor.startsWith(`${realRoot}${sep}`)) {
+    if (!isInside(realRoot, realAncestor)) {
       throw new Error(`Shared view parent escapes the workspace: ${target}`);
     }
     await mkdir(dirname(target), { recursive: true });
     const realParent = await realpath(dirname(target));
-    if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
+    if (!isInside(realRoot, realParent)) {
       throw new Error(`Shared view parent escapes the workspace: ${target}`);
     }
     await rm(target, { recursive: true, force: true });
@@ -424,7 +425,7 @@ export async function materializeSharedViewPaths(
       // removes a link as a link, never through it.
       const realParent = await realpath(dirname(resolvedTarget)).catch(() => null);
       if (realParent === null) continue; // parent gone — nothing to delete
-      if (realParent !== realRoot && !realParent.startsWith(`${realRoot}${sep}`)) {
+      if (!isInside(realRoot, realParent)) {
         throw new Error(`Shared view parent escapes the workspace: ${target}`);
       }
       // recursive: a locally tampered DIRECTORY at the target must not
@@ -1680,8 +1681,7 @@ export async function repairSharedViewProjection(
   const maybeRealRoot = await realpath(rootDir).catch(() => null);
   if (maybeRealRoot === null) return 0;
   const realRoot: string = maybeRealRoot;
-  const containsReal = (candidate: string) =>
-    candidate === realRoot || candidate.startsWith(`${realRoot}${sep}`);
+  const containsReal = (candidate: string) => isInside(realRoot, candidate);
   // Self-heal a tampered tree: remove the first symlinked component on the
   // path (AS A LINK — rm without recursive never follows) so the
   // re-materialization below can rebuild the real directory chain instead
