@@ -2908,6 +2908,13 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
 interface WorkspaceActivityOpenOptions {
   afterActivityOpen?: () => Promise<void>;
   whileEngineStoreLockHeld?: () => Promise<void>;
+  // Runs after reopen recovery has settled (resumed and completed a partial
+  // move, or found nothing pending) but BEFORE activity.open starts the
+  // daemon-owned capture. The rebuild's own reopen uses this to release the
+  // request-scoped gate before capture.start()'s startup probe binds a
+  // session — otherwise that probe races the still-raised gate and
+  // self-refuses in the background (#882 round 19).
+  afterReopenRecoverySettled?: () => void;
 }
 
 async function ensureWorkspaceActivityOpenBody(
@@ -2961,8 +2968,14 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
   return withEngineStoreRecoveredUnderEngineStoreLock(
     workspace,
     () => ensureWorkspaceActivityOpenBody(workspace, options),
-    (rootPath) =>
-      completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
+    async (rootPath) => {
+      await completePendingEngineStoreMoveForWorkspace(workspace, rootPath);
+      // Recovery settled (resumed-and-completed, or an honest no-op) without
+      // throwing — release before the activity-open body below starts
+      // capture. A failed recovery throws out of the line above and never
+      // reaches this call, so the sticky-on-failure rule is untouched.
+      options.afterReopenRecoverySettled?.();
+    },
   );
 }
 
@@ -11046,7 +11059,10 @@ function registerIpcHandlers(
             moveStoreAside: moveEngineStoreAside,
             reopenActivity: async () => {
               try {
-                await openWorkspaceActivityUnderEngineStoreLock(workspace);
+                await openWorkspaceActivityUnderEngineStoreLock(workspace, {
+                  afterReopenRecoverySettled: () =>
+                    sessions.endRebuild(workspace.workspaceId),
+                });
               } finally {
                 notifyRenderer();
               }

@@ -60,10 +60,22 @@ describe("main-process engine store rebuild wiring", () => {
     expect(lockedOpen).toContain(
       "withEngineStoreRecoveredUnderEngineStoreLock(",
     );
+    // Round 19: the reopen's recovery step must settle (resume-and-complete,
+    // or an honest no-op) and release the request gate BEFORE the
+    // activity-open body starts the daemon-owned capture — not after the
+    // whole reopen resolves. The hook sits inside the completePendingMove
+    // callback, after the recovery call and before the callback returns.
+    expect(lockedOpen).toContain("options.afterReopenRecoverySettled?.()");
+    expect(
+      lockedOpen.indexOf("completePendingEngineStoreMoveForWorkspace("),
+    ).toBeLessThan(lockedOpen.indexOf("options.afterReopenRecoverySettled?.()"));
     expect(rebuild).toContain("withKeyedStartLock(");
     expect(rebuild).toContain("openWorkspaceActivityUnderEngineStoreLock(");
     expect(rebuild).toContain("begin: () => sessions.beginRebuild(");
     expect(rebuild).toContain("end: () => sessions.endRebuild(");
+    expect(rebuild).toMatch(
+      /afterReopenRecoverySettled: \(\) =>\s*sessions\.endRebuild\(workspace\.workspaceId\),/,
+    );
     expect(rebuild).toContain("moveStoreAside: moveEngineStoreAside");
     expect(rebuild).not.toContain("requireEngineSessions().beginRebuild(");
   });

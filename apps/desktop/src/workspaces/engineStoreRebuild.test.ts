@@ -1550,6 +1550,132 @@ describe("rebuildEngineStore", () => {
     },
   );
 
+  it("lets the reopened capture's first daemon probe bind a session, not just the settled request", async () => {
+    await mkdir(backupDir);
+    await writeFile(join(backupDir, "MOVE_COMPLETE"), "");
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "handle-1" } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    let probe: Promise<unknown> | undefined;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({
+        capture: {
+          start: () => {
+            probe = sessions.run(workspace, async () => "probed");
+          },
+          captureBatch: vi.fn(),
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+        } as never,
+        shareView: false,
+      }),
+    });
+
+    // Mirrors main.ts's actual rebuild-reopen wiring (round 19): the outer
+    // request gate is already raised — rebuildEngineStore raises it before
+    // moveStoreAside — and the reopen's completePendingMove wrapper releases
+    // it right after recovery settles, before the activity-open body below
+    // starts the daemon-owned capture. A stub reopenActivity (like the
+    // it.each pins above) can't see this: it never actually starts a
+    // capture that races the gate.
+    sessions.beginRebuild(workspace.workspaceId);
+    await withEngineStoreRecoveredUnderEngineStoreLock(
+      workspace,
+      () => activity.open(workspace),
+      async (rootPath) => {
+        await completePendingEngineStoreMove(rootPath);
+        sessions.endRebuild(workspace.workspaceId);
+      },
+    );
+
+    await expect(probe).resolves.toBe("probed");
+    await activity.stopAll();
+  });
+
+  it("keeps a reopened capture's first daemon probe refused when recovery genuinely fails", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "handle-1" } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    let probe: Promise<unknown> | undefined;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({
+        capture: {
+          start: () => {
+            probe = sessions.run(workspace, async () => "probed");
+          },
+          captureBatch: vi.fn(),
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+        } as never,
+        shareView: false,
+      }),
+    });
+
+    sessions.beginRebuild(workspace.workspaceId);
+    await expect(
+      withEngineStoreRecoveredUnderEngineStoreLock(
+        workspace,
+        () => activity.open(workspace),
+        async (rootPath) => {
+          await completePendingEngineStoreMove(rootPath, {
+            rename: async () => {
+              throw new Error("rename denied");
+            },
+          });
+          sessions.endRebuild(workspace.workspaceId);
+        },
+      ),
+    ).rejects.toThrow();
+
+    // Recovery threw before the endRebuild() line above ever ran, so the
+    // gate is still raised — the sticky-on-failure rule (unaffected by this
+    // fix). The capture body never started either (probe stays undefined).
+    expect(probe).toBeUndefined();
+    await expect(
+      sessions.run(workspace, async () => "unexpected"),
+    ).rejects.toEqual(new EngineWorkspaceRebuildingError(workspace.workspaceId));
+    await activity.stopAll();
+  });
+
   it("keeps the rebuild gate raised when reopen recovery fails", async () => {
     const { rebuildGate, sessions, workspace } = createRealRebuildGate();
     const recoveryError = new EngineStoreRecoveryFailedError(
