@@ -53,7 +53,7 @@ function assertWriteNotAborted(signal?: AbortSignal): void {
 // `access` picks the lexical validator: "write" (the default — fail closed)
 // refuses the reserved shared-with-me projection; "read" allows it (share
 // mounts exist to be read) while keeping every other guard identical.
-export async function resolveWorkspaceFile(
+async function resolveWorkspaceFileTarget(
   rootPath: string,
   relativePath: string,
   access: "read" | "write" = "write",
@@ -82,16 +82,33 @@ export async function resolveWorkspaceFile(
       label: "Asset path",
       access,
     });
-  // Every caller needs a file that is already there: the OS opener is handed
-  // one, the editor's save renames onto one, and the database paths open one.
-  // The walk answers for a target that does not exist yet, so the existence
-  // proof is made here, on the canonical path.
-  await stat(resolvedAbsolute);
   return {
     realTarget: resolvedAbsolute,
     normalized: validated.normalized,
     resolvedPath: resolvedPath.replaceAll("\\", "/"),
   };
+}
+
+export async function resolveWorkspaceFile(
+  rootPath: string,
+  relativePath: string,
+  access: "read" | "write" = "write",
+): Promise<{
+  realTarget: string;
+  normalized: string;
+  resolvedPath: string;
+}> {
+  const target = await resolveWorkspaceFileTarget(
+    rootPath,
+    relativePath,
+    access,
+  );
+  // Public callers need a file that is already there: the OS opener is handed
+  // one, the editor's save renames onto one, and the database paths open one.
+  // A prepared owner read delays this proof until after owner classification,
+  // because canonical share bytes may exist while their projection does not.
+  await stat(target.realTarget);
+  return target;
 }
 
 // Media views buffer the whole file into the privileged main process before
@@ -106,26 +123,100 @@ export interface WorkspaceAssetSource {
   mediaType: string;
 }
 
-// Reads a workspace-relative file's canonical identity and bytes from the one
-// resolution that passed the path guard.
-export async function readWorkspaceAssetSource(
-  rootPath: string,
-  relativePath: string,
+async function readWorkspaceAssetTarget(
+  realTarget: string,
+  resolvedPath: string,
+  spelledPath: string,
 ): Promise<WorkspaceAssetSource> {
-  const { realTarget, resolvedPath } = await resolveWorkspaceFile(
-    rootPath,
-    relativePath,
-    "read",
-  );
   const { size } = await stat(realTarget);
   if (size > WORKSPACE_ASSET_MAX_BYTES) {
-    throw new Error(`Asset too large to serve (${size} bytes): ${relativePath}`);
+    throw new Error(`Asset too large to serve (${size} bytes): ${spelledPath}`);
   }
   return {
     path: resolvedPath,
     bytes: await readFile(realTarget),
     mediaType: mediaTypeForExtension(resolvedPath),
   };
+}
+
+/**
+ * One guarded workspace-file resolution, kept with every later read.
+ *
+ * The canonical absolute target is private so callers cannot separate the
+ * path that passed containment from the operation that uses it. In
+ * particular, an ownership router can classify `path` and then read through
+ * this object without following the caller's alias a second time.
+ */
+export class PreparedWorkspaceFileRead {
+  readonly #rootPath: string;
+  readonly #realTarget: string;
+  readonly #resolvedPath: string;
+  readonly #spelledPath: string;
+
+  private constructor(input: {
+    rootPath: string;
+    realTarget: string;
+    resolvedPath: string;
+    spelledPath: string;
+  }) {
+    this.#rootPath = input.rootPath;
+    this.#realTarget = input.realTarget;
+    this.#resolvedPath = input.resolvedPath;
+    this.#spelledPath = input.spelledPath;
+  }
+
+  get path(): string {
+    return this.#resolvedPath;
+  }
+
+  static async prepare(
+    rootPath: string,
+    relativePath: string,
+  ): Promise<PreparedWorkspaceFileRead> {
+    const { realTarget, resolvedPath } = await resolveWorkspaceFileTarget(
+      rootPath,
+      relativePath,
+      "read",
+    );
+    return new PreparedWorkspaceFileRead({
+      rootPath,
+      realTarget,
+      resolvedPath,
+      spelledPath: relativePath,
+    });
+  }
+
+  readAsset(): Promise<WorkspaceAssetSource> {
+    return readWorkspaceAssetTarget(
+      this.#realTarget,
+      this.#resolvedPath,
+      this.#spelledPath,
+    );
+  }
+
+  readText(): Promise<WorkspaceTextReadResult> {
+    return withOrderedWorkspaceTargetPath(
+      this.#rootPath,
+      this.#realTarget,
+      () => readTextTarget(this.#realTarget),
+    );
+  }
+}
+
+export function prepareWorkspaceFileRead(
+  rootPath: string,
+  relativePath: string,
+): Promise<PreparedWorkspaceFileRead> {
+  return PreparedWorkspaceFileRead.prepare(rootPath, relativePath);
+}
+
+// Reads a workspace-relative file's canonical identity and bytes from the one
+// resolution that passed the path guard.
+export async function readWorkspaceAssetSource(
+  rootPath: string,
+  relativePath: string,
+): Promise<WorkspaceAssetSource> {
+  return (await prepareWorkspaceFileRead(rootPath, relativePath)).readAsset();
 }
 
 // Reads a workspace-relative file's bytes for callers that do not classify

@@ -1,9 +1,10 @@
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ShareMountRecord } from "./registryStore";
 import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
 import type { ShareViewFiles } from "./shareViewFiles";
+import { prepareShareProjectionRead } from "./shareMounts";
 import { createTestScratch } from "./testTemp";
 
 describe("owned workspace complete source reads", () => {
@@ -63,5 +64,44 @@ describe("owned workspace complete source reads", () => {
       },
       { kind: "asset", path: "data.csv" },
     );
+  });
+
+  it("keeps a prepared local read local when its alias is retargeted into the projection", async () => {
+    const rootPath = await createTestScratch("dohc-owned-file-retarget-");
+    const localPath = join(rootPath, "imports", "data.csv");
+    const cachePath = join(
+      rootPath,
+      "shared-with-me",
+      "alice",
+      "data.csv",
+    );
+    const aliasPath = join(rootPath, "source.csv");
+    await mkdir(join(rootPath, "imports"), { recursive: true });
+    await mkdir(join(rootPath, "shared-with-me", "alice"), {
+      recursive: true,
+    });
+    await writeFile(localPath, "id,value\n1,local owner\n");
+    await writeFile(cachePath, "id,value\n1,recipient cache\n");
+    await symlink(localPath, aliasPath);
+
+    const prepared = await prepareShareProjectionRead(
+      rootPath,
+      "source.csv",
+      [],
+      true,
+    );
+    expect(prepared.kind).toBe("local");
+
+    await rm(aliasPath);
+    await symlink(cachePath, aliasPath);
+
+    if (prepared.kind !== "local") throw new Error("Expected a local read.");
+    await expect(prepared.source.readAsset()).resolves.toMatchObject({
+      path: "imports/data.csv",
+      bytes: Buffer.from("id,value\n1,local owner\n"),
+    });
+    await expect(
+      prepareShareProjectionRead(rootPath, "source.csv", [], true),
+    ).rejects.toThrow(/no share owns it/i);
   });
 });

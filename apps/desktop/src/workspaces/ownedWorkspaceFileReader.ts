@@ -9,11 +9,13 @@ import {
   type ShareViewFilesWorkspaceRecord,
 } from "./shareViewFilesTarget";
 import { shareViewIsPresent } from "./shareViewMarker";
-import { resolveShareMountPath } from "./shareMounts";
 import {
-  readWorkspaceAssetSource,
-  readWorkspaceText,
-  type WorkspaceTextReadResult,
+  prepareShareProjectionRead,
+  resolveShareMountPath,
+} from "./shareMounts";
+import type {
+  PreparedWorkspaceFileRead,
+  WorkspaceTextReadResult,
 } from "./workspaceAssets";
 
 export interface OwnedWorkspaceFileSource {
@@ -39,6 +41,10 @@ export function createOwnedWorkspaceFileReader(input: {
   workspace: ShareViewFilesWorkspaceRecord;
   files: Pick<ShareViewFiles, "read">;
 }): OwnedWorkspaceFileReader {
+  type PreparedRead =
+    | { kind: "local"; source: PreparedWorkspaceFileRead }
+    | { kind: "share"; target: ShareViewFilesTarget; path: string };
+
   async function resolveShare(path: string): Promise<{
     target: ShareViewFilesTarget;
     path: string;
@@ -70,18 +76,45 @@ export function createOwnedWorkspaceFileReader(input: {
         };
   }
 
+  async function prepareRead(path: string): Promise<PreparedRead> {
+    if (shareViewIsPresent(input.workspace.shareView)) {
+      return {
+        kind: "share",
+        target: {
+          kind: "standalone",
+          workspaceId: input.workspace.workspaceId,
+        },
+        path,
+      };
+    }
+    const prepared = await prepareShareProjectionRead(
+      input.workspace.rootPath,
+      path,
+      storedShareMounts(input.workspace),
+      shareMountRegistryIsPresent(input.workspace),
+    );
+    return prepared.kind === "local"
+      ? prepared
+      : {
+          kind: "share",
+          target: {
+            kind: "mount",
+            workspaceId: input.workspace.workspaceId,
+            shareId: prepared.mount.shareId,
+          },
+          path: prepared.path,
+        };
+  }
+
   async function readAssetSource(path: string): Promise<{
     path: string;
     kind: "asset";
     bytes: Buffer;
     mediaType: string;
   }> {
-    const routed = await resolveShare(path);
-    if (routed === null) {
-      const source = await readWorkspaceAssetSource(
-        input.workspace.rootPath,
-        path,
-      );
+    const prepared = await prepareRead(path);
+    if (prepared.kind === "local") {
+      const source = await prepared.source.readAsset();
       return {
         path: source.path,
         kind: "asset",
@@ -89,14 +122,14 @@ export function createOwnedWorkspaceFileReader(input: {
         mediaType: source.mediaType,
       };
     }
-    const read = await input.files.read(routed.target, {
+    const read = await input.files.read(prepared.target, {
       kind: "asset",
-      path: routed.path,
+      path: prepared.path,
     });
     if (read.kind !== "asset") {
       throw new Error("Shared asset read returned an invalid result.");
     }
-    return { path: routed.path, ...read };
+    return { path: prepared.path, ...read };
   }
 
   async function readAsset(
@@ -117,13 +150,13 @@ export function createOwnedWorkspaceFileReader(input: {
     resolveShare,
 
     async readText(path) {
-      const routed = await resolveShare(path);
-      if (routed === null) {
-        return readWorkspaceText(input.workspace.rootPath, path);
+      const prepared = await prepareRead(path);
+      if (prepared.kind === "local") {
+        return prepared.source.readText();
       }
-      const read = await input.files.read(routed.target, {
+      const read = await input.files.read(prepared.target, {
         kind: "text",
-        path: routed.path,
+        path: prepared.path,
       });
       if (read.kind !== "text") {
         throw new Error("Shared text read returned an invalid result.");

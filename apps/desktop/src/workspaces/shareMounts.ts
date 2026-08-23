@@ -17,6 +17,10 @@ import { ShareMountStatusRow } from "../ipc/bridgeContract";
 import { SharePinInvalidError } from "./shareViewRecords";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import type { ShareMountRecord } from "./registryStore";
+import {
+  prepareWorkspaceFileRead,
+  type PreparedWorkspaceFileRead,
+} from "./workspaceAssets";
 
 // Share mounts: the receive side of a relay share materialized INSIDE a host
 // workspace as shared-with-me/<label>/ — ordinary read-only files the user's
@@ -213,22 +217,10 @@ export type ResolvedShareProjectionPath<Mount> =
       path: string;
     };
 
-/** Decide which owner controls a path after resolving aliases and symlinks. */
-export async function resolveShareProjectionPath<Mount>(
-  hostRoot: string,
-  relativePath: string,
+function classifyResolvedShareProjectionPath<Mount>(
+  normalizedPath: string,
   mounts: readonly Mount[],
-): Promise<ResolvedShareProjectionPath<Mount>> {
-  const validated = validateUserReadPath(relativePath);
-  if (!validated.ok) return { kind: "local" };
-  const resolved = await assertResolvedWorkspacePath({
-    rootPath: hostRoot,
-    absolutePath: join(hostRoot, validated.normalized),
-    spelled: relativePath,
-    label: "Shared file path",
-    access: "read",
-  });
-  const normalizedPath = resolved.relative.replaceAll("\\", "/");
+): ResolvedShareProjectionPath<Mount> {
   if (normalizedPath === "") return { kind: "workspace-root" };
   if (isSharedWithMePath(normalizedPath) && !normalizedPath.includes("/")) {
     return { kind: "projection-root" };
@@ -264,6 +256,50 @@ export async function resolveShareProjectionPath<Mount>(
         ? ""
         : normalizedPath.split("/").slice(2).join("/"),
   };
+}
+
+/** Decide which owner controls a path after resolving aliases and symlinks. */
+export async function resolveShareProjectionPath<Mount>(
+  hostRoot: string,
+  relativePath: string,
+  mounts: readonly Mount[],
+): Promise<ResolvedShareProjectionPath<Mount>> {
+  const validated = validateUserReadPath(relativePath);
+  if (!validated.ok) return { kind: "local" };
+  const resolved = await assertResolvedWorkspacePath({
+    rootPath: hostRoot,
+    absolutePath: join(hostRoot, validated.normalized),
+    spelled: relativePath,
+    label: "Shared file path",
+    access: "read",
+  });
+  const normalizedPath = resolved.relative.replaceAll("\\", "/");
+  return classifyResolvedShareProjectionPath(normalizedPath, mounts);
+}
+
+export type PreparedShareProjectionRead<Mount> =
+  | { kind: "local"; source: PreparedWorkspaceFileRead }
+  | {
+      kind: "mount";
+      mount: Mount & { shareId: string; label: string };
+      path: string;
+    };
+
+/** Resolve owner authority and retain the exact local read that was judged. */
+export async function prepareShareProjectionRead<Mount>(
+  hostRoot: string,
+  relativePath: string,
+  mounts: readonly Mount[],
+  hasMountRegistry: boolean,
+): Promise<PreparedShareProjectionRead<Mount>> {
+  const source = await prepareWorkspaceFileRead(hostRoot, relativePath);
+  if (mounts.length === 0 && !hasMountRegistry) {
+    return { kind: "local", source };
+  }
+  const resolved = classifyResolvedShareProjectionPath(source.path, mounts);
+  return resolved.kind === "mount"
+    ? { kind: "mount", mount: resolved.mount, path: resolved.path }
+    : { kind: "local", source };
 }
 
 /**
