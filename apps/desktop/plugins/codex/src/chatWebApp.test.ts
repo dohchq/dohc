@@ -420,6 +420,17 @@ describe("Codex chat web app", () => {
       stream: "assistant",
       text: secondText,
     });
+    // A known event right after the truncated text: any stale delta the
+    // truncation missed would replay BEFORE this one, so asserting this is
+    // the very next replay event is a deterministic proof that nothing
+    // else landed -- no timeout needed, and no risk of a slow-but-real
+    // event racing past an arbitrary wait.
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+    expect(await live.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "completed",
+    });
     await live.close();
 
     const replay = await eventStream(url, token);
@@ -435,7 +446,11 @@ describe("Codex chat web app", () => {
     if (textDelta.kind !== "text-delta") throw new Error("The replay omitted its text delta.");
     expect(textDelta.text.length).toBeLessThanOrEqual(maxCoalescedTextChars);
     expect(await replay.next()).toEqual({ kind: "history-trimmed" });
-    expect(await raceTimeout(replay.next(), 200)).toBe("timeout");
+    expect(await replay.next()).toEqual({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "completed",
+    });
     await replay.close();
   });
 
