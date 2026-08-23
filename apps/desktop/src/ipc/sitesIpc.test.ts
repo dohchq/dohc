@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../workspaces/sitePackage";
 import type { SitePreviewMode } from "./bridgeContract";
-import { CHANNELS } from "./channels";
 import {
   createSitesIpcHandlers,
   type SitesIpcDependencies,
@@ -85,20 +84,12 @@ function harness() {
 
 const trustedEvent: TestEvent = { trusted: true, senderId: 7 };
 
-describe("sites IPC handler record", () => {
-  it("owns exactly the two site-read channels", () => {
-    const { handlers } = harness();
-    expect(Object.keys(handlers)).toEqual([
-      CHANNELS.listSites,
-      CHANNELS.getSitePackage,
-    ]);
-  });
-
+describe("sites IPC handlers", () => {
   it("rejects an untrusted sender before parsing or reading", async () => {
     const { handlers, trace, list } = harness();
 
     await expect(
-      handlers[CHANNELS.listSites]!({ trusted: false, senderId: 7 }, null),
+      handlers.listSites({ trusted: false, senderId: 7 }, null),
     ).rejects.toThrow("Untrusted renderer.");
 
     expect(trace).toEqual(["trust"]);
@@ -109,7 +100,7 @@ describe("sites IPC handler record", () => {
     const { handlers, trace, list } = harness();
 
     await expect(
-      handlers[CHANNELS.listSites]!(trustedEvent, { workspaceId: "" }),
+      handlers.listSites(trustedEvent, { workspaceId: "" }),
     ).rejects.toThrow();
 
     expect(trace).toEqual(["trust"]);
@@ -119,7 +110,7 @@ describe("sites IPC handler record", () => {
   it("rejects unknown and inactive workspaces before owner catalog reads", async () => {
     const unknown = harness();
     await expect(
-      unknown.handlers[CHANNELS.listSites]!(trustedEvent, {
+      unknown.handlers.listSites(trustedEvent, {
         workspaceId: "workspace-missing",
       }),
     ).rejects.toThrow("Unknown workspace: workspace-missing");
@@ -128,7 +119,7 @@ describe("sites IPC handler record", () => {
     const inactive = harness();
     inactive.setActiveWorkspaceId("workspace-2");
     await expect(
-      inactive.handlers[CHANNELS.getSitePackage]!(trustedEvent, {
+      inactive.handlers.getSitePackage(trustedEvent, {
         workspaceId: "workspace-1",
         path: "site",
       }),
@@ -140,7 +131,7 @@ describe("sites IPC handler record", () => {
     const test = harness();
 
     await expect(
-      test.handlers[CHANNELS.listSites]!(trustedEvent, {
+      test.handlers.listSites(trustedEvent, {
         workspaceId: "workspace-1",
       }),
     ).resolves.toEqual({ sites: [] });
@@ -158,7 +149,7 @@ describe("sites IPC handler record", () => {
     const test = harness();
 
     await expect(
-      test.handlers[CHANNELS.getSitePackage]!(trustedEvent, {
+      test.handlers.getSitePackage(trustedEvent, {
         workspaceId: "workspace-1",
         path: "clients/acme/site",
         effectivePreviewMode: "build",
@@ -183,7 +174,7 @@ describe("sites IPC handler record", () => {
       new Error("Canonical owner unavailable."),
     );
     await expect(
-      listTest.handlers[CHANNELS.listSites]!(trustedEvent, {
+      listTest.handlers.listSites(trustedEvent, {
         workspaceId: "workspace-1",
       }),
     ).rejects.toThrow("Canonical owner unavailable.");
@@ -193,7 +184,7 @@ describe("sites IPC handler record", () => {
       new Error("Canonical owner unavailable."),
     );
     await expect(
-      getTest.handlers[CHANNELS.getSitePackage]!(trustedEvent, {
+      getTest.handlers.getSitePackage(trustedEvent, {
         workspaceId: "workspace-1",
         path: "site",
       }),
@@ -209,7 +200,7 @@ describe("sites IPC handler record", () => {
       undefined,
     ] as const) {
       const test = harness();
-      await test.handlers[CHANNELS.getSitePackage]!(trustedEvent, {
+      await test.handlers.getSitePackage(trustedEvent, {
         workspaceId: "workspace-1",
         path: "site",
         ...(mode === undefined ? {} : { effectivePreviewMode: mode }),
@@ -222,7 +213,7 @@ describe("sites IPC handler record", () => {
     const listTest = harness();
     listTest.list.mockResolvedValueOnce([{} as SitePackageInfo]);
     await expect(
-      listTest.handlers[CHANNELS.listSites]!(trustedEvent, {
+      listTest.handlers.listSites(trustedEvent, {
         workspaceId: "workspace-1",
       }),
     ).rejects.toThrow();
@@ -230,7 +221,7 @@ describe("sites IPC handler record", () => {
     const getTest = harness();
     getTest.get.mockResolvedValueOnce({} as SitePackageInfo);
     await expect(
-      getTest.handlers[CHANNELS.getSitePackage]!(trustedEvent, {
+      getTest.handlers.getSitePackage(trustedEvent, {
         workspaceId: "workspace-1",
         path: "site",
       }),

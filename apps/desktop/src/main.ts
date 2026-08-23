@@ -7905,14 +7905,12 @@ function registerIpcHandlers(
     );
   });
 
-  for (const [channel, handler] of Object.entries(
-    createSitesIpcHandlers({
-      authority: senderWorkspaceAuthority,
-      catalog: ownedSiteCatalog,
-    }),
-  )) {
-    ipcMain.handle(channel, handler);
-  }
+  const siteIpcHandlers = createSitesIpcHandlers({
+    authority: senderWorkspaceAuthority,
+    catalog: ownedSiteCatalog,
+  });
+  ipcMain.handle(CHANNELS.listSites, siteIpcHandlers.listSites);
+  ipcMain.handle(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
 
   ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
     assertTrustedSender(event);

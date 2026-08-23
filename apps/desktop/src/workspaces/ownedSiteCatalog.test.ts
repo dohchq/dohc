@@ -111,6 +111,7 @@ describe("owned site catalog", () => {
   });
 
   it("uses the local file listing when search preparation needs no owner filter", async () => {
+    await writeUnownedSite();
     const listing = { files: [], folders: [] };
     const listFiles = vi.fn(async () => listing);
     const catalog = createOwnedSiteCatalog({

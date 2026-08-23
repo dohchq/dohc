@@ -5,16 +5,16 @@ import {
   SitePackagePayload,
   SitePackageResult,
 } from "./bridgeContract";
-import { CHANNELS } from "./channels";
 
 type SitesIpcHandler<Event, Result = unknown> = (
   event: Event,
   payload: unknown,
 ) => Promise<Result>;
 
-type SitesIpcHandlerRecord<Event> = Readonly<
-  Record<string, SitesIpcHandler<Event>>
->;
+export interface SitesIpcHandlers<Event> {
+  listSites: SitesIpcHandler<Event>;
+  getSitePackage: SitesIpcHandler<Event>;
+}
 
 export interface SitesIpcDependencies<Event, Sender, Workspace> {
   authority: {
@@ -34,7 +34,7 @@ export function createSitesIpcHandlers<
   Workspace,
 >(
   dependencies: SitesIpcDependencies<Event, Sender, Workspace>,
-): SitesIpcHandlerRecord<Event> {
+): SitesIpcHandlers<Event> {
   const handle = <
     Payload extends { workspaceId: string },
     RawResult,
@@ -57,14 +57,14 @@ export function createSitesIpcHandlers<
     };
 
   return {
-    [CHANNELS.listSites]: handle({
+    listSites: handle({
       parse: ListSitesPayload.parse,
       run: async (workspace) => ({
         sites: await dependencies.catalog.list(workspace),
       }),
       validate: ListSitesResult.parse,
     }),
-    [CHANNELS.getSitePackage]: handle({
+    getSitePackage: handle({
       parse: SitePackagePayload.parse,
       run: (workspace, payload) =>
         dependencies.catalog.get(
