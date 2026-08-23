@@ -565,6 +565,12 @@ describe("collectZipEntries", () => {
       ),
     );
     await expect(collectZipEntries(root, "many")).rejects.toThrow(/Export too large/);
+    await expect(
+      collectZipEntries(root, "many", {
+        includeArchivePath: () => false,
+      }),
+      "MUTATION: excluded projection files are buffered before owner replacement",
+    ).resolves.toMatchObject({ entries: [] });
     // 30s because this one writes 2001 real files — an I/O budget, not a logic
     // budget (#372). Scoped to this test: the other 58 in this file measured
     // under 1s on a loaded box, and a file-wide bump would multiply how long a
@@ -842,17 +848,17 @@ describe("importDroppedPaths", () => {
 // EACCES on that second look is not arrangeable here -- and it is the case
 // that carried the defect: a check that FAILED was reported as a change.
 describe("trash ladder stop classification", () => {
-  const entry = { ino: 7, dev: 3 };
+  const entry = { ino: 7n, dev: 3n };
 
   it("carries on only when the entry is provably the same", () => {
-    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 7, dev: 3 } })).toBeNull();
+    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 7n, dev: 3n } })).toBeNull();
   });
 
   it("stops on a replacement", () => {
-    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 8, dev: 3 } })).toBe(
+    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 8n, dev: 3n } })).toBe(
       "replaced",
     );
-    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 7, dev: 4 } })).toBe(
+    expect(classifyLadderProbe(entry, { looked: true, now: { ino: 7n, dev: 4n } })).toBe(
       "replaced",
     );
   });
@@ -875,7 +881,7 @@ describe("trash ladder stop classification", () => {
 
   // A filesystem with no inode to give proves neither sameness nor difference.
   it("says it could not check when the filesystem gives no inode", () => {
-    expect(classifyLadderProbe({ ino: 0, dev: 3 }, { looked: true, now: entry })).toBe(
+    expect(classifyLadderProbe({ ino: 0n, dev: 3n }, { looked: true, now: entry })).toBe(
       "unchecked",
     );
   });

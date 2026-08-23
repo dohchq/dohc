@@ -22,6 +22,14 @@ function handlerSource(channel: string): string {
   return mainSource.slice(start, end);
 }
 
+function functionSource(signature: string): string {
+  const start = mainSource.indexOf(signature);
+  if (start < 0) throw new Error(`Missing ${signature}`);
+  const end = mainSource.indexOf("\n}\n", start);
+  if (end < 0) throw new Error(`Unterminated ${signature}`);
+  return mainSource.slice(start, end);
+}
+
 let root: string;
 
 beforeEach(async () => {
@@ -147,12 +155,14 @@ describe("site preview main-process wiring", () => {
     const lookupAt = handler.indexOf(
       "const site = requireExactSiteRoot(",
     );
-    const getSitePackageAt = handler.indexOf(
-      "await getSitePackage(workspace.rootPath, input.siteRoot),",
-      lookupAt,
+    const ownedSitesAt = handler.indexOf(
+      "const sites = await listOwnedSitePackages(workspace);",
     );
+    const getSitePackageAt = handler.indexOf("await getSitePackage(", lookupAt);
     const startAt = handler.indexOf("const started = await startPreviewForSite({", lookupAt);
+    expect(ownedSitesAt).toBeGreaterThanOrEqual(0);
     expect(lookupAt).toBeGreaterThanOrEqual(0);
+    expect(lookupAt).toBeGreaterThan(ownedSitesAt);
     expect(getSitePackageAt).toBeGreaterThan(lookupAt);
     expect(startAt).toBeGreaterThan(getSitePackageAt);
   });
@@ -186,7 +196,7 @@ describe("site preview main-process wiring", () => {
     );
   });
 
-  it("wires listSites and getSitePackage to call withActiveWorkspaceForSiteRead", () => {
+  it("wires site reads through active-workspace and canonical-owner boundaries", () => {
     // requireWorkspace alone only proves workspaceId names a workspace
     // REGISTERED somewhere in this app instance — not that it's the one
     // THIS sender's own window is currently showing. Without the active-
@@ -197,21 +207,18 @@ describe("site preview main-process wiring", () => {
     // cannot be imported directly under Vitest, so this only pins that
     // each handler routes its actual read through that function rather
     // than reimplementing the guard inline.
-    for (const [channel, readCall] of [
-      ["listSites", "listSitePackages(workspace.rootPath)"],
-      ["getSitePackage", "getSitePackage(workspace.rootPath, input.path,"],
-    ] as const) {
+    for (const channel of ["listSites", "getSitePackage"] as const) {
       const handler = handlerSource(channel);
       const guardAt = handler.indexOf("await withActiveWorkspaceForSiteRead(");
-      const readAt = handler.indexOf(readCall);
+      const readAt = handler.indexOf("listOwnedSitePackages(workspace)");
       expect(guardAt).toBeGreaterThanOrEqual(0);
-      // The read call must sit textually INSIDE withActiveWorkspaceForSiteRead's
-      // own arguments (its deferred callback), not hoisted out and merely
-      // referenced — that's what actually defers the read until after the
-      // guard runs, not just the presence of the guard's name somewhere in
-      // the handler.
       expect(readAt).toBeGreaterThan(guardAt);
     }
+
+    const ownedSites = functionSource("async function listOwnedSitePackages(");
+    expect(ownedSites).toContain("await reads.prepareSearch()");
+    expect(ownedSites).toContain("searchView.listing ?? undefined");
+    expect(ownedSites).not.toContain("await reads.listFiles()");
   });
 
   it("withActiveWorkspaceForSiteRead only runs the read when the sender's active workspace matches", async () => {

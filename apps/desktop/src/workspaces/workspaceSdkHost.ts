@@ -13,11 +13,13 @@ import {
   createWorkspaceTextExclusive,
   readWorkspaceText,
   restoreWorkspaceText,
+  type WorkspaceTextReadResult,
 } from "./workspaceAssets";
 import {
   applyDatabaseEdit,
   readDatabaseSnapshot,
   type DatabaseEdit,
+  type DatabaseSnapshotView,
 } from "./workspaceDatabase";
 import { listFiles } from "./workspaceFiles";
 import {
@@ -47,9 +49,25 @@ export interface WorkspaceSdkHostContext {
   // today's behavior.
   now?: () => number;
   createId?: () => string;
+  reads?: WorkspaceSdkReadPort;
 }
 
 export type SdkSearchStarter = typeof startRipgrepSearch;
+
+export interface WorkspaceSdkReadPort {
+  readText(path: string): Promise<WorkspaceTextReadResult>;
+  listFiles(): Promise<{
+    files: Awaited<ReturnType<typeof listFiles>>["files"];
+    folders?: readonly string[];
+  }>;
+  prepareSearch(path?: string): Promise<WorkspaceSdkSearchView>;
+  readDatabase(path: string): Promise<DatabaseSnapshotView>;
+}
+
+export interface WorkspaceSdkSearchView {
+  includeGlob?: string;
+  allowPath(path: string): boolean;
+}
 
 const MAX_LIST_RESULTS = 10_000;
 const MAX_SEARCH_RESULTS = 2_000;
@@ -135,7 +153,9 @@ async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknow
   const requestedRoot =
     input.path === undefined || input.path === "." ? "." : sdkWorkspacePath(input.path);
   const recursive = input.recursive !== false;
-  const listed = await listFiles(context.workspaceRoot);
+  const listed = context.reads
+    ? await context.reads.listFiles()
+    : await listFiles(context.workspaceRoot);
   const files = [];
   for (const entry of listed.files) {
     const path = entry.path;
@@ -153,13 +173,12 @@ async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknow
 
 async function requestedIncludeGlob(
   workspaceRoot: string,
-  requestedPath: unknown,
+  requestedPath: string | undefined,
 ): Promise<string | undefined> {
-  if (requestedPath === undefined || requestedPath === ".") return undefined;
-  const path = sdkWorkspacePath(requestedPath);
-  const literalGlob = path.replace(/([*?[\]{}!\\])/g, "\\$1");
+  if (requestedPath === undefined) return undefined;
+  const literalGlob = requestedPath.replace(/([*?[\]{}!\\])/g, "\\$1");
   try {
-    if ((await stat(join(workspaceRoot, path))).isFile()) return literalGlob;
+    if ((await stat(join(workspaceRoot, requestedPath))).isFile()) return literalGlob;
   } catch {
     // A missing path simply produces no rg matches through the directory glob.
   }
@@ -169,7 +188,19 @@ async function requestedIncludeGlob(
 async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: unknown) {
   const input = record(params);
   const query = text(input.query, "query", 2_000);
-  const includeGlob = await requestedIncludeGlob(context.workspaceRoot, input.path);
+  const requestedPath =
+    input.path === undefined || input.path === "."
+      ? undefined
+      : sdkWorkspacePath(input.path);
+  const searchView = context.reads
+    ? await context.reads.prepareSearch(requestedPath)
+    : {
+        includeGlob: await requestedIncludeGlob(
+          context.workspaceRoot,
+          requestedPath,
+        ),
+        allowPath: undefined,
+      };
   const requestedLimit =
     typeof input.limit === "number" && Number.isInteger(input.limit)
       ? input.limit
@@ -181,7 +212,7 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
     ...(typeof input.wholeWord === "boolean" ? { wholeWord: input.wholeWord } : {}),
     ...(typeof input.regex === "boolean" ? { regex: input.regex } : {}),
     ...(typeof input.excludeGlob === "string" ? { excludeGlob: input.excludeGlob } : {}),
-    ...(includeGlob ? { includeGlob } : {}),
+    ...(searchView.includeGlob ? { includeGlob: searchView.includeGlob } : {}),
   };
   const root = await realpath(context.workspaceRoot);
   if (context.signal?.aborted) {
@@ -210,6 +241,7 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
       realRoot: root,
       searchId: `workspace-sdk-${Date.now()}`,
       request,
+      ...(searchView.allowPath ? { allowPath: searchView.allowPath } : {}),
       onBatch(batch) {
         for (const entry of batch.entries) {
           entries.push(entry);
@@ -270,10 +302,10 @@ export async function invokeWorkspaceSdkHost(
       return capabilities(context);
     case "files.read": {
       const input = record(params);
-      return readWorkspaceText(
-        context.workspaceRoot,
-        sdkWorkspacePath(input.path),
-      );
+      const path = sdkWorkspacePath(input.path);
+      return context.reads
+        ? context.reads.readText(path)
+        : readWorkspaceText(context.workspaceRoot, path);
     }
     case "files.list":
       return listVisibleFiles(context, params);
@@ -317,10 +349,10 @@ export async function invokeWorkspaceSdkHost(
           "This dohc host exposes database snapshots; read-only SQL queries are not available yet.",
         );
       }
-      return readDatabaseSnapshot(
-        context.workspaceRoot,
-        sdkWorkspacePath(input.path),
-      );
+      const path = sdkWorkspacePath(input.path);
+      return context.reads
+        ? context.reads.readDatabase(path)
+        : readDatabaseSnapshot(context.workspaceRoot, path);
     }
     case "databases.edit": {
       if (!context.writable) {

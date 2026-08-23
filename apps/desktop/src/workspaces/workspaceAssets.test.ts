@@ -1,3 +1,4 @@
+import { rmSync, symlinkSync } from "node:fs";
 import {
   mkdir,
   readFile,
@@ -17,7 +18,7 @@ import {
   createWorkspaceOperationScheduler,
   createWorkspaceTextExclusive,
   mediaTypeForExtension,
-  readWorkspaceAsset,
+  prepareWorkspaceFileRead,
   readWorkspaceText,
   resolveWorkspaceFile,
   restoreWorkspaceText,
@@ -68,8 +69,70 @@ describe("resolveWorkspaceFile containment", () => {
       /escapes the workspace/,
     );
     // And the read paths built on it refuse too — nothing leaks via media/text.
-    await expect(readWorkspaceAsset(root, "notes/link.txt")).rejects.toThrow(/escapes the workspace/);
+    await expect(
+      prepareWorkspaceFileRead(root, "notes/link.txt").then((read) =>
+        read.readAsset(),
+      ),
+    ).rejects.toThrow(/escapes the workspace/);
     await expect(readWorkspaceText(root, "notes/link.txt")).rejects.toThrow(/escapes the workspace/);
+  });
+
+  it("returns the resolved source path with bytes read through an in-workspace alias", async () => {
+    const root = await makeWorkspace();
+    await writeFile(join(root, "notes", "data.csv"), "id,value\n1,canonical\n");
+    await symlink(
+      join(root, "notes", "data.csv"),
+      join(root, "notes", "notes.json"),
+    );
+
+    const source = await (
+      await prepareWorkspaceFileRead(root, "notes/notes.json")
+    ).readAsset();
+
+    expect(source.path).toBe("notes/data.csv");
+    expect(source.bytes.toString("utf8")).toBe("id,value\n1,canonical\n");
+  });
+
+  it("keeps an asset alias media type from the requested path", async () => {
+    const root = await makeWorkspace();
+    await writeFile(join(root, "notes", "blob"), "image bytes");
+    await symlink(join(root, "notes", "blob"), join(root, "notes", "cover.png"));
+
+    const source = await (
+      await prepareWorkspaceFileRead(root, "notes/cover.png")
+    ).readAsset();
+
+    expect(source.path).toBe("notes/blob");
+    expect(source.mediaType).toBe("image/png");
+  });
+
+  it("keeps verified native-path operations synchronous", async () => {
+    const root = await makeWorkspace();
+    const prepared = await prepareWorkspaceFileRead(root, "notes/a.md");
+    if (false) {
+      // @ts-expect-error A verified path must not escape into async work.
+      prepared.withVerifiedPathSync(async () => "not allowed");
+    }
+
+    const thenable = { then: vi.fn() };
+    await expect(
+      (prepared.withVerifiedPathSync as unknown as (
+        run: () => unknown,
+      ) => Promise<unknown>)(() => thenable),
+    ).rejects.toThrow(/finish synchronously/i);
+    expect(thenable.then).not.toHaveBeenCalled();
+
+    const replacement = join(root, "notes", "replacement.md");
+    await writeFile(replacement, "replacement");
+    await expect(
+      (prepared.withVerifiedPathSync as unknown as (
+        run: () => unknown,
+      ) => Promise<unknown>)(() => {
+        rmSync(join(root, "notes", "a.md"));
+        symlinkSync(replacement, join(root, "notes", "a.md"));
+        return thenable;
+      }),
+    ).rejects.toThrow(/file changed/i);
   });
 });
 
@@ -79,7 +142,11 @@ describe("size caps", () => {
     const big = join(root, "notes", "huge.png");
     await writeFile(big, "");
     await truncate(big, 64 * 1024 * 1024 + 1);
-    await expect(readWorkspaceAsset(root, "notes/huge.png")).rejects.toThrow(/too large to serve/);
+    await expect(
+      prepareWorkspaceFileRead(root, "notes/huge.png").then((read) =>
+        read.readAsset(),
+      ),
+    ).rejects.toThrow(/too large to serve/);
   });
 
   it("refuses an editor write above the 2MB text cap before touching the file", async () => {

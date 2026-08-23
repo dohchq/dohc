@@ -18,34 +18,37 @@ import {
   type ShareViewDaemonHarness,
 } from "../testing/shareViewLoopbackTransport";
 import {
-  assertShareChangesJournalable,
   captureSharedViewLocalDivergence,
   captureStandaloneShareViewDivergence,
   clearPendingMaterializationPaths,
   clearPullInFlightMarker,
   readPendingMaterializationPaths,
+  readSharedViewProjectionDebt,
   resolvedShareViewTarget,
-  SharePinInvalidError,
   materializeSharedViewPaths,
   readCollisionRecordPaths,
-  refreshStandaloneShareViewOnce as refreshStandaloneShareViewOnceWithPull,
+  reconcileStandaloneShareView,
   refreshSharedViewOnce as refreshSharedViewOnceWithPull,
   recordCollisionPaths,
-  shareViewIdentitySelector,
   withShareViewRefreshLifecycleLock,
   writePendingMaterializationPaths,
 } from "./sharedView";
+import {
+  assertShareChangesJournalable,
+  SharePinInvalidError,
+  shareViewIdentitySelector,
+} from "./shareViewRecords";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
 } from "./workspaceEngineCapture";
 import {
-  routeWorkspaceFileCreate,
-  routeWorkspaceFileImport,
-  routeWorkspacePathDelete,
-  routeWorkspacePathMove,
-} from "./workspaceFileOps";
-import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
+  applyShareViewFileCreate,
+  applyShareViewFileImport,
+  applyShareViewPathDelete,
+  applyShareViewPathMove,
+} from "./shareViewFileChanges";
+import { applyShareViewTextWrite } from "./shareViewFileChanges";
 import { withOrderedWorkspaceTextPath } from "./workspaceAssets";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import {
@@ -63,6 +66,7 @@ let readdirCalls: string[] = [];
 let observeRealpath: ((path: string) => void) | null = null;
 let realpathOverride: ((path: string, resolved: string) => string | null) | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
+let failReaddirPathOnce: { path: string; error: Error } | null = null;
 let collisionRecordRenameTargets: string[] = [];
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -70,6 +74,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     readdir: (async (path: Parameters<typeof readdir>[0], options?: unknown) => {
       readdirCalls.push(String(path));
+      const failure = failReaddirPathOnce;
+      if (failure !== null && String(path) === failure.path) {
+        failReaddirPathOnce = null;
+        throw failure.error;
+      }
       return actual.readdir(path as string, options as never);
     }) as typeof readdir,
     realpath: (async (
@@ -109,6 +118,14 @@ const PINNED_SELECTOR = {
 const WORKSPACE = "shared-view-ws";
 const SHARE_ID = "share-1";
 const TOKEN = "test:recipient";
+
+function reconcileStandaloneForTest(
+  input: Parameters<typeof reconcileStandaloneShareView>[0],
+) {
+  return withShareViewRefreshLifecycleLock(input.rootDir, () =>
+    reconcileStandaloneShareView(input),
+  );
+}
 
 // chmod-based fixtures cannot make a path unreadable for root. Windows uses
 // the workspace-fs NTFS deny-read fixture and has no getuid.
@@ -157,12 +174,14 @@ beforeEach(() => {
   observeRealpath = null;
   realpathOverride = null;
   failRenameToPathOnce = null;
+  failReaddirPathOnce = null;
   collisionRecordRenameTargets = [];
 });
 
 afterEach(async () => {
   realpathOverride = null;
   failRenameToPathOnce = null;
+  failReaddirPathOnce = null;
   collisionRecordRenameTargets = [];
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
@@ -347,6 +366,97 @@ class FakeShareRelay {
 }
 
 describe("shared view refresh", () => {
+  it("does not heal a malformed canonical path outside the projection", async () => {
+    const rootDir = await tempRoot();
+    const outside = await tempRoot();
+    const outsideLink = join(
+      dirname(rootDir),
+      `${basename(rootDir)}-outside-link`,
+    );
+    roots.push(outsideLink);
+    await symlink(outside, outsideLink, "dir");
+    const maliciousPath = `../${basename(outsideLink)}/child.md`;
+    const harness = daemonHarness(new FakeShareRelay());
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    const malformedStore: typeof store = {
+      ...store,
+      async listTextFileMetadata() {
+        return [
+          {
+            path: maliciousPath,
+            objectId: "malformed-object",
+            contentKind: "text",
+            byteLength: 1,
+            sha256: "0".repeat(64),
+            updatedAtMs: 1,
+            latestMomentId: "malformed-moment",
+            hasYdocMarker: false,
+          },
+        ];
+      },
+    };
+
+    try {
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          malformedStore,
+          false,
+          SHARE_ID,
+        ),
+      ).rejects.toThrow(/escapes the workspace/);
+      await expect(
+        lstat(outsideLink),
+        "MUTATION: projection healing removes a link outside the projection",
+      ).resolves.toBeDefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("refuses a folder delete when its projection cannot be read", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/plans/one.md";
+    relay.addWrite(path, "one\n");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    failReaddirPathOnce = {
+      path: join(rootDir, "docs", "plans"),
+      error: Object.assign(new Error("projection directory is unreadable"), {
+        code: "EACCES",
+      }),
+    };
+
+    try {
+      await expect(
+        applyShareViewPathDelete({
+          workspaceId: WORKSPACE,
+          rootPath: rootDir,
+          relativePath: "docs/plans",
+          shareViewStore: () => store,
+        }),
+        "MUTATION: an unreadable directory looks empty and is deleted recursively",
+      ).rejects.toThrow("projection directory is unreadable");
+      await expect(readFile(join(rootDir, path), "utf8")).resolves.toBe("one\n");
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.listTextFileMetadata!({
+          workspaceId: WORKSPACE,
+          versionId: main.id,
+        }),
+      ).resolves.toEqual([expect.objectContaining({ path })]);
+    } finally {
+      await store.close();
+    }
+  });
+
   it("captures an out-of-app modification through the standalone refresh", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
@@ -366,7 +476,7 @@ describe("shared view refresh", () => {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       const beforeIds = new Set(before.moments.map((moment) => moment.id));
 
-      const refreshed = await refreshStandaloneShareViewOnceWithPull({
+      const refreshed = await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -394,7 +504,7 @@ describe("shared view refresh", () => {
       expect(await readFile(join(rootDir, path), "utf8")).toBe("outside editor");
 
       const momentIds = after.moments.map((entry) => entry.id);
-      const quiet = await refreshStandaloneShareViewOnceWithPull({
+      const quiet = await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -444,7 +554,7 @@ describe("shared view refresh", () => {
         "utf8",
       );
       const before = await momentIds(store);
-      const outcome = await refreshStandaloneShareViewOnceWithPull({
+      const outcome = await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -554,9 +664,6 @@ describe("shared view refresh", () => {
       shareId: SHARE_ID,
     });
     await writeFile(join(rootDir, path), "outside editor", "utf8");
-    const barrierPath = "docs/barrier.md";
-    await writeFile(join(rootDir, barrierPath), "barrier", "utf8");
-
     const store = harness.openStore(target);
     let markCaptureBlocked!: () => void;
     let releaseCapture!: () => void;
@@ -577,56 +684,43 @@ describe("shared view refresh", () => {
     const pendingOperations: Promise<unknown>[] = [];
 
     try {
-      const capturing = captureSharedViewLocalDivergence(
-        rootDir,
-        WORKSPACE,
-        store,
-        true,
-        SHARE_ID,
-        {
-          async beforeCaptureWrite(hookPath) {
-            markCaptureBlocked();
-            expect(hookPath).toBe(path);
-            await captureHeld;
+      const capturing = withShareViewRefreshLifecycleLock(rootDir, () =>
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          true,
+          SHARE_ID,
+          {
+            async beforeCaptureWrite(hookPath) {
+              markCaptureBlocked();
+              expect(hookPath).toBe(path);
+              await captureHeld;
+            },
           },
-        },
+        ),
       );
       pendingOperations.push(capturing);
       await captureBlocked;
-      const saving = routeWorkspaceTextWrite({
-        workspaceId: WORKSPACE,
-        rootPath: rootDir,
-        relativePath: path,
-        text: "saved in app",
-        expectedContentHash: sha256("outside editor"),
-        shareView: { access: "edit", ended: false },
-        shareViewStore: () => saveStore,
-      });
+      const saving = withShareViewRefreshLifecycleLock(rootDir, () =>
+        applyShareViewTextWrite({
+          workspaceId: WORKSPACE,
+          rootPath: rootDir,
+          relativePath: path,
+          text: "saved in app",
+          expectedContentHash: sha256("outside editor"),
+          shareViewStore: () => saveStore,
+        }),
+      );
       pendingOperations.push(saving);
-      let samePathProbeRan = false;
-      const samePathProbe = withOrderedWorkspaceTextPath(
-        rootDir,
-        path,
-        async () => {
-          samePathProbeRan = true;
-        },
-      );
-      pendingOperations.push(samePathProbe);
-      await withOrderedWorkspaceTextPath(
-        rootDir,
-        barrierPath,
-        async () => undefined,
-      );
       for (let turn = 0; turn < 20 && !saveWriteStarted; turn += 1) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       expect(saveWriteStarted).toBe(false);
-      expect(samePathProbeRan).toBe(false);
       releaseCapture();
-      const [captured] = await Promise.all([capturing, saving, samePathProbe]);
+      const [captured] = await Promise.all([capturing, saving]);
 
       expect(saveWriteStarted).toBe(true);
-      expect(samePathProbeRan).toBe(true);
       const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
       await expect(
         store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path }),
@@ -690,13 +784,12 @@ describe("shared view refresh", () => {
     const pendingOperations: Promise<unknown>[] = [];
 
     try {
-      const saving = routeWorkspaceTextWrite({
+      const saving = applyShareViewTextWrite({
         workspaceId: WORKSPACE,
         rootPath: rootDir,
         relativePath: path,
         text: "saved in app",
         expectedContentHash: sha256("granter body"),
-        shareView: { access: "edit", ended: false },
         shareViewStore: () => saveStore,
       });
       pendingOperations.push(saving);
@@ -783,13 +876,12 @@ describe("shared view refresh", () => {
       );
       await snapshotRead;
       await expect(
-        routeWorkspaceTextWrite({
+        applyShareViewTextWrite({
           workspaceId: WORKSPACE,
           rootPath: rootDir,
           relativePath: path,
           text: "saved in app",
           expectedContentHash: sha256("granter body"),
-          shareView: { access: "edit", ended: false },
           shareViewStore: () => store,
         }),
       ).resolves.toMatchObject({ status: "written" });
@@ -817,7 +909,7 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("queues an in-app save behind a pending-path repair on the same target", async () => {
+  it("queues a pending-path repair behind an in-app save on the same target", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -862,23 +954,26 @@ describe("shared view refresh", () => {
     };
 
     try {
-      const saving = routeWorkspaceTextWrite({
-        workspaceId: WORKSPACE,
-        rootPath: rootDir,
-        relativePath: path,
-        text: "saved in app",
-        expectedContentHash: sha256("moment one"),
-        shareView: { access: "edit", ended: false },
-        shareViewStore: () => saveStore,
-      });
+      const saving = withShareViewRefreshLifecycleLock(rootDir, () =>
+        applyShareViewTextWrite({
+          workspaceId: WORKSPACE,
+          rootPath: rootDir,
+          relativePath: path,
+          text: "saved in app",
+          expectedContentHash: sha256("moment two"),
+          shareViewStore: () => saveStore,
+        }),
+      );
       await saveStarted;
       await rm(join(rootDir, path));
-      const repairing = captureSharedViewLocalDivergence(
-        rootDir,
-        WORKSPACE,
-        repairStore,
-        true,
-        SHARE_ID,
+      const repairing = withShareViewRefreshLifecycleLock(rootDir, () =>
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          repairStore,
+          true,
+          SHARE_ID,
+        ),
       );
       for (let turn = 0; turn < 20 && !repairMaterializationStarted; turn += 1) {
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -951,7 +1046,7 @@ describe("shared view refresh", () => {
     try {
       const before = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       relay.addWrite(path, "new granter body");
-      const refreshed = await refreshStandaloneShareViewOnceWithPull({
+      const refreshed = await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -972,7 +1067,7 @@ describe("shared view refresh", () => {
       const after = await store.listMoments({ workspaceId: WORKSPACE, limit: 100 });
       expect(after.moments).toHaveLength(before.moments.length + 1);
 
-      const quiet = await refreshStandaloneShareViewOnceWithPull({
+      const quiet = await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -1017,7 +1112,7 @@ describe("shared view refresh", () => {
         denied = true;
         relay.addWrite(path, "new granter body");
 
-        const refreshed = await refreshStandaloneShareViewOnceWithPull({
+        const refreshed = await reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -1171,7 +1266,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       relay.addWrite(path, "new granter body");
-      const refreshed = await refreshStandaloneShareViewOnceWithPull({
+      const refreshed = await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -1211,13 +1306,12 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await expect(
-        routeWorkspaceTextWrite({
+        applyShareViewTextWrite({
           workspaceId: WORKSPACE,
           rootPath: rootDir,
           relativePath: path,
           text: "moment B",
           expectedContentHash: sha256("moment A"),
-          shareView: { access: "edit", ended: false },
           shareViewStore: () => store,
         }),
       ).resolves.toMatchObject({ status: "written" });
@@ -1389,7 +1483,7 @@ describe("shared view refresh", () => {
       await writePendingMaterializationPaths(rootDir, [path]);
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -1433,7 +1527,7 @@ describe("shared view refresh", () => {
       await writePendingMaterializationPaths(rootDir, [path]);
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -1483,7 +1577,7 @@ describe("shared view refresh", () => {
     };
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -1729,7 +1823,7 @@ describe("shared view refresh", () => {
       await writePendingMaterializationPaths(rootDir, [path]);
       await writeFile(join(rootDir, path), "recipient edit one", "utf8");
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -1869,13 +1963,12 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await writePendingMaterializationPaths(rootDir, [savedPath, otherPath]);
-      await routeWorkspaceTextWrite({
+      await applyShareViewTextWrite({
         workspaceId: WORKSPACE,
         rootPath: rootDir,
         relativePath: savedPath,
         text: "saved after",
         expectedContentHash: sha256("saved before"),
-        shareView: { access: "edit", ended: false },
         shareViewStore: () => store,
       });
       await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
@@ -1955,7 +2048,7 @@ describe("shared view refresh", () => {
       await writeFile(pendingPath, "not json", "utf8");
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2011,7 +2104,7 @@ describe("shared view refresh", () => {
         );
 
         await expect(
-          refreshStandaloneShareViewOnceWithPull({
+          reconcileStandaloneForTest({
             rootDir,
             workspaceId: WORKSPACE,
             relay: harness.relay,
@@ -2057,7 +2150,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2099,7 +2192,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2137,7 +2230,7 @@ describe("shared view refresh", () => {
 
     const store = harness.openStore(target);
     try {
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2154,7 +2247,7 @@ describe("shared view refresh", () => {
       const before = await momentIds(store);
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2193,7 +2286,7 @@ describe("shared view refresh", () => {
 
     const store = harness.openStore(target);
     try {
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2210,7 +2303,7 @@ describe("shared view refresh", () => {
       relay.addDelete(path);
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2228,7 +2321,7 @@ describe("shared view refresh", () => {
 
       expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
       await rm(join(rootDir, path));
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2243,7 +2336,7 @@ describe("shared view refresh", () => {
 
       relay.addWrite(path, "granter re-add");
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2327,7 +2420,7 @@ describe("shared view refresh", () => {
 
     const store = harness.openStore(target);
     try {
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2371,7 +2464,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2391,7 +2484,7 @@ describe("shared view refresh", () => {
       );
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2481,7 +2574,7 @@ describe("shared view refresh", () => {
 
     const store = harness.openStore(target);
     try {
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2498,7 +2591,7 @@ describe("shared view refresh", () => {
       await rm(join(rootDir, path));
       const before = await momentIds(store);
 
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2646,7 +2739,7 @@ describe("shared view refresh", () => {
 
       const store = harness.openStore(target);
       try {
-        await refreshStandaloneShareViewOnceWithPull({
+        await reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2715,7 +2808,7 @@ describe("shared view refresh", () => {
       };
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2794,7 +2887,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2909,7 +3002,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -2927,7 +3020,7 @@ describe("shared view refresh", () => {
       );
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2946,7 +3039,7 @@ describe("shared view refresh", () => {
       expect(await readFile(join(rootDir, path), "utf8")).toBe("recipient data");
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -2991,7 +3084,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await refreshStandaloneShareViewOnceWithPull({
+      await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -3010,7 +3103,7 @@ describe("shared view refresh", () => {
       const before = await momentIds(store);
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -3060,7 +3153,7 @@ describe("shared view refresh", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -3120,7 +3213,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -3174,10 +3267,9 @@ describe("shared view refresh", () => {
       };
 
       await expect(
-        routeWorkspaceFileCreate({
+        applyShareViewFileCreate({
           workspaceId: WORKSPACE,
           rootPath: rootDir,
-          shareView: { access: "edit", ended: false, granterEmail: null },
           shareViewStore: () => failingStore,
           relativePath: created,
           initialText: "the recipient's new file\n",
@@ -3247,10 +3339,9 @@ describe("shared view refresh", () => {
     const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
     const created = "docs/new-then-deleted.md";
     try {
-      await routeWorkspaceFileCreate({
+      await applyShareViewFileCreate({
         workspaceId: WORKSPACE,
         rootPath: rootDir,
-        shareView: { access: "edit", ended: false, granterEmail: null },
         shareViewStore: () => store,
         relativePath: created,
         initialText: "delete me\n",
@@ -3303,10 +3394,9 @@ describe("shared view refresh", () => {
     const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
     const created = "docs/view-repair.md";
     try {
-      await routeWorkspaceFileCreate({
+      await applyShareViewFileCreate({
         workspaceId: WORKSPACE,
         rootPath: rootDir,
-        shareView: { access: "edit", ended: false, granterEmail: null },
         shareViewStore: () => store,
         relativePath: created,
         initialText: "restore me\n",
@@ -3367,10 +3457,9 @@ describe("shared view refresh", () => {
       },
     };
     try {
-      const moving = routeWorkspacePathMove({
+      const moving = applyShareViewPathMove({
         workspaceId: WORKSPACE,
         rootPath: rootDir,
-        shareView: { access: "edit", ended: false, granterEmail: null },
         shareViewStore: () => pausedStore,
         fromPath: from,
         toPath: to,
@@ -3434,15 +3523,11 @@ describe("shared view refresh", () => {
       },
     };
     try {
-      const deleting = routeWorkspacePathDelete({
+      const deleting = applyShareViewPathDelete({
         workspaceId: WORKSPACE,
         rootPath: rootDir,
-        shareView: { access: "edit", ended: false, granterEmail: null },
         shareViewStore: () => pausedStore,
         relativePath: "docs/remove",
-        trashItem: async () => {
-          throw new Error("share-view delete must not use the OS trash");
-        },
       });
       await stored;
       let markerError: unknown;
@@ -3501,10 +3586,9 @@ describe("shared view refresh", () => {
       },
     };
     try {
-      const importing = routeWorkspaceFileImport({
+      const importing = applyShareViewFileImport({
         workspaceId: WORKSPACE,
         rootPath: rootDir,
-        shareView: { access: "edit", ended: false, granterEmail: null },
         shareViewStore: () => pausedStore,
         absolutePaths: [source],
         screenAgainstRoots: null,
@@ -3575,10 +3659,11 @@ describe("shared view refresh", () => {
   // #859: a share-view FOLDER delete crashing between the store deleting its
   // children and `materializeSharedViewPaths`' single recursive rm on the
   // folder path used to leave the projection showing files the store had
-  // already deleted — `shareViewDelete` marked only the FOLDER path pending,
+  // already deleted — the old delete primitive marked only the FOLDER path
+  // pending,
   // so recovery never revisited the children at all, found a still-present
   // directory with no matching preimage, and misclassified it as an
-  // unjournalable non-file replacement. #862 changed `shareViewDelete` to
+  // unjournalable non-file replacement. #862 changed the delete primitive to
   // mark every CHILD path pending before the store mutation, which is what
   // makes them reachable here: the leftover-pending arm below predates #862
   // unchanged, but a path only reaches it when the marker names it.
@@ -3586,8 +3671,8 @@ describe("shared view refresh", () => {
   // The crash is driven through the REAL writer, not hand-assembled: a
   // failing store proxy lets both `deleteTextFile` calls succeed, then makes
   // the very first call `materializeSharedViewPaths` itself makes
-  // (`ensureMainVersion`) throw — so `routeWorkspacePathDelete` leaves
-  // whatever state `shareViewDelete` actually produces at that exact point,
+  // (`ensureMainVersion`) throw — so `applyShareViewPathDelete` leaves
+  // whatever state `applyShareViewPathDelete` produces at that exact point,
   // with disk untouched because materialization never ran its rm.
   //
   // Also pins a known, accepted residue (finding 6): recovery finishes each
@@ -3617,7 +3702,8 @@ describe("shared view refresh", () => {
           // Both children are gone from the store by the time materialization
           // asks for the main version, which is the first thing it does — so
           // this fails materialization before its rm ever runs, and only
-          // after the store mutation shareViewDelete makes is already done.
+          // after the store mutation applyShareViewPathDelete makes is already
+          // done.
           if (deletesDone >= paths.length) {
             throw Object.assign(new Error("EBUSY: projection delete failed"), {
               code: "EBUSY",
@@ -3628,21 +3714,17 @@ describe("shared view refresh", () => {
       };
 
       await expect(
-        routeWorkspacePathDelete({
+        applyShareViewPathDelete({
           workspaceId: WORKSPACE,
           rootPath: rootDir,
-          shareView: { access: "edit", ended: false, granterEmail: null },
           shareViewStore: () => failingStore,
           relativePath: "docs/plans",
-          trashItem: async () => {
-            throw new Error("a share view's delete must not reach the ordinary trash path");
-          },
         }),
       ).rejects.toThrow("EBUSY: projection delete failed");
 
-      // What shareViewDelete actually left behind: both children gone from
-      // the store, both children (not the folder path) marked pending, disk
-      // untouched because materialization died before its rm.
+      // What applyShareViewPathDelete actually left behind: both children gone
+      // from the store, both children (not the folder path) marked pending,
+      // disk untouched because materialization died before its rm.
       await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
         new Set(paths),
       );
@@ -3819,7 +3901,7 @@ describe("shared view refresh", () => {
         },
       };
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -3937,7 +4019,7 @@ describe("shared view refresh", () => {
     const store = harness.openStore(target);
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -3957,7 +4039,7 @@ describe("shared view refresh", () => {
     }
   });
 
-  it("repairs every tracked path after a pull stops before per-path markers", async () => {
+  it("records per-path debt before post-pull classification fails", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
@@ -4013,13 +4095,13 @@ describe("shared view refresh", () => {
           interruptedInput as Parameters<typeof refreshSharedViewOnceWithPull>[0],
         ),
       ).rejects.toThrow("simulated crash after pull");
-      await expect(
-        readFile(join(rootDir, ".dohc", "pending-materialization.json"), "utf8"),
-      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+        new Set([path]),
+      );
       const beforeRecovery = await momentIds(store);
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -4040,6 +4122,55 @@ describe("shared view refresh", () => {
     } finally {
       await store.close();
     }
+  });
+
+  it("clears every retry count after materializing the latest canonical value", async () => {
+    const rootDir = await tempRoot();
+    const path = "docs/retried.md";
+    const pendingRecord = join(
+      rootDir,
+      ".dohc",
+      "pending-materialization.json",
+    );
+    await writePendingMaterializationPaths(rootDir, [path]);
+    const commitCursor = vi.fn(async () => undefined);
+
+    await refreshSharedViewOnceWithPull({
+      rootDir,
+      workspaceId: WORKSPACE,
+      relay: new FakeShareRelay().connection(),
+      shareId: SHARE_ID,
+      pinnedSelector: PINNED_SELECTOR,
+      recordRefusals: async () => undefined,
+      store: stubStore(async () => ({ text: "latest canonical body" })),
+      trackPendingMaterialization: true,
+      pull: async (input) => {
+        await input.recordChangedPaths?.([path]);
+        await expect(readFile(pendingRecord, "utf8")).resolves.toBe(
+          JSON.stringify({ counts: { [path]: 2 } }),
+        );
+        return {
+          fetched: 1,
+          applied: 1,
+          skipped: 0,
+          nextCursor: 2,
+          refusalCount: 0,
+          refusals: [],
+          changedPaths: [
+            { path, operation: "write", contentKind: "text" },
+          ],
+          commitCursor,
+        };
+      },
+    });
+
+    await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
+      new Set(),
+    );
+    await expect(readFile(join(rootDir, path), "utf8")).resolves.toBe(
+      "latest canonical body",
+    );
+    expect(commitCursor).toHaveBeenCalledOnce();
   });
 
   it("replaces a pull marker symlink without writing through it", async () => {
@@ -4094,6 +4225,59 @@ describe("shared view refresh", () => {
     await expect(clearPullInFlightMarker(rootDir)).resolves.toBeUndefined();
 
     await expect(lstat(metadataDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("clears a stale pull marker only after a full successful capture", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "notes/recovered.md";
+    relay.addWrite(path, "canonical\n");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await mkdir(join(rootDir, ".dohc"), { recursive: true });
+    await writeFile(join(rootDir, ".dohc", "pull-in-flight.marker"), "");
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toMatchObject({ pullInFlight: true });
+
+      await captureSharedViewLocalDivergence(
+        rootDir,
+        WORKSPACE,
+        store,
+        true,
+        SHARE_ID,
+        { paths: [path] },
+      );
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toMatchObject({ pullInFlight: true });
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toMatchObject({ unjournalablePaths: [] });
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toEqual({
+        pendingPaths: new Set(),
+        collisionPaths: new Set(),
+        pullInFlight: false,
+      });
+    } finally {
+      await store.close();
+    }
   });
 
   it("refuses to write sidecars through a symlinked metadata directory", async () => {
@@ -4282,7 +4466,7 @@ describe("shared view refresh", () => {
       const beforeRecovery = new Set(await momentIds(store));
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -4449,7 +4633,7 @@ describe("shared view refresh", () => {
       ).resolves.toMatchObject({ text: "granter three" });
       expect(await readFile(join(rootDir, path), "utf8")).toBe("granter one");
 
-      const recovered = await refreshStandaloneShareViewOnceWithPull({
+      const recovered = await reconcileStandaloneForTest({
         rootDir,
         workspaceId: WORKSPACE,
         relay: harness.relay,
@@ -4633,7 +4817,7 @@ describe("shared view refresh", () => {
         await denyRead(parent, "dir");
         try {
           await expect(
-            refreshStandaloneShareViewOnceWithPull({
+            reconcileStandaloneForTest({
               rootDir,
               workspaceId: WORKSPACE,
               relay: harness.relay,
@@ -4676,7 +4860,7 @@ describe("shared view refresh", () => {
         error: new Error("pending marker unavailable"),
       };
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -4730,7 +4914,7 @@ describe("shared view refresh", () => {
       };
 
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -4785,7 +4969,7 @@ describe("shared view refresh", () => {
         await denyRead(parent, "dir");
         try {
           await expect(
-            refreshStandaloneShareViewOnceWithPull({
+            reconcileStandaloneForTest({
               rootDir,
               workspaceId: WORKSPACE,
               relay: harness.relay,
@@ -4858,7 +5042,7 @@ describe("shared view refresh", () => {
         observeRealpath = (absolutePath) => {
           if (absolutePath === parent) markDeniedParentResolved();
         };
-        const refreshing = refreshStandaloneShareViewOnceWithPull({
+        const refreshing = reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -4895,7 +5079,7 @@ describe("shared view refresh", () => {
         }
 
         await expect(
-          refreshStandaloneShareViewOnceWithPull({
+          reconcileStandaloneForTest({
             rootDir,
             workspaceId: WORKSPACE,
             relay: harness.relay,
@@ -4957,7 +5141,7 @@ describe("shared view refresh", () => {
 
       relay.addWrite(path, "new granter body");
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,
@@ -5218,7 +5402,7 @@ describe("shared view refresh", () => {
 
     try {
       await expect(
-        refreshStandaloneShareViewOnceWithPull({
+        reconcileStandaloneForTest({
           rootDir,
           workspaceId: WORKSPACE,
           relay: harness.relay,

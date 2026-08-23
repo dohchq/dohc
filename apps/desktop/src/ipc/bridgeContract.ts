@@ -498,6 +498,10 @@ export const ImportWorkspaceFilesResult = z.object({
   // collision budget exhausted) — surfaced so the import summary can say
   // "2 skipped" instead of the batch silently shrinking.
   skipped: z.number().int().min(0),
+  // Some files landed before the owner lost a trustworthy completion result.
+  // This is not an ordinary skip: the Explorer must refresh before the user
+  // decides what, if anything, to retry.
+  interrupted: z.literal(true).optional(),
 });
 export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult
@@ -867,6 +871,22 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
+  // Additive: a shared view can have canonical file state that has not yet
+  // reached its local folder. The producer bounds each path sample while the
+  // counts report the full repair debt.
+  shareProjection: z
+    .discriminatedUnion("state", [
+      z.object({ state: z.literal("current") }),
+      z.object({
+        state: z.literal("pending"),
+        pendingPathCount: z.number().int().nonnegative(),
+        pendingPaths: z.array(PATH_STRING),
+        collisionPathCount: z.number().int().nonnegative(),
+        collisionPaths: z.array(PATH_STRING),
+        pullInFlight: z.boolean(),
+      }),
+    ])
+    .optional(),
   // #882: increments whenever main retires this workspace's live
   // editor sessions. Every renderer re-reads status after an activity ping,
   // so the generation makes every mounted editor release its retired session.

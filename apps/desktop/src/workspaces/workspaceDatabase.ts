@@ -8,11 +8,24 @@ import {
   type DatabaseRowOp,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { appendFile, link, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { isInside } from "../security/pathContainment";
-import { resolveWorkspaceFile } from "./workspaceAssets";
+import {
+  resolveWorkspaceFile,
+  type PreparedWorkspaceFileRead,
+} from "./workspaceAssets";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
@@ -105,8 +118,15 @@ export async function readDatabaseSnapshot(
     relativePath,
     "read",
   );
+  return readDatabaseSnapshotAtPath(realTarget, normalized);
+}
+
+function readDatabaseSnapshotAtPath(
+  absolutePath: string,
+  resultPath: string,
+): DatabaseSnapshotView {
   const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(realTarget, { readOnly: true });
+  const db = new DatabaseSync(absolutePath, { readOnly: true });
   try {
     const tableNames = db
       .prepare(
@@ -136,9 +156,47 @@ export async function readDatabaseSnapshot(
       }
       return { name, columns, rows: sanitizeRows(rows) };
     });
-    return { path: normalized, tables };
+    return { path: resultPath, tables };
   } finally {
     db.close();
+  }
+}
+
+/**
+ * Open a local database through the file identity that owner routing judged.
+ * The verified handle stays open while SQLite reads the path, so a replacement
+ * detected immediately before or after the snapshot refuses the result.
+ * node:sqlite has no file-descriptor input, so an external actor could still
+ * replace and restore the exact pathname during this synchronous call.
+ */
+export function readPreparedDatabaseSnapshot(
+  requestedPath: string,
+  source: PreparedWorkspaceFileRead,
+): Promise<DatabaseSnapshotView> {
+  return source.withVerifiedPathSync((absolutePath) =>
+    readDatabaseSnapshotAtPath(absolutePath, requestedPath),
+  );
+}
+
+// Received-share databases are owned by the share's canonical store, not by
+// their visible projection. SQLite needs a filesystem path, so give it a
+// private, short-lived copy containing only the owner's main database bytes.
+// Projection WAL/journal sidecars never enter this directory.
+export async function readDatabaseSnapshotFromBytes(
+  relativePath: string,
+  bytes: Uint8Array,
+): Promise<DatabaseSnapshotView> {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "dohc-database-snapshot-"));
+  try {
+    const temporaryPath = "snapshot.sqlite";
+    await writeFile(join(temporaryRoot, temporaryPath), bytes, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    const snapshot = await readDatabaseSnapshot(temporaryRoot, temporaryPath);
+    return { ...snapshot, path: relativePath };
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
   }
 }
 
@@ -327,22 +385,21 @@ async function writeWorkspaceBytes(
 // materialization point) so the watcher only ever sees a complete database.
 export async function importToDatabase(
   rootPath: string,
-  sourceRelativePath: string,
+  source: { path: string; body: string },
   databaseRelativePath: string,
   tableName: string,
 ): Promise<{ path: string; tableName: string; rowCount: number }> {
-  const { realTarget } = await resolveWorkspaceFile(
-    rootPath,
-    sourceRelativePath,
-    "read",
-  );
-  const body = await readFile(realTarget, "utf8");
-  const mediaType = mediaTypeForPath(sourceRelativePath) ?? "text/plain";
+  const mediaType = mediaTypeForPath(source.path) ?? "text/plain";
 
   // Dynamic import keeps the engine (and node:sqlite) off the launch path.
   const { createSqliteEngine } = await import("@dohc/sqlite-worker");
   const engine = await createSqliteEngine();
-  const result = await engine.importData({ name: basename(sourceRelativePath), mediaType, body, tableName });
+  const result = await engine.importData({
+    name: basename(source.path),
+    mediaType,
+    body: source.body,
+    tableName,
+  });
   if (!result.ok) {
     throw new Error(`Import failed (${result.code}): ${result.message}`);
   }

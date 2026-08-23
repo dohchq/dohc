@@ -15,6 +15,7 @@ import { isInside } from "../security/pathContainment";
 import {
   assertContainedFilePath,
   startStaticDirectoryPreview,
+  type StaticDirectoryFileSource,
 } from "../security/staticDirectoryPreview";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import type { SiteAuthority } from "./sitePackage";
@@ -252,7 +253,11 @@ export function isPathAllowedForAuthority(authority: SiteAuthority, candidate: s
 export async function startStaticSitePreview(
   workspaceRoot: string,
   siteRoot: string,
-  options: { authority: SiteAuthority; entry?: string },
+  options: {
+    authority: SiteAuthority;
+    entry?: string;
+    fileSource?: StaticDirectoryFileSource;
+  },
 ): Promise<StaticSitePreview> {
   const root = await resolveContainedDir(workspaceRoot, siteRoot);
   const realWorkspaceRoot = await realpath(workspaceRoot);
@@ -276,6 +281,7 @@ export async function startStaticSitePreview(
     entry: options.entry ?? "index.html",
     entryLabel: "site entry",
     forbidSharedWithMePaths: true,
+    fileSource: options.fileSource,
   });
 }
 

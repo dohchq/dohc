@@ -17,7 +17,10 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { parse as parseHtml } from "parse5";
-import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
+import type {
+  ListWorkspaceFilesResult,
+  WorkspaceFileEntry,
+} from "../ipc/bridgeContract";
 import {
   assertLoopbackOnlyDevServerCommand,
   isPathAllowedForAuthority,
@@ -3128,6 +3131,19 @@ export function staticPreviewTargetForSite(
   return ownedStaticEntryTarget(site);
 }
 
+/** Files the owner listing permits the static server to expose. */
+export function staticPreviewOwnerFiles(
+  site: SitePackageInfo,
+  target: ReturnType<typeof staticPreviewTargetForSite>,
+): ReadonlySet<string> {
+  const files = new Set<string>();
+  for (const workspacePath of site.sourceFiles) {
+    const servedPath = pathRelativeToArtifact(target.root, workspacePath);
+    if (servedPath) files.add(servedPath);
+  }
+  return files;
+}
+
 function packagePathFor(root: string, sourceFiles: string[]): string | null {
   const packagePath = joinSitePath(root, "package.json");
   return sourceFiles.includes(packagePath) ? packagePath : null;
@@ -3343,8 +3359,11 @@ async function sourceForFile(rootPath: string, path: string): Promise<string | W
   }
 }
 
-export async function listSitePackages(rootPath: string): Promise<SitePackageInfo[]> {
-  const listed = await listFiles(rootPath);
+export async function listSitePackages(
+  rootPath: string,
+  ownedListing?: ListWorkspaceFilesResult,
+): Promise<SitePackageInfo[]> {
+  const listed = ownedListing ?? (await listFiles(rootPath));
   const sources = await Promise.all(listed.files.map((file) => sourceForFile(rootPath, file.path)));
   const sites = discoverSites(sources);
   const mapped = await Promise.all(

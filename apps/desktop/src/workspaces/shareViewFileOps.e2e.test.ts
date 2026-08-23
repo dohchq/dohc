@@ -19,16 +19,25 @@ import {
   readPendingMaterializationPaths,
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
-import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
-import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
+import {
+  createCaptureLiveStores,
+  type CaptureVersionedTextStore,
+} from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 import {
-  routeWorkspaceFileCreate,
-  routeWorkspaceFileImport,
-  routeWorkspacePathDelete,
-  routeWorkspacePathMove,
-} from "./workspaceFileOps";
-import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
+  applyShareViewFileCreate,
+  applyShareViewFileImport,
+  applyShareViewPathDelete,
+  applyShareViewPathMove,
+  applyShareViewTextWrite,
+} from "./shareViewFileChanges";
+import {
+  createShareViewFiles,
+  shareViewFilesStore,
+  type ResolvedShareViewFilesTarget,
+} from "./shareViewFiles";
+import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
+import { createFile, movePath } from "./workspaceFiles";
 
 // The four remaining writes a share view admits (#802), driven the way
 // `shareViewTextWrite.e2e.test.ts` drives the text save.
@@ -135,12 +144,55 @@ async function seedSharedFiles(
   );
 }
 
-function scope(harnessed: Harness, access: "edit" = "edit") {
+function scope(harnessed: Harness) {
   return {
     workspaceId: harnessed.workspaceId,
     rootPath: harnessed.rootPath,
-    shareView: { access, ended: false, granterEmail: "granter@dohc.test" },
     shareViewStore: () => harnessed.store,
+  };
+}
+
+function shareViewFilesOwner(
+  harnessed: Harness,
+  store: CaptureVersionedTextStore = harnessed.store,
+) {
+  const requested = {
+    kind: "standalone" as const,
+    workspaceId: harnessed.workspaceId,
+  };
+  const resolved: ResolvedShareViewFilesTarget = {
+    ...requested,
+    storeWorkspaceId: harnessed.workspaceId,
+    schedulingRootPath: harnessed.rootPath,
+    rootPath: harnessed.rootPath,
+    shareId: SHARE_ID,
+    granterEmail: "granter@example.com",
+    grantedSelector: {
+      paths: ["docs"],
+      versionId: null,
+      access: "edit" as const,
+    },
+    ended: false,
+  };
+  return {
+    requested,
+    files: createShareViewFiles({
+      resolveTarget: (candidate) =>
+        candidate.kind === requested.kind &&
+        candidate.workspaceId === requested.workspaceId
+          ? resolved
+          : null,
+      openStore: () => shareViewFilesStore(store),
+      resolveRelay: async () => null,
+      pull: async () => {
+        throw new Error("Unexpected pull");
+      },
+      recordRefusals: async () => undefined,
+      markEnded: async () => undefined,
+      retireTarget: async () => undefined,
+      assertProjectionRoot: async () => undefined,
+      removeMount: async () => ({ folderLeft: false }),
+    }),
   };
 }
 
@@ -282,7 +334,7 @@ describe("share-view file operations through the real store", () => {
         : null;
       expect(outsideMoment?.payload.after.text).toBe("outside after\n");
 
-      const result = await routeWorkspaceTextWrite({
+      const result = await applyShareViewTextWrite({
         ...scope(view),
         relativePath: inAppPath,
         text: "in-app after\n",
@@ -318,7 +370,7 @@ describe("share-view file operations through the real store", () => {
       await seedSharedFiles(view, [{ path: "docs/note.md", text: "granter\n" }]);
       const journalBefore = replicationLogRows(view.rootPath);
 
-      const path = await routeWorkspaceFileCreate({
+      const path = await applyShareViewFileCreate({
         ...scope(view),
         relativePath: "docs/added.md",
         initialText: "recipient\n",
@@ -351,7 +403,7 @@ describe("share-view file operations through the real store", () => {
       };
 
       await expect(
-        routeWorkspaceFileCreate({
+        applyShareViewFileCreate({
           ...scope(view),
           relativePath: path,
           initialText: "recipient\n",
@@ -391,14 +443,18 @@ describe("share-view file operations through the real store", () => {
       // `repairSharedViewProjection` leaves it there because it is user data.
       await writeFile(join(view.rootPath, "docs", "mine.md"), "mine\n", "utf8");
       const journalBefore = replicationLogRows(view.rootPath);
+      const owner = shareViewFilesOwner(view);
 
-      const path = await routeWorkspaceFileCreate({
-        ...scope(view),
-        relativePath: "docs/mine.md",
-        initialText: "# overwritten\n",
-      });
-
-      expect(path).toBe("docs/mine.md");
+      await expect(
+        withStaleSensitiveWorkspaceOperation(view.rootPath, (lease) =>
+          owner.files.change(lease, owner.requested, {
+            kind: "create",
+            path: "docs/mine.md",
+            initialText: "# overwritten\n",
+          }),
+        ),
+        "MUTATION: a create reports success for a path occupied only by the recipient's own file",
+      ).rejects.toThrow(/already exists/);
       await expect(
         readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
         "MUTATION: a create that journals over an occupied path destroys the recipient's own file",
@@ -415,7 +471,7 @@ describe("share-view file operations through the real store", () => {
       await seedSharedFiles(view, [{ path: "docs/note.md", text: "granter\n" }]);
       const journalBefore = replicationLogRows(view.rootPath);
 
-      const path = await routeWorkspacePathMove({
+      const path = await applyShareViewPathMove({
         ...scope(view),
         fromPath: "docs/note.md",
         toPath: "docs/renamed.md",
@@ -468,13 +524,17 @@ describe("share-view file operations through the real store", () => {
           };
         },
       }) as CaptureVersionedTextStore;
+      const owner = shareViewFilesOwner(view, pausedStore);
 
-      const moving = routeWorkspacePathMove({
-        ...scope(view),
-        fromPath,
-        toPath,
-        shareViewStore: () => pausedStore,
-      });
+      const moving = withStaleSensitiveWorkspaceOperation(
+        view.rootPath,
+        (lease) =>
+          owner.files.change(lease, owner.requested, {
+            kind: "move",
+            fromPath,
+            toPath,
+          }),
+      );
       await storeRenamed;
 
       let captureEnteredGap = false;
@@ -494,7 +554,11 @@ describe("share-view file operations through the real store", () => {
       const captureStartedBeforeProjection = captureEnteredGap;
 
       releaseRename();
-      await moving;
+      await expect(moving).resolves.toMatchObject({
+        status: "committed",
+        kind: "move",
+        value: toPath,
+      });
       const captured = await capturing;
 
       expect(
@@ -538,7 +602,7 @@ describe("share-view file operations through the real store", () => {
         { path: "docs/plans/two.md", text: "two\n" },
       ]);
 
-      await routeWorkspacePathMove({
+      await applyShareViewPathMove({
         ...scope(view),
         fromPath: "docs/plans",
         toPath: "docs/roadmap",
@@ -573,7 +637,7 @@ describe("share-view file operations through the real store", () => {
       await writeFile(join(view.rootPath, "docs", "mine.md"), "mine\n", "utf8");
 
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/note.md",
           toPath: "docs/mine.md",
@@ -601,7 +665,7 @@ describe("share-view file operations through the real store", () => {
       // The carve-out `movePath` already makes: on a case-insensitive
       // filesystem the destination "exists" because it IS the source, and
       // refusing there would block a rename the user plainly meant.
-      const path = await routeWorkspacePathMove({
+      const path = await applyShareViewPathMove({
         ...scope(view),
         fromPath: "docs/note.md",
         toPath: "docs/Note.md",
@@ -639,7 +703,7 @@ describe("share-view file operations through the real store", () => {
         { path: "docs/Plans/two.md", text: "two\n" },
       ]);
 
-      await routeWorkspacePathMove({
+      await applyShareViewPathMove({
         ...scope(view),
         fromPath: "docs/Plans",
         toPath: "docs/plans",
@@ -650,6 +714,10 @@ describe("share-view file operations through the real store", () => {
         ["docs/plans/one.md", "docs/plans/two.md"],
         "The case-only folder rename never settled in the store",
       );
+      expect(
+        await readdir(join(view.rootPath, "docs")),
+        "MUTATION: a case-only folder rename changes the store spelling but leaves the old directory spelling on disk",
+      ).toEqual(["plans"]);
       // The cleanup that removes an emptied source folder must not run when
       // the source and the destination are the SAME folder: it would remove
       // the files this rename just put there.
@@ -673,7 +741,7 @@ describe("share-view file operations through the real store", () => {
       roots.push(sourceDir);
       await writeFile(join(sourceDir, "note.md"), "imported\n", "utf8");
 
-      const outcome = await routeWorkspaceFileImport({
+      const outcome = await applyShareViewFileImport({
         ...scope(view),
         absolutePaths: [join(sourceDir, "note.md")],
         screenAgainstRoots: null,
@@ -721,7 +789,7 @@ describe("share-view file operations through the real store", () => {
       const source = join(sourceDir, "note.md");
       await writeFile(source, "imported\n", "utf8");
 
-      const outcome = await routeWorkspaceFileImport({
+      const outcome = await applyShareViewFileImport({
         ...scope(view),
         absolutePaths: [source],
         screenAgainstRoots: null,
@@ -753,7 +821,7 @@ describe("share-view file operations through the real store", () => {
       await writeFile(join(view.rootPath, "docs", "roadmap", "mine.md"), "mine\n", "utf8");
 
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
@@ -765,6 +833,38 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "roadmap", "mine.md"), "utf8"),
       ).resolves.toBe("mine\n");
       expect(await storePaths(view)).toEqual(["docs/plans/one.md"]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to move a folder onto an existing folder in the store",
+    async () => {
+      const view = await harness("dohc-share-move-store-folder-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/roadmap/keep.md", text: "keep\n" },
+      ]);
+
+      await expect(
+        applyShareViewPathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+        }),
+        "MUTATION: a folder move merges into an existing canonical folder",
+      ).rejects.toThrow(/already exists/);
+
+      expect(await storePaths(view)).toEqual([
+        "docs/plans/one.md",
+        "docs/roadmap/keep.md",
+      ]);
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
+      ).resolves.toBe("one\n");
+      await expect(
+        readFile(join(view.rootPath, "docs", "roadmap", "keep.md"), "utf8"),
+      ).resolves.toBe("keep\n");
     },
     60_000,
   );
@@ -784,7 +884,7 @@ describe("share-view file operations through the real store", () => {
       // refusal, which also contains that fragment, and this test could not
       // tell the two apart.
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
@@ -817,12 +917,9 @@ describe("share-view file operations through the real store", () => {
       await writeFile(join(view.rootPath, "docs", "plans", "mine.md"), "mine\n", "utf8");
 
       await expect(
-        routeWorkspacePathDelete({
+        applyShareViewPathDelete({
           ...scope(view),
           relativePath: "docs/plans",
-          trashItem: async () => {
-            throw new Error("a share view's delete must not reach the ordinary trash path");
-          },
         }),
         "MUTATION: deleting a folder removes it whole, destroying the files under it the store never held",
       ).rejects.toThrow(
@@ -854,12 +951,9 @@ describe("share-view file operations through the real store", () => {
       );
 
       await expect(
-        routeWorkspacePathDelete({
+        applyShareViewPathDelete({
           ...scope(view),
           relativePath: "docs/notes.md",
-          trashItem: async () => {
-            throw new Error("a refused delete must not reach the trash");
-          },
         }),
         "MUTATION: deleting over a directory that replaced a tracked file recursively removes the directory and everything in it",
       ).rejects.toThrow(
@@ -896,7 +990,7 @@ describe("share-view file operations through the real store", () => {
       );
 
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/notes.md",
           toPath: "docs/renamed.md",
@@ -934,12 +1028,9 @@ describe("share-view file operations through the real store", () => {
       await symlink(outside, join(view.rootPath, "docs", "notes.md"), "file");
 
       await expect(
-        routeWorkspacePathDelete({
+        applyShareViewPathDelete({
           ...scope(view),
           relativePath: "docs/notes.md",
-          trashItem: async () => {
-            throw new Error("a refused delete must not reach the trash");
-          },
         }),
         "MUTATION: deleting over a symlink that replaced a tracked file follows it and destroys what it points at",
       ).rejects.toThrow(
@@ -987,7 +1078,7 @@ describe("share-view file operations through the real store", () => {
       await symlink(linkTarget, join(view.rootPath, "docs", "plans"), "junction");
 
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
@@ -1026,12 +1117,9 @@ describe("share-view file operations through the real store", () => {
       }
 
       await expect(
-        routeWorkspacePathDelete({
+        applyShareViewPathDelete({
           ...scope(view),
           relativePath: "docs/plans",
-          trashItem: async () => {
-            throw new Error("a share view's delete must not reach the ordinary trash path");
-          },
         }),
         "MUTATION: a refusal that lists every file is unreadable at the size a real folder reaches",
       ).rejects.toThrow(
@@ -1064,7 +1152,7 @@ describe("share-view file operations through the real store", () => {
         view.store,
       );
 
-      const path = await routeWorkspacePathMove({
+      const path = await applyShareViewPathMove({
         ...scope(view),
         fromPath: "docs/picture.png",
         toPath: "docs/renamed.png",
@@ -1096,7 +1184,7 @@ describe("share-view file operations through the real store", () => {
       ]);
 
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
@@ -1142,7 +1230,7 @@ describe("share-view file operations through the real store", () => {
       // 5-7 are the put-backs in reverse. Failing call 6 strands the MIDDLE
       // put-back: the two around it must still run.
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
@@ -1177,10 +1265,9 @@ describe("share-view file operations through the real store", () => {
       ]);
 
       await expect(
-        routeWorkspacePathDelete({
+        applyShareViewPathDelete({
           ...scope(view),
           relativePath: "docs/plans",
-          trashItem: async () => undefined,
           shareViewStore: () => storeFailingAt(view.store, "deleteTextFile", 3),
         }),
       ).rejects.toThrow(/engine refused deleteTextFile call 3/);
@@ -1214,7 +1301,7 @@ describe("share-view file operations through the real store", () => {
       const directory = join(sourceDir, "folder");
       await mkdir(directory);
 
-      const outcome = await routeWorkspaceFileImport({
+      const outcome = await applyShareViewFileImport({
         ...scope(view),
         absolutePaths: [file, directory],
         screenAgainstRoots: [view.rootPath],
@@ -1240,12 +1327,9 @@ describe("share-view file operations through the real store", () => {
       ]);
       const journalBefore = replicationLogRows(view.rootPath);
 
-      const result = await routeWorkspacePathDelete({
+      const result = await applyShareViewPathDelete({
         ...scope(view),
         relativePath: "docs/note.md",
-        trashItem: async () => {
-          throw new Error("a share view's delete must not reach the ordinary trash path");
-        },
       });
 
       expect(result).toEqual({ trashed: false });
@@ -1270,10 +1354,9 @@ describe("share-view file operations through the real store", () => {
       await writeFile(join(view.rootPath, "docs", "mine.md"), "mine\n", "utf8");
 
       await expect(
-        routeWorkspacePathDelete({
+        applyShareViewPathDelete({
           ...scope(view),
           relativePath: "docs/mine.md",
-          trashItem: async () => undefined,
         }),
         "MUTATION: deleting a path the store never had removes a file the granter can never be told about",
       ).rejects.toThrow(/not part of this shared view/);
@@ -1282,7 +1365,7 @@ describe("share-view file operations through the real store", () => {
       ).resolves.toBe("mine\n");
 
       await expect(
-        routeWorkspacePathMove({
+        applyShareViewPathMove({
           ...scope(view),
           fromPath: "docs/mine.md",
           toPath: "docs/renamed.md",
@@ -1303,12 +1386,9 @@ describe("share-view file operations through the real store", () => {
         { path: "docs/keep.md", text: "keep\n" },
       ]);
 
-      await routeWorkspacePathDelete({
+      await applyShareViewPathDelete({
         ...scope(view),
         relativePath: "docs/plans",
-        trashItem: async () => {
-          throw new Error("a share view's delete must not reach the ordinary trash path");
-        },
       });
 
       expect(
@@ -1338,7 +1418,7 @@ describe("share-view file operations through the real store", () => {
       await mkdir(join(sourceDir, "folder"));
       const journalBefore = replicationLogRows(view.rootPath);
 
-      const outcome = await routeWorkspaceFileImport({
+      const outcome = await applyShareViewFileImport({
         ...scope(view),
         absolutePaths: [
           join(sourceDir, "added.md"),
@@ -1408,7 +1488,7 @@ describe("share-view file operations through the real store", () => {
       };
 
       await expect(
-        routeWorkspaceFileImport({
+        applyShareViewFileImport({
           ...scope(view),
           shareViewStore: () => failingStore,
           absolutePaths: [source],
@@ -1440,29 +1520,57 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
+    "repairs a missing canonical destination before importing into it",
+    async () => {
+      const view = await harness("dohc-share-import-missing-destination-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/target/keep.md", text: "keep\n" },
+      ]);
+      await rm(join(view.rootPath, "docs", "target"), {
+        recursive: true,
+        force: true,
+      });
+      const sourceDir = await createTestScratch(
+        "dohc-share-import-missing-destination-src-",
+      );
+      roots.push(sourceDir);
+      const source = join(sourceDir, "added.md");
+      await writeFile(source, "added\n", "utf8");
+
+      await expect(
+        applyShareViewFileImport({
+          ...scope(view),
+          absolutePaths: [source],
+          screenAgainstRoots: null,
+          targetDir: "docs/target",
+        }),
+        "MUTATION: disk probing refuses a visible canonical folder whose projection was deleted out of app",
+      ).resolves.toEqual({ imported: ["docs/target/added.md"], skipped: 0 });
+
+      expect(await storePaths(view)).toEqual([
+        "docs/target/added.md",
+        "docs/target/keep.md",
+      ]);
+      await expect(
+        readFile(join(view.rootPath, "docs", "target", "keep.md"), "utf8"),
+      ).resolves.toBe("keep\n");
+      await expect(
+        readFile(join(view.rootPath, "docs", "target", "added.md"), "utf8"),
+      ).resolves.toBe("added\n");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
     "leaves an ordinary workspace's file operations on disk, where the watcher records them",
     async () => {
       const workspace = await harness("dohc-ordinary-file-ops-");
-      const ordinary = {
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        shareView: null,
-        shareViewStore: () => workspace.store,
-      };
       // The store is opened first so the daemon's own open-time reconciliation
-      // is counted here rather than mistaken for a routed write below.
+      // is counted here rather than mistaken for a filesystem write below.
       const before = await storePaths(workspace);
 
-      await routeWorkspaceFileCreate({
-        ...ordinary,
-        relativePath: "note.md",
-        initialText: "hello\n",
-      });
-      await routeWorkspacePathMove({
-        ...ordinary,
-        fromPath: "note.md",
-        toPath: "renamed.md",
-      });
+      await createFile(workspace.rootPath, "note.md", "hello\n");
+      await movePath(workspace.rootPath, "note.md", "renamed.md");
 
       await expect(
         readFile(join(workspace.rootPath, "renamed.md"), "utf8"),

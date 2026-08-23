@@ -48,7 +48,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   const canWrite = scope.shareView === null || shareViewTakesLocalWrites(scope.shareView);
   // New folder is offered nowhere in a share view, at any level: the engine
   // has no folder object, so an empty folder is nothing the recipient could
-  // send. `routeWorkspaceFolderCreate` says the same thing in words.
+  // send. `ShareViewFiles` therefore exposes no empty-folder operation.
   const canCreateFolder = canWrite && !isSharedView;
 
   if (scope.isMountPath) {

@@ -1,5 +1,5 @@
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
-import { recordedShareSelector } from "./sharedView";
+import { recordedShareSelector } from "./shareViewRecords";
 import type { ShareViewSelector } from "./shareViewInfo";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";

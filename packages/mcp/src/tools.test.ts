@@ -72,12 +72,11 @@ vi.mock("node:crypto", async (importOriginal) => {
 const lstatOverride = vi.hoisted(() => ({
   path: null as string | null,
   results: [] as (NodeJS.ErrnoException | null)[],
-  inodes: [] as (number | null)[],
+  inodes: [] as (bigint | null)[],
 }));
 // A path another process changes between the check and the rename. It happens
 // inside the rename call, which is the race itself. `replaceWith` names an
-// entry to move ON TOP of the path -- a real second file, so the replacement
-// carries its own inode and no test depends on a deleted one not being reused.
+// entry to move ON TOP of the path.
 // Without it the path is simply removed. `failWith` names an errno code the
 // mock throws INSTEAD of calling the real rename -- for a failure a real
 // filesystem will not reproduce on demand, such as a length rejection whose
@@ -103,13 +102,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
-    lstat: async (path: Parameters<typeof actual.lstat>[0]) => {
+    lstat: async (
+      path: Parameters<typeof actual.lstat>[0],
+      options?: Parameters<typeof actual.lstat>[1],
+    ) => {
       const armed = lstatOverride.path === String(path);
       if (armed && lstatOverride.results.length > 0) {
         const failure = lstatOverride.results.shift();
         if (failure) throw failure;
       }
-      const stats = await actual.lstat(path);
+      const stats = await actual.lstat(path, options);
       if (armed && lstatOverride.inodes.length > 0) {
         const ino = lstatOverride.inodes.shift();
         // Copy through the prototype so the Stats methods survive.
@@ -931,7 +933,7 @@ describe("mcp tool path containment", () => {
         // violation, which is what makes libuv fall back to a directory stat
         // and report a FileId of 0.
         lstatOverride.path = join(ctx.root, "note.md");
-        lstatOverride.inodes = [null, 0];
+        lstatOverride.inodes = [null, 0n];
 
         const result = await deleteWorkspacePath(ctx, { path: "note.md" });
         expect(refusalReason(result)).toMatch(

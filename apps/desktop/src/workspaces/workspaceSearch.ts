@@ -259,9 +259,11 @@ export function startRipgrepSearch(options: {
   realRoot: string;
   searchId: string;
   request: WorkspaceSearchRequest;
+  // Applied to normalized paths before entries affect batches or limits.
+  allowPath?: (path: string) => boolean;
   onBatch: (batch: SearchBatch) => void;
 }): SearchHandle {
-  const { rgPath, realRoot, searchId, request, onBatch } = options;
+  const { rgPath, realRoot, searchId, request, allowPath, onBatch } = options;
   // spawn with an argv ARRAY and shell:false (the default) — the query is
   // data, never shell input. cwd is the realpathed workspace root, so rg's
   // relative output paths are workspace-relative by construction.
@@ -298,11 +300,15 @@ export function startRipgrepSearch(options: {
     if (finished || limitHit) return;
     const data = parseRipgrepLine(line);
     if (!data) return;
+    const entries = toSearchEntries(data);
+    if (entries.length === 0 || (allowPath && !allowPath(entries[0].path))) {
+      return;
+    }
     // Flush INSIDE the loop: one rg match event carries one entry per
     // SUBMATCH, and a long prose line against a short query can carry
     // hundreds — a batch must never exceed the contract's per-event entry
     // cap, no matter how many entries one line yields.
-    for (const entry of toSearchEntries(data)) {
+    for (const entry of entries) {
       if (total >= SEARCH_MAX_TOTAL_MATCHES) break;
       pending.push(entry);
       total += 1;
@@ -354,8 +360,12 @@ export function createSearchRegistry(deps: {
       searchId: string,
       request: WorkspaceSearchRequest,
       onBatch: (batch: SearchBatch) => void,
-      isCurrent: () => boolean = () => true,
+      options: {
+        isCurrent: () => boolean;
+        allowPath?: (path: string) => boolean;
+      },
     ): Promise<void> {
+      const { isCurrent, allowPath } = options;
       const realRoot = await realpath(rootPath);
       if (!(await stat(realRoot)).isDirectory()) {
         throw new Error("Workspace root is not a directory");
@@ -370,6 +380,7 @@ export function createSearchRegistry(deps: {
         realRoot,
         searchId,
         request,
+        allowPath,
         onBatch: (batch) => {
           // Drop the registry entry when the CURRENT search finishes (a
           // superseded search's late done-batch must not delete its

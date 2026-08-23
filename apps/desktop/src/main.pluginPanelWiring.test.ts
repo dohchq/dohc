@@ -363,9 +363,8 @@ describe("plugin panel main-process wiring", () => {
 
   it("skips plugin-pipeline warmup when a later openWorkspace switched away first (#779 round 4 finding 1)", () => {
     const open = handler("openWorkspace");
-    const awaitAt = open.indexOf(
-      "const status = SyncStatusResult.parse(await openWorkspaceActivity(workspace));",
-    );
+    const statusAt = open.indexOf("const status = SyncStatusResult.parse(");
+    const awaitAt = open.indexOf("await openWorkspaceActivity(workspace),", statusAt);
     const recheckAt = open.indexOf(
       "const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;",
       awaitAt,
@@ -376,7 +375,8 @@ describe("plugin panel main-process wiring", () => {
     // switched workspaces while this call's openWorkspaceActivity was still
     // pending would warm the plugin pipeline for the workspace it just left
     // instead of the one it is actually on now.
-    expect(awaitAt).toBeGreaterThan(-1);
+    expect(statusAt).toBeGreaterThan(-1);
+    expect(awaitAt).toBeGreaterThan(statusAt);
     expect(recheckAt).toBeGreaterThan(awaitAt);
     expect(warmupAt).toBeGreaterThan(recheckAt);
     expect(open).toContain("stillActive && !sharedViewOf(workspace.workspaceId)");

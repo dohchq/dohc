@@ -1,5 +1,5 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { recordedShareSelector } from "./sharedView";
+import { recordedShareSelector } from "./shareViewRecords";
 
 // Reading a registry entry's share-view marker, as one rule in one place.
 //

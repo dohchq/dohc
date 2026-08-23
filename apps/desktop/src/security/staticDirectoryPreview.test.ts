@@ -60,6 +60,38 @@ describe("startStaticDirectoryPreview", () => {
     }
   });
 
+  it("serves only bytes and paths supplied by an owner file source", async () => {
+    const siteRoot = join(root, "shared-site");
+    await mkdir(siteRoot, { recursive: true });
+    await writeFile(join(siteRoot, "index.html"), "recipient index");
+    await writeFile(join(siteRoot, "recipient-only.js"), "recipient script");
+    const read = vi.fn(async () => Buffer.from("owner index"));
+
+    const preview = await startStaticDirectoryPreview(siteRoot, {
+      containmentRoot: root,
+      entry: "index.html",
+      entryLabel: "site entry",
+      fileSource: {
+        contains: (path) => path === "index.html",
+        read,
+      },
+    });
+    try {
+      await expect(fetch(preview.url).then((response) => response.text())).resolves.toBe(
+        "owner index",
+      );
+      await expect(
+        fetch(new URL("/recipient-only.js", preview.url)).then(
+          (response) => response.status,
+        ),
+      ).resolves.toBe(404);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledWith("index.html");
+    } finally {
+      await preview.stop();
+    }
+  });
+
   it("refuses a root outside its containment root", async () => {
     const containment = join(root, "contained");
     const outside = join(root, "outside");

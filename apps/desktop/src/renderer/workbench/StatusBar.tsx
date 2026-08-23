@@ -35,6 +35,7 @@ export function StatusBar(props: {
   onConnectCloud: () => void;
   onOpenHistory: () => void;
   onOpenConflicts: () => void;
+  onRefreshShareView: () => void;
   // Changes recipients sent to this workspace, and the review they open
   // (#646 PR3a). Same shape as the conflict pair above: the shell owns the
   // state, the notice center only announces it.
@@ -98,6 +99,7 @@ export function StatusBar(props: {
           onOpenHistory={props.onOpenHistory}
           onOpenSettings={props.onOpenSettings}
           onOpenConflicts={props.onOpenConflicts}
+          onRefreshShareView={props.onRefreshShareView}
           onRebuildEngineStore={props.onRebuildEngineStore}
           {...(props.shareChangeNotices
             ? { shareChangeNotices: props.shareChangeNotices }

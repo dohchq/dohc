@@ -11,8 +11,8 @@ import {
   startRipgrepSearch,
   toSearchEntries,
   type SearchBatch,
-  type SearchHandle,
- mountScopedIncludeGlob,} from "./workspaceSearch";
+  mountScopedIncludeGlob,
+} from "./workspaceSearch";
 import { createTestScratch } from "./testTemp";
 
 describe("buildRipgrepArgs", () => {
@@ -246,6 +246,7 @@ describe("startRipgrepSearch (real rg)", () => {
   function runSearch(
     root: string,
     request: Parameters<typeof buildRipgrepArgs>[0],
+    allowPath?: (path: string) => boolean,
   ): Promise<SearchBatch[]> {
     return new Promise((resolve) => {
       const batches: SearchBatch[] = [];
@@ -254,6 +255,7 @@ describe("startRipgrepSearch (real rg)", () => {
         realRoot: root,
         searchId: "test-1",
         request,
+        allowPath,
         onBatch: (batch) => {
           batches.push(batch);
           if (batch.done) resolve(batches);
@@ -359,6 +361,31 @@ describe("startRipgrepSearch (real rg)", () => {
     expect(batches.at(-1)!.done).toBe(true);
   });
 
+  it("filters disallowed paths before they can consume the total-match cap", async () => {
+    const root = await makeRoot();
+    const body = Array.from(
+      { length: 300 },
+      (_, i) => `line ${i} capmatch`,
+    ).join("\n");
+    await Promise.all(
+      Array.from({ length: 15 }, (_, i) =>
+        writeFile(join(root, `recipient-${i}.md`), body),
+      ),
+    );
+    await writeFile(join(root, "canonical.md"), "one capmatch\n");
+
+    const batches = await runSearch(
+      root,
+      { query: "capmatch" },
+      (path) => path === "canonical.md",
+    );
+
+    expect(
+      batches.flatMap((batch) => batch.entries).map((entry) => entry.path),
+    ).toEqual(["canonical.md"]);
+    expect(batches.at(-1)).toMatchObject({ done: true, limitHit: false });
+  });
+
   it("streams results in bounded batches (entries cap per batch)", async () => {
     const root = await makeRoot();
     const body = Array.from({ length: 120 }, (_, i) => `row ${i} streamtok`).join("\n");
@@ -387,8 +414,10 @@ describe("startRipgrepSearch (real rg)", () => {
 });
 
 describe("createSearchRegistry", () => {
-  function fakeStart(killed: string[]) {
-    return (options: { searchId: string; onBatch: (b: SearchBatch) => void }): SearchHandle => ({
+  const current = { isCurrent: () => true };
+
+  function fakeStart(killed: string[]): typeof startRipgrepSearch {
+    return (options) => ({
       searchId: options.searchId,
       kill: () => killed.push(options.searchId),
     });
@@ -396,11 +425,43 @@ describe("createSearchRegistry", () => {
 
   it("kills the previous search when an owner starts a new one", async () => {
     const killed: string[] = [];
-    const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) as never });
+    const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(1, root, "s1", { query: "a" }, () => {});
-    await registry.startSearch(1, root, "s2", { query: "b" }, () => {});
+    await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current);
+    await registry.startSearch(1, root, "s2", { query: "b" }, () => {}, current);
     expect(killed).toEqual(["s1"]);
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("applies a path allowance through the registry and local runner", async () => {
+    const registry = createSearchRegistry({ rgPath });
+    const root = await createTestScratch("dohc-reg-");
+    await writeFile(join(root, "canonical.md"), "registrymatch\n");
+    await writeFile(join(root, "recipient.md"), "registrymatch\n");
+    const batches: SearchBatch[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      registry
+        .startSearch(
+          1,
+          root,
+          "s1",
+          { query: "registrymatch" },
+          (batch) => {
+            batches.push(batch);
+            if (batch.done) resolve();
+          },
+          {
+            isCurrent: () => true,
+            allowPath: (path) => path === "canonical.md",
+          },
+        )
+        .catch(reject);
+    });
+
+    expect(
+      batches.flatMap((batch) => batch.entries).map((entry) => entry.path),
+    ).toEqual(["canonical.md"]);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -409,23 +470,30 @@ describe("createSearchRegistry", () => {
     const started: string[] = [];
     const registry = createSearchRegistry({
       rgPath: "/unused",
-      start: ((options: { searchId: string }) => {
+      start: (options) => {
         started.push(options.searchId);
         return {
           searchId: options.searchId,
           kill: () => killed.push(options.searchId),
         };
-      }) as never,
+      },
     });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(1, root, "current", { query: "a" }, () => {});
+    await registry.startSearch(
+      1,
+      root,
+      "current",
+      { query: "a" },
+      () => {},
+      current,
+    );
     await registry.startSearch(
       1,
       root,
       "stale",
       { query: "b" },
       () => {},
-      () => false,
+      { isCurrent: () => false },
     );
     expect(started).toEqual(["current"]);
     expect(killed).toEqual([]);
@@ -434,26 +502,33 @@ describe("createSearchRegistry", () => {
 
   it("cancel kills only a matching searchId; disposeOwner and killAll kill tracked children", async () => {
     const killed: string[] = [];
-    const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) as never });
+    const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(1, root, "s1", { query: "a" }, () => {});
+    await registry.startSearch(1, root, "s1", { query: "a" }, () => {}, current);
     registry.cancel(1, "wrong-id");
     expect(killed).toEqual([]);
     registry.cancel(1, "s1");
     expect(killed).toEqual(["s1"]);
-    await registry.startSearch(2, root, "s3", { query: "c" }, () => {});
+    await registry.startSearch(2, root, "s3", { query: "c" }, () => {}, current);
     registry.disposeOwner(2);
     expect(killed).toEqual(["s1", "s3"]);
-    await registry.startSearch(3, root, "s4", { query: "d" }, () => {});
+    await registry.startSearch(3, root, "s4", { query: "d" }, () => {}, current);
     registry.killAll();
     expect(killed).toEqual(["s1", "s3", "s4"]);
     await rm(root, { recursive: true, force: true });
   });
 
   it("refuses a root that does not resolve", async () => {
-    const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart([]) as never });
+    const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart([]) });
     await expect(
-      registry.startSearch(1, "/definitely/not/a/real/root", "s1", { query: "a" }, () => {}),
+      registry.startSearch(
+        1,
+        "/definitely/not/a/real/root",
+        "s1",
+        { query: "a" },
+        () => {},
+        current,
+      ),
     ).rejects.toThrow();
   });
 });

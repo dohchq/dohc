@@ -36,20 +36,27 @@ describe("engine Y.Doc save-state reporting in main", () => {
     for (const channel of ["moveWorkspacePath", "deleteWorkspacePath"]) {
       const handler = handlerSource(channel);
       const exclusiveAt = handler.indexOf("withExclusiveWorkspaceOperation(");
-      const callbackAt = handler.indexOf("async (markWorkspaceChanged)", exclusiveAt);
+      const callbackAt = handler.indexOf(
+        "async (markWorkspaceChanged, lease)",
+        exclusiveAt,
+      );
       const captureAt =
         channel === "moveWorkspacePath"
           ? handler.indexOf("capture.beginFileRename(")
           : handler.indexOf("settleAndCloseLiveSessionsForPath(");
-      const mutationAt =
+      const diskMutationAt =
         channel === "moveWorkspacePath"
-          ? handler.indexOf("await routeWorkspacePathMove({")
-          : handler.indexOf("await routeWorkspacePathDelete({");
+          ? handler.indexOf("? await movePath(")
+          : handler.indexOf("? await deletePath(");
+      const sharedMutationAt = handler.indexOf("await shareViewFiles.change(");
       const successAt =
         channel === "moveWorkspacePath"
           ? handler.indexOf("finishRename?.(true)")
           : handler.indexOf("finishDebts?.(true)");
-      const changedAt = handler.indexOf("markWorkspaceChanged()", mutationAt);
+      const changedAt = handler.indexOf(
+        "markWorkspaceChanged()",
+        Math.max(diskMutationAt, sharedMutationAt),
+      );
       const failureAt =
         channel === "moveWorkspacePath"
           ? handler.indexOf("finishRename?.(false)")
@@ -57,10 +64,13 @@ describe("engine Y.Doc save-state reporting in main", () => {
       expect(exclusiveAt).toBeGreaterThan(-1);
       expect(callbackAt).toBeGreaterThan(exclusiveAt);
       expect(captureAt).toBeGreaterThan(callbackAt);
-      expect(mutationAt).toBeGreaterThan(captureAt);
-      expect(changedAt).toBeGreaterThan(mutationAt);
+      expect(diskMutationAt).toBeGreaterThan(captureAt);
+      expect(sharedMutationAt).toBeGreaterThan(captureAt);
+      expect(changedAt).toBeGreaterThan(diskMutationAt);
+      expect(changedAt).toBeGreaterThan(sharedMutationAt);
       expect(changedAt).toBeLessThan(successAt);
-      expect(successAt).toBeGreaterThan(mutationAt);
+      expect(successAt).toBeGreaterThan(diskMutationAt);
+      expect(successAt).toBeGreaterThan(sharedMutationAt);
       expect(failureAt).toBeGreaterThan(successAt);
     }
   });
@@ -83,18 +93,21 @@ describe("engine Y.Doc save-state reporting in main", () => {
   });
 
   it("admits file and folder creation through stale-sensitive workspace scheduling", () => {
-    for (const [channel, mutation] of [
-      // Both creates are routed (#802) — a file lands in the engine store for
-      // a share view and on disk for every other workspace, and a folder is
-      // refused for a share view at every level. Which branch either takes
-      // does not change what this pins: the mutation runs inside the schedule.
-      ["createWorkspaceFile", "await routeWorkspaceFileCreate({"],
-      ["createWorkspaceFolder", "await routeWorkspaceFolderCreate({"],
+    for (const [channel, mutations] of [
+      // A file lands in the received-share owner or on disk. A folder remains
+      // an ordinary-workspace operation. Every applicable mutation stays
+      // inside the stale-sensitive schedule.
+      ["createWorkspaceFile", ["? await createFile(", "await shareViewFiles.change("]],
+      ["createWorkspaceFolder", ["const path = await createFolder("]],
     ] as const) {
       const handler = handlerSource(channel);
       const scheduledAt = handler.indexOf("withStaleSensitiveWorkspaceOperation(");
       expect(scheduledAt).toBeGreaterThan(-1);
-      expect(handler.indexOf(mutation)).toBeGreaterThan(scheduledAt);
+      for (const mutation of mutations) {
+        expect(handler.indexOf(mutation), `${channel}: ${mutation}`).toBeGreaterThan(
+          scheduledAt,
+        );
+      }
     }
   });
 
@@ -109,16 +122,19 @@ describe("engine Y.Doc save-state reporting in main", () => {
       "a second schedule site is a second place this property has to hold",
     ).toBe(-1);
     // The import runs INSIDE it.
-    const importAt = handler.indexOf("routeWorkspaceFileImport({");
+    const importAt = handler.indexOf("await shareViewFiles.change(");
     expect(importAt).toBeGreaterThan(scheduleAt);
     // The native dialog does NOT: it is opened outside the scheduled call,
     // and the drag-in entrypoint reaches the schedule without opening it at
     // all. A dialog awaited inside would hold the workspace's stale-sensitive
     // lane open for as long as the user browsed.
-    const scheduled = handler.slice(scheduleAt, handler.indexOf("      );", importAt));
+    const scheduleEndAt = handler.indexOf("const droppedPaths = input.droppedPaths;");
+    const scheduled = handler.slice(scheduleAt, scheduleEndAt);
     // The slice really covers the scheduled callback: without this, an empty
     // slice would satisfy the refusal below by containing nothing at all.
-    expect(scheduled).toContain("routeWorkspaceFileImport({");
+    expect(scheduled).toContain("copyIntoWorkspace(");
+    expect(scheduled).toContain("importDroppedPaths(");
+    expect(scheduled).toContain("shareViewFiles.change(");
     expect(
       scheduled,
       "MUTATION: a dialog inside the scheduled operation holds the lane open while the user browses",
@@ -131,12 +147,15 @@ describe("engine Y.Doc save-state reporting in main", () => {
 
   it("notifies live renderer sessions only after the disk delete succeeds", () => {
     const handler = handlerSource("deleteWorkspacePath");
-    const deleteAt = handler.indexOf("await routeWorkspacePathDelete({");
+    const diskDeleteAt = handler.indexOf("? await deletePath(");
+    const sharedDeleteAt = handler.indexOf("await shareViewFiles.change(");
     const notifyAt = handler.indexOf("notifyEngineYDocSessionsDeleted(");
     const successAt = handler.indexOf("finishDebts?.(true)");
     const failureAt = handler.indexOf("finishDebts?.(false)");
-    expect(deleteAt).toBeGreaterThan(-1);
-    expect(notifyAt).toBeGreaterThan(deleteAt);
+    expect(diskDeleteAt).toBeGreaterThan(-1);
+    expect(sharedDeleteAt).toBeGreaterThan(-1);
+    expect(notifyAt).toBeGreaterThan(diskDeleteAt);
+    expect(notifyAt).toBeGreaterThan(sharedDeleteAt);
     expect(notifyAt).toBeLessThan(successAt);
     expect(failureAt).toBeGreaterThan(successAt);
   });

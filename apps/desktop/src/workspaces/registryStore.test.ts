@@ -628,7 +628,7 @@ describe("registry store", () => {
     expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
   });
 
-  it("records, marks ended, and clears share mounts", () => {
+  it("records, marks ended, and keeps an empty ownership tombstone", () => {
     store.register(personal);
     const mount = {
       shareId: "share-9",
@@ -649,7 +649,10 @@ describe("registry store", () => {
     expect(reopened.find("ws-1")?.shareMounts).toEqual([{ ...mount, ended: true }]);
 
     store.setShareMounts("ws-1", []);
-    expect(store.find("ws-1")?.shareMounts).toBeUndefined();
+    expect(store.find("ws-1")?.shareMounts).toEqual([]);
+    expect(createRegistryStore(registryPath).find("ws-1")?.shareMounts).toEqual(
+      [],
+    );
   });
 
   it("remove unregisters a workspace and tolerates unknown ids (failed-join rollback)", () => {

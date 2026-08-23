@@ -1,13 +1,15 @@
 import {
+  sameFsEntry,
+  type FsEntryIdentity,
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
+import type { FileHandle } from "node:fs/promises";
 import {
   mkdir,
   open,
-  readFile,
   realpath,
   rename,
   rm,
@@ -17,6 +19,14 @@ import {
 import { dirname, join, relative } from "node:path";
 import { TextDecoder } from "node:util";
 import { isInside } from "../security/pathContainment";
+import {
+  BoundedFileReadChangedError,
+  BoundedFileReadNotFileError,
+  BoundedFileReadTooLargeError,
+  BoundedFileReadUnverifiableError,
+  readFileHandleExact,
+  readFileHandleTruncated,
+} from "./boundedFileRead";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
@@ -53,11 +63,15 @@ function assertWriteNotAborted(signal?: AbortSignal): void {
 // `access` picks the lexical validator: "write" (the default — fail closed)
 // refuses the reserved shared-with-me projection; "read" allows it (share
 // mounts exist to be read) while keeping every other guard identical.
-export async function resolveWorkspaceFile(
+async function resolveWorkspaceFileTarget(
   rootPath: string,
   relativePath: string,
   access: "read" | "write" = "write",
-): Promise<{ realTarget: string; normalized: string }> {
+): Promise<{
+  realTarget: string;
+  normalized: string;
+  resolvedPath: string;
+}> {
   const validated =
     access === "read"
       ? validateUserReadPath(relativePath)
@@ -70,44 +84,338 @@ export async function resolveWorkspaceFile(
   // The reservation is therefore decided on where the path lands, and the
   // caller receives THAT resolution — resolving the spelling a second time
   // would hand back a target no rule was applied to.
-  const { resolvedAbsolute } = await assertResolvedWorkspacePath({
+  const { relative: resolvedPath, resolvedAbsolute } =
+    await assertResolvedWorkspacePath({
+      rootPath,
+      absolutePath: join(rootPath, validated.normalized),
+      spelled: relativePath,
+      label: "Asset path",
+      access,
+    });
+  return {
+    realTarget: resolvedAbsolute,
+    normalized: validated.normalized,
+    resolvedPath: resolvedPath.replaceAll("\\", "/"),
+  };
+}
+
+export async function resolveWorkspaceFile(
+  rootPath: string,
+  relativePath: string,
+  access: "read" | "write" = "write",
+): Promise<{
+  realTarget: string;
+  normalized: string;
+  resolvedPath: string;
+}> {
+  const target = await resolveWorkspaceFileTarget(
     rootPath,
-    absolutePath: join(rootPath, validated.normalized),
-    spelled: relativePath,
-    label: "Asset path",
+    relativePath,
     access,
-  });
-  // Every caller needs a file that is already there: the OS opener is handed
+  );
+  // Public callers need a file that is already there: the OS opener is handed
   // one, the editor's save renames onto one, and the database paths open one.
-  // The walk answers for a target that does not exist yet, so the existence
-  // proof is made here, on the canonical path.
-  await stat(resolvedAbsolute);
-  return { realTarget: resolvedAbsolute, normalized: validated.normalized };
+  // A prepared owner read delays this proof until after owner classification,
+  // because canonical share bytes may exist while their projection does not.
+  await stat(target.realTarget);
+  return target;
 }
 
 // Media views buffer the whole file into the privileged main process before
 // serving — cap it so one oversized file can't OOM/freeze the app (same
 // reasoning as MAX_TEXT_BYTES, sized for real images/audio).
-const MAX_ASSET_BYTES = 64 * 1024 * 1024;
+export const WORKSPACE_ASSET_MAX_BYTES = 64 * 1024 * 1024;
 
-// Reads a workspace-relative file's bytes.
-export async function readWorkspaceAsset(
+export interface WorkspaceAssetSource {
+  /** The authoritative workspace-relative path after following aliases. */
+  path: string;
+  bytes: Buffer;
+  mediaType: string;
+}
+
+const FILE_CHANGED_DURING_READ =
+  "This file changed while dohc was reading it. Try again.";
+const FILE_IDENTITY_UNVERIFIABLE =
+  "dohc could not confirm this is the same file. Try again.";
+
+function assertSameFile(
+  expected: FsEntryIdentity,
+  actual: FsEntryIdentity,
+): void {
+  const comparison = sameFsEntry(expected, actual);
+  if (comparison === "replaced") {
+    throw new Error(FILE_CHANGED_DURING_READ);
+  }
+  if (comparison === "unknown") {
+    throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+  }
+}
+
+function throwWorkspaceBoundedReadError(error: unknown): never {
+  if (error instanceof BoundedFileReadChangedError) {
+    throw new Error(FILE_CHANGED_DURING_READ);
+  }
+  if (error instanceof BoundedFileReadUnverifiableError) {
+    throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+  }
+  if (error instanceof BoundedFileReadNotFileError) {
+    throw new Error("This path is not a file. Choose a file and try again.");
+  }
+  throw error;
+}
+
+/** A read bound to the file identity captured after owner classification. */
+export interface PreparedWorkspaceFileRead {
+  readonly path: string;
+  readAsset(): Promise<WorkspaceAssetSource>;
+  readText(): Promise<WorkspaceTextReadResult>;
+  withVerifiedPathSync<T>(
+    run: (
+      absolutePath: string,
+    ) => T extends PromiseLike<unknown> ? never : T,
+  ): Promise<T>;
+}
+
+export interface ResolvedWorkspaceFileRead {
+  /** Canonical path for owner classification; no local file is opened yet. */
+  readonly path: string;
+  prepare(): Promise<PreparedWorkspaceFileRead>;
+}
+
+class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
+  readonly #rootPath: string;
+  readonly #realTarget: string;
+  readonly #resolvedPath: string;
+  readonly #spelledPath: string;
+  readonly #requestedPath: string;
+  readonly #identity: FsEntryIdentity;
+
+  constructor(input: {
+    rootPath: string;
+    realTarget: string;
+    resolvedPath: string;
+    spelledPath: string;
+    requestedPath: string;
+    identity: FsEntryIdentity;
+  }) {
+    this.#rootPath = input.rootPath;
+    this.#realTarget = input.realTarget;
+    this.#resolvedPath = input.resolvedPath;
+    this.#spelledPath = input.spelledPath;
+    this.#requestedPath = input.requestedPath;
+    this.#identity = input.identity;
+  }
+
+  get path(): string {
+    return this.#resolvedPath;
+  }
+
+  async #openVerified(): Promise<FileHandle> {
+    let handle: FileHandle;
+    try {
+      handle = await open(this.#realTarget, "r");
+    } catch {
+      throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+    }
+    try {
+      let info;
+      try {
+        info = await handle.stat({ bigint: true });
+      } catch {
+        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+      }
+      assertSameFile(this.#identity, info);
+      return handle;
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
+  async #withVerifiedHandle<T>(
+    run: (handle: FileHandle) => T | Promise<T>,
+  ): Promise<T> {
+    const handle = await this.#openVerified();
+    try {
+      return await run(handle);
+    } finally {
+      await handle.close();
+    }
+  }
+
+  readAsset(): Promise<WorkspaceAssetSource> {
+    return this.#withVerifiedHandle(async (handle) => {
+      let bytes: Buffer;
+      try {
+        bytes = (
+          await readFileHandleExact(handle, WORKSPACE_ASSET_MAX_BYTES)
+        ).bytes;
+      } catch (error) {
+        if (error instanceof BoundedFileReadTooLargeError) {
+          throw new Error(
+            `Asset too large to serve (${error.size} bytes): ${this.#spelledPath}`,
+          );
+        }
+        throwWorkspaceBoundedReadError(error);
+      }
+      return {
+        path: this.#resolvedPath,
+        bytes,
+        mediaType: mediaTypeForExtension(this.#requestedPath),
+      };
+    });
+  }
+
+  readText(): Promise<WorkspaceTextReadResult> {
+    return withOrderedWorkspaceTargetPath(
+      this.#rootPath,
+      this.#realTarget,
+      () => this.#withVerifiedHandle(readTextHandle),
+    );
+  }
+
+  withVerifiedPathSync<T>(
+    run: (
+      absolutePath: string,
+    ) => T extends PromiseLike<unknown> ? never : T,
+  ): Promise<T> {
+    return this.#withVerifiedHandle(async () => {
+      await this.#assertCanonicalPath();
+      try {
+        const result = run(this.#realTarget);
+        if (
+          (typeof result === "object" || typeof result === "function") &&
+          result !== null &&
+          "then" in result &&
+          typeof result.then === "function"
+        ) {
+          throw new Error(
+            "Verified file path operations must finish synchronously.",
+          );
+        }
+        return result;
+      } finally {
+        await this.#assertCanonicalPath();
+      }
+    });
+  }
+
+  async #assertCanonicalPath(): Promise<void> {
+    let currentCanonical: string;
+    let pathInfo;
+    try {
+      currentCanonical = await realpath(this.#realTarget);
+      pathInfo = await stat(this.#realTarget, { bigint: true });
+    } catch {
+      throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+    }
+    const pathKey = (value: string) =>
+      process.platform === "win32" ? value.toLowerCase() : value;
+    if (pathKey(currentCanonical) !== pathKey(this.#realTarget)) {
+      throw new Error(FILE_CHANGED_DURING_READ);
+    }
+    assertSameFile(this.#identity, pathInfo);
+  }
+}
+
+class ResolvedWorkspaceFileReadCapability implements ResolvedWorkspaceFileRead {
+  readonly #rootPath: string;
+  readonly #realTarget: string;
+  readonly #resolvedPath: string;
+  readonly #requestedPath: string;
+  readonly #spelledPath: string;
+
+  constructor(
+    rootPath: string,
+    realTarget: string,
+    resolvedPath: string,
+    requestedPath: string,
+    spelledPath: string,
+  ) {
+    this.#rootPath = rootPath;
+    this.#realTarget = realTarget;
+    this.#resolvedPath = resolvedPath;
+    this.#requestedPath = requestedPath;
+    this.#spelledPath = spelledPath;
+  }
+
+  get path(): string {
+    return this.#resolvedPath;
+  }
+
+  async prepare(): Promise<PreparedWorkspaceFileRead> {
+    let handle: FileHandle;
+    try {
+      handle = await open(this.#realTarget, "r");
+    } catch {
+      throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+    }
+    try {
+      const info = await handle.stat({ bigint: true });
+      if (!info.isFile()) {
+        throw new Error(
+          `This path is not a file: ${this.#spelledPath}. Choose a file and try again.`,
+        );
+      }
+      let current: Awaited<ReturnType<typeof assertResolvedWorkspacePath>>;
+      try {
+        current = await assertResolvedWorkspacePath({
+          rootPath: this.#rootPath,
+          absolutePath: this.#realTarget,
+          spelled: this.#spelledPath,
+          label: "File path",
+          access: "read",
+        });
+      } catch {
+        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+      }
+      if (current.relative.replaceAll("\\", "/") !== this.#resolvedPath) {
+        throw new Error(FILE_CHANGED_DURING_READ);
+      }
+      const identity: FsEntryIdentity = info;
+      let pathInfo;
+      try {
+        pathInfo = await stat(current.resolvedAbsolute, { bigint: true });
+      } catch {
+        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+      }
+      assertSameFile(identity, pathInfo);
+      return new PreparedWorkspaceFileReadCapability({
+        rootPath: this.#rootPath,
+        realTarget: this.#realTarget,
+        resolvedPath: this.#resolvedPath,
+        requestedPath: this.#requestedPath,
+        spelledPath: this.#spelledPath,
+        identity,
+      });
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+export async function resolveWorkspaceFileRead(
   rootPath: string,
   relativePath: string,
-): Promise<{ bytes: Buffer; mediaType: string }> {
-  const { realTarget, normalized } = await resolveWorkspaceFile(
+): Promise<ResolvedWorkspaceFileRead> {
+  const { realTarget, normalized, resolvedPath } =
+    await resolveWorkspaceFileTarget(rootPath, relativePath, "read");
+  return new ResolvedWorkspaceFileReadCapability(
     rootPath,
+    realTarget,
+    resolvedPath,
+    normalized,
     relativePath,
-    "read",
   );
-  const { size } = await stat(realTarget);
-  if (size > MAX_ASSET_BYTES) {
-    throw new Error(`Asset too large to serve (${size} bytes): ${relativePath}`);
-  }
-  return {
-    bytes: await readFile(realTarget),
-    mediaType: mediaTypeForExtension(normalized),
-  };
+}
+
+export function prepareWorkspaceFileRead(
+  rootPath: string,
+  relativePath: string,
+): Promise<PreparedWorkspaceFileRead> {
+  return resolveWorkspaceFileRead(rootPath, relativePath).then((source) =>
+    source.prepare(),
+  );
 }
 
 // Text views (markdown/CSV/JSON/plain) read content over IPC rather than via a
@@ -126,6 +434,28 @@ export type WorkspaceTextWriteResult =
 
 function hashContent(content: Uint8Array | string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+export function workspaceTextReadResultFromBytes(
+  bytes: Buffer,
+  totalByteLength = bytes.byteLength,
+): WorkspaceTextReadResult {
+  const truncated = totalByteLength > MAX_TEXT_BYTES;
+  const content = bytes.subarray(0, Math.min(bytes.byteLength, MAX_TEXT_BYTES));
+  if (truncated) {
+    return {
+      text: new TextDecoder("utf-8", { ignoreBOM: true }).decode(content, {
+        stream: true,
+      }),
+      truncated: true,
+      contentHash: null,
+    };
+  }
+  return {
+    text: content.toString("utf8"),
+    truncated: false,
+    contentHash: hashContent(content),
+  };
 }
 
 function isMissingTargetError(error: unknown): boolean {
@@ -208,6 +538,18 @@ type WorkspaceOperationState = {
   queue: WorkspaceOperationEntry[];
 };
 
+declare const workspaceOperationLeaseBrand: unique symbol;
+
+/**
+ * Proof that an operation holds the process-wide scheduler for one workspace
+ * root. Received-share mutations require this proof so they cannot bypass the
+ * same admission boundary used by ordinary workspace writes.
+ */
+export interface WorkspaceOperationLease {
+  readonly rootPath: string;
+  readonly [workspaceOperationLeaseBrand]: true;
+}
+
 class WorkspaceOperationSupersededError extends Error {
   constructor() {
     super(
@@ -266,7 +608,10 @@ export function createWorkspaceOperationScheduler() {
   const enqueue = <T>(
     rootPath: string,
     mode: "shared" | "exclusive",
-    operation: (markChanged: () => void) => Promise<T>,
+    operation: (
+      markChanged: () => void,
+      lease: WorkspaceOperationLease,
+    ) => Promise<T>,
     staleSensitive = false,
   ): Promise<T> => {
     const key = pathKey(rootPath);
@@ -288,9 +633,13 @@ export function createWorkspaceOperationScheduler() {
           }
           let changed = false;
           try {
-            const value = await operation(() => {
-              changed = true;
-            });
+            const lease = { rootPath } as WorkspaceOperationLease;
+            const value = await operation(
+              () => {
+                changed = true;
+              },
+              lease,
+            );
             if (mode === "exclusive") changed = true;
             resolve(value);
           } catch (error) {
@@ -307,11 +656,22 @@ export function createWorkspaceOperationScheduler() {
   return {
     shared: <T>(rootPath: string, operation: () => Promise<T>) =>
       enqueue(rootPath, "shared", () => operation()),
-    staleSensitiveShared: <T>(rootPath: string, operation: () => Promise<T>) =>
-      enqueue(rootPath, "shared", () => operation(), true),
+    staleSensitiveShared: <T>(
+      rootPath: string,
+      operation: (lease: WorkspaceOperationLease) => Promise<T>,
+    ) =>
+      enqueue(
+        rootPath,
+        "shared",
+        (_markChanged, lease) => operation(lease),
+        true,
+      ),
     exclusive: <T>(
       rootPath: string,
-      operation: (markChanged: () => void) => Promise<T>,
+      operation: (
+        markChanged: () => void,
+        lease: WorkspaceOperationLease,
+      ) => Promise<T>,
     ) => enqueue(rootPath, "exclusive", operation),
   };
 }
@@ -406,39 +766,24 @@ export function createOrderedWorkspaceTextAccess(deps: {
   };
 }
 
+async function readTextHandle(
+  handle: FileHandle,
+): Promise<WorkspaceTextReadResult> {
+  try {
+    const result = await readFileHandleTruncated(handle, MAX_TEXT_BYTES);
+    return workspaceTextReadResultFromBytes(
+      result.bytes,
+      result.totalByteLength,
+    );
+  } catch (error) {
+    throwWorkspaceBoundedReadError(error);
+  }
+}
+
 async function readTextTarget(target: string): Promise<WorkspaceTextReadResult> {
   const handle = await open(target, "r");
   try {
-    const info = await handle.stat();
-    if (!info.isFile()) {
-      throw new Error(`Text path is not a file: ${target}`);
-    }
-    // Only the first MAX_TEXT_BYTES (+1 byte to detect overflow) enters memory.
-    const buffer = Buffer.alloc(MAX_TEXT_BYTES + 1);
-    let totalBytesRead = 0;
-    while (totalBytesRead < buffer.length) {
-      const { bytesRead } = await handle.read(
-        buffer,
-        totalBytesRead,
-        buffer.length - totalBytesRead,
-        totalBytesRead,
-      );
-      if (bytesRead === 0) break;
-      totalBytesRead += bytesRead;
-    }
-    const truncated = totalBytesRead > MAX_TEXT_BYTES || info.size > MAX_TEXT_BYTES;
-    const content = buffer.subarray(0, Math.min(totalBytesRead, MAX_TEXT_BYTES));
-    if (truncated) {
-      const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(content, {
-        stream: true,
-      });
-      return { text, truncated: true, contentHash: null };
-    }
-    return {
-      text: content.toString("utf8"),
-      truncated: false,
-      contentHash: hashContent(content),
-    };
+    return await readTextHandle(handle);
   } finally {
     await handle.close();
   }
@@ -522,14 +867,17 @@ export function withOrderedWorkspaceTargetPath<T>(
 
 export function withExclusiveWorkspaceOperation<T>(
   rootPath: string,
-  operation: (markChanged: () => void) => Promise<T>,
+  operation: (
+    markChanged: () => void,
+    lease: WorkspaceOperationLease,
+  ) => Promise<T>,
 ): Promise<T> {
   return workspaceOperationScheduler.exclusive(rootPath, operation);
 }
 
 export function withStaleSensitiveWorkspaceOperation<T>(
   rootPath: string,
-  operation: () => Promise<T>,
+  operation: (lease: WorkspaceOperationLease) => Promise<T>,
 ): Promise<T> {
   return workspaceOperationScheduler.staleSensitiveShared(rootPath, operation);
 }

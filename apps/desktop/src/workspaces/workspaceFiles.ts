@@ -12,6 +12,7 @@ import {
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
+  type FsEntryIdentity,
 } from "@dohc/workspace-core";
 // The engine path floor is a CROSS-PROCESS security contract, not engine
 // state: it has a deliberate Rust twin at crates/dohc-engine-files/src/policy.rs
@@ -21,7 +22,7 @@ import {
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { randomUUID } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -482,9 +483,9 @@ type LadderStop = "gone" | "replaced" | "unchecked";
  * `null` means "same entry, carry on".
  */
 export function classifyLadderProbe(
-  started: { ino: number; dev: number } | null,
+  started: FsEntryIdentity | null,
   probe:
-    | { looked: true; now: { ino: number; dev: number } }
+    | { looked: true; now: FsEntryIdentity }
     | { looked: false; code: string | undefined },
 ): LadderStop | null {
   // No starting identity means there is nothing to compare against, so the
@@ -500,9 +501,9 @@ export function classifyLadderProbe(
 
 async function ladderStop(
   target: string,
-  started: Stats | null,
+  started: FsEntryIdentity | null,
 ): Promise<LadderStop | null> {
-  const probe = await lstat(target).then(
+  const probe = await lstat(target, { bigint: true }).then(
     (now) => ({ looked: true as const, now }),
     (error: unknown) => ({
       looked: false as const,
@@ -614,8 +615,8 @@ const MAX_IMPORT_PATHS = 100;
 
 // OS drag-in import: the screen below, then the picker-grade copy — the
 // same basename-only, COPYFILE_EXCL `copyIntoWorkspace` the import dialog
-// uses. A share view runs the same screen and writes its engine store
-// instead (`workspaceFileOps.ts`).
+// uses. A share view runs the same screen and writes its engine store through
+// ShareViewFiles instead.
 export async function importDroppedPaths(
   rootPath: string,
   absolutePaths: string[],
@@ -983,7 +984,7 @@ export async function moveIntoWorkspaceTrash(
   // next rung would move the replacement into the trash and report the delete
   // done -- for a file the user never selected. Re-reading this per rung would
   // compare the source with itself and reopen the window.
-  const started = await lstat(target).catch(() => null);
+  const started = await lstat(target, { bigint: true }).catch(() => null);
   let moveError: unknown = null;
   for (const [rung, candidate] of plan.candidates.entries()) {
     if (rung > 0) {
@@ -1015,8 +1016,11 @@ export async function moveIntoWorkspaceTrash(
 
 // Export bounds: policy caps for what main will buffer into one in-memory
 // archive (the container itself tops out at 65k entries / 4GB — zipWriter).
-const MAX_ZIP_ENTRIES = 2000;
-const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
+export const MAX_ZIP_ENTRIES = 2000;
+export const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
+export const ZIP_TOO_LARGE_REFUSAL =
+  `Export too large (over ${MAX_ZIP_ENTRIES} files or ` +
+  `${MAX_ZIP_TOTAL_BYTES / (1024 * 1024)}MB). Export a smaller folder.`;
 
 // Gathers the zip entries for a workspace export: the whole workspace, one
 // folder, or one file. Ignored segments (.dohc, .git, node_modules) and
@@ -1030,6 +1034,9 @@ const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
 export async function collectZipEntries(
   rootPath: string,
   relativePath?: string,
+  options?: {
+    includeArchivePath?(path: string): boolean;
+  },
 ): Promise<{ entries: ZipEntry[]; baseName: string }> {
   const realRoot = await realpath(rootPath);
   let startAbsolute = realRoot;
@@ -1097,9 +1104,7 @@ export async function collectZipEntries(
       }
       totalBytes += st.size;
       if (entries.length >= MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
-        throw new Error(
-          `Export too large (over ${MAX_ZIP_ENTRIES} files or 256MB) — export a smaller folder`,
-        );
+        throw new Error(ZIP_TOO_LARGE_REFUSAL);
       }
       const data = Buffer.alloc(st.size);
       let read = 0;
@@ -1126,6 +1131,7 @@ export async function collectZipEntries(
       if (dirent.isSymbolicLink()) continue;
       const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
       const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
+      if (options?.includeArchivePath?.(archivePath) === false) continue;
       if (dirent.isDirectory()) {
         if (!IGNORED_DIRS.has(dirent.name)) {
           await walk(join(dir, dirent.name), relPath, archivePath);
@@ -1142,7 +1148,7 @@ export async function collectZipEntries(
   const startRel = relativePath === undefined ? "" : prefixRel;
   if ((await stat(startAbsolute)).isDirectory()) {
     await walk(startAbsolute, startRel, prefix);
-  } else {
+  } else if (options?.includeArchivePath?.(prefix) !== false) {
     await add(startAbsolute, prefix);
   }
   return { entries, baseName };

@@ -200,14 +200,21 @@ describe("workspace text writes: a live Y.Doc stays canonical", () => {
     const sessionGuardAt = handler.indexOf(
       "for (const entry of engineYDocSessions.values())",
     );
-    // The router, not the disk writer: since #646 PR3 a share view's save goes
-    // to its engine store instead, and the live-document rule must precede
-    // BOTH destinations.
-    const directWriteAt = handler.indexOf("await routeWorkspaceTextWrite(");
+    // The schedule encloses both destinations: the ordinary disk writer and
+    // the received-share owner. The live-document rule must precede both.
+    const scheduledWriteAt = handler.indexOf(
+      "const result = await withStaleSensitiveWorkspaceOperation(",
+    );
 
     expect(sessionGuardAt).toBeGreaterThan(-1);
-    expect(directWriteAt).toBeGreaterThan(-1);
-    expect(sessionGuardAt).toBeLessThan(directWriteAt);
+    expect(scheduledWriteAt).toBeGreaterThan(-1);
+    expect(sessionGuardAt).toBeLessThan(scheduledWriteAt);
+    expect(handler.indexOf("? writeWorkspaceText(")).toBeGreaterThan(
+      scheduledWriteAt,
+    );
+    expect(handler.indexOf("await shareViewFiles.change(")).toBeGreaterThan(
+      scheduledWriteAt,
+    );
     expect(handler).toContain("entry.workspaceId === workspace.workspaceId");
     expect(handler).toContain("const writePath = validateUserWritePath(input.relativePath)");
     expect(handler).toContain("entry.path === writePath.normalized");

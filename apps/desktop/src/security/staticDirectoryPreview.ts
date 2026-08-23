@@ -18,6 +18,11 @@ export interface StaticDirectoryPreview {
   stop(): Promise<void>;
 }
 
+export interface StaticDirectoryFileSource {
+  contains(relativePath: string): boolean;
+  read(relativePath: string): Promise<Uint8Array>;
+}
+
 const MIME_TYPES: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
   ".gif": "image/gif",
@@ -93,6 +98,7 @@ export async function startStaticDirectoryPreview(
     entry: string;
     entryLabel: string;
     forbidSharedWithMePaths?: boolean;
+    fileSource?: StaticDirectoryFileSource;
   },
 ): Promise<StaticDirectoryPreview> {
   const root = await realpath(rootPath);
@@ -106,7 +112,13 @@ export async function startStaticDirectoryPreview(
   }
   const entry = options.entry;
   assertContainedFilePath(entry, options.entryLabel);
-  await access(join(root, entry), constants.R_OK);
+  if (options.fileSource) {
+    if (!options.fileSource.contains(entry)) {
+      throw new Error(`Invalid ${options.entryLabel}: ${entry}`);
+    }
+  } else {
+    await access(join(root, entry), constants.R_OK);
+  }
 
   const server = createServer(async (request, response) => {
     try {
@@ -131,6 +143,23 @@ export async function startStaticDirectoryPreview(
       ) {
         response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
         response.end("Forbidden");
+        return;
+      }
+      if (options.fileSource) {
+        if (!options.fileSource.contains(relativePath)) {
+          response.writeHead(404, {
+            "content-type": "text/plain; charset=utf-8",
+          });
+          response.end("Not found");
+          return;
+        }
+        const body = await options.fileSource.read(relativePath);
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-type": mimeType(relativePath),
+          "x-content-type-options": "nosniff",
+        });
+        response.end(body);
         return;
       }
       const target = join(root, relativePath);

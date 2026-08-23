@@ -784,76 +784,15 @@ describe("main-process chat authorization", () => {
     expect(scope).toContain("resolveShareViewRelayAuthorId(");
   });
 
-  // #646 PR3a. The same property the #627 pin above asserts for chat, now for
-  // FILES: `assertWritableWorkspace` stopped being "is this workspace a share
-  // view?" and became "what does this share grant?", so a handler that reaches
-  // a store before it writes at view level.
-  //
-  // The gate has to precede every await, not just every named seam: an await
-  // is where a store call can hide, and a check after one is a check the write
-  // already passed.
-  it("gates every file-write handler on the workspace write boundary, before any await", () => {
-    const fileWrites = [
-      "createWorkspaceFile",
-      "createWorkspaceFolder",
-      "moveWorkspacePath",
-      "deleteWorkspacePath",
-      "importWorkspaceFiles",
-      "writeWorkspaceText",
-      "writeWorkspaceAsset",
-      "applyDatabaseEdit",
-      "importToDatabase",
-      // #874: moves the workspace's engine database aside. Not a content
-      // write, but it relocates workspace state on disk — same boundary.
-      "rebuildEngineStore",
-    ];
-    const seams = [
-      "createFolder(",
-      "routeWorkspaceTextWrite(",
-      "routeWorkspaceFileCreate(",
-      "routeWorkspacePathMove(",
-      "routeWorkspacePathDelete(",
-      "routeWorkspaceFileImport(",
-      "writeWorkspaceAsset(",
-      "applyDatabaseEdit(",
-      "importToDatabase(",
-      "withExclusiveWorkspaceOperation(",
-      "withStaleSensitiveWorkspaceOperation(",
-      "engineCaptureFor(",
-      "rebuildEngineStoreRequest(",
-    ];
-
-    for (const channel of fileWrites) {
-      const handler = handlerSource(channel);
-      const gateAt = handler.indexOf("assertWritableWorkspace(workspace);");
-      expect(
-        gateAt,
-        `${channel}: MUTATION: an ungated file write lands in someone else's workspace at view level`,
-      ).toBeGreaterThan(-1);
-
-      const awaitAt = handler.indexOf("await ");
-      if (awaitAt >= 0) {
-        expect(awaitAt, `${channel}: the gate must precede every await`).toBeGreaterThan(
-          gateAt,
-        );
-      }
-      const seamAts = seams
-        .map((seam) => handler.indexOf(seam))
-        .filter((at) => at >= 0);
-      expect(seamAts.length, channel).toBeGreaterThan(0);
-      expect(
-        Math.min(...seamAts),
-        `${channel}: the gate must precede the store`,
-      ).toBeGreaterThan(gateAt);
-    }
-  });
-
   // #874: the rebuild moves a workspace's engine database aside. Main must
   // derive the refusal from its OWN activity status. A renderer that can
   // trigger the move on a HEALTHY store would silently detach the workspace's
   // history and chats. engineStoreRebuild.test.ts behavior-tests ordering.
   it("gates the engine-store rebuild on main's own refusal fact", () => {
     const handler = handlerSource("rebuildEngineStore");
+    const gateAt = handler.indexOf("assertWritableWorkspace(workspace);");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(handler.indexOf("await ")).toBeGreaterThan(gateAt);
     expect(handler).toContain("isStoreRefused: () =>");
     expect(handler).toContain(
       "activity.getStatus(workspace.workspaceId).engineStoreRefused",
@@ -898,21 +837,23 @@ describe("main-process chat authorization", () => {
     expect(resolver).toContain("readableShareLevel(marker.grantedSelector)");
     expect(resolver).toContain("ended: marker.ended === true");
 
-    // The WRITE PATH asks the same rule, from the same registry answer, and it
-    // is the only thing that decides where an editor save lands. A share view
-    // has no watcher, so a save routed to disk alone would leave the recipient
-    // nothing to send.
-    const writeRouter = readFileSync(
-      new URL("./workspaces/workspaceTextWrite.ts", import.meta.url),
+    // The received-share owner asks the same rule after resolving the current
+    // registry target. A share view has no watcher, so a save routed to disk
+    // alone would leave the recipient nothing to send.
+    const shareViewFiles = readFileSync(
+      new URL("./workspaces/shareViewFiles.ts", import.meta.url),
       "utf8",
     );
     expect(
-      writeRouter,
+      shareViewFiles,
       "MUTATION: a second copy of the level rule is a copy that drifts",
-    ).toContain("shareViewTakesLocalWrites(input.shareView)");
-    expect(handlerSource("writeWorkspaceText")).toContain(
+    ).toContain("!shareViewTakesLocalWrites({");
+    const writeHandler = handlerSource("writeWorkspaceText");
+    expect(writeHandler).toContain(
       "const shareView = sharedViewOf(workspace.workspaceId);",
     );
+    expect(writeHandler).toContain("await shareViewFiles.change(");
+    expect(writeHandler).not.toContain("shareViewTakesLocalWrites(");
   });
 
   // The menu is a UX MIRROR of the gates below it, and it has to mirror the
@@ -1005,47 +946,38 @@ describe("main-process chat authorization", () => {
     // them is decided at its own routed seam instead, and none of them spells
     // a level in main.
     const routed = [
-      ["writeWorkspaceText", "routeWorkspaceTextWrite("],
-      ["createWorkspaceFile", "routeWorkspaceFileCreate("],
-      ["createWorkspaceFolder", "routeWorkspaceFolderCreate("],
-      ["moveWorkspacePath", "routeWorkspacePathMove("],
-      ["deleteWorkspacePath", "routeWorkspacePathDelete("],
-      ["importWorkspaceFiles", "routeWorkspaceFileImport("],
+      ["writeWorkspaceText", 'kind: "save"'],
+      ["createWorkspaceFile", 'kind: "create"'],
+      ["moveWorkspacePath", 'kind: "move"'],
+      ["deleteWorkspacePath", 'kind: "delete"'],
+      ["importWorkspaceFiles", 'kind: "import"'],
     ] as const;
-    for (const [channel, seam] of routed) {
+    for (const [channel, changeKind] of routed) {
       const handler = handlerSource(channel);
       expect(
         handler,
         `${channel}: MUTATION: an unrouted share view takes the blanket refusal and its write never becomes a change`,
       ).toContain("if (shareView === null) assertWritableWorkspace(workspace);");
-      expect(handler, channel).toContain(seam);
+      expect(handler, channel).toContain("await shareViewFiles.change(");
+      expect(handler, channel).toContain(changeKind);
       expect(
         handler,
         `${channel}: MUTATION: a second copy of the level rule in main is a copy that drifts`,
       ).not.toContain("shareViewTakesLocalWrites(");
     }
 
-    // The folder create is routed for its MESSAGE, not for a right: it refuses
-    // a share view on presence, exactly as the gate it left did. Driven in
-    // `workspaces/workspaceFileOps.test.ts`.
-    const fileOps = readFileSync(
-      new URL("./workspaces/workspaceFileOps.ts", import.meta.url),
-      "utf8",
+    // Folder creation has no canonical shared-file operation. It stays behind
+    // the blanket gate and never enters the received-share owner.
+    const folder = handlerSource("createWorkspaceFolder");
+    expect(folder).toContain(
+      "throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);",
     );
-    const folderAt = fileOps.indexOf("export async function routeWorkspaceFolderCreate(");
-    // To the NEXT top-level declaration, not to the first `\n}`: the signature
-    // is a multi-line object type, and its own closing brace would end the
-    // slice before the body this pin is about.
-    const folder = fileOps.slice(
-      folderAt,
-      fileOps.indexOf("\nexport ", folderAt + 1),
-    );
-    expect(folderAt).toBeGreaterThan(-1);
     expect(
       folder,
       "MUTATION: a folder create that asks the level lets an edit share view make a folder no moment can state",
-    ).toContain("if (input.shareView) {");
-    expect(folder.indexOf("throw new SharedFileReadOnlyError(")).toBeLessThan(
+    ).toContain("assertWritableWorkspace(workspace);");
+    expect(folder).not.toContain("shareViewFiles.change(");
+    expect(folder.indexOf("assertWritableWorkspace(workspace);")).toBeLessThan(
       folder.indexOf("createFolder("),
     );
   });
@@ -1116,36 +1048,30 @@ describe("main-process chat authorization", () => {
     expect(
       submit,
       "MUTATION: submitting without a final disk capture drops edits made after the last refresh",
-    ).toContain("const captured = await withShareViewRefreshLifecycleLock(");
-    expect(submit).toContain("scope.workspace.rootPath,");
-    const lifecycleLockAt = submit.indexOf(
-      "const captured = await withShareViewRefreshLifecycleLock(",
+    ).toContain("const reconciled = await withStaleSensitiveWorkspaceOperation(");
+    expect(submit).toContain("shareViewFiles.reconcile(");
+    expect(submit).toContain('{ kind: "standalone", workspaceId: scope.workspace.workspaceId },');
+    expect(submit).toContain('"settle",');
+    const schedulerAt = submit.indexOf(
+      "const reconciled = await withStaleSensitiveWorkspaceOperation(",
     );
-    const captureAt = submit.indexOf(
-      "captureStandaloneShareViewDivergence({",
-    );
+    const reconcileAt = submit.indexOf("shareViewFiles.reconcile(");
     const refusalAt = submit.indexOf(
-      "assertShareChangesJournalable(captured.unjournalablePaths);",
+      "assertShareChangesJournalable(reconciled.unjournalablePaths);",
     );
     const submitAt = submit.indexOf(").submitShareProposal({");
     // indexOf returns -1 for an absent anchor, and -1 orders below every real
     // position, so a removed guard would satisfy the comparisons below.
-    expect(lifecycleLockAt).toBeGreaterThan(-1);
-    expect(captureAt).toBeGreaterThan(-1);
+    expect(schedulerAt).toBeGreaterThan(-1);
+    expect(reconcileAt).toBeGreaterThan(-1);
     expect(refusalAt).toBeGreaterThan(-1);
     expect(submitAt).toBeGreaterThan(-1);
-    expect(lifecycleLockAt).toBeLessThan(captureAt);
-    expect(captureAt).toBeLessThan(refusalAt);
+    expect(schedulerAt).toBeLessThan(reconcileAt);
+    expect(reconcileAt).toBeLessThan(refusalAt);
     expect(refusalAt).toBeLessThan(submitAt);
-    expect(submit).toContain(
-      "pinnedSelector: isRecordValue(scope.workspace.shareView)",
-    );
-    expect(submit).toContain("? scope.workspace.shareView.grantedSelector");
-    expect(submit).toContain("scope.workspace.shareView.ended === true");
-    expect(submit).not.toContain("ended: false");
     expect(submit).toContain("return resolveSubmitShareChangesResult(");
     expect(submit).toContain(
-      "captured.capturedPaths + captured.repairedPaths,",
+      "reconciled.capturedPaths + reconciled.repairedPaths,",
     );
   });
 });

@@ -10,9 +10,9 @@ import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createMountDirectory,
   mountRootFor,
-  refreshShareMountOnce,
   removeMountFolder,
 } from "./shareMounts";
+import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 
@@ -45,7 +45,7 @@ describe("share mounts real daemon", () => {
         const activeSessions = new EngineWorkspaceSessions(lifecycle);
         sessions = activeSessions;
         await expect(
-          refreshShareMountOnce({
+          refreshShareMountThroughOwnerForTest({
             hostWorkspaceId: "host-workspace-1",
             hostRoot: host,
             mount,

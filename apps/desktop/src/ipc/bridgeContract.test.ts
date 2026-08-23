@@ -1843,6 +1843,20 @@ describe("sync status IPC contract (#505, #540)", () => {
     expect(SyncStatusResult.parse(status).sharingDeclined).toEqual(
       status.sharingDeclined,
     );
+    const pendingProjection = {
+      state: "pending" as const,
+      pendingPathCount: 2,
+      pendingPaths: ["notes/one.md", "notes/two.md"],
+      collisionPathCount: 0,
+      collisionPaths: [],
+      pullInFlight: false,
+    };
+    const statusWithPendingProjection = SyncStatusResult.parse({
+      ...status,
+      shareProjection: pendingProjection,
+    });
+    expect(statusWithPendingProjection.liveSessionsGeneration).toBe(0);
+    expect(statusWithPendingProjection.shareProjection).toEqual(pendingProjection);
     expect(
       SyncStatusResult.parse({ ...status, liveSessionsGeneration: 3 })
         .liveSessionsGeneration,

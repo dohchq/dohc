@@ -1,6 +1,6 @@
 import { ShareSkippedOpsSummary, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
-import { validMountLabel } from "./shareMounts";
+import { usableShareMountRecord } from "./shareMounts";
 import {
   readableShareLevel,
   shareViewGranterEmail,
@@ -102,9 +102,9 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
           // never materialize through cannot be trusted to address one.
           const shareId = boundedString(row.shareId, 1, 200);
           const label = boundedString(row.label, 1, 64);
-          const usableLabel = label !== null && validMountLabel(label);
+          const usableRecord = usableShareMountRecord(rawMounts, row);
           const level = readableShareLevel(row.grantedSelector);
-          const damaged = shareId === null || !usableLabel || level === null;
+          const damaged = shareId === null || !usableRecord || level === null;
           const skipped = ShareSkippedOpsSummary.safeParse(row.skippedOps);
           return {
             ...(shareId !== null ? { shareId } : {}),

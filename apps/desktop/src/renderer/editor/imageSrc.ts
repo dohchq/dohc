@@ -108,7 +108,7 @@ export function resolveWorkspaceImageSrc(
   // Containment: refuse to mint a privileged dohc-file:// URL for a path that
   // normalizes to nothing or climbs out of the workspace root — and refuse to
   // hand the raw path back to the browser either (see BLOCKED_IMAGE_SRC). The
-  // escaping link renders as its alt text and reaches nothing. (readWorkspaceAsset
+  // escaping link renders as its alt text and reaches nothing. (readOwnedWorkspaceAsset
   // / the dohc-file handler also re-check real-path containment; this is the
   // first, purely-lexical gate.)
   if (workspacePath.length === 0 || escapesWorkspaceRoot(workspacePath)) {

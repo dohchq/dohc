@@ -262,6 +262,64 @@ describe("buildMarkdownGraph", () => {
 });
 
 describe("readWorkspaceGraph", () => {
+  it("uses a supplied file source instead of a stale disk projection", async () => {
+    await writeFile(join(root, "index.md"), "# Stale source\n[[Ghost]]\n");
+    await writeFile(join(root, "target.md"), "# Stale target\n");
+    await writeFile(join(root, "ghost.md"), "# Disk only\n");
+
+    const canonical = new Map([
+      ["index.md", "# Canonical source\n[[Target]]\n"],
+      ["target.md", "# Canonical target\n"],
+    ]);
+    const source = {
+      async list() {
+        return {
+          files: [...canonical.keys()].map((path) => ({ path })),
+        };
+      },
+      async readText(path: string) {
+        const text = canonical.get(path);
+        if (text === undefined) {
+          throw new Error(`Missing canonical file: ${path}`);
+        }
+        return { text, truncated: false };
+      },
+    };
+
+    const graph = await readWorkspaceGraph(root, source);
+    expect(graph.nodes).toMatchObject([
+      { path: "index.md", title: "Canonical source" },
+      { path: "target.md", title: "Canonical target" },
+    ]);
+    expect(graph.edges).toEqual([
+      { source: "index.md", target: "target.md", kind: "wikilink" },
+    ]);
+
+    const backlinks = await readWorkspaceBacklinks(root, "target.md", source);
+    expect(backlinks).toMatchObject([
+      { sourcePath: "index.md", sourceTitle: "Canonical source" },
+    ]);
+  });
+
+  it("bounds text copied from a supplied canonical source", async () => {
+    const source = {
+      async list() {
+        return { files: [{ path: "large.md" }] };
+      },
+      async readText() {
+        return {
+          text: `# Large\n${"x".repeat(600 * 1024)}`,
+          truncated: false,
+        };
+      },
+    };
+
+    await expect(readWorkspaceGraph(root, source)).resolves.toMatchObject({
+      scannedFileCount: 1,
+      truncatedFileCount: 1,
+    });
+  });
+
   it("includes all real files from the workspace listing", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await mkdir(join(root, "notes"), { recursive: true });

@@ -3,29 +3,36 @@ import {
   RefreshShareMountsResult,
   ShareMountStatusRow,
 } from "../ipc/bridgeContract";
-import { SharePinInvalidError } from "./sharedView";
+import { SharePinInvalidError } from "./shareViewRecords";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createShareViewDaemonHarness,
   type ShareViewDaemonHarness,
 } from "../testing/shareViewLoopbackTransport";
 import {
   assertMountableSelector,
+  allocateShareMountLabel,
   classifyShareMountRefreshError,
   shareMountResultRow,
   createMountDirectory,
-  mountLabelFor,
   mountRootFor,
   mountStoreWorkspaceIdFor,
-  refreshShareMountOnce as refreshShareMountOnceWithPull,
-  relayTargetForShareMount,
   removeMountFolder,
+  removeShareMountProjection,
+  refuseImportIntoShareProjection,
+  refuseMoveAcrossShareMount,
+  resolveShareMountPath,
+  resolveShareProjectionPath,
+  overlayCanonicalShareMountFiles,
+  planShareMountRemoval,
+  usableShareMountRecord,
   validMountLabel,
 } from "./shareMounts";
+import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // These tests drive the pull with the selector a mount record pins. No paths
@@ -82,7 +89,7 @@ async function ensureMountFolder(hostRoot: string, label: string): Promise<void>
 // store. Binding the relay route before the refresh is what production does
 // too (see engineRelayClient.test.ts), and it is what makes `workspace.open`
 // carry the mount's relay configuration and captureMode.
-async function refreshShareMountOnce(
+async function refreshShareMount(
   harness: ShareViewDaemonHarness,
   input: {
     hostRoot: string;
@@ -95,13 +102,13 @@ async function refreshShareMountOnce(
   },
 ) {
   await ensureMountFolder(input.hostRoot, input.mount.label);
-  const target = relayTargetForShareMount(
-    HOST_WORKSPACE,
-    input.hostRoot,
-    input.mount,
-  );
+  const target = {
+    workspaceId: mountStoreWorkspaceIdFor(HOST_WORKSPACE, input.mount.shareId),
+    rootPath: mountRootFor(input.hostRoot, input.mount.label),
+    shareMount: true as const,
+  };
   const pull = harness.pullFor(target);
-  return await refreshShareMountOnceWithPull({
+  return await refreshShareMountThroughOwnerForTest({
     hostWorkspaceId: HOST_WORKSPACE,
     hostRoot: input.hostRoot,
     mount: input.mount,
@@ -213,16 +220,57 @@ class FakeShareRelay {
 
 describe("mount labels", () => {
   it("derives a safe label from the granter email and deduplicates", () => {
-    expect(mountLabelFor("alex@example.com", [])).toBe("alex");
-    expect(mountLabelFor("alex@example.com", ["alex"])).toBe("alex (2)");
-    expect(mountLabelFor("alex@example.com", ["alex", "alex (2)"])).toBe("alex (3)");
-    expect(mountLabelFor("Wild! Chars?@x.com", [])).toBe("wild-chars");
-    expect(mountLabelFor(null, [])).toBe("share");
-    expect(mountLabelFor("...@x.com", [])).toBe("share");
+    const allocate = (
+      granterEmail: string | null,
+      onDiskNames: readonly string[] = [],
+    ) =>
+      allocateShareMountLabel({
+        storedMounts: [],
+        onDiskNames,
+        granterEmail,
+      });
+    expect(allocate("alex@example.com")).toBe("alex");
+    expect(allocate("alex@example.com", ["alex"])).toBe("alex (2)");
+    expect(allocate("alex@example.com", ["alex", "alex (2)"])).toBe(
+      "alex (3)",
+    );
+    expect(allocate("Wild! Chars?@x.com")).toBe("wild-chars");
+    expect(allocate(null)).toBe("share");
+    expect(allocate("...@x.com")).toBe("share");
     // A secret-shaped local part must not become a label the read
     // classifier would suppress (prod.env -> secret).
-    expect(mountLabelFor("prod.env@example.com", [])).toBe("prod-env");
-    expect(mountLabelFor(".env@example.com", [])).toBe("env");
+    expect(allocate("prod.env@example.com")).toBe("prod-env");
+    expect(allocate(".env@example.com")).toBe("env");
+  });
+
+  it("reserves every string label held by damaged registry records", () => {
+    const damaged = [
+      { shareId: SHARE_ID, label: "alex" },
+      { shareId: SHARE_ID, label: "sam" },
+      { shareId: 7, label: "alex (2)" },
+      { shareId: "missing-label", label: null },
+    ];
+    expect(usableShareMountRecord(damaged, damaged[0]!)).toBe(false);
+    expect(usableShareMountRecord(damaged, damaged[1]!)).toBe(false);
+    expect(usableShareMountRecord(damaged, damaged[2]!)).toBe(false);
+
+    expect(
+      allocateShareMountLabel({
+        storedMounts: damaged,
+        onDiskNames: [],
+        granterEmail: "alex@example.com",
+      }),
+    ).toBe("alex (3)");
+  });
+
+  it("reserves on-disk names in the same allocation", () => {
+    expect(
+      allocateShareMountLabel({
+        storedMounts: [{ shareId: "share-a", label: "alex" }],
+        onDiskNames: ["alex (2)"],
+        granterEmail: "alex@example.com",
+      }),
+    ).toBe("alex (3)");
   });
 
   it("refuses traversal, separators, reserved and secret-shaped labels", () => {
@@ -269,9 +317,386 @@ describe("mount labels", () => {
       join(host, SHARED_WITH_ME_FOLDER, "..cache"),
     );
   });
+
+  it("routes a symlinked spelling to the mount that owns its real path", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    await mkdir(join(mountRootFor(host, "alex"), "docs"), { recursive: true });
+    await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
+    const mount = { shareId: SHARE_ID, label: "alex" };
+
+    await expect(
+      resolveShareMountPath(host, "shared-with-me/alex", [mount], true),
+    ).resolves.toEqual({ mount, path: "" });
+    await expect(
+      resolveShareMountPath(host, "inbox", [mount], true),
+    ).resolves.toEqual({ mount, path: "" });
+    await expect(
+      resolveShareMountPath(host, "inbox/docs/brief.md", [mount], true),
+    ).resolves.toEqual({ mount, path: "docs/brief.md" });
+    await expect(
+      resolveShareMountPath(host, "notes/ordinary.md", [mount], true),
+    ).resolves.toBeNull();
+  });
+
+  it("classifies aliases to the projection and workspace roots", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER), { recursive: true });
+    await symlink(
+      join(host, SHARED_WITH_ME_FOLDER),
+      join(host, "projection-alias"),
+      "dir",
+    );
+    await symlink(host, join(host, "workspace-alias"), "dir");
+
+    await expect(
+      resolveShareProjectionPath(host, "projection-alias", []),
+    ).resolves.toEqual({ kind: "projection-root" });
+    await expect(
+      resolveShareProjectionPath(host, "workspace-alias", []),
+    ).resolves.toEqual({ kind: "workspace-root" });
+  });
+
+  it("refuses a disk path claimed by an invalid registry label", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, ".env", "docs"), {
+      recursive: true,
+    });
+
+    await expect(
+      resolveShareMountPath(
+        host,
+        "shared-with-me/.env/docs/brief.md",
+        [{ shareId: SHARE_ID, label: ".env" }],
+        true,
+      ),
+      "MUTATION: skipping an invalid matching label lets the caller read the projection from disk",
+    ).rejects.toThrow(/saved details are invalid/);
+  });
+
+  it("refuses an unclaimed projection path when a mount registry exists", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan", "docs"), {
+      recursive: true,
+    });
+
+    await expect(
+      resolveShareMountPath(
+        host,
+        "shared-with-me/orphan/docs/brief.md",
+        [],
+        true,
+      ),
+      "MUTATION: an empty but present registry lets stale projection bytes fall through to disk",
+    ).rejects.toThrow(
+      "dohc cannot use this path because no share owns it. Add the share again, or move the file or folder outside shared-with-me/.",
+    );
+  });
+
+  it("refuses a disk path claimed by more than one registry record", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    const labels = ["alex", "Alex"];
+
+    await expect(
+      resolveShareMountPath(
+        host,
+        "shared-with-me/alex/docs/brief.md",
+        labels.map((label, index) => ({
+          shareId: `share-${index + 1}`,
+          label,
+        })),
+        true,
+      ),
+      "MUTATION: first-match routing sends an ambiguous mount path to an arbitrary share",
+    ).rejects.toThrow(/saved details are invalid/);
+  });
+
+  it("never gives case-colliding labels separate owner authority", () => {
+    const mounts = [
+      { shareId: "first", label: "alex" },
+      { shareId: "second", label: "Alex" },
+    ];
+
+    expect(usableShareMountRecord(mounts, mounts[0]!)).toBe(false);
+    expect(usableShareMountRecord(mounts, mounts[1]!)).toBe(false);
+  });
+
+  it("plans ambiguous or unusable records for registry-only removal", () => {
+    const healthy = { shareId: "healthy", label: "healthy" };
+    const duplicateOne = { shareId: SHARE_ID, label: "alex" };
+    const duplicateTwo = { shareId: SHARE_ID, label: "sam" };
+    expect(
+      planShareMountRemoval(
+        [healthy, duplicateOne, duplicateTwo],
+        SHARE_ID,
+      ),
+    ).toEqual({ kind: "registry-only", remaining: [healthy] });
+    expect(
+      planShareMountRemoval(
+        [healthy, { shareId: "damaged", label: ".env" }],
+        "damaged",
+      ),
+    ).toEqual({ kind: "registry-only", remaining: [healthy] });
+    expect(planShareMountRemoval([healthy], "missing")).toEqual({
+      kind: "missing",
+    });
+  });
+
+  it("refuses a move when either resolved endpoint belongs to a mount", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    await mkdir(join(mountRootFor(host, "alex"), "docs"), { recursive: true });
+    await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
+    const mounts = [{ shareId: SHARE_ID, label: "alex" }];
+
+    await expect(
+      refuseMoveAcrossShareMount(
+        host,
+        "notes/local.md",
+        "inbox/docs/local.md",
+        mounts,
+        true,
+      ),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseMoveAcrossShareMount(
+        host,
+        "inbox/docs/shared.md",
+        "notes/shared.md",
+        mounts,
+        true,
+      ),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseMoveAcrossShareMount(
+        host,
+        "notes/a.md",
+        "notes/b.md",
+        mounts,
+        true,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses a move into stale projection bytes after the final unmount", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan"), {
+      recursive: true,
+    });
+
+    await expect(
+      refuseMoveAcrossShareMount(
+        host,
+        "notes/local.md",
+        "shared-with-me/orphan/local.md",
+        [],
+        true,
+      ),
+    ).rejects.toThrow(/no share owns it/i);
+  });
+
+  it("refuses imports into a mount through its projection path or an alias", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
+    const mounts = [{ shareId: SHARE_ID, label: "alex" }];
+
+    await expect(
+      refuseImportIntoShareProjection(
+        host,
+        "shared-with-me/alex",
+        mounts,
+        true,
+      ),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseImportIntoShareProjection(host, "inbox", mounts, true),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseImportIntoShareProjection(host, "notes", mounts, true),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses imports into unowned projection paths when share state remains", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan"), {
+      recursive: true,
+    });
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, ".env"), {
+      recursive: true,
+    });
+    await symlink(
+      join(host, SHARED_WITH_ME_FOLDER),
+      join(host, "projection-alias"),
+      "dir",
+    );
+
+    await expect(
+      refuseImportIntoShareProjection(
+        host,
+        "shared-with-me/orphan",
+        [],
+        true,
+      ),
+      "MUTATION: an empty ownership tombstone must not turn stale projection bytes into a local import destination",
+    ).rejects.toThrow(/no share owns it/i);
+    await expect(
+      refuseImportIntoShareProjection(host, "projection-alias", [], true),
+      "MUTATION: a projection alias must not bypass an empty ownership tombstone",
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseImportIntoShareProjection(
+        host,
+        "shared-with-me/.env",
+        [{ shareId: SHARE_ID, label: ".env" }],
+        true,
+      ),
+      "MUTATION: a matched but unusable record must not let its projection become a local import destination",
+    ).rejects.toThrow(/saved details are invalid/i);
+  });
+
+  it("isolates a failed canonical listing to its mount", async () => {
+    const failures: string[] = [];
+    const mounts = [
+      { shareId: "damaged", label: "alex" },
+      { shareId: "healthy", label: "sam" },
+    ];
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "notes/local.md", size: 5 },
+            { path: "shared-with-me/alex/recipient-only.md", size: 10 },
+            { path: "shared-with-me/sam/stale.md", size: 11 },
+          ],
+          folders: [
+            "notes",
+            "shared-with-me/alex",
+            "shared-with-me/sam",
+          ],
+        },
+        mounts,
+        listCanonical: async (mount) => {
+          if (mount.shareId === "damaged") throw new Error("broken store");
+          return {
+            files: [{ path: "docs/canonical.md", size: 12 }],
+            folders: ["docs"],
+          };
+        },
+        onFailure: (mount) => failures.push(mount.shareId),
+      }),
+    ).resolves.toEqual({
+      files: [
+        { path: "notes/local.md", size: 5 },
+        { path: "shared-with-me/sam/docs/canonical.md", size: 12 },
+      ],
+      folders: [
+        "notes",
+        "shared-with-me/alex",
+        "shared-with-me/sam",
+        "shared-with-me/sam/docs",
+      ],
+    });
+    expect(failures).toEqual(["damaged"]);
+  });
+
+  it("hides disk entries for an invalid mount record", async () => {
+    const listCanonical = vi.fn();
+    const failures: unknown[] = [];
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "notes/local.md", size: 5 },
+            { path: "shared-with-me/.env/recipient-only.md", size: 10 },
+          ],
+          folders: ["notes", "shared-with-me/.env"],
+        },
+        mounts: [{ shareId: "invalid", label: ".env" }],
+        listCanonical,
+        onFailure: (_mount, error) => failures.push(error),
+      }),
+    ).resolves.toEqual({
+      files: [{ path: "notes/local.md", size: 5 }],
+      folders: ["notes"],
+    });
+    expect(listCanonical).not.toHaveBeenCalled();
+    expect(failures).toEqual([
+      expect.objectContaining({ message: expect.stringMatching(/invalid/i) }),
+    ]);
+  });
+
+  it("keeps local files but hides the projection for an empty owner set", async () => {
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "notes/local.md" },
+            { path: "shared-with-me/orphan/recipient-only.md" },
+          ],
+          folders: ["notes", "shared-with-me/orphan"],
+        },
+        mounts: [],
+        listCanonical: async () => ({ files: [] }),
+      }),
+    ).resolves.toEqual({
+      files: [{ path: "notes/local.md" }],
+      folders: ["notes"],
+    });
+  });
+
+  it("hides an ambiguous projection claimed by two mount records", async () => {
+    const listCanonical = vi.fn();
+    const mounts = [
+      { shareId: "first", label: "owner" },
+      { shareId: "second", label: "owner" },
+    ];
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [{ path: "shared-with-me/owner/stale.md" }],
+          folders: ["shared-with-me/owner"],
+        },
+        mounts,
+        listCanonical,
+      }),
+    ).resolves.toEqual({ files: [], folders: [] });
+    expect(listCanonical).not.toHaveBeenCalled();
+  });
+
+  it("contains malformed records and still overlays a later healthy mount", async () => {
+    const failures: unknown[] = [];
+    const malformed = { shareId: "damaged", label: null } as never;
+    const healthy = { shareId: "healthy", label: "healthy" };
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "shared-with-me/unknown/recipient-only.md" },
+            { path: "shared-with-me/healthy/stale.md" },
+          ],
+          folders: ["shared-with-me/unknown", "shared-with-me/healthy"],
+        },
+        mounts: [malformed, healthy],
+        listCanonical: async (mount) => ({
+          files: [{ path: `${mount.shareId}.md` }],
+        }),
+        onFailure: (_mount, error) => failures.push(error),
+      }),
+    ).resolves.toEqual({
+      files: [{ path: "shared-with-me/healthy/healthy.md" }],
+      folders: ["shared-with-me/healthy"],
+    });
+    expect(failures).toHaveLength(1);
+  });
 });
 
-describe("refreshShareMountOnce", () => {
+describe("refreshShareMount", () => {
   it("materializes shared files under shared-with-me/<label>/ and reports statuses", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
@@ -279,7 +704,7 @@ describe("refreshShareMountOnce", () => {
     relay.addWrite("docs/brief.md", "the brief");
     relay.addWrite("docs/deep/notes.md", "deep notes");
 
-    const first = await refreshShareMountOnce(harness, {
+    const first = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -300,7 +725,7 @@ describe("refreshShareMountOnce", () => {
       }),
     );
 
-    const second = await refreshShareMountOnce(harness, {
+    const second = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -314,7 +739,7 @@ describe("refreshShareMountOnce", () => {
     });
 
     relay.addWrite("docs/brief.md", "the brief v2");
-    const third = await refreshShareMountOnce(harness, {
+    const third = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -334,7 +759,7 @@ describe("refreshShareMountOnce", () => {
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "the brief");
 
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
       openStore: (workspace) => {
@@ -369,13 +794,13 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("plan.md", "keep me");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
 
     relay.ended = true;
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -402,7 +827,7 @@ describe("refreshShareMountOnce", () => {
     const hostA = await tempHostRoot();
     await symlink(elsewhere, join(hostA, SHARED_WITH_ME_FOLDER), "dir");
     await expect(
-      refreshShareMountOnce(harness, {
+      refreshShareMount(harness, {
         hostRoot: hostA,
         mount: { shareId: SHARE_ID, label: "alex" },
       }),
@@ -414,7 +839,7 @@ describe("refreshShareMountOnce", () => {
     await mkdir(join(hostB, SHARED_WITH_ME_FOLDER), { recursive: true });
     await symlink(elsewhere, join(hostB, SHARED_WITH_ME_FOLDER, "alex"), "dir");
     await expect(
-      refreshShareMountOnce(harness, {
+      refreshShareMount(harness, {
         hostRoot: hostB,
         mount: { shareId: SHARE_ID, label: "alex" },
       }),
@@ -429,7 +854,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -441,7 +866,7 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs/brief.md"));
     await symlink(join(elsewhere, "victim.md"), join(mountRoot, "docs/brief.md"), "file");
     relay.addWrite("docs/brief.md", "v2");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -454,7 +879,7 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addWrite("docs/brief.md", "v3");
-    const healed = await refreshShareMountOnce(harness, {
+    const healed = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -468,15 +893,16 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "authoritative");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
     const mounted = join(host, SHARED_WITH_ME_FOLDER, "alex", "docs/brief.md");
-    const target = relayTargetForShareMount(HOST_WORKSPACE, host, {
-      shareId: SHARE_ID,
-      label: "alex",
-    });
+    const target = {
+      workspaceId: mountStoreWorkspaceIdFor(HOST_WORKSPACE, SHARE_ID),
+      rootPath: mountRootFor(host, "alex"),
+      shareMount: true as const,
+    };
     const storeBefore = harness.openStore(target);
     const momentIdsBefore = (
       await storeBefore.listMoments({ workspaceId: target.workspaceId, limit: 100 })
@@ -486,7 +912,7 @@ describe("refreshShareMountOnce", () => {
 
     // A rogue tool edits the mounted file directly; the relay is unchanged.
     await writeFile(mounted, "defaced");
-    const repaired = await refreshShareMountOnce(harness, {
+    const repaired = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -512,7 +938,7 @@ describe("refreshShareMountOnce", () => {
     expect(momentIdsBeforeDelete.length).toBeGreaterThan(0);
     await storeBeforeDelete.close();
     await rm(mounted);
-    const restored = await refreshShareMountOnce(harness, {
+    const restored = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -531,7 +957,7 @@ describe("refreshShareMountOnce", () => {
     await storeAfterDelete.close();
 
     // An untouched projection stays "unchanged" — no busy repainting.
-    const quiet = await refreshShareMountOnce(harness, {
+    const quiet = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -551,7 +977,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/top.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -562,7 +988,7 @@ describe("refreshShareMountOnce", () => {
     // link first, so the deep write lands inside the workspace and nothing
     // is ever created through the link.
     relay.addWrite("docs/deep/file.md", "payload");
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -591,7 +1017,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -601,7 +1027,7 @@ describe("refreshShareMountOnce", () => {
     // rebuild the real chain instead of wedging on ENOTDIR.
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await writeFile(join(mountRoot, "docs"), "squatter");
-    const healed = await refreshShareMountOnce(harness, {
+    const healed = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -615,7 +1041,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -628,7 +1054,7 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addDelete("docs/brief.md");
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -679,7 +1105,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     await expect(
-      refreshShareMountOnce(harness, {
+      refreshShareMount(harness, {
         hostRoot: host,
         mount: { shareId: SHARE_ID, label: "../../etc" },
       }),
@@ -706,6 +1132,21 @@ describe("removeMountFolder", () => {
     const host = await tempHostRoot();
     await expect(removeMountFolder(host, "..")).rejects.toThrow(
       /Invalid share mount label/,
+    );
+  });
+
+  it("leaves the folder present when the container is a symlink", async () => {
+    const host = await tempHostRoot();
+    const elsewhere = await tempHostRoot();
+    await mkdir(join(elsewhere, "alex"));
+    await writeFile(join(elsewhere, "alex", "victim.md"), "untouched");
+    await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
+
+    await expect(
+      removeShareMountProjection(host, "alex"),
+    ).resolves.toMatchObject({ folderLeft: true, error: expect.any(Error) });
+    expect(await readFile(join(elsewhere, "alex", "victim.md"), "utf8")).toBe(
+      "untouched",
     );
   });
 });

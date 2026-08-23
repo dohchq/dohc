@@ -601,6 +601,10 @@ export interface EngineRelayWorkspaceClient {
     // Called with each page's changed paths before that page's cursor is
     // committed, so callers can persist collision exclusions first.
     recordCollisions?: (paths: readonly string[]) => Promise<void>;
+    // Called after the page is applied but before any collision work or cursor
+    // advance. A received-share projection can therefore persist recovery
+    // debt for every applied page, even if fetching a later page fails.
+    recordChangedPaths?: (paths: readonly string[]) => Promise<void>;
   }): Promise<PullShareViewResult>;
   // #646 PR2: this replica's own chat about the shared files, back to the
   // granter. Takes the SAME pinned selector the pull takes, for the same
@@ -1114,6 +1118,7 @@ export class EngineRelayClient {
         grantedSelector,
         recordRefusals,
         recordCollisions,
+        recordChangedPaths,
       }) => {
         let fetched = 0;
         let applied = 0;
@@ -1203,7 +1208,9 @@ export class EngineRelayClient {
             "share.view.pull",
           );
           if (pageChangedPaths.length > 0) {
-            await recordCollisions?.(pageChangedPaths.map((path) => path.path));
+            const paths = pageChangedPaths.map((path) => path.path);
+            await recordChangedPaths?.(paths);
+            await recordCollisions?.(paths);
           }
           for (const path of pageChangedPaths) {
             changed.set(path.path, path);
