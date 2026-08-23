@@ -54,9 +54,9 @@ const cmdPath = process.env.ComSpec ?? "cmd.exe";
 
 // A stub `node` reporting a fabricated version, so the launcher's version
 // gate can be exercised without actually installing that Node release.
-// POSIX gets a plain shell script -- `command -v`/exec do not care that it
-// isn't a real interpreter, and (for a refused version) the gate exits
-// before anything tries to run the bundle through it. Windows cannot use a
+// POSIX gets a shell script that delegates every call except `--version`
+// to this host's real Node interpreter, so accepted versions still run the
+// bundle end to end. Windows cannot use a
 // .cmd/.bat stand-in here: the launcher invokes `node` bare (no `call`),
 // and chaining into another batch file that way transfers control
 // permanently instead of returning -- the rest of dohc-mcp.cmd would never
@@ -130,10 +130,54 @@ function fabricatedNodeDir(version) {
     assert.ok(replacements > 0, "the Node executable did not contain its version string");
     writeFileSync(join(dir, "node.exe"), binary, { mode: 0o755 });
   } else {
-    writeFileSync(join(dir, "node"), `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 });
+    writeFileSync(
+      join(dir, "node"),
+      `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  echo "${version}"\nelse\n  exec "$DOHC_LAUNCHER_REAL_NODE" "$@"\nfi\n`,
+      { mode: 0o755 },
+    );
   }
   return { dir, version };
 }
+
+function runSh(majorMinor) {
+  const dir = launcherDir();
+  const fabricated = fabricatedNodeDir(fabricatedVersion(majorMinor));
+  const result = spawnSync(
+    shPath,
+    [join(dir, "dohc-mcp").replaceAll("\\", "/"), "--workspace", "w"],
+    {
+      env: {
+        ...process.env,
+        DOHC_LAUNCHER_REAL_NODE: process.execPath,
+        PATH: fabricated.dir,
+      },
+      encoding: "utf8",
+    },
+  );
+  return { fabricated, result };
+}
+
+function runCmd(majorMinor) {
+  const dir = launcherDir();
+  const fabricated = fabricatedNodeDir(fabricatedVersion(majorMinor));
+  const path = fabricated.dir + delimiter + dir;
+  const result = spawnSync(
+    cmdPath,
+    ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"],
+    {
+      env: { ...process.env, PATH: path, Path: path },
+      encoding: "utf8",
+    },
+  );
+  return { fabricated, result };
+}
+
+const rejectedVersions = [
+  { version: "22.12", floor: "22.13" },
+  { version: "23.3", floor: "23.4" },
+];
+
+const acceptedVersions = ["22.13", "23.4"];
 
 test("the sh launcher names the Node.js prerequisite when PATH has no node", { skip: !shPath }, () => {
   const dir = launcherDir();
@@ -146,43 +190,32 @@ test("the sh launcher names the Node.js prerequisite when PATH has no node", { s
   assert.ok(result.stderr.includes(NODE_MISSING_MESSAGE));
 });
 
-test(
-  "the sh launcher refuses Node.js 22.12 and names the found version",
-  { skip: skipUnlessShFabricated("22.12") },
-  () => {
-    // node:sqlite needed --experimental-sqlite until it stabilized in
-    // 22.13, and the launcher passes no flag -- the boundary that
-    // actually matters is 22.12/22.13, not merely "below 22".
-    const dir = launcherDir();
-    const fabricated = fabricatedNodeDir(fabricatedVersion("22.12"));
-    const result = spawnSync(shPath, [join(dir, "dohc-mcp").replaceAll("\\", "/")], {
-      env: { ...process.env, PATH: fabricated.dir },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 127);
-    assert.match(result.stderr, /Node\.js 22\.13 or newer/);
-    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
-  },
-);
+// node:sqlite needed --experimental-sqlite until it stabilized at 22.13
+// and 23.4. The floor is per-major, not one flattened threshold.
+for (const { version, floor } of rejectedVersions) {
+  test(
+    `the sh launcher refuses Node.js ${version} and names the found version`,
+    { skip: skipUnlessShFabricated(version) },
+    () => {
+      const { fabricated, result } = runSh(version);
+      assert.equal(result.status, 127);
+      assert.match(result.stderr, new RegExp(`Node\\.js ${floor.replace(".", "\\.")} or newer`));
+      assert.ok(result.stderr.includes(fabricated.version.slice(1)));
+    },
+  );
+}
 
-test(
-  "the sh launcher refuses Node.js 23.3 and names the found version",
-  { skip: skipUnlessShFabricated("23.3") },
-  () => {
-    // The flag's floor is per-major, not one flattened threshold: 23.x
-    // dropped it at 23.4, a DIFFERENT minor than 22.x's 22.13, so a
-    // single "major*100+minor" comparison would wrongly accept 23.0-23.3.
-    const dir = launcherDir();
-    const fabricated = fabricatedNodeDir(fabricatedVersion("23.3"));
-    const result = spawnSync(shPath, [join(dir, "dohc-mcp").replaceAll("\\", "/")], {
-      env: { ...process.env, PATH: fabricated.dir },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 127);
-    assert.match(result.stderr, /Node\.js 23\.4 or newer/);
-    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
-  },
-);
+for (const version of acceptedVersions) {
+  test(
+    `the sh launcher runs the bundle beside it on Node.js ${version} exactly`,
+    { skip: skipUnlessShFabricated(version) },
+    () => {
+      const { result } = runSh(version);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /SERVER-RAN --workspace w/);
+    },
+  );
+}
 
 test("the sh launcher runs the bundle beside it when node is on PATH", { skip: !shPath }, () => {
   const dir = launcherDir();
@@ -204,94 +237,33 @@ test("the cmd launcher names the Node.js prerequisite when PATH has no node", { 
   assert.match(result.stderr, /Node\.js/);
 });
 
-test(
-  "the cmd launcher refuses Node.js 22.12 and names the found version",
-  { skip: skipUnlessWindowsFabricated("22.12") },
-  () => {
-    const dir = launcherDir();
-    const fabricated = fabricatedNodeDir(fabricatedVersion("22.12"));
-    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd")], {
-      env: { ...process.env, PATH: fabricated.dir, Path: fabricated.dir },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 127);
-    assert.match(result.stderr, /Node\.js 22\.13 or newer/);
-    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
-  },
-);
+for (const { version, floor } of rejectedVersions) {
+  test(
+    `the cmd launcher refuses Node.js ${version} and names the found version`,
+    { skip: skipUnlessWindowsFabricated(version) },
+    () => {
+      const { fabricated, result } = runCmd(version);
+      assert.equal(result.status, 127);
+      assert.match(result.stderr, new RegExp(`Node\\.js ${floor.replace(".", "\\.")} or newer`));
+      assert.ok(result.stderr.includes(fabricated.version.slice(1)));
+    },
+  );
+}
 
-test(
-  "the cmd launcher runs the bundle beside it on Node.js 22.13 exactly",
-  { skip: skipUnlessWindowsFabricated("22.13") },
-  () => {
-    // The byte-patched node.exe stays a genuine, working interpreter -- only
-    // its reported --version changes -- so this actually exercises the
-    // launcher accepting the boundary version and running real code through
-    // it, not just failing to refuse it.
-    const dir = launcherDir();
-    const fabricated = fabricatedNodeDir(fabricatedVersion("22.13"));
-    const path = fabricated.dir + delimiter + dir;
-    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
-      env: { ...process.env, PATH: path, Path: path },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /SERVER-RAN --workspace w/);
-  },
-);
-
-test(
-  "the cmd launcher refuses Node.js 23.3 and names the found version",
-  { skip: skipUnlessWindowsFabricated("23.3") },
-  () => {
-    // The flag's floor is per-major, not one flattened threshold: 23.x
-    // dropped it at 23.4, a DIFFERENT minor than 22.x's 22.13.
-    const dir = launcherDir();
-    const fabricated = fabricatedNodeDir(fabricatedVersion("23.3"));
-    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd")], {
-      env: { ...process.env, PATH: fabricated.dir, Path: fabricated.dir },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 127);
-    assert.match(result.stderr, /Node\.js 23\.4 or newer/);
-    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
-  },
-);
-
-test(
-  "the cmd launcher runs the bundle beside it on Node.js 23.4 exactly",
-  { skip: skipUnlessWindowsFabricated("23.4") },
-  () => {
-    const dir = launcherDir();
-    const fabricated = fabricatedNodeDir(fabricatedVersion("23.4"));
-    const path = fabricated.dir + delimiter + dir;
-    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
-      env: { ...process.env, PATH: path, Path: path },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /SERVER-RAN --workspace w/);
-  },
-);
-
-test(
-  "the cmd launcher runs the bundle beside it on Node.js 24.0 exactly",
-  { skip: skipUnlessWindowsFabricated("24.0") },
-  () => {
-    // A major of 24+ is never floor-checked at all -- this pins that the
-    // per-major branches don't accidentally fall through to a refusal for
-    // the major that needs no floor.
-    const dir = launcherDir();
-    const fabricated = fabricatedNodeDir(fabricatedVersion("24.0"));
-    const path = fabricated.dir + delimiter + dir;
-    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
-      env: { ...process.env, PATH: path, Path: path },
-      encoding: "utf8",
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /SERVER-RAN --workspace w/);
-  },
-);
+// A major of 24+ is never floor-checked. The byte-patched node.exe remains
+// a genuine interpreter, so every accepted case runs the bundle as well as
+// passing the version gate.
+for (const version of [...acceptedVersions, "24.0"]) {
+  test(
+    `the cmd launcher runs the bundle beside it on Node.js ${version} exactly`,
+    { skip: skipUnlessWindowsFabricated(version) },
+    () => {
+      const { result } = runCmd(version);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /SERVER-RAN --workspace w/);
+    },
+  );
+}
 
 test("the cmd launcher runs the bundle beside it when node is on PATH", { skip: !isWindows }, () => {
   const dir = launcherDir();

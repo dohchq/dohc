@@ -487,7 +487,6 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     settleFetch(
       new Response(
         JSON.stringify({
-          turnId: 1,
           controls: { canSend: false, canStop: true, turnId: 1 },
           seq: 1,
         }),
@@ -610,7 +609,6 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     messageResponse.resolve(
       new Response(
         JSON.stringify({
-          turnId: 1,
           controls: { canSend: false, canStop: true, turnId: 1 },
           seq: 5,
         }),
@@ -650,7 +648,6 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     messageResponse.resolve(
       new Response(
         JSON.stringify({
-          turnId: 1,
           controls: { canSend: false, canStop: true, turnId: 1 },
           seq: 3,
         }),
@@ -714,7 +711,6 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     messageResponse.resolve(
       new Response(
         JSON.stringify({
-          turnId: 1,
           controls: { canSend: false, canStop: true, turnId: 1 },
           seq: 2,
         }),
@@ -819,7 +815,6 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     messageResponse.resolve(
       new Response(
         JSON.stringify({
-          turnId: 1,
           controls: { canSend: false, canStop: true, turnId: 1 },
           seq: 2,
         }),
@@ -868,7 +863,29 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(stopButton.disabled).toBe(false);
   });
 
-  it("Stop 1 rejects during turn 2 -- no stale failure card", async () => {
+  it.each([
+    {
+      settlement: "network rejection",
+      settle(stopResponse: { reject: (reason?: unknown) => void }) {
+        stopResponse.reject(new Error("The old Stop request lost its connection."));
+      },
+    },
+    {
+      settlement: "late non-ok response with a stale sequence",
+      settle(stopResponse: { resolve: (response: Response) => void }) {
+        stopResponse.resolve(
+          new Response(
+            JSON.stringify({
+              message: "Stop failed.",
+              controls: { canSend: true, canStop: true, turnId: 1 },
+              seq: 2,
+            }),
+            { status: 500 },
+          ),
+        );
+      },
+    },
+  ])("ignores Stop 1's $settlement during turn 2", async ({ settle }) => {
     const { eventSource } = await loadChatModule();
     const stopResponse = deferred<Response>();
     globalThis.fetch = (() => stopResponse.promise) as typeof fetch;
@@ -896,52 +913,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
       seq: 3,
     });
 
-    stopResponse.reject(new Error("The old Stop request lost its connection."));
-    await flushMicrotasks();
-
-    expect(document.querySelectorAll(".error-card")).toHaveLength(0);
-    expect(sendButton.disabled).toBe(true);
-    expect(stopButton.disabled).toBe(false);
-  });
-
-  it("Stop 1's old failure response arrives during turn 2 -- no stale failure card", async () => {
-    const { eventSource } = await loadChatModule();
-    const stopResponse = deferred<Response>();
-    globalThis.fetch = (() => stopResponse.promise) as typeof fetch;
-    const sendButton = document.querySelector("#send") as HTMLButtonElement;
-    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
-
-    sendEvent(eventSource, {
-      kind: "session-state",
-      state: "running",
-      controls: { canSend: false, canStop: true, turnId: 1 },
-      seq: 1,
-    });
-    stopButton.click();
-    sendEvent(eventSource, {
-      kind: "turn-completed",
-      turnId: 1,
-      status: "completed",
-      controls: { canSend: true, canStop: true, turnId: 1 },
-      seq: 2,
-    });
-    sendEvent(eventSource, {
-      kind: "session-state",
-      state: "running",
-      controls: { canSend: false, canStop: true, turnId: 2 },
-      seq: 3,
-    });
-
-    stopResponse.resolve(
-      new Response(
-        JSON.stringify({
-          message: "Stop failed.",
-          controls: { canSend: true, canStop: true, turnId: 1 },
-          seq: 2,
-        }),
-        { status: 500 },
-      ),
-    );
+    settle(stopResponse);
     await flushMicrotasks();
 
     expect(document.querySelectorAll(".error-card")).toHaveLength(0);

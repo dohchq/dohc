@@ -77,7 +77,6 @@ type ChatStreamEvent =
 interface EventLogEntry {
   event: ChatStreamEvent;
   at: number;
-  turnId?: number;
   seq?: number;
   provisional?: boolean;
   truncated?: boolean;
@@ -274,9 +273,9 @@ export function createChatWebApp(
   // This server's own monotonic turn identity -- assigned once per accepted
   // prompt, independent of whatever opaque turnId the underlying driver
   // generates internally (that one is not guaranteed comparable across
-  // drivers). Stamped on every published control fact and returned in
-  // /message's 202 body so each fact names the turn it describes. The
-  // separate seq orders those facts for the client.
+  // drivers). Included in every published control fact so each fact names
+  // the turn it describes. The separate seq orders those facts for the
+  // client.
   let currentTurnId: number | undefined;
   let seqCounter = 0;
 
@@ -319,8 +318,8 @@ export function createChatWebApp(
   // The last controls fact actually broadcast to connected clients (never a
   // per-connection snapshot or a per-requester response body -- see frame()
   // below, the only place that updates this). Compared against on every
-  // pendingPrompt/turnActive/currentTurnId mutation outside a publish() call
-  // of its own: if the derived fact differs, publish one, so a connected
+  // pendingPrompt/turnActive/currentTurnId mutation outside a broadcast
+  // of its own: if the derived fact differs, broadcast one, so a connected
   // page always learns the change even when the response body that would
   // also have carried it is lost, delayed, or never read.
   let lastPublishedControls = computeControls();
@@ -333,7 +332,7 @@ export function createChatWebApp(
   }
 
   /** Call after any pendingPrompt/turnActive/currentTurnId assignment not
-   * immediately followed (synchronously) by its own publish()/frame() call
+   * immediately followed (synchronously) by its own broadcast/frame() call
    * for some other event -- those already recompute controls fresh and
    * announce the change as a side effect; calling this there too would only
    * be redundant, not wrong, so it is reserved for sites that otherwise
@@ -345,7 +344,7 @@ export function createChatWebApp(
   function syncControls(): void {
     const next = computeControls();
     if (controlsEqual(next, lastPublishedControls)) return;
-    publish({ kind: "controls" });
+    broadcastLive({ kind: "controls" }, Date.now(), nextSeq());
   }
 
   function attachControls(error: unknown): unknown {
@@ -389,7 +388,6 @@ export function createChatWebApp(
   function frame(
     event: ChatStreamEvent,
     at: number,
-    turnId: number | undefined,
     seq: number | undefined,
     replay?: boolean,
   ): string {
@@ -400,13 +398,17 @@ export function createChatWebApp(
       JSON.stringify({
         ...event,
         at,
-        turnId,
         seq,
         controls,
         ...(replay ? { replay: true } : {}),
       }) +
       "\n\n"
     );
+  }
+
+  function broadcastLive(event: ChatStreamEvent, at: number, seq: number): void {
+    const encoded = frame(event, at, seq);
+    for (const client of clients) client.write(encoded);
   }
 
   /** The current-state snapshot every new connection gets first, marked so
@@ -421,7 +423,6 @@ export function createChatWebApp(
       JSON.stringify({
         ...state,
         snapshot: true,
-        turnId: currentTurnId,
         seq: nextSeq(),
         controls: computeControls(),
       }) +
@@ -457,7 +458,6 @@ export function createChatWebApp(
       eventLog.unshift({
         event: { kind: "history-trimmed" },
         at: Date.now(),
-        turnId: currentTurnId,
         seq: nextSeq(),
       });
     }
@@ -493,7 +493,7 @@ export function createChatWebApp(
         liveSeq = nextSeq();
       } else {
         const entrySeq = nextSeq();
-        open = { event: { ...event }, at, turnId: currentTurnId, seq: entrySeq };
+        open = { event: { ...event }, at, seq: entrySeq };
         eventLog.push(open);
         openDeltas.set(key, open);
         trimLog();
@@ -506,7 +506,6 @@ export function createChatWebApp(
           eventLog.push({
             event: { kind: "history-trimmed" },
             at,
-            turnId: currentTurnId,
             seq: nextSeq(),
           });
           trimLog();
@@ -514,11 +513,10 @@ export function createChatWebApp(
       }
     } else {
       liveSeq = nextSeq();
-      eventLog.push({ event, at, turnId: currentTurnId, seq: liveSeq });
+      eventLog.push({ event, at, seq: liveSeq });
       trimLog();
     }
-    const encoded = frame(event, at, currentTurnId, liveSeq);
-    for (const client of clients) client.write(encoded);
+    broadcastLive(event, at, liveSeq);
   }
 
   function sessionEnded(event: ChatStreamEvent): boolean {
@@ -636,30 +634,29 @@ export function createChatWebApp(
 
   async function liveSession(): Promise<PluginAgentSession> {
     if (processSession) return processSession;
-    const available = await Promise.resolve(driver.probe()).catch((error: unknown) => {
-      // A Stop that arrived while the probe was in flight already recorded
-      // its intent (pendingPrompt.stopRequested) and already answered 200
-      // -- if the probe goes on to reject anyway, that rejection is not
-      // news the user asked about: report the stop as the outcome, not an
-      // unrelated fatal error and a recovery card for nothing left to
-      // recover.
-      if (pendingPrompt?.stopRequested) {
-        throw requestError(503, "The Codex session was stopped while it started.");
-      }
-      const message = errorMessage(error);
-      publish({ kind: "error", message, fatal: true });
-      throw requestError(503, message);
-    });
+    const probeResult = await Promise.resolve(driver.probe()).then(
+      (available) => ({ ok: true as const, available }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
     // A Stop that arrived while the probe was still in flight has no
     // sessionStart yet for stop() to abandon on its own -- pendingPrompt
     // .stopRequested is the only record of it, and this is the first point
     // after that await where message() can honor it, before this attempt
     // goes on to start a session nobody wants anymore. Nothing async
     // separates this line from the decision, a few lines down, to actually
-    // start that session -- one check covers the whole stretch.
+    // start that session -- one check covers the whole stretch. If the probe
+    // rejected too, that rejection is not news the user asked about: report
+    // the stop as the outcome, not an unrelated fatal error and a recovery
+    // card for nothing left to recover.
     if (pendingPrompt?.stopRequested) {
       throw requestError(503, "The Codex session was stopped while it started.");
     }
+    if (!probeResult.ok) {
+      const message = errorMessage(probeResult.error);
+      publish({ kind: "error", message, fatal: true });
+      throw requestError(503, message);
+    }
+    const available = probeResult.available;
     if (!available.installed) {
       // The provider's own diagnostic (often a raw "spawn codex ENOENT")
       // always exists for a probe that reports not-installed, so it used to
@@ -718,7 +715,6 @@ export function createChatWebApp(
       const reserved: {
         event: ChatStreamEvent;
         at: number;
-        turnId?: number;
         seq?: number;
         provisional?: boolean;
       } = {
@@ -792,7 +788,6 @@ export function createChatWebApp(
       // for one that in fact was.
       turnActive = true;
       reserved.provisional = false;
-      reserved.turnId = currentTurnId;
       reserved.seq = nextSeq();
       // The reservation can have aged out of the buffer's cap while prompt()
       // was still pending (a very active turn ahead of it) -- put it back at
@@ -802,8 +797,7 @@ export function createChatWebApp(
         eventLog.push(reserved);
         trimLog();
       }
-      const encoded = frame(reserved.event, reserved.at, reserved.turnId, reserved.seq);
-      for (const client of clients) client.write(encoded);
+      broadcastLive(reserved.event, reserved.at, reserved.seq);
       // A Stop that arrived while the prompt was still awaiting acceptance:
       // now that the driver holds the turn, the recorded intent becomes a
       // real cancel. Best-effort like any cancel after Stop's own 200
@@ -817,9 +811,7 @@ export function createChatWebApp(
         "content-type": "application/json; charset=utf-8",
         "x-content-type-options": "nosniff",
       });
-      response.end(
-        JSON.stringify({ turnId: currentTurnId, controls: computeControls(), seq: nextSeq() }),
-      );
+      response.end(JSON.stringify({ controls: computeControls(), seq: nextSeq() }));
     } finally {
       if (pendingPrompt === inFlight) pendingPrompt = null;
       syncControls();
@@ -942,7 +934,7 @@ export function createChatWebApp(
     response.write(snapshotFrame());
     for (const entry of eventLog) {
       if (entry.provisional) continue;
-      response.write(frame(entry.event, entry.at, entry.turnId, entry.seq, true));
+      response.write(frame(entry.event, entry.at, entry.seq, true));
     }
     clients.add(response);
     request.once("close", () => clients.delete(response));
