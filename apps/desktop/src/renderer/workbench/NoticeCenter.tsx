@@ -12,7 +12,11 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
+import {
+  ENGINE_STORE_BACKUP_DIR,
+  type SyncStatusResult,
+  type UpdateStateEvent,
+} from "../../ipc/bridgeContract";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
@@ -287,23 +291,12 @@ export function NoticeCenter(props: {
       });
     }
 
-    // #874: the engine refused to open this workspace's database — a
-    // designed recovery outcome, not a generic capture failure. Say what was
-    // found in the user's nouns and offer the real recovery; the
-    // capture-failed copy below would claim recent changes "may be missing"
-    // from a History that cannot open at all, and offers nothing.
     if (props.syncStatus?.engineStoreRefused) {
       next.push({
         id: "engine-store-refused",
         tone: "danger",
-        title:
-          props.syncStatus.engineStoreRefused === "unsupported-fingerprint"
-            ? "Data store from an older dohc"
-            : "Data store not created by dohc",
-        body:
-          props.syncStatus.engineStoreRefused === "unsupported-fingerprint"
-            ? "This workspace's data store is from an older version of dohc. Your files are untouched."
-            : "This workspace's data store was not created by dohc. Your files are untouched.",
+        title: "dohc can't read this data store",
+        body: `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds history from your files.`,
         action: { label: "Rebuild", onClick: props.onRebuildEngineStore },
         Icon: AlertTriangle,
       });

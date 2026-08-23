@@ -91,6 +91,22 @@ export {
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
+export async function probeEngineStoreRefusal(
+  workspaceId: string,
+  rootPath: string,
+  rustEngineSessions: EngineWorkspaceSessions,
+): Promise<EngineStoreRefusal | null> {
+  try {
+    await createCaptureLiveStores(
+      { workspaceId, rootPath },
+      rustEngineSessions,
+    ).store.ensureMainVersion({ workspaceId });
+    return null;
+  } catch (error) {
+    return engineStoreRefusalOf(error);
+  }
+}
+
 // PR 0M-3 watcher->engine capture + PR 0M-4 named-version operations +
 // PR 0M-5 history/restore (which ended the 0M-3 interim dual-write).
 //

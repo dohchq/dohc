@@ -382,7 +382,10 @@ import {
   SHARED_WITH_ME_FOLDER,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
-import { moveEngineStoreAside } from "./workspaces/engineStoreRebuild";
+import {
+  moveEngineStoreAside,
+  rebuildEngineStore as rebuildEngineStoreFiles,
+} from "./workspaces/engineStoreRebuild";
 import {
   completeWorkspaceJoinBootstrap,
   effectiveHome,
@@ -585,6 +588,7 @@ import {
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
+  probeEngineStoreRefusal,
 } from "./workspaces/workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
@@ -10839,37 +10843,36 @@ function registerIpcHandlers(
     return SyncStatusResult.parse(activity.getStatus(input.workspaceId));
   });
 
-  // #874: the recovery for an engine database the daemon refuses to open.
-  // Main derives everything itself — the workspace root from the registry,
-  // the refusal from its OWN activity status — so the renderer only asks;
-  // it cannot choose what moves or where.
   ipcMain.handle(CHANNELS.rebuildEngineStore, async (event, payload) => {
     assertTrustedSender(event);
     const input = RebuildEngineStorePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    // Only a store main itself saw refused may be moved. A healthy store
-    // moved aside would silently detach the workspace's history and chats,
-    // so a request that races a recovered store refuses here.
-    if (activity.getStatus(workspace.workspaceId).engineStoreRefused === null) {
+    // Only a store main itself saw refused may be moved.
+    if (!activity.getStatus(workspace.workspaceId).engineStoreRefused) {
       throw new Error(
-        "This workspace's data store is not refused. Nothing to rebuild.",
+        "dohc can read this workspace's current data store. Nothing moved.",
       );
     }
-    // Stop this workspace's engine activity before touching the files: a
-    // concurrent daemon open holds the database, and Windows refuses to
-    // rename an open file. Reopen afterwards EITHER way — on a completed
-    // move the fresh store rebuilds from files; on the no-clobber refusal
-    // the workspace comes back in its refused-but-visible state.
-    await closeDispatchRunActivity(workspace.workspaceId);
-    try {
-      return RebuildEngineStoreResult.parse(
-        await moveEngineStoreAside(workspace.rootPath),
-      );
-    } finally {
-      await openWorkspaceActivity(workspace);
-      notifyRenderer();
-    }
+    return RebuildEngineStoreResult.parse(
+      await rebuildEngineStoreFiles(workspace.rootPath, {
+        closeActivity: () => closeDispatchRunActivity(workspace.workspaceId),
+        probeStoreRefusal: () =>
+          probeEngineStoreRefusal(
+            workspace.workspaceId,
+            workspace.rootPath,
+            requireEngineSessions(),
+          ),
+        moveStoreAside: moveEngineStoreAside,
+        reopenActivity: async () => {
+          try {
+            await openWorkspaceActivity(workspace);
+          } finally {
+            notifyRenderer();
+          }
+        },
+      }),
+    );
   });
 
   // Enabling agents starts a local run: the workspace must already be OPEN (the

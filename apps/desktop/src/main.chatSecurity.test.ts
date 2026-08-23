@@ -820,7 +820,7 @@ describe("main-process chat authorization", () => {
       "withExclusiveWorkspaceOperation(",
       "withStaleSensitiveWorkspaceOperation(",
       "engineCaptureFor(",
-      "moveEngineStoreAside(",
+      "rebuildEngineStoreFiles(",
     ];
 
     for (const channel of fileWrites) {
@@ -854,8 +854,10 @@ describe("main-process chat authorization", () => {
   // detach the workspace's history and chats.
   it("gates the engine-store rebuild on main's own refusal fact, before the move", () => {
     const handler = handlerSource("rebuildEngineStore");
-    const gateAt = handler.indexOf(".engineStoreRefused === null");
-    const moveAt = handler.indexOf("moveEngineStoreAside(");
+    const gateAt = handler.indexOf(
+      "!activity.getStatus(workspace.workspaceId).engineStoreRefused",
+    );
+    const moveAt = handler.indexOf("moveStoreAside: moveEngineStoreAside");
     expect(
       gateAt,
       "MUTATION: without the gate, any renderer request moves a healthy store",

@@ -1830,7 +1830,6 @@ describe("sync status IPC contract (#505, #540)", () => {
       lastSyncedAtMs: null,
       historyRecordingUnavailable: false,
       historyShareView: false,
-      engineStoreRefused: null,
       sharingDeclined: [
         {
           path: "notes/large.md",
@@ -1843,22 +1842,27 @@ describe("sync status IPC contract (#505, #540)", () => {
     expect(SyncStatusResult.parse(status).sharingDeclined).toEqual(
       status.sharingDeclined,
     );
-    // The cause fields are REQUIRED where their neighbours are optional: an
-    // omitted value would read as "the user chose this" / "the store opened",
-    // which are the false causes #505 (build failure), #540 (shared view),
-    // and #874 (refused store) exist to kill.
+    // The recorder cause fields are required because omission would claim the
+    // user chose the failure or that this is not a shared view.
     const { historyRecordingUnavailable: _dropped, ...withoutFailureCause } = status;
     expect(SyncStatusResult.safeParse(withoutFailureCause).success).toBe(false);
     const { historyShareView: _alsoDropped, ...withoutShareCause } = status;
     expect(SyncStatusResult.safeParse(withoutShareCause).success).toBe(false);
-    const { engineStoreRefused: _refusalDropped, ...withoutRefusalCause } = status;
+    const failedStatus = {
+      ...status,
+      historyCaptureFailed: true as const,
+      engineStoreRefused: null,
+    };
+    const { engineStoreRefused: _refusalDropped, ...withoutRefusalCause } =
+      failedStatus;
     expect(SyncStatusResult.safeParse(withoutRefusalCause).success).toBe(false);
     expect(
-      SyncStatusResult.parse({
-        ...status,
-        engineStoreRefused: "unsupported-fingerprint",
-      }).engineStoreRefused,
-    ).toBe("unsupported-fingerprint");
+      SyncStatusResult.safeParse({ ...status, engineStoreRefused: null }).success,
+    ).toBe(false);
+    expect(
+      SyncStatusResult.safeParse({ ...status, engineStoreRefused: undefined })
+        .success,
+    ).toBe(false);
   });
 });
 

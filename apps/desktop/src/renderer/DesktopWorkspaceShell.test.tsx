@@ -136,7 +136,6 @@ const SYNC_STATUS: SyncStatusResult = {
   // and whether the engine refused the workspace's data store.
   historyRecordingUnavailable: false,
   historyShareView: false,
-  engineStoreRefused: null,
 };
 
 const IDLE_UPDATE_STATE: UpdateStateEvent = {
@@ -328,8 +327,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     // default: the recovery tests swap in the no-clobber refusal.
     rebuildEngineStore: vi.fn(
       async (): Promise<RebuildEngineStoreResult> => ({
-        moved: true,
-        backupDir: ".dohc/engine/pre-v2-backup",
+        outcome: "moved",
       }),
     ),
     // Typed to the contract, not to this idle default: a freshness test drives
@@ -5984,7 +5982,7 @@ describe("ui-state merge-on-load", () => {
 describe("engine store recovery", () => {
   const refusedStatus = {
     ...SYNC_STATUS,
-    historyCaptureFailed: true,
+    historyCaptureFailed: true as const,
     engineStoreRefused: "unsupported-fingerprint" as const,
   };
 
@@ -6009,7 +6007,7 @@ describe("engine store recovery", () => {
     // The user learns what moves, where it goes, and what does NOT come
     // back, before anything moves.
     expect(dialog.textContent).toContain(
-      "This workspace's data store is from an older version of dohc.",
+      "dohc can't read this workspace's data store format.",
     );
     expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(dialog.textContent).toContain(
@@ -6037,9 +6035,7 @@ describe("engine store recovery", () => {
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     bridge.rebuildEngineStore = vi.fn(async () => ({
-      moved: false as const,
-      reason: "backup-exists" as const,
-      backupDir: ".dohc/engine/pre-v2-backup",
+      outcome: "backup-exists" as const,
     }));
     const { user, dialog } = await openRebuildDialog(bridge);
 
@@ -6049,9 +6045,36 @@ describe("engine store recovery", () => {
     await waitFor(() => {
       const text = screen.getByTestId("engine-rebuild-dialog").textContent;
       expect(text).toContain(
-        "A folder already exists at .dohc/engine/pre-v2-backup",
+        "A file or folder already exists at .dohc/engine/pre-v2-backup",
       );
-      expect(text).toContain("Move that folder away, then try again.");
+      expect(text).toContain("Move it away, then try again.");
+    });
+  });
+
+  it("reports a completed move and a reopen failure separately", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => ({
+      outcome: "moved" as const,
+      reopenFailed:
+        "dohc could not finish rebuilding this workspace's data store.",
+    }));
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+
+    await waitFor(() => {
+      const text = screen.getByTestId("engine-rebuild-dialog").textContent;
+      expect(text).toContain(
+        "The old data store is at .dohc/engine/pre-v2-backup",
+      );
+      expect(text).toContain(
+        "dohc could not finish rebuilding this workspace's data store.",
+      );
+      expect(text).not.toContain("could not move");
     });
   });
 
@@ -8694,6 +8717,28 @@ describe("history page", () => {
     await waitFor(() =>
       expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(statusCalls),
     );
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+  });
+
+  it("never asks a refused store for engine moments", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const refusedStatus = {
+      ...SYNC_STATUS,
+      historyCaptureFailed: true as const,
+      engineStoreRefused: "foreign-database" as const,
+    };
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
+
     expect(bridge.listEngineMoments).not.toHaveBeenCalled();
   });
 
@@ -12216,7 +12261,6 @@ describe("version-compare off copy", () => {
     lastSyncedAtMs: null,
     historyRecordingUnavailable: false,
     historyShareView: false,
-    engineStoreRefused: null,
   };
 
   it("calls a failed capture build unavailable, never empty", () => {
@@ -12280,7 +12324,6 @@ describe("chats off copy", () => {
     lastSyncedAtMs: null,
     historyRecordingUnavailable: false,
     historyShareView: false,
-    engineStoreRefused: null,
   };
 
   it("calls a failed capture build unavailable, never empty", () => {

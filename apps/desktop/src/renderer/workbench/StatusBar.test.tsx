@@ -175,7 +175,6 @@ describe("sync status surface", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
       },
     });
     const status = screen.getByTestId("sync-status");
@@ -196,7 +195,6 @@ describe("sync status surface", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
         conflictCount: 2,
       },
     });
@@ -213,7 +211,6 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
         sharingDeclined: [
           {
             path: "notes/large.md",
@@ -248,7 +245,6 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
         conflictCount: 2,
       },
       agentActive: true,
@@ -301,7 +297,7 @@ describe("notice center", () => {
   // user's nouns, state that files are untouched, and offer the rebuild —
   // and it REPLACES the "History paused" copy, which says nothing is wrong
   // with the store and offers no recovery.
-  it("explains a data store from an older dohc and offers the rebuild", async () => {
+  it("explains an unreadable data store and offers the rebuild", async () => {
     const onRebuildEngineStore = vi.fn();
     renderBar({
       syncStatus: {
@@ -318,17 +314,16 @@ describe("notice center", () => {
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-engine-store-refused");
-    expect(notice.textContent).toContain(
-      "This workspace's data store is from an older version of dohc.",
-    );
+    expect(notice.textContent).toContain("dohc can't read this data store");
     expect(notice.textContent).toContain("Your files are untouched.");
+    expect(notice.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
 
     await userEvent.click(within(notice).getByRole("button", { name: "Rebuild" }));
     expect(onRebuildEngineStore).toHaveBeenCalledOnce();
   });
 
-  it("explains a data store that dohc did not create", async () => {
+  it("uses the same facts for a foreign-database refusal", async () => {
     renderBar({
       syncStatus: {
         state: "synced",
@@ -344,9 +339,7 @@ describe("notice center", () => {
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-engine-store-refused");
-    expect(notice.textContent).toContain(
-      "This workspace's data store was not created by dohc.",
-    );
+    expect(notice.textContent).toContain("dohc can't read this data store");
     expect(notice.textContent).toContain("Your files are untouched.");
     expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
   });
@@ -359,7 +352,6 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
         conflictCount: 1,
       },
     });
@@ -384,7 +376,6 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
         historyRecordingOff: true,
         // #483: the cause rides main's open-time read, on the same status
         // that decided history is off. One read answers both.
@@ -410,7 +401,6 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
         historyRecordingOff: true,
       },
     });
@@ -433,7 +423,6 @@ describe("notice center", () => {
         historyRecordingOff: true,
         historyRecordingUnavailable: true,
         historyShareView: false,
-        engineStoreRefused: null,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -463,7 +452,6 @@ describe("notice center", () => {
         historyRecordingOff: true,
         historyRecordingUnavailable: false,
         historyShareView: true,
-        engineStoreRefused: null,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -484,7 +472,6 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
       },
     });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -528,7 +515,7 @@ describe("notice center", () => {
       historyRecordingUnavailable: false,
       historyShareView: false,
       engineStoreRefused: null,
-      historyCaptureFailed: true,
+      historyCaptureFailed: true as const,
     };
     const { rerender } = renderBar({ syncStatus: failedStatus });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -538,11 +525,16 @@ describe("notice center", () => {
       ),
     ).toBeTruthy();
 
+    const {
+      historyCaptureFailed: _historyCaptureFailed,
+      engineStoreRefused: _engineStoreRefused,
+      ...recoveredStatus
+    } = failedStatus;
     rerender(
       <StatusBar
         workspaceId="ws-status-test"
         workspaceName="my-notes"
-        syncStatus={{ ...failedStatus, historyCaptureFailed: false }}
+        syncStatus={recoveredStatus}
         agentActive={false}
         conflictSummaries={[]}
         onConnectCloud={() => {}}
@@ -711,7 +703,6 @@ describe("notice center", () => {
         lastSyncedAtMs: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        engineStoreRefused: null,
       },
     });
 

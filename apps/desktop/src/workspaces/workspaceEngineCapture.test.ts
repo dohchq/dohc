@@ -2746,7 +2746,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     state.failing = false;
     engineCapture!.captureBatch([{ path: "note.md", operation: "update" }]);
     await engineCapture!.flush();
-    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBeUndefined();
     expect(notifyCount).toBe(notifiesAtRaise + 1);
 
     await activity.stopAll();
@@ -2764,10 +2764,10 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
       captureFor: () => ({ capture: null, shareView: false }),
     });
     await activity.open(workspace);
-    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBeUndefined();
     await activity.stopAll();
     // Not-open workspaces report a clean status too.
-    expect(activity.getStatus("never-opened").historyCaptureFailed).toBe(false);
+    expect(activity.getStatus("never-opened").historyCaptureFailed).toBeUndefined();
   }, 15_000);
 });
 

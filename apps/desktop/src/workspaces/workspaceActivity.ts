@@ -46,17 +46,9 @@ interface WatchedWorkspace {
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
   historyShareView: boolean;
-  // True while the engine capture (this workspace's SOLE history recorder)
-  // is failing. Drives the persistent history-capture notice: set on the
-  // first failed capture pass, cleared when a later pass succeeds, notify()
-  // only on transitions so repeated failures never spam the UI.
-  captureFailed: boolean;
-  // The engine's classification when it REFUSES to open this workspace's
-  // database (#874): a store from an unsupported dohc version, or a file the
-  // engine will not initialize over. Null while the store opens (or fails for
-  // any other reason). Drives the recovery notice — the copy and the
-  // move-aside rebuild action — instead of the generic capture-failure one.
-  engineStoreRefused: EngineStoreRefusal | null;
+  // One failure cause keeps the wire status from describing impossible
+  // combinations. "other" means capture failed without a store refusal.
+  historyCaptureFailure: "other" | EngineStoreRefusal | null;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -166,11 +158,10 @@ export function createWorkspaceActivity(
     // notice center shows when history capture is failing, and — post flag
     // flip — when a workspace records no history at all (engine opt-out;
     // the legacy recorder is retired).
-    return {
+    const historyCaptureFailure = w?.historyCaptureFailure ?? null;
+    const baseStatus = {
       ...status,
       conflictCount,
-      historyCaptureFailed: w?.captureFailed ?? false,
-      engineStoreRefused: w?.engineStoreRefused ?? null,
       historyRecordingOff: w?.historyRecordingOff ?? false,
       ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
@@ -178,6 +169,15 @@ export function createWorkspaceActivity(
       sharingDeclined: snap?.sharingDeclined ?? [],
       syncFailing: snap?.syncFailing ?? false,
     };
+    if (historyCaptureFailure) {
+      return {
+        ...baseStatus,
+        historyCaptureFailed: true,
+        engineStoreRefused:
+          historyCaptureFailure === "other" ? null : historyCaptureFailure,
+      };
+    }
+    return baseStatus;
   }
 
   async function open(workspace: CreatedWorkspace): Promise<SyncStatusResult> {
@@ -193,8 +193,7 @@ export function createWorkspaceActivity(
         settingsWarning: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        captureFailed: false,
-        engineStoreRefused: null,
+        historyCaptureFailure: null,
         agentRun: null,
       };
       watched.set(workspace.workspaceId, entry);
@@ -218,14 +217,9 @@ export function createWorkspaceActivity(
                 // never re-notify. The refusal classification transitions the
                 // same way (#874): a persistently refused store re-reports
                 // the same code on every pass.
-                if (
-                  entry.captureFailed === !ok &&
-                  entry.engineStoreRefused === storeRefused
-                ) {
-                  return;
-                }
-                entry.captureFailed = !ok;
-                entry.engineStoreRefused = storeRefused;
+                const failure = ok ? null : (storeRefused ?? "other");
+                if (entry.historyCaptureFailure === failure) return;
+                entry.historyCaptureFailure = failure;
                 notify();
               },
             });

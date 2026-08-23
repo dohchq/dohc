@@ -1,18 +1,22 @@
-import { mkdir, rename, rmdir } from "node:fs/promises";
+import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
+import {
+  access,
+  mkdir,
+  rename as renameFile,
+  rmdir,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
+import {
+  ENGINE_STORE_BACKUP_DIR,
+  type RebuildEngineStoreResult,
+} from "../ipc/bridgeContract";
 
-// #874: recovery for an engine database the daemon refuses to open
-// (`unsupported-fingerprint` / `foreign-database`). The store moves — never
-// deletes — into a named folder inside the workspace, and the next open
-// creates a fresh store that rebuilds from files.
-//
-// Workspace-relative on purpose: the UI shows this string as the reverse
-// path, and a relative path names the location without embedding a username.
-export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
+const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
+const MOVE_COMPLETE = "MOVE_COMPLETE";
 
-export type EngineStoreMoveResult =
-  | { moved: true; backupDir: string }
-  | { moved: false; reason: "backup-exists"; backupDir: string };
+type MoveOutcome = RebuildEngineStoreResult["outcome"];
 
 function errorCode(error: unknown): string | null {
   return typeof error === "object" &&
@@ -23,56 +27,122 @@ function errorCode(error: unknown): string | null {
     : null;
 }
 
-// Moves `.dohc/engine/engine.db` and its `-wal`/`-shm` sidecars into
-// `ENGINE_STORE_BACKUP_DIR`. Refuses — moving NOTHING — when that folder
-// already exists: it holds the only copy of a store dohc already moved
-// aside, and writing over it would destroy the reverse path this move
-// exists to preserve.
-//
-// The caller must have stopped this workspace's engine activity first: a
-// concurrent daemon open holds the database file, and Windows refuses to
-// rename an open file.
-export async function moveEngineStoreAside(
-  rootPath: string,
-): Promise<EngineStoreMoveResult> {
-  const engineDir = join(rootPath, ".dohc", "engine");
-  const backupDir = join(engineDir, "pre-v2-backup");
-  // The mkdir is the no-clobber reservation: exclusive by contract, so two
-  // concurrent attempts cannot both proceed.
+async function exists(path: string): Promise<boolean> {
   try {
-    await mkdir(backupDir);
+    await access(path);
+    return true;
   } catch (error) {
-    if (errorCode(error) === "EEXIST") {
-      return {
-        moved: false,
-        reason: "backup-exists",
-        backupDir: ENGINE_STORE_BACKUP_DIR,
-      };
-    }
+    if (errorCode(error) === "ENOENT") return false;
     throw error;
   }
+}
+
+export async function moveEngineStoreAside(
+  rootPath: string,
+  deps: { rename?: typeof renameFile } = {},
+): Promise<MoveOutcome> {
+  const rename = deps.rename ?? renameFile;
+  const engineDir = join(rootPath, ".dohc", "engine");
+  const backupDir = join(rootPath, ENGINE_STORE_BACKUP_DIR);
+  const inProgressMarker = join(backupDir, MOVE_IN_PROGRESS);
+  const completeMarker = join(backupDir, MOVE_COMPLETE);
+  let freshReservation = false;
+
+  try {
+    await mkdir(backupDir);
+    freshReservation = true;
+  } catch (error) {
+    if (errorCode(error) !== "EEXIST") throw error;
+    // A completed or unmarked path is not ours to overwrite.
+    if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) {
+      return "backup-exists";
+    }
+  }
+  if (freshReservation) {
+    try {
+      await writeFile(inProgressMarker, "", { flag: "wx" });
+    } catch (error) {
+      await rmdir(backupDir).catch(() => undefined);
+      throw error;
+    }
+  }
+
   let movedAny = false;
   try {
-    // Sidecars first, database last. Each rename is atomic but the group is
-    // not; if the process dies mid-move, this order leaves `engine.db` in
-    // place — the workspace stays refused-but-recoverable. The other order
-    // could leave a stale WAL beside a fresh database, and SQLite would
-    // replay the old store's pages into it.
-    for (const sidecar of ["engine.db-wal", "engine.db-shm"]) {
+    const liveDatabase = join(engineDir, "engine.db");
+    const backupDatabase = join(backupDir, "engine.db");
+    if (!(await exists(liveDatabase)) && !(await exists(backupDatabase))) {
+      throw Object.assign(new Error(`ENOENT: no engine database at ${liveDatabase}`), {
+        code: "ENOENT",
+      });
+    }
+
+    // SHM is transient; move SHM, then the authoritative WAL, then the database.
+    for (const name of ["engine.db-shm", "engine.db-wal", "engine.db"] as const) {
+      const from = join(engineDir, name);
+      const to = join(backupDir, name);
+      if (await exists(to)) continue;
       try {
-        await rename(join(engineDir, sidecar), join(backupDir, sidecar));
+        await rename(from, to);
         movedAny = true;
       } catch (error) {
         if (errorCode(error) !== "ENOENT") throw error;
+        if (name === "engine.db" && !(await exists(to))) throw error;
       }
     }
-    await rename(join(engineDir, "engine.db"), join(backupDir, "engine.db"));
+    await renameFile(inProgressMarker, completeMarker);
+    return "moved";
   } catch (error) {
-    // A failed move with nothing moved must release the reservation, or the
-    // empty folder wedges every later attempt behind the no-clobber refusal.
-    // Once anything moved, the folder holds real files and stays.
-    if (!movedAny) await rmdir(backupDir).catch(() => undefined);
+    if (freshReservation && !movedAny) {
+      await unlink(inProgressMarker).catch(() => undefined);
+      await rmdir(backupDir).catch(() => undefined);
+    }
     throw error;
   }
-  return { moved: true, backupDir: ENGINE_STORE_BACKUP_DIR };
+}
+
+export class EngineStoreNotRefusedError extends Error {
+  constructor() {
+    super("dohc can read this workspace's current data store. Nothing moved.");
+    this.name = "EngineStoreNotRefusedError";
+  }
+}
+
+export async function rebuildEngineStore(
+  rootPath: string,
+  deps: {
+    probeStoreRefusal: () => Promise<EngineStoreRefusal | null>;
+    closeActivity: () => Promise<void>;
+    reopenActivity: () => Promise<void>;
+    moveStoreAside: (rootPath: string) => Promise<MoveOutcome>;
+  },
+): Promise<RebuildEngineStoreResult> {
+  let outcome: MoveOutcome | undefined;
+  let operationError: unknown;
+  let reopenFailed: string | undefined;
+
+  try {
+    await deps.closeActivity();
+    if ((await deps.probeStoreRefusal()) === null) {
+      throw new EngineStoreNotRefusedError();
+    }
+    outcome = await deps.moveStoreAside(rootPath);
+  } catch (error) {
+    operationError = error;
+  } finally {
+    try {
+      await deps.reopenActivity();
+    } catch {
+      if (outcome) {
+        reopenFailed =
+          "dohc could not finish rebuilding this workspace's data store.";
+      }
+    }
+  }
+
+  if (operationError !== undefined) throw operationError;
+  if (outcome === undefined) {
+    throw new Error("The data store rebuild finished without an outcome.");
+  }
+  return { outcome, ...(reopenFailed ? { reopenFailed } : {}) };
 }

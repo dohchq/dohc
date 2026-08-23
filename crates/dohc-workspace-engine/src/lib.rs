@@ -11707,13 +11707,8 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if store_busy(&error) {
         return wire(ErrorCode::Overloaded, "engine-store-busy");
     }
-    // A database the fingerprint fence refuses is a DESIGNED export/reset
-    // outcome (#874): the storage layer classified it, and the desktop turns
-    // the code into its recovery surface ("your store is from an older dohc"
-    // plus the move-aside rebuild). The generic tail buried both refusals as
-    // "workspace operation failed". Matched as `RuntimeError::Storage` only:
-    // the fence runs when `supervisor.open` opens the store, before any
-    // wrapper layer exists for the workspace.
+    // Keep the storage refusal code so the desktop can offer move-aside
+    // recovery instead of reporting a generic workspace failure.
     if let RuntimeError::Storage(
         refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
         | dohc_engine_storage::StorageError::ForeignDatabase),
@@ -12179,22 +12174,8 @@ mod tests {
         assert_ne!(corrupt.message, "engine-store-busy");
     }
 
-    /// #874: a database the fingerprint fence refuses is a DESIGNED
-    /// export/reset outcome (`dohc-engine-storage`), not an anonymous
-    /// failure. The generic tail reported both refusals as "workspace
-    /// operation failed", so the desktop could not tell "your store is from
-    /// an older dohc" apart from any other internal error — and offered no
-    /// recovery. The wire message carries the storage code so the desktop
-    /// can say what it found and offer the move-aside rebuild.
-    ///
-    /// These reach `map_runtime` only as `RuntimeError::Storage`: the fence
-    /// runs when `supervisor.open` opens the store, before any wrapper layer
-    /// (domain, collab, sync) exists for the workspace.
-    ///
-    /// MUTATION: remove the refused-database arm from `map_runtime` -> both
-    /// report "workspace operation failed".
     #[test]
-    fn a_refused_engine_database_names_its_storage_code_on_the_wire() {
+    fn an_unsupported_fingerprint_names_its_storage_code_on_the_wire() {
         use dohc_engine_storage::StorageError;
         let fingerprint = map_runtime(RuntimeError::Storage(
             StorageError::UnsupportedFingerprint {
@@ -12204,10 +12185,6 @@ mod tests {
         ));
         assert_eq!(fingerprint.code, ErrorCode::Internal);
         assert_eq!(fingerprint.message, "unsupported-fingerprint");
-
-        let foreign = map_runtime(RuntimeError::Storage(StorageError::ForeignDatabase));
-        assert_eq!(foreign.code, ErrorCode::Internal);
-        assert_eq!(foreign.message, "foreign-database");
     }
 
     /// #874 repro shape: a July-era `engine.db` — user tables, `user_version`

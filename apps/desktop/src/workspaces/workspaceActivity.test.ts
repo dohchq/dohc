@@ -330,7 +330,7 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
       },
     });
     await activity.open(workspace());
-    expect(activity.getStatus("activity-test").engineStoreRefused).toBeNull();
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
 
     notify.mockClear();
     hooks!.onCaptureOutcome({
@@ -351,8 +351,14 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
 
     // A pass that reached the store clears the refusal with the failure.
     hooks!.onCaptureOutcome({ ok: true, storeRefused: null });
-    expect(activity.getStatus("activity-test").engineStoreRefused).toBeNull();
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
     expect(notify).toHaveBeenCalledTimes(2);
+
+    hooks!.onCaptureOutcome({ ok: false, storeRefused: null });
+    const otherFailure = activity.getStatus("activity-test");
+    expect(otherFailure.historyCaptureFailed).toBe(true);
+    expect(otherFailure.engineStoreRefused).toBeNull();
+    expect(notify).toHaveBeenCalledTimes(3);
     await activity.stopAll();
   });
 });

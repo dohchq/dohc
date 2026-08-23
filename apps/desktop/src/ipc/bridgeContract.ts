@@ -817,7 +817,7 @@ export const ImportToDatabaseResult = z.object({
 });
 export type ImportToDatabaseResult = z.infer<typeof ImportToDatabaseResult>;
 
-export const SyncStatusResult = z.object({
+const SYNC_STATUS_BASE_FIELDS = {
   state: z.enum([
     "synced",
     "syncing",
@@ -831,24 +831,6 @@ export const SyncStatusResult = z.object({
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
-  // Additive (PR 0M-7): true while the workspace-engine capture — a flagged
-  // workspace's SOLE history recorder — is failing, so the notice center can
-  // say history is not being recorded. Optional so older producers/fixtures
-  // keep parsing.
-  historyCaptureFailed: z.boolean().optional(),
-  // #874: the engine's classification when it REFUSES to open this
-  // workspace's database — a store from an unsupported dohc version, or a
-  // file the engine will not initialize over. The notice center reads this
-  // FIRST: the generic capture-failure copy says nothing is wrong with the
-  // store and offers no recovery, both false here.
-  //
-  // REQUIRED like historyRecordingUnavailable, and for the same reason: an
-  // omitted value would read as "the store opened", which routes a refused
-  // store to copy that cannot recover it. A producer that cannot say must
-  // not compile.
-  engineStoreRefused: z
-    .enum(["unsupported-fingerprint", "foreign-database"])
-    .nullable(),
   // Additive (WS-H1 retirement Phase C): true when this workspace records NO
   // history at all — the engine is explicitly opted out and the legacy
   // recorder no longer exists. Drives the persistent "History is off"
@@ -894,15 +876,38 @@ export const SyncStatusResult = z.object({
       }),
     )
     .optional(),
-});
+};
+
+export const SyncStatusResult = z.union([
+  z.object({
+    ...SYNC_STATUS_BASE_FIELDS,
+    historyCaptureFailed: z.literal(true),
+    // A failed producer must say whether the engine refused the store. Null
+    // means history capture failed for another reason.
+    engineStoreRefused: z
+      .enum(["unsupported-fingerprint", "foreign-database"])
+      .nullable(),
+  }),
+  z
+    .object({
+      ...SYNC_STATUS_BASE_FIELDS,
+      historyCaptureFailed: z.literal(false).optional(),
+      engineStoreRefused: z.never().optional(),
+    })
+    .superRefine((status, context) => {
+      if (Object.hasOwn(status, "engineStoreRefused")) {
+        context.addIssue({
+          code: "custom",
+          path: ["engineStoreRefused"],
+          message: "A healthy status must omit the store refusal field.",
+        });
+      }
+    }),
+]);
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
-// #874: the recovery for a refused engine store. Main moves the workspace's
-// engine database (and its -wal/-shm sidecars) into `backupDir` — a path
-// RELATIVE to the workspace root, named so the success copy can show the
-// reverse path — then reopens the workspace so a fresh store rebuilds from
-// files. `moved: false` is the no-clobber refusal: a previous backup already
-// sits at `backupDir`, and dohc never writes over it.
+export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
+
 export const RebuildEngineStorePayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
@@ -910,16 +915,11 @@ export type RebuildEngineStorePayload = z.infer<
   typeof RebuildEngineStorePayload
 >;
 
-export const RebuildEngineStoreResult = z.discriminatedUnion("moved", [
-  z.object({ moved: z.literal(true), backupDir: z.string().min(1) }),
-  z.object({
-    moved: z.literal(false),
-    reason: z.literal("backup-exists"),
-    backupDir: z.string().min(1),
-  }),
-]);
+export const RebuildEngineStoreResult = z.object({
+  outcome: z.enum(["moved", "backup-exists"]),
+  reopenFailed: z.string().min(1).max(2000).optional(),
+});
 export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
-
 
 // Engine history (PR 0M-5, workspace-engine alpha): flagged workspaces read
 // their timeline from ENGINE moments instead of legacy change sets. Every

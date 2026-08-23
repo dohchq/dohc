@@ -44,6 +44,7 @@ import type {
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
+import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import { formatSize } from "../plugins/pluginFormat";
 import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
@@ -1468,7 +1469,11 @@ export function DesktopWorkspaceShell(props: {
   // or a failed capture build — every engine-history call can only error,
   // whatever the renderer's own capability read said.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
-    Boolean(status?.historyRecordingOff || status?.historyRecordingUnavailable);
+    Boolean(
+      status?.historyRecordingOff ||
+        status?.historyRecordingUnavailable ||
+        status?.engineStoreRefused,
+    );
   // Whether main's capture decision for THIS workspace has landed. The
   // surfaces that call on mount need it, and no reading of the status can
   // supply it:
@@ -2409,16 +2414,12 @@ export function DesktopWorkspaceShell(props: {
     [],
   );
 
-  // #874: the rebuild flow for a data store the engine refused. The notice
-  // center offers the way in; this dialog is the explicit action — it states
-  // the destination before anything moves, and its success copy names the
-  // moved store's location (the reverse path). Main performs the move and
-  // derives everything from its own state; the renderer only asks.
+  // The result keeps the move outcome visible even when reopening fails.
   const [engineRebuild, setEngineRebuild] = useState<
     | { phase: "confirm" }
     | { phase: "moving" }
-    | { phase: "moved"; backupDir: string }
-    | { phase: "backup-exists"; backupDir: string }
+    | { phase: "moved"; reopenFailed?: string }
+    | { phase: "backup-exists"; reopenFailed?: string }
     | null
   >(null);
   // Workspace-scoped guard (AGENTS.md): a slow response for workspace A must
@@ -2435,11 +2436,10 @@ export function DesktopWorkspaceShell(props: {
     try {
       const result = await bridge().rebuildEngineStore({ workspaceId });
       if (engineRebuildToken.current !== token) return;
-      setEngineRebuild(
-        result.moved
-          ? { phase: "moved", backupDir: result.backupDir }
-          : { phase: "backup-exists", backupDir: result.backupDir },
-      );
+      setEngineRebuild({
+        phase: result.outcome,
+        ...(result.reopenFailed ? { reopenFailed: result.reopenFailed } : {}),
+      });
     } catch (error) {
       if (engineRebuildToken.current !== token) return;
       setEngineRebuild(null);
@@ -6208,8 +6208,10 @@ export function DesktopWorkspaceShell(props: {
                   <p className="m-0 text-sm text-ink">Data store moved</p>
                   <p className="mb-0 mt-2 text-xs text-muted">
                     The old data store is at{" "}
-                    <span className="font-mono">{engineRebuild.backupDir}</span>.
-                    dohc is rebuilding history from your files.
+                    <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
+                    {engineRebuild.reopenFailed
+                      ? ` ${engineRebuild.reopenFailed}`
+                      : " dohc is rebuilding history from your files."}
                   </p>
                 </>
               ) : engineRebuild.phase === "backup-exists" ? (
@@ -6218,10 +6220,15 @@ export function DesktopWorkspaceShell(props: {
                     dohc did not move the data store
                   </p>
                   <p className="mb-0 mt-2 text-xs text-muted">
-                    A folder already exists at{" "}
-                    <span className="font-mono">{engineRebuild.backupDir}</span>.
-                    Move that folder away, then try again.
+                    A file or folder already exists at{" "}
+                    <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
+                    Move it away, then try again.
                   </p>
+                  {engineRebuild.reopenFailed ? (
+                    <p className="mb-0 mt-2 text-xs text-muted">
+                      {engineRebuild.reopenFailed}
+                    </p>
+                  ) : null}
                 </>
               ) : (
                 <>
@@ -6229,12 +6236,10 @@ export function DesktopWorkspaceShell(props: {
                     Move the old data store aside and rebuild?
                   </p>
                   <p className="mb-0 mt-2 text-xs text-muted">
-                    {syncStatus?.engineStoreRefused === "foreign-database"
-                      ? "This workspace's data store was not created by dohc."
-                      : "This workspace's data store is from an older version of dohc."}{" "}
+                    dohc can't read this workspace's data store format.
                     dohc moves it to{" "}
-                    <span className="font-mono">.dohc/engine/pre-v2-backup</span>{" "}
-                    and starts fresh history from your files.
+                    <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>{" "}
+                    and rebuilds history from your files.
                   </p>
                   <p className="mb-0 mt-2 text-xs text-muted">
                     Past history and chats stay in the moved data store. Your
