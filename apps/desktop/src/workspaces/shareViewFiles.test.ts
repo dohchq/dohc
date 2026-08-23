@@ -366,6 +366,53 @@ describe("ShareViewFiles", () => {
     );
   });
 
+  it("repairs an ended mount locally without resolving or pulling a relay", async () => {
+    const rootPath = await workspaceRoot();
+    await mkdir(join(rootPath, "docs"), { recursive: true });
+    await writeFile(join(rootPath, "docs", "note.md"), "changed\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/note.md", text: "canonical\n" }],
+    });
+    const resolveRelay = vi.fn(async () => {
+      throw new Error("relay resolution must not run for an ended mount");
+    });
+    const pull = vi.fn(async () => {
+      throw new Error("relay pull must not run for an ended mount");
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => ({ ...mountTarget(rootPath), ended: true }),
+      openStore: () => store,
+      resolveRelay,
+      pull,
+    });
+
+    const outcome = await withStaleSensitiveWorkspaceOperation(
+      rootPath,
+      (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "refresh",
+        ),
+    );
+
+    expect(outcome).toMatchObject({
+      kind: "refresh",
+      outcome: {
+        status: "ended",
+        changedPaths: 1,
+        collisionRecordQuarantined: false,
+        unjournalablePaths: [],
+      },
+    });
+    expect(resolveRelay).not.toHaveBeenCalled();
+    expect(pull).not.toHaveBeenCalled();
+    await expect(
+      readFile(join(rootPath, "docs", "note.md"), "utf8"),
+    ).resolves.toBe("canonical\n");
+  });
+
   it("keeps mounted recipient data after quarantining a malformed collision record", async () => {
     const rootPath = await workspaceRoot();
     const path = "docs/collision.md";

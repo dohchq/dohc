@@ -7588,10 +7588,6 @@ function registerIpcHandlers(
                 pushMountResult(mount, "damaged", 0);
                 continue;
               }
-              if (mount.ended) {
-                pushMountResult(mount, "ended", 0);
-                continue;
-              }
               try {
                 // A slow relay can hold this mount's transaction, but it must
                 // not extend one workspace lease across every mounted share.
