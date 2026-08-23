@@ -16,6 +16,8 @@ import {
   ENGINE_STORE_BACKUP_DIR,
   type RebuildEngineStoreResult,
 } from "../ipc/bridgeContract";
+import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import { withKeyedStartLock } from "./sitePreviewLifecycle";
 
 const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
 const MOVE_COMPLETE = "MOVE_COMPLETE";
@@ -37,6 +39,16 @@ const engineStoreMoveManifestSchema = z.object({
   ),
 });
 type EngineStoreMoveManifest = z.infer<typeof engineStoreMoveManifestSchema>;
+
+export class EngineStoreRecoveryFailedError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `dohc could not finish rebuilding this workspace's data store. Rebuild files remain at ${ENGINE_STORE_BACKUP_DIR}. Open this workspace again to retry.`,
+      { cause },
+    );
+    this.name = "EngineStoreRecoveryFailedError";
+  }
+}
 
 function errorCode(error: unknown): string | null {
   return typeof error === "object" &&
@@ -134,21 +146,42 @@ async function completeManifestMove(
 
 export async function completePendingEngineStoreMove(
   rootPath: string,
+  deps: { rename?: typeof renameFile } = {},
 ): Promise<void> {
-  const backupDir = join(rootPath, ENGINE_STORE_BACKUP_DIR);
-  const inProgressMarker = join(backupDir, MOVE_IN_PROGRESS);
-  const completeMarker = join(backupDir, MOVE_COMPLETE);
-  if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) return;
+  try {
+    const backupDir = join(rootPath, ENGINE_STORE_BACKUP_DIR);
+    const inProgressMarker = join(backupDir, MOVE_IN_PROGRESS);
+    const completeMarker = join(backupDir, MOVE_COMPLETE);
+    if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) return;
 
-  const manifest = await readMoveManifest(inProgressMarker);
-  await completeManifestMove(
-    join(rootPath, ".dohc", "engine"),
-    backupDir,
-    inProgressMarker,
-    completeMarker,
-    manifest,
-    renameFile,
-  );
+    const manifest = await readMoveManifest(inProgressMarker);
+    await completeManifestMove(
+      join(rootPath, ".dohc", "engine"),
+      backupDir,
+      inProgressMarker,
+      completeMarker,
+      manifest,
+      deps.rename ?? renameFile,
+    );
+  } catch (error) {
+    throw new EngineStoreRecoveryFailedError(error);
+  }
+}
+
+export async function withEngineStoreRecovered<T>(
+  locks: Map<string, Promise<void>>,
+  workspace: Pick<CreatedWorkspace, "workspaceId" | "rootPath">,
+  alreadySerialized: boolean,
+  body: () => Promise<T>,
+  completePendingMove: (
+    rootPath: string,
+  ) => Promise<void> = completePendingEngineStoreMove,
+): Promise<T> {
+  if (alreadySerialized) return body();
+  return withKeyedStartLock(locks, workspace.workspaceId, async () => {
+    await completePendingMove(workspace.rootPath);
+    return body();
+  });
 }
 
 export async function moveEngineStoreAside(
@@ -224,6 +257,16 @@ export class EngineStoreNotRefusedError extends Error {
   }
 }
 
+export class EngineStoreCloseFailedError extends Error {
+  constructor(cause: unknown) {
+    super(
+      "dohc could not finish closing this workspace's data store. Nothing moved. Try again.",
+      { cause },
+    );
+    this.name = "EngineStoreCloseFailedError";
+  }
+}
+
 export interface RebuildEngineStoreDependencies {
   probeStoreRefusal: () => Promise<EngineStoreRefusal | null>;
   closeActivity: () => Promise<void>;
@@ -235,12 +278,17 @@ export async function rebuildEngineStore(
   rootPath: string,
   deps: RebuildEngineStoreDependencies,
 ): Promise<RebuildEngineStoreResult> {
+  try {
+    await deps.closeActivity();
+  } catch (error) {
+    throw new EngineStoreCloseFailedError(error);
+  }
+
   let outcome: MoveOutcome | undefined;
   let operationError: unknown;
   let reopenFailed: string | undefined;
 
   try {
-    await deps.closeActivity();
     if ((await deps.probeStoreRefusal()) === null) {
       throw new EngineStoreNotRefusedError();
     }

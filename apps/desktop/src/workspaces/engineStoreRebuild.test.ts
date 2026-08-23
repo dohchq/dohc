@@ -11,12 +11,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import {
   completePendingEngineStoreMove,
+  EngineStoreCloseFailedError,
   EngineStoreNotRefusedError,
+  EngineStoreRecoveryFailedError,
   moveEngineStoreAside,
   rebuildEngineStore,
   rebuildEngineStoreRequest,
+  withEngineStoreRecovered,
 } from "./engineStoreRebuild";
 import { withKeyedStartLock } from "./sitePreviewLifecycle";
+import { createWorkspaceActivity } from "./workspaceActivity";
+import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
 
 let root: string;
@@ -71,6 +76,14 @@ async function expectCompleteStore(): Promise<void> {
   );
   expect(await readFile(join(backupDir, "engine.db-wal"), "utf8")).toBe("wal");
   expect(await readFile(join(backupDir, "engine.db-shm"), "utf8")).toBe("shm");
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 describe("moveEngineStoreAside", () => {
@@ -338,6 +351,182 @@ describe("moveEngineStoreAside", () => {
       "engine.db",
     ]);
   });
+
+  it("rejects an open before activity starts when pending-move recovery fails", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    const activity = createWorkspaceActivity(() => {});
+    const openActivity = vi.fn(() => activity.open(workspace));
+    const lifecycle = createWorkspaceChatLifecycle({
+      isReadOnly: () => false,
+      maintain: async () => undefined,
+      onError: vi.fn(),
+    });
+    const renameError = new Error("rename denied");
+
+    const opening = lifecycle.open(workspace, () =>
+      withEngineStoreRecovered(
+        new Map(),
+        workspace,
+        false,
+        openActivity,
+        (rootPath) =>
+          completePendingEngineStoreMove(rootPath, {
+            rename: async () => {
+              throw renameError;
+            },
+          }),
+      ),
+    );
+
+    try {
+      await expect(opening).rejects.toBeInstanceOf(EngineStoreRecoveryFailedError);
+      await expect(opening).rejects.toMatchObject({
+        message: expect.stringContaining(ENGINE_STORE_BACKUP_DIR),
+        cause: renameError,
+      });
+      await expect(opening).rejects.toThrow(
+        "dohc could not finish rebuilding this workspace's data store",
+      );
+      expect(openActivity).not.toHaveBeenCalled();
+      expect(activity.listOpenWorkspaceIds()).toEqual([]);
+    } finally {
+      await activity.stopAll();
+    }
+  });
+
+  it("recovers a pending move before a dispatch-scoped capture can open a new store", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-wal": "wal",
+      "engine.db-shm": "shm",
+    });
+    await mkdir(backupDir);
+    await writeMoveManifest([
+      "engine.db-shm",
+      "engine.db-wal",
+      "engine.db",
+    ]);
+    await rename(
+      join(engineDir, "engine.db-shm"),
+      join(backupDir, "engine.db-shm"),
+    );
+    const workspace = { workspaceId: "workspace", rootPath: root };
+    const openScopedCapture = vi.fn(async () => {
+      expect((await readdir(backupDir)).sort()).toEqual([
+        "MOVE_COMPLETE",
+        "engine.db",
+        "engine.db-shm",
+        "engine.db-wal",
+      ]);
+      expect((await readdir(engineDir)).sort()).toEqual(["pre-v2-backup"]);
+      await writeFile(join(engineDir, "engine.db"), "rebuilt-store");
+      return true;
+    });
+
+    await expect(
+      withEngineStoreRecovered(
+        new Map(),
+        workspace,
+        false,
+        openScopedCapture,
+      ),
+    ).resolves.toBe(true);
+
+    expect(openScopedCapture).toHaveBeenCalledOnce();
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
+      "rebuilt-store",
+    );
+    expect(await readFile(join(backupDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
+    );
+  });
+
+  it("holds the workspace lock through an ordinary activity open before rebuilding", async () => {
+    const locks = new Map<string, Promise<void>>();
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    const openReachedCapture = deferred();
+    const finishOpen = deferred();
+    const order: string[] = [];
+    let captureBuilds = 0;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: async () => {
+        captureBuilds += 1;
+        order.push(`activity.open:${captureBuilds}:start`);
+        if (captureBuilds === 1) {
+          openReachedCapture.resolve();
+          await finishOpen.promise;
+        }
+        order.push(`activity.open:${captureBuilds}:end`);
+        return { capture: null, shareView: false };
+      },
+    });
+    const ordinaryOpen = withEngineStoreRecovered(
+      locks,
+      workspace,
+      false,
+      async () => {
+        const result = await activity.open(workspace);
+        order.push("ordinary-open-finished");
+        return result;
+      },
+    );
+    await openReachedCapture.promise;
+
+    const closeActivity = vi.fn(async () => {
+      order.push("rebuild-close");
+      await activity.close(workspace.workspaceId);
+    });
+    const rebuild = withKeyedStartLock(locks, workspace.workspaceId, () =>
+      rebuildEngineStore(root, {
+        closeActivity,
+        probeStoreRefusal: async () => "foreign-database",
+        moveStoreAside: async () => {
+          order.push("rebuild-move");
+          return "moved";
+        },
+        reopenActivity: () =>
+          withEngineStoreRecovered(
+            locks,
+            workspace,
+            true,
+            async () => {
+              await activity.open(workspace);
+              order.push("rebuild-reopen-finished");
+            },
+          ),
+      }),
+    );
+
+    await Promise.resolve();
+    finishOpen.resolve();
+    await ordinaryOpen;
+    await expect(rebuild).resolves.toEqual({ outcome: "moved" });
+
+    expect(order).toEqual([
+      "activity.open:1:start",
+      "activity.open:1:end",
+      "ordinary-open-finished",
+      "rebuild-close",
+      "rebuild-move",
+      "activity.open:2:start",
+      "activity.open:2:end",
+      "rebuild-reopen-finished",
+    ]);
+    await activity.stopAll();
+  });
 });
 
 describe("rebuildEngineStore", () => {
@@ -400,7 +589,7 @@ describe("rebuildEngineStore", () => {
     expect(order).toEqual(["close", "probe", "move", "reopen"]);
   });
 
-  it("attempts to reopen when close rejects", async () => {
+  it("stops before probe, move, or reopen when close rejects", async () => {
     const closeError = new Error("stop failed");
     const d = deps({
       closeActivity: vi.fn(async () => {
@@ -408,10 +597,16 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    await expect(rebuildEngineStore(root, d)).rejects.toBe(closeError);
+    const rebuilding = rebuildEngineStore(root, d);
+    await expect(rebuilding).rejects.toBeInstanceOf(EngineStoreCloseFailedError);
+    await expect(rebuilding).rejects.toMatchObject({
+      message:
+        "dohc could not finish closing this workspace's data store. Nothing moved. Try again.",
+      cause: closeError,
+    });
     expect(d.probeStoreRefusal).not.toHaveBeenCalled();
     expect(d.moveStoreAside).not.toHaveBeenCalled();
-    expect(d.reopenActivity).toHaveBeenCalledOnce();
+    expect(d.reopenActivity).not.toHaveBeenCalled();
   });
 
   it("preserves a completed move when reopening fails", async () => {

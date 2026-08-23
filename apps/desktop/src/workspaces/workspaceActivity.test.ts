@@ -309,6 +309,103 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     await activity.stopAll();
   });
 
+  it("stops the capture and forgets the entry when an engine stop rejects", async () => {
+    const stopError = new Error("engine stop failed");
+    const firstCaptureStop = vi.fn(async () => undefined);
+    const secondCaptureStop = vi.fn(async () => undefined);
+    let captureBuilds = 0;
+    let engineBuilds = 0;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => {
+        captureBuilds += 1;
+        return {
+          capture: {
+            start: vi.fn(),
+            captureBatch: vi.fn(),
+            stop: captureBuilds === 1 ? firstCaptureStop : secondCaptureStop,
+          } as never,
+          shareView: false,
+        };
+      },
+      engineFor: () => {
+        engineBuilds += 1;
+        return {
+          start: async () => undefined,
+          queueSync: () => undefined,
+          snapshot: () => ({
+            syncing: false,
+            lastSyncedAtMs: null,
+            pendingChangeCount: 0,
+            conflictCount: 0,
+            authExpired: false,
+            sharingDeclined: [],
+          }),
+          stop: async () => {
+            if (engineBuilds === 1) throw stopError;
+          },
+        };
+      },
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+
+    await expect(activity.close("activity-test")).rejects.toBe(stopError);
+
+    expect(firstCaptureStop).toHaveBeenCalledOnce();
+    expect(activity.listOpenWorkspaceIds()).toEqual([]);
+    await expect(activity.open(workspace())).resolves.toBeDefined();
+    expect(activity.listOpenWorkspaceIds()).toEqual(["activity-test"]);
+    expect(captureBuilds).toBe(2);
+    await activity.close("activity-test");
+    expect(secondCaptureStop).toHaveBeenCalledOnce();
+  });
+
+  it("waits for the watcher and engine before stopping the capture", async () => {
+    let finishEngineStop: () => void = () => {
+      throw new Error("Engine stop did not start.");
+    };
+    const engineStopStarted = vi.fn();
+    const captureStop = vi.fn(async () => undefined);
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({
+        capture: {
+          start: vi.fn(),
+          captureBatch: vi.fn(),
+          stop: captureStop,
+        } as never,
+        shareView: false,
+      }),
+      engineFor: () => ({
+        start: async () => undefined,
+        queueSync: () => undefined,
+        snapshot: () => ({
+          syncing: false,
+          lastSyncedAtMs: null,
+          pendingChangeCount: 0,
+          conflictCount: 0,
+          authExpired: false,
+          sharingDeclined: [],
+        }),
+        stop: () => {
+          engineStopStarted();
+          return new Promise<void>((resolve) => {
+            finishEngineStop = resolve;
+          });
+        },
+      }),
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+
+    const closing = activity.close("activity-test");
+    await vi.waitFor(() => expect(engineStopStarted).toHaveBeenCalledOnce());
+    expect(captureStop).not.toHaveBeenCalled();
+
+    finishEngineStop();
+    await closing;
+    expect(captureStop).toHaveBeenCalledOnce();
+  });
+
   // #874: a refused engine store rides the capture outcome into the status
   // the notice center reads, transition-only like the capture-failed flag —
   // a persistently refused store re-reports the same code on every pass and

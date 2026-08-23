@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
 import {
   act,
   cleanup,
@@ -282,10 +283,12 @@ for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((r, fail) => {
     resolve = r;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
@@ -6094,6 +6097,71 @@ describe("engine store recovery", () => {
       (await screen.findByTestId("workspace-shell-error")).textContent,
     ).toContain("EACCES: permission denied");
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+  });
+
+  it("clears rebuild state in the first render for a new workspace and discards the old response", async () => {
+    const decision = deferred<RebuildEngineStoreResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(() => decision.promise);
+    const workspaceB: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-shell-b",
+      rootPath: "/home/ice/dohc/b",
+    };
+    const user = userEvent.setup();
+    const view = renderShell(bridge, WORKSPACE, [WORKSPACE, workspaceB]);
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(
+      within(await screen.findByTestId("notice-engine-store-refused")).getByRole(
+        "button",
+        { name: "Rebuild" },
+      ),
+    );
+    await user.click(
+      within(screen.getByTestId("engine-rebuild-dialog")).getByRole("button", {
+        name: "Move and rebuild",
+      }),
+    );
+    expect(screen.getByTestId("engine-rebuild-dialog").textContent).toContain(
+      "Moving",
+    );
+
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={workspaceB}
+        workspaces={[WORKSPACE, workspaceB]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+
+    await act(async () => {
+      decision.reject(new Error("Workspace A rebuild failed"));
+      await decision.promise.catch(() => undefined);
+    });
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+    expect(
+      screen.queryByTestId("workspace-shell-error")?.textContent ?? "",
+    ).not.toContain("Workspace A rebuild failed");
+
+    const source = readFileSync(
+      "src/renderer/DesktopWorkspaceShell.tsx",
+      "utf8",
+    );
+    const guard = source.slice(
+      source.indexOf("const engineRebuildToken = useRef(0);"),
+      source.indexOf(
+        "const confirmEngineRebuild = useCallback",
+        source.indexOf("const engineRebuildToken = useRef(0);"),
+      ),
+    );
+    expect(guard).toContain(
+      "if (engineRebuildWorkspaceIdRef.current !== workspaceId)",
+    );
+    expect(guard).not.toContain("useEffect");
   });
 });
 

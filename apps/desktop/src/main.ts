@@ -383,9 +383,10 @@ import {
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
-  completePendingEngineStoreMove,
+  EngineStoreRecoveryFailedError,
   moveEngineStoreAside,
   rebuildEngineStoreRequest,
+  withEngineStoreRecovered,
 } from "./workspaces/engineStoreRebuild";
 import {
   completeWorkspaceJoinBootstrap,
@@ -2766,6 +2767,7 @@ function syncDispatchWorkspaces(): ChatDispatchWorkspace[] {
 // attributed. Normal renderer/CLI opens retain activity for the app session.
 const dispatchScopedSyncs = new Map<string, Promise<boolean>>();
 const retainedWorkspaceActivities = new Set<string>();
+const engineStoreRebuildLocks = new Map<string, Promise<void>>();
 const workspaceActivityOpenPromises = new Map<
   string,
   Promise<SyncStatusResult>
@@ -2775,61 +2777,70 @@ const workspaceActivityClosePromises = new Map<string, Promise<void>>();
 async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   const closing = workspaceActivityClosePromises.get(workspaceId);
   if (closing) await closing.catch(() => undefined);
-  if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
-    activity.queueCloudSync(workspaceId);
-    return activity.engineCaptureFor(workspaceId) !== null;
-  }
   const existing = dispatchScopedSyncs.get(workspaceId);
   if (existing) return existing;
   const workspace = findWorkspace(workspaceId);
   if (!workspace || sharedViewOf(workspaceId)) return false;
-  const scoped = (async () => {
-    const { capture } = await captureForFlaggedWorkspace(
-      {
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        // Guarded above: a shared view already returned false.
-        shareView: false,
-      },
-      {
-        activeAgentRun: () => null,
-        onCaptureOutcome: () => undefined,
-      },
-      requireEngineSessions(),
-    );
-    if (!capture) return false;
-    try {
-      // A normal open may have started while the scoped capture was built.
-      // Yield ownership rather than opening a second relay sync engine.
-      if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
-        activity.queueCloudSync(workspaceId);
-        return activity.engineCaptureFor(workspaceId) !== null;
-      }
-      const engine = engineForWorkspace(workspace, capture);
-      if (!engine) return false;
-      try {
-        await engine.start();
-        return true;
-      } finally {
-        await engine.stop().catch(() => undefined);
-        const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
-        if (relayWorkspaceId) {
-          await closeRelayTransportWorkspace(relayWorkspaceId).catch(
-            () => undefined,
-          );
-        }
-      }
-    } finally {
-      await capture.stop().catch(() => undefined);
-    }
-  })();
-  dispatchScopedSyncs.set(workspaceId, scoped);
   try {
-    return await scoped;
-  } finally {
-    if (dispatchScopedSyncs.get(workspaceId) === scoped) {
-      dispatchScopedSyncs.delete(workspaceId);
-    }
+    return await withEngineStoreRecovered(
+      engineStoreRebuildLocks,
+      workspace,
+      false,
+      async () => {
+        if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+          activity.queueCloudSync(workspaceId);
+          return activity.engineCaptureFor(workspaceId) !== null;
+        }
+        const scoped = (async () => {
+          const { capture } = await captureForFlaggedWorkspace(
+            {
+              workspaceId: workspace.workspaceId,
+              rootPath: workspace.rootPath,
+              // Guarded above: a shared view already returned false.
+              shareView: false,
+            },
+            {
+              activeAgentRun: () => null,
+              onCaptureOutcome: () => undefined,
+            },
+            requireEngineSessions(),
+          );
+          if (!capture) return false;
+          try {
+            const engine = engineForWorkspace(workspace, capture);
+            if (!engine) return false;
+            try {
+              await engine.start();
+              return true;
+            } finally {
+              await engine.stop().catch(() => undefined);
+              const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
+              if (relayWorkspaceId) {
+                await closeRelayTransportWorkspace(relayWorkspaceId).catch(
+                  () => undefined,
+                );
+              }
+            }
+          } finally {
+            await capture.stop().catch(() => undefined);
+          }
+        })();
+        dispatchScopedSyncs.set(workspaceId, scoped);
+        try {
+          return await scoped;
+        } finally {
+          if (dispatchScopedSyncs.get(workspaceId) === scoped) {
+            dispatchScopedSyncs.delete(workspaceId);
+          }
+        }
+      },
+    );
+  } catch (error) {
+    if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
+    // The dispatch pump stops on false. A thrown sync error is logged, then
+    // the pump scans anyway and can open the still-split store directly.
+    console.error("[desktop] pending engine store move:", error);
+    return false;
   }
 }
 
@@ -2837,44 +2848,31 @@ async function ensureWorkspaceActivityOpen(
   workspace: CreatedWorkspace,
   engineStoreMoveAlreadySerialized = false,
 ): Promise<SyncStatusResult> {
-  if (!engineStoreMoveAlreadySerialized) {
-    try {
-      await withKeyedStartLock(
-        engineStoreRebuildLocks,
-        workspace.workspaceId,
-        () => completePendingEngineStoreMove(workspace.rootPath),
-      );
-    } catch (error) {
-      console.error("[desktop] pending engine store move:", error);
-    }
-  }
-  for (;;) {
-    const scoped = dispatchScopedSyncs.get(workspace.workspaceId);
-    if (scoped) {
-      await scoped.catch(() => undefined);
-      continue;
-    }
-    const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
-    if (closing) {
-      await closing.catch(() => undefined);
-      continue;
-    }
-    const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
-    if (existing) return existing;
-    // activity.open registers the workspace synchronously before its first
-    // await. With no yield after the checks above, a scoped scan can only
-    // start before us (and be observed on the next loop) or after us (and
-    // yield to the registered activity owner).
-    const opening = activity.open(workspace);
-    workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
-    try {
-      return await opening;
-    } finally {
-      if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
-        workspaceActivityOpenPromises.delete(workspace.workspaceId);
+  return withEngineStoreRecovered(
+    engineStoreRebuildLocks,
+    workspace,
+    engineStoreMoveAlreadySerialized,
+    async () => {
+      for (;;) {
+        const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
+        if (closing) {
+          await closing.catch(() => undefined);
+          continue;
+        }
+        const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
+        if (existing) return existing;
+        const opening = activity.open(workspace);
+        workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
+        try {
+          return await opening;
+        } finally {
+          if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
+            workspaceActivityOpenPromises.delete(workspace.workspaceId);
+          }
+        }
       }
-    }
-  }
+    },
+  );
 }
 
 async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
@@ -3147,7 +3145,6 @@ const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
-const engineStoreRebuildLocks = new Map<string, Promise<void>>();
 const lastEngineStoreRebuildResult = new Map<
   string,
   RebuildEngineStoreResult

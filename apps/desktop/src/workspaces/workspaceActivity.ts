@@ -346,9 +346,18 @@ export function createWorkspaceActivity(
     const entry = watched.get(workspaceId);
     if (!entry) return;
     watched.delete(workspaceId);
-    await Promise.all([entry.handle.stop(), entry.engine?.stop() ?? Promise.resolve()]);
-    await (entry.capture?.stop() ?? Promise.resolve());
+    const stopped = await Promise.allSettled([
+      Promise.resolve().then(() => entry.handle.stop()),
+      Promise.resolve().then(() => entry.engine?.stop()),
+    ]);
+    const captureStopped = await Promise.allSettled([
+      Promise.resolve().then(() => entry.capture?.stop()),
+    ]);
     notify();
+    const failed = [...stopped, ...captureStopped].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed) throw failed.reason;
   }
 
   // After a login completes, attach engines to already-open cloud-enabled

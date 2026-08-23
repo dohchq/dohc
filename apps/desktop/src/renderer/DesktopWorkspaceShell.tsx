@@ -2430,10 +2430,12 @@ export function DesktopWorkspaceShell(props: {
   // never repaint workspace B. Switching workspaces closes the dialog and
   // invalidates any in-flight move's answer.
   const engineRebuildToken = useRef(0);
-  useEffect(() => {
+  const engineRebuildWorkspaceIdRef = useRef(workspaceId);
+  if (engineRebuildWorkspaceIdRef.current !== workspaceId) {
+    engineRebuildWorkspaceIdRef.current = workspaceId;
     engineRebuildToken.current += 1;
-    setEngineRebuild(null);
-  }, [workspaceId]);
+    if (engineRebuild !== null) setEngineRebuild(null);
+  }
   const confirmEngineRebuild = useCallback(async () => {
     const token = engineRebuildToken.current;
     setEngineRebuild({ phase: "moving" });
