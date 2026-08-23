@@ -3,10 +3,10 @@ import { cp, lstat, mkdir, readdir, realpath, rmdir } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../ipc/channels";
 import { readPluginManifestFile } from "./pluginManifest";
+import { isInside } from "../security/pathContainment";
 import {
   delay,
   errorMessage,
-  isInside,
   removeStaging,
   renameWithWindowsRetry,
 } from "./pluginShared";

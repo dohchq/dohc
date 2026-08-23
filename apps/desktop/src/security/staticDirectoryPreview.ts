@@ -2,8 +2,9 @@ import { hasIgnoredSegment, isSharedWithMePath } from "@dohc/workspace-core";
 import { constants } from "node:fs";
 import { access, open, realpath } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { extname, isAbsolute, join, relative, sep } from "node:path";
+import { extname, join, relative } from "node:path";
 import { assertResolvedWorkspacePath } from "../workspaces/workspaceRealPath";
+import { isInside } from "./pathContainment";
 
 /**
  * Serves one directory on loopback for a sandboxed frame to load, and refuses
@@ -45,12 +46,6 @@ const MIME_TYPES: Record<string, string> = {
 // loudly, so `?? 0` keeps the intent explicit. Windows therefore keeps the
 // residual named at the read site.
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
-
-export function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const rel = relative(parent, child);
-  return rel.length > 0 && !isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(sep);
-}
 
 export function assertContainedFilePath(path: string, label: string): void {
   if (

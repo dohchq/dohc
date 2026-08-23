@@ -20,10 +20,10 @@ import {
   DohcPluginManifest as DohcPluginManifestSchema,
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
+import { isInside } from "../security/pathContainment";
 import {
   delay,
   errorMessage,
-  isInside,
   removeStaging,
   renameWithWindowsRetry,
   WINDOWS_RENAME_RETRY_DELAYS_MS,
@@ -310,15 +310,6 @@ async function inspectBuildPaths(
     snapshotRoot,
     ...manifest.entry.split("/"),
   );
-  if (!isInside(snapshotRoot, entryPath)) {
-    throw new PluginBuildRunnerError(
-      "invalid-entry",
-      `Plugin entry at ${entryPath} is outside the installed snapshot root ` +
-        `at ${snapshotRoot}.`,
-      entryPath,
-    );
-  }
-
   let containedEntry: string;
   try {
     containedEntry = await realpath(entryPath);

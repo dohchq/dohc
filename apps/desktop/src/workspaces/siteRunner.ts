@@ -11,9 +11,9 @@ import {
   resolveSpawnCommand,
 } from "../process/windowsSpawn";
 import { isLoopbackHostname } from "../security/loopback";
+import { isInside } from "../security/pathContainment";
 import {
   assertContainedFilePath,
-  isInside,
   startStaticDirectoryPreview,
 } from "../security/staticDirectoryPreview";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";

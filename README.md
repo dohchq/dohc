@@ -1,18 +1,18 @@
 # dohc
 
-dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files and data across your devices and facilitates sharing and collaboration between you, your team and your agents.
+dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files across your devices and lets you share your work with your team and your agents.
 
-At a glance, it is a text editor, chat, and app runner in one. The important part is underneath. Your files stay on your computer, supports multiplayer editing/sharing, and provides storage and authorization for the apps you and your agents build.
+At a glance, it is a text editor, chat, and app runner in one. The important part is underneath: your files stay on your computer, multiplayer editing comes standard, and whenever you or your agents need history, access control, or storage, it's already there.
 
 [Download a build](https://github.com/dohc-ai/dohc/releases) or [run it from source](#run-it-from-source).
 
 ## Why this exists
 
-This whole AI thing is still new and we're still trying to figure out how agents should fit into real work. So far, we mostly end up trying to bolt agents onto our old workflows with varying levels of success. dohc was built in order to help get closer to figuring this out rather than solve it.
+This whole AI thing is still new and we're still trying to figure out how agents should fit into real work. So far, we mostly end up trying to bolt agents onto our old workflows with mixed success. We built dohc to help us figure this out by staying out of the way, assuming nothing about how you work, and building on the tools you already use.
 
-Instead of a fixed CRM, project process, or agent-team template, dohc provides building blocks. It does the the boring and tedious parts such as file sync, history, identity, permissions, storage, and app isolation so users and agents can decide how to work without having to rebuild the necessary infrastructure.
+Instead of a fixed CRM, project process, or agent-team template, dohc provides building blocks. It handles the boring parts: file sync, history, identity, permissions, storage, hosting, and app isolation. With those parts handled, you and your agents go straight to the work itself.
 
-In a way, working with an agent resembles collaborating with another person: communicating with natural language and building on shared context. Which is why dohc is multiplayer by design, providing humans and agents a shared workspace. One person can use dohc as a personal workspace and can easily share their work when they're ready.
+Lastly, working with an agent resembles collaborating with another person: communicating with natural language and building on shared context. That is why dohc is multiplayer by design: humans and agents share one workspace. One person can use dohc as a personal workspace and can easily share their work when they're ready.
 
 ## Agents and workspace apps
 
@@ -40,7 +40,7 @@ dohc Cloud has not shipped yet.
 
 ## Run it from source
 
-You need Node.js 24.14.0, pnpm 11.20.0, and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+You need Node.js 24.14 or newer, pnpm 11.20.0, and the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ```bash
 pnpm install
@@ -69,7 +69,7 @@ pnpm dev:postgres
 pnpm migrate
 ```
 
-Set `NODE_ENV=development` and the same `BETTER_AUTH_SECRET` of at least 32 characters in both service terminals. Then start each service:
+In both service terminals, set `NODE_ENV=development` and the same `BETTER_AUTH_SECRET`, at least 32 characters. Then start each service:
 
 ```bash
 pnpm dev:workspace-api
@@ -84,8 +84,7 @@ apps/site             marketing site and interactive product demo
 crates                Rust workspace engine and supporting crates
 packages              shared TypeScript contracts, clients, tools, and UI code
 services              optional authentication and sync services
-docs                  product, architecture, security, and development notes
-tools                  repository gates and Rust engine evidence tools
+tools                 Rust engine gate scripts, fixtures, and evidence
 ```
 
 ## Checks
@@ -98,7 +97,7 @@ pnpm test:desktop
 pnpm test
 ```
 
-Rust changes use the repository's guarded Rust gate. Contributors and agents should read [`AGENTS.md`](AGENTS.md) before changing the codebase.
+Run Rust checks through [`rust-gate`](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Contributors and agents should read [`AGENTS.md`](AGENTS.md) before changing the codebase.
 
 ## Stack
 
