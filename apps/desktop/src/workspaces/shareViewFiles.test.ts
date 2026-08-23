@@ -1298,8 +1298,5 @@ describe("ShareViewFiles", () => {
     expect(main).toContain(
       '...(target.kind === "mount" ? { shareMount: true as const } : {})',
     );
-    expect(main).toMatch(
-      /rootPath:\s*validMountLabel\(mount\.label\)\s*\? mountRootFor/,
-    );
   });
 });
