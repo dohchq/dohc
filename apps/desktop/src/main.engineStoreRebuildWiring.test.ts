@@ -81,7 +81,7 @@ describe("main-process engine store rebuild wiring", () => {
     expect(gate).not.toContain("catch");
   });
 
-  it("marks only store moves as rebuilding so probe and reopen can bind", () => {
+  it("keeps the gate raised from the store move through reopen recovery", () => {
     const helper = sourceBetween(
       "async function withRebuildBoundGate<T>(",
       "async function syncWorkspaceForDispatch(",
@@ -109,12 +109,13 @@ describe("main-process engine store rebuild wiring", () => {
       /\},\s*\(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*completePendingEngineStoreMove\(rootPath\),\s*\),\s*\);/,
     );
     expect(rebuild).toMatch(
-      /moveStoreAside: \(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*moveEngineStoreAside\(rootPath\),\s*\),/,
+      /moveStoreAside: \(rootPath\) => \{\s*requireEngineSessions\(\)\.beginRebuild\(workspace\.workspaceId\);\s*return moveEngineStoreAside\(rootPath\);\s*\},/,
     );
-    // Exactly one gate in the whole handler: only `moveStoreAside` may hold
-    // it. `probeStoreRefusal`, `closeActivity`, and `reopenActivity` each
-    // call into EngineWorkspaceSessions.run themselves — gating any of them
-    // too would make the rebuild refuse its own probe or reopen.
-    expect((rebuild.match(/withRebuildBoundGate\(/g) ?? []).length).toBe(1);
+    // The move raises the gate without lowering it. Reopen's mandatory
+    // recovery callback lowers it before activity.open binds the fresh store.
+    // A handler-wide bracket would make the probe or reopen refuse itself.
+    expect((rebuild.match(/beginRebuild\(/g) ?? []).length).toBe(1);
+    expect(rebuild).not.toContain("endRebuild(");
+    expect(rebuild).not.toContain("withRebuildBoundGate(");
   });
 });

@@ -10912,10 +10912,11 @@ function registerIpcHandlers(
                 workspace.rootPath,
                 requireEngineSessions(),
               ),
-            moveStoreAside: (rootPath) =>
-              withRebuildBoundGate(workspace.workspaceId, () =>
-                moveEngineStoreAside(rootPath),
-              ),
+            // Reopen recovery lowers this gate before activity.open binds.
+            moveStoreAside: (rootPath) => {
+              requireEngineSessions().beginRebuild(workspace.workspaceId);
+              return moveEngineStoreAside(rootPath);
+            },
             reopenActivity: async () => {
               try {
                 await openWorkspaceActivity(workspace, undefined, true);

@@ -934,13 +934,26 @@ describe("rebuildEngineStore", () => {
     expect(order).toEqual(["close", "probe", "move", "reopen"]);
   });
 
-  it("blocks direct engine runs only while the rebuild moves the store", async () => {
-    await seedStore({ "engine.db": "refused-store" });
+  it("blocks direct engine runs until reopen recovery finishes", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-journal": "journal",
+      "engine.db-wal": "wal",
+      "engine.db-shm": "shm",
+    });
     const workspace = { workspaceId: "workspace", rootPath: root };
-    const moveStarted = deferred();
-    const finishMove = deferred();
+    const recoveryStarted = deferred();
+    const finishRecovery = deferred();
     const requests: Parameters<EngineDaemonClient["sendRequest"]>[0][] = [];
     const operations: string[] = [];
+    const moveError = new Error("rename failed");
+    let runDuringMove:
+      | { status: "resolved" }
+      | { status: "rejected"; error: unknown }
+      | undefined;
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const client: EngineDaemonClient = {
       close() {},
       async sendRequest(request) {
@@ -960,6 +973,18 @@ describe("rebuildEngineStore", () => {
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => client,
     });
+    const expectRunRefused = async (operation: string) => {
+      await expect(
+        sessions.run(workspace, async () => {
+          operations.push(operation);
+        }),
+      ).rejects.toEqual(
+        new EngineWorkspaceRebuildingError(workspace.workspaceId),
+      );
+      expect(
+        requests.filter((request) => request.method === "workspace.open"),
+      ).toHaveLength(1);
+    };
     const rebuilding = rebuildEngineStore(root, {
       closeActivity: () => sessions.closeWorkspace(workspace.workspaceId),
       probeStoreRefusal: async () => {
@@ -971,41 +996,69 @@ describe("rebuildEngineStore", () => {
       },
       moveStoreAside: async (rootPath) => {
         sessions.beginRebuild(workspace.workspaceId);
-        try {
-          return await moveEngineStoreAside(rootPath, {
-            rename: async (from, to) => {
-              if (to === join(backupDir, "engine.db")) {
-                moveStarted.resolve();
-                await finishMove.promise;
+        return moveEngineStoreAside(rootPath, {
+          rename: async (from, to) => {
+            if (to === join(backupDir, "engine.db")) {
+              try {
+                await sessions.run(workspace, async () => {
+                  operations.push("during-move");
+                });
+                runDuringMove = { status: "resolved" };
+              } catch (error) {
+                runDuringMove = { status: "rejected", error };
               }
-              await rename(from, to);
-            },
-          });
-        } finally {
-          sessions.endRebuild(workspace.workspaceId);
-        }
-      },
-      reopenActivity: async () => {
-        await sessions.run(workspace, async () => {
-          operations.push("reopen");
+              throw moveError;
+            }
+            await rename(from, to);
+          },
         });
       },
+      reopenActivity: () =>
+        withEngineStoreRecovered(
+          new Map(),
+          workspace,
+          true,
+          () =>
+            sessions.run(workspace, async () => {
+              operations.push("reopen");
+            }),
+          async (rootPath) => {
+            sessions.beginRebuild(workspace.workspaceId);
+            try {
+              await completePendingEngineStoreMove(rootPath, {
+                rename: async (from, to) => {
+                  if (to === join(backupDir, "engine.db")) {
+                    recoveryStarted.resolve();
+                    await finishRecovery.promise;
+                  }
+                  await rename(from, to);
+                },
+              });
+            } finally {
+              sessions.endRebuild(workspace.workspaceId);
+            }
+          },
+        ),
     });
-    await moveStarted.promise;
 
     try {
-      await expect(
-        sessions.run(workspace, async () => {
-          operations.push("during-move");
-        }),
-      ).rejects.toEqual(
-        new EngineWorkspaceRebuildingError(workspace.workspaceId),
-      );
-      expect(
-        requests.filter((request) => request.method === "workspace.open"),
-      ).toHaveLength(1);
+      await recoveryStarted.promise;
+      expect(runDuringMove).toEqual({
+        status: "rejected",
+        error: new EngineWorkspaceRebuildingError(workspace.workspaceId),
+      });
+      expect((await readdir(backupDir)).sort()).toEqual([
+        "MOVE_IN_PROGRESS",
+        "engine.db-journal",
+        "engine.db-shm",
+        "engine.db-wal",
+      ]);
+      expect(await readdir(engineDir)).toContain("engine.db");
+      await expectRunRefused("during-recovery");
     } finally {
-      finishMove.resolve();
+      finishRecovery.resolve();
+      await rebuilding.catch(() => undefined);
+      consoleError.mockRestore();
     }
 
     await expect(rebuilding).resolves.toEqual({ outcome: "moved" });
@@ -1013,6 +1066,7 @@ describe("rebuildEngineStore", () => {
     expect(
       requests.filter((request) => request.method === "workspace.open"),
     ).toHaveLength(2);
+    await expectCompleteStore();
   });
 
   it("stops before probe, move, or reopen when close rejects", async () => {
