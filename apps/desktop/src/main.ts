@@ -685,6 +685,7 @@ import {
 } from "./plugins/PluginPipeline";
 import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
+import type { WorkspaceSdkReadPort } from "./workspaces/workspaceSdkHost";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
@@ -3364,14 +3365,6 @@ async function invokeWorkspacePluginSdk(input: {
   params?: unknown;
 }): Promise<unknown> {
   const workspace = requireWorkspace(input.workspaceId);
-  if (
-    input.method === "files.read" ||
-    input.method === "files.list" ||
-    input.method === "workspace.search" ||
-    input.method === "databases.read"
-  ) {
-    await ensureAllOwnedProjectionsCurrent(workspace);
-  }
   return invokePluginSdkHost(
     {
       pluginId: input.pluginId,
@@ -3383,6 +3376,7 @@ async function invokeWorkspacePluginSdk(input: {
       declaredWebApps: registeredPlugin(input.workspaceId, input.pluginId)
         ?.manifest.webApps,
       isWritable: input.isWritable,
+      reads: ownedWorkspaceSdkReads(workspace),
       writeAvailable: async () => {
         try {
           const workspaceForWrite = requireWorkspace(input.workspaceId);
@@ -4607,6 +4601,31 @@ async function listOwnedWorkspaceFiles(
         error,
       ),
   });
+}
+
+function ownedWorkspaceSdkReads(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+): WorkspaceSdkReadPort {
+  let listed: ReturnType<typeof listOwnedWorkspaceFiles> | null = null;
+  const listFilesOnce = () => {
+    listed ??= listOwnedWorkspaceFiles(workspace);
+    return listed;
+  };
+  return {
+    readText: (path) => readOwnedWorkspaceText(workspace, path),
+    listFiles: listFilesOnce,
+    searchAllowPath: async () => {
+      await ensureAllOwnedProjectionsCurrent(workspace);
+      const allowed = new Set(
+        (await listFilesOnce()).files.map((file) => searchPathKey(file.path)),
+      );
+      return (path) => allowed.has(searchPathKey(path));
+    },
+    readDatabase: async (path) => {
+      await ensureOwnedProjectionCurrent(workspace, path);
+      return readDatabaseSnapshot(workspace.rootPath, path);
+    },
+  };
 }
 
 function ownedWorkspaceGraphSource(

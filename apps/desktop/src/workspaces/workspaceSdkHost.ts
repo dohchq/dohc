@@ -13,11 +13,13 @@ import {
   createWorkspaceTextExclusive,
   readWorkspaceText,
   restoreWorkspaceText,
+  type WorkspaceTextReadResult,
 } from "./workspaceAssets";
 import {
   applyDatabaseEdit,
   readDatabaseSnapshot,
   type DatabaseEdit,
+  type DatabaseSnapshotView,
 } from "./workspaceDatabase";
 import { listFiles } from "./workspaceFiles";
 import {
@@ -47,9 +49,20 @@ export interface WorkspaceSdkHostContext {
   // today's behavior.
   now?: () => number;
   createId?: () => string;
+  reads?: WorkspaceSdkReadPort;
 }
 
 export type SdkSearchStarter = typeof startRipgrepSearch;
+
+export interface WorkspaceSdkReadPort {
+  readText(path: string): Promise<WorkspaceTextReadResult>;
+  listFiles(): Promise<{
+    files: Awaited<ReturnType<typeof listFiles>>["files"];
+    folders?: readonly string[];
+  }>;
+  searchAllowPath(): Promise<(path: string) => boolean>;
+  readDatabase(path: string): Promise<DatabaseSnapshotView>;
+}
 
 const MAX_LIST_RESULTS = 10_000;
 const MAX_SEARCH_RESULTS = 2_000;
@@ -135,7 +148,9 @@ async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknow
   const requestedRoot =
     input.path === undefined || input.path === "." ? "." : sdkWorkspacePath(input.path);
   const recursive = input.recursive !== false;
-  const listed = await listFiles(context.workspaceRoot);
+  const listed = context.reads
+    ? await context.reads.listFiles()
+    : await listFiles(context.workspaceRoot);
   const files = [];
   for (const entry of listed.files) {
     const path = entry.path;
@@ -183,6 +198,9 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
     ...(typeof input.excludeGlob === "string" ? { excludeGlob: input.excludeGlob } : {}),
     ...(includeGlob ? { includeGlob } : {}),
   };
+  const allowPath = context.reads
+    ? await context.reads.searchAllowPath()
+    : undefined;
   const root = await realpath(context.workspaceRoot);
   if (context.signal?.aborted) {
     throw new Error("The surface that owns this SDK request is no longer active.");
@@ -210,6 +228,7 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
       realRoot: root,
       searchId: `workspace-sdk-${Date.now()}`,
       request,
+      ...(allowPath ? { allowPath } : {}),
       onBatch(batch) {
         for (const entry of batch.entries) {
           entries.push(entry);
@@ -270,10 +289,10 @@ export async function invokeWorkspaceSdkHost(
       return capabilities(context);
     case "files.read": {
       const input = record(params);
-      return readWorkspaceText(
-        context.workspaceRoot,
-        sdkWorkspacePath(input.path),
-      );
+      const path = sdkWorkspacePath(input.path);
+      return context.reads
+        ? context.reads.readText(path)
+        : readWorkspaceText(context.workspaceRoot, path);
     }
     case "files.list":
       return listVisibleFiles(context, params);
@@ -317,10 +336,10 @@ export async function invokeWorkspaceSdkHost(
           "This dohc host exposes database snapshots; read-only SQL queries are not available yet.",
         );
       }
-      return readDatabaseSnapshot(
-        context.workspaceRoot,
-        sdkWorkspacePath(input.path),
-      );
+      const path = sdkWorkspacePath(input.path);
+      return context.reads
+        ? context.reads.readDatabase(path)
+        : readDatabaseSnapshot(context.workspaceRoot, path);
     }
     case "databases.edit": {
       if (!context.writable) {

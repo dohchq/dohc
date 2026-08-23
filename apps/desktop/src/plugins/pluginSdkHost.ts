@@ -34,6 +34,7 @@ export interface PluginSdkHostContext {
   requestPath: "panel" | "plugin-process";
   isWritable: () => boolean;
   writeAvailable: () => Promise<boolean>;
+  reads?: WorkspaceSdkHostContext["reads"];
   /**
    * The web apps this plugin's manifest declares, so `ui.openWebApp` can
    * refuse an id the plugin never contributed and one whose shape does not
@@ -179,6 +180,7 @@ export async function invokePluginSdkHost(
     writable: context.isWritable(),
     signal: context.signal,
     author: pluginDatabaseAuthor(context.pluginId),
+    ...(context.reads ? { reads: context.reads } : {}),
   };
 
   switch (method) {

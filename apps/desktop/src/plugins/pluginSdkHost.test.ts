@@ -143,6 +143,31 @@ describe("invokePluginSdkHost", () => {
     ).resolves.toContainEqual(expect.objectContaining({ path: "notes/router.txt" }));
   });
 
+  it("forwards the workspace owner's read authority", async () => {
+    const root = await workspaceRoot();
+    await mkdir(join(root, "notes"));
+    await writeFile(join(root, "notes", "recipient-only.txt"), "disk copy\n");
+    const hostContext: PluginSdkHostContext = {
+      ...context(root),
+      reads: {
+        readText: async (path) => {
+          throw new Error(`File not found: ${path}`);
+        },
+        listFiles: async () => ({ files: [] }),
+        searchAllowPath: async () => () => false,
+        readDatabase: async (path) => {
+          throw new Error(`File not found: ${path}`);
+        },
+      },
+    };
+
+    await expect(
+      invokePluginSdkHost(hostContext, "files.read", {
+        path: "notes/recipient-only.txt",
+      }),
+    ).rejects.toThrow("File not found: notes/recipient-only.txt");
+  });
+
   it("forwards host-derived attribution to authored writes", async () => {
     const root = await workspaceRoot();
     const writes: AuthoredWrite[] = [];

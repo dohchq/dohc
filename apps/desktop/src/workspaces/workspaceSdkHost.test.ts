@@ -7,6 +7,7 @@ import {
   invokeWorkspaceSdkHost,
   sdkWorkspacePath,
   type SdkSearchStarter,
+  type WorkspaceSdkReadPort,
 } from "./workspaceSdkHost";
 import { createTestScratch } from "./testTemp";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
@@ -67,6 +68,59 @@ describe("workspace SDK host authority", () => {
     await expect(readFile(join(root, "notes", "from-plugin.txt"), "utf8")).resolves.toBe(
       "written by a plugin\n",
     );
+  });
+
+  it("routes reads, listings, searches, and database admission through one read port", async () => {
+    const root = await workspace();
+    await writeFile(join(root, "notes", "recipient-only.md"), "hello from recipient disk\n");
+    const recipientDatabase = join(root, "recipient-only.sqlite");
+    seedDatabase(recipientDatabase, "recipient");
+    const reads: WorkspaceSdkReadPort = {
+      readText: async (path) => {
+        if (path !== "notes/today.md") throw new Error(`File not found: ${path}`);
+        return {
+          text: "hello from canonical owner\n",
+          truncated: false,
+          contentHash: "canonical-hash",
+        };
+      },
+      listFiles: async () => ({
+        files: [{ path: "notes/today.md", kind: "file" }],
+        folders: ["notes"],
+      }),
+      searchAllowPath: async () => (path) => path === "notes/today.md",
+      readDatabase: async (path) => {
+        if (path !== "canonical.sqlite") throw new Error(`File not found: ${path}`);
+        return { path, tables: [] };
+      },
+    };
+    const context = {
+      workspaceRoot: root,
+      writable: true,
+      author: USER_AUTHOR,
+      reads,
+    };
+
+    await expect(
+      invokeWorkspaceSdkHost(context, "files.read", {
+        path: "notes/recipient-only.md",
+      }),
+    ).rejects.toThrow("File not found: notes/recipient-only.md");
+    await expect(
+      invokeWorkspaceSdkHost(context, "files.list", { path: "notes" }),
+    ).resolves.toEqual([
+      expect.objectContaining({ path: "notes/today.md", name: "today.md" }),
+    ]);
+    await expect(
+      invokeWorkspaceSdkHost(context, "workspace.search", { query: "hello" }),
+    ).resolves.toEqual([
+      expect.objectContaining({ path: "notes/today.md" }),
+    ]);
+    await expect(
+      invokeWorkspaceSdkHost(context, "databases.read", {
+        path: "recipient-only.sqlite",
+      }),
+    ).rejects.toThrow("File not found: recipient-only.sqlite");
   });
 
   it("atomically honors overwrite false under concurrent writes", async () => {
