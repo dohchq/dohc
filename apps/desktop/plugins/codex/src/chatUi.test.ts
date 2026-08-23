@@ -442,4 +442,65 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
 
     expect(stopButton.disabled).toBe(false);
   });
+
+  it("keeps Send disabled for a newer turn when a stale, stop-abandoned request's late failure arrives", async () => {
+    const { eventSource } = await loadChatModule();
+    const enteredFirst = deferred();
+    const enteredSecond = deferred();
+    let settleFirst!: (response: Response) => void;
+    let settleSecond!: (response: Response) => void;
+    const pendingFirst = new Promise<Response>((resolve) => {
+      settleFirst = resolve;
+    });
+    const pendingSecond = new Promise<Response>((resolve) => {
+      settleSecond = resolve;
+    });
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls += 1;
+      if (calls === 1) {
+        enteredFirst.resolve();
+        return pendingFirst;
+      }
+      enteredSecond.resolve();
+      return pendingSecond;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    // First message: its request is abandoned server-side by a stop during
+    // driver startup (round-6), which publishes session-state: closed and
+    // re-enables Send immediately -- long before this request's own
+    // response ever lands.
+    messageInput.value = "First";
+    composer.requestSubmit();
+    await enteredFirst.promise;
+    expect(sendButton.disabled).toBe(true);
+    sendEvent(eventSource, { kind: "session-state", state: "closed", reason: "Stopped" });
+    expect(sendButton.disabled).toBe(false);
+
+    // A fresh second message is sent while the first request is still
+    // outstanding, and its own turn starts running.
+    messageInput.value = "Second";
+    composer.requestSubmit();
+    await enteredSecond.promise;
+    expect(sendButton.disabled).toBe(true);
+    sendEvent(eventSource, { kind: "session-state", state: "running" });
+    expect(sendButton.disabled).toBe(true);
+
+    // The abandoned first request finally settles with the 503 the
+    // unwound handshake produces. Without the fix this unconditionally
+    // re-enables Send while the second turn is still running.
+    settleFirst(new Response(null, { status: 503 }));
+    await pendingFirst;
+    expect(sendButton.disabled).toBe(true);
+
+    // The second turn actually settling is what correctly restores Send.
+    sendEvent(eventSource, { kind: "session-state", state: "ready" });
+    expect(sendButton.disabled).toBe(false);
+    settleSecond(new Response(null, { status: 202 }));
+    await pendingSecond;
+  });
 });

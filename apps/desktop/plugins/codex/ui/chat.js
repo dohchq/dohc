@@ -45,6 +45,13 @@ const permissions = new Map();
 // submitting page's own connection sees it too), the echo confirms the
 // existing card instead of rendering a duplicate.
 const pendingMessages = new Map();
+// Bumped on every /message submit. A stale request's own failure (its
+// generation no longer the current one -- a newer message was sent while it
+// was still in flight, e.g. the abandoned handshake behind a stop-during-
+// startup) must only annotate its own card, never touch Send: Send's state
+// belongs to whichever request is current, and a newer turn can already be
+// running by the time an old one's response finally lands.
+let sendGeneration = 0;
 
 // `at` is the server's own publish time (every event carries it); replaying
 // history must render when it really happened, not the reconnect moment.
@@ -487,9 +494,12 @@ function markMessageFailed(clientId, card, message, reenable = true) {
     hideEmptyState();
     transcript.append(card);
   }
-  // A 409 means a turn really is still active server-side: re-enabling here
-  // would just let the user fire another message that also 409s. Leave it
-  // disabled and let the eventual settled session-state event restore it.
+  // Callers fold two reasons to leave this false into `reenable`: a 409
+  // means a turn really is still active server-side (re-enabling would just
+  // let the user fire another message that also 409s), and a stale request
+  // (superseded by a newer send before this one's response landed) must
+  // never touch Send state that now belongs to the newer turn. Either way,
+  // the eventual settled session-state event is what actually restores it.
   if (reenable) sendButton.disabled = false;
 }
 
@@ -503,6 +513,7 @@ composer.addEventListener("submit", async (event) => {
   pendingMessages.set(clientId, card);
   messageInput.value = "";
   sendButton.disabled = true;
+  const generation = ++sendGeneration;
   try {
     const response = await fetch("/message", {
       method: "POST",
@@ -516,14 +527,19 @@ composer.addEventListener("submit", async (event) => {
         response.status === 409
           ? "Wait for the current response to finish."
           : "This message was not sent. Send it again.",
-        response.status !== 409,
+        response.status !== 409 && generation === sendGeneration,
       );
     }
     // A successful 202 leaves Send disabled: the session-state:running
     // event that follows drives it, and re-enables Send once the turn
     // actually settles rather than as soon as the request lands.
   } catch {
-    markMessageFailed(clientId, card, "This message was not sent. Send it again.");
+    markMessageFailed(
+      clientId,
+      card,
+      "This message was not sent. Send it again.",
+      generation === sendGeneration,
+    );
   } finally {
     messageInput.focus();
   }
