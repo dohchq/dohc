@@ -6,7 +6,10 @@ import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import type {
+  WorkspaceEngineCapture,
+  WorkspaceEngineCaptureFailure,
+} from "./workspaceEngineCapture";
 import {
   startWorkspaceWatch,
   type ActiveAgentRun,
@@ -110,15 +113,7 @@ export interface WorkspaceCaptureDecision {
 }
 
 export interface WorkspaceCaptureHooks {
-  // Wire into WorkspaceEngineCaptureOptions.onCaptureOutcome: each background
-  // capture pass reports here, and the activity layer turns failure/recovery
-  // transitions into the workspace's persistent capture-failure notice.
-  // `storeRefused` rides along (#874) so a refused store raises the recovery
-  // notice instead of the generic capture-failure one.
-  onCaptureOutcome: (outcome: {
-    ok: boolean;
-    storeRefused: EngineStoreRefusal | null;
-  }) => void;
+  onCaptureOutcome: (failure: WorkspaceEngineCaptureFailure) => void;
   // Wire into WorkspaceEngineCaptureOptions.activeAgentRun: the workspace's
   // live agent-run slot, so settled batches captured while a dohc-tracked
   // run is active carry agent authorship into engine moments (PR 0N-1).
@@ -231,14 +226,13 @@ export function createWorkspaceActivity(
               // whatever run is active at that moment (may flip between
               // batches within one open).
               activeAgentRun: () => entry.agentRun,
-              onCaptureOutcome: ({ ok, storeRefused }) => {
+              onCaptureOutcome: (failure) => {
                 // Transition-only: the FIRST failure raises the notice, the
                 // first success after a failure clears it, and repeated
                 // failures (a persistently broken store retries every batch)
                 // never re-notify. The refusal classification transitions the
                 // same way (#874): a persistently refused store re-reports
                 // the same code on every pass.
-                const failure = ok ? null : (storeRefused ?? "other");
                 if (entry.historyCaptureFailure === failure) return;
                 entry.historyCaptureFailure = failure;
                 notify();

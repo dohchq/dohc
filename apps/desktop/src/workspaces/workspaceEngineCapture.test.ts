@@ -32,6 +32,7 @@ import {
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
 import {
   DaemonRefusalError,
@@ -105,10 +106,7 @@ interface CaptureOptions {
   now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
-  onCaptureOutcome?: (outcome: {
-    ok: boolean;
-    storeRefused: "unsupported-fingerprint" | "foreign-database" | null;
-  }) => void;
+  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
   daemonOwnsCapture?: boolean;
@@ -952,7 +950,7 @@ describe("workspaceEngineCapture batch capture", () => {
         store: daemonStore,
         rustEngineSessions: sessions,
         daemonOwnsCapture: true,
-        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onCaptureOutcome: (failure) => outcomes.push(failure === null),
       });
       try {
         engine.start();
@@ -983,7 +981,7 @@ describe("workspaceEngineCapture batch capture", () => {
     try {
       const root = await tempRoot();
       let refuse = true;
-      const outcomes: Array<{ ok: boolean; storeRefused: string | null }> = [];
+      const outcomes: WorkspaceEngineCaptureFailure[] = [];
       const sessions = mockLiveSessions(new VersionedLoopbackEngine());
       const liveStore = createCaptureLiveStores(
         { workspaceId: WORKSPACE_ID, rootPath: root },
@@ -1022,17 +1020,12 @@ describe("workspaceEngineCapture batch capture", () => {
       try {
         engine.start();
         await engine.flush();
-        expect(outcomes).toEqual([
-          { ok: false, storeRefused: "foreign-database" },
-        ]);
+        expect(outcomes).toEqual(["foreign-database"]);
 
         refuse = false;
         await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
         await engine.flush();
-        expect(outcomes).toEqual([
-          { ok: false, storeRefused: "foreign-database" },
-          { ok: true, storeRefused: null },
-        ]);
+        expect(outcomes).toEqual(["foreign-database", null]);
       } finally {
         try {
           await engine.stop();
@@ -2439,7 +2432,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     const loopback = new VersionedLoopbackEngine();
     try {
       const engine = liveCapture(root, loopback, {
-        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onCaptureOutcome: (failure) => outcomes.push(failure === null),
         onError: (context, error) => errors.push({ context, error }),
       });
       engine.start();
@@ -2487,7 +2480,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     let recorded: EngineMomentRow[] = [];
     try {
       const second = liveCapture(root, loopback, {
-        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onCaptureOutcome: (failure) => outcomes.push(failure === null),
         onError: () => {},
       });
       second.start();
@@ -2517,7 +2510,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     await unlink(join(root, "vanishes.md"));
     const outcomes: boolean[] = [];
     const second = liveCapture(root, loopback, {
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
     });
     second.start();
     await second.flush();
@@ -2709,7 +2702,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     const outcomes: boolean[] = [];
     const engine = liveCapture(root, loopback, {
       onError: () => {},
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
     });
 
     engine.captureBatch([{ path: "note.md", operation: "update" }]);
@@ -2741,8 +2734,8 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     });
     const engine = liveCapture(root, loopback, {
       daemonOwnsCapture: true,
-      onCaptureOutcome: ({ ok }) => {
-        outcomes.push(ok);
+      onCaptureOutcome: (failure) => {
+        outcomes.push(failure === null);
         resolveOutcome();
       },
       onError: (context) => {
@@ -2772,7 +2765,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     const outcomes: boolean[] = [];
     const engine = liveCapture(root, loopback, {
       onError: () => {},
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
     });
     engine.captureBatch([
       { path: "bad.md", operation: "update" },
@@ -4099,7 +4092,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     let reportedDeath = false;
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
       onError: () => undefined,
       openRustYDocProviderSession: async (options) => {
         opens += 1;

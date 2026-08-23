@@ -406,10 +406,7 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
       },
     );
     await activity.open(workspace());
-    hooks!.onCaptureOutcome({
-      ok: false,
-      storeRefused: "unsupported-fingerprint",
-    });
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
     statusesSeenByRenderer.length = 0;
 
     await expect(
@@ -460,10 +457,7 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
       },
     });
     await activity.open(workspace());
-    hooks!.onCaptureOutcome({
-      ok: false,
-      storeRefused: "unsupported-fingerprint",
-    });
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
 
     await activity.close("activity-test", { preserveStatus: true });
     expect(activity.getStatus("activity-test").engineStoreRefused).toBe(
@@ -616,28 +610,22 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
 
     notify.mockClear();
-    hooks!.onCaptureOutcome({
-      ok: false,
-      storeRefused: "unsupported-fingerprint",
-    });
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
     const refused = activity.getStatus("activity-test");
     expect(refused.engineStoreRefused).toBe("unsupported-fingerprint");
     expect(refused.historyCaptureFailed).toBe(true);
     expect(notify).toHaveBeenCalledTimes(1);
 
     // The same refusal again is not news.
-    hooks!.onCaptureOutcome({
-      ok: false,
-      storeRefused: "unsupported-fingerprint",
-    });
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
     expect(notify).toHaveBeenCalledTimes(1);
 
     // A pass that reached the store clears the refusal with the failure.
-    hooks!.onCaptureOutcome({ ok: true, storeRefused: null });
+    hooks!.onCaptureOutcome(null);
     expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
     expect(notify).toHaveBeenCalledTimes(2);
 
-    hooks!.onCaptureOutcome({ ok: false, storeRefused: null });
+    hooks!.onCaptureOutcome("other");
     const otherFailure = activity.getStatus("activity-test");
     expect(otherFailure.historyCaptureFailed).toBe(true);
     expect(otherFailure.engineStoreRefused).toBeNull();

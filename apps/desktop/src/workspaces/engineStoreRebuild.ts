@@ -123,6 +123,22 @@ function matchesManifestEntry(
   );
 }
 
+async function scanEngineStoreFiles(
+  engineDir: string,
+  fileSystem: EngineStoreMoveFileSystem,
+): Promise<Map<EngineStoreFileName, Stats | null>> {
+  const files = new Map<EngineStoreFileName, Stats | null>();
+  for (const name of ENGINE_STORE_FILES) {
+    const path = join(engineDir, name);
+    const metadata = await lstatIfExists(path, fileSystem);
+    if (metadata !== null && !metadata.isFile()) {
+      throw new EngineStoreManifestDriftError(path);
+    }
+    files.set(name, metadata);
+  }
+  return files;
+}
+
 function parseMoveManifest(contents: string): EngineStoreMoveManifest {
   const manifest = engineStoreMoveManifestSchema.parse(JSON.parse(contents));
   const names = new Set<EngineStoreFileName>();
@@ -139,18 +155,15 @@ async function captureMoveManifest(
   engineDir: string,
   fileSystem: EngineStoreMoveFileSystem,
 ): Promise<EngineStoreMoveManifest> {
-  const files: EngineStoreMoveManifest["files"] = [];
-  for (const name of ENGINE_STORE_FILES) {
-    const path = join(engineDir, name);
-    const metadata = await lstatIfExists(path, fileSystem);
-    if (metadata) {
-      if (!metadata.isFile()) {
-        throw new EngineStoreManifestDriftError(path);
-      }
-      files.push({ name, size: metadata.size, mtimeMs: metadata.mtimeMs });
-    }
-  }
-  return { files };
+  const scan = await scanEngineStoreFiles(engineDir, fileSystem);
+  return {
+    files: ENGINE_STORE_FILES.flatMap((name) => {
+      const metadata = scan.get(name);
+      return metadata
+        ? [{ name, size: metadata.size, mtimeMs: metadata.mtimeMs }]
+        : [];
+    }),
+  };
 }
 
 async function readMoveManifest(path: string): Promise<EngineStoreMoveManifest> {
@@ -219,11 +232,10 @@ async function assertNoUnlistedStoreFiles(
   fileSystem: EngineStoreMoveFileSystem,
 ): Promise<void> {
   const listedNames = new Set(manifest.files.map(({ name }) => name));
-  for (const name of ENGINE_STORE_FILES) {
-    if (listedNames.has(name)) continue;
-    const path = join(engineDir, name);
-    if ((await lstatIfExists(path, fileSystem)) !== null) {
-      throw new EngineStoreManifestDriftError(path);
+  const scan = await scanEngineStoreFiles(engineDir, fileSystem);
+  for (const [name, metadata] of scan) {
+    if (metadata !== null && !listedNames.has(name)) {
+      throw new EngineStoreManifestDriftError(join(engineDir, name));
     }
   }
 }
@@ -232,11 +244,10 @@ async function assertEngineDirHasNoStoreFiles(
   engineDir: string,
   fileSystem: EngineStoreMoveFileSystem,
 ): Promise<void> {
-  for (const name of ENGINE_STORE_FILES) {
-    const path = join(engineDir, name);
-    if ((await lstatIfExists(path, fileSystem)) !== null) {
-      throw new EngineStoreManifestDriftError(path);
-    }
+  const scan = await scanEngineStoreFiles(engineDir, fileSystem);
+  const remaining = ENGINE_STORE_FILES.find((name) => scan.get(name) !== null);
+  if (remaining !== undefined) {
+    throw new EngineStoreManifestDriftError(join(engineDir, remaining));
   }
 }
 
@@ -335,18 +346,29 @@ export async function completePendingEngineStoreMove(
 export async function withEngineStoreRecovered<T>(
   locks: Map<string, Promise<void>>,
   workspace: Pick<CreatedWorkspace, "workspaceId" | "rootPath">,
-  alreadySerialized: boolean,
   body: () => Promise<T>,
   completePendingMove: (
     rootPath: string,
   ) => Promise<void> = completePendingEngineStoreMove,
 ): Promise<T> {
-  const recovered = async () => {
-    await completePendingMove(workspace.rootPath);
-    return body();
-  };
-  if (alreadySerialized) return recovered();
-  return withKeyedStartLock(locks, workspace.workspaceId, recovered);
+  return withKeyedStartLock(locks, workspace.workspaceId, () =>
+    withEngineStoreRecoveredUnderEngineStoreLock(
+      workspace,
+      body,
+      completePendingMove,
+    ),
+  );
+}
+
+export async function withEngineStoreRecoveredUnderEngineStoreLock<T>(
+  workspace: Pick<CreatedWorkspace, "rootPath">,
+  body: () => Promise<T>,
+  completePendingMove: (
+    rootPath: string,
+  ) => Promise<void> = completePendingEngineStoreMove,
+): Promise<T> {
+  await completePendingMove(workspace.rootPath);
+  return body();
 }
 
 async function throwAfterReservationCleanup(
@@ -469,29 +491,33 @@ export async function moveEngineStoreAside(
   }
 }
 
-export class EngineStoreNotRefusedError extends Error {
-  constructor() {
-    super("dohc can read this workspace's current data store. Nothing moved.");
-    this.name = "EngineStoreNotRefusedError";
-  }
-}
+type EngineStoreRebuildRequestFailure =
+  | "not-refused"
+  | "agent-run-active"
+  | "close-failed";
 
-export class EngineStoreAgentRunActiveError extends Error {
-  constructor() {
-    super(
-      "An agent is working in this workspace. Wait for it to finish, then try again.",
-    );
-    this.name = "EngineStoreAgentRunActiveError";
-  }
-}
+const engineStoreRebuildRequestMessages: Record<
+  EngineStoreRebuildRequestFailure,
+  string
+> = {
+  "not-refused":
+    "dohc can read this workspace's current data store. Nothing moved.",
+  "agent-run-active":
+    "An agent is working in this workspace. Wait for it to finish, then try again.",
+  "close-failed":
+    "dohc could not finish closing this workspace's data store. Nothing moved. Try again.",
+};
 
-export class EngineStoreCloseFailedError extends Error {
-  constructor(cause: unknown) {
+export class EngineStoreRebuildRequestError extends Error {
+  readonly reason: EngineStoreRebuildRequestFailure;
+
+  constructor(reason: EngineStoreRebuildRequestFailure, cause?: unknown) {
     super(
-      "dohc could not finish closing this workspace's data store. Nothing moved. Try again.",
-      { cause },
+      engineStoreRebuildRequestMessages[reason],
+      cause === undefined ? undefined : { cause },
     );
-    this.name = "EngineStoreCloseFailedError";
+    this.name = "EngineStoreRebuildRequestError";
+    this.reason = reason;
   }
 }
 
@@ -509,7 +535,7 @@ export async function rebuildEngineStore(
   try {
     await deps.closeActivity();
   } catch (error) {
-    throw new EngineStoreCloseFailedError(error);
+    throw new EngineStoreRebuildRequestError("close-failed", error);
   }
 
   let outcome: MoveOutcome | undefined;
@@ -519,7 +545,7 @@ export async function rebuildEngineStore(
 
   try {
     if ((await deps.probeStoreRefusal()) === null) {
-      throw new EngineStoreNotRefusedError();
+      throw new EngineStoreRebuildRequestError("not-refused");
     }
     moveAttempted = true;
     outcome = await deps.moveStoreAside(rootPath);
@@ -564,7 +590,6 @@ export async function rebuildEngineStore(
         : "dohc could not finish rebuilding this workspace's data store.";
   return {
     outcome,
-    sessionsClosed: true,
     ...(reopenFailed ? { reopenFailed } : {}),
   };
 }
@@ -581,10 +606,10 @@ export async function rebuildEngineStoreRequest(
   const previousResult = deps.previousResult();
   if (!deps.isStoreRefused()) {
     if (previousResult) return previousResult;
-    throw new EngineStoreNotRefusedError();
+    throw new EngineStoreRebuildRequestError("not-refused");
   }
   if (deps.hasActiveAgentRun()) {
-    throw new EngineStoreAgentRunActiveError();
+    throw new EngineStoreRebuildRequestError("agent-run-active");
   }
 
   try {
@@ -592,7 +617,11 @@ export async function rebuildEngineStoreRequest(
     deps.rememberResult(result);
     return result;
   } catch (error) {
-    if (error instanceof EngineStoreNotRefusedError && previousResult) {
+    if (
+      error instanceof EngineStoreRebuildRequestError &&
+      error.reason === "not-refused" &&
+      previousResult
+    ) {
       return previousResult;
     }
     throw error;

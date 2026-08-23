@@ -388,6 +388,7 @@ import {
   moveEngineStoreAside,
   rebuildEngineStoreRequest,
   withEngineStoreRecovered,
+  withEngineStoreRecoveredUnderEngineStoreLock,
 } from "./workspaces/engineStoreRebuild";
 import {
   completeWorkspaceJoinBootstrap,
@@ -2788,6 +2789,19 @@ const workspaceActivityOpenPromises = new Map<
 >();
 const workspaceActivityClosePromises = new Map<string, Promise<void>>();
 
+function completePendingEngineStoreMoveForWorkspace(
+  workspace: Pick<CreatedWorkspace, "workspaceId">,
+  rootPath: string,
+): Promise<void> {
+  const sessions = requireEngineSessions();
+  return completePendingEngineStoreMove(rootPath, {
+    rebuildGate: {
+      begin: () => sessions.beginRebuild(workspace.workspaceId),
+      end: () => sessions.endRebuild(workspace.workspaceId),
+    },
+  });
+}
+
 async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   return coalesceDispatchScopedSync(
     dispatchScopedSyncs,
@@ -2801,7 +2815,6 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
         return await withEngineStoreRecovered(
           engineStoreRebuildLocks,
           workspace,
-          false,
           async () => {
             if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
               activity.queueCloudSync(workspaceId);
@@ -2840,15 +2853,8 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
               await capture.stop().catch(() => undefined);
             }
           },
-          (rootPath) => {
-            const sessions = requireEngineSessions();
-            return completePendingEngineStoreMove(rootPath, {
-              rebuildGate: {
-                begin: () => sessions.beginRebuild(workspace.workspaceId),
-                end: () => sessions.endRebuild(workspace.workspaceId),
-              },
-            });
-          },
+          (rootPath) =>
+            completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
         );
       } catch (error) {
         if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
@@ -2863,8 +2869,38 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
 
 interface WorkspaceActivityOpenOptions {
   afterActivityOpen?: () => Promise<void>;
-  engineStoreMoveAlreadySerialized?: boolean;
   whileEngineStoreLockHeld?: () => Promise<void>;
+}
+
+async function ensureWorkspaceActivityOpenBody(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  let status: SyncStatusResult;
+  for (;;) {
+    const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
+    if (closing) {
+      await closing.catch(() => undefined);
+      continue;
+    }
+    const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
+    if (existing) {
+      status = await existing;
+      break;
+    }
+    const opening = activity.open(workspace);
+    workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
+    try {
+      status = await opening;
+      break;
+    } finally {
+      if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
+        workspaceActivityOpenPromises.delete(workspace.workspaceId);
+      }
+    }
+  }
+  await options.whileEngineStoreLockHeld?.();
+  return status;
 }
 
 async function ensureWorkspaceActivityOpen(
@@ -2874,43 +2910,21 @@ async function ensureWorkspaceActivityOpen(
   return withEngineStoreRecovered(
     engineStoreRebuildLocks,
     workspace,
-    options.engineStoreMoveAlreadySerialized ?? false,
-    async () => {
-      let status: SyncStatusResult;
-      for (;;) {
-        const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
-        if (closing) {
-          await closing.catch(() => undefined);
-          continue;
-        }
-        const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
-        if (existing) {
-          status = await existing;
-          break;
-        }
-        const opening = activity.open(workspace);
-        workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
-        try {
-          status = await opening;
-          break;
-        } finally {
-          if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
-            workspaceActivityOpenPromises.delete(workspace.workspaceId);
-          }
-        }
-      }
-      await options.whileEngineStoreLockHeld?.();
-      return status;
-    },
-    (rootPath) => {
-      const sessions = requireEngineSessions();
-      return completePendingEngineStoreMove(rootPath, {
-        rebuildGate: {
-          begin: () => sessions.beginRebuild(workspace.workspaceId),
-          end: () => sessions.endRebuild(workspace.workspaceId),
-        },
-      });
-    },
+    () => ensureWorkspaceActivityOpenBody(workspace, options),
+    (rootPath) =>
+      completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
+  );
+}
+
+async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  return withEngineStoreRecoveredUnderEngineStoreLock(
+    workspace,
+    () => ensureWorkspaceActivityOpenBody(workspace, options),
+    (rootPath) =>
+      completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
   );
 }
 
@@ -3164,24 +3178,46 @@ const workspaceChatLifecycle = createWorkspaceChatLifecycle({
   },
 });
 
-async function openWorkspaceActivity(
+async function openWorkspaceActivityWith(
   workspace: CreatedWorkspace,
-  options: WorkspaceActivityOpenOptions = {},
+  options: WorkspaceActivityOpenOptions,
+  ensureOpen: (
+    workspace: CreatedWorkspace,
+    options: WorkspaceActivityOpenOptions,
+  ) => Promise<SyncStatusResult>,
 ): Promise<SyncStatusResult> {
   retainedWorkspaceActivities.add(workspace.workspaceId);
   const result = await workspaceChatLifecycle.open(
     workspace,
-    () =>
-      ensureWorkspaceActivityOpen(
-        workspace,
-        options,
-      ),
+    () => ensureOpen(workspace, options),
     options.afterActivityOpen,
   );
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
   return result;
+}
+
+async function openWorkspaceActivity(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  return openWorkspaceActivityWith(
+    workspace,
+    options,
+    ensureWorkspaceActivityOpen,
+  );
+}
+
+async function openWorkspaceActivityUnderEngineStoreLock(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  return openWorkspaceActivityWith(
+    workspace,
+    options,
+    ensureWorkspaceActivityOpenUnderEngineStoreLock,
+  );
 }
 
 async function startAgentRunWithWorkspaceActivity(
@@ -10976,9 +11012,7 @@ function registerIpcHandlers(
             },
             reopenActivity: async () => {
               try {
-                await openWorkspaceActivity(workspace, {
-                  engineStoreMoveAlreadySerialized: true,
-                });
+                await openWorkspaceActivityUnderEngineStoreLock(workspace);
               } finally {
                 notifyRenderer();
               }

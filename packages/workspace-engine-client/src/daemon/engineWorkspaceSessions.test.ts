@@ -707,47 +707,6 @@ describe("EngineWorkspaceSessions", () => {
     expect(requests).toHaveLength(2);
   });
 
-  it.each([
-    ["resolving", false],
-    ["rejecting", true],
-  ])("binds a rebuild gate to a %s recovery body", async (_name, rejectBody) => {
-    const workspace = await tempWorkspace();
-    const client = new MockClient("handle-rebuild-bracket");
-    const sessions = new EngineWorkspaceSessions({
-      currentClient: () => client,
-    });
-    const moveError = new Error("rename failed during recovery");
-
-    const withRebuildBoundGate = async <T>(body: () => Promise<T>) => {
-      sessions.beginRebuild(workspace.workspaceId);
-      const result = await body();
-      sessions.endRebuild(workspace.workspaceId);
-      return result;
-    };
-    const body = rejectBody
-      ? async () => {
-          throw moveError;
-        }
-      : async () => "moved";
-
-    if (rejectBody) {
-      await expect(withRebuildBoundGate(body)).rejects.toBe(moveError);
-      await expect(
-        sessions.run(workspace, async () => "unexpected"),
-      ).rejects.toEqual(
-        new EngineWorkspaceRebuildingError(workspace.workspaceId),
-      );
-      await expect(
-        withRebuildBoundGate(async () => "recovered"),
-      ).resolves.toBe("recovered");
-    } else {
-      await expect(withRebuildBoundGate(body)).resolves.toBe("moved");
-    }
-    await expect(
-      sessions.run(workspace, async () => "opened"),
-    ).resolves.toBe("opened");
-  });
-
   it("refuses a run that was waiting for close when rebuilding starts", async () => {
     const workspace = await tempWorkspace();
     const closeStarted = deferred<void>();

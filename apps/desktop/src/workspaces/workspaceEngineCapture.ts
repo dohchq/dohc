@@ -625,17 +625,7 @@ export interface WorkspaceEngineCaptureOptions {
   // than onError: version/restore operations reject to their caller (the UI
   // surfaces those directly) and best-effort rename coordination falls back
   // to plain capture, so neither means history is silently missing.
-  //
-  // `storeRefused` carries the fingerprint fence's classification when the
-  // failure was the engine refusing to open this workspace's database (#874).
-  // REQUIRED, not optional: null asserts "the store was not refused", and a
-  // producer that cannot say which failure it saw must not compile — an
-  // omitted field would silently route a refused store to the generic
-  // capture-failure copy, which is the bug this field exists to fix.
-  onCaptureOutcome?: (outcome: {
-    ok: boolean;
-    storeRefused: EngineStoreRefusal | null;
-  }) => void;
+  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -667,6 +657,11 @@ export interface WorkspaceEngineCaptureOptions {
     }
   >;
 }
+
+export type WorkspaceEngineCaptureFailure =
+  | EngineStoreRefusal
+  | "other"
+  | null;
 
 export interface EngineDiskWriter {
   writeTextFile(absolutePath: string, text: string): Promise<void>;
@@ -1490,10 +1485,11 @@ export function createWorkspaceEngineCapture(
   let storeRefused: EngineStoreRefusal | null = null;
 
   const publishCaptureOutcome = (): void => {
-    options.onCaptureOutcome?.({
-      ok: backgroundCaptureHealthy && deadYDocSessions.size === 0,
-      storeRefused,
-    });
+    const failure =
+      backgroundCaptureHealthy && deadYDocSessions.size === 0
+        ? null
+        : (storeRefused ?? "other");
+    options.onCaptureOutcome?.(failure);
   };
 
   const emitCaptureOutcome = (ok: boolean): void => {

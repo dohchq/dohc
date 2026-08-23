@@ -334,7 +334,6 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     rebuildEngineStore: vi.fn(
       async (): Promise<RebuildEngineStoreResult> => ({
         outcome: "moved",
-        sessionsClosed: true,
       }),
     ),
     // Typed to the contract, not to this idle default: a freshness test drives
@@ -6048,7 +6047,7 @@ describe("engine store recovery", () => {
     expect(document.activeElement).toBe(dialog);
 
     await act(async () => {
-      decision.resolve({ outcome: "moved", sessionsClosed: true });
+      decision.resolve({ outcome: "moved" });
       await decision.promise;
     });
     const done = await within(dialog).findByRole("button", { name: "Done" });
@@ -6065,7 +6064,6 @@ describe("engine store recovery", () => {
     // A partial move completed during reopen has this same result.
     bridge.rebuildEngineStore = vi.fn(async () => ({
       outcome: "moved" as const,
-      sessionsClosed: true as const,
     }));
     const { user, dialog } = await openRebuildDialog(bridge);
 
@@ -6077,9 +6075,6 @@ describe("engine store recovery", () => {
 
     // The user learns what moves, where it goes, and what does NOT come
     // back, before anything moves.
-    expect(dialog.textContent).toContain(
-      "This workspace's data store is not in the format this version of dohc uses.",
-    );
     expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(dialog.textContent).toContain(
       "The old data store stays in the backup location. History and chats stored only there will not appear in the rebuilt workspace. Your workspace files stay in place.",
@@ -6135,9 +6130,9 @@ describe("engine store recovery", () => {
     expect(dialog.textContent).not.toContain("not created by dohc");
   });
 
-  it.each(["moved", "backup-exists"] as const)(
-    "reopens a mounted live document after a %s result and sends the next edit to the fresh session",
-    async (outcome) => {
+  it(
+    "reopens a mounted live document after a successful rebuild and sends the next edit to the fresh session",
+    async () => {
       const rebuild = deferred<RebuildEngineStoreResult>();
       let liveSessionsGeneration = 0;
       const bridge = makeEngineBridge(
@@ -6201,7 +6196,7 @@ describe("engine store recovery", () => {
       await act(async () => {
         liveSessionsGeneration += 1;
         bridge.emitWorkspaceActivity();
-        rebuild.resolve({ outcome, sessionsClosed: true });
+        rebuild.resolve({ outcome: "moved" });
         await rebuild.promise;
       });
 
@@ -6319,7 +6314,7 @@ describe("engine store recovery", () => {
     await act(async () => {
       liveSessionsGeneration = 1;
       bridge.emitWorkspaceActivity();
-      rebuild.resolve({ outcome: "moved", sessionsClosed: true });
+      rebuild.resolve({ outcome: "moved" });
       await rebuild.promise;
     });
 
@@ -6458,7 +6453,6 @@ describe("engine store recovery", () => {
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     bridge.rebuildEngineStore = vi.fn(async () => ({
       outcome: "backup-exists" as const,
-      sessionsClosed: true as const,
     }));
     const { user, dialog } = await openRebuildDialog(bridge);
 
@@ -6480,7 +6474,6 @@ describe("engine store recovery", () => {
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
     bridge.rebuildEngineStore = vi.fn(async () => ({
       outcome: "moved" as const,
-      sessionsClosed: true as const,
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
     }));

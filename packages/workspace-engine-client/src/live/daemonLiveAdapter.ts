@@ -182,13 +182,6 @@ export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error);
 }
 
-// The engine's fingerprint fence refused to open the workspace's database
-// (#874): `unsupported-fingerprint` is a store stamped by a version of dohc
-// this build does not support, `foreign-database` a non-empty file the engine
-// refuses to initialize over. Both are designed export/reset outcomes
-// (`dohc-engine-storage`), never auto-repaired and never cleared by retrying —
-// the recovery is moving the store aside and rebuilding from files, and the
-// desktop owes the user that surface instead of a generic failure.
 export type EngineStoreRefusal = "unsupported-fingerprint" | "foreign-database";
 
 export function engineStoreRefusalOf(error: unknown): EngineStoreRefusal | null {

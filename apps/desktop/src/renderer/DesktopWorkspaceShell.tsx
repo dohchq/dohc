@@ -37,6 +37,7 @@ import type {
   EngineStoreRefusal,
   MyShareChangeRow,
   RefreshSharedViewResult,
+  RebuildEngineStoreResult,
   ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
@@ -2425,8 +2426,7 @@ export function DesktopWorkspaceShell(props: {
   const [engineRebuild, setEngineRebuild] = useState<
     | { phase: "confirm"; refusal: EngineStoreRefusal }
     | { phase: "moving"; refusal: EngineStoreRefusal }
-    | { phase: "moved"; reopenFailed?: string }
-    | { phase: "backup-exists"; reopenFailed?: string }
+    | { phase: "complete"; result: RebuildEngineStoreResult }
     | null
   >(null);
   // Bumped after an engine version operation or a main-process live-session
@@ -2456,10 +2456,7 @@ export function DesktopWorkspaceShell(props: {
       try {
         const result = await bridge().rebuildEngineStore({ workspaceId });
         if (engineRebuildToken.current !== token) return;
-        setEngineRebuild({
-          phase: result.outcome,
-          ...(result.reopenFailed ? { reopenFailed: result.reopenFailed } : {}),
-        });
+        setEngineRebuild({ phase: "complete", result });
       } catch (error) {
         if (engineRebuildToken.current !== token) return;
         setEngineRebuild(null);
@@ -6246,7 +6243,8 @@ export function DesktopWorkspaceShell(props: {
         >
           <div className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel">
             <div className="p-4">
-              {engineRebuild.phase === "moved" ? (
+              {engineRebuild.phase === "complete" &&
+              engineRebuild.result.outcome === "moved" ? (
                 <>
                   <p
                     id="engine-rebuild-title"
@@ -6257,12 +6255,12 @@ export function DesktopWorkspaceShell(props: {
                   <p className="mb-0 mt-2 text-xs text-muted">
                     The old data store is at{" "}
                     <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
-                    {engineRebuild.reopenFailed
-                      ? ` ${engineRebuild.reopenFailed}`
+                    {engineRebuild.result.reopenFailed
+                      ? ` ${engineRebuild.result.reopenFailed}`
                       : " dohc is rebuilding history from your files."}
                   </p>
                 </>
-              ) : engineRebuild.phase === "backup-exists" ? (
+              ) : engineRebuild.phase === "complete" ? (
                 <>
                   <p
                     id="engine-rebuild-title"
@@ -6275,9 +6273,9 @@ export function DesktopWorkspaceShell(props: {
                     <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
                     Move it away, then try again.
                   </p>
-                  {engineRebuild.reopenFailed ? (
+                  {engineRebuild.result.reopenFailed ? (
                     <p className="mb-0 mt-2 text-xs text-muted">
-                      {engineRebuild.reopenFailed}
+                      {engineRebuild.result.reopenFailed}
                     </p>
                   ) : null}
                 </>
@@ -6333,7 +6331,9 @@ export function DesktopWorkspaceShell(props: {
                   autoFocus
                   onClick={() => setEngineRebuild(null)}
                 >
-                  {engineRebuild.phase === "moved" ? "Done" : "Close"}
+                  {engineRebuild.result.outcome === "moved"
+                    ? "Done"
+                    : "Close"}
                 </SecondaryButton>
               )}
             </div>
