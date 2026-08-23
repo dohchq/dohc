@@ -1449,6 +1449,21 @@ describe("Codex chat web app", () => {
 
     expect((await firstMessage).status).toBe(500);
 
+    // Replay after reconnect: the initial snapshot, then the failure card
+    // the driver's own onEvent handler published -- straight after it, no
+    // orphaned user-message reservation and no orphaned "running"/other
+    // turn noise sitting in between. The terminal card is the only place
+    // a reconnect ever learns why the session ended, so it must survive
+    // being dropped along with the rest of the orphaned turn.
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({
+      kind: "error",
+      message: "Codex crashed.",
+      fatal: true,
+    });
+    await reattached.close();
+
     // No 409 left behind: the fresh message drives a whole new session,
     // proving turnActive was never left stuck true.
     const secondMessage = await post(url, "message", { text: "Second" }, token);

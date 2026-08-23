@@ -544,22 +544,29 @@ export function createChatWebApp(
       };
       eventLog.push(reserved);
       trimLog();
-      // Drops the reservation AND everything the driver published (via
-      // onEvent) after it -- while pendingPrompt/turnActive gate every
-      // other /message, nothing but this turn's own driver can have added
-      // anything past this point. Used both when prompt() itself rejects
-      // and when it resolves into a session that died out from under it:
-      // either way this message was never really accepted, and a stray
-      // session-state (e.g. "running") the driver fired before things went
-      // wrong must not survive as an orphan with no question and no
-      // resolution in front of it.
+      // Drops the reservation and the rest of this orphaned turn's OWN
+      // events (a stray "running" state, deltas) -- while
+      // pendingPrompt/turnActive gate every other /message, nothing but
+      // this turn's own driver can have added anything past this point.
+      // Used both when prompt() itself rejects and when it resolves into a
+      // session that died out from under it. A genuine terminal event
+      // (fatal error, or session-state closed/error) can already be
+      // sitting in that same tail -- the session's own onEvent handler
+      // published it independently of this call, before prompt() ever
+      // settled -- and it is the ONLY place a reconnect ever sees why the
+      // session ended, so it is kept, in its original position, not swept
+      // away with the rest of the orphaned turn.
       const dropOrphanedReservation = (): void => {
         const index = eventLog.indexOf(reserved);
         if (index === -1) return;
-        for (const dropped of eventLog.splice(index, eventLog.length - index)) {
-          if (dropped.event.kind !== "text-delta") continue;
-          const key = dropped.event.stream + ":" + dropped.event.itemId;
-          if (openDeltas.get(key) === dropped) openDeltas.delete(key);
+        for (const entry of eventLog.splice(index)) {
+          if (sessionEnded(entry.event)) {
+            eventLog.push(entry);
+            continue;
+          }
+          if (entry.event.kind !== "text-delta") continue;
+          const key = entry.event.stream + ":" + entry.event.itemId;
+          if (openDeltas.get(key) === entry) openDeltas.delete(key);
         }
       };
       try {
