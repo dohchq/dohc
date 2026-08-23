@@ -448,9 +448,15 @@ describe("Codex chat web app", () => {
     const reservedControls = await stream.nextRaw();
     expect(reservedControls).toMatchObject({
       kind: "controls",
-      controls: { canSend: false, canStop: false, turnId: null },
+      controls: { canSend: false, canStop: true, turnId: null },
     });
     observe(reservedControls);
+    const assignedTurn = await stream.nextRaw();
+    expect(assignedTurn).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(assignedTurn);
     fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
 
     const running = await stream.nextRaw();
@@ -564,7 +570,7 @@ describe("Codex chat web app", () => {
     });
     observe(reconnectSnapshot);
     const replayed: Record<string, unknown>[] = [];
-    for (let index = 0; index < 7; index += 1) replayed.push(await reattached.nextRaw());
+    for (let index = 0; index < 8; index += 1) replayed.push(await reattached.nextRaw());
     const replayedDeltas = replayed.filter(
       (event) => event.kind === "text-delta" && event.itemId === "answer",
     );
@@ -608,8 +614,19 @@ describe("Codex chat web app", () => {
     expect((await post(url, "message", { text: "First", clientId: "c1" }, token)).status).toBe(
       202,
     );
-    expect(await stream.nextRaw()).toMatchObject({ kind: "controls" });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
     expect(await stream.nextRaw()).toMatchObject({ kind: "user-message", text: "First" });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: false, turnId: 1 },
+    });
     fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
     expect(await stream.nextRaw()).toMatchObject({ kind: "turn-completed" });
 
@@ -618,6 +635,10 @@ describe("Codex chat web app", () => {
     expect(await stream.nextRaw()).toMatchObject({
       kind: "controls",
       controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 2 },
     });
     expect((await post(url, "stop", undefined, token)).status).toBe(200);
 
@@ -657,13 +678,13 @@ describe("Codex chat web app", () => {
     expect(response.status).toBe(503);
     expect(await stream.nextRaw()).toMatchObject({
       kind: "controls",
-      controls: { canSend: false, canStop: false, turnId: null },
+      controls: { canSend: false, canStop: true, turnId: null },
     });
     expect(await stream.nextRaw()).toMatchObject({
       kind: "error",
       message: "Codex failed to spawn.",
       fatal: true,
-      controls: { canSend: false, canStop: false, turnId: null },
+      controls: { canSend: false, canStop: true, turnId: null },
     });
     expect(await stream.nextRaw()).toMatchObject({
       kind: "controls",
@@ -685,14 +706,44 @@ describe("Codex chat web app", () => {
 
     const messageResponse = post(url, "message", { text: "Hello" }, token);
     await probeEntered.promise;
-    expect(await stream.nextRaw()).toMatchObject({
-      kind: "controls",
-      controls: { canSend: false, canStop: false, turnId: null },
-    });
+    const reservation = await stream.nextRaw();
 
     probeGate.resolve();
     expect((await messageResponse).status).toBe(202);
     await stream.close();
+    expect(reservation).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+  });
+
+  it("publishes the turn id before prompt acceptance without waiting for a driver event", async () => {
+    const promptEntered = deferred();
+    const promptGate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => promptEntered.resolve(),
+      promptGate: () => promptGate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    const messageResponse = post(url, "message", { text: "Hello" }, token);
+    await promptEntered.promise;
+    const reservation = await stream.nextRaw();
+    const turnControls = await raceTimeout(stream.nextRaw(), 200);
+
+    promptGate.resolve();
+    expect((await messageResponse).status).toBe(202);
+    await stream.close();
+    expect(reservation).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+    });
+    expect(turnControls).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
   });
 
   it("reconnect after a reservation reports a seq newer than what was already applied", async () => {
@@ -712,7 +763,9 @@ describe("Codex chat web app", () => {
 
     expect((await post(url, "message", { text: "First" }, token)).status).toBe(202);
     await stream.nextRaw(); // reservation controls
+    await stream.nextRaw(); // assigned-turn controls
     await stream.nextRaw(); // accepted user-message
+    await stream.nextRaw(); // released reservation controls
     fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
     await stream.nextRaw();
 

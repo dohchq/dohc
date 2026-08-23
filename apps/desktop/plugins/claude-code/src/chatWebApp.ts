@@ -302,9 +302,8 @@ export function createChatWebApp(
    * stop valid right now, and what turn (if any) is that answer about. Pure
    * -- computed fresh from existing state every time it's read, never
    * cached or stored on anything. `canSend` mirrors message()'s own 409
-   * gate exactly; `canStop` mirrors the pill's existing closed/error check
-   * (Stop is always a safe no-op otherwise, so it stays clickable whenever
-   * the session itself is alive). */
+   * gate exactly. `canStop` includes a claimed prompt before the session
+   * opens; after that, Stop stays available while the session is alive. */
   function computeControls(): {
     canSend: boolean;
     canStop: boolean;
@@ -312,7 +311,7 @@ export function createChatWebApp(
   } {
     return {
       canSend: !turnActive && !pendingPrompt,
-      canStop: state.state !== "closed" && state.state !== "error",
+      canStop: pendingPrompt !== null || (state.state !== "closed" && state.state !== "error"),
       turnId: currentTurnId ?? null,
     };
   }
@@ -320,7 +319,7 @@ export function createChatWebApp(
   // The last controls fact actually broadcast to connected clients (never a
   // per-connection snapshot or a per-requester response body -- see frame()
   // below, the only place that updates this). Compared against on every
-  // pendingPrompt/turnActive mutation that happens OUTSIDE a publish() call
+  // pendingPrompt/turnActive/currentTurnId mutation outside a publish() call
   // of its own: if the derived fact differs, publish one, so a connected
   // page always learns the change even when the response body that would
   // also have carried it is lost, delayed, or never read.
@@ -333,13 +332,14 @@ export function createChatWebApp(
     return a.canSend === b.canSend && a.canStop === b.canStop && a.turnId === b.turnId;
   }
 
-  /** Call after any pendingPrompt/turnActive assignment that is NOT already
+  /** Call after any pendingPrompt/turnActive/currentTurnId assignment not
    * immediately followed (synchronously) by its own publish()/frame() call
    * for some other event -- those already recompute controls fresh and
    * announce the change as a side effect; calling this there too would only
    * be redundant, not wrong, so it is reserved for sites that otherwise
-   * have no announcement: message()'s reservation and finally-block release,
-   * plus shutdown()'s release before it awaits disposal. A no-op
+   * have no announcement: message()'s reservation, turn-id assignment and
+   * finally-block release, plus shutdown()'s release before it awaits
+   * disposal. A no-op
    * `{ kind: "controls" }` event carries nothing but the fact itself --
    * ChatStreamEvent's existing local union gains this one new shape. */
   function syncControls(): void {
@@ -759,6 +759,7 @@ export function createChatWebApp(
       // pending, and those must carry this turn's real identity, not a
       // stale leftover from whatever the previous turn was.
       currentTurnId = ++turnSequence;
+      syncControls();
       try {
         await live.prompt({ text: body.text });
       } catch (error) {

@@ -12,6 +12,7 @@ import {
   NODE_MISSING_MESSAGE,
   POSIX_MCP_LAUNCHER,
   WINDOWS_MCP_LAUNCHER,
+  posixMcpLauncher,
 } from "./build-cli-bin.mjs";
 
 function launcherDir() {
@@ -26,6 +27,15 @@ function launcherDir() {
   );
   return dir;
 }
+
+test("the POSIX launcher template names the requested module without changing the packaged default", () => {
+  assert.equal(POSIX_MCP_LAUNCHER, posixMcpLauncher("dohc-mcp.mjs"));
+  assert.ok(
+    posixMcpLauncher("dohc-mcp-0123456789abcdef.mjs").endsWith(
+      'exec node "${0%/*}/dohc-mcp-0123456789abcdef.mjs" "$@"\n',
+    ),
+  );
+});
 
 const nodeDir = dirname(process.execPath);
 const isWindows = process.platform === "win32";

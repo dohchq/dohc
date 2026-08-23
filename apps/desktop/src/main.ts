@@ -12150,9 +12150,9 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     if (app.isPackaged && process.platform === "linux" && isAppImageBoot()) {
-      // A failed refresh must not block startup, and must not throw away an
-      // intact launcher a previous boot already published -- only a boot
-      // with nothing usable there falls back to the packaged mount.
+      // A failed refresh must not block startup or discard an intact pair
+      // from an earlier boot. With no usable pair, report the launcher
+      // unavailable instead of exposing the AppImage mount path.
       linuxStableCliBinDir = await refreshLinuxStableCliBin({
         resourcesCliBinDir: resolveDohcCliBinDirectory({
           appRoot: app.getAppPath(),

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { posixMcpLauncher } from "../../scripts/mcp-launchers.mjs";
 import {
   hasIntactStableCliBin,
   refreshLinuxStableCliBin,
@@ -17,95 +18,133 @@ import {
 } from "./linuxStableCliBin";
 
 const scratchDirs: string[] = [];
-let failLauncherCopy = false;
+let failLauncherPublish = false;
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
-    copyFile: (async (...args: Parameters<typeof actual.copyFile>) => {
-      if (failLauncherCopy && basename(String(args[0])) === "dohc-mcp") {
-        await actual.writeFile(args[1], "partial-launcher");
-        throw new Error("launcher copy failed");
+    writeFile: (async (...args: Parameters<typeof actual.writeFile>) => {
+      if (failLauncherPublish && /^dohc-mcp\.tmp-/.test(basename(String(args[0])))) {
+        await actual.writeFile(args[0], "partial-launcher");
+        throw new Error("launcher publish failed");
       }
-      return actual.copyFile(...args);
-    }) as typeof actual.copyFile,
+      return actual.writeFile(...args);
+    }) as typeof actual.writeFile,
   };
 });
 
 afterEach(() => {
-  failLauncherCopy = false;
+  failLauncherPublish = false;
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+function referencedModuleName(targetDir: string): string {
+  const launcher = readFileSync(join(targetDir, "dohc-mcp"), "utf8");
+  const moduleFileName = /exec node "\$\{0%\/\*\}\/([^"]+)" "\$@"/.exec(launcher)?.[1];
+  if (!moduleFileName) throw new Error("The launcher does not name its module.");
+  return moduleFileName;
+}
+
+function publishedModuleNames(targetDir: string): string[] {
+  return readdirSync(targetDir)
+    .filter((name) => /^dohc-mcp-[a-f0-9]{16}\.mjs$/.test(name))
+    .sort();
+}
+
 describe("syncLinuxStableCliBin", () => {
-  it("copies both launchers, sets the executable mode, and overwrites stale copies", async () => {
+  it("publishes a content-addressed module and swaps the executable launcher to it", async () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
     scratchDirs.push(root);
     const resourcesCliBinDir = join(root, "resources", "cli-bin");
     const targetDir = join(root, "state", "cli-bin");
     mkdirSync(resourcesCliBinDir, { recursive: true });
-    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v1");
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
 
     await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir });
-    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe("launcher-v1");
-    expect(readFileSync(join(targetDir, "dohc-mcp.mjs"), "utf8")).toBe("module-v1");
+    const firstModule = referencedModuleName(targetDir);
+    expect(firstModule).toMatch(/^dohc-mcp-[a-f0-9]{16}\.mjs$/);
+    expect(readFileSync(join(targetDir, firstModule), "utf8")).toBe("module-v1");
+    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe(
+      posixMcpLauncher(firstModule),
+    );
     if (process.platform !== "win32") {
       expect(statSync(join(targetDir, "dohc-mcp")).mode & 0o777).toBe(0o755);
     }
 
-    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v2");
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
     await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir });
-    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe("launcher-v2");
-    expect(readFileSync(join(targetDir, "dohc-mcp.mjs"), "utf8")).toBe("module-v2");
+    const secondModule = referencedModuleName(targetDir);
+    expect(secondModule).not.toBe(firstModule);
+    expect(readFileSync(join(targetDir, secondModule), "utf8")).toBe("module-v2");
+    expect(publishedModuleNames(targetDir)).toEqual([firstModule, secondModule].sort());
   });
 
-  it("keeps the published launcher intact when its replacement copy fails", async () => {
+  it("keeps the previous launcher and module paired when launcher publication fails", async () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
     scratchDirs.push(root);
     const resourcesCliBinDir = join(root, "resources", "cli-bin");
     const targetDir = join(root, "state", "cli-bin");
     const targetLauncher = join(targetDir, "dohc-mcp");
     mkdirSync(resourcesCliBinDir, { recursive: true });
-    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v1");
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
 
     await syncLinuxStableCliBin({ resourcesCliBinDir, targetDir });
+    const firstLauncher = readFileSync(targetLauncher, "utf8");
+    const firstModule = referencedModuleName(targetDir);
     const publishedMode = statSync(targetLauncher).mode & 0o777;
     if (process.platform !== "win32") expect(publishedMode).toBe(0o755);
 
-    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v2");
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
-    failLauncherCopy = true;
+    failLauncherPublish = true;
 
     await expect(syncLinuxStableCliBin({ resourcesCliBinDir, targetDir })).rejects.toThrow(
-      "launcher copy failed",
+      "launcher publish failed",
     );
-    expect(readFileSync(targetLauncher, "utf8")).toBe("launcher-v1");
+    const secondModule = publishedModuleNames(targetDir).find((name) => name !== firstModule);
+    expect(secondModule).toBeDefined();
+    expect(readFileSync(targetLauncher, "utf8")).toBe(firstLauncher);
     expect(statSync(targetLauncher).mode & 0o777).toBe(publishedMode);
-    expect(readFileSync(join(targetDir, "dohc-mcp.mjs"), "utf8")).toBe("module-v2");
+    expect(referencedModuleName(targetDir)).toBe(firstModule);
+    expect(referencedModuleName(targetDir)).not.toBe(secondModule);
+    expect(readFileSync(join(targetDir, firstModule), "utf8")).toBe("module-v1");
+    expect(readFileSync(join(targetDir, secondModule!), "utf8")).toBe("module-v2");
+    expect(await hasIntactStableCliBin(targetDir)).toBe(true);
     expect(readdirSync(targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
   });
 });
 
 describe("hasIntactStableCliBin", () => {
-  it("is false for a missing directory, a partial pair, or an empty file, true once both files are non-empty", async () => {
+  it("requires a non-empty module at the exact path named by the launcher", async () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
     scratchDirs.push(root);
     const targetDir = join(root, "state", "cli-bin");
+    const moduleFileName = "dohc-mcp-0123456789abcdef.mjs";
     expect(await hasIntactStableCliBin(targetDir)).toBe(false);
 
     mkdirSync(targetDir, { recursive: true });
-    writeFileSync(join(targetDir, "dohc-mcp"), "launcher");
+    writeFileSync(join(targetDir, "dohc-mcp"), posixMcpLauncher(moduleFileName));
     expect(await hasIntactStableCliBin(targetDir)).toBe(false);
 
-    writeFileSync(join(targetDir, "dohc-mcp.mjs"), "");
+    writeFileSync(join(targetDir, moduleFileName), "");
     expect(await hasIntactStableCliBin(targetDir)).toBe(false);
 
-    writeFileSync(join(targetDir, "dohc-mcp.mjs"), "module");
+    writeFileSync(join(targetDir, moduleFileName), "module");
     expect(await hasIntactStableCliBin(targetDir)).toBe(true);
+  });
+
+  it("rejects a launcher when only a different module survives", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
+    scratchDirs.push(root);
+    const targetDir = join(root, "state", "cli-bin");
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(
+      join(targetDir, "dohc-mcp"),
+      posixMcpLauncher("dohc-mcp-missing-generation.mjs"),
+    );
+    writeFileSync(join(targetDir, "dohc-mcp.mjs"), "a different generation");
+
+    expect(await hasIntactStableCliBin(targetDir)).toBe(false);
   });
 
   it("is false when either name is a directory, even a non-empty one", async () => {
@@ -117,9 +156,13 @@ describe("hasIntactStableCliBin", () => {
     const targetDir = join(root, "state", "cli-bin");
     mkdirSync(join(targetDir, "dohc-mcp"), { recursive: true });
     writeFileSync(join(targetDir, "dohc-mcp", "not-the-launcher"), "x");
-    mkdirSync(join(targetDir, "dohc-mcp.mjs"), { recursive: true });
-    writeFileSync(join(targetDir, "dohc-mcp.mjs", "not-the-module"), "y");
+    expect(await hasIntactStableCliBin(targetDir)).toBe(false);
 
+    rmSync(join(targetDir, "dohc-mcp"), { recursive: true });
+    const moduleFileName = "dohc-mcp-0123456789abcdef.mjs";
+    writeFileSync(join(targetDir, "dohc-mcp"), posixMcpLauncher(moduleFileName));
+    mkdirSync(join(targetDir, moduleFileName));
+    writeFileSync(join(targetDir, moduleFileName, "not-the-module"), "y");
     expect(await hasIntactStableCliBin(targetDir)).toBe(false);
   });
 });
@@ -131,7 +174,6 @@ describe("refreshLinuxStableCliBin", () => {
     const resourcesCliBinDir = join(root, "resources", "cli-bin");
     const targetDir = join(root, "state", "cli-bin");
     mkdirSync(resourcesCliBinDir, { recursive: true });
-    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v1");
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
 
     const onError = vi.fn();
@@ -150,21 +192,26 @@ describe("refreshLinuxStableCliBin", () => {
     const resourcesCliBinDir = join(root, "resources", "cli-bin");
     const targetDir = join(root, "state", "cli-bin");
     mkdirSync(resourcesCliBinDir, { recursive: true });
-    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v1");
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
     await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir });
+    const firstLauncher = readFileSync(join(targetDir, "dohc-mcp"), "utf8");
+    const firstModule = referencedModuleName(targetDir);
 
-    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v2");
     writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
-    failLauncherCopy = true;
+    failLauncherPublish = true;
 
     const onError = vi.fn();
     const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, onError });
     expect(result).toBe(targetDir);
     expect(onError).toHaveBeenCalledOnce();
-    // The stable pair the caller is told to trust is exactly the one on
-    // disk -- the previous launcher, not a half-written new one.
-    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe("launcher-v1");
+    const secondModule = publishedModuleNames(targetDir).find((name) => name !== firstModule);
+    expect(secondModule).toBeDefined();
+    expect(await hasIntactStableCliBin(targetDir)).toBe(true);
+    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe(firstLauncher);
+    expect(referencedModuleName(targetDir)).toBe(firstModule);
+    expect(referencedModuleName(targetDir)).not.toBe(secondModule);
+    expect(readFileSync(join(targetDir, firstModule), "utf8")).toBe("module-v1");
+    expect(readFileSync(join(targetDir, secondModule!), "utf8")).toBe("module-v2");
   });
 
   it("resolves to undefined when a refresh fails and nothing was ever published", async () => {

@@ -694,6 +694,36 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(stopButton.disabled).toBe(true);
   });
 
+  it("enables Stop from a live controls fact while the message request is still pending", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = (() => messageResponse.promise) as typeof fetch;
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    sendEvent(eventSource, {
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+      seq: 1,
+    });
+    expect(stopButton.disabled).toBe(false);
+
+    messageResponse.resolve(
+      new Response(
+        JSON.stringify({
+          turnId: 1,
+          controls: { canSend: false, canStop: true, turnId: 1 },
+          seq: 2,
+        }),
+        { status: 202 },
+      ),
+    );
+    await flushMicrotasks();
+  });
+
   it("keeps Stop at the later click's state when an earlier response arrives last", async () => {
     const { eventSource } = await loadChatModule();
     const firstResponse = deferred<Response>();
