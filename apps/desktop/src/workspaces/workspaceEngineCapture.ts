@@ -489,6 +489,9 @@ export interface WorkspaceEngineCapture {
   settleAndCloseLiveSessionsForPath(
     pathOrPrefix: string,
   ): Promise<(removed: boolean) => void>;
+  // Workspace lifecycle close: flush and retire every live editor session
+  // before the capture releases its store.
+  settleAndCloseAllLiveSessions(): Promise<void>;
   // Version operations (PR 0M-4). Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
@@ -4971,6 +4974,15 @@ export function createWorkspaceEngineCapture(
           closeRemovalWindow();
         };
       });
+    },
+
+    settleAndCloseAllLiveSessions() {
+      return enqueueResult("close live sessions for workspace close", () =>
+        settleAndCloseLiveYDocSessions(
+          () => true,
+          "Saved latest edits before closing the workspace",
+        ),
+      );
     },
 
     async listVersions() {

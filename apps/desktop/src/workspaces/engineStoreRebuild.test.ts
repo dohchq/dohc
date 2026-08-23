@@ -28,7 +28,10 @@ import {
   withEngineStoreRecovered,
 } from "./engineStoreRebuild";
 import { withKeyedStartLock } from "./sitePreviewLifecycle";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import {
+  closeWorkspaceActivityAndRelay,
+  createWorkspaceActivity,
+} from "./workspaceActivity";
 import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
 
@@ -183,7 +186,7 @@ describe("moveEngineStoreAside", () => {
     await expectCompleteStore();
   });
 
-  it("flushes moved files and the completion marker before returning", async () => {
+  it("flushes the backup before the engine directory and the completion marker before returning", async () => {
     await seedStore({ "engine.db": "refused-store" });
     const events: string[] = [];
 
@@ -202,8 +205,8 @@ describe("moveEngineStoreAside", () => {
       `rename:${join(backupDir, "MOVE_IN_PROGRESS.tmp")}->${join(backupDir, "MOVE_IN_PROGRESS")}`,
       `sync:${backupDir}`,
       `rename:${join(engineDir, "engine.db")}->${join(backupDir, "engine.db")}`,
-      `sync:${engineDir}`,
       `sync:${backupDir}`,
+      `sync:${engineDir}`,
       `rename:${join(backupDir, "MOVE_IN_PROGRESS")}->${join(backupDir, "MOVE_COMPLETE")}`,
       `sync:${backupDir}`,
       "return:moved",
@@ -329,6 +332,51 @@ describe("moveEngineStoreAside", () => {
       "engine.db",
       "pre-v2-backup",
     ]);
+  });
+
+  it("ignores a file at the backup path before opening workspace activity", async () => {
+    await writeFile(backupDir, "occupied");
+    const openActivity = vi.fn(async () => "opened");
+    const inspectedPaths: string[] = [];
+
+    await expect(
+      completePendingEngineStoreMove(root, {
+        lstat: async (path) => {
+          inspectedPaths.push(String(path));
+          return lstat(path);
+        },
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      withEngineStoreRecovered(
+        new Map(),
+        { workspaceId: "workspace", rootPath: root },
+        false,
+        openActivity,
+      ),
+    ).resolves.toBe("opened");
+
+    expect(openActivity).toHaveBeenCalledOnce();
+    expect(inspectedPaths).toEqual([backupDir]);
+    expect(await readFile(backupDir, "utf8")).toBe("occupied");
+  });
+
+  it("does not follow a symlink at the backup path during startup recovery", async () => {
+    const target = join(root, "other-recovery");
+    await mkdir(target);
+    await writeFile(join(target, "MOVE_IN_PROGRESS"), "not a manifest");
+    await symlink(
+      target,
+      backupDir,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(completePendingEngineStoreMove(root)).resolves.toBeUndefined();
+
+    expect((await lstat(backupDir)).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(target, "MOVE_IN_PROGRESS"), "utf8")).toBe(
+      "not a manifest",
+    );
   });
 
   it("refuses a reservation that has only an unpublished manifest", async () => {
@@ -595,6 +643,33 @@ describe("moveEngineStoreAside", () => {
 
     expect(await readFile(join(engineDir, "engine.db-wal"), "utf8")).toBe(
       "new-wal",
+    );
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+    ]);
+  });
+
+  it("completes a pending move when the same store file exists in both locations", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    await writeFile(join(backupDir, "engine.db"), "refused-store");
+
+    await completePendingEngineStoreMove(root, {
+      rename: async (from, to) => {
+        if (from === join(engineDir, "engine.db")) {
+          throw new Error("recovery tried to replace an existing destination");
+        }
+        await rename(from, to);
+      },
+    });
+
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
+    );
+    expect(await readFile(join(backupDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
     );
     expect((await readdir(backupDir)).sort()).toEqual([
       "MOVE_COMPLETE",
@@ -1177,6 +1252,51 @@ describe("rebuildEngineStore", () => {
     expect(d.reopenActivity).toHaveBeenCalledOnce();
   });
 
+  it("continues through move and reopen when relay teardown fails", async () => {
+    const relayError = new Error("relay close failed");
+    const onRelayCloseError = vi.fn();
+    const order: string[] = [];
+
+    await expect(
+      rebuildEngineStore(
+        root,
+        deps({
+          closeActivity: () =>
+            closeWorkspaceActivityAndRelay({
+              closeActivity: async () => {
+                order.push("local-close");
+              },
+              closeRelay: async () => {
+                order.push("relay-close");
+                throw relayError;
+              },
+              onRelayCloseError,
+            }),
+          probeStoreRefusal: async () => {
+            order.push("probe");
+            return "foreign-database";
+          },
+          moveStoreAside: async () => {
+            order.push("move");
+            return "moved";
+          },
+          reopenActivity: async () => {
+            order.push("reopen");
+          },
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "moved" });
+
+    expect(order).toEqual([
+      "local-close",
+      "relay-close",
+      "probe",
+      "move",
+      "reopen",
+    ]);
+    expect(onRelayCloseError).toHaveBeenCalledWith(relayError);
+  });
+
   it("moves once and shares the result between concurrent rebuild requests", async () => {
     await seedStore({ "engine.db": "refused-store" });
     const locks = new Map<string, Promise<void>>();
@@ -1192,6 +1312,7 @@ describe("rebuildEngineStore", () => {
       withKeyedStartLock(locks, "workspace", () =>
         rebuildEngineStoreRequest(root, {
           isStoreRefused: () => refused,
+          hasActiveAgentRun: () => false,
           previousResult: () => results.get("workspace"),
           rememberResult: (result) => results.set("workspace", result),
           closeActivity,
@@ -1223,6 +1344,7 @@ describe("rebuildEngineStore", () => {
     await expect(
       rebuildEngineStoreRequest(root, {
         isStoreRefused: () => true,
+        hasActiveAgentRun: () => false,
         previousResult: () => previous,
         rememberResult: vi.fn(),
         closeActivity: vi.fn(async () => undefined),
@@ -1242,6 +1364,7 @@ describe("rebuildEngineStore", () => {
     await expect(
       rebuildEngineStoreRequest(root, {
         isStoreRefused: () => false,
+        hasActiveAgentRun: () => false,
         previousResult: () => undefined,
         rememberResult: vi.fn(),
         closeActivity,
@@ -1253,5 +1376,30 @@ describe("rebuildEngineStore", () => {
 
     expect(closeActivity).not.toHaveBeenCalled();
     expect(moveStoreAside).not.toHaveBeenCalled();
+  });
+
+  it("refuses an active agent run before closing or moving the store", async () => {
+    const closeActivity = vi.fn(async () => undefined);
+    const moveStoreAside = vi.fn(async () => "moved" as const);
+    const reopenActivity = vi.fn(async () => undefined);
+
+    await expect(
+      rebuildEngineStoreRequest(root, {
+        isStoreRefused: () => true,
+        hasActiveAgentRun: () => true,
+        previousResult: () => undefined,
+        rememberResult: vi.fn(),
+        closeActivity,
+        probeStoreRefusal: vi.fn(async () => "foreign-database" as const),
+        moveStoreAside,
+        reopenActivity,
+      }),
+    ).rejects.toThrow(
+      "An agent is working in this workspace. Wait for it to finish, then try again.",
+    );
+
+    expect(closeActivity).not.toHaveBeenCalled();
+    expect(moveStoreAside).not.toHaveBeenCalled();
+    expect(reopenActivity).not.toHaveBeenCalled();
   });
 });

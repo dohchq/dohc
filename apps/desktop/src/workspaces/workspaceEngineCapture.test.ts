@@ -578,6 +578,68 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("settles and retires every live Y.Doc session before stopping the capture", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "note.md",
+      text: "seed",
+    });
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "drawing.md",
+      text: "seed",
+    });
+    const order: string[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        const doc = new Y.Doc();
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "richdoc" as const,
+          path: options.path,
+          head: "present" as const,
+          lineage: "existing" as const,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+          settleNow: async () => {
+            order.push(`settle:${options.path}`);
+            return { sha256: "a".repeat(64), content: "# Edited\n" } as never;
+          },
+          close: async (closeOptions?: { settle?: boolean }) => {
+            order.push(`close:${options.path}:${String(closeOptions?.settle)}`);
+          },
+        };
+      },
+    });
+    await engine.openYDocSession({
+      path: "note.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+    });
+    await engine.openYDocSession({
+      path: "drawing.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+    });
+
+    await engine.settleAndCloseAllLiveSessions!();
+    await engine.stop();
+
+    expect(order).toEqual([
+      "settle:note.md",
+      "close:note.md:false",
+      "settle:drawing.md",
+      "close:drawing.md:false",
+    ]);
+  });
+
   // #338. The engine owns the .md: it materializes a changed projection and
   // leaves a drifted file alone. The desktop mirrored the settled content
   // over the file anyway, so an edit made outside dohc while the document was

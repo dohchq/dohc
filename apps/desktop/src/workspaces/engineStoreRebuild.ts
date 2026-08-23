@@ -45,6 +45,7 @@ const engineStoreMoveManifestSchema = z.object({
 });
 type EngineStoreMoveManifest = z.infer<typeof engineStoreMoveManifestSchema>;
 type EngineStoreMoveFileSystem = {
+  lstat: (path: string) => Promise<Stats>;
   rename: typeof renameFile;
   syncDirectory: (path: string) => Promise<void>;
 };
@@ -84,6 +85,18 @@ async function statIfExists(
 ): Promise<Stats | null> {
   try {
     return await stat(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function lstatIfExists(
+  path: string,
+  fileSystem: EngineStoreMoveFileSystem,
+): Promise<Stats | null> {
+  try {
+    return await fileSystem.lstat(path);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return null;
     throw error;
@@ -143,6 +156,7 @@ function moveFileSystem(
   deps: EngineStoreMoveDependencies,
 ): EngineStoreMoveFileSystem {
   return {
+    lstat: deps.lstat ?? lstat,
     rename: deps.rename ?? renameFile,
     syncDirectory: deps.syncDirectory ?? syncDirectory,
   };
@@ -204,8 +218,8 @@ async function completeManifestMove(
       if (errorCode(error) !== "ENOENT") throw error;
     }
   }
-  await fileSystem.syncDirectory(engineDir);
   await fileSystem.syncDirectory(backupDir);
+  await fileSystem.syncDirectory(engineDir);
   await fileSystem.rename(inProgressMarker, completeMarker);
   await fileSystem.syncDirectory(backupDir);
 }
@@ -217,6 +231,8 @@ export async function completePendingEngineStoreMove(
   try {
     const fileSystem = moveFileSystem(deps);
     const backupDir = join(rootPath, ENGINE_STORE_BACKUP_DIR);
+    const backupEntry = await lstatIfExists(backupDir, fileSystem);
+    if (backupEntry === null || !backupEntry.isDirectory()) return;
     const inProgressMarker = join(backupDir, MOVE_IN_PROGRESS);
     const completeMarker = join(backupDir, MOVE_COMPLETE);
     if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) return;
@@ -330,6 +346,15 @@ export class EngineStoreNotRefusedError extends Error {
   }
 }
 
+export class EngineStoreAgentRunActiveError extends Error {
+  constructor() {
+    super(
+      "An agent is working in this workspace. Wait for it to finish, then try again.",
+    );
+    this.name = "EngineStoreAgentRunActiveError";
+  }
+}
+
 export class EngineStoreCloseFailedError extends Error {
   constructor(cause: unknown) {
     super(
@@ -405,6 +430,7 @@ export async function rebuildEngineStoreRequest(
   rootPath: string,
   deps: RebuildEngineStoreDependencies & {
     isStoreRefused: () => boolean;
+    hasActiveAgentRun: () => boolean;
     previousResult: () => RebuildEngineStoreResult | undefined;
     rememberResult: (result: RebuildEngineStoreResult) => void;
   },
@@ -413,6 +439,9 @@ export async function rebuildEngineStoreRequest(
   if (!deps.isStoreRefused()) {
     if (previousResult) return previousResult;
     throw new EngineStoreNotRefusedError();
+  }
+  if (deps.hasActiveAgentRun()) {
+    throw new EngineStoreAgentRunActiveError();
   }
 
   try {

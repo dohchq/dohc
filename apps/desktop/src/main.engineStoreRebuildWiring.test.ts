@@ -17,6 +17,23 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 }
 
 describe("main-process engine store rebuild wiring", () => {
+  it("treats relay teardown as non-fatal after local activity closes", () => {
+    const close = sourceBetween(
+      "async function closeDispatchRunActivity(",
+      "async function acquireDispatchRunActivity(",
+    );
+
+    expect(close).toContain("closeWorkspaceActivityAndRelay({");
+    expect(close).toContain(
+      "closeActivity: () => activity.close(workspaceId, { preserveStatus: true })",
+    );
+    expect(close).toContain(
+      "closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId)",
+    );
+    expect(close).toContain("onRelayCloseError: (error) =>");
+    expect(close).toContain("console.error(");
+  });
+
   it("routes ordinary opens and dispatch scans through the same recovery gate as rebuilds", () => {
     const dispatch = sourceBetween(
       "async function syncWorkspaceForDispatch(",
@@ -64,6 +81,9 @@ describe("main-process engine store rebuild wiring", () => {
     expect(rebuild).toContain("rebuildEngineStoreRequest(workspace.rootPath,");
     expect(rebuild).toContain(
       "openWorkspaceActivity(workspace, undefined, true)",
+    );
+    expect(rebuild).toMatch(
+      /hasActiveAgentRun: \(\) =>\s*activity\.hasAgentRun\(workspace\.workspaceId\)/,
     );
 
     const gateStart = rebuildSource.indexOf(

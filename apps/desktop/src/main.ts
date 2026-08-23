@@ -582,7 +582,10 @@ import {
   engineMomentForIpc,
   versionConflictForIpc,
 } from "./ipc/engineHistoryIpc";
-import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
+import {
+  closeWorkspaceActivityAndRelay,
+  createWorkspaceActivity,
+} from "./workspaces/workspaceActivity";
 import type {
   WorkspaceEngineCapture,
   WorkspaceEngineYDocProviderSession,
@@ -2902,13 +2905,22 @@ async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
   if (existing) return existing;
   const relayWorkspaceId =
     findWorkspace(workspaceId)?.remote?.remoteWorkspaceId;
-  const closing = activity.close(workspaceId);
+  const closing = closeWorkspaceActivityAndRelay({
+    closeActivity: () => activity.close(workspaceId, { preserveStatus: true }),
+    ...(relayWorkspaceId
+      ? {
+          closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId),
+        }
+      : {}),
+    onRelayCloseError: (error) =>
+      console.error(
+        `[desktop] relay workspace close failed for ${relayWorkspaceId}:`,
+        error,
+      ),
+  });
   workspaceActivityClosePromises.set(workspaceId, closing);
   try {
     await closing;
-    if (relayWorkspaceId) {
-      await closeRelayTransportWorkspace(relayWorkspaceId);
-    }
   } finally {
     if (workspaceActivityClosePromises.get(workspaceId) === closing) {
       workspaceActivityClosePromises.delete(workspaceId);
@@ -10900,6 +10912,8 @@ function registerIpcHandlers(
               Boolean(
                 activity.getStatus(workspace.workspaceId).engineStoreRefused,
               ),
+            hasActiveAgentRun: () =>
+              activity.hasAgentRun(workspace.workspaceId),
             previousResult: () =>
               lastEngineStoreRebuildResult.get(workspace.workspaceId),
             rememberResult: (result) =>

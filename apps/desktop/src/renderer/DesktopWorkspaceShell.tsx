@@ -2426,6 +2426,9 @@ export function DesktopWorkspaceShell(props: {
     | { phase: "backup-exists"; reopenFailed?: string }
     | null
   >(null);
+  // Bumped after an engine version operation or a store rebuild settles so
+  // mounted editors release their old engine session before opening another.
+  const [versionEpoch, setVersionEpoch] = useState(0);
   const engineRebuildReturnFocusRef = useRef<HTMLElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
   useEffect(() => {
@@ -2460,6 +2463,10 @@ export function DesktopWorkspaceShell(props: {
         "dohc could not move this workspace's data store.",
         error,
       );
+    } finally {
+      if (engineRebuildToken.current === token) {
+        setVersionEpoch((epoch) => epoch + 1);
+      }
     }
   }, [workspaceId, reportShellError]);
 
@@ -2971,9 +2978,6 @@ export function DesktopWorkspaceShell(props: {
     captureDecidedFor === workspaceId && engineReadForWorkspace !== null;
   const captureAvailable =
     engineSurfacesExist && captureDecided && !statusSaysNoRecorder(syncStatus);
-  // Bumped after a version switch/merge/conflict resolution so open editors
-  // re-read their file content immediately (FileInspector refreshKey).
-  const [versionEpoch, setVersionEpoch] = useState(0);
   // An unreadable settings file reads as opted out, so the workspace records
   // nothing. That must never be silent — but the notice says so from MAIN's
   // open-time read (syncStatus.settingsWarning), the read that decided

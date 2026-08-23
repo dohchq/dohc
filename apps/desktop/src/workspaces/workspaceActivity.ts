@@ -125,6 +125,20 @@ export interface WorkspaceCaptureHooks {
   activeAgentRun: () => ActiveAgentRun | null;
 }
 
+export async function closeWorkspaceActivityAndRelay(options: {
+  closeActivity: () => Promise<void>;
+  closeRelay?: () => Promise<void>;
+  onRelayCloseError: (error: unknown) => void;
+}): Promise<void> {
+  await options.closeActivity();
+  if (!options.closeRelay) return;
+  try {
+    await options.closeRelay();
+  } catch (error) {
+    options.onRelayCloseError(error);
+  }
+}
+
 // Owns the live file-watch → engine-capture pipeline per workspace, the
 // optional cloud sync engine riding on it, and the derived sync status. The
 // desktop layer opens a workspace once; subsequent status reads are served
@@ -134,8 +148,11 @@ export function createWorkspaceActivity(
   options: WorkspaceActivityOptions = {},
 ) {
   const watched = new Map<string, WatchedWorkspace>();
+  const preservedStatuses = new Map<string, SyncStatusResult>();
 
   function statusFor(workspaceId: string): SyncStatusResult {
+    const preserved = preservedStatuses.get(workspaceId);
+    if (preserved) return preserved;
     const w = watched.get(workspaceId);
     const cloud = options.cloudStateFor?.(workspaceId) ?? {
       enabled: false,
@@ -307,6 +324,7 @@ export function createWorkspaceActivity(
         void engine.start();
       }
     }
+    preservedStatuses.delete(workspace.workspaceId);
     return statusFor(workspace.workspaceId);
   }
 
@@ -342,19 +360,32 @@ export function createWorkspaceActivity(
   // Failed-join rollback (0P-C gate fix): stop and forget ONE workspace —
   // watcher, engine, and capture — so the join handler can remove its
   // folder/registry state without tearing down every other workspace.
-  async function close(workspaceId: string): Promise<void> {
+  async function close(
+    workspaceId: string,
+    closeOptions: { preserveStatus?: boolean } = {},
+  ): Promise<void> {
     const entry = watched.get(workspaceId);
     if (!entry) return;
+    if (closeOptions.preserveStatus) {
+      preservedStatuses.set(workspaceId, statusFor(workspaceId));
+    } else {
+      preservedStatuses.delete(workspaceId);
+    }
     watched.delete(workspaceId);
     const stopped = await Promise.allSettled([
       Promise.resolve().then(() => entry.handle.stop()),
       Promise.resolve().then(() => entry.engine?.stop()),
     ]);
+    const liveSessionsRetired = await Promise.allSettled([
+      Promise.resolve().then(() =>
+        entry.capture?.settleAndCloseAllLiveSessions(),
+      ),
+    ]);
     const captureStopped = await Promise.allSettled([
       Promise.resolve().then(() => entry.capture?.stop()),
     ]);
     notify();
-    const failed = [...stopped, ...captureStopped].find(
+    const failed = [...stopped, ...liveSessionsRetired, ...captureStopped].find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (failed) throw failed.reason;
@@ -489,6 +520,7 @@ export function createWorkspaceActivity(
       await (w.capture?.stop() ?? Promise.resolve());
     });
     watched.clear();
+    preservedStatuses.clear();
     await Promise.all(stops);
   }
 
