@@ -1824,7 +1824,7 @@ export async function refreshCapturedShareView(
   input: ShareViewRefreshCompositionInput & {
     captured: CaptureSharedViewLocalDivergenceOutcome;
   },
-): Promise<RefreshSharedViewOutcome & { collisionRecordQuarantined: boolean }> {
+): Promise<RefreshSharedViewOutcome> {
   const { captured, ...refreshInput } = input;
   const localChanges = captured.capturedPaths + captured.repairedPaths;
   const main = await refreshInput.store.ensureMainVersion({
@@ -1855,7 +1855,9 @@ export async function refreshCapturedShareView(
   });
   return {
     ...outcome,
-    collisionRecordQuarantined: captured.collisionRecordQuarantined,
+    ...(captured.collisionRecordQuarantined
+      ? { collisionRecordQuarantined: true }
+      : {}),
     status:
       outcome.status === "unchanged" && localChanges > 0
         ? "updated"
@@ -1886,6 +1888,7 @@ export async function reconcileStandaloneShareView(
     return {
       ok: true,
       ...outcome,
+      collisionRecordQuarantined: captured.collisionRecordQuarantined,
     };
   } catch (error) {
     // A damaged pin never heals on retry; main.ts turns it into a specific
