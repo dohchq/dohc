@@ -1387,6 +1387,75 @@ describe("Claude Code chat web app", () => {
     await stream.close();
   });
 
+  it("removes a session-state event the driver published before a rejected prompt, so replay has no orphan", async () => {
+    // The driver can report "running" via onEvent before its own prompt()
+    // call goes on to reject -- without also dropping that event, a
+    // reconnect's replay would show Running, then the failure, with no
+    // question anywhere near either of them.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    await entered.promise;
+    fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
+    const session = fake.sessions[0];
+    if (!session) throw new Error("The fake driver did not start a session.");
+    session.promptError = new Error("Claude Code refused the turn.");
+    gate.resolve();
+
+    expect((await sendPromise).status).toBe(500);
+
+    // A fresh connection's replay: the initial snapshot, then the failure
+    // card directly -- no orphaned "running" transition sitting between
+    // them (that would have replayed here first, before the error, since
+    // it was published earlier).
+    const reattached = await eventStream(url, token);
+    await reattached.next(); // the initial state snapshot
+    expect(await reattached.next()).toEqual({
+      kind: "error",
+      message: "Claude Code refused the turn.",
+      fatal: true,
+    });
+    await reattached.close();
+  });
+
+  it("treats a late-resolving prompt as rejected when the session died while it was pending, leaving turnActive clear", async () => {
+    // A fatal error (a crashed driver process, say) can arrive through the
+    // session's own onEvent handler while prompt() is still awaiting the
+    // driver's accept -- that already clears processSession and publishes
+    // the real terminal card, independently of whether prompt() itself
+    // ever settles. Without treating a late "success" here as a rejection,
+    // turnActive would be stranded true with no live session left to ever
+    // emit turn-completed and clear it.
+    const entered = deferred();
+    const gate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => entered.resolve(),
+      promptGate: () => gate.promise,
+    });
+    const { url, token } = await start(fake);
+
+    const firstMessage = post(url, "message", { text: "First" }, token);
+    await entered.promise;
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "Claude Code crashed.", fatal: true });
+    // prompt() itself still resolves -- its own promise is independent of
+    // the onEvent stream that just reported the session's death.
+    gate.resolve();
+
+    expect((await firstMessage).status).toBe(500);
+
+    // No 409 left behind: the fresh message drives a whole new session,
+    // proving turnActive was never left stuck true.
+    const secondMessage = await post(url, "message", { text: "Second" }, token);
+    expect(secondMessage.status).toBe(202);
+    expect(fake.startInputs).toHaveLength(2);
+  });
+
   describe("control server authentication", () => {
     it("rejects a mutation with no token, and the session survives", async () => {
       const fake = fakeDriver();

@@ -545,11 +545,28 @@ export function createChatWebApp(
       };
       eventLog.push(reserved);
       trimLog();
+      // Drops the reservation AND everything the driver published (via
+      // onEvent) after it -- while pendingPrompt/turnActive gate every
+      // other /message, nothing but this turn's own driver can have added
+      // anything past this point. Used both when prompt() itself rejects
+      // and when it resolves into a session that died out from under it:
+      // either way this message was never really accepted, and a stray
+      // session-state (e.g. "running") the driver fired before things went
+      // wrong must not survive as an orphan with no question and no
+      // resolution in front of it.
+      const dropOrphanedReservation = (): void => {
+        const index = eventLog.indexOf(reserved);
+        if (index === -1) return;
+        for (const dropped of eventLog.splice(index, eventLog.length - index)) {
+          if (dropped.event.kind !== "text-delta") continue;
+          const key = dropped.event.stream + ":" + dropped.event.itemId;
+          if (openDeltas.get(key) === dropped) openDeltas.delete(key);
+        }
+      };
       try {
         await live.prompt({ text: body.text });
       } catch (error) {
-        const index = eventLog.indexOf(reserved);
-        if (index !== -1) eventLog.splice(index, 1);
+        dropOrphanedReservation();
         if (processSession === live) {
           processSession = null;
           settlePendingPermissions();
@@ -558,6 +575,20 @@ export function createChatWebApp(
         publish({ kind: "error", message, fatal: true });
         await Promise.resolve(live.dispose()).catch(() => undefined);
         throw requestError(500, message);
+      }
+      // prompt() can resolve successfully even though the session itself
+      // ended while it was still pending: a fatal error or a bare "closed"
+      // arriving through the session's own onEvent handler already
+      // published the real terminal card and cleared processSession,
+      // independently of this call. Marking the turn active here would
+      // leave nothing left to ever emit turn-completed, stranding every
+      // later /message behind a 409 forever -- treat it exactly like a
+      // rejection instead, without publishing a second, redundant terminal
+      // event (the client already has the real one).
+      if (processSession !== live) {
+        dropOrphanedReservation();
+        await Promise.resolve(live.dispose()).catch(() => undefined);
+        throw requestError(500, "The session ended before this message could be confirmed.");
       }
       // Published only now that the driver actually accepted it: a reconnect
       // must never replay a message that was never really sent, and the
