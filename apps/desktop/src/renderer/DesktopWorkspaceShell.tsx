@@ -2430,8 +2430,8 @@ export function DesktopWorkspaceShell(props: {
     | { phase: "backup-exists"; reopenFailed?: string }
     | null
   >(null);
-  // Bumped after an engine version operation or a completed store move so
-  // mounted editors release their old engine session before opening another.
+  // Bumped after an engine version operation or a rebuild that closed sessions
+  // so mounted editors release their old engine session before opening another.
   const [versionEpoch, setVersionEpoch] = useState(0);
   const engineRebuildReturnFocusRef = useRef<HTMLElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
@@ -2461,7 +2461,7 @@ export function DesktopWorkspaceShell(props: {
           phase: result.outcome,
           ...(result.reopenFailed ? { reopenFailed: result.reopenFailed } : {}),
         });
-        if (result.outcome === "moved") {
+        if (result.sessionsClosed) {
           setVersionEpoch((epoch) => epoch + 1);
         }
       } catch (error) {

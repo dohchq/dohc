@@ -930,6 +930,7 @@ export type RebuildEngineStorePayload = z.infer<
 
 export const RebuildEngineStoreResult = z.object({
   outcome: z.enum(["moved", "backup-exists"]),
+  sessionsClosed: z.literal(true),
   reopenFailed: z.string().min(1).max(2000).optional(),
 });
 export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;

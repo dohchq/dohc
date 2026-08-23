@@ -2785,11 +2785,9 @@ async function withRebuildBoundGate<T>(
 ): Promise<T> {
   const sessions = requireEngineSessions();
   sessions.beginRebuild(workspaceId);
-  try {
-    return await body();
-  } finally {
-    sessions.endRebuild(workspaceId);
-  }
+  const result = await body();
+  sessions.endRebuild(workspaceId);
+  return result;
 }
 
 async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {

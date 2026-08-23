@@ -124,8 +124,9 @@ describe("main-process engine store rebuild wiring", () => {
     );
 
     expect(helper).toMatch(
-      /beginRebuild\(workspaceId\);\s*try \{\s*return await body\(\);\s*\} finally \{\s*sessions\.endRebuild\(workspaceId\);/,
+      /beginRebuild\(workspaceId\);\s*const result = await body\(\);\s*sessions\.endRebuild\(workspaceId\);\s*return result;/,
     );
+    expect(helper).not.toContain("finally");
     expect(dispatch).toMatch(
       /\},\s*\(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*completePendingEngineStoreMove\(rootPath\),\s*\),\s*\);/,
     );

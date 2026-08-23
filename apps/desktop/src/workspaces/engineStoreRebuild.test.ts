@@ -7,6 +7,7 @@ import {
   rename,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -663,29 +664,54 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
-  it("completes a pending move when the same store file exists in both locations", async () => {
+  it("removes a manifest-matching source duplicate before completing recovery", async () => {
     await seedStore({ "engine.db": "refused-store" });
+    const capturedTime = new Date("2025-01-02T03:04:05.000Z");
+    const source = join(engineDir, "engine.db");
+    const destination = join(backupDir, "engine.db");
+    await utimes(source, capturedTime, capturedTime);
     await mkdir(backupDir);
     await writeMoveManifest(["engine.db"]);
-    await writeFile(join(backupDir, "engine.db"), "refused-store");
+    await rename(source, destination);
+    await writeFile(source, "refused-store");
+    await utimes(source, capturedTime, capturedTime);
+    const backupContents = await readFile(destination, "utf8");
 
-    await completePendingEngineStoreMove(root, {
-      rename: async (from, to) => {
-        if (from === join(engineDir, "engine.db")) {
-          throw new Error("recovery tried to replace an existing destination");
-        }
-        await rename(from, to);
-      },
+    await completePendingEngineStoreMove(root);
+
+    await expect(readFile(source, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
     });
-
-    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
-      "refused-store",
-    );
-    expect(await readFile(join(backupDir, "engine.db"), "utf8")).toBe(
-      "refused-store",
-    );
+    expect(await readFile(destination, "utf8")).toBe(backupContents);
     expect((await readdir(backupDir)).sort()).toEqual([
       "MOVE_COMPLETE",
+      "engine.db",
+    ]);
+  });
+
+  it("preserves a changed source duplicate and leaves recovery incomplete", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const source = join(engineDir, "engine.db");
+    const destination = join(backupDir, "engine.db");
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    await rename(source, destination);
+    await writeFile(source, "different-and-important-store");
+    const changedContents = await readFile(source, "utf8");
+    const backupContents = await readFile(destination, "utf8");
+
+    await expect(completePendingEngineStoreMove(root)).rejects.toMatchObject({
+      name: "EngineStoreRecoveryFailedError",
+      cause: expect.objectContaining({
+        name: "EngineStoreManifestDriftError",
+        message: expect.stringContaining(source),
+      }),
+    });
+
+    expect(await readFile(source, "utf8")).toBe(changedContents);
+    expect(await readFile(destination, "utf8")).toBe(backupContents);
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
       "engine.db",
     ]);
   });
@@ -876,7 +902,10 @@ describe("moveEngineStoreAside", () => {
         }),
     );
 
-    await expect(rebuilding).resolves.toEqual({ outcome: "moved" });
+    await expect(rebuilding).resolves.toEqual({
+      outcome: "moved",
+      sessionsClosed: true,
+    });
     expect(consoleError).toHaveBeenCalledWith(
       "The engine store move reported an error, but reopening completed the move.",
       moveError,
@@ -962,7 +991,10 @@ describe("moveEngineStoreAside", () => {
     await Promise.resolve();
     finishOpen.resolve();
     await ordinaryOpen;
-    await expect(rebuild).resolves.toEqual({ outcome: "moved" });
+    await expect(rebuild).resolves.toEqual({
+      outcome: "moved",
+      sessionsClosed: true,
+    });
 
     expect(order).toEqual([
       "activity.open:1:start",
@@ -1038,6 +1070,7 @@ describe("rebuildEngineStore", () => {
 
     await expect(rebuildEngineStore(root, d)).resolves.toEqual({
       outcome: "moved",
+      sessionsClosed: true,
     });
     expect(order).toEqual(["close", "probe", "move", "reopen"]);
   });
@@ -1169,7 +1202,10 @@ describe("rebuildEngineStore", () => {
       consoleError.mockRestore();
     }
 
-    await expect(rebuilding).resolves.toEqual({ outcome: "moved" });
+    await expect(rebuilding).resolves.toEqual({
+      outcome: "moved",
+      sessionsClosed: true,
+    });
     expect(operations).toEqual(["probe", "reopen"]);
     expect(
       requests.filter((request) => request.method === "workspace.open"),
@@ -1210,6 +1246,7 @@ describe("rebuildEngineStore", () => {
 
     await expect(rebuildEngineStore(root, d)).resolves.toEqual({
       outcome: "moved",
+      sessionsClosed: true,
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
     });
@@ -1232,6 +1269,7 @@ describe("rebuildEngineStore", () => {
 
     await expect(rebuildEngineStore(root, d)).resolves.toEqual({
       outcome: "moved",
+      sessionsClosed: true,
       reopenFailed: recoveryError.message,
     });
   });
@@ -1254,6 +1292,7 @@ describe("rebuildEngineStore", () => {
 
     await expect(rebuildEngineStore(root, d)).resolves.toEqual({
       outcome: "moved",
+      sessionsClosed: true,
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
     });
@@ -1274,6 +1313,7 @@ describe("rebuildEngineStore", () => {
 
     await expect(rebuildEngineStore(root, d)).resolves.toEqual({
       outcome: "backup-exists",
+      sessionsClosed: true,
       reopenFailed:
         "dohc could not finish rebuilding this workspace's data store.",
     });
@@ -1327,7 +1367,7 @@ describe("rebuildEngineStore", () => {
           },
         }),
       ),
-    ).resolves.toEqual({ outcome: "moved" });
+    ).resolves.toEqual({ outcome: "moved", sessionsClosed: true });
 
     expect(order).toEqual([
       "local-close",
@@ -1365,8 +1405,8 @@ describe("rebuildEngineStore", () => {
       );
 
     await expect(Promise.all([request(), request()])).resolves.toEqual([
-      { outcome: "moved" },
-      { outcome: "moved" },
+      { outcome: "moved", sessionsClosed: true },
+      { outcome: "moved", sessionsClosed: true },
     ]);
 
     expect(moveStoreAside).toHaveBeenCalledOnce();
@@ -1380,7 +1420,7 @@ describe("rebuildEngineStore", () => {
   });
 
   it("returns the prior result when a fresh probe finds a healthy store", async () => {
-    const previous = { outcome: "moved" } as const;
+    const previous = { outcome: "moved", sessionsClosed: true } as const;
     const moveStoreAside = vi.fn(async () => "moved" as const);
 
     await expect(

@@ -115,6 +115,17 @@ async function lstatIfExists(
   }
 }
 
+function matchesManifestEntry(
+  metadata: Stats | null,
+  entry: EngineStoreMoveManifest["files"][number],
+): boolean {
+  return (
+    metadata !== null &&
+    metadata.size === entry.size &&
+    metadata.mtimeMs === entry.mtimeMs
+  );
+}
+
 function parseMoveManifest(contents: string): EngineStoreMoveManifest {
   const manifest = engineStoreMoveManifestSchema.parse(JSON.parse(contents));
   const names = new Set<EngineStoreFileName>();
@@ -212,14 +223,18 @@ async function completeManifestMove(
     if (!entry) continue;
     const from = join(engineDir, entry.name);
     const to = join(backupDir, entry.name);
-    if (await exists(to)) continue;
+    if (await exists(to)) {
+      const duplicate = await statIfExists(from);
+      if (duplicate === null) continue;
+      if (!matchesManifestEntry(duplicate, entry)) {
+        throw new EngineStoreManifestDriftError(from);
+      }
+      await unlink(from);
+      continue;
+    }
 
     const live = await statIfExists(from);
-    if (
-      live === null ||
-      live.size !== entry.size ||
-      live.mtimeMs !== entry.mtimeMs
-    ) {
+    if (!matchesManifestEntry(live, entry)) {
       throw new EngineStoreManifestDriftError(from);
     }
 
@@ -451,7 +466,11 @@ export async function rebuildEngineStore(
       : reopenError instanceof EngineStoreRecoveryFailedError
         ? reopenError.message
         : "dohc could not finish rebuilding this workspace's data store.";
-  return { outcome, ...(reopenFailed ? { reopenFailed } : {}) };
+  return {
+    outcome,
+    sessionsClosed: true,
+    ...(reopenFailed ? { reopenFailed } : {}),
+  };
 }
 
 export async function rebuildEngineStoreRequest(
