@@ -536,7 +536,7 @@ function changeIsFullyApplied(
     case "move": {
       const from = normalizedWritePath(change.fromPath);
       const to = normalizedMaterializePath(change.toPath);
-      if (from === null || to === null) return false;
+      if (from === null || to === null || from === to) return false;
       const sources = pathAndChildren(before, from);
       if (sources.length === 0) return false;
       return sources.every((source) => {

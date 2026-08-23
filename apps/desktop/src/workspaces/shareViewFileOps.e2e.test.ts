@@ -29,6 +29,8 @@ import {
   applyShareViewPathMove,
 } from "./shareViewFileChanges";
 import { applyShareViewTextWrite } from "./shareViewTextChange";
+import { createShareViewFiles } from "./shareViewFiles";
+import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import { createFile, movePath } from "./workspaceFiles";
 
 // The four remaining writes a share view admits (#802), driven the way
@@ -141,6 +143,50 @@ function scope(harnessed: Harness) {
     workspaceId: harnessed.workspaceId,
     rootPath: harnessed.rootPath,
     shareViewStore: () => harnessed.store,
+  };
+}
+
+function shareViewFilesOwner(
+  harnessed: Harness,
+  store: CaptureVersionedTextStore = harnessed.store,
+) {
+  const requested = {
+    kind: "standalone" as const,
+    workspaceId: harnessed.workspaceId,
+  };
+  const resolved = {
+    ...requested,
+    storeWorkspaceId: harnessed.workspaceId,
+    schedulingRootPath: harnessed.rootPath,
+    rootPath: harnessed.rootPath,
+    shareId: SHARE_ID,
+    granterEmail: "granter@example.com",
+    grantedSelector: {
+      paths: ["docs"],
+      versionId: null,
+      access: "edit" as const,
+    },
+    ended: false,
+  };
+  return {
+    requested,
+    files: createShareViewFiles({
+      resolveTarget: (candidate) =>
+        candidate.kind === requested.kind &&
+        candidate.workspaceId === requested.workspaceId
+          ? resolved
+          : null,
+      openStore: () => store,
+      resolveRelay: async () => null,
+      pull: async () => {
+        throw new Error("Unexpected pull");
+      },
+      recordRefusals: async () => undefined,
+      markEnded: async () => undefined,
+      retireTarget: async () => undefined,
+      assertProjectionRoot: async () => undefined,
+      removeMount: async () => ({ folderLeft: false }),
+    }),
   };
 }
 
@@ -391,14 +437,23 @@ describe("share-view file operations through the real store", () => {
       // `repairSharedViewProjection` leaves it there because it is user data.
       await writeFile(join(view.rootPath, "docs", "mine.md"), "mine\n", "utf8");
       const journalBefore = replicationLogRows(view.rootPath);
+      const owner = shareViewFilesOwner(view);
 
-      const path = await applyShareViewFileCreate({
-        ...scope(view),
-        relativePath: "docs/mine.md",
-        initialText: "# overwritten\n",
+      const outcome = await withStaleSensitiveWorkspaceOperation(
+        view.rootPath,
+        (lease) =>
+          owner.files.change(lease, owner.requested, {
+            kind: "create",
+            path: "docs/mine.md",
+            initialText: "# overwritten\n",
+          }),
+      );
+
+      expect(outcome).toMatchObject({
+        status: "committed",
+        kind: "create",
+        value: "docs/mine.md",
       });
-
-      expect(path).toBe("docs/mine.md");
       await expect(
         readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
         "MUTATION: a create that journals over an occupied path destroys the recipient's own file",
@@ -468,13 +523,17 @@ describe("share-view file operations through the real store", () => {
           };
         },
       }) as CaptureVersionedTextStore;
+      const owner = shareViewFilesOwner(view, pausedStore);
 
-      const moving = applyShareViewPathMove({
-        ...scope(view),
-        fromPath,
-        toPath,
-        shareViewStore: () => pausedStore,
-      });
+      const moving = withStaleSensitiveWorkspaceOperation(
+        view.rootPath,
+        (lease) =>
+          owner.files.change(lease, owner.requested, {
+            kind: "move",
+            fromPath,
+            toPath,
+          }),
+      );
       await storeRenamed;
 
       let captureEnteredGap = false;
@@ -494,7 +553,11 @@ describe("share-view file operations through the real store", () => {
       const captureStartedBeforeProjection = captureEnteredGap;
 
       releaseRename();
-      await moving;
+      await expect(moving).resolves.toMatchObject({
+        status: "committed",
+        kind: "move",
+        value: toPath,
+      });
       const captured = await capturing;
 
       expect(

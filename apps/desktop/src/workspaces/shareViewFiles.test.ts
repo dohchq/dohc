@@ -1050,6 +1050,35 @@ describe("ShareViewFiles", () => {
     ).resolves.toMatchObject({ text: "body\n" });
   });
 
+  it("does not report a rejected same-path move as committed", async () => {
+    const rootPath = await workspaceRoot();
+    await mkdir(join(rootPath, "docs"), { recursive: true });
+    await writeFile(join(rootPath, "docs", "note.md"), "body\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/note.md", text: "body\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "move",
+            fromPath: "docs/note.md",
+            toPath: "docs/note.md",
+          },
+        ),
+      ),
+    ).rejects.toThrow("Cannot move a path into itself");
+    expect(store.renameTextFile).not.toHaveBeenCalled();
+  });
+
   it("keeps main behind the received-share owner", async () => {
     const main = await readFile(new URL("../main.ts", import.meta.url), "utf8");
     expect(main).toContain("createShareViewFiles({");

@@ -132,7 +132,7 @@ export async function applyShareViewFileCreate(
     input.relativePath,
   );
   if (await projectionHolds(input.rootPath, path)) {
-    throw new Error(`Destination already exists: ${path}`);
+    return path;
   }
   const store = input.shareViewStore();
   const main = await store.ensureMainVersion({
