@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -30,6 +31,26 @@ import { withKeyedStartLock } from "./sitePreviewLifecycle";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
+
+const engineStoreRebuildSource = readFileSync(
+  new URL("./engineStoreRebuild.ts", import.meta.url),
+  "utf8",
+);
+const rehearsalHarnessSource = readFileSync(
+  new URL(
+    "../../../../crates/dohc-workspace-engine/src/rehearsal_harness.rs",
+    import.meta.url,
+  ),
+  "utf8",
+);
+
+function stringLiteralsInArray(source: string, name: string): string[] {
+  const match = new RegExp(
+    `const ${name}[^=]*=\\s*\\[([\\s\\S]*?)\\]\\s*(?:as const)?;`,
+  ).exec(source);
+  if (!match) throw new Error(`Could not find ${name}.`);
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+}
 
 let root: string;
 let engineDir: string;
@@ -75,11 +96,15 @@ async function expectCompleteStore(): Promise<void> {
   expect((await readdir(backupDir)).sort()).toEqual([
     "MOVE_COMPLETE",
     "engine.db",
+    "engine.db-journal",
     "engine.db-shm",
     "engine.db-wal",
   ]);
   expect(await readFile(join(backupDir, "engine.db"), "utf8")).toBe(
     "refused-store",
+  );
+  expect(await readFile(join(backupDir, "engine.db-journal"), "utf8")).toBe(
+    "journal",
   );
   expect(await readFile(join(backupDir, "engine.db-wal"), "utf8")).toBe("wal");
   expect(await readFile(join(backupDir, "engine.db-shm"), "utf8")).toBe("shm");
@@ -94,9 +119,22 @@ function deferred() {
 }
 
 describe("moveEngineStoreAside", () => {
+  it("keeps the TypeScript store files in sync with the Rust source list", () => {
+    expect(
+      new Set(
+        stringLiteralsInArray(engineStoreRebuildSource, "ENGINE_STORE_FILES"),
+      ),
+    ).toEqual(
+      new Set(
+        stringLiteralsInArray(rehearsalHarnessSource, "SQLITE_SOURCE_FILES"),
+      ),
+    );
+  });
+
   it("moves only the database and its sidecars into a completed backup", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
       SHADOW_CLONE: "token",
@@ -114,6 +152,7 @@ describe("moveEngineStoreAside", () => {
   it("publishes a complete manifest before moving any store file", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -129,13 +168,18 @@ describe("moveEngineStoreAside", () => {
             expect(to).toBe(join(backupDir, "MOVE_IN_PROGRESS"));
             expect(
               (await readMoveManifest()).files.map(({ name }) => name),
-            ).toEqual(["engine.db-shm", "engine.db-wal", "engine.db"]);
+            ).toEqual([
+              "engine.db-shm",
+              "engine.db-wal",
+              "engine.db-journal",
+              "engine.db",
+            ]);
           }
         },
       }),
     ).resolves.toBe("moved");
 
-    expect(renames).toBe(5);
+    expect(renames).toBe(6);
     await expectCompleteStore();
   });
 
@@ -177,6 +221,25 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
+  it("moves a rollback journal beside its database", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-journal": "journal",
+    });
+
+    await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
+
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+      "engine.db-journal",
+    ]);
+    expect(await readFile(join(backupDir, "engine.db-journal"), "utf8")).toBe(
+      "journal",
+    );
+    expect(await readdir(engineDir)).not.toContain("engine.db-journal");
+  });
+
   it("refuses a completed backup and leaves both stores untouched", async () => {
     await seedStore({ "engine.db": "refused-store" });
     await mkdir(backupDir);
@@ -196,6 +259,7 @@ describe("moveEngineStoreAside", () => {
   it("refuses an unmarked path and leaves the live store untouched", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -206,6 +270,7 @@ describe("moveEngineStoreAside", () => {
     expect((await readdir(backupDir))).toEqual([]);
     expect((await readdir(engineDir)).sort()).toEqual([
       "engine.db",
+      "engine.db-journal",
       "engine.db-shm",
       "engine.db-wal",
       "pre-v2-backup",
@@ -269,6 +334,7 @@ describe("moveEngineStoreAside", () => {
   it("refuses a reservation that has only an unpublished manifest", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -280,6 +346,7 @@ describe("moveEngineStoreAside", () => {
     expect(await readdir(backupDir)).toEqual(["MOVE_IN_PROGRESS.tmp"]);
     expect((await readdir(engineDir)).sort()).toEqual([
       "engine.db",
+      "engine.db-journal",
       "engine.db-shm",
       "engine.db-wal",
       "pre-v2-backup",
@@ -289,6 +356,7 @@ describe("moveEngineStoreAside", () => {
   it("resumes after a crash moved only SHM", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -310,6 +378,7 @@ describe("moveEngineStoreAside", () => {
     expect(manifest.files.map(({ name }) => name)).toEqual([
       "engine.db-shm",
       "engine.db-wal",
+      "engine.db-journal",
       "engine.db",
     ]);
     expect(manifest.files.every(({ size }) => Number.isFinite(size))).toBe(true);
@@ -325,6 +394,7 @@ describe("moveEngineStoreAside", () => {
   it("resumes after a crash moved SHM and WAL", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -349,9 +419,51 @@ describe("moveEngineStoreAside", () => {
     await expectCompleteStore();
   });
 
+  it("resumes after a crash moved a rollback journal but not its database", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-journal": "journal",
+    });
+    let renames = 0;
+
+    await expect(
+      moveEngineStoreAside(root, {
+        rename: async (from, to) => {
+          renames += 1;
+          if (renames === 3) throw new Error("host crash");
+          await rename(from, to);
+        },
+      }),
+    ).rejects.toThrow("host crash");
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
+      "engine.db-journal",
+    ]);
+    expect((await readdir(engineDir)).sort()).toEqual([
+      "engine.db",
+      "pre-v2-backup",
+    ]);
+
+    await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
+
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+      "engine.db-journal",
+    ]);
+    expect(await readFile(join(backupDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
+    );
+    expect(await readFile(join(backupDir, "engine.db-journal"), "utf8")).toBe(
+      "journal",
+    );
+    expect(await readdir(engineDir)).not.toContain("engine.db-journal");
+  });
+
   it("resumes an in-progress reservation before any file moved", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -359,6 +471,7 @@ describe("moveEngineStoreAside", () => {
     await writeMoveManifest([
       "engine.db-shm",
       "engine.db-wal",
+      "engine.db-journal",
       "engine.db",
     ]);
 
@@ -390,6 +503,7 @@ describe("moveEngineStoreAside", () => {
   it("keeps a partial backup when a resumed move fails", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -397,6 +511,7 @@ describe("moveEngineStoreAside", () => {
     await writeMoveManifest([
       "engine.db-shm",
       "engine.db-wal",
+      "engine.db-journal",
       "engine.db",
     ]);
     await rename(
@@ -426,6 +541,7 @@ describe("moveEngineStoreAside", () => {
   it("completes a move after the database rename crashes before the marker rename", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -434,7 +550,7 @@ describe("moveEngineStoreAside", () => {
       moveEngineStoreAside(root, {
         rename: async (from, to) => {
           renames += 1;
-          if (renames === 5) throw new Error("host crash");
+          if (renames === 6) throw new Error("host crash");
           await rename(from, to);
         },
       }),
@@ -443,6 +559,7 @@ describe("moveEngineStoreAside", () => {
     expect((await readdir(backupDir)).sort()).toEqual([
       "MOVE_IN_PROGRESS",
       "engine.db",
+      "engine.db-journal",
       "engine.db-shm",
       "engine.db-wal",
     ]);
@@ -559,6 +676,7 @@ describe("moveEngineStoreAside", () => {
   it("recovers a pending move before a dispatch-scoped capture can open a new store", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
@@ -566,6 +684,7 @@ describe("moveEngineStoreAside", () => {
     await writeMoveManifest([
       "engine.db-shm",
       "engine.db-wal",
+      "engine.db-journal",
       "engine.db",
     ]);
     await rename(
@@ -577,6 +696,7 @@ describe("moveEngineStoreAside", () => {
       expect((await readdir(backupDir)).sort()).toEqual([
         "MOVE_COMPLETE",
         "engine.db",
+        "engine.db-journal",
         "engine.db-shm",
         "engine.db-wal",
       ]);
@@ -606,12 +726,16 @@ describe("moveEngineStoreAside", () => {
   it("recovers a failed partial move before an already-locked reopen opens the store", async () => {
     await seedStore({
       "engine.db": "refused-store",
+      "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
     });
     const locks = new Map<string, Promise<void>>();
     const workspace = { workspaceId: "workspace", rootPath: root };
     const moveError = new Error("host crash");
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     let renames = 0;
     let stateAtOpen:
       | { backupFiles: string[]; liveFiles: string[] }
@@ -635,7 +759,7 @@ describe("moveEngineStoreAside", () => {
             moveEngineStoreAside(rootPath, {
               rename: async (from, to) => {
                 renames += 1;
-                if (renames === 4) throw moveError;
+                if (renames === 5) throw moveError;
                 await rename(from, to);
               },
             }),
@@ -644,12 +768,17 @@ describe("moveEngineStoreAside", () => {
         }),
     );
 
-    await expect(rebuilding).rejects.toBe(moveError);
+    await expect(rebuilding).resolves.toEqual({ outcome: "moved" });
+    expect(consoleError).toHaveBeenCalledWith(
+      "The engine store move reported an error, but reopening completed the move.",
+      moveError,
+    );
     expect(openActivity).toHaveBeenCalledOnce();
     expect(stateAtOpen).toEqual({
       backupFiles: [
         "MOVE_COMPLETE",
         "engine.db",
+        "engine.db-journal",
         "engine.db-shm",
         "engine.db-wal",
       ],
@@ -658,6 +787,7 @@ describe("moveEngineStoreAside", () => {
     expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
       "rebuilt-store",
     );
+    consoleError.mockRestore();
   });
 
   it("holds the workspace lock through an ordinary activity open before rebuilding", async () => {
@@ -751,7 +881,9 @@ describe("rebuildEngineStore", () => {
     };
   }
 
-  it("refuses a healthy fresh probe despite a prior refusal and reopens", async () => {
+  it("refuses a healthy fresh probe despite a completed prior backup", async () => {
+    await mkdir(backupDir);
+    await writeFile(join(backupDir, "MOVE_COMPLETE"), "");
     const d = deps({ probeStoreRefusal: vi.fn(async () => null) });
 
     await expect(rebuildEngineStore(root, d)).rejects.toBeInstanceOf(
@@ -763,7 +895,9 @@ describe("rebuildEngineStore", () => {
     expect(d.reopenActivity).toHaveBeenCalledOnce();
   });
 
-  it("reopens and surfaces an unrecognized probe failure without moving", async () => {
+  it("rethrows a probe failure beside a completed prior backup", async () => {
+    await mkdir(backupDir);
+    await writeFile(join(backupDir, "MOVE_COMPLETE"), "");
     const probeError = Object.assign(new Error("permission denied"), {
       code: "EACCES",
     });
@@ -929,6 +1063,34 @@ describe("rebuildEngineStore", () => {
       outcome: "moved",
       reopenFailed: recoveryError.message,
     });
+  });
+
+  it("reports a reopen failure after recovery completes a failed move", async () => {
+    await mkdir(backupDir);
+    await writeFile(join(backupDir, "MOVE_COMPLETE"), "");
+    const moveError = new Error("host crash");
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const d = deps({
+      moveStoreAside: vi.fn(async () => {
+        throw moveError;
+      }),
+      reopenActivity: vi.fn(async () => {
+        throw new Error("daemon did not come back");
+      }),
+    });
+
+    await expect(rebuildEngineStore(root, d)).resolves.toEqual({
+      outcome: "moved",
+      reopenFailed:
+        "dohc could not finish rebuilding this workspace's data store.",
+    });
+    expect(consoleError).toHaveBeenCalledWith(
+      "The engine store move reported an error, but reopening completed the move.",
+      moveError,
+    );
+    consoleError.mockRestore();
   });
 
   it("preserves a no-clobber outcome when reopening fails", async () => {

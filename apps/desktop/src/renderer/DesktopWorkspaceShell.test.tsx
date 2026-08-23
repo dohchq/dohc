@@ -14,6 +14,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
 // tests — so the wall-clock profile is the file, not one test (#372).
@@ -6075,10 +6076,14 @@ describe("engine store recovery", () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  it("confirms before moving, names the destination, then names the reverse path", async () => {
+  it("confirms before moving, then shows a moved result and its reverse path", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
     bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    // A partial move completed during reopen has this same result.
+    bridge.rebuildEngineStore = vi.fn(async () => ({
+      outcome: "moved" as const,
+    }));
     const { user, dialog } = await openRebuildDialog(bridge);
 
     expect(
@@ -6112,7 +6117,7 @@ describe("engine store recovery", () => {
       ).toBe(dialog);
       expect(
         screen.getByTestId("engine-rebuild-dialog").textContent,
-      ).toContain("The old data store is at .dohc/engine/pre-v2-backup");
+      ).toContain(`The old data store is at ${ENGINE_STORE_BACKUP_DIR}`);
     });
   });
 

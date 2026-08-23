@@ -23,9 +23,12 @@ import { withKeyedStartLock } from "./sitePreviewLifecycle";
 const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
 const MOVE_IN_PROGRESS_TEMP = `${MOVE_IN_PROGRESS}.tmp`;
 const MOVE_COMPLETE = "MOVE_COMPLETE";
+// SQLITE_SOURCE_FILES in rehearsal_harness.rs is the source of truth for names.
+// Move transient SHM first, durable WAL and journal next, and the database last.
 const ENGINE_STORE_FILES = [
   "engine.db-shm",
   "engine.db-wal",
+  "engine.db-journal",
   "engine.db",
 ] as const;
 
@@ -355,13 +358,15 @@ export async function rebuildEngineStore(
   }
 
   let outcome: MoveOutcome | undefined;
+  let moveAttempted = false;
   let operationError: unknown;
-  let reopenFailed: string | undefined;
+  let reopenError: unknown;
 
   try {
     if ((await deps.probeStoreRefusal()) === null) {
       throw new EngineStoreNotRefusedError();
     }
+    moveAttempted = true;
     outcome = await deps.moveStoreAside(rootPath);
   } catch (error) {
     operationError = error;
@@ -369,19 +374,30 @@ export async function rebuildEngineStore(
     try {
       await deps.reopenActivity();
     } catch (error) {
-      if (outcome) {
-        reopenFailed =
-          error instanceof EngineStoreRecoveryFailedError
-            ? error.message
-            : "dohc could not finish rebuilding this workspace's data store.";
-      }
+      reopenError = error;
     }
   }
 
-  if (operationError !== undefined) throw operationError;
+  if (operationError !== undefined) {
+    const moveCompleted =
+      moveAttempted &&
+      (await exists(join(rootPath, ENGINE_STORE_BACKUP_DIR, MOVE_COMPLETE)));
+    if (!moveCompleted) throw operationError;
+    console.error(
+      "The engine store move reported an error, but reopening completed the move.",
+      operationError,
+    );
+    outcome = "moved";
+  }
   if (outcome === undefined) {
     throw new Error("The data store rebuild finished without an outcome.");
   }
+  const reopenFailed =
+    reopenError === undefined
+      ? undefined
+      : reopenError instanceof EngineStoreRecoveryFailedError
+        ? reopenError.message
+        : "dohc could not finish rebuilding this workspace's data store.";
   return { outcome, ...(reopenFailed ? { reopenFailed } : {}) };
 }
 
