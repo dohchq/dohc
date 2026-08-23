@@ -1297,13 +1297,22 @@ describe("buildSite", () => {
       // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
       // real attempts to observe the descendant Start-Process just created,
       // instead of racing the wrapper's own spawn with a single shot.
-      // PROCESS_DEATH_TIMEOUT_MS gives real headroom on top: stopChild
-      // already awaits taskkill to completion before buildSite returns, but
-      // taskkill itself is a real spawned process, and an already-loaded
-      // 8-worker suite can delay it.
+      //
+      // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild
+      // already awaits taskkill to completion before buildSite returns, so
+      // by the time this test starts polling, the descendant is either
+      // already dead or was never captured at all (nothing left to wait
+      // for — it sleeps 60 real seconds either way). Measured 2026-08-23
+      // under combined desktop+mcp 8-worker load (N=29 successful captures,
+      // one separate run's buildSite call itself hit its own BUILD_TIMEOUT_MS
+      // under the same load and never reached this wait — a different,
+      // unaddressed failure mode, not this one): death was confirmed on the
+      // very first check every time, min/median/p95/max all 0-1ms. 500ms is
+      // real headroom over that measured range, not a growing pad chasing a
+      // flake this wait was never the cause of.
       const CAPTURE_INTERVAL_MS = 100;
       const WRAPPER_LIFETIME_MS = 2_000;
-      const PROCESS_DEATH_TIMEOUT_MS = 8_000;
+      const PROCESS_DEATH_TIMEOUT_MS = 500;
       const BUILD_TIMEOUT_MS = 15_000;
       await mkdir(join(root, "site"), { recursive: true });
       const script = [
