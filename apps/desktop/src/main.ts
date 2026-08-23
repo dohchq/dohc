@@ -631,6 +631,8 @@ import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
+  isAppImageBoot,
+  pluginHostEnvFor,
   resolveDohcCliBinDirectory,
   resolveDohcMcpCommand,
   type ChatDispatchPresenceInput,
@@ -1077,14 +1079,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
         resourcesPath: process.resourcesPath,
         linuxStableCliBinDir,
       });
-      const pluginHostEnv = { ...process.env };
-      if (dohcMcpCommand === null) {
-        delete pluginHostEnv.DOHC_MCP_COMMAND;
-        pluginHostEnv.DOHC_MCP_COMMAND_UNAVAILABLE = "1";
-      } else {
-        pluginHostEnv.DOHC_MCP_COMMAND = dohcMcpCommand;
-        delete pluginHostEnv.DOHC_MCP_COMMAND_UNAVAILABLE;
-      }
+      const pluginHostEnv = pluginHostEnvFor(dohcMcpCommand, process.env);
       const child = utilityProcess.fork(
         join(import.meta.dirname, "plugin-host.js"),
         [],
@@ -12154,7 +12149,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(async () => {
-    if (app.isPackaged && process.platform === "linux" && process.env.APPIMAGE) {
+    if (app.isPackaged && process.platform === "linux" && isAppImageBoot()) {
       // A failed refresh must not block startup, and must not throw away an
       // intact launcher a previous boot already published -- only a boot
       // with nothing usable there falls back to the packaged mount.

@@ -287,6 +287,21 @@ export function resolveDohcCliBinDirectory(input: {
   return resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
 }
 
+/** True when this process is genuinely running from inside an AppImage's
+ * own mount -- electron-builder's AppImage target exports this at a real,
+ * non-empty path. Some launchers otherwise inherit an EMPTY APPIMAGE from
+ * a parent process, which must not be mistaken for one -- boot's
+ * stable-copy refresh and this file's command resolver must agree on the
+ * same test, or a packaged, non-AppImage install with an empty APPIMAGE in
+ * its environment gets treated as an AppImage with no stable copy, and MCP
+ * becomes wrongly unavailable even though its ordinary resources/cli-bin
+ * is perfectly stable. */
+export function isAppImageBoot(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return Boolean(env.APPIMAGE);
+}
+
 /**
  * The dohc-mcp command a chat session config points the user's AI tool at.
  *
@@ -315,7 +330,7 @@ export function resolveDohcMcpCommand(input: {
   if (!input.isPackaged) return "dohc-mcp";
   const platform = input.platform ?? process.platform;
   let cliBinDir: string;
-  if (platform === "linux" && env.APPIMAGE !== undefined) {
+  if (platform === "linux" && isAppImageBoot(env)) {
     if (!input.linuxStableCliBinDir) return null;
     cliBinDir = input.linuxStableCliBinDir;
   } else {
@@ -325,6 +340,29 @@ export function resolveDohcMcpCommand(input: {
     cliBinDir,
     platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp",
   );
+}
+
+/**
+ * The plugin host's own env, layered onto the ambient process env: the
+ * resolved dohc-mcp command when one exists, or an explicit "unavailable"
+ * marker when it doesn't -- never both, and never a stale leftover of
+ * whichever one applied on a previous call (a workspace's plugin host can
+ * respawn after this install's launcher availability changes, e.g. once a
+ * boot's stable-copy refresh finally succeeds).
+ */
+export function pluginHostEnvFor(
+  dohcMcpCommand: string | null,
+  baseEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const env = { ...baseEnv };
+  if (dohcMcpCommand === null) {
+    delete env.DOHC_MCP_COMMAND;
+    env.DOHC_MCP_COMMAND_UNAVAILABLE = "1";
+  } else {
+    env.DOHC_MCP_COMMAND = dohcMcpCommand;
+    delete env.DOHC_MCP_COMMAND_UNAVAILABLE;
+  }
+  return env;
 }
 
 export function tokenizeRunnerCommand(command: string): string[] {

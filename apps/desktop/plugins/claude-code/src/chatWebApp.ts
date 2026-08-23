@@ -50,7 +50,24 @@ interface HistoryTrimmedEvent {
   kind: "history-trimmed";
 }
 
-type ChatStreamEvent = PluginAgentEvent | UserMessageEvent | HistoryTrimmedEvent;
+/** A fatal error whose only real recovery is restarting dohc itself --
+ * sending another message can never fix it, since nothing changes until
+ * the launcher this session needs becomes available again. Distinguished
+ * from an ordinary fatal error so the client can show the one action that
+ * actually works, instead of the generic (and here, false) "send a
+ * message to start a new session". */
+interface LauncherUnavailableErrorEvent {
+  kind: "error";
+  message: string;
+  fatal: true;
+  restartOnly: true;
+}
+
+type ChatStreamEvent =
+  | PluginAgentEvent
+  | UserMessageEvent
+  | HistoryTrimmedEvent
+  | LauncherUnavailableErrorEvent;
 
 interface EventLogEntry {
   event: ChatStreamEvent;
@@ -88,7 +105,10 @@ function errorMessage(error: unknown): string {
 // environment. See both plugins' README.md.
 function mcpConfig(workspaceRoot: string): { command: string; args: string[] } {
   if (process.env.DOHC_MCP_COMMAND_UNAVAILABLE === "1") {
-    throw new Error("dohc could not prepare its MCP launcher. Restart dohc to try again.");
+    throw Object.assign(
+      new Error("dohc could not prepare its MCP launcher. Restart dohc to try again."),
+      { restartOnly: true as const },
+    );
   }
   return {
     command: process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp",
@@ -455,7 +475,13 @@ export function createChatWebApp(
       // terminal event here, the pill would sit on Starting forever with
       // Stop still enabled and no session behind it to stop.
       if (generation === sessionGeneration) {
-        publish({ kind: "error", message: errorMessage(error), fatal: true });
+        const restartOnly =
+          error instanceof Error && "restartOnly" in error && error.restartOnly === true;
+        publish(
+          restartOnly
+            ? { kind: "error", message: errorMessage(error), fatal: true, restartOnly: true }
+            : { kind: "error", message: errorMessage(error), fatal: true },
+        );
       }
       throw requestError(503, errorMessage(error));
     } finally {
@@ -482,6 +508,15 @@ export function createChatWebApp(
   async function liveSession(): Promise<PluginAgentSession> {
     if (processSession) return processSession;
     const available = await Promise.resolve(driver.probe()).catch((error: unknown) => {
+      // A Stop that arrived while the probe was in flight already recorded
+      // its intent (pendingPrompt.stopRequested) and already answered 204
+      // -- if the probe goes on to reject anyway, that rejection is not
+      // news the user asked about: report the stop as the outcome, not an
+      // unrelated fatal error and a recovery card for nothing left to
+      // recover.
+      if (pendingPrompt?.stopRequested) {
+        throw requestError(503, "The Claude Code session was stopped while it started.");
+      }
       const message = errorMessage(error);
       publish({ kind: "error", message, fatal: true });
       throw requestError(503, message);
@@ -490,7 +525,9 @@ export function createChatWebApp(
     // sessionStart yet for stop() to abandon on its own -- pendingPrompt
     // .stopRequested is the only record of it, and this is the first point
     // after that await where message() can honor it, before this attempt
-    // goes on to start a session nobody wants anymore.
+    // goes on to start a session nobody wants anymore. Nothing async
+    // separates this line from the decision, a few lines down, to actually
+    // start that session -- one check covers the whole stretch.
     if (pendingPrompt?.stopRequested) {
       throw requestError(503, "The Claude Code session was stopped while it started.");
     }
@@ -508,13 +545,6 @@ export function createChatWebApp(
       throw requestError(503, message);
     }
     if (!sessionStart) {
-      // Checked again immediately before committing to a real session-start
-      // attempt: still true from the identical synchronous stretch above (no
-      // await separates them today), named here too so this stays covered
-      // if a future change ever inserts one.
-      if (pendingPrompt?.stopRequested) {
-        throw requestError(503, "The Claude Code session was stopped while it started.");
-      }
       const attempt = startSession();
       sessionStart = attempt;
       // A separate chain off the same promise, not the one callers await:

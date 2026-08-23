@@ -31,12 +31,15 @@ function uiRootMissingScript(): string {
 function deferred<T = void>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
 } {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /** Races a promise against a bounded wait, for proving a negative -- "this
@@ -1355,12 +1358,14 @@ describe("Codex chat web app", () => {
       kind: "error",
       message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       fatal: true,
+      restartOnly: true,
     });
     expect((await post(url, "message", { text: "Hello again" }, token)).status).toBe(503);
     expect(await stream.next()).toEqual({
       kind: "error",
       message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       fatal: true,
+      restartOnly: true,
     });
     expect(fake.startInputs).toHaveLength(0);
     await stream.close();
@@ -1585,6 +1590,34 @@ describe("Codex chat web app", () => {
 
       const nextResponse = await post(url, "message", { text: "Fresh" }, token);
       expect(nextResponse.status).toBe(202);
+    });
+
+    it("stop during a rejecting driver probe still cancels the prompt", async () => {
+      const probeEntered = deferred();
+      const probeGate = deferred();
+      const fake = fakeDriver(undefined, {
+        onProbeEntered: () => probeEntered.resolve(),
+        probeGate: () => probeGate.promise,
+      });
+      const { url, token } = await start(fake);
+
+      const messagePromise = post(url, "message", { text: "Hello" }, token);
+      await probeEntered.promise;
+
+      const stopResponse = await post(url, "stop", undefined, token);
+      expect(stopResponse.status).toBe(204);
+
+      probeGate.reject(new Error("probe crashed"));
+      const messageResponse = await messagePromise;
+      expect(messageResponse.status).toBe(503);
+      expect(await messageResponse.text()).toBe(
+        "The Codex session was stopped while it started.",
+      );
+      expect(fake.startInputs).toHaveLength(0);
+
+      const stream = await eventStream(url, token);
+      expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+      await stream.close();
     });
 
     it("stop during startup disposes the pending session instead of installing it", async () => {

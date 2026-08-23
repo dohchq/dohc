@@ -50,6 +50,15 @@ const pendingMessages = new Map();
 // sets it optimistically to bridge the gap before its running event arrives.
 // Failed requests leave it untouched because they did not start a turn.
 let turnActive = false;
+// True only once an ACTUAL session-state: "running" event has been
+// processed -- never by the composer's own optimistic `turnActive = true`
+// after a 202 (that bridges the gap before the real event arrives, but is
+// not proof by itself). Distinguishing this from `turnActive` is what
+// keeps an out-of-order `starting` frame (delivered late, over the
+// separate SSE connection, after an early 202) from looking like a
+// genuine transition out of a running turn: it never was one, confirmed,
+// in the first place.
+let turnConfirmedByEvent = false;
 // Bumped by every setSessionState call (any state). A /message accept can
 // land asynchronously behind a Stop's cancellation, after the turn it
 // started has already completed (or the session has already closed or
@@ -158,19 +167,36 @@ function setSessionState(state, reason, options = {}) {
   statePill.textContent = label;
   statePill.dataset.state = state;
   stopButton.disabled = state === "closed" || state === "error";
-  const wasActive = turnActive;
+  const wasConfirmedActive = turnConfirmedByEvent;
   turnActive = state === "running";
-  // A pending send is proven settled by the session ending outright
-  // (closed/error -- whatever it was waiting on no longer matters), or by
-  // a turn that really was running just stopping being active. A
-  // `starting`/`ready` reached WITHOUT ever having been running first (the
-  // ordinary handshake before this send's own turn has started) must NOT
-  // clear it -- that gap is exactly what let Send be clicked a second time
-  // before the server had even accepted the first attempt.
-  if (state === "closed" || state === "error" || (wasActive && !turnActive)) {
-    clearPendingSend();
+  turnConfirmedByEvent = state === "running";
+  // Replay (a reconnect's own required snapshot, or a buffered history
+  // frame the server marks `replay: true`) rebuilds PAST state -- it must
+  // never clear a send or advance the Stop counter (see stopStateVersion
+  // below) that belong to something genuinely happening right now. A
+  // silent snapshot's `closed` state, in particular, does not mean the
+  // session ended just this instant; only a live transition does.
+  const isPastEvent = Boolean(options.silent || options.replay);
+  if (!isPastEvent) {
+    // A pending send is proven settled by the session ending outright
+    // (closed/error -- whatever it was waiting on no longer matters), or
+    // by a turn that was CONFIRMED running (a real event, never the
+    // composer's own optimistic bridge) just stopping being active. A
+    // `starting`/`ready` reached without the turn ever having been
+    // confirmed running first -- the ordinary handshake before this
+    // send's own turn has started, OR an out-of-order frame that
+    // chronologically preceded a 202 the browser happened to receive
+    // first -- must NOT clear it.
+    if (state === "closed" || state === "error" || (wasConfirmedActive && !turnActive)) {
+      clearPendingSend();
+    }
+    if (state === "closed" || state === "error") {
+      // Advancing here correctly discards a /stop response that lands
+      // after this exact turn already ended. The user's Stop intent was
+      // met, so a failure from the now-moot request needs no error card.
+      stopStateVersion += 1;
+    }
   }
-  if (state === "closed" || state === "error") stopStateVersion += 1;
   updateSendAvailability();
   // The initial connection snapshot applies to the pill only: the log
   // replay right behind it (or a live event still to come) is what
@@ -220,6 +246,15 @@ function errorCard(message, nextAction, replay) {
 // The session actually ended: sending a message means starting over.
 function recoveryCard(message, replay) {
   errorCard(message, "Send a message to start a new session.", replay);
+}
+
+// The launcher itself is what's missing, not this session's context --
+// unlike every other fatal error, sending another message can never
+// recover this one until dohc itself restarts. recoveryCard's "Send a
+// message to start a new session" would be a false instruction here; load
+// this repo's dohc-interface skill before touching this string.
+function restartRequiredCard(message, replay) {
+  errorCard(message, "Restart dohc to try again.", replay);
 }
 
 function renderText(event) {
@@ -459,14 +494,21 @@ function renderEvent(event) {
         : event.used + " tokens used";
       break;
     case "turn-completed":
-      // A turn-completed event is definitive proof this send's turn ran,
-      // even on the rare path where turnActive itself never became true
-      // (a 202 landing behind a fresher handshake event never gets to set
-      // it -- see the composer submit handler below). Cleared explicitly
-      // rather than relying only on setSessionState's wasActive check.
-      clearPendingSend();
-      stopStateVersion += 1;
-      setSessionState("ready");
+      if (!event.replay) {
+        // A turn-completed event is definitive proof this send's turn
+        // ran, even on the rare path where turnActive itself never got
+        // CONFIRMED (a 202 landing behind a fresher handshake event
+        // bridges turnActive optimistically, but setSessionState's own
+        // wasConfirmedActive check above would still miss it -- see
+        // there). A REPLAYED turn-completed is history, not news: it must
+        // not clear a send or a stop that is genuinely still pending
+        // right now (this is Finding 2 below, same rule, same reason).
+        clearPendingSend();
+        // A /stop failure that lands after this live completion is
+        // deliberately stale: the turn already met the user's Stop intent.
+        stopStateVersion += 1;
+      }
+      setSessionState("ready", undefined, { replay: event.replay });
       // The session itself is still alive (the pill just went back to
       // Ready), so the next action is a retry -- "start a new session"
       // would be false here.
@@ -496,7 +538,11 @@ function renderEvent(event) {
     case "error":
       if (event.fatal) {
         setSessionState("error", undefined, { silent: event.replay });
-        recoveryCard(event.message, event.replay);
+        if (event.restartOnly) {
+          restartRequiredCard(event.message, event.replay);
+        } else {
+          recoveryCard(event.message, event.replay);
+        }
       } else {
         messageCard("Claude Code", event.message, "agent", event.at);
         announce(event.message);

@@ -239,6 +239,20 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(card?.textContent).toContain("Send a message to start a new session.");
   });
 
+  it("renders the restart-only next action for the MCP launcher error, not the generic resume instruction", async () => {
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      fatal: true,
+      restartOnly: true,
+    });
+
+    const nextAction = textOf(".error-card .next-action");
+    expect(nextAction).toBe("Restart dohc to try again.");
+    expect(nextAction).not.toBe("Send a message to start a new session.");
+  });
+
   it("renders a fallback failure line for a failed turn with no errorMessage, so it doesn't look like it succeeded", async () => {
     const { eventSource } = await loadChatModule();
     sendEvent(eventSource, { kind: "turn-completed", turnId: "t1", status: "failed" });
@@ -479,6 +493,68 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(sendButton.disabled).toBe(false);
   });
 
+  it("keeps Send disabled through a reconnect snapshot while its request is still pending", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageEntered = deferred();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/message") throw new Error(`Unexpected fetch: ${url}`);
+      messageEntered.resolve();
+      return messageResponse.promise;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    await messageEntered.promise;
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "closed",
+      snapshot: true,
+    });
+    expect(sendButton.disabled).toBe(true);
+
+    messageResponse.resolve(new Response(null, { status: 202 }));
+    await flushMicrotasks();
+    sendEvent(eventSource, { kind: "session-state", state: "running" });
+    sendEvent(eventSource, { kind: "turn-completed" });
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it("keeps Send disabled when a delayed starting frame arrives after an early 202", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageEntered = deferred();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/message") throw new Error(`Unexpected fetch: ${url}`);
+      messageEntered.resolve();
+      return messageResponse.promise;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    await messageEntered.promise;
+    expect(sendButton.disabled).toBe(true);
+
+    messageResponse.resolve(new Response(null, { status: 202 }));
+    await flushMicrotasks();
+    sendEvent(eventSource, { kind: "session-state", state: "starting" });
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, { kind: "session-state", state: "running" });
+    sendEvent(eventSource, { kind: "turn-completed" });
+    expect(sendButton.disabled).toBe(false);
+  });
+
   it("keeps Stop disabled when the session closes before a delayed successful stop response", async () => {
     const { eventSource } = await loadChatModule();
     const stopEntered = deferred();
@@ -525,6 +601,63 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     await flushMicrotasks();
     expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore);
     expect(stopButton.disabled).toBe(true);
+  });
+
+  it("shows the real Stop failure even if a replayed old fatal frame arrives during it", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopEntered = deferred();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/stop") throw new Error(`Unexpected fetch: ${url}`);
+      stopEntered.resolve();
+      return stopResponse.promise;
+    }) as typeof fetch;
+
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    stopButton.click();
+    await stopEntered.promise;
+    expect(stopButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "An old, unrelated failure.",
+      fatal: true,
+      replay: true,
+    });
+    const errorCardsBefore = document.querySelectorAll(".error-card").length;
+
+    stopResponse.resolve(new Response(null, { status: 500 }));
+    await flushMicrotasks();
+    expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore + 1);
+    expect(stopButton.disabled).toBe(false);
+  });
+
+  it("discards a Stop failure that lands after the turn already completed naturally", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopEntered = deferred();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/stop") throw new Error(`Unexpected fetch: ${url}`);
+      stopEntered.resolve();
+      return stopResponse.promise;
+    }) as typeof fetch;
+
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+    sendEvent(eventSource, { kind: "session-state", state: "running" });
+    expect(sendButton.disabled).toBe(true);
+    stopButton.click();
+    await stopEntered.promise;
+
+    sendEvent(eventSource, { kind: "turn-completed" });
+    const errorCardsBefore = document.querySelectorAll(".error-card").length;
+    expect(sendButton.disabled).toBe(false);
+    expect(stopButton.disabled).toBe(false);
+
+    stopResponse.resolve(new Response(null, { status: 500 }));
+    await flushMicrotasks();
+    expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore);
+    expect(stopButton.disabled).toBe(false);
   });
 
   it("shows a Stop failure after a benign starting/ready transition, not just after the session ends", async () => {
