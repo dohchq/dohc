@@ -38,6 +38,8 @@ const MOUNT_LABEL_MAX = 64;
 const SHARE_ID_MAX = 200;
 const INVALID_SHARE_MOUNT_DETAILS =
   "dohc cannot verify this mounted share because its saved details are invalid. Remove the share. Add it again.";
+const UNOWNED_SHARE_PROJECTION_PATH =
+  "dohc cannot use this path because no share owns it. Add the share again, or move the file or folder outside shared-with-me/.";
 
 // A mount label must be exactly one safe path segment. The registry file is
 // data, not a write path into the tree — labels are re-validated on every
@@ -244,7 +246,7 @@ export async function resolveShareProjectionPath<Mount>(
   });
   if (matches.length === 0) {
     if (isSharedWithMePath(normalizedPath)) {
-      throw new Error(INVALID_SHARE_MOUNT_DETAILS);
+      throw new Error(UNOWNED_SHARE_PROJECTION_PATH);
     }
     return { kind: "local" };
   }

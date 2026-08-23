@@ -388,7 +388,9 @@ describe("mount labels", () => {
         true,
       ),
       "MUTATION: an empty but present registry lets stale projection bytes fall through to disk",
-    ).rejects.toThrow(/saved details are invalid/);
+    ).rejects.toThrow(
+      "dohc cannot use this path because no share owns it. Add the share again, or move the file or folder outside shared-with-me/.",
+    );
   });
 
   it("refuses a disk path claimed by more than one registry record", async () => {
@@ -491,7 +493,7 @@ describe("mount labels", () => {
         [],
         true,
       ),
-    ).rejects.toThrow(/saved details are invalid/i);
+    ).rejects.toThrow(/no share owns it/i);
   });
 
   it("refuses imports into a mount through its projection path or an alias", async () => {
@@ -521,6 +523,9 @@ describe("mount labels", () => {
     await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan"), {
       recursive: true,
     });
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, ".env"), {
+      recursive: true,
+    });
     await symlink(
       join(host, SHARED_WITH_ME_FOLDER),
       join(host, "projection-alias"),
@@ -535,7 +540,7 @@ describe("mount labels", () => {
         true,
       ),
       "MUTATION: an empty ownership tombstone must not turn stale projection bytes into a local import destination",
-    ).rejects.toThrow(/saved details are invalid/i);
+    ).rejects.toThrow(/no share owns it/i);
     await expect(
       refuseImportIntoShareProjection(host, "projection-alias", [], true),
       "MUTATION: a projection alias must not bypass an empty ownership tombstone",
@@ -543,11 +548,11 @@ describe("mount labels", () => {
     await expect(
       refuseImportIntoShareProjection(
         host,
-        "shared-with-me/damaged",
-        [{ shareId: SHARE_ID, label: null } as never],
+        "shared-with-me/.env",
+        [{ shareId: SHARE_ID, label: ".env" }],
         true,
       ),
-      "MUTATION: a damaged record must not let its projection become a local import destination",
+      "MUTATION: a matched but unusable record must not let its projection become a local import destination",
     ).rejects.toThrow(/saved details are invalid/i);
   });
 

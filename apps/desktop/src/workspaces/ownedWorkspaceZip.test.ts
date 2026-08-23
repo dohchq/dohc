@@ -111,6 +111,28 @@ describe("ownedZipProjectionPlan", () => {
     expect(collectShare).not.toHaveBeenCalled();
   });
 
+  it("excludes cached projections when mount labels collide", async () => {
+    const root = await workspaceRoot();
+    const collectShare = canonicalShareCollector();
+
+    const exported = await collectOwnedWorkspaceZipEntries({
+      workspace: {
+        workspaceId: "host",
+        rootPath: root,
+        shareMounts: [
+          { shareId: "share-a", label: "owner" },
+          { shareId: "share-b", label: "Owner" },
+        ],
+      },
+      collectShare,
+    });
+
+    expect(exported.entries.map((entry) => entry.path)).toEqual([
+      "notes/local.md",
+    ]);
+    expect(collectShare).not.toHaveBeenCalled();
+  });
+
   it("uses resolved ownership when an export aliases the workspace root", async () => {
     const root = await workspaceRoot();
     await symlink(root, join(root, "workspace-alias"), "dir");
