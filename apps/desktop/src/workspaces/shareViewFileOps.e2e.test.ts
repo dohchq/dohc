@@ -441,21 +441,16 @@ describe("share-view file operations through the real store", () => {
       const journalBefore = replicationLogRows(view.rootPath);
       const owner = shareViewFilesOwner(view);
 
-      const outcome = await withStaleSensitiveWorkspaceOperation(
-        view.rootPath,
-        (lease) =>
+      await expect(
+        withStaleSensitiveWorkspaceOperation(view.rootPath, (lease) =>
           owner.files.change(lease, owner.requested, {
             kind: "create",
             path: "docs/mine.md",
             initialText: "# overwritten\n",
           }),
-      );
-
-      expect(outcome).toMatchObject({
-        status: "committed",
-        kind: "create",
-        value: "docs/mine.md",
-      });
+        ),
+        "MUTATION: a create reports success for a path occupied only by the recipient's own file",
+      ).rejects.toThrow(/already exists/);
       await expect(
         readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
         "MUTATION: a create that journals over an occupied path destroys the recipient's own file",
@@ -715,6 +710,10 @@ describe("share-view file operations through the real store", () => {
         ["docs/plans/one.md", "docs/plans/two.md"],
         "The case-only folder rename never settled in the store",
       );
+      expect(
+        await readdir(join(view.rootPath, "docs")),
+        "MUTATION: a case-only folder rename changes the store spelling but leaves the old directory spelling on disk",
+      ).toEqual(["plans"]);
       // The cleanup that removes an emptied source folder must not run when
       // the source and the destination are the SAME folder: it would remove
       // the files this rename just put there.
@@ -830,6 +829,38 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "roadmap", "mine.md"), "utf8"),
       ).resolves.toBe("mine\n");
       expect(await storePaths(view)).toEqual(["docs/plans/one.md"]);
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "refuses to move a folder onto an existing folder in the store",
+    async () => {
+      const view = await harness("dohc-share-move-store-folder-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/plans/one.md", text: "one\n" },
+        { path: "docs/roadmap/keep.md", text: "keep\n" },
+      ]);
+
+      await expect(
+        applyShareViewPathMove({
+          ...scope(view),
+          fromPath: "docs/plans",
+          toPath: "docs/roadmap",
+        }),
+        "MUTATION: a folder move merges into an existing canonical folder",
+      ).rejects.toThrow(/already exists/);
+
+      expect(await storePaths(view)).toEqual([
+        "docs/plans/one.md",
+        "docs/roadmap/keep.md",
+      ]);
+      await expect(
+        readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
+      ).resolves.toBe("one\n");
+      await expect(
+        readFile(join(view.rootPath, "docs", "roadmap", "keep.md"), "utf8"),
+      ).resolves.toBe("keep\n");
     },
     60_000,
   );
@@ -1480,6 +1511,48 @@ describe("share-view file operations through the real store", () => {
         readFile(join(view.rootPath, "docs", "interrupted.md"), "utf8"),
       ).resolves.toBe("imported body\n");
       expect(await storePaths(view)).toContain("docs/interrupted.md");
+    },
+    60_000,
+  );
+
+  it.skipIf(engine.missing)(
+    "repairs a missing canonical destination before importing into it",
+    async () => {
+      const view = await harness("dohc-share-import-missing-destination-", "edit");
+      await seedSharedFiles(view, [
+        { path: "docs/target/keep.md", text: "keep\n" },
+      ]);
+      await rm(join(view.rootPath, "docs", "target"), {
+        recursive: true,
+        force: true,
+      });
+      const sourceDir = await createTestScratch(
+        "dohc-share-import-missing-destination-src-",
+      );
+      roots.push(sourceDir);
+      const source = join(sourceDir, "added.md");
+      await writeFile(source, "added\n", "utf8");
+
+      await expect(
+        applyShareViewFileImport({
+          ...scope(view),
+          absolutePaths: [source],
+          screenAgainstRoots: null,
+          targetDir: "docs/target",
+        }),
+        "MUTATION: disk probing refuses a visible canonical folder whose projection was deleted out of app",
+      ).resolves.toEqual({ imported: ["docs/target/added.md"], skipped: 0 });
+
+      expect(await storePaths(view)).toEqual([
+        "docs/target/added.md",
+        "docs/target/keep.md",
+      ]);
+      await expect(
+        readFile(join(view.rootPath, "docs", "target", "keep.md"), "utf8"),
+      ).resolves.toBe("keep\n");
+      await expect(
+        readFile(join(view.rootPath, "docs", "target", "added.md"), "utf8"),
+      ).resolves.toBe("added\n");
     },
     60_000,
   );

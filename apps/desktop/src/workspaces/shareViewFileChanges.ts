@@ -21,6 +21,7 @@ import {
 } from "./shareViewRecords";
 import {
   importNameFor,
+  movePath,
   resolveImportDestination,
   screenDroppedPaths,
   type ImportCopyOutcome,
@@ -192,9 +193,6 @@ export async function applyShareViewFileCreate(
     "file path",
     input.relativePath,
   );
-  if (await projectionHolds(input.rootPath, path)) {
-    return path;
-  }
   const store = input.shareViewStore();
   const main = await store.ensureMainVersion({
     workspaceId: input.workspaceId,
@@ -205,22 +203,27 @@ export async function applyShareViewFileCreate(
     path,
   });
   if (existing !== null) {
-    // The store has it and the folder does not, so the projection lost a file
-    // the recipient can still see in the explorer. Put it back rather than
-    // reporting success over a path that stays missing.
-    await materializeWithPendingRecord(
-      input.rootPath,
-      input.workspaceId,
-      [
-        {
-          path,
-          operation: "write",
-          contentKind: existing.contentKind === "binary" ? "binary" : "text",
-        },
-      ],
-      store,
-    );
+    if (!(await projectionHolds(input.rootPath, path))) {
+      // The store has it and the folder does not, so the projection lost a file
+      // the recipient can still see in the explorer. Put it back rather than
+      // reporting success over a path that stays missing.
+      await materializeWithPendingRecord(
+        input.rootPath,
+        input.workspaceId,
+        [
+          {
+            path,
+            operation: "write",
+            contentKind: existing.contentKind === "binary" ? "binary" : "text",
+          },
+        ],
+        store,
+      );
+    }
     return path;
+  }
+  if (await projectionHolds(input.rootPath, path)) {
+    throw new Error(`Destination already exists: ${path}`);
   }
   const changed = [
     { path, operation: "write" as const, contentKind: "text" as const },
@@ -290,6 +293,9 @@ export async function applyShareViewPathMove(
   // two are the same entry, which is what a case-only rename is.
   const renamesInPlace = await sameProjectionEntry(input.rootPath, from, to);
   if (!renamesInPlace) await refuseUntrackedUnder(input.rootPath, to, held);
+  if (!renamesInPlace && pathsUnder(held, to).length > 0) {
+    throw new Error(`Destination already exists: ${to}`);
+  }
   const moves = sources.map((path) => ({
     from: path,
     to: path === from ? to : `${to}/${path.slice(from.length + 1)}`,
@@ -337,6 +343,13 @@ export async function applyShareViewPathMove(
             toPath: move.to,
             metadata: { origin: "local-file" },
           });
+        }
+        // Rewriting the files through their new paths does not change an
+        // existing directory entry's spelling on a case-insensitive disk.
+        // Rename that entry while the pending record is still held; a refusal
+        // enters the same store-compensation branch as a failed file rename.
+        if (renamesInPlace && !held.has(from)) {
+          await movePath(input.rootPath, from, to);
         }
       } catch (error) {
         // A transport failure does not prove whether the current rename
@@ -520,15 +533,22 @@ export async function applyShareViewFileImport(
     input.screenAgainstRoots === null
       ? { usable: input.absolutePaths, refused: 0 }
       : await screenDroppedPaths(input.absolutePaths, input.screenAgainstRoots);
-  const { absDir, relDir } = await resolveImportDestination(
-    input.rootPath,
-    input.targetDir,
-  );
   const store = input.shareViewStore();
   const main = await store.ensureMainVersion({
     workspaceId: input.workspaceId,
   });
   const held = await shareViewPaths(store, input.workspaceId, main.id);
+  await repairMissingCanonicalImportFolder(
+    input.rootPath,
+    input.workspaceId,
+    input.targetDir,
+    held,
+    store,
+  );
+  const { absDir, relDir } = await resolveImportDestination(
+    input.rootPath,
+    input.targetDir,
+  );
   // Names already occupied, on BOTH sides. The store is what a change is made
   // of; the projection can also hold a file the recipient put there by hand,
   // and the disk copy this replaces would never have overwritten it.
@@ -613,6 +633,62 @@ export async function applyShareViewFileImport(
     );
   }
   return { imported, skipped };
+}
+
+/**
+ * The explorer can still name a canonical folder after its projection was
+ * removed outside dohc. Restore that folder before the ordinary import guard
+ * requires it to exist on disk. A file, link, or unreadable component is not
+ * repaired here; the destination guard keeps refusing those shapes.
+ */
+async function repairMissingCanonicalImportFolder(
+  rootPath: string,
+  workspaceId: string,
+  targetDir: string | undefined,
+  held: ReadonlyMap<string, "text" | "binary">,
+  store: CaptureVersionedTextStore,
+): Promise<void> {
+  if (targetDir === undefined || targetDir === "") return;
+  const validated = validateUserMaterializePath(targetDir);
+  if (!validated.ok) return;
+  const folder = validated.normalized;
+  const canonicalFiles = [...held.entries()].filter(([path]) =>
+    path.startsWith(`${folder}/`),
+  );
+  if (
+    canonicalFiles.length === 0 ||
+    !(await projectionFolderIsMissing(rootPath, folder))
+  ) {
+    return;
+  }
+  await materializeWithPendingRecord(
+    rootPath,
+    workspaceId,
+    canonicalFiles.map(([path, contentKind]) => ({
+      path,
+      operation: "write",
+      contentKind,
+    })),
+    store,
+  );
+}
+
+/** Missing, rather than replaced by a file or routed through a symlink. */
+async function projectionFolderIsMissing(
+  rootPath: string,
+  folder: string,
+): Promise<boolean> {
+  let current = rootPath;
+  for (const segment of folder.split("/")) {
+    current = join(current, segment);
+    try {
+      const entry = await lstat(current);
+      if (entry.isSymbolicLink() || !entry.isDirectory()) return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+  }
+  return false;
 }
 
 /**
