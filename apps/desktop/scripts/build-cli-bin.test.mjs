@@ -90,6 +90,19 @@ function skipUnlessWindowsFabricated(majorMinor) {
   return windowsFabricatedVersionSkipReason(majorMinor) ?? false;
 }
 
+// fabricatedNodeDir branches on the TEST HOST's own platform, not which
+// launcher (sh or cmd) is under test -- on a Windows host, even the
+// sh-launcher tests (run through git-bash's sh.exe) get the byte-patched
+// node.exe, because that is the only `node` a Windows PATH lookup finds.
+// So an sh-launcher test fabricating a version needs the exact same
+// length-mismatch skip a cmd-launcher one does; only a genuinely POSIX
+// test host is exempt (its plain shell-script stub has no length
+// constraint at all).
+function skipUnlessShFabricated(majorMinor) {
+  if (!shPath) return true;
+  return windowsFabricatedVersionSkipReason(majorMinor) ?? false;
+}
+
 function fabricatedNodeDir(version) {
   const dir = mkdtempSync(join(tmpdir(), "dohc-mcp-fabricated-node-"));
   if (isWindows) {
@@ -123,20 +136,43 @@ test("the sh launcher names the Node.js prerequisite when PATH has no node", { s
   assert.ok(result.stderr.includes(NODE_MISSING_MESSAGE));
 });
 
-test("the sh launcher refuses Node.js 22.12 and names the found version", { skip: !shPath }, () => {
-  // node:sqlite needed --experimental-sqlite until it stabilized in 22.13,
-  // and the launcher passes no flag -- the boundary that actually matters
-  // is 22.12/22.13, not merely "below 22".
-  const dir = launcherDir();
-  const fabricated = fabricatedNodeDir(fabricatedVersion("22.12"));
-  const result = spawnSync(shPath, [join(dir, "dohc-mcp").replaceAll("\\", "/")], {
-    env: { ...process.env, PATH: fabricated.dir },
-    encoding: "utf8",
-  });
-  assert.equal(result.status, 127);
-  assert.match(result.stderr, /Node\.js 22\.13 or newer/);
-  assert.ok(result.stderr.includes(fabricated.version.slice(1)));
-});
+test(
+  "the sh launcher refuses Node.js 22.12 and names the found version",
+  { skip: skipUnlessShFabricated("22.12") },
+  () => {
+    // node:sqlite needed --experimental-sqlite until it stabilized in
+    // 22.13, and the launcher passes no flag -- the boundary that
+    // actually matters is 22.12/22.13, not merely "below 22".
+    const dir = launcherDir();
+    const fabricated = fabricatedNodeDir(fabricatedVersion("22.12"));
+    const result = spawnSync(shPath, [join(dir, "dohc-mcp").replaceAll("\\", "/")], {
+      env: { ...process.env, PATH: fabricated.dir },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 127);
+    assert.match(result.stderr, /Node\.js 22\.13 or newer/);
+    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
+  },
+);
+
+test(
+  "the sh launcher refuses Node.js 23.3 and names the found version",
+  { skip: skipUnlessShFabricated("23.3") },
+  () => {
+    // The flag's floor is per-major, not one flattened threshold: 23.x
+    // dropped it at 23.4, a DIFFERENT minor than 22.x's 22.13, so a
+    // single "major*100+minor" comparison would wrongly accept 23.0-23.3.
+    const dir = launcherDir();
+    const fabricated = fabricatedNodeDir(fabricatedVersion("23.3"));
+    const result = spawnSync(shPath, [join(dir, "dohc-mcp").replaceAll("\\", "/")], {
+      env: { ...process.env, PATH: fabricated.dir },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 127);
+    assert.match(result.stderr, /Node\.js 23\.4 or newer/);
+    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
+  },
+);
 
 test("the sh launcher runs the bundle beside it when node is on PATH", { skip: !shPath }, () => {
   const dir = launcherDir();
@@ -184,6 +220,59 @@ test(
     // it, not just failing to refuse it.
     const dir = launcherDir();
     const fabricated = fabricatedNodeDir(fabricatedVersion("22.13"));
+    const path = fabricated.dir + delimiter + dir;
+    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
+      env: { ...process.env, PATH: path, Path: path },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /SERVER-RAN --workspace w/);
+  },
+);
+
+test(
+  "the cmd launcher refuses Node.js 23.3 and names the found version",
+  { skip: skipUnlessWindowsFabricated("23.3") },
+  () => {
+    // The flag's floor is per-major, not one flattened threshold: 23.x
+    // dropped it at 23.4, a DIFFERENT minor than 22.x's 22.13.
+    const dir = launcherDir();
+    const fabricated = fabricatedNodeDir(fabricatedVersion("23.3"));
+    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd")], {
+      env: { ...process.env, PATH: fabricated.dir, Path: fabricated.dir },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 127);
+    assert.match(result.stderr, /Node\.js 23\.4 or newer/);
+    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
+  },
+);
+
+test(
+  "the cmd launcher runs the bundle beside it on Node.js 23.4 exactly",
+  { skip: skipUnlessWindowsFabricated("23.4") },
+  () => {
+    const dir = launcherDir();
+    const fabricated = fabricatedNodeDir(fabricatedVersion("23.4"));
+    const path = fabricated.dir + delimiter + dir;
+    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
+      env: { ...process.env, PATH: path, Path: path },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /SERVER-RAN --workspace w/);
+  },
+);
+
+test(
+  "the cmd launcher runs the bundle beside it on Node.js 24.0 exactly",
+  { skip: skipUnlessWindowsFabricated("24.0") },
+  () => {
+    // A major of 24+ is never floor-checked at all -- this pins that the
+    // per-major branches don't accidentally fall through to a refusal for
+    // the major that needs no floor.
+    const dir = launcherDir();
+    const fabricated = fabricatedNodeDir(fabricatedVersion("24.0"));
     const path = fabricated.dir + delimiter + dir;
     const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
       env: { ...process.env, PATH: path, Path: path },

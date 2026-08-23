@@ -1539,6 +1539,54 @@ describe("Claude Code chat web app", () => {
       expect(fake.disposed).toEqual(["session-1"]);
     });
 
+    it("shutdown mid-startup releases the prompt slot so a restart's first message is accepted", async () => {
+      const entered = deferred();
+      const gate = deferred();
+      let starts = 0;
+      const fake = fakeDriver(undefined, {
+        onStartSessionEntered: () => entered.resolve(),
+        startGate: () => {
+          starts += 1;
+          return starts === 1 ? gate.promise : Promise.resolve();
+        },
+      });
+      const { app, url, token } = await start(fake);
+
+      // Caught right here, not awaited later: the underlying connection is
+      // force-closed inside deactivate(), well before this test gets
+      // around to awaiting it below -- attaching the handler immediately
+      // avoids an unhandled-rejection warning for the gap in between.
+      const abandonedMessage = post(url, "message", { text: "Hello" }, token).catch(
+        () => undefined,
+      );
+      await entered.promise;
+      // deactivate() (and stopWebApp, on the same shutdown()) reset
+      // sessionStart/turnActive but, without the fix, never touch the
+      // reservation this still-pending message() claimed -- a restart
+      // reusing the same plugin instance would 409 every message until
+      // the abandoned prompt() call above eventually settles on its own.
+      await app.deactivate();
+
+      const restarted = await app.startWebApp("chat", null);
+      const restartedToken = tokenFromUrl(restarted.url);
+      const freshResponse = await post(
+        restarted.url,
+        "message",
+        { text: "Fresh" },
+        restartedToken,
+      );
+      expect(freshResponse.status).toBe(202);
+      // A second, real driver.startSession() attempt -- not just a status
+      // code that happened to be 202 for some other reason. (startInputs
+      // itself isn't checked here: the fake only pushes to it AFTER its own
+      // gate resolves, and the abandoned first attempt's gate is still held
+      // open below.)
+      expect(starts).toBe(2);
+
+      gate.resolve();
+      await abandonedMessage;
+    });
+
     it("stop during startup releases the prompt slot before the abandoned start settles", async () => {
       const entered = deferred();
       const gate = deferred();

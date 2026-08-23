@@ -789,6 +789,16 @@ export function createChatWebApp(
     settlePendingPermissions();
     turnActive = false;
     sessionStart = null;
+    // A message() still awaiting the driver's accept when teardown runs
+    // holds a reservation for a session that no longer exists -- release
+    // it here exactly like the Stop-during-startup path does, or a
+    // restarted server 409s every message until that abandoned prompt()
+    // call itself eventually settles (which can be indefinite, against a
+    // hung driver). message()'s own identity-checked finally
+    // (`pendingPrompt === inFlight`) still no-ops safely if a request from
+    // AFTER the restart has already reclaimed the slot by the time the
+    // old one settles.
+    pendingPrompt = null;
     // Guarded: a rejection here must not skip the cleanup below and leave
     // the server listening (and the session's process running) after
     // teardown.

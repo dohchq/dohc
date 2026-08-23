@@ -30,13 +30,21 @@ NODE_RELEASE=\${NODE_VERSION#v}
 NODE_MAJOR=\${NODE_RELEASE%%.*}
 NODE_MINOR_REST=\${NODE_RELEASE#*.}
 NODE_MINOR=\${NODE_MINOR_REST%%.*}
-# node:sqlite arrived in 22.5 but needed --experimental-sqlite until it
-# stabilized in 22.13 -- the launcher passes no flag, so anything below
-# 22.13 must be refused too, not just anything below 22. Compared as one
-# integer (major*100+minor) so this stays a single numeric test.
-NODE_VERSION_NUM=$((NODE_MAJOR * 100 + NODE_MINOR))
-if [ "$NODE_VERSION_NUM" -lt 2213 ]; then
-  echo "dohc-mcp needs Node.js 22.13 or newer; found Node.js $NODE_RELEASE." >&2
+# node:sqlite's --experimental-sqlite requirement was dropped on a
+# different floor per major line -- 22.13 and 23.4, per the Node docs --
+# so a single flattened "major*100+minor" threshold wrongly accepted
+# 23.0-23.3. The launcher passes no flag, so each major below 24 is
+# checked against its own floor; 24 and newer never needed the flag.
+NODE_FLOOR=""
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  NODE_FLOOR="22.13"
+elif [ "$NODE_MAJOR" -eq 22 ] && [ "$NODE_MINOR" -lt 13 ]; then
+  NODE_FLOOR="22.13"
+elif [ "$NODE_MAJOR" -eq 23 ] && [ "$NODE_MINOR" -lt 4 ]; then
+  NODE_FLOOR="23.4"
+fi
+if [ -n "$NODE_FLOOR" ]; then
+  echo "dohc-mcp needs Node.js $NODE_FLOOR or newer; found Node.js $NODE_RELEASE." >&2
   exit 127
 fi
 exec node "\${0%/*}/dohc-mcp.mjs" "$@"
@@ -56,11 +64,17 @@ export const WINDOWS_MCP_LAUNCHER =
   "for /f \"delims=\" %%v in ('node --version 2^>nul') do set \"NODE_VERSION=%%v\"\r\n" +
   "set \"NODE_RELEASE=%NODE_VERSION:~1%\"\r\n" +
   "for /f \"tokens=1,2 delims=.\" %%v in (\"%NODE_RELEASE%\") do set \"NODE_MAJOR=%%v\" & set \"NODE_MINOR=%%w\"\r\n" +
-  // node:sqlite arrived in 22.5 but needed --experimental-sqlite until it
-  // stabilized in 22.13 -- refuse anything below 22.13, not just below 22.
-  "set /a NODE_VERSION_NUM=NODE_MAJOR*100+NODE_MINOR\r\n" +
-  "if %NODE_VERSION_NUM% LSS 2213 (\r\n" +
-  "  echo dohc-mcp needs Node.js 22.13 or newer; found Node.js %NODE_RELEASE%. 1>&2\r\n" +
+  // node:sqlite's --experimental-sqlite requirement was dropped on a
+  // different floor per major line -- 22.13 and 23.4, per the Node docs --
+  // so each major below 24 is checked against its own floor; 24+ never
+  // needed the flag. NODE_FLOOR stays unset (falsy to `defined`) unless a
+  // check below actually names the floor being missed.
+  "set \"NODE_FLOOR=\"\r\n" +
+  "if %NODE_MAJOR% LSS 22 set \"NODE_FLOOR=22.13\"\r\n" +
+  "if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 13 set \"NODE_FLOOR=22.13\"\r\n" +
+  "if %NODE_MAJOR% EQU 23 if %NODE_MINOR% LSS 4 set \"NODE_FLOOR=23.4\"\r\n" +
+  "if defined NODE_FLOOR (\r\n" +
+  "  echo dohc-mcp needs Node.js %NODE_FLOOR% or newer; found Node.js %NODE_RELEASE%. 1>&2\r\n" +
   "  exit /b 127\r\n" +
   ")\r\n" +
   'node "%~dp0dohc-mcp.mjs" %*\r\n';
