@@ -26,9 +26,8 @@ const CHAT_WEB_APP_ID = "chat";
 // starts at a turn boundary instead of mid-sentence.
 const MAX_BUFFERED_EVENTS = 500;
 // Bounds what one coalesced entry can retain, so the entry cap above stays
-// a real memory guard: an item whose text outgrows this continues in a
-// fresh entry (whole deltas only), and a replay's concatenation is
-// unchanged.
+// a real memory guard. Replays keep the newest text and receive a notice
+// when an item's earlier text no longer fits.
 const MAX_COALESCED_TEXT_CHARS = 256 * 1024;
 
 type SessionStateEvent = Extract<PluginAgentEvent, { kind: "session-state" }>;
@@ -44,15 +43,21 @@ interface UserMessageEvent {
   clientId: string;
 }
 
-/** Log-only marker trimLog leaves where an overflow cut could not reach a
- * turn boundary: the page renders it as a notice that earlier messages are
- * missing, instead of replaying mid-turn as if nothing were. Never
- * broadcast live -- it only exists in the replayed log. */
+/** Log-only marker left where buffered history is incomplete: the page
+ * renders it as a notice that earlier messages are missing. Never broadcast
+ * live -- it only exists in the replayed log. */
 interface HistoryTrimmedEvent {
   kind: "history-trimmed";
 }
 
 type ChatStreamEvent = PluginAgentEvent | UserMessageEvent | HistoryTrimmedEvent;
+
+interface EventLogEntry {
+  event: ChatStreamEvent;
+  at: number;
+  provisional?: boolean;
+  truncated?: boolean;
+}
 
 export interface ChatWebApp {
   startWebApp(webAppId: string, instanceKey: string | null): Promise<PluginWebAppStart>;
@@ -258,14 +263,13 @@ export function createChatWebApp(
   // unconfirmed send as if it were accepted, with no live fetch left on
   // that connection to ever mark it failed if the driver goes on to reject
   // it. Live clients still see it normally, once it's actually confirmed.
-  const eventLog: Array<{ event: ChatStreamEvent; at: number; provisional?: boolean }> = [];
+  const eventLog: EventLogEntry[] = [];
   // The log entry currently accumulating each item's streamed text, keyed
   // by "stream:itemId". Live clients still get every delta as its own
   // frame; only the log coalesces, so a single long streamed reply is one
-  // entry the log keeps or evicts whole -- a replay can never start
-  // mid-delta. Cleared when its turn settles, and pruned when eviction
-  // drops the entry it points at.
-  const openDeltas = new Map<string, { event: ChatStreamEvent; at: number }>();
+  // bounded entry the log keeps or evicts whole. Cleared when its turn
+  // settles, and pruned when eviction drops the entry it points at.
+  const openDeltas = new Map<string, EventLogEntry>();
   const clients = new Set<ServerResponse>();
   const pendingPermissions = new Set<string>();
   // A request permission() has claimed (removed from pendingPermissions, so
@@ -346,18 +350,23 @@ export function createChatWebApp(
       // broadcast below still carries just this delta. The stored copy is
       // this server's own object -- never the driver's, which must not be
       // mutated as later deltas append.
-      const open = openDeltas.get(event.stream + ":" + event.itemId);
-      if (
-        open &&
-        open.event.kind === "text-delta" &&
-        open.event.text.length < MAX_COALESCED_TEXT_CHARS
-      ) {
+      const key = event.stream + ":" + event.itemId;
+      let open = openDeltas.get(key);
+      if (open && open.event.kind === "text-delta") {
         open.event.text += event.text;
       } else {
-        const entry = { event: { ...event }, at };
-        eventLog.push(entry);
-        openDeltas.set(event.stream + ":" + event.itemId, entry);
+        open = { event: { ...event }, at };
+        eventLog.push(open);
+        openDeltas.set(key, open);
         trimLog();
+      }
+      if (open.event.kind === "text-delta" && open.event.text.length > MAX_COALESCED_TEXT_CHARS) {
+        open.event.text = open.event.text.slice(-MAX_COALESCED_TEXT_CHARS);
+        if (!open.truncated) {
+          open.truncated = true;
+          eventLog.push({ event: { kind: "history-trimmed" }, at });
+          trimLog();
+        }
       }
     } else {
       eventLog.push({ event, at });

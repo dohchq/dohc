@@ -384,6 +384,61 @@ describe("Codex chat web app", () => {
     await stream.close();
   });
 
+  it("caps replayed text while live clients receive each full delta", async () => {
+    const maxCoalescedTextChars = 256 * 1024;
+    const firstText = "y".repeat(300 * 1024);
+    const secondText = "z".repeat(300 * 1024);
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const live = await eventStream(url, token);
+    await live.next(); // the initial state snapshot
+    await post(url, "message", { text: "Begin", clientId: "c1" }, token);
+    await live.next(); // the user-message echo
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: firstText,
+    });
+    expect(await live.next()).toEqual({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: firstText,
+    });
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: secondText,
+    });
+    expect(await live.next()).toEqual({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: secondText,
+    });
+    await live.close();
+
+    const replay = await eventStream(url, token);
+    await replay.next(); // the initial state snapshot
+    await replay.next(); // the user-message echo
+    const textDelta = await replay.next();
+    expect(textDelta).toEqual({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: secondText.slice(-maxCoalescedTextChars),
+    });
+    if (textDelta.kind !== "text-delta") throw new Error("The replay omitted its text delta.");
+    expect(textDelta.text.length).toBeLessThanOrEqual(maxCoalescedTextChars);
+    expect(await replay.next()).toEqual({ kind: "history-trimmed" });
+    expect(await raceTimeout(replay.next(), 200)).toBe("timeout");
+    await replay.close();
+  });
+
   it("replays buffered events -- including the user's own message -- and reuses the HTTP server after a reload", async () => {
     const fake = fakeDriver();
     const { app, url, token } = await start(fake);
@@ -734,45 +789,6 @@ describe("Codex chat web app", () => {
 
     expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
     expect(fake.sessions[0]?.cancelCalls).toBe(1);
-  });
-
-  it("continues an oversized streamed reply in a fresh log entry, keeping replay content exact", async () => {
-    // Coalescing must not turn the entry cap into no memory guard at all:
-    // one entry stops growing at its own bound and the item continues in a
-    // new entry, whole deltas only, so a replay's concatenation never
-    // changes.
-    const fake = fakeDriver();
-    const { url, token } = await start(fake);
-    await post(url, "message", { text: "Question", clientId: "c1" }, token);
-
-    const chunk = "y".repeat(1024);
-    for (let index = 0; index < 300; index += 1) {
-      fake.startInputs[0]?.onEvent({
-        kind: "text-delta",
-        itemId: "i1",
-        stream: "assistant",
-        text: chunk,
-      });
-    }
-    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
-
-    const reattached = await eventStream(url, token);
-    await reattached.next(); // the initial state snapshot
-    await reattached.next(); // the user's own message
-    let text = "";
-    let frames = 0;
-    for (;;) {
-      const event = await reattached.next();
-      if (event.kind === "turn-completed") break;
-      expect(event.kind).toBe("text-delta");
-      if (event.kind === "text-delta") {
-        text += event.text;
-        frames += 1;
-      }
-    }
-    expect(frames).toBeGreaterThan(1);
-    expect(text).toBe(chunk.repeat(300));
-    await reattached.close();
   });
 
   it("a Stop with no prompt in flight never dooms the next message's turn", async () => {
