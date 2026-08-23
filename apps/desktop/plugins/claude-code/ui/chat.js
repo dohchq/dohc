@@ -45,13 +45,17 @@ const permissions = new Map();
 // submitting page's own connection sees it too), the echo confirms the
 // existing card instead of rendering a duplicate.
 const pendingMessages = new Map();
-// Bumped on every /message submit. A stale request's own failure (its
-// generation no longer the current one -- a newer message was sent while it
-// was still in flight, e.g. the abandoned handshake behind a stop-during-
-// startup) must only annotate its own card, never touch Send: Send's state
-// belongs to whichever request is current, and a newer turn can already be
-// running by the time an old one's response finally lands.
-let sendGeneration = 0;
+// The one stored fact Send's availability derives from: is a turn active?
+// Session-state events set it authoritatively. A successful /message accept
+// sets it optimistically to bridge the gap before its running event arrives.
+// Failed requests leave it untouched because they did not start a turn.
+let turnActive = false;
+
+// `submitting` is a one-call admission guard, not another stored state. It
+// blocks duplicate submits only while /message has not settled.
+function updateSendAvailability(submitting = false) {
+  sendButton.disabled = turnActive || submitting;
+}
 
 // `at` is the server's own publish time (every event carries it); replaying
 // history must render when it really happened, not the reconnect moment.
@@ -123,10 +127,8 @@ function setSessionState(state, reason, options = {}) {
   statePill.textContent = label;
   statePill.dataset.state = state;
   stopButton.disabled = state === "closed" || state === "error";
-  // Send re-enables only once the turn settles (back to Ready) or the
-  // session ends -- not on the message's own 202, which lands well before
-  // the driver's turn actually finishes.
-  sendButton.disabled = state === "running";
+  turnActive = state === "running";
+  updateSendAvailability();
   // The initial connection snapshot applies to the pill only: the log
   // replay right behind it (or a live event still to come) is what
   // actually narrates the transcript. Announcing or rendering a card here
@@ -480,7 +482,7 @@ events.addEventListener("error", () => {
   statePill.dataset.state = "starting";
 });
 
-function markMessageFailed(clientId, card, message, reenable = true) {
+function markMessageFailed(clientId, card, message) {
   pendingMessages.delete(clientId);
   card.dataset.failed = "true";
   const note = document.createElement("p");
@@ -494,13 +496,11 @@ function markMessageFailed(clientId, card, message, reenable = true) {
     hideEmptyState();
     transcript.append(card);
   }
-  // Callers fold two reasons to leave this false into `reenable`: a 409
-  // means a turn really is still active server-side (re-enabling would just
-  // let the user fire another message that also 409s), and a stale request
-  // (superseded by a newer send before this one's response landed) must
-  // never touch Send state that now belongs to the newer turn. Either way,
-  // the eventual settled session-state event is what actually restores it.
-  if (reenable) sendButton.disabled = false;
+  // This attempt did not start a turn from this client's point of view. A
+  // 409 started nothing, and any other failure means the attempt failed.
+  // Re-deriving from the untouched turn fact preserves an earlier session
+  // event, a newer active turn, or the existing idle state.
+  updateSendAvailability();
 }
 
 composer.addEventListener("submit", async (event) => {
@@ -512,8 +512,7 @@ composer.addEventListener("submit", async (event) => {
   card.dataset.pending = "true";
   pendingMessages.set(clientId, card);
   messageInput.value = "";
-  sendButton.disabled = true;
-  const generation = ++sendGeneration;
+  updateSendAvailability(true);
   try {
     const response = await fetch("/message", {
       method: "POST",
@@ -527,19 +526,15 @@ composer.addEventListener("submit", async (event) => {
         response.status === 409
           ? "Wait for the current response to finish."
           : "This message was not sent. Send it again.",
-        response.status !== 409 && generation === sendGeneration,
       );
+    } else {
+      // The accepted request owns an active turn before its running event
+      // arrives. Recording it here keeps Send disabled through that gap.
+      turnActive = true;
+      updateSendAvailability();
     }
-    // A successful 202 leaves Send disabled: the session-state:running
-    // event that follows drives it, and re-enables Send once the turn
-    // actually settles rather than as soon as the request lands.
   } catch {
-    markMessageFailed(
-      clientId,
-      card,
-      "This message was not sent. Send it again.",
-      generation === sendGeneration,
-    );
+    markMessageFailed(clientId, card, "This message was not sent. Send it again.");
   } finally {
     messageInput.focus();
   }

@@ -503,4 +503,56 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     settleSecond(new Response(null, { status: 202 }));
     await pendingSecond;
   });
+
+  it("keeps Send enabled when retry rejection and stale failure follow a fatal event", async () => {
+    const { eventSource } = await loadChatModule();
+    const enteredFirst = deferred();
+    const enteredSecond = deferred();
+    let settleFirst!: (response: Response) => void;
+    let settleSecond!: (response: Response) => void;
+    const pendingFirst = new Promise<Response>((resolve) => {
+      settleFirst = resolve;
+    });
+    const pendingSecond = new Promise<Response>((resolve) => {
+      settleSecond = resolve;
+    });
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls += 1;
+      if (calls === 1) {
+        enteredFirst.resolve();
+        return pendingFirst;
+      }
+      enteredSecond.resolve();
+      return pendingSecond;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    messageInput.value = "First";
+    composer.requestSubmit();
+    await enteredFirst.promise;
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, { kind: "error", message: "Driver exited unexpectedly.", fatal: true });
+    expect(sendButton.disabled).toBe(false);
+
+    messageInput.value = "Second";
+    composer.requestSubmit();
+    await enteredSecond.promise;
+    expect(sendButton.disabled).toBe(true);
+
+    settleSecond(new Response(null, { status: 409 }));
+    await pendingSecond;
+    expect(sendButton.disabled).toBe(false);
+
+    // The fatal event is the last session-state update. Generation checks made
+    // the retry's 409 and first request's late 500 both refuse to restore Send.
+    // The user could recover only by reloading the page.
+    settleFirst(new Response(null, { status: 500 }));
+    await pendingFirst;
+    expect(sendButton.disabled).toBe(false);
+  });
 });
