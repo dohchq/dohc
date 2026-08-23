@@ -28,8 +28,15 @@ fi
 NODE_VERSION=$(node --version 2>/dev/null)
 NODE_RELEASE=\${NODE_VERSION#v}
 NODE_MAJOR=\${NODE_RELEASE%%.*}
-if [ "$NODE_MAJOR" -lt 22 ]; then
-  echo "dohc-mcp needs Node.js 22 or newer; found Node.js $NODE_RELEASE." >&2
+NODE_MINOR_REST=\${NODE_RELEASE#*.}
+NODE_MINOR=\${NODE_MINOR_REST%%.*}
+# node:sqlite arrived in 22.5 but needed --experimental-sqlite until it
+# stabilized in 22.13 -- the launcher passes no flag, so anything below
+# 22.13 must be refused too, not just anything below 22. Compared as one
+# integer (major*100+minor) so this stays a single numeric test.
+NODE_VERSION_NUM=$((NODE_MAJOR * 100 + NODE_MINOR))
+if [ "$NODE_VERSION_NUM" -lt 2213 ]; then
+  echo "dohc-mcp needs Node.js 22.13 or newer; found Node.js $NODE_RELEASE." >&2
   exit 127
 fi
 exec node "\${0%/*}/dohc-mcp.mjs" "$@"
@@ -48,9 +55,12 @@ export const WINDOWS_MCP_LAUNCHER =
   "set \"NODE_VERSION=\"\r\n" +
   "for /f \"delims=\" %%v in ('node --version 2^>nul') do set \"NODE_VERSION=%%v\"\r\n" +
   "set \"NODE_RELEASE=%NODE_VERSION:~1%\"\r\n" +
-  "for /f \"tokens=1 delims=.\" %%v in (\"%NODE_RELEASE%\") do set \"NODE_MAJOR=%%v\"\r\n" +
-  "if %NODE_MAJOR% LSS 22 (\r\n" +
-  "  echo dohc-mcp needs Node.js 22 or newer; found Node.js %NODE_RELEASE%. 1>&2\r\n" +
+  "for /f \"tokens=1,2 delims=.\" %%v in (\"%NODE_RELEASE%\") do set \"NODE_MAJOR=%%v\" & set \"NODE_MINOR=%%w\"\r\n" +
+  // node:sqlite arrived in 22.5 but needed --experimental-sqlite until it
+  // stabilized in 22.13 -- refuse anything below 22.13, not just below 22.
+  "set /a NODE_VERSION_NUM=NODE_MAJOR*100+NODE_MINOR\r\n" +
+  "if %NODE_VERSION_NUM% LSS 2213 (\r\n" +
+  "  echo dohc-mcp needs Node.js 22.13 or newer; found Node.js %NODE_RELEASE%. 1>&2\r\n" +
   "  exit /b 127\r\n" +
   ")\r\n" +
   'node "%~dp0dohc-mcp.mjs" %*\r\n';

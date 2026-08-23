@@ -10,7 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { syncLinuxStableCliBin } from "./linuxStableCliBin";
+import {
+  hasIntactStableCliBin,
+  refreshLinuxStableCliBin,
+  syncLinuxStableCliBin,
+} from "./linuxStableCliBin";
 
 const scratchDirs: string[] = [];
 let failLauncherCopy = false;
@@ -83,5 +87,81 @@ describe("syncLinuxStableCliBin", () => {
     expect(statSync(targetLauncher).mode & 0o777).toBe(publishedMode);
     expect(readFileSync(join(targetDir, "dohc-mcp.mjs"), "utf8")).toBe("module-v2");
     expect(readdirSync(targetDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+});
+
+describe("hasIntactStableCliBin", () => {
+  it("is false for a missing directory, a partial pair, or an empty file, true once both files are non-empty", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
+    scratchDirs.push(root);
+    const targetDir = join(root, "state", "cli-bin");
+    expect(await hasIntactStableCliBin(targetDir)).toBe(false);
+
+    mkdirSync(targetDir, { recursive: true });
+    writeFileSync(join(targetDir, "dohc-mcp"), "launcher");
+    expect(await hasIntactStableCliBin(targetDir)).toBe(false);
+
+    writeFileSync(join(targetDir, "dohc-mcp.mjs"), "");
+    expect(await hasIntactStableCliBin(targetDir)).toBe(false);
+
+    writeFileSync(join(targetDir, "dohc-mcp.mjs"), "module");
+    expect(await hasIntactStableCliBin(targetDir)).toBe(true);
+  });
+});
+
+describe("refreshLinuxStableCliBin", () => {
+  it("resolves to targetDir on a successful sync", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
+    scratchDirs.push(root);
+    const resourcesCliBinDir = join(root, "resources", "cli-bin");
+    const targetDir = join(root, "state", "cli-bin");
+    mkdirSync(resourcesCliBinDir, { recursive: true });
+    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v1");
+    writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
+
+    const onError = vi.fn();
+    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, onError });
+    expect(result).toBe(targetDir);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps resolving to targetDir when a refresh fails but a previously published pair is intact", async () => {
+    // A boot's own refresh can fail for reasons that have nothing to do
+    // with whether the LAST successful boot's launcher still works (a full
+    // disk, a permissions hiccup) -- the config an already-configured agent
+    // is holding must keep pointing at something real either way.
+    const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
+    scratchDirs.push(root);
+    const resourcesCliBinDir = join(root, "resources", "cli-bin");
+    const targetDir = join(root, "state", "cli-bin");
+    mkdirSync(resourcesCliBinDir, { recursive: true });
+    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v1");
+    writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v1");
+    await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir });
+
+    writeFileSync(join(resourcesCliBinDir, "dohc-mcp"), "launcher-v2");
+    writeFileSync(join(resourcesCliBinDir, "dohc-mcp.mjs"), "module-v2");
+    failLauncherCopy = true;
+
+    const onError = vi.fn();
+    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, onError });
+    expect(result).toBe(targetDir);
+    expect(onError).toHaveBeenCalledOnce();
+    // The stable pair the caller is told to trust is exactly the one on
+    // disk -- the previous launcher, not a half-written new one.
+    expect(readFileSync(join(targetDir, "dohc-mcp"), "utf8")).toBe("launcher-v1");
+  });
+
+  it("resolves to undefined when a refresh fails and nothing was ever published", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
+    scratchDirs.push(root);
+    // No resourcesCliBinDir at all: every copy fails from the first sync.
+    const resourcesCliBinDir = join(root, "resources", "cli-bin");
+    const targetDir = join(root, "state", "cli-bin");
+
+    const onError = vi.fn();
+    const result = await refreshLinuxStableCliBin({ resourcesCliBinDir, targetDir, onError });
+    expect(result).toBeUndefined();
+    expect(onError).toHaveBeenCalledOnce();
   });
 });

@@ -636,7 +636,7 @@ import {
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
-import { syncLinuxStableCliBin } from "./agents/linuxStableCliBin";
+import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
 import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
 import {
   createLiveAgentDispatchStore,
@@ -12144,21 +12144,18 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(async () => {
     if (app.isPackaged && process.platform === "linux" && process.env.APPIMAGE) {
-      const targetDir = join(stateDir(), "cli-bin");
-      try {
-        await syncLinuxStableCliBin({
-          resourcesCliBinDir: resolveDohcCliBinDirectory({
-            appRoot: app.getAppPath(),
-            isPackaged: app.isPackaged,
-            resourcesPath: process.resourcesPath,
-          }),
-          targetDir,
-        });
-        linuxStableCliBinDir = targetDir;
-      } catch (error) {
-        // A failed refresh must not block startup; this boot uses the packaged mount.
-        console.error("[desktop] Stable Linux cli-bin refresh failed:", error);
-      }
+      // A failed refresh must not block startup, and must not throw away an
+      // intact launcher a previous boot already published -- only a boot
+      // with nothing usable there falls back to the packaged mount.
+      linuxStableCliBinDir = await refreshLinuxStableCliBin({
+        resourcesCliBinDir: resolveDohcCliBinDirectory({
+          appRoot: app.getAppPath(),
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+        }),
+        targetDir: join(stateDir(), "cli-bin"),
+        onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
+      });
     }
     if (!(await startRustEngineDaemon())) return;
     // BrowserWindow and Dock APIs are only safe after Electron is ready.
