@@ -23,6 +23,7 @@ import {
   clearPendingMaterializationPaths,
   clearPullInFlightMarker,
   readPendingMaterializationPaths,
+  readSharedViewProjectionDebt,
   resolvedShareViewTarget,
   materializeSharedViewPaths,
   readCollisionRecordPaths,
@@ -4125,6 +4126,59 @@ describe("shared view refresh", () => {
     await expect(clearPullInFlightMarker(rootDir)).resolves.toBeUndefined();
 
     await expect(lstat(metadataDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("clears a stale pull marker only after a full successful capture", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "notes/recovered.md";
+    relay.addWrite(path, "canonical\n");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await mkdir(join(rootDir, ".dohc"), { recursive: true });
+    await writeFile(join(rootDir, ".dohc", "pull-in-flight.marker"), "");
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toMatchObject({ pullInFlight: true });
+
+      await captureSharedViewLocalDivergence(
+        rootDir,
+        WORKSPACE,
+        store,
+        true,
+        SHARE_ID,
+        { paths: [path] },
+      );
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toMatchObject({ pullInFlight: true });
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toMatchObject({ unjournalablePaths: [] });
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toEqual({
+        pendingPaths: new Set(),
+        collisionPaths: new Set(),
+        pullInFlight: false,
+      });
+    } finally {
+      await store.close();
+    }
   });
 
   it("refuses to write sidecars through a symlinked metadata directory", async () => {

@@ -479,8 +479,9 @@ async function readPendingMaterializationPathsForCapture(
   paths: Set<string>;
   recordedPaths: Set<string>;
   canClearRecord: boolean;
+  pullInFlight: boolean;
 }> {
-  const verifyEveryTrackedPath = await pullMayBeInFlight(rootDir);
+  const pullInFlight = await pullMayBeInFlight(rootDir);
   const target = pendingMaterializationPath(rootDir);
   return withExclusiveWorkspaceOperation(target, async () => {
     try {
@@ -488,13 +489,14 @@ async function readPendingMaterializationPathsForCapture(
         Object.keys(await readPendingFileUnlocked(rootDir)),
       );
       const paths = new Set(recordedPaths);
-      if (verifyEveryTrackedPath) {
+      if (pullInFlight) {
         for (const path of trackedPaths) paths.add(path);
       }
       return {
         paths,
         recordedPaths,
         canClearRecord: true,
+        pullInFlight,
       };
     } catch (error) {
       console.error(
@@ -510,6 +512,7 @@ async function readPendingMaterializationPathsForCapture(
         paths: new Set(trackedPaths),
         recordedPaths: new Set(),
         canClearRecord: quarantined,
+        pullInFlight,
       };
     }
   });
@@ -1542,6 +1545,17 @@ export async function captureSharedViewLocalDivergence(
       resolvedCollisionPaths,
     );
     await clearCollisionRecordPaths(rootDir, shareId, resolvedCollisionPaths);
+  }
+
+  if (
+    options?.paths === undefined &&
+    pendingState.pullInFlight &&
+    unjournalablePaths.length === 0
+  ) {
+    // A crashed pull asks capture to verify every tracked path. Only that full,
+    // successful pass can prove the broad marker is no longer needed; a
+    // save-time scoped capture must leave it for the later full repair.
+    await clearPullInFlightMarker(rootDir);
   }
 
   return {
