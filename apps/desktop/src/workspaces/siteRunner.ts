@@ -855,6 +855,19 @@ export function detectDevUrl(text: string): string | null {
   return matched?.replace(DEV_URL_TRAILING_PUNCTUATION_RE, "") ?? null;
 }
 
+// Test-only override for the descendant-poll cadence and reader, shared by
+// startSiteDevServer and buildSite (both call createDescendantCapture).
+// Production always gets DESCENDANT_CAPTURE_INTERVAL_MS and the real,
+// platform-dispatched defaultDescendantsReader. A test overrides the reader
+// to construct a deterministic race between two overlapping captures (an
+// earlier one that resolves slow, a later one that resolves fast) via
+// controlled promises, instead of depending on real ps/PowerShell subprocess
+// timing.
+interface DescendantCaptureOverrides {
+  descendantCaptureIntervalMs?: number;
+  descendantsReader?: (pid: number) => Promise<number[]>;
+}
+
 export async function startSiteDevServer(input: {
   workspaceRoot: string;
   siteRoot: string;
@@ -863,17 +876,7 @@ export async function startSiteDevServer(input: {
   env?: NodeJS.ProcessEnv;
   readyTimeoutMs?: number;
   signal?: AbortSignal;
-  // Test-only override for the descendant-poll cadence — production always
-  // gets DESCENDANT_CAPTURE_INTERVAL_MS.
-  descendantCaptureIntervalMs?: number;
-  // Test-only override for the descendant reader itself — lets a test
-  // construct a DETERMINISTIC race between two overlapping captures (an
-  // earlier one that resolves SLOW, a later one that resolves FAST) via
-  // controlled promises, instead of depending on real ps/PowerShell
-  // subprocess timing. Production always gets the real, platform-
-  // dispatched defaultDescendantsReader.
-  descendantsReader?: (pid: number) => Promise<number[]>;
-}): Promise<SiteProcessHandle> {
+} & DescendantCaptureOverrides): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   assertLoopbackOnlyDevServerCommand(input.command, args);
@@ -1154,16 +1157,7 @@ export async function buildSite(input: {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   signal?: AbortSignal;
-  // Test-only override for the descendant-poll cadence — production always
-  // gets DESCENDANT_CAPTURE_INTERVAL_MS. See startSiteDevServer's own
-  // override for why a test needs this: a single immediate snapshot races
-  // the wrapper's own child spawn, and only a tighter interval turns that
-  // race into a real wait instead of a hardcoded sleep.
-  descendantCaptureIntervalMs?: number;
-  // Test-only override for the descendant reader itself, mirroring
-  // startSiteDevServer's own override.
-  descendantsReader?: (pid: number) => Promise<number[]>;
-}): Promise<BuildSiteResult> {
+} & DescendantCaptureOverrides): Promise<BuildSiteResult> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;

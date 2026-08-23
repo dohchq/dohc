@@ -877,8 +877,6 @@ describe("plugin panel tabs", () => {
     expect(screen.getByRole("tab", { name: "main" }).title).toBe(
       "hello-plugin — main",
     );
-    // The page's DOM lands one commit before the passive effect that calls
-    // startPluginPanel runs, so wait on the call itself (#787).
     await waitFor(() =>
       expect(bridge.startPluginPanel).toHaveBeenCalledWith({
         workspaceId: WORKSPACE.workspaceId,

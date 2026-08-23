@@ -1080,6 +1080,10 @@ describe("main.tsx composition", () => {
       throw new Error("QuotaExceededError");
     });
     captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    // main.tsx renders outside act, so the crash screen's DOM can land one
+    // commit before the guard's passive effect adds this listener — wait for
+    // the registration itself rather than a fixed number of flushes.
+    const addEventListenerSpy = vi.spyOn(window, "addEventListener");
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
@@ -1089,10 +1093,12 @@ describe("main.tsx composition", () => {
     } finally {
       consoleError.mockRestore();
     }
-    // main.tsx renders outside act, and the crash screen's DOM lands one
-    // commit before the guard's passive effect adds its beforeunload
-    // listener — flush the pending effects before dispatching (#787).
-    await act(async () => {});
+    await waitFor(() =>
+      expect(addEventListenerSpy).toHaveBeenCalledWith(
+        "beforeunload",
+        expect.any(Function),
+      ),
+    );
 
     const event = new Event("beforeunload", { cancelable: true });
     act(() => {

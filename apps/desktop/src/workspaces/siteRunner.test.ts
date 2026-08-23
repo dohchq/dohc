@@ -1291,6 +1291,16 @@ describe("buildSite", () => {
       // already exited — taskkill /PID <dead wrapper> /T then has nothing
       // live to walk from, exactly the gap stopChild's win32 branch closes
       // by reaching each periodically-captured descendant pid directly.
+      //
+      // The wrapper stays alive for WRAPPER_LIFETIME_MS after echoing the
+      // descendant's pid, and buildSite takes a real Win32_Process snapshot
+      // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
+      // real attempts to observe the descendant Start-Process just created,
+      // instead of racing the wrapper's own spawn with a single shot.
+      const CAPTURE_INTERVAL_MS = 100;
+      const WRAPPER_LIFETIME_MS = 2_000;
+      const PROCESS_DEATH_TIMEOUT_MS = 5_000;
+      const BUILD_TIMEOUT_MS = 15_000;
       await mkdir(join(root, "site"), { recursive: true });
       const script = [
         "$psExe = Join-Path $PSHOME 'powershell.exe'",
@@ -1298,27 +1308,15 @@ describe("buildSite", () => {
           "'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' " +
           "-PassThru -WindowStyle Hidden",
         "Write-Output ('CHILD:' + $proc.Id)",
-        // Keeps the wrapper alive long enough for a descendant snapshot (a
-        // separate powershell.exe round trip reading Win32_Process) to land
-        // before this wrapper exits on its own.
-        "Start-Sleep -Milliseconds 2000",
+        `Start-Sleep -Milliseconds ${WRAPPER_LIFETIME_MS}`,
       ].join("; ");
       const result = await buildSite({
         workspaceRoot: root,
         siteRoot: "site",
         command: "powershell.exe",
         args: ["-NoProfile", "-NonInteractive", "-Command", script],
-        timeoutMs: 15000,
-        // A single immediate snapshot races the wrapper's own Start-Process
-        // call under an already-loaded worker pool: whichever freshly
-        // spawned powershell.exe (the capture query vs. the wrapper's own
-        // child) actually runs first is real OS scheduling, not something a
-        // longer sleep can guarantee. buildSite has no descendant-poll
-        // interval by default (a build usually exits well inside it), so
-        // override it here the same way startSiteDevServer's own tests do —
-        // many real capture attempts across the wrapper's alive window,
-        // still reading the real process table, instead of one shot.
-        descendantCaptureIntervalMs: 100,
+        timeoutMs: BUILD_TIMEOUT_MS,
+        descendantCaptureIntervalMs: CAPTURE_INTERVAL_MS,
       });
       expect(result.exitCode).toBe(0);
       const childLog = result.logs.find((entry) => entry.text.includes("CHILD:"));
@@ -1326,7 +1324,9 @@ describe("buildSite", () => {
       expect(descendantPid).toBeGreaterThan(0);
 
       try {
-        expect(await waitForProcessDeath(descendantPid, 5000)).toBe(true);
+        expect(
+          await waitForProcessDeath(descendantPid, PROCESS_DEATH_TIMEOUT_MS),
+        ).toBe(true);
       } finally {
         try {
           process.kill(descendantPid, "SIGKILL");
@@ -1335,7 +1335,7 @@ describe("buildSite", () => {
         }
       }
     },
-    20_000,
+    20_000, // Real-process test ceiling: WRAPPER_LIFETIME_MS + PROCESS_DEATH_TIMEOUT_MS plus headroom for process spawn overhead.
   );
 
   it("reports failed builds without stale output", async () => {

@@ -145,6 +145,37 @@ async function findTextEditorContents(count: number): Promise<HTMLElement[]> {
   return await Promise.all(hosts.map(textEditorContent));
 }
 
+// Fake-timer helpers for the tests below that drive their own clock instead
+// of racing the machine (#787). AUTOSAVE_DEBOUNCE_MS mirrors FileInspector's
+// own debounce; ONE_FRAME_MS pumps a single fake animation frame — far under
+// the debounce, so pumping frames can never itself fire the autosave.
+const AUTOSAVE_DEBOUNCE_MS = 800;
+const ONE_FRAME_MS = 20;
+const MAX_FRAME_PUMPS = 5;
+
+// user-event resolves a click or keystroke only once CodeMirror's own
+// requestAnimationFrame-driven view update settles. Fake timers never
+// advance on their own, so pump frames while the action is still pending
+// instead of hanging forever waiting for a tick nothing will deliver.
+async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
+  let done = false;
+  void pending.then(() => {
+    done = true;
+  });
+  for (let i = 0; i < MAX_FRAME_PUMPS && !done; i++) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
+    });
+  }
+  return pending;
+}
+
+async function advanceAutosaveDebounce(): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS);
+  });
+}
+
 // Build legacy app-model path markers through interpolation so this test does
 // not contain the raw deprecated folder or manifest filenames that the
 // no-legacy scanner is meant to catch.
@@ -733,6 +764,9 @@ describe("markdown editor unmount flush", () => {
   });
 
   afterEach(async () => {
+    // Real timers before cleanup: settleAfterUnmount below awaits real
+    // promise settlement, which a still-fake, still-frozen clock would hang.
+    vi.useRealTimers();
     cleanup();
     await settleAfterUnmount();
     await resetOrphanedDraftsAndSettle();
@@ -2169,38 +2203,34 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("edits plain text files through the same bounded write seam", async () => {
-    // Fake timers: the 800ms autosave debounce must not fire off the wall
-    // clock mid-typing under a loaded worker pool (#787). The write this test
-    // pins is the unmount flush, and unmount alone drives it.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      bridgeMock.readWorkspaceText.mockResolvedValueOnce({
-        text: "",
-        truncated: false,
-        contentHash: TEST_CONTENT_HASH,
-      });
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-      const view = render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const view = render(<FileInspector workspaceId="ws-1" path="notes/plain.txt" />);
+    const editor = await screen.findByTestId("view-text-editor");
+    const content = await textEditorContent(editor);
 
-      const editor = await screen.findByTestId("view-text-editor");
-      const content = await textEditorContent(editor);
-      await user.click(content);
-      await user.keyboard("hello world");
-      view.unmount();
+    // Freeze the clock only once the editor is mounted, and never advance it
+    // before unmount: the 800ms autosave debounce stays at 0ms elapsed, so
+    // the unmount flush is the only thing that can produce this write.
+    vi.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await settleUserEventAction(user.click(content));
+    await settleUserEventAction(user.keyboard("hello world"));
+    view.unmount();
 
-      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith(
-        expect.objectContaining({
-          workspaceId: "ws-1",
-          relativePath: "notes/plain.txt",
-        }),
-      );
-      const lastWrite = bridgeMock.writeWorkspaceText.mock.calls.at(-1)?.[0] as
-        | { text: string }
-        | undefined;
-      expect(lastWrite?.text).not.toBe("");
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: "ws-1",
+        relativePath: "notes/plain.txt",
+      }),
+    );
+    const lastWrite = bridgeMock.writeWorkspaceText.mock.calls.at(-1)?.[0] as
+      | { text: string }
+      | undefined;
+    expect(lastWrite?.text).not.toBe("");
   });
 
   it("shares a local draft and save baseline across duplicate text inspectors", async () => {
@@ -3593,8 +3623,10 @@ describe("markdown editor unmount flush", () => {
     // seam must remain safe even before React applies a peer snapshot.
     buffer.subscribe = () => () => {};
     const publishDraft = vi.spyOn(buffer, "publishDraft");
-    // Fake timers: both debounce expiries below fire at the test's own clock
-    // (#787). 900ms covers the WYSIWYG dirty rAF plus the 800ms it arms.
+    // shouldAdvanceTime stays: the WYSIWYG editor's onDirty callback and this
+    // pane's own registration both need real macrotask progress a frozen
+    // fake clock never delivers. Both debounces below still fire from an
+    // explicit advance, so auto-advance changes nothing this test checks.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -3610,18 +3642,22 @@ describe("markdown editor unmount flush", () => {
 
       await user.click(editor);
       await user.keyboard("{End}First");
+      // The WYSIWYG editor reports the edit on a frame, which arms the
+      // debounce; fire each explicitly.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(900);
+        await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
       });
+      await advanceAutosaveDebounce();
       await waitFor(() =>
         expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
       );
       await user.keyboard("{End}Queued");
-      // The second debounce expires HERE, behind the held first write — the
-      // queued write must not reach the bridge yet.
+      // The second debounce expires behind the held first write; the queued
+      // write must not reach the bridge yet.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(900);
+        await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
       });
+      await advanceAutosaveDebounce();
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
       let publishesBeforeRelease = 0;
@@ -3675,9 +3711,9 @@ describe("markdown editor unmount flush", () => {
       const buffer = getSharedLocalDocument(
         documentVersionKey("ws-1", path, undefined),
       );
-      // Fake timers: the first write is debounce-driven, so fire the 800ms
-      // window (plus the WYSIWYG dirty rAF that precedes it) at the test's
-      // own clock instead of racing waitFor against the scheduler (#787).
+      // shouldAdvanceTime stays: the WYSIWYG editor's onDirty callback needs
+      // real macrotask progress a frozen fake clock never delivers. The
+      // first write still fires from an explicit advance either way.
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {
         const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -3696,9 +3732,14 @@ describe("markdown editor unmount flush", () => {
 
         await user.click(surface);
         await user.keyboard("{End} first");
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(900);
-        });
+        // The WYSIWYG editor reports the edit on a frame, which arms the
+        // debounce; the plain source editor arms it directly.
+        if (markdown) {
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
+          });
+        }
+        await advanceAutosaveDebounce();
         await waitFor(() =>
           expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
         );
@@ -4638,86 +4679,84 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("rearms autosave when a debounce expires behind a shell flush", async () => {
-    // Fake timers: the debounce this test expires must expire at the test's
-    // own clock, not after a real 900ms the loaded worker pool can stretch
-    // (#787).
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "",
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    let releaseFirst!: () => void;
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    let releaseSecond!: () => void;
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
+      (resolve) => {
+        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+      },
+    );
+    bridgeMock.writeWorkspaceText
+      .mockImplementationOnce(() => heldFirst)
+      .mockImplementationOnce(() => heldSecond);
+    let flush: (() => Promise<void>) | null = null;
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/plain.txt"
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    const content = await findTextEditorContent();
+
+    // shouldAdvanceTime stays here: the flush this test drives crosses a
+    // registerDraftFlush passive effect and a save-state update, both of
+    // which need real macrotask progress a frozen fake clock never delivers
+    // (a bare vi.useFakeTimers() hangs at the flush registration). The
+    // debounce this test pins fires from an explicit advance either way, so
+    // auto-advance drifting ahead of it changes nothing this test checks.
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      bridgeMock.readWorkspaceText.mockResolvedValueOnce({
-        text: "",
-        truncated: false,
-        contentHash: TEST_CONTENT_HASH,
-      });
-      let releaseFirst!: () => void;
-      const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
-        (resolve) => {
-          releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-        },
-      );
-      let releaseSecond!: () => void;
-      const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
-        (resolve) => {
-          releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-        },
-      );
-      bridgeMock.writeWorkspaceText
-        .mockImplementationOnce(() => heldFirst)
-        .mockImplementationOnce(() => heldSecond);
-      let flush: (() => Promise<void>) | null = null;
-      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-      const view = render(
-        <FileInspector
-          workspaceId="ws-1"
-          path="notes/plain.txt"
-          registerDraftFlush={(next) => {
-            flush = next;
-          }}
-        />,
-      );
-      const content = await findTextEditorContent();
-      await user.click(content);
-      await user.keyboard("One");
-      await waitFor(() => expect(flush).not.toBeNull());
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(content);
+    await user.keyboard("One");
+    await waitFor(() => expect(flush).not.toBeNull());
 
-      let flushSettled = false;
-      const flushPromise = flush!().then(() => {
-        flushSettled = true;
-      });
-      await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
-      await user.keyboard("Two");
-      // The debounce expires HERE, behind the held first write.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(900);
-      });
-      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
+    let flushSettled = false;
+    const flushPromise = flush!().then(() => {
+      flushSettled = true;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
+    await user.keyboard("Two");
+    // The second keystroke's debounce is armed behind the still-held first
+    // write; firing it must not let the queued text reach the bridge yet.
+    await advanceAutosaveDebounce();
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
-      await act(async () => {
-        releaseFirst();
-        await heldFirst;
-      });
-      await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(50);
-      });
-      expect(flushSettled).toBe(false);
-      expect(bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
-        {
-          workspaceId: "ws-1",
-          relativePath: "notes/plain.txt",
-          text: "OneTwo",
-          expectedContentHash: TEST_CONTENT_HASH,
-        },
-      ]);
-      await act(async () => {
-        releaseSecond();
-        await heldSecond;
-        await flushPromise;
-      });
-      expect(flushSettled).toBe(true);
-      view.unmount();
-    } finally {
-      vi.useRealTimers();
-    }
+    await act(async () => {
+      releaseFirst();
+      await heldFirst;
+    });
+    await waitFor(() => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    // The second write is already observed above, so the flush it belongs to
+    // cannot have settled yet — no advance needed to know that.
+    expect(flushSettled).toBe(false);
+    expect(bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
+      {
+        workspaceId: "ws-1",
+        relativePath: "notes/plain.txt",
+        text: "OneTwo",
+        expectedContentHash: TEST_CONTENT_HASH,
+      },
+    ]);
+    await act(async () => {
+      releaseSecond();
+      await heldSecond;
+      await flushPromise;
+    });
+    expect(flushSettled).toBe(true);
+    view.unmount();
   });
 
   it("drains a flush-time edit before its debounce expires", async () => {
@@ -5614,57 +5653,54 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("retires an in-flight Markdown conflict after a real unmount", async () => {
-    // Fake timers: the held conflict write is debounce-driven, so fire the
-    // 800ms window at the test's own clock — it must be IN FLIGHT before the
-    // unmount below (#787).
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const initialHash = "7".repeat(64);
-      const externalHash = "8".repeat(64);
-      bridgeMock.readWorkspaceText.mockResolvedValue({
-        text: "# Base\n",
-        truncated: false,
-        contentHash: initialHash,
-      });
-      let resolveConflict!: () => void;
-      const heldConflict = new Promise<{
-        status: "conflict";
-        currentContentHash: string;
-      }>((resolve) => {
-        resolveConflict = () =>
-          resolve({ status: "conflict", currentContentHash: externalHash });
-      });
-      bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldConflict);
-      const key = documentVersionKey("ws-1", "notes/versioned.md", 1);
-      const view = render(
-        <FileInspector
-          workspaceId="ws-1"
-          path="notes/versioned.md"
-          engineVersionKey={1}
-        />,
-      );
-      fireEvent.click(await findEnabledMarkdownEditToggle());
-      const source = await findSourceEditor();
-      fireEvent.change(source, { target: { value: `${source.value}Draft` } });
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(900);
-      });
-      await waitFor(() =>
-        expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      );
-      const oldBuffer = getSharedLocalDocument(key);
-      view.unmount();
+    const initialHash = "7".repeat(64);
+    const externalHash = "8".repeat(64);
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "# Base\n",
+      truncated: false,
+      contentHash: initialHash,
+    });
+    let resolveConflict!: () => void;
+    const heldConflict = new Promise<{
+      status: "conflict";
+      currentContentHash: string;
+    }>((resolve) => {
+      resolveConflict = () =>
+        resolve({ status: "conflict", currentContentHash: externalHash });
+    });
+    bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldConflict);
+    const key = documentVersionKey("ws-1", "notes/versioned.md", 1);
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="notes/versioned.md"
+        engineVersionKey={1}
+      />,
+    );
+    fireEvent.click(await findEnabledMarkdownEditToggle());
+    const source = await findSourceEditor();
 
-      await act(async () => {
-        resolveConflict();
-        await heldConflict;
-      });
-      await waitFor(() =>
-        expect(getSharedLocalDocument(key)).not.toBe(oldBuffer),
-      );
-    } finally {
-      vi.useRealTimers();
-    }
+    // shouldAdvanceTime stays here: the markdown source path re-projects
+    // through a requestAnimationFrame (see the showSource effect in
+    // FileInspector.tsx) that needs real macrotask progress a frozen fake
+    // clock never delivers. The debounce this test pins fires from an
+    // explicit advance either way, so auto-advance changes nothing it checks.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(source, { target: { value: `${source.value}Draft` } });
+    await advanceAutosaveDebounce();
+    await waitFor(() =>
+      expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+    );
+    const oldBuffer = getSharedLocalDocument(key);
+    view.unmount();
+
+    await act(async () => {
+      resolveConflict();
+      await heldConflict;
+    });
+    await waitFor(() =>
+      expect(getSharedLocalDocument(key)).not.toBe(oldBuffer),
+    );
   });
 
   it("does not capture the v2 plain-text draft when v1 settles after the view closes", async () => {
@@ -9632,6 +9668,9 @@ describe("markdown document opening state", () => {
   });
 
   afterEach(async () => {
+    // Real timers before cleanup: settleAfterUnmount below awaits real
+    // promise settlement, which a still-fake, still-frozen clock would hang.
+    vi.useRealTimers();
     cleanup();
     await settleAfterUnmount();
     vi.unstubAllGlobals();
@@ -10387,10 +10426,9 @@ describe("markdown document opening state", () => {
   });
 
   it("sets aside the live WYSIWYG draft when an older in-flight save conflicts", async () => {
-    // Fake timers: the WYSIWYG editor reports an edit on a
-    // requestAnimationFrame, so fire that frame at the test's own clock —
-    // "saving" must not lag the scheduler (#787). 50ms stays far under the
-    // 800ms debounce, so no save is issued by the advance itself.
+    // shouldAdvanceTime stays: the WYSIWYG editor's onDirty callback needs
+    // real macrotask progress a frozen fake clock never delivers. ONE_FRAME_MS
+    // stays far under the debounce, so firing it cannot itself issue a save.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -10429,7 +10467,7 @@ describe("markdown document opening state", () => {
 
       await user.type(editor, "L1");
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(50);
+        await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
       });
       await waitFor(() =>
         expect(screen.getByTestId("markdown-save-state").dataset.state).toBe(
