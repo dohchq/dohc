@@ -1,4 +1,7 @@
-import { isSharedWithMePath } from "@dohc/workspace-core";
+import {
+  isSharedWithMePath,
+  validateUserReadPath,
+} from "@dohc/workspace-core";
 import { basename } from "node:path";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import {
@@ -111,6 +114,10 @@ export async function collectOwnedWorkspaceZipEntries(input: {
   if (input.relativePath !== undefined) {
     selection = { kind: "local" };
     if (hasMountRegistry) {
+      const validated = validateUserReadPath(input.relativePath);
+      const archiveRoot = basename(
+        validated.ok ? validated.normalized : input.relativePath,
+      );
       const resolved = await resolveShareProjectionPath(
         workspace.rootPath,
         input.relativePath,
@@ -123,11 +130,10 @@ export async function collectOwnedWorkspaceZipEntries(input: {
             workspaceId: workspace.workspaceId,
             shareId: resolved.mount.shareId,
           },
-          rootName: basename(input.relativePath),
+          rootName: archiveRoot,
           ...(resolved.path === "" ? {} : { relativePath: resolved.path }),
         });
       }
-      const archiveRoot = basename(input.relativePath);
       if (resolved.kind === "workspace-root") {
         selection = { kind: "workspace-root", archiveRoot };
       } else if (resolved.kind === "projection-root") {

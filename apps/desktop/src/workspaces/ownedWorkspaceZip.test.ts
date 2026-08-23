@@ -140,6 +140,27 @@ describe("ownedZipProjectionPlan", () => {
     });
   });
 
+  it("normalizes an aliased workspace-root spelling before excluding projections", async () => {
+    const root = await workspaceRoot();
+    await symlink(root, join(root, "workspace-alias"), "dir");
+    const collectShare = canonicalShareCollector();
+
+    const exported = await collectOwnedWorkspaceZipEntries({
+      workspace: {
+        workspaceId: "host",
+        rootPath: root,
+        shareMounts: [{ shareId: "share-owner", label: "owner" }],
+      },
+      relativePath: "workspace-alias/.",
+      collectShare,
+    });
+
+    expect(exported.entries.map((entry) => entry.path)).toEqual([
+      "workspace-alias/notes/local.md",
+      "workspace-alias/shared-with-me/owner/canonical.md",
+    ]);
+  });
+
   it("never reads cached bytes through an alias to the projection root", async () => {
     const root = await workspaceRoot();
     await symlink(
