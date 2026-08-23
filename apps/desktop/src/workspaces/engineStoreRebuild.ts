@@ -224,6 +224,18 @@ async function assertNoUnlistedStoreFiles(
   }
 }
 
+async function assertEngineDirHasNoStoreFiles(
+  engineDir: string,
+  fileSystem: EngineStoreMoveFileSystem,
+): Promise<void> {
+  for (const name of ENGINE_STORE_FILES) {
+    const path = join(engineDir, name);
+    if ((await lstatIfExists(path, fileSystem)) !== null) {
+      throw new EngineStoreManifestDriftError(path);
+    }
+  }
+}
+
 async function completeManifestMove(
   engineDir: string,
   backupDir: string,
@@ -270,7 +282,10 @@ async function completeManifestMove(
   }
   await fileSystem.syncDirectory(backupDir);
   await fileSystem.syncDirectory(engineDir);
-  await assertNoUnlistedStoreFiles(engineDir, manifest, fileSystem);
+  await assertEngineDirHasNoStoreFiles(engineDir, fileSystem);
+  // The final rescan cannot exclude a process outside dohc's control. If such a
+  // process creates a store file in the gap before this rename, no later open
+  // will detect it because MOVE_COMPLETE is terminal.
   await fileSystem.rename(inProgressMarker, completeMarker);
   await fileSystem.syncDirectory(backupDir);
 }

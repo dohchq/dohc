@@ -216,6 +216,35 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
+  it("runs the final rescan immediately before marking the move complete", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const events: string[] = [];
+    const database = join(engineDir, "engine.db");
+    const markerRename =
+      `rename:${join(backupDir, "MOVE_IN_PROGRESS")}->${join(backupDir, "MOVE_COMPLETE")}`;
+
+    await moveEngineStoreAside(root, {
+      lstat: async (path) => {
+        events.push(`lstat:${path}`);
+        return lstat(path);
+      },
+      rename: async (from, to) => {
+        events.push(`rename:${from}->${to}`);
+        await rename(from, to);
+      },
+      syncDirectory: async (path) => {
+        events.push(`sync:${path}`);
+      },
+    });
+
+    const finalDatabaseScan = events.lastIndexOf(`lstat:${database}`);
+    expect(finalDatabaseScan).toBeGreaterThanOrEqual(0);
+    expect(events.slice(finalDatabaseScan, finalDatabaseScan + 2)).toEqual([
+      `lstat:${database}`,
+      markerRename,
+    ]);
+  });
+
   it("moves a database that has no sidecars", async () => {
     await seedStore({ "engine.db": "refused-store" });
 
@@ -740,7 +769,7 @@ describe("moveEngineStoreAside", () => {
     });
   });
 
-  it("refuses to complete recovery around a sidecar omitted from the manifest", async () => {
+  it("refuses recovery when an unlisted sidecar exists before the rename loop", async () => {
     await seedStore({ "engine.db": "refused-store" });
     await mkdir(backupDir);
     await writeMoveManifest(["engine.db"]);
@@ -760,6 +789,47 @@ describe("moveEngineStoreAside", () => {
     expect((await readdir(backupDir)).sort()).toEqual([
       "MOVE_IN_PROGRESS",
       "engine.db",
+    ]);
+  });
+
+  it("refuses recovery when a listed sidecar reappears after the rename loop", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-wal": "old-wal",
+    });
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db-wal", "engine.db"]);
+    const sidecar = join(engineDir, "engine.db-wal");
+    let backupSynced = false;
+
+    await expect(
+      completePendingEngineStoreMove(root, {
+        syncDirectory: async (path) => {
+          if (path !== backupDir || backupSynced) return;
+          backupSynced = true;
+          await writeFile(sidecar, "new-wal");
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "EngineStoreRecoveryFailedError",
+      cause: expect.objectContaining({
+        name: "EngineStoreManifestDriftError",
+        message: expect.stringContaining(sidecar),
+      }),
+    });
+
+    expect(backupSynced).toBe(true);
+    expect(await readFile(sidecar, "utf8")).toBe("new-wal");
+    expect(await readFile(join(backupDir, "engine.db-wal"), "utf8")).toBe(
+      "old-wal",
+    );
+    expect(await readFile(join(backupDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
+    );
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
+      "engine.db",
+      "engine.db-wal",
     ]);
   });
 
