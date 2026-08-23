@@ -31,6 +31,12 @@ check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
   "bundled dohc chat CLI exists",
 );
+for (const file of ["dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
+  check(
+    existsSync(join(desktopDir, `resources/cli-bin/${file}`)),
+    `bundled dohc-mcp launcher part exists: ${file}`,
+  );
+}
 const engineBinary = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
 check(
   existsSync(join(desktopDir, "resources/workspace-engine", engineBinary)),
@@ -91,13 +97,19 @@ if (config) {
       `${theme} system theme icon ships as an extraResource`,
     );
   }
-  check(
-    extraResources.some(
-      (entry) =>
-        entry?.from === "resources/cli-bin" && entry?.to === "cli-bin",
-    ),
-    "dohc chat CLI ships as an unpacked extraResource",
+  const cliBinResource = extraResources.find(
+    (entry) => entry?.from === "resources/cli-bin" && entry?.to === "cli-bin",
   );
+  check(Boolean(cliBinResource), "dohc chat CLI ships as an unpacked extraResource");
+  // resolveDohcMcpCommand points packaged chat session configs at these two
+  // files by absolute path -- a filter that omits them ships sessions with
+  // no dohc MCP tools.
+  for (const launcher of ["dohc", "dohc.cmd", "dohc-mcp", "dohc-mcp.cmd", "dohc-mcp.mjs"]) {
+    check(
+      cliBinResource?.filter?.includes(launcher) === true,
+      `cli-bin extraResource ships ${launcher}`,
+    );
+  }
   // The only tie between this config and BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES:
   // a driver added there without a matching extraResources entry ships in dev
   // but silently disappears from a packaged app's Offered section.

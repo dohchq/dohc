@@ -2,10 +2,14 @@ import {
   deriveSyncStatus,
   type WatcherEvent,
 } from "@dohc/workspace-core";
+import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import type {
+  WorkspaceEngineCapture,
+  WorkspaceEngineCaptureFailure,
+} from "./workspaceEngineCapture";
 import {
   startWorkspaceWatch,
   type ActiveAgentRun,
@@ -45,11 +49,9 @@ interface WatchedWorkspace {
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
   historyShareView: boolean;
-  // True while the engine capture (this workspace's SOLE history recorder)
-  // is failing. Drives the persistent history-capture notice: set on the
-  // first failed capture pass, cleared when a later pass succeeds, notify()
-  // only on transitions so repeated failures never spam the UI.
-  captureFailed: boolean;
+  // One failure cause keeps the wire status from describing impossible
+  // combinations. "other" means capture failed without a store refusal.
+  historyCaptureFailure: "other" | EngineStoreRefusal | null;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -111,14 +113,25 @@ export interface WorkspaceCaptureDecision {
 }
 
 export interface WorkspaceCaptureHooks {
-  // Wire into WorkspaceEngineCaptureOptions.onCaptureOutcome: each background
-  // capture pass reports here, and the activity layer turns failure/recovery
-  // transitions into the workspace's persistent capture-failure notice.
-  onCaptureOutcome: (outcome: { ok: boolean }) => void;
+  onCaptureOutcome: (failure: WorkspaceEngineCaptureFailure) => void;
   // Wire into WorkspaceEngineCaptureOptions.activeAgentRun: the workspace's
   // live agent-run slot, so settled batches captured while a dohc-tracked
   // run is active carry agent authorship into engine moments (PR 0N-1).
   activeAgentRun: () => ActiveAgentRun | null;
+}
+
+export async function closeWorkspaceActivityAndRelay(options: {
+  closeActivity: () => Promise<void>;
+  closeRelay?: () => Promise<void>;
+  onRelayCloseError: (error: unknown) => void;
+}): Promise<void> {
+  await options.closeActivity();
+  if (!options.closeRelay) return;
+  try {
+    await options.closeRelay();
+  } catch (error) {
+    options.onRelayCloseError(error);
+  }
 }
 
 // Owns the live file-watch → engine-capture pipeline per workspace, the
@@ -130,8 +143,14 @@ export function createWorkspaceActivity(
   options: WorkspaceActivityOptions = {},
 ) {
   const watched = new Map<string, WatchedWorkspace>();
+  const preservedStatuses = new Map<string, SyncStatusResult>();
+  const liveSessionsGenerations = new Map<string, number>();
 
   function statusFor(workspaceId: string): SyncStatusResult {
+    const liveSessionsGeneration =
+      liveSessionsGenerations.get(workspaceId) ?? 0;
+    const preserved = preservedStatuses.get(workspaceId);
+    if (preserved) return { ...preserved, liveSessionsGeneration };
     const w = watched.get(workspaceId);
     const cloud = options.cloudStateFor?.(workspaceId) ?? {
       enabled: false,
@@ -154,17 +173,27 @@ export function createWorkspaceActivity(
     // notice center shows when history capture is failing, and — post flag
     // flip — when a workspace records no history at all (engine opt-out;
     // the legacy recorder is retired).
-    return {
+    const historyCaptureFailure = w?.historyCaptureFailure ?? null;
+    const baseStatus = {
       ...status,
       conflictCount,
-      historyCaptureFailed: w?.captureFailed ?? false,
       historyRecordingOff: w?.historyRecordingOff ?? false,
       ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
       syncFailing: snap?.syncFailing ?? false,
+      liveSessionsGeneration,
     };
+    if (historyCaptureFailure) {
+      return {
+        ...baseStatus,
+        historyCaptureFailed: true,
+        engineStoreRefused:
+          historyCaptureFailure === "other" ? null : historyCaptureFailure,
+      };
+    }
+    return baseStatus;
   }
 
   async function open(workspace: CreatedWorkspace): Promise<SyncStatusResult> {
@@ -180,7 +209,7 @@ export function createWorkspaceActivity(
         settingsWarning: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
-        captureFailed: false,
+        historyCaptureFailure: null,
         agentRun: null,
       };
       watched.set(workspace.workspaceId, entry);
@@ -197,13 +226,15 @@ export function createWorkspaceActivity(
               // whatever run is active at that moment (may flip between
               // batches within one open).
               activeAgentRun: () => entry.agentRun,
-              onCaptureOutcome: ({ ok }) => {
+              onCaptureOutcome: (failure) => {
                 // Transition-only: the FIRST failure raises the notice, the
                 // first success after a failure clears it, and repeated
                 // failures (a persistently broken store retries every batch)
-                // never re-notify.
-                if (entry.captureFailed === !ok) return;
-                entry.captureFailed = !ok;
+                // never re-notify. The refusal classification transitions the
+                // same way (#874): a persistently refused store re-reports
+                // the same code on every pass.
+                if (entry.historyCaptureFailure === failure) return;
+                entry.historyCaptureFailure = failure;
                 notify();
               },
             });
@@ -291,6 +322,7 @@ export function createWorkspaceActivity(
         void engine.start();
       }
     }
+    preservedStatuses.delete(workspace.workspaceId);
     return statusFor(workspace.workspaceId);
   }
 
@@ -326,13 +358,41 @@ export function createWorkspaceActivity(
   // Failed-join rollback (0P-C gate fix): stop and forget ONE workspace —
   // watcher, engine, and capture — so the join handler can remove its
   // folder/registry state without tearing down every other workspace.
-  async function close(workspaceId: string): Promise<void> {
+  async function close(
+    workspaceId: string,
+    closeOptions: { preserveStatus?: boolean; notify?: boolean } = {},
+  ): Promise<void> {
     const entry = watched.get(workspaceId);
     if (!entry) return;
+    if (closeOptions.preserveStatus) {
+      preservedStatuses.set(workspaceId, statusFor(workspaceId));
+    } else {
+      preservedStatuses.delete(workspaceId);
+    }
     watched.delete(workspaceId);
-    await Promise.all([entry.handle.stop(), entry.engine?.stop() ?? Promise.resolve()]);
-    await (entry.capture?.stop() ?? Promise.resolve());
-    notify();
+    const stopped = await Promise.allSettled([
+      Promise.resolve().then(() => entry.handle.stop()),
+      Promise.resolve().then(() => entry.engine?.stop()),
+    ]);
+    const liveSessionsRetired = await Promise.allSettled([
+      Promise.resolve().then(() =>
+        entry.capture?.settleAndCloseAllLiveSessions(),
+      ),
+    ]);
+    if (entry.capture) {
+      liveSessionsGenerations.set(
+        workspaceId,
+        (liveSessionsGenerations.get(workspaceId) ?? 0) + 1,
+      );
+    }
+    const captureStopped = await Promise.allSettled([
+      Promise.resolve().then(() => entry.capture?.stop()),
+    ]);
+    if (closeOptions.notify !== false) notify();
+    const failed = [...stopped, ...liveSessionsRetired, ...captureStopped].find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed) throw failed.reason;
   }
 
   // After a login completes, attach engines to already-open cloud-enabled
@@ -464,6 +524,7 @@ export function createWorkspaceActivity(
       await (w.capture?.stop() ?? Promise.resolve());
     });
     watched.clear();
+    preservedStatuses.clear();
     await Promise.all(stops);
   }
 

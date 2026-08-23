@@ -11707,6 +11707,15 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if store_busy(&error) {
         return wire(ErrorCode::Overloaded, "engine-store-busy");
     }
+    // Keep the storage refusal code so the desktop can offer move-aside
+    // recovery instead of reporting a generic workspace failure.
+    if let RuntimeError::Storage(
+        refused @ (dohc_engine_storage::StorageError::UnsupportedFingerprint { .. }
+        | dohc_engine_storage::StorageError::ForeignDatabase),
+    ) = &error
+    {
+        return wire(ErrorCode::Internal, refused.code());
+    }
     if matches!(
         &error,
         RuntimeError::Collab(CollabError::ReplayParityViolation { .. })
@@ -12163,6 +12172,57 @@ mod tests {
         }));
         assert_eq!(corrupt.code, ErrorCode::Internal);
         assert_ne!(corrupt.message, "engine-store-busy");
+    }
+
+    #[test]
+    fn an_unsupported_fingerprint_names_its_storage_code_on_the_wire() {
+        use dohc_engine_storage::StorageError;
+        let fingerprint = map_runtime(RuntimeError::Storage(
+            StorageError::UnsupportedFingerprint {
+                found: 0,
+                expected: 2,
+            },
+        ));
+        assert_eq!(fingerprint.code, ErrorCode::Internal);
+        assert_eq!(fingerprint.message, "unsupported-fingerprint");
+    }
+
+    /// #874 repro shape: a July-era `engine.db` — user tables, `user_version`
+    /// still 0 — sitting in a real workspace root. `workspace.open` must
+    /// surface the REAL fence's classification (`foreign-database`) on the
+    /// wire, driven through the storage layer rather than a fabricated error
+    /// value, so the desktop's recovery surface has a code to match.
+    ///
+    /// MUTATION: remove the refused-database arm from `map_runtime` -> this
+    /// open reports "workspace operation failed".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_workspace_over_a_foreign_engine_db_names_the_refusal() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let engine_dir = scratch.path().join(".dohc").join("engine");
+        std::fs::create_dir_all(&engine_dir).expect("engine dir");
+        {
+            let conn =
+                rusqlite::Connection::open(engine_dir.join("engine.db")).expect("fabricate db");
+            conn.execute_batch("CREATE TABLE notes (body TEXT);")
+                .expect("user table");
+        }
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let refused = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "foreign-store-repro",
+                }),
+            )
+            .await
+            .expect_err("the fence must refuse a foreign database");
+        assert_eq!(refused.code, ErrorCode::Internal);
+        assert_eq!(refused.message, "foreign-database");
     }
 
     #[test]

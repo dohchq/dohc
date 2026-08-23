@@ -27,10 +27,12 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
   isYDocPathNotInVersionError,
+  probeEngineStoreRefusal,
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
 import {
   DaemonRefusalError,
@@ -104,7 +106,7 @@ interface CaptureOptions {
   now?: () => number;
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
-  onCaptureOutcome?: (outcome: { ok: boolean }) => void;
+  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
   daemonOwnsCapture?: boolean;
@@ -123,6 +125,27 @@ function capture(root: string, options: CaptureOptions = {}) {
     ...rest,
   });
 }
+
+describe("probeEngineStoreRefusal", () => {
+  it("rethrows an unrecognized engine error", async () => {
+    const root = await tempRoot();
+    const probeError = Object.assign(new Error("permission denied"), {
+      code: "EACCES",
+    });
+    const sessions = mockLiveSessions(
+      new VersionedLoopbackEngine(),
+      undefined,
+      () => ({ settled: true, running: true, degraded: false }),
+      async () => {
+        throw probeError;
+      },
+    );
+
+    await expect(
+      probeEngineStoreRefusal(WORKSPACE_ID, root, sessions),
+    ).rejects.toBe(probeError);
+  });
+});
 
 // Daemon-path capture: `rustEngineSessions` selects the Rust engine, and the
 // VersionedLoopbackEngine behind it holds real state and real sha256 — so the
@@ -553,6 +576,68 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("settles and retires every live Y.Doc session before stopping the capture", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "note.md",
+      text: "seed",
+    });
+    loopback.seedTextFile({
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: "drawing.md",
+      text: "seed",
+    });
+    const order: string[] = [];
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+      openRustYDocProviderSession: async (options) => {
+        const doc = new Y.Doc();
+        return {
+          doc,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          contentKind: "richdoc" as const,
+          path: options.path,
+          head: "present" as const,
+          lineage: "existing" as const,
+          evict: async () => undefined,
+          applyLocalUpdate: async () => undefined,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
+          settleNow: async () => {
+            order.push(`settle:${options.path}`);
+            return { sha256: "a".repeat(64), content: "# Edited\n" } as never;
+          },
+          close: async (closeOptions?: { settle?: boolean }) => {
+            order.push(`close:${options.path}:${String(closeOptions?.settle)}`);
+          },
+        };
+      },
+    });
+    await engine.openYDocSession({
+      path: "note.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+    });
+    await engine.openYDocSession({
+      path: "drawing.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: () => undefined,
+    });
+
+    await engine.settleAndCloseAllLiveSessions!();
+    await engine.stop();
+
+    expect(order).toEqual([
+      "settle:note.md",
+      "close:note.md:false",
+      "settle:drawing.md",
+      "close:drawing.md:false",
+    ]);
+  });
+
   // #338. The engine owns the .md: it materializes a changed projection and
   // leaves a drifted file alone. The desktop mirrored the settled content
   // over the file anyway, so an edit made outside dohc while the document was
@@ -865,7 +950,7 @@ describe("workspaceEngineCapture batch capture", () => {
         store: daemonStore,
         rustEngineSessions: sessions,
         daemonOwnsCapture: true,
-        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onCaptureOutcome: (failure) => outcomes.push(failure === null),
       });
       try {
         engine.start();
@@ -875,6 +960,72 @@ describe("workspaceEngineCapture batch capture", () => {
         await engine.flush();
 
         expect(outcomes).toEqual([true, false]);
+      } finally {
+        try {
+          await engine.stop();
+        } finally {
+          await liveStore.close();
+        }
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // #874: the engine refusing the workspace's DATABASE is not a degraded
+  // watcher. The outcome carries the fence's classification so the product
+  // offers the move-aside rebuild instead of "History paused" — and a later
+  // pass that reaches the store clears it.
+  it("carries the store refusal on the health outcome and clears it on recovery", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = await tempRoot();
+      let refuse = true;
+      const outcomes: WorkspaceEngineCaptureFailure[] = [];
+      const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+      const liveStore = createCaptureLiveStores(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ).store;
+      const daemonStore = new Proxy(liveStore, {
+        get(target, property) {
+          if (property === "watcherStatus") {
+            return async () => {
+              if (refuse) {
+                // The wire shape a refused workspace.open reaches the desktop
+                // in: an INTERNAL error whose message is the storage code.
+                throw Object.assign(new Error("foreign-database"), {
+                  wireError: {
+                    code: "INTERNAL",
+                    message: "foreign-database",
+                    retry: "no",
+                  },
+                });
+              }
+              return { running: true, degraded: false, terminal: false };
+            };
+          }
+          if (property === "flushCapture") return async () => undefined;
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const engine = capture(root, {
+        store: daemonStore,
+        rustEngineSessions: sessions,
+        daemonOwnsCapture: true,
+        onError: () => {},
+        onCaptureOutcome: (outcome) => outcomes.push(outcome),
+      });
+      try {
+        engine.start();
+        await engine.flush();
+        expect(outcomes).toEqual(["foreign-database"]);
+
+        refuse = false;
+        await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
+        await engine.flush();
+        expect(outcomes).toEqual(["foreign-database", null]);
       } finally {
         try {
           await engine.stop();
@@ -2281,7 +2432,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     const loopback = new VersionedLoopbackEngine();
     try {
       const engine = liveCapture(root, loopback, {
-        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onCaptureOutcome: (failure) => outcomes.push(failure === null),
         onError: (context, error) => errors.push({ context, error }),
       });
       engine.start();
@@ -2329,7 +2480,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     let recorded: EngineMomentRow[] = [];
     try {
       const second = liveCapture(root, loopback, {
-        onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+        onCaptureOutcome: (failure) => outcomes.push(failure === null),
         onError: () => {},
       });
       second.start();
@@ -2359,7 +2510,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     await unlink(join(root, "vanishes.md"));
     const outcomes: boolean[] = [];
     const second = liveCapture(root, loopback, {
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
     });
     second.start();
     await second.flush();
@@ -2551,7 +2702,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     const outcomes: boolean[] = [];
     const engine = liveCapture(root, loopback, {
       onError: () => {},
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
     });
 
     engine.captureBatch([{ path: "note.md", operation: "update" }]);
@@ -2583,8 +2734,8 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     });
     const engine = liveCapture(root, loopback, {
       daemonOwnsCapture: true,
-      onCaptureOutcome: ({ ok }) => {
-        outcomes.push(ok);
+      onCaptureOutcome: (failure) => {
+        outcomes.push(failure === null);
         resolveOutcome();
       },
       onError: (context) => {
@@ -2614,7 +2765,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     const outcomes: boolean[] = [];
     const engine = liveCapture(root, loopback, {
       onError: () => {},
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
     });
     engine.captureBatch([
       { path: "bad.md", operation: "update" },
@@ -2672,7 +2823,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
     state.failing = false;
     engineCapture!.captureBatch([{ path: "note.md", operation: "update" }]);
     await engineCapture!.flush();
-    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBeUndefined();
     expect(notifyCount).toBe(notifiesAtRaise + 1);
 
     await activity.stopAll();
@@ -2690,10 +2841,10 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
       captureFor: () => ({ capture: null, shareView: false }),
     });
     await activity.open(workspace);
-    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBe(false);
+    expect(activity.getStatus(workspace.workspaceId).historyCaptureFailed).toBeUndefined();
     await activity.stopAll();
     // Not-open workspaces report a clean status too.
-    expect(activity.getStatus("never-opened").historyCaptureFailed).toBe(false);
+    expect(activity.getStatus("never-opened").historyCaptureFailed).toBeUndefined();
   }, 15_000);
 });
 
@@ -3949,7 +4100,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     let reportedDeath = false;
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
-      onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+      onCaptureOutcome: (failure) => outcomes.push(failure === null),
       onError: () => undefined,
       openRustYDocProviderSession: async (options) => {
         opens += 1;

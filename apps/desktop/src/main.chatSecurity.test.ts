@@ -784,6 +784,18 @@ describe("main-process chat authorization", () => {
     expect(scope).toContain("resolveShareViewRelayAuthorId(");
   });
 
+  // #874: the rebuild moves a workspace's engine database aside. Main must
+  // derive the refusal from its OWN activity status. A renderer that can
+  // trigger the move on a HEALTHY store would silently detach the workspace's
+  // history and chats. engineStoreRebuild.test.ts behavior-tests ordering.
+  it("gates the engine-store rebuild on main's own refusal fact", () => {
+    const handler = handlerSource("rebuildEngineStore");
+    expect(handler).toContain("isStoreRefused: () =>");
+    expect(handler).toContain(
+      "activity.getStatus(workspace.workspaceId).engineStoreRefused",
+    );
+  });
+
   // The write gate's own shape, pinned where it is defined. Same split as
   // `assertChatWritable` above: main DELEGATES the level rule, and the rule's
   // behaviour is driven against the REAL function in shareWriteGate.test.ts.

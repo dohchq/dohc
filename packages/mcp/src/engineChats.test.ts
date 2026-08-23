@@ -1,4 +1,4 @@
-import { DohcCliError } from "@dohc/cli";
+import { DohcCliError } from "@dohc/cli/errors";
 import {
   CLI_PROTOCOL_VERSION,
   type CliRequestWithoutToken,

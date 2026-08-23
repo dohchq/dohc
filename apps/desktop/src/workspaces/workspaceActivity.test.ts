@@ -1,7 +1,11 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import {
+  closeWorkspaceActivityAndRelay,
+  createWorkspaceActivity,
+  type WorkspaceCaptureHooks,
+} from "./workspaceActivity";
 import { captureForFlaggedWorkspace } from "./engineCaptureGate";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -57,6 +61,7 @@ describe("workspaceActivity capture hooks", () => {
         capture: {
           start: vi.fn(),
           captureBatch,
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
           stop: vi.fn(async () => undefined),
         } as never,
       }),
@@ -303,6 +308,328 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     // The entry is gone: status derives from nothing and re-open works.
     expect(activity.getStatus("activity-test").conflictCount).toBe(0);
     await activity.close("activity-test"); // idempotent, never throws
+    await activity.stopAll();
+  });
+
+  it("stops the capture and forgets the entry when an engine stop rejects", async () => {
+    const stopError = new Error("engine stop failed");
+    const firstCaptureStop = vi.fn(async () => undefined);
+    const secondCaptureStop = vi.fn(async () => undefined);
+    let captureBuilds = 0;
+    let engineBuilds = 0;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => {
+        captureBuilds += 1;
+        return {
+          capture: {
+            start: vi.fn(),
+            captureBatch: vi.fn(),
+            settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+            stop: captureBuilds === 1 ? firstCaptureStop : secondCaptureStop,
+          } as never,
+          shareView: false,
+        };
+      },
+      engineFor: () => {
+        engineBuilds += 1;
+        return {
+          start: async () => undefined,
+          queueSync: () => undefined,
+          snapshot: () => ({
+            syncing: false,
+            lastSyncedAtMs: null,
+            pendingChangeCount: 0,
+            conflictCount: 0,
+            authExpired: false,
+            sharingDeclined: [],
+          }),
+          stop: async () => {
+            if (engineBuilds === 1) throw stopError;
+          },
+        };
+      },
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+
+    await expect(activity.close("activity-test")).rejects.toBe(stopError);
+
+    expect(firstCaptureStop).toHaveBeenCalledOnce();
+    expect(activity.listOpenWorkspaceIds()).toEqual([]);
+    await expect(activity.open(workspace())).resolves.toBeDefined();
+    expect(activity.listOpenWorkspaceIds()).toEqual(["activity-test"]);
+    expect(captureBuilds).toBe(2);
+    await activity.close("activity-test");
+    expect(secondCaptureStop).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a refused status visible when close fails before any reopen", async () => {
+    let hooks: WorkspaceCaptureHooks | null = null;
+    let activity!: ReturnType<typeof createWorkspaceActivity>;
+    const statusesSeenByRenderer: Array<string | null | undefined> = [];
+    const closeError = new Error("engine stop failed");
+    activity = createWorkspaceActivity(
+      () => {
+        statusesSeenByRenderer.push(
+          activity.getStatus("activity-test").engineStoreRefused,
+        );
+      },
+      {
+        captureFor: (_workspace, captureHooks) => {
+          hooks = captureHooks;
+          return {
+            capture: {
+              start: vi.fn(),
+              captureBatch: vi.fn(),
+              settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+              stop: vi.fn(async () => undefined),
+            } as never,
+            shareView: false,
+          };
+        },
+        engineFor: () => ({
+          start: async () => undefined,
+          queueSync: () => undefined,
+          snapshot: () => ({
+            syncing: false,
+            lastSyncedAtMs: null,
+            pendingChangeCount: 0,
+            conflictCount: 0,
+            authExpired: false,
+            sharingDeclined: [],
+          }),
+          stop: async () => {
+            throw closeError;
+          },
+        }),
+        cloudStateFor: () => ({ enabled: true, connected: true }),
+      },
+    );
+    await activity.open(workspace());
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
+    statusesSeenByRenderer.length = 0;
+
+    await expect(
+      activity.close("activity-test", { preserveStatus: true }),
+    ).rejects.toBe(closeError);
+
+    expect(activity.listOpenWorkspaceIds()).toEqual([]);
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBe(
+      "unsupported-fingerprint",
+    );
+    expect(statusesSeenByRenderer).toEqual(["unsupported-fingerprint"]);
+    await activity.stopAll();
+  });
+
+  it("keeps the refused status through a successful close until reopen completes", async () => {
+    let hooks: WorkspaceCaptureHooks | null = null;
+    let finishReopen: () => void = () => {
+      throw new Error("Reopen did not start.");
+    };
+    let captureBuilds = 0;
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: (_workspace, captureHooks) => {
+        hooks = captureHooks;
+        captureBuilds += 1;
+        if (captureBuilds === 2) {
+          return new Promise((resolve) => {
+            finishReopen = () =>
+              resolve({
+                capture: {
+                  start: vi.fn(),
+                  captureBatch: vi.fn(),
+                  settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+                  stop: vi.fn(async () => undefined),
+                } as never,
+                shareView: false,
+              });
+          });
+        }
+        return {
+          capture: {
+            start: vi.fn(),
+            captureBatch: vi.fn(),
+            settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+            stop: vi.fn(async () => undefined),
+          } as never,
+          shareView: false,
+        };
+      },
+    });
+    await activity.open(workspace());
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
+
+    await activity.close("activity-test", { preserveStatus: true });
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBe(
+      "unsupported-fingerprint",
+    );
+
+    const reopening = activity.open(workspace());
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBe(
+      "unsupported-fingerprint",
+    );
+    finishReopen();
+    await reopening;
+
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+    await activity.close("activity-test");
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+  });
+
+  it("keeps live-session retirement generations current across preserved closes and reopens", async () => {
+    const retireLiveSessions = vi.fn(async () => undefined);
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: () => ({
+        capture: {
+          start: vi.fn(),
+          captureBatch: vi.fn(),
+          settleAndCloseAllLiveSessions: retireLiveSessions,
+          stop: vi.fn(async () => undefined),
+        } as never,
+        shareView: false,
+      }),
+    });
+
+    expect((await activity.open(workspace())).liveSessionsGeneration).toBe(0);
+    notify.mockClear();
+    await activity.close("activity-test", { preserveStatus: true });
+    expect(retireLiveSessions).toHaveBeenCalledOnce();
+    expect(activity.getStatus("activity-test").liveSessionsGeneration).toBe(1);
+    expect(notify).toHaveBeenCalledOnce();
+
+    expect((await activity.open(workspace())).liveSessionsGeneration).toBe(1);
+    notify.mockClear();
+    await activity.close("activity-test", {
+      preserveStatus: true,
+      notify: false,
+    });
+    expect(retireLiveSessions).toHaveBeenCalledTimes(2);
+    expect(activity.getStatus("activity-test").liveSessionsGeneration).toBe(2);
+    expect(notify).not.toHaveBeenCalled();
+    await activity.stopAll();
+  });
+
+  it("logs a relay close failure after local activity closes without rejecting", async () => {
+    const relayError = new Error("relay close failed");
+    const onRelayCloseError = vi.fn();
+    const order: string[] = [];
+
+    await expect(
+      closeWorkspaceActivityAndRelay({
+        closeActivity: async () => {
+          order.push("local");
+        },
+        closeRelay: async () => {
+          order.push("relay");
+          throw relayError;
+        },
+        onRelayCloseError,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(order).toEqual(["local", "relay"]);
+    expect(onRelayCloseError).toHaveBeenCalledWith(relayError);
+  });
+
+  it("waits for the watcher and engine before stopping the capture", async () => {
+    let finishEngineStop: () => void = () => {
+      throw new Error("Engine stop did not start.");
+    };
+    const engineStopStarted = vi.fn();
+    const retireLiveSessions = vi.fn(async () => undefined);
+    const captureStop = vi.fn(async () => undefined);
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () => ({
+        capture: {
+          start: vi.fn(),
+          captureBatch: vi.fn(),
+          settleAndCloseAllLiveSessions: retireLiveSessions,
+          stop: captureStop,
+        } as never,
+        shareView: false,
+      }),
+      engineFor: () => ({
+        start: async () => undefined,
+        queueSync: () => undefined,
+        snapshot: () => ({
+          syncing: false,
+          lastSyncedAtMs: null,
+          pendingChangeCount: 0,
+          conflictCount: 0,
+          authExpired: false,
+          sharingDeclined: [],
+        }),
+        stop: () => {
+          engineStopStarted();
+          return new Promise<void>((resolve) => {
+            finishEngineStop = resolve;
+          });
+        },
+      }),
+      cloudStateFor: () => ({ enabled: true, connected: true }),
+    });
+    await activity.open(workspace());
+
+    const closing = activity.close("activity-test");
+    await vi.waitFor(() => expect(engineStopStarted).toHaveBeenCalledOnce());
+    expect(retireLiveSessions).not.toHaveBeenCalled();
+    expect(captureStop).not.toHaveBeenCalled();
+
+    finishEngineStop();
+    await closing;
+    expect(retireLiveSessions).toHaveBeenCalledOnce();
+    expect(captureStop).toHaveBeenCalledOnce();
+    expect(retireLiveSessions.mock.invocationCallOrder[0]).toBeLessThan(
+      captureStop.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  // #874: a refused engine store rides the capture outcome into the status
+  // the notice center reads, transition-only like the capture-failed flag —
+  // a persistently refused store re-reports the same code on every pass and
+  // must not re-notify.
+  it("publishes a store refusal, clears it on recovery, and notifies only on transitions", async () => {
+    let hooks: WorkspaceCaptureHooks | null = null;
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: (_workspace, captureHooks) => {
+        hooks = captureHooks;
+        return {
+          shareView: false,
+          capture: {
+            start: vi.fn(),
+            captureBatch: vi.fn(),
+            settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+            stop: vi.fn(async () => undefined),
+          } as never,
+        };
+      },
+    });
+    await activity.open(workspace());
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+
+    notify.mockClear();
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
+    const refused = activity.getStatus("activity-test");
+    expect(refused.engineStoreRefused).toBe("unsupported-fingerprint");
+    expect(refused.historyCaptureFailed).toBe(true);
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    // The same refusal again is not news.
+    hooks!.onCaptureOutcome("unsupported-fingerprint");
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    // A pass that reached the store clears the refusal with the failure.
+    hooks!.onCaptureOutcome(null);
+    expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
+    expect(notify).toHaveBeenCalledTimes(2);
+
+    hooks!.onCaptureOutcome("other");
+    const otherFailure = activity.getStatus("activity-test");
+    expect(otherFailure.historyCaptureFailed).toBe(true);
+    expect(otherFailure.engineStoreRefused).toBeNull();
+    expect(notify).toHaveBeenCalledTimes(3);
     await activity.stopAll();
   });
 });

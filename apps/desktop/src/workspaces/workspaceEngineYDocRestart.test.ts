@@ -116,7 +116,7 @@ async function reconnectFailureCapture(prefix: string) {
     rootPath,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
-    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onCaptureOutcome: (failure) => outcomes.push(failure === null),
     onError: () => undefined,
   });
   return { capture, outcomes, rootPath, state };
@@ -875,7 +875,7 @@ it("opens first when record recovery loses the restarted daemon transport", asyn
     workspaceId: workspaceHandle,
     rootPath,
     rustEngineSessions: sessions,
-    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onCaptureOutcome: (failure) => outcomes.push(failure === null),
     onError,
   });
   const session = await capture.openYDocSession({
@@ -1100,7 +1100,7 @@ it("releases a close-latched failed generation with settle true before the next 
     rootPath,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
-    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onCaptureOutcome: (failure) => outcomes.push(failure === null),
   });
   const session = await capture.openYDocSession({
     path: "note.md",
@@ -1209,9 +1209,9 @@ it("defers a version switch behind a dead generation until release converges", a
     rootPath,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
-    onCaptureOutcome: ({ ok }) => {
-      outcomes.push(ok);
-      historyCaptureFailed = !ok;
+    onCaptureOutcome: (failure) => {
+      outcomes.push(failure === null);
+      historyCaptureFailed = failure !== null;
     },
     onError,
   });
@@ -1817,7 +1817,7 @@ it("keeps every keystroke typed while the daemon is dead and replays them into t
     rootPath,
     rustEngineSessions: sessions,
     openRustYDocProviderSession: openProvider,
-    onCaptureOutcome: ({ ok }) => outcomes.push(ok),
+    onCaptureOutcome: (failure) => outcomes.push(failure === null),
     onError: () => undefined,
   });
   const session = await capture.openYDocSession({

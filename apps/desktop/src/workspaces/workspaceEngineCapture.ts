@@ -33,6 +33,7 @@ import type {
 import {
   openEngineYdocProviderSession,
   DaemonRefusalError,
+  engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
   isFileLockedRefusal,
@@ -41,6 +42,7 @@ import {
   isYdocUnsettledCloseRefusal,
   YdocReleasedWithSettleFailureError,
   YdocAdapterError,
+  type EngineStoreRefusal,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
@@ -89,6 +91,24 @@ export {
 } from "./workspaceEngineCaptureLimits";
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
+
+export async function probeEngineStoreRefusal(
+  workspaceId: string,
+  rootPath: string,
+  rustEngineSessions: EngineWorkspaceSessions,
+): Promise<EngineStoreRefusal | null> {
+  try {
+    await createCaptureLiveStores(
+      { workspaceId, rootPath },
+      rustEngineSessions,
+    ).store.ensureMainVersion({ workspaceId });
+    return null;
+  } catch (error) {
+    const refusal = engineStoreRefusalOf(error);
+    if (refusal !== null) return refusal;
+    throw error;
+  }
+}
 
 // PR 0M-3 watcher->engine capture + PR 0M-4 named-version operations +
 // PR 0M-5 history/restore (which ended the 0M-3 interim dual-write).
@@ -470,6 +490,9 @@ export interface WorkspaceEngineCapture {
   settleAndCloseLiveSessionsForPath(
     pathOrPrefix: string,
   ): Promise<(removed: boolean) => void>;
+  // Workspace lifecycle close: flush and retire every live editor session
+  // before the capture releases its store.
+  settleAndCloseAllLiveSessions(): Promise<void>;
   // Version operations (PR 0M-4). Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
@@ -603,7 +626,7 @@ export interface WorkspaceEngineCaptureOptions {
   // than onError: version/restore operations reject to their caller (the UI
   // surfaces those directly) and best-effort rename coordination falls back
   // to plain capture, so neither means history is silently missing.
-  onCaptureOutcome?: (outcome: { ok: boolean }) => void;
+  onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -635,6 +658,11 @@ export interface WorkspaceEngineCaptureOptions {
     }
   >;
 }
+
+export type WorkspaceEngineCaptureFailure =
+  | EngineStoreRefusal
+  | "other"
+  | null;
 
 export interface EngineDiskWriter {
   writeTextFile(absolutePath: string, text: string): Promise<void>;
@@ -1452,11 +1480,17 @@ export function createWorkspaceEngineCapture(
   // Dead-session failures are an independent penalty, so retain the latest
   // watcher/health result when that penalty is added and later removed.
   let backgroundCaptureHealthy = true;
+  // The fingerprint fence's classification from the latest background pass
+  // (#874). Set when a pass failed because the engine REFUSED this
+  // workspace's database, cleared by the next pass that reached the store.
+  let storeRefused: EngineStoreRefusal | null = null;
 
   const publishCaptureOutcome = (): void => {
-    options.onCaptureOutcome?.({
-      ok: backgroundCaptureHealthy && deadYDocSessions.size === 0,
-    });
+    const failure =
+      backgroundCaptureHealthy && deadYDocSessions.size === 0
+        ? null
+        : (storeRefused ?? "other");
+    options.onCaptureOutcome?.(failure);
   };
 
   const emitCaptureOutcome = (ok: boolean): void => {
@@ -3332,6 +3366,13 @@ export function createWorkspaceEngineCapture(
     let ok = false;
     try {
       ok = await task();
+      storeRefused = null;
+    } catch (error) {
+      // A thrown pass says whether the engine REFUSED the store (#874) or
+      // failed some other way; a pass that completed — even degraded —
+      // reached the store, so any earlier refusal no longer describes it.
+      storeRefused = engineStoreRefusalOf(error);
+      throw error;
     } finally {
       emitCaptureOutcome(ok);
     }
@@ -4930,6 +4971,15 @@ export function createWorkspaceEngineCapture(
           closeRemovalWindow();
         };
       });
+    },
+
+    settleAndCloseAllLiveSessions() {
+      return enqueueResult("close live sessions for workspace close", () =>
+        settleAndCloseLiveYDocSessions(
+          () => true,
+          "Saved latest edits before closing the workspace",
+        ),
+      );
     },
 
     async listVersions() {

@@ -73,6 +73,7 @@ function renderBar(
         ? { onDismissAgentNotification: props.onDismissAgentNotification }
         : {})}
       onOpenSettings={props.onOpenSettings ?? (() => {})}
+      onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       onToggleTheme={() => {}}
       onContextMenu={props.onContextMenu ?? (() => {})}
     />,
@@ -173,6 +174,7 @@ describe("sync status surface", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
       },
@@ -193,6 +195,7 @@ describe("sync status surface", () => {
         state: "conflict",
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
         conflictCount: 2,
@@ -210,8 +213,10 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: true,
+        historyCaptureFailed: false,
         shareProjection: {
           state: "pending",
           pendingPathCount: 2,
@@ -241,6 +246,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
         sharingDeclined: [
@@ -275,6 +281,7 @@ describe("notice center", () => {
         state: "conflict",
         pendingChangeCount: 2,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
         conflictCount: 2,
@@ -324,12 +331,60 @@ describe("notice center", () => {
     expect(onOpenHistory).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    {
+      cause: "unsupported-fingerprint" as const,
+      sentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+      otherSentence: "dohc cannot read this workspace's data store.",
+    },
+    {
+      cause: "foreign-database" as const,
+      sentence: "dohc cannot read this workspace's data store.",
+      otherSentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+    },
+  ])("explains the $cause refusal and offers the rebuild", async ({
+    cause,
+    sentence,
+    otherSentence,
+  }) => {
+    const onRebuildEngineStore = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
+        historyCaptureFailed: true,
+        engineStoreRefused: cause,
+        historyRecordingUnavailable: false,
+        historyShareView: false,
+      },
+      onRebuildEngineStore,
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-engine-store-refused");
+    expect(within(notice).getByText(sentence)).toBeTruthy();
+    expect(within(notice).queryByText(otherSentence)).toBeNull();
+    expect(notice.textContent).not.toContain("older");
+    expect(notice.textContent).not.toContain("not created by dohc");
+    expect(notice.textContent).toContain("Your files are untouched.");
+    expect(notice.textContent).toContain(".dohc/engine/pre-v2-backup");
+    expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull();
+
+    await userEvent.click(within(notice).getByRole("button", { name: "Rebuild" }));
+    expect(onRebuildEngineStore).toHaveBeenCalledOnce();
+  });
+
   it("titles the conflict notice in two-machine language with calm fallback copy", async () => {
     renderBar({
       syncStatus: {
         state: "conflict",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
         conflictCount: 1,
@@ -354,6 +409,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
         historyRecordingOff: true,
@@ -379,6 +435,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
         historyRecordingOff: true,
@@ -400,6 +457,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingOff: true,
         historyRecordingUnavailable: true,
         historyShareView: false,
@@ -429,6 +487,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingOff: true,
         historyRecordingUnavailable: false,
         historyShareView: true,
@@ -450,6 +509,7 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
       },
@@ -465,8 +525,10 @@ describe("notice center", () => {
         state: "synced",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
+        engineStoreRefused: null,
         historyCaptureFailed: true,
       },
       onOpenHistory,
@@ -491,9 +553,11 @@ describe("notice center", () => {
       state: "synced" as const,
       pendingChangeCount: 0,
       lastSyncedAtMs: null,
+      liveSessionsGeneration: 0,
       historyRecordingUnavailable: false,
       historyShareView: false,
-      historyCaptureFailed: true,
+      engineStoreRefused: null,
+      historyCaptureFailed: true as const,
     };
     const { rerender } = renderBar({ syncStatus: failedStatus });
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -503,11 +567,16 @@ describe("notice center", () => {
       ),
     ).toBeTruthy();
 
+    const {
+      historyCaptureFailed: _historyCaptureFailed,
+      engineStoreRefused: _engineStoreRefused,
+      ...recoveredStatus
+    } = failedStatus;
     rerender(
       <StatusBar
         workspaceId="ws-status-test"
         workspaceName="my-notes"
-        syncStatus={{ ...failedStatus, historyCaptureFailed: false }}
+        syncStatus={recoveredStatus}
         agentActive={false}
         conflictSummaries={[]}
         onConnectCloud={() => {}}
@@ -515,6 +584,7 @@ describe("notice center", () => {
         onOpenConflicts={() => {}}
         onRefreshShareView={() => {}}
         onOpenSettings={() => {}}
+        onRebuildEngineStore={() => {}}
         onToggleTheme={() => {}}
         onContextMenu={() => {}}
       />,
@@ -674,6 +744,7 @@ describe("notice center", () => {
         state: "cloud-disconnected",
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
+        liveSessionsGeneration: 0,
         historyRecordingUnavailable: false,
         historyShareView: false,
       },

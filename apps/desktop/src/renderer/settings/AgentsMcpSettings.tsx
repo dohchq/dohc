@@ -11,7 +11,9 @@ import { PreferredNameControl } from "./PreferredNameControl";
 import { RunnerSettingsCard } from "./RunnerSettingsCard";
 import { SettingRow } from "./SettingRow";
 
-export function configSnippet(config: McpConfigResult): string {
+export function configSnippet(
+  config: Extract<McpConfigResult, { command: string }>,
+): string {
   return JSON.stringify(
     {
       mcpServers: {
@@ -191,7 +193,7 @@ export function AgentsMcpSettings(props: {
   }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange]);
 
   const copyConfig = useCallback(async () => {
-    if (!config) return;
+    if (!config || "unavailable" in config) return;
     const version = requestVersionRef.current;
     const text = configSnippet(config);
     try {
@@ -413,7 +415,7 @@ export function AgentsMcpSettings(props: {
           <h3 className="m-0 text-[13px] font-medium text-ink">MCP config</h3>
           <button
             type="button"
-            disabled={!config}
+            disabled={!config || "unavailable" in config}
             onClick={() => void copyConfig()}
             className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -429,12 +431,18 @@ export function AgentsMcpSettings(props: {
             {copyError}
           </p>
         ) : null}
-        <pre
-          data-testid="mcp-config-snippet"
-          className="m-0 max-h-56 overflow-auto rounded-md border border-line bg-panel-2 p-3 font-mono text-[11px] leading-relaxed text-ink"
-        >
-          {config ? configSnippet(config) : "..."}
-        </pre>
+        {config && "unavailable" in config ? (
+          <p data-testid="mcp-unavailable" className="m-0 text-[11px] text-danger">
+            {config.message}
+          </p>
+        ) : (
+          <pre
+            data-testid="mcp-config-snippet"
+            className="m-0 max-h-56 overflow-auto rounded-md border border-line bg-panel-2 p-3 font-mono text-[11px] leading-relaxed text-ink"
+          >
+            {config ? configSnippet(config) : "..."}
+          </pre>
+        )}
       </section>
 
       <section className="py-4">

@@ -13,6 +13,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 
 // These drive userEvent through async UI settles — 67 findBy* awaits across 47
 // tests — so the wall-clock profile is the file, not one test (#372).
@@ -50,6 +51,7 @@ import type {
   ReadWorkspaceTextPayload,
   ReadEngineMomentResult,
   SetPluginWebAppBoundsPayload,
+  RebuildEngineStoreResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
@@ -131,10 +133,12 @@ const SYNC_STATUS: SyncStatusResult = {
   state: "synced",
   pendingChangeCount: 0,
   lastSyncedAtMs: null,
-  // Required on the contract (#505, #540): every status states whether the
-  // recorder failed to build and whether the workspace is a shared view.
+  // Required on the contract (#505, #540, #874): every status states whether
+  // the recorder failed to build, whether the workspace is a shared view,
+  // and whether the engine refused the workspace's data store.
   historyRecordingUnavailable: false,
   historyShareView: false,
+  liveSessionsGeneration: 0,
 };
 
 const IDLE_UPDATE_STATE: UpdateStateEvent = {
@@ -281,14 +285,16 @@ for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((r, fail) => {
     resolve = r;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
-  let activityCallback: (() => void) | null = null;
+  const activityCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
   let pluginPanelOpenedCallback:
@@ -298,7 +304,9 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     | ((event: PluginWebAppOpenedEvent) => void)
     | null = null;
   return {
-    emitWorkspaceActivity: () => activityCallback?.(),
+    emitWorkspaceActivity: () => {
+      for (const callback of [...activityCallbacks]) callback();
+    },
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
       pluginPanelOpenedCallback?.(event),
@@ -322,6 +330,13 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     })),
     openWorkspace: vi.fn(async () => SYNC_STATUS),
     getSyncStatus: vi.fn(async () => SYNC_STATUS),
+    // #874: the refused-store rebuild. Typed to the contract, not to this
+    // default: the recovery tests swap in the no-clobber refusal.
+    rebuildEngineStore: vi.fn(
+      async (): Promise<RebuildEngineStoreResult> => ({
+        outcome: "moved",
+      }),
+    ),
     // Typed to the contract, not to this idle default: a freshness test drives
     // a real running agent through it.
     getAgentRunStatus: vi.fn(
@@ -547,9 +562,9 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       }),
     ),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
-      activityCallback = callback;
+      activityCallbacks.add(callback);
       return () => {
-        activityCallback = null;
+        activityCallbacks.delete(callback);
       };
     }),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
@@ -5977,6 +5992,590 @@ describe("ui-state merge-on-load", () => {
   });
 });
 
+// #874: a data store the engine refuses gets a real recovery, not a dead
+// generic error. The notice explains what was found; the rebuild is explicit
+// (a confirmed click), states the destination BEFORE anything moves, and the
+// success copy names the reverse path.
+describe("engine store recovery", () => {
+  const refusedStatus = {
+    ...SYNC_STATUS,
+    historyCaptureFailed: true as const,
+    engineStoreRefused: "unsupported-fingerprint" as const,
+  };
+
+  async function openRebuildDialog(bridge: ReturnType<typeof makeBridge>) {
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(
+      within(
+        await screen.findByTestId("notice-engine-store-refused"),
+      ).getByRole("button", { name: "Rebuild" }),
+    );
+    return { user, dialog: await screen.findByTestId("engine-rebuild-dialog") };
+  }
+
+  it("keeps focus in the dialog during the move and restores it after close", async () => {
+    const decision = deferred<RebuildEngineStoreResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(() => decision.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const trigger = await screen.findByTestId("notice-center-toggle");
+    await user.click(trigger);
+    await user.click(
+      within(
+        await screen.findByTestId("notice-engine-store-refused"),
+      ).getByRole("button", { name: "Rebuild" }),
+    );
+
+    const dialog = await screen.findByTestId("engine-rebuild-dialog");
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    expect(
+      (within(dialog).getByRole("button", {
+        name: "Cancel",
+      }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (within(dialog).getByRole("button", {
+        name: "Moving",
+      }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    await user.tab();
+
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(dialog);
+
+    await act(async () => {
+      decision.resolve({ outcome: "moved" });
+      await decision.promise;
+    });
+    const done = await within(dialog).findByRole("button", { name: "Done" });
+    expect(document.activeElement).toBe(done);
+    await user.click(done);
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it("confirms before moving, then shows a moved result and its reverse path", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    // A partial move completed during reopen has this same result.
+    bridge.rebuildEngineStore = vi.fn(async () => ({
+      outcome: "moved" as const,
+    }));
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    expect(
+      screen.getByRole("dialog", {
+        name: "Move the old data store aside and rebuild?",
+      }),
+    ).toBe(dialog);
+
+    // The user learns what moves, where it goes, and what does NOT come
+    // back, before anything moves.
+    expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
+    expect(dialog.textContent).toContain(
+      "The old data store stays in the backup location. History and chats stored only there will not appear in the rebuilt workspace. Your workspace files stay in place.",
+    );
+    expect(bridge.rebuildEngineStore).not.toHaveBeenCalled();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    expect(bridge.rebuildEngineStore).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+    });
+    // The reverse path, named in the success copy (product invariant: every
+    // reversible state change shows its reverse).
+    await waitFor(() => {
+      expect(
+        screen.getByRole("dialog", { name: "Data store moved" }),
+      ).toBe(dialog);
+      expect(
+        screen.getByTestId("engine-rebuild-dialog").textContent,
+      ).toContain(`The old data store is at ${ENGINE_STORE_BACKUP_DIR}`);
+    });
+  });
+
+  it.each([
+    {
+      cause: "unsupported-fingerprint" as const,
+      sentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+      otherSentence: "dohc cannot read this workspace's data store.",
+    },
+    {
+      cause: "foreign-database" as const,
+      sentence: "dohc cannot read this workspace's data store.",
+      otherSentence:
+        "This workspace's data store is not in the format this version of dohc uses.",
+    },
+  ])("names the $cause refusal in the confirm dialog", async ({
+    cause,
+    sentence,
+    otherSentence,
+  }) => {
+    const status = { ...refusedStatus, engineStoreRefused: cause };
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+
+    const { dialog } = await openRebuildDialog(bridge);
+
+    expect(dialog.textContent).toContain(sentence);
+    expect(dialog.textContent).not.toContain(otherSentence);
+    expect(dialog.textContent).not.toContain("older");
+    expect(dialog.textContent).not.toContain("not created by dohc");
+  });
+
+  it(
+    "reopens a mounted live document after a successful rebuild and sends the next edit to the fresh session",
+    async () => {
+      const rebuild = deferred<RebuildEngineStoreResult>();
+      let liveSessionsGeneration = 0;
+      const bridge = makeEngineBridge(
+        Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+      );
+      bridge.openWorkspace = vi.fn(async () => ({
+        ...refusedStatus,
+        liveSessionsGeneration,
+      }));
+      bridge.getSyncStatus = vi.fn(async () => ({
+        ...refusedStatus,
+        liveSessionsGeneration,
+      }));
+      bridge.rebuildEngineStore = vi.fn(() => rebuild.promise);
+      const sessionIds: string[] = [];
+      const openEngineYDocSession = vi.fn(
+        async (payload: { sessionId: string }) => {
+          sessionIds.push(payload.sessionId);
+          const doc = markdownToYDoc("# Doc\n");
+          return {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(doc),
+            lineageGeneration: 1,
+          };
+        },
+      );
+      const applyEngineYDocUpdate = vi.fn(
+        async (_payload: { sessionId: string }) => ({ accepted: true as const }),
+      );
+      const closeEngineYDocSession = vi.fn(async () => undefined);
+      Object.assign(bridge, {
+        openEngineYDocSession,
+        applyEngineYDocUpdate,
+        closeEngineYDocSession,
+        onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+        onEngineYDocSaveState: vi.fn(() => () => undefined),
+        onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+        acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+          updates: [],
+        })),
+      });
+      const { user, dialog } = await openRebuildDialog(bridge);
+      await screen.findByTestId(
+        "markdown-source-toggle",
+        {},
+        { timeout: 5_000 },
+      );
+      await waitFor(() =>
+        expect(openEngineYDocSession).toHaveBeenCalledTimes(1),
+      );
+
+      await user.click(
+        within(dialog).getByRole("button", { name: "Move and rebuild" }),
+      );
+      await waitFor(() =>
+        expect(bridge.rebuildEngineStore).toHaveBeenCalledOnce(),
+      );
+      expect(openEngineYDocSession).toHaveBeenCalledTimes(1);
+      expect(closeEngineYDocSession).not.toHaveBeenCalled();
+
+      await act(async () => {
+        liveSessionsGeneration += 1;
+        bridge.emitWorkspaceActivity();
+        rebuild.resolve({ outcome: "moved" });
+        await rebuild.promise;
+      });
+
+      await waitFor(() =>
+        expect(openEngineYDocSession).toHaveBeenCalledTimes(2),
+      );
+      expect(closeEngineYDocSession).toHaveBeenCalledTimes(1);
+      expect(
+        closeEngineYDocSession.mock.invocationCallOrder[0],
+      ).toBeLessThan(openEngineYDocSession.mock.invocationCallOrder[1]!);
+
+      applyEngineYDocUpdate.mockClear();
+      await user.type(screen.getByTestId("page-title"), " after rebuild");
+      await waitFor(() => expect(applyEngineYDocUpdate).toHaveBeenCalled());
+      expect(applyEngineYDocUpdate.mock.calls.at(-1)?.[0].sessionId).toBe(
+        sessionIds[1],
+      );
+    },
+  );
+
+  it("remounts live editors in every shell when one shell rebuilds the workspace", async () => {
+    const rebuild = deferred<RebuildEngineStoreResult>();
+    let liveSessionsGeneration = 0;
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    bridge.openWorkspace = vi.fn(async () => ({
+      ...refusedStatus,
+      liveSessionsGeneration,
+    }));
+    bridge.getSyncStatus = vi.fn(async () => ({
+      ...refusedStatus,
+      liveSessionsGeneration,
+    }));
+    bridge.rebuildEngineStore = vi.fn(() => rebuild.promise);
+    const openedSessions: Array<{
+      path: string;
+      sessionId: string;
+      workspaceId: string;
+    }> = [];
+    const openEngineYDocSession = vi.fn(
+      async (payload: {
+        path: string;
+        sessionId: string;
+        workspaceId: string;
+      }) => {
+        openedSessions.push(payload);
+        const doc = markdownToYDoc("# Doc\n");
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
+      },
+    );
+    const closeEngineYDocSession = vi.fn(
+      async (_payload: { sessionId: string }) => undefined,
+    );
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession,
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const first = render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
+    bridge.getWorkspaceUiState.mockResolvedValue(
+      storedStateWithTabs(["b.md"], "b.md"),
+    );
+    const second = render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+    expect(openedSessions.slice(0, 2).map(({ path }) => path).sort()).toEqual([
+      "a.md",
+      "b.md",
+    ]);
+
+    const user = userEvent.setup();
+    await user.click(
+      await within(first.container).findByTestId("notice-center-toggle"),
+    );
+    await user.click(
+      within(
+        await within(first.container).findByTestId(
+          "notice-engine-store-refused",
+        ),
+      ).getByRole("button", { name: "Rebuild" }),
+    );
+    await user.click(
+      within(
+        within(first.container).getByTestId("engine-rebuild-dialog"),
+      ).getByRole("button", { name: "Move and rebuild" }),
+    );
+    await waitFor(() => expect(bridge.rebuildEngineStore).toHaveBeenCalledOnce());
+
+    const originalSessionIds = openedSessions
+      .slice(0, 2)
+      .map(({ sessionId }) => sessionId)
+      .sort();
+    await act(async () => {
+      liveSessionsGeneration = 1;
+      bridge.emitWorkspaceActivity();
+      rebuild.resolve({ outcome: "moved" });
+      await rebuild.promise;
+    });
+
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(closeEngineYDocSession).toHaveBeenCalledTimes(2));
+    expect(
+      closeEngineYDocSession.mock.calls
+        .map(([payload]) => payload.sessionId)
+        .sort(),
+    ).toEqual(originalSessionIds);
+    expect(
+      openedSessions.slice(2).map(({ path }) => path).sort(),
+    ).toEqual(["a.md", "b.md"]);
+    expect(
+      openedSessions
+        .slice(2)
+        .map(({ sessionId }) => sessionId)
+        .sort(),
+    ).not.toEqual(originalSessionIds);
+    second.unmount();
+  });
+
+  it("baselines the live-session generation when the shell switches workspaces", async () => {
+    const workspaceB: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-shell-b",
+      rootPath: "/home/ice/dohc/b",
+    };
+    let currentStatus: SyncStatusResult = {
+      ...SYNC_STATUS,
+      liveSessionsGeneration: 5,
+    };
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    bridge.openWorkspace = vi.fn(async () => currentStatus);
+    bridge.getSyncStatus = vi.fn(async () => currentStatus);
+    const openEngineYDocSession = vi.fn(
+      async (_payload: { workspaceId: string }) => {
+        const doc = markdownToYDoc("# Doc\n");
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
+      },
+    );
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    });
+    const view = renderShell(bridge, WORKSPACE, [WORKSPACE, workspaceB]);
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
+
+    currentStatus = { ...SYNC_STATUS, liveSessionsGeneration: 0 };
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={workspaceB}
+        workspaces={[WORKSPACE, workspaceB]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        openEngineYDocSession.mock.calls.filter(
+          ([payload]) => payload.workspaceId === workspaceB.workspaceId,
+        ),
+      ).toHaveLength(1),
+    );
+    await waitFor(() =>
+      expect(bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: workspaceB.workspaceId,
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      openEngineYDocSession.mock.calls.filter(
+        ([payload]) => payload.workspaceId === workspaceB.workspaceId,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps a mounted live document on its current session when the rebuild rejects", async () => {
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => {
+      throw new Error("The store was not refused");
+    });
+    const openEngineYDocSession = vi.fn(async () => {
+      const doc = markdownToYDoc("# Doc\n");
+      return {
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        lineageGeneration: 1,
+      };
+    });
+    const closeEngineYDocSession = vi.fn(async () => undefined);
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession,
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    });
+    const { user, dialog } = await openRebuildDialog(bridge);
+    await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain("The store was not refused");
+    await waitFor(() => expect(closeEngineYDocSession).not.toHaveBeenCalled());
+    expect(openEngineYDocSession).toHaveBeenCalledOnce();
+  });
+
+  it("refuses to write over an existing backup and says what to do", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => ({
+      outcome: "backup-exists" as const,
+    }));
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    await waitFor(() => {
+      const text = screen.getByTestId("engine-rebuild-dialog").textContent;
+      expect(text).toContain(
+        "A file or folder already exists at .dohc/engine/pre-v2-backup",
+      );
+      expect(text).toContain("Move it away, then try again.");
+    });
+  });
+
+  it("reports a completed move and a reopen failure separately", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => ({
+      outcome: "moved" as const,
+      reopenFailed:
+        "dohc could not finish rebuilding this workspace's data store.",
+    }));
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+
+    await waitFor(() => {
+      const text = screen.getByTestId("engine-rebuild-dialog").textContent;
+      expect(text).toContain(
+        "The old data store is at .dohc/engine/pre-v2-backup",
+      );
+      expect(text).toContain(
+        "dohc could not finish rebuilding this workspace's data store.",
+      );
+      expect(text).not.toContain("could not move");
+    });
+  });
+
+  it("surfaces a failed move in the shell error banner", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(async () => {
+      throw new Error("EACCES: permission denied");
+    });
+    const { user, dialog } = await openRebuildDialog(bridge);
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    expect(
+      (await screen.findByTestId("workspace-shell-error")).textContent,
+    ).toContain(
+      "dohc could not move this workspace's data store. EACCES: permission denied",
+    );
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+  });
+
+  it("clears rebuild state in the first render for a new workspace and discards the old response", async () => {
+    const decision = deferred<RebuildEngineStoreResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(() => decision.promise);
+    const workspaceB: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-shell-b",
+      rootPath: "/home/ice/dohc/b",
+    };
+    const user = userEvent.setup();
+    const view = renderShell(bridge, WORKSPACE, [WORKSPACE, workspaceB]);
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(
+      within(await screen.findByTestId("notice-engine-store-refused")).getByRole(
+        "button",
+        { name: "Rebuild" },
+      ),
+    );
+    await user.click(
+      within(screen.getByTestId("engine-rebuild-dialog")).getByRole("button", {
+        name: "Move and rebuild",
+      }),
+    );
+    expect(screen.getByTestId("engine-rebuild-dialog").textContent).toContain(
+      "Moving",
+    );
+
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={workspaceB}
+        workspaces={[WORKSPACE, workspaceB]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+
+    await act(async () => {
+      decision.reject(new Error("Workspace A rebuild failed"));
+      await decision.promise.catch(() => undefined);
+    });
+    expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
+    expect(
+      screen.queryByTestId("workspace-shell-error")?.textContent ?? "",
+    ).not.toContain("Workspace A rebuild failed");
+  });
+});
+
 describe("workspace shell errors", () => {
   it("reports openWorkspace failures instead of leaving an unhandled rejection", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -8597,6 +9196,28 @@ describe("history page", () => {
     await waitFor(() =>
       expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(statusCalls),
     );
+    expect(bridge.listEngineMoments).not.toHaveBeenCalled();
+  });
+
+  it("never asks a refused store for engine moments", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    const refusedStatus = {
+      ...SYNC_STATUS,
+      historyCaptureFailed: true as const,
+      engineStoreRefused: "foreign-database" as const,
+    };
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
+
     expect(bridge.listEngineMoments).not.toHaveBeenCalled();
   });
 
@@ -12117,6 +12738,7 @@ describe("version-compare off copy", () => {
     state: "synced" as const,
     pendingChangeCount: 0,
     lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
     historyRecordingUnavailable: false,
     historyShareView: false,
   };
@@ -12180,6 +12802,7 @@ describe("chats off copy", () => {
     state: "synced" as const,
     pendingChangeCount: 0,
     lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
     historyRecordingUnavailable: false,
     historyShareView: false,
   };
@@ -13599,6 +14222,38 @@ describe("drawing entry point", () => {
     expect(await within(right).findByTestId("tab-Untitled.excalidraw")).toBeTruthy();
     expect(within(left).queryByTestId("tab-Untitled.excalidraw")).toBeNull();
     expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
+  });
+});
+
+describe("unavailable MCP launcher settings", () => {
+  it("shows the launcher error without a copyable config", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getMcpConfig = vi.fn(
+      async (): Promise<McpConfigResult> => ({
+        unavailable: true,
+        message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+
+    expect((await screen.findByTestId("mcp-unavailable")).textContent).toBe(
+      "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+    );
+    expect(screen.queryByTestId("mcp-config-snippet")).toBeNull();
+    const configSection = screen.getByRole("heading", { name: "MCP config" }).closest("section");
+    if (!configSection) throw new Error("The MCP config section did not render.");
+    expect(
+      (within(configSection).getByRole("button", { name: "Copy" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 });
 
