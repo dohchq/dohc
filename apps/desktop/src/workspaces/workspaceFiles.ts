@@ -12,6 +12,7 @@ import {
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
+  type FsEntryIdentity,
 } from "@dohc/workspace-core";
 // The engine path floor is a CROSS-PROCESS security contract, not engine
 // state: it has a deliberate Rust twin at crates/dohc-engine-files/src/policy.rs
@@ -21,7 +22,7 @@ import {
 // interaction here -- an RPC would add a failure mode where today there is none.
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { randomUUID } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -482,9 +483,9 @@ type LadderStop = "gone" | "replaced" | "unchecked";
  * `null` means "same entry, carry on".
  */
 export function classifyLadderProbe(
-  started: { ino: number; dev: number } | null,
+  started: FsEntryIdentity | null,
   probe:
-    | { looked: true; now: { ino: number; dev: number } }
+    | { looked: true; now: FsEntryIdentity }
     | { looked: false; code: string | undefined },
 ): LadderStop | null {
   // No starting identity means there is nothing to compare against, so the
@@ -500,9 +501,9 @@ export function classifyLadderProbe(
 
 async function ladderStop(
   target: string,
-  started: Stats | null,
+  started: FsEntryIdentity | null,
 ): Promise<LadderStop | null> {
-  const probe = await lstat(target).then(
+  const probe = await lstat(target, { bigint: true }).then(
     (now) => ({ looked: true as const, now }),
     (error: unknown) => ({
       looked: false as const,
@@ -983,7 +984,7 @@ export async function moveIntoWorkspaceTrash(
   // next rung would move the replacement into the trash and report the delete
   // done -- for a file the user never selected. Re-reading this per rung would
   // compare the source with itself and reopen the window.
-  const started = await lstat(target).catch(() => null);
+  const started = await lstat(target, { bigint: true }).catch(() => null);
   let moveError: unknown = null;
   for (const [rung, candidate] of plan.candidates.entries()) {
     if (rung > 0) {

@@ -35,6 +35,7 @@ import {
   type DohcPathGuard,
   type DohcSiteConfig,
   type FileChange,
+  type FsEntryIdentity,
   type PackageJson,
   type SiteConfidence,
   type SiteDiagnostic,
@@ -443,7 +444,7 @@ type Aftermath = "replaced" | "gone" | "unchecked" | "undetermined";
 // Positive evidence only, for the warning after a failed move: "unknown" is
 // not evidence of a replacement and must not read as one. The rule itself is
 // shared with the desktop, which runs the same ladder over the same trash.
-function replacedSince(before: Stats, after: Stats): boolean {
+function replacedSince(before: FsEntryIdentity, after: FsEntryIdentity): boolean {
   return sameFsEntry(before, after) === "replaced";
 }
 
@@ -456,8 +457,8 @@ function replacedSince(before: Stats, after: Stats): boolean {
 // "unknown" stops the ladder too. A filesystem with no inode to give cannot
 // prove sameness, and the costs are not symmetric: a wrong refusal costs a
 // retry, a wrong success trashes the wrong file and says it is done.
-async function sourceUnchangedSince(absolute: string, before: Stats): Promise<Aftermath> {
-  return lstat(absolute).then(
+async function sourceUnchangedSince(absolute: string, before: FsEntryIdentity): Promise<Aftermath> {
+  return lstat(absolute, { bigint: true }).then(
     (now) => {
       const identity = sameFsEntry(before, now);
       return identity === "same" ? "undetermined" : identity === "replaced" ? "replaced" : "unchecked";
@@ -1248,7 +1249,7 @@ export async function deleteWorkspacePath(
   // answers EACCES for a file that is right there, and an agent told that file
   // is gone would stop looking for it -- the same lie in the opposite
   // direction. Every other code keeps its own failure.
-  const source = await lstat(resolved.absolute).then(
+  const source = await lstat(resolved.absolute, { bigint: true }).then(
     (stats) => ({ found: true as const, stats }),
     (error: unknown) => ({ found: false as const, code: errnoCode(error) ?? "no errno" }),
   );
@@ -1352,7 +1353,7 @@ export async function deleteWorkspacePath(
     // path between the check above and this rename.
     const after =
       aborted ??
-      (await lstat(resolved.absolute).then(
+      (await lstat(resolved.absolute, { bigint: true }).then(
         (stats) => (replacedSince(source.stats, stats) ? "replaced" : "undetermined"),
         (probe: unknown) => (errnoCode(probe) === "ENOENT" ? "gone" : "unchecked"),
       ));

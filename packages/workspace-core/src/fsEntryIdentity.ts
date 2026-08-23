@@ -13,14 +13,15 @@
 
 /** The parts of a stat that identify one filesystem entry. */
 export interface FsEntryIdentity {
-  ino: number;
-  dev: number;
+  ino: bigint;
+  dev: bigint;
 }
 
 /**
  * `ino` + `dev` identify an entry on every filesystem dohc ships to: NTFS
  * supplies the file index and the volume serial number, ext4 and APFS the
- * inode and device.
+ * inode and device. They stay as bigint because NTFS file indexes can exceed
+ * Number's safe range and collapse distinct entries onto the same value.
  *
  * An inode of `0` is a filesystem saying it has none to give, so it proves
  * neither sameness nor difference. That is "unknown", never "same" -- a caller
@@ -32,6 +33,6 @@ export function sameFsEntry(
   before: FsEntryIdentity,
   after: FsEntryIdentity,
 ): "same" | "replaced" | "unknown" {
-  if (before.ino === 0 || after.ino === 0) return "unknown";
+  if (before.ino === 0n || after.ino === 0n) return "unknown";
   return before.ino === after.ino && before.dev === after.dev ? "same" : "replaced";
 }
