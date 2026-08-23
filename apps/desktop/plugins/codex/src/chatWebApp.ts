@@ -87,6 +87,9 @@ function errorMessage(error: unknown): string {
 // rather than the desktop's, and cloud-aware tools have no runtime
 // environment. See both plugins' README.md.
 function mcpConfig(workspaceRoot: string): { command: string; args: string[] } {
+  if (process.env.DOHC_MCP_COMMAND_UNAVAILABLE === "1") {
+    throw new Error("dohc could not prepare its MCP launcher. Restart dohc to try again.");
+  }
   return {
     command: process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp",
     args: ["--workspace", workspaceRoot],

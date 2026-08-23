@@ -296,6 +296,11 @@ export function resolveDohcCliBinDirectory(input: {
  * exists on no user's PATH. Dev keeps the bare name: the workspace's
  * node_modules/.bin provides it. DOHC_MCP_COMMAND stays the explicit
  * override either way.
+ *
+ * A packaged Linux AppImage returns null when its persistent cli-bin copy
+ * is unavailable. The caller must not write a command in that case: the
+ * fallback resources path is inside the AppImage's temporary FUSE mount and
+ * must never reach a config file or a spawned process's environment.
  */
 export function resolveDohcMcpCommand(input: {
   isPackaged: boolean;
@@ -303,17 +308,19 @@ export function resolveDohcMcpCommand(input: {
   platform?: NodeJS.Platform;
   env?: Record<string, string | undefined>;
   linuxStableCliBinDir?: string;
-}): string {
-  const override = (input.env ?? process.env).DOHC_MCP_COMMAND?.trim();
+}): string | null {
+  const env = input.env ?? process.env;
+  const override = env.DOHC_MCP_COMMAND?.trim();
   if (override) return override;
   if (!input.isPackaged) return "dohc-mcp";
   const platform = input.platform ?? process.platform;
-  const cliBinDir =
-    platform === "linux" &&
-    (input.env ?? process.env).APPIMAGE &&
-    input.linuxStableCliBinDir
-      ? input.linuxStableCliBinDir
-      : resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
+  let cliBinDir: string;
+  if (platform === "linux" && env.APPIMAGE !== undefined) {
+    if (!input.linuxStableCliBinDir) return null;
+    cliBinDir = input.linuxStableCliBinDir;
+  } else {
+    cliBinDir = resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
+  }
   return join(
     cliBinDir,
     platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp",

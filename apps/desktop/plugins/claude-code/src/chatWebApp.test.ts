@@ -324,6 +324,7 @@ async function start(
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(runningApps.splice(0).map((app) => app.deactivate().catch(() => undefined)));
 });
 
@@ -1333,6 +1334,24 @@ describe("Claude Code chat web app", () => {
       reason: "Claude Code failed to spawn.",
     });
     await reattached.close();
+  });
+
+  it("publishes one fatal error when the MCP launcher is unavailable", async () => {
+    vi.stubEnv("DOHC_MCP_COMMAND_UNAVAILABLE", "1");
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    expect(await stream.next()).toEqual({ kind: "session-state", state: "closed" });
+
+    expect((await post(url, "message", { text: "Hello" }, token)).status).toBe(503);
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      fatal: true,
+    });
+    expect(await raceTimeout(stream.next(), 200)).toBe("timeout");
+    expect(fake.startInputs).toHaveLength(0);
+    await stream.close();
   });
 
   it("renders exactly one boundary card for a startup failure, not the driver's own closed plus our fatal error", async () => {

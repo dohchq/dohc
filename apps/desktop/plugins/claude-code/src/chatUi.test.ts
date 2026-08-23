@@ -443,6 +443,86 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(stopButton.disabled).toBe(false);
   });
 
+  it("keeps Send disabled through handshake states until the pending turn completes", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageEntered = deferred();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/message") throw new Error(`Unexpected fetch: ${url}`);
+      messageEntered.resolve();
+      return messageResponse.promise;
+    }) as typeof fetch;
+
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    await messageEntered.promise;
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, { kind: "session-state", state: "starting" });
+    expect(sendButton.disabled).toBe(true);
+    sendEvent(eventSource, { kind: "session-state", state: "ready" });
+    expect(sendButton.disabled).toBe(true);
+
+    messageResponse.resolve(new Response(null, { status: 202 }));
+    await messageResponse.promise;
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, { kind: "turn-completed" });
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it("keeps Stop disabled when the session closes before a delayed successful stop response", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopEntered = deferred();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/stop") throw new Error(`Unexpected fetch: ${url}`);
+      stopEntered.resolve();
+      return stopResponse.promise;
+    }) as typeof fetch;
+
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    stopButton.click();
+    await stopEntered.promise;
+    expect(stopButton.disabled).toBe(true);
+
+    sendEvent(eventSource, { kind: "session-state", state: "closed", reason: "Session ended." });
+    expect(stopButton.disabled).toBe(true);
+
+    stopResponse.resolve(new Response(null, { status: 200 }));
+    await stopResponse.promise;
+    expect(stopButton.disabled).toBe(true);
+  });
+
+  it("ignores a delayed stop failure after the session has closed", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopEntered = deferred();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/stop") throw new Error(`Unexpected fetch: ${url}`);
+      stopEntered.resolve();
+      return stopResponse.promise;
+    }) as typeof fetch;
+
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    stopButton.click();
+    await stopEntered.promise;
+    expect(stopButton.disabled).toBe(true);
+
+    sendEvent(eventSource, { kind: "session-state", state: "closed", reason: "Session ended." });
+    expect(stopButton.disabled).toBe(true);
+    const errorCardsBefore = document.querySelectorAll(".error-card").length;
+
+    stopResponse.resolve(new Response(null, { status: 500 }));
+    await stopResponse.promise;
+    expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore);
+    expect(stopButton.disabled).toBe(true);
+  });
+
   it("keeps Send enabled when a stopped turn completes before its delayed acceptance arrives", async () => {
     const { eventSource } = await loadChatModule();
     const messageEntered = deferred();

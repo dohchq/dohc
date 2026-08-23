@@ -2793,6 +2793,17 @@ describe("chatDispatchService", () => {
       ).toBe(join(resolve(resourcesPath), "cli-bin", "dohc-mcp"));
     });
 
+    it("returns unavailable instead of exposing a packaged AppImage mount path", () => {
+      expect(
+        resolveDohcMcpCommand({
+          isPackaged: true,
+          resourcesPath: "/tmp/.mount_dohcAbC123/resources",
+          platform: "linux",
+          env: { APPIMAGE: "/home/user/Downloads/dohc-1.2.3-linux-x86_64.AppImage" },
+        }),
+      ).toBeNull();
+    });
+
     it("keeps the workspace bin in dev and the DOHC_MCP_COMMAND override everywhere", () => {
       expect(resolveDohcMcpCommand({ isPackaged: false, env: {} })).toBe("dohc-mcp");
       expect(

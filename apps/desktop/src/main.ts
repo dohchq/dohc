@@ -1072,6 +1072,19 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
     spawnTransport: (callbacks) => {
+      const dohcMcpCommand = resolveDohcMcpCommand({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        linuxStableCliBinDir,
+      });
+      const pluginHostEnv = { ...process.env };
+      if (dohcMcpCommand === null) {
+        delete pluginHostEnv.DOHC_MCP_COMMAND;
+        pluginHostEnv.DOHC_MCP_COMMAND_UNAVAILABLE = "1";
+      } else {
+        pluginHostEnv.DOHC_MCP_COMMAND = dohcMcpCommand;
+        delete pluginHostEnv.DOHC_MCP_COMMAND_UNAVAILABLE;
+      }
       const child = utilityProcess.fork(
         join(import.meta.dirname, "plugin-host.js"),
         [],
@@ -1079,19 +1092,12 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
           cwd: callbacks.pluginRoot,
           serviceName: "dohc-plugin-host",
           stdio: ["ignore", "ignore", "pipe"],
-          env: {
-            ...process.env,
-            // The driver plugins' chat session configs read this seam for
-            // the dohc-mcp command they hand the user's AI tool. Resolved
-            // here because only main knows whether this install is packaged
-            // (and where its shipped cli-bin launcher lives); the resolver
-            // keeps an explicit DOHC_MCP_COMMAND override first.
-            DOHC_MCP_COMMAND: resolveDohcMcpCommand({
-              isPackaged: app.isPackaged,
-              resourcesPath: process.resourcesPath,
-              linuxStableCliBinDir,
-            }),
-          },
+          // The driver plugins' chat session configs read this seam for the
+          // dohc-mcp command they hand the user's AI tool. Only main knows
+          // whether this install is packaged and where its stable launcher
+          // lives. If that launcher is unavailable, the host gets an explicit
+          // marker and no command it could leak into a spawned process.
+          env: pluginHostEnv,
         },
       );
       return createPluginUtilityTransport(child, callbacks);
@@ -2263,20 +2269,24 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const MCP_LAUNCHER_UNAVAILABLE_MESSAGE =
+  "dohc could not prepare its MCP launcher. Restart dohc to try again.";
+
 function mcpConfigFor(
   rootPath: string,
   shareAccess: ShareAccess | null,
-): {
-  command: string;
-  args: string[];
-  workspacePath: string;
-  home: string;
-} {
+): McpConfigResult {
   const command = resolveDohcMcpCommand({
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     linuxStableCliBinDir,
   });
+  if (command === null) {
+    return {
+      unavailable: true,
+      message: MCP_LAUNCHER_UNAVAILABLE_MESSAGE,
+    };
+  }
   const home = stateDir();
   const args = ["--workspace", rootPath, "--home", home];
   // A share view hands out the MCP profile for its level (#646): the launched
@@ -2302,6 +2312,7 @@ async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   // but if a runtime MCP is ever spawned for one it must carry the share's
   // level — never the full local profile.
   const config = mcpConfigFor(rootPath, mcpShareAccessOf(workspace?.shareView));
+  if ("unavailable" in config) throw new Error(config.message);
   const env = mcpCloudEnvironment({
     workspace,
     credentials: cachedCredentials,

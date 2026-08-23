@@ -58,10 +58,26 @@ let turnActive = false;
 // once a fresher session-state fact has already superseded it.
 let stateVersion = 0;
 
-// `submitting` is a one-call admission guard, not another stored state. It
-// blocks duplicate submits only while /message has not settled.
-function updateSendAvailability(submitting = false) {
-  sendButton.disabled = turnActive || submitting;
+// The id of the most recent /message request whose own turn has not yet
+// been PROVEN settled -- 0 when none is outstanding. A 202 alone is not
+// proof (the turn may not even be running yet); only a session-state
+// transition out of a genuine `running`, the session ending, or a
+// turn-completed event clears it (see setSessionState and the
+// turn-completed case below). This is what a bare `submitting` flag
+// couldn't be: that guard only applied for the single synchronous call at
+// submit time, and any later, unrelated updateSendAvailability() call (a
+// starting/ready event mid-handshake, for instance) silently dropped it,
+// leaving Send clickable a second time while the first request was still
+// awaiting its own response.
+let pendingSendId = 0;
+let nextSendId = 0;
+
+function updateSendAvailability() {
+  sendButton.disabled = turnActive || pendingSendId !== 0;
+}
+
+function clearPendingSend() {
+  pendingSendId = 0;
 }
 
 // `at` is the server's own publish time (every event carries it); replaying
@@ -135,7 +151,18 @@ function setSessionState(state, reason, options = {}) {
   statePill.textContent = label;
   statePill.dataset.state = state;
   stopButton.disabled = state === "closed" || state === "error";
+  const wasActive = turnActive;
   turnActive = state === "running";
+  // A pending send is proven settled by the session ending outright
+  // (closed/error -- whatever it was waiting on no longer matters), or by
+  // a turn that really was running just stopping being active. A
+  // `starting`/`ready` reached WITHOUT ever having been running first (the
+  // ordinary handshake before this send's own turn has started) must NOT
+  // clear it -- that gap is exactly what let Send be clicked a second time
+  // before the server had even accepted the first attempt.
+  if (state === "closed" || state === "error" || (wasActive && !turnActive)) {
+    clearPendingSend();
+  }
   updateSendAvailability();
   // The initial connection snapshot applies to the pill only: the log
   // replay right behind it (or a live event still to come) is what
@@ -424,6 +451,12 @@ function renderEvent(event) {
         : event.used + " tokens used";
       break;
     case "turn-completed":
+      // A turn-completed event is definitive proof this send's turn ran,
+      // even on the rare path where turnActive itself never became true
+      // (a 202 landing behind a fresher handshake event never gets to set
+      // it -- see the composer submit handler below). Cleared explicitly
+      // rather than relying only on setSessionState's wasActive check.
+      clearPendingSend();
       setSessionState("ready");
       // The session itself is still alive (the pill just went back to
       // Ready), so the next action is a retry -- "start a new session"
@@ -520,7 +553,9 @@ composer.addEventListener("submit", async (event) => {
   card.dataset.pending = "true";
   pendingMessages.set(clientId, card);
   messageInput.value = "";
-  updateSendAvailability(true);
+  const sendId = ++nextSendId;
+  pendingSendId = sendId;
+  updateSendAvailability();
   const stateVersionAtSend = stateVersion;
   try {
     const response = await fetch("/message", {
@@ -529,6 +564,11 @@ composer.addEventListener("submit", async (event) => {
       body: JSON.stringify({ text, clientId }),
     });
     if (!response.ok) {
+      // This attempt never started a turn -- clear its own pending-send
+      // slot (only if a newer send hasn't already claimed it) before
+      // annotating the card, so a plain failure with no session-state
+      // event of its own doesn't leave Send stuck disabled forever.
+      if (pendingSendId === sendId) clearPendingSend();
       markMessageFailed(
         clientId,
         card,
@@ -544,9 +584,12 @@ composer.addEventListener("submit", async (event) => {
       // card; it never gets to resurrect Send once something fresher already
       // settled it.
       if (stateVersion === stateVersionAtSend) turnActive = true;
+      // pendingSendId stays set here: a 202 alone is not proof the turn
+      // ran -- only setSessionState/turn-completed above clear it.
       updateSendAvailability();
     }
   } catch {
+    if (pendingSendId === sendId) clearPendingSend();
     markMessageFailed(clientId, card, "This message was not sent. Send it again.");
   } finally {
     messageInput.focus();
@@ -562,11 +605,18 @@ messageInput.addEventListener("keydown", (event) => {
 
 stopButton.addEventListener("click", async () => {
   stopButton.disabled = true;
+  const stateVersionAtStop = stateVersion;
   try {
     const response = await fetch("/stop", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
     });
+    // A session-state fact -- the session closing, failing, or otherwise
+    // moving on -- that arrived since this click was issued already told
+    // the truth about Stop and the session. This response is stale: it
+    // must only settle a promise, never touch the button or append a card
+    // for a session this page has already explained.
+    if (stateVersion !== stateVersionAtStop) return;
     if (!response.ok) {
       stopButton.disabled = false;
       errorCard("dohc could not stop this session.");
@@ -580,6 +630,7 @@ stopButton.addEventListener("click", async () => {
     // little early alongside that is harmless.
     stopButton.disabled = false;
   } catch {
+    if (stateVersion !== stateVersionAtStop) return;
     stopButton.disabled = false;
     errorCard("dohc could not stop this session.");
   }
