@@ -50,6 +50,46 @@ describe("ShareViewFiles main-process wiring", () => {
     expect(folderAt).toBeGreaterThan(registryCatchAt);
   });
 
+  it("holds the mount lock across preflight but leases the workspace only for local mount work", () => {
+    const mount = handlerSource("mountShare");
+    const mountLockAt = mount.indexOf("return withShareMountLock(");
+    const infoAt = mount.indexOf("await fetchShareViewInfo(");
+    const exclusiveAt = mount.indexOf("return withExclusiveWorkspaceOperation(");
+    const createAt = mount.indexOf("await createMountDirectory(");
+    const reconcileAt = mount.indexOf("await shareViewFiles.reconcile(");
+
+    expect(mountLockAt).toBeGreaterThan(-1);
+    expect(infoAt).toBeGreaterThan(mountLockAt);
+    expect(exclusiveAt).toBeGreaterThan(infoAt);
+    expect(createAt).toBeGreaterThan(exclusiveAt);
+    expect(reconcileAt).toBeGreaterThan(createAt);
+
+    const refresh = handlerSource("refreshShareMounts");
+    const refreshLockAt = refresh.indexOf("return withShareMountLock(");
+    const loopAt = refresh.indexOf("for (const mount of mounts)");
+    const perMountLeaseAt = refresh.indexOf(
+      "await withExclusiveWorkspaceOperation(",
+      loopAt,
+    );
+    const refreshReconcileAt = refresh.indexOf(
+      "shareViewFiles.reconcile(",
+      perMountLeaseAt,
+    );
+
+    expect(refreshLockAt).toBeGreaterThan(-1);
+    expect(loopAt).toBeGreaterThan(refreshLockAt);
+    expect(perMountLeaseAt).toBeGreaterThan(loopAt);
+    expect(refreshReconcileAt).toBeGreaterThan(perMountLeaseAt);
+    expect(refresh.slice(refreshLockAt, loopAt)).not.toContain(
+      "withExclusiveWorkspaceOperation(",
+    );
+
+    const unmount = handlerSource("unmountShare");
+    expect(unmount.indexOf("return withShareMountLock(")).toBeLessThan(
+      unmount.indexOf("withExclusiveWorkspaceOperation("),
+    );
+  });
+
   it("repairs available projections before disk-only reads even when status says current", () => {
     const one = functionSource(
       "async function ensureOwnedProjectionTargetCurrent(",

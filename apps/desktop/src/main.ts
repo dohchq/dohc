@@ -7570,17 +7570,15 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     // A mount changes the host tree — shared views cannot host mounts.
     assertWritableWorkspace(workspace);
-    return withExclusiveWorkspaceOperation(
-      workspace.rootPath,
-      (_markWorkspaceChanged, lease) =>
-        withShareMountLock(workspace.workspaceId, async () => {
+    return withShareMountLock(workspace.workspaceId, async () => {
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
       throw new Error("That doesn't look like a share code. Copy it again and retry.");
     }
     const credentials = await loadAndCacheCurrentCredentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first.");
-    if (!credentials.relayUrl || !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)) {
+    const relayUrl = credentials.relayUrl;
+    if (!relayUrl || !relayUrlsMatch(relayUrl, parsed.relayUrl)) {
       // Same security gate as openSharedView: the session token is only ever
       // sent to the relay this machine signed in with.
       throw new Error(
@@ -7588,7 +7586,7 @@ function registerIpcHandlers(
           `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then try again.`,
       );
     }
-    const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
+    const relay = { baseUrl: relayUrl, token: credentials.token };
     const existing = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
     if (existing.some((mount) => mount.shareId === parsed.shareId)) {
       throw new Error("This share is already added to this workspace.");
@@ -7609,7 +7607,13 @@ function registerIpcHandlers(
     }
     // A chat-channel code has no file content to mount — send the user to
     // the right surface instead of creating an empty folder.
-    assertMountableSelector(info.selector);
+    const grantedSelector = info.selector;
+    assertMountableSelector(grantedSelector);
+    // Relay preflight stays under the mount lock, but local mount state starts
+    // only after the workspace lease is held.
+    return withExclusiveWorkspaceOperation(
+      workspace.rootPath,
+      async (_markWorkspaceChanged, lease) => {
     // Label dedupe considers BOTH registry mounts and whatever is already on
     // disk under shared-with-me — a leftover or hand-made folder must never
     // be adopted (its contents would be overwritten by the pull and deleted
@@ -7624,10 +7628,10 @@ function registerIpcHandlers(
         ...onDisk,
       ]),
       granterEmail: info.granterEmail,
-      relayUrl: credentials.relayUrl,
+      relayUrl,
       recipientEmail: credentials.email ?? null,
       // Pin the selector the relay just stated (same reason as a view).
-      grantedSelector: info.selector,
+      grantedSelector,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
     let registered = false;
@@ -7722,18 +7726,16 @@ function registerIpcHandlers(
         "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
       );
     }
-        }),
+      },
     );
+    });
   });
 
   ipcMain.handle(CHANNELS.refreshShareMounts, async (event, payload) => {
     assertTrustedSender(event);
     const input = RefreshShareMountsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return withExclusiveWorkspaceOperation(
-      workspace.rootPath,
-      (_markWorkspaceChanged, lease) =>
-        withShareMountLock(workspace.workspaceId, async () => {
+    return withShareMountLock(workspace.workspaceId, async () => {
           const mounts =
             findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
           const results: Array<{
@@ -7762,14 +7764,20 @@ function registerIpcHandlers(
                 continue;
               }
               try {
-                const reconciled = await shareViewFiles.reconcile(
-                  lease,
-                  {
-                    kind: "mount",
-                    workspaceId: workspace.workspaceId,
-                    shareId: mount.shareId,
-                  },
-                  "refresh",
+                // A slow relay can hold this mount's transaction, but it must
+                // not extend one workspace lease across every mounted share.
+                const reconciled = await withExclusiveWorkspaceOperation(
+                  workspace.rootPath,
+                  (_markWorkspaceChanged, lease) =>
+                    shareViewFiles.reconcile(
+                      lease,
+                      {
+                        kind: "mount",
+                        workspaceId: workspace.workspaceId,
+                        shareId: mount.shareId,
+                      },
+                      "refresh",
+                    ),
                 );
                 if (
                   reconciled.kind !== "refresh" ||
@@ -7800,8 +7808,7 @@ function registerIpcHandlers(
           } finally {
             notifyRenderer();
           }
-        }),
-    );
+    });
   });
 
   ipcMain.handle(CHANNELS.unmountShare, async (event, payload) => {
@@ -7809,10 +7816,10 @@ function registerIpcHandlers(
     const input = UnmountSharePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    return withExclusiveWorkspaceOperation(
-      workspace.rootPath,
-      (_markWorkspaceChanged, lease) =>
-        withShareMountLock(workspace.workspaceId, async () => {
+    return withShareMountLock(workspace.workspaceId, () =>
+      withExclusiveWorkspaceOperation(
+        workspace.rootPath,
+        async (_markWorkspaceChanged, lease) => {
           const mount = (
             findWorkspace(workspace.workspaceId)?.shareMounts ?? []
           ).find((candidate) => candidate.shareId === input.shareId);
@@ -7832,7 +7839,8 @@ function registerIpcHandlers(
             ),
             ...(removed.folderLeft ? { folderLeft: true as const } : {}),
           });
-        }),
+        },
+      ),
     );
   });
 
