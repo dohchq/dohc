@@ -59,7 +59,8 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   type ActiveAgentRun,
@@ -859,7 +860,7 @@ async function digestSettledFile(
     if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
     return { kind: "unverifiable", reason: `the folder could not be read (${code ?? "unknown"})` };
   }
-  if (realParent !== realRoot && !realParent.startsWith(realRoot + sep)) {
+  if (!isInside(realRoot, realParent)) {
     return {
       kind: "unverifiable",
       reason: "the folder now resolves outside the workspace",
@@ -1342,7 +1343,7 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       realpath(resolve(rootPath)),
       realpath(absoluteDir),
     ]);
-    if (realDir !== realRoot && !realDir.startsWith(realRoot + sep)) {
+    if (!isInside(realRoot, realDir)) {
       throw new Error(`Engine write escaped the workspace root: ${absoluteDir}`);
     }
   }

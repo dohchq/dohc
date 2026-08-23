@@ -264,6 +264,10 @@ describe("mount labels", () => {
     expect(mountRootFor(host, "alex")).toBe(
       join(host, SHARED_WITH_ME_FOLDER, "alex"),
     );
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
+    expect(mountRootFor(host, "..cache")).toBe(
+      join(host, SHARED_WITH_ME_FOLDER, "..cache"),
+    );
   });
 });
 

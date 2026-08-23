@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
+import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
 import {
   CLAIMS_DRAINING_ERROR_CODE,
@@ -265,20 +266,20 @@ export function forgetWorkspaceRegistrations(
   registrations.delete(workspaceId);
 }
 
-function workspaceRelativePluginRoot(
+async function workspaceRelativePluginRoot(
   workspaceRoot: string,
   pluginRoot: string,
-): string {
+): Promise<string> {
   if (!isAbsolute(pluginRoot)) return pluginRoot;
-  const resolved = relative(workspaceRoot, pluginRoot);
-  if (resolved.length === 0) return ".";
-  if (
-    isAbsolute(resolved) ||
-    resolved === ".." ||
-    resolved.startsWith(`..${sep}`)
-  ) {
+  const [realWorkspaceRoot, realPluginRoot] = await Promise.all([
+    realpath(workspaceRoot),
+    realpath(pluginRoot),
+  ]);
+  if (!isInside(realWorkspaceRoot, realPluginRoot)) {
     throw new Error(`Plugin root escapes the workspace: ${pluginRoot}.`);
   }
+  const resolved = relative(realWorkspaceRoot, realPluginRoot);
+  if (resolved.length === 0) return ".";
   return resolved.replaceAll("\\", "/");
 }
 
@@ -288,7 +289,7 @@ async function loadValidatedPluginManifest(input: {
   pluginId: string;
   pluginRegistration?: PluginRegistrationSource;
 }): Promise<{ pluginRoot: string; manifest: DohcPluginManifest }> {
-  const requestedRoot = workspaceRelativePluginRoot(
+  const requestedRoot = await workspaceRelativePluginRoot(
     input.workspaceRoot,
     input.pluginRoot,
   );

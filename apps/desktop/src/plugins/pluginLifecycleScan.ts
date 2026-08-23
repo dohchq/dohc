@@ -16,7 +16,8 @@ import {
   NPM_PACKAGE_NAME,
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
-import { errorMessage, isInside, lexicalCompare } from "./pluginShared";
+import { isInside } from "../security/pathContainment";
+import { errorMessage, lexicalCompare } from "./pluginShared";
 
 // `prepublish` is deliberately absent. Measured against the pinned
 // pnpm@11.20.0 on 2026-08-14, with `postinstall` as the control in every

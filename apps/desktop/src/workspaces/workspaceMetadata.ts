@@ -1,5 +1,6 @@
 import { lstat, mkdir, realpath } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { join } from "node:path";
+import { isInside } from "../security/pathContainment";
 import {
   DOHC_METADATA_GUARD,
   notARealFolderRefusal,
@@ -35,9 +36,11 @@ export async function resolveWorkspaceMetadataDir(rootPath: string): Promise<str
     throw new Error(notARealFolderRefusal(DOHC_METADATA_GUARD, stats));
   }
   // Belt and braces: with the root resolved and .dohc a real directory the
-  // resolved dir IS the joined path; anything else means an escape.
+  // resolved dir IS the joined path; anything else means an escape. Proper
+  // descendant on purpose: isInside counts the root as inside, and a .dohc
+  // that resolves TO the root must stay refused.
   const realDir = await realpath(dir);
-  if (realDir !== dir && !realDir.startsWith(realRoot + sep)) {
+  if (realDir === realRoot || !isInside(realRoot, realDir)) {
     throw new Error(outsideWorkspaceRefusal(DOHC_METADATA_GUARD));
   }
   return dir;

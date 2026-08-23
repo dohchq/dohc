@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, realpath, rm } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { isInside } from "../security/pathContainment";
 // See the note in workspaceGraph.ts: the path floor is a cross-process security
 // contract with a Rust twin, not engine state. SyncRelayConnection stays on the
 // oracle -- that one IS engine surface and migrates with the relay work.
@@ -87,11 +88,8 @@ export function mountRootFor(hostRoot: string, label: string): string {
   const container = resolve(join(hostRoot, SHARED_WITH_ME_FOLDER));
   // Containment sandwich even though validMountLabel already refused
   // separators/traversal — this is the last hop before fs operations.
-  if (target !== container && !target.startsWith(`${container}${sep}`)) {
+  if (!isInside(container, target)) {
     throw new Error(`Share mount escapes shared-with-me: ${label}`);
-  }
-  if (target === container) {
-    throw new Error(`Share mount label resolves to shared-with-me itself: ${label}`);
   }
   return target;
 }

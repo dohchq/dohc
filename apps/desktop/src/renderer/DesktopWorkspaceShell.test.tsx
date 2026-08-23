@@ -892,12 +892,14 @@ describe("plugin panel tabs", () => {
     expect(screen.getByRole("tab", { name: "main" }).title).toBe(
       "hello-plugin — main",
     );
-    expect(bridge.startPluginPanel).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      pluginId: "hello-plugin",
-      panelId: "main",
-      placement: "editor",
-    });
+    await waitFor(() =>
+      expect(bridge.startPluginPanel).toHaveBeenCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        pluginId: "hello-plugin",
+        panelId: "main",
+        placement: "editor",
+      }),
+    );
 
     await user.click(screen.getByRole("button", { name: "Close main" }));
     await waitFor(() =>

@@ -10,7 +10,8 @@ import {
 import { randomUUID } from "node:crypto";
 import { appendFile, link, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
+import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceFile } from "./workspaceAssets";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
@@ -262,12 +263,6 @@ async function applyDatabaseEditNow(
   await appendFile(logAbs, serializeDatabaseOperation(operation));
 
   return readDatabaseSnapshot(rootPath, relativePath);
-}
-
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const rel = relative(parent, child);
-  return rel.length > 0 && !isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(sep);
 }
 
 // Atomically writes bytes to a NEW workspace-relative path, enforcing

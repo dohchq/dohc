@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createShareViewDaemonHarness,
@@ -24,6 +24,7 @@ import {
   clearPendingMaterializationPaths,
   clearPullInFlightMarker,
   readPendingMaterializationPaths,
+  resolvedShareViewTarget,
   SharePinInvalidError,
   materializeSharedViewPaths,
   readCollisionRecordPaths,
@@ -60,6 +61,7 @@ import { createTestScratch } from "./testTemp";
 // makes zero readdir calls, so the recursive tree walk #866 removed stays gone.
 let readdirCalls: string[] = [];
 let observeRealpath: ((path: string) => void) | null = null;
+let realpathOverride: ((path: string, resolved: string) => string | null) | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
 let collisionRecordRenameTargets: string[] = [];
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -76,7 +78,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ) => {
       const resolved = await actual.realpath(path, options as never);
       observeRealpath?.(String(path));
-      return resolved;
+      return realpathOverride?.(String(path), String(resolved)) ?? resolved;
     }) as typeof actual.realpath,
     rename: (async (
       oldPath: Parameters<typeof actual.rename>[0],
@@ -153,11 +155,13 @@ beforeEach(() => {
   roots = [];
   harnesses = [];
   observeRealpath = null;
+  realpathOverride = null;
   failRenameToPathOnce = null;
   collisionRecordRenameTargets = [];
 });
 
 afterEach(async () => {
+  realpathOverride = null;
   failRenameToPathOnce = null;
   collisionRecordRenameTargets = [];
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
@@ -5421,6 +5425,34 @@ describe("shared view refresh", () => {
       ),
     ).rejects.toThrow(/escapes the workspace/);
   });
+
+  if (process.platform === "win32") {
+    // MUTATION (case-fold): restore case folding and this pin goes red. The
+    // test steers realpath because CI cannot depend on an NTFS directory with
+    // per-directory case sensitivity enabled.
+    it("refuses a parent that resolves under a case-distinct sibling", async () => {
+      const rootDir = await tempRoot();
+      const parent = join(rootDir, "docs");
+      await mkdir(parent);
+      const siblingRoot = join(dirname(rootDir), basename(rootDir).toUpperCase());
+
+      await expect(
+        materializeSharedViewPaths(
+          rootDir,
+          WORKSPACE,
+          [{ path: "docs/a.md", operation: "write", contentKind: "text" }],
+          stubStore(async () => {
+            // Turn on the simulated symlink resolution after the common
+            // workspace resolver has judged the target. This isolates the
+            // real-parent isInside guard in materializeSharedViewPaths.
+            realpathOverride = (path) =>
+              path === parent ? join(siblingRoot, "docs") : null;
+            return { text: "must not be written" };
+          }),
+        ),
+      ).rejects.toThrow(/parent escapes the workspace/i);
+    });
+  }
 });
 
 // #646 PR3-1 — which share views ask for a sync identity.
@@ -5526,5 +5558,17 @@ describe("shareViewIdentitySelector", () => {
       versionId: null,
       access: "comment",
     });
+  });
+});
+
+describe("containment of '..'-prefixed names", () => {
+  it("resolves a shared-view target under a directory whose NAME starts with '..'", async () => {
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
+    const root = await createTestScratch("dohc-shared-view-dotdot-");
+    await mkdir(join(root, "..cache"), { recursive: true });
+    await writeFile(join(root, "..cache", "x.md"), "cached");
+    await expect(resolvedShareViewTarget(root, "..cache/x.md")).resolves.toBe(
+      join(root, "..cache", "x.md"),
+    );
   });
 });
