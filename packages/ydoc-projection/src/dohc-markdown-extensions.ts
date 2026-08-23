@@ -130,7 +130,7 @@ export function sanitizeImageSrc(src: string): string {
   //   - the editor: imageSrc.ts serves a src over dohc-file:// only if it
   //     normalizes inside the workspace root, and emits NO src otherwise (a raw
   //     relative path would resolve against the app's own page);
-  //   - the protocol layer: readWorkspaceAsset / the dohc-file handler re-check
+  //   - the protocol layer: readOwnedWorkspaceAsset / the dohc-file handler re-check
   //     real-path containment;
   //   - exports: documentExport.ts drops any src that could climb out of the
   //     exported file's own folder (see its EXPORT IMAGE CONTRACT).

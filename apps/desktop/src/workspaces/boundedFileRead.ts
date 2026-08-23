@@ -66,47 +66,21 @@ async function fillFromStart(
   return total;
 }
 
-/**
- * Read one stable file exactly. The extra byte detects growth without ever
- * allocating in proportion to an already-oversized file.
- */
-export async function readFileHandleExact(
+async function readStableFileHandle(
   handle: BoundedFileHandle,
   maxBytes: number,
+  oversized: "reject" | "truncate",
 ): Promise<BoundedFileReadResult> {
   assertLimit(maxBytes);
   const before = await statHandle(handle);
   if (!before.isFile()) throw new BoundedFileReadNotFileError();
   if (before.size < 0n) throw new BoundedFileReadUnverifiableError();
-  if (before.size > BigInt(maxBytes)) {
+  const limit = BigInt(maxBytes);
+  const truncated = before.size > limit;
+  if (truncated && oversized === "reject") {
     throw new BoundedFileReadTooLargeError(before.size);
   }
 
-  const expectedBytes = Number(before.size);
-  const buffer = Buffer.allocUnsafe(expectedBytes + 1);
-  const bytesRead = await fillFromStart(handle, buffer);
-  const after = await statHandle(handle);
-  if (after.size !== before.size || bytesRead !== expectedBytes) {
-    throw new BoundedFileReadChangedError();
-  }
-  return {
-    bytes: buffer.subarray(0, expectedBytes),
-    totalByteLength: expectedBytes,
-  };
-}
-
-/** Read a stable prefix, retaining one byte beyond the text-view limit. */
-export async function readFileHandleTruncated(
-  handle: BoundedFileHandle,
-  maxBytes: number,
-): Promise<BoundedFileReadResult> {
-  assertLimit(maxBytes);
-  const before = await statHandle(handle);
-  if (!before.isFile()) throw new BoundedFileReadNotFileError();
-  if (before.size < 0n) throw new BoundedFileReadUnverifiableError();
-
-  const limit = BigInt(maxBytes);
-  const truncated = before.size > limit;
   const expectedBytes = truncated ? maxBytes + 1 : Number(before.size);
   const buffer = Buffer.allocUnsafe(
     Number(before.size < limit ? before.size : limit) + 1,
@@ -118,6 +92,25 @@ export async function readFileHandleTruncated(
   }
   return {
     bytes: buffer.subarray(0, expectedBytes),
-    totalByteLength: truncated ? maxBytes + 1 : expectedBytes,
+    totalByteLength: expectedBytes,
   };
+}
+
+/**
+ * Read one stable file exactly. The extra byte detects growth without ever
+ * allocating in proportion to an already-oversized file.
+ */
+export function readFileHandleExact(
+  handle: BoundedFileHandle,
+  maxBytes: number,
+): Promise<BoundedFileReadResult> {
+  return readStableFileHandle(handle, maxBytes, "reject");
+}
+
+/** Read a stable prefix, retaining one byte beyond the text-view limit. */
+export function readFileHandleTruncated(
+  handle: BoundedFileHandle,
+  maxBytes: number,
+): Promise<BoundedFileReadResult> {
+  return readStableFileHandle(handle, maxBytes, "truncate");
 }

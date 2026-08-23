@@ -8,7 +8,7 @@ import { prepareShareProjectionRead } from "./shareMounts";
 import { createTestScratch } from "./testTemp";
 import { WORKSPACE_ASSET_MAX_BYTES } from "./workspaceAssets";
 
-describe("owned workspace complete source reads", () => {
+describe("owned workspace asset reads", () => {
   it("pairs local bytes with the resolved target path", async () => {
     const rootPath = await createTestScratch("dohc-owned-file-local-");
     await mkdir(join(rootPath, "imports"), { recursive: true });
@@ -24,10 +24,14 @@ describe("owned workspace complete source reads", () => {
     const source = await createOwnedWorkspaceFileReader({
       workspace: { workspaceId: "local", rootPath },
       files: { read: read as ShareViewFiles["read"] },
-    }).readCompleteSource("imports/notes.json");
+    }).readAsset("imports/notes.json");
 
-    expect(source.path).toBe("imports/data.csv");
-    expect(source.bytes.toString("utf8")).toBe("id,value\n1,local\n");
+    expect(source).toEqual({
+      path: "imports/data.csv",
+      kind: "asset",
+      bytes: Buffer.from("id,value\n1,local\n"),
+      mediaType: "application/octet-stream",
+    });
     expect(read).not.toHaveBeenCalled();
   });
 
@@ -54,9 +58,14 @@ describe("owned workspace complete source reads", () => {
     const source = await createOwnedWorkspaceFileReader({
       workspace: { workspaceId: "host", rootPath, shareMounts: [mount] },
       files: { read: read as ShareViewFiles["read"] },
-    }).readCompleteSource("shared-with-me/alice/notes.json");
+    }).readAsset("shared-with-me/alice/notes.json");
 
-    expect(source).toEqual({ path: "data.csv", bytes: ownerBytes });
+    expect(source).toEqual({
+      path: "data.csv",
+      kind: "asset",
+      bytes: ownerBytes,
+      mediaType: "text/csv",
+    });
     expect(read).toHaveBeenCalledWith(
       {
         kind: "mount",
@@ -86,9 +95,14 @@ describe("owned workspace complete source reads", () => {
     const source = await createOwnedWorkspaceFileReader({
       workspace: { workspaceId: "host", rootPath, shareMounts: [mount] },
       files: { read: read as ShareViewFiles["read"] },
-    }).readCompleteSource("shared-with-me/alice/missing.bin");
+    }).readAsset("shared-with-me/alice/missing.bin");
 
-    expect(source).toEqual({ path: "missing.bin", bytes: ownerBytes });
+    expect(source).toEqual({
+      path: "missing.bin",
+      kind: "asset",
+      bytes: ownerBytes,
+      mediaType: "application/octet-stream",
+    });
     expect(read).toHaveBeenCalledOnce();
   });
 

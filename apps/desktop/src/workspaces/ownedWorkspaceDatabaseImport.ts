@@ -14,7 +14,7 @@ export async function importOwnedWorkspaceDatabase(input: {
   const source = await createOwnedWorkspaceFileReader({
     workspace: input.workspace,
     files: input.files,
-  }).readCompleteSource(input.sourcePath);
+  }).readAsset(input.sourcePath);
   return importToDatabase(
     input.workspace.rootPath,
     { path: source.path, body: source.bytes.toString("utf8") },

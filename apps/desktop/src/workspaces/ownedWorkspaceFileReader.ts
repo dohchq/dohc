@@ -23,12 +23,6 @@ import {
   type DatabaseSnapshotView,
 } from "./workspaceDatabase";
 
-export interface OwnedWorkspaceFileSource {
-  /** The authoritative owner-relative path after following aliases. */
-  path: string;
-  bytes: Buffer;
-}
-
 export interface OwnedWorkspaceFileReader {
   resolveShare(path: string): Promise<{
     target: ShareViewFilesTarget;
@@ -37,8 +31,9 @@ export interface OwnedWorkspaceFileReader {
   readText(path: string): Promise<WorkspaceTextReadResult>;
   readAsset(
     path: string,
-  ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>>;
-  readCompleteSource(path: string): Promise<OwnedWorkspaceFileSource>;
+  ): Promise<
+    { path: string } & Extract<ShareViewFileReadOutcome, { kind: "asset" }>
+  >;
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
 }
 
@@ -112,7 +107,7 @@ export function createOwnedWorkspaceFileReader(input: {
         };
   }
 
-  async function readAssetSource(path: string): Promise<{
+  async function readAsset(path: string): Promise<{
     path: string;
     kind: "asset";
     bytes: Buffer;
@@ -138,20 +133,6 @@ export function createOwnedWorkspaceFileReader(input: {
     return { path: prepared.path, ...read };
   }
 
-  async function readAsset(
-    path: string,
-  ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>> {
-    const { path: _path, ...asset } = await readAssetSource(path);
-    return asset;
-  }
-
-  async function readCompleteSource(
-    path: string,
-  ): Promise<OwnedWorkspaceFileSource> {
-    const source = await readAssetSource(path);
-    return { path: source.path, bytes: source.bytes };
-  }
-
   return {
     resolveShare,
 
@@ -171,8 +152,6 @@ export function createOwnedWorkspaceFileReader(input: {
     },
 
     readAsset,
-
-    readCompleteSource,
 
     async readDatabase(path) {
       const prepared = await prepareRead(path);

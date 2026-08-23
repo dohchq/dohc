@@ -138,13 +138,6 @@ const FILE_CHANGED_DURING_READ =
 const FILE_IDENTITY_UNVERIFIABLE =
   "dohc could not confirm this is the same file. Try again.";
 
-function fsEntryIdentity(info: {
-  dev: number | bigint;
-  ino: number | bigint;
-}): FsEntryIdentity {
-  return { dev: BigInt(info.dev), ino: BigInt(info.ino) };
-}
-
 function assertSameFile(
   expected: FsEntryIdentity,
   actual: FsEntryIdentity,
@@ -231,7 +224,7 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
       } catch {
         throw new Error(FILE_IDENTITY_UNVERIFIABLE);
       }
-      assertSameFile(this.#identity, fsEntryIdentity(info));
+      assertSameFile(this.#identity, info);
       return handle;
     } catch (error) {
       await handle.close();
@@ -244,15 +237,7 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
   ): Promise<T> {
     const handle = await this.#openVerified();
     try {
-      const result = await run(handle);
-      let info;
-      try {
-        info = await handle.stat({ bigint: true });
-      } catch {
-        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
-      }
-      assertSameFile(this.#identity, fsEntryIdentity(info));
-      return result;
+      return await run(handle);
     } finally {
       await handle.close();
     }
@@ -294,8 +279,8 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
       absolutePath: string,
     ) => T extends PromiseLike<unknown> ? never : T,
   ): Promise<T> {
-    return this.#withVerifiedHandle(async (handle) => {
-      await this.#assertCanonicalPathNamesHandle(handle);
+    return this.#withVerifiedHandle(async () => {
+      await this.#assertCanonicalPath();
       try {
         const result = run(this.#realTarget);
         if (
@@ -310,19 +295,17 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
         }
         return result;
       } finally {
-        await this.#assertCanonicalPathNamesHandle(handle);
+        await this.#assertCanonicalPath();
       }
     });
   }
 
-  async #assertCanonicalPathNamesHandle(handle: FileHandle): Promise<void> {
+  async #assertCanonicalPath(): Promise<void> {
     let currentCanonical: string;
     let pathInfo;
-    let handleInfo;
     try {
       currentCanonical = await realpath(this.#realTarget);
       pathInfo = await stat(this.#realTarget, { bigint: true });
-      handleInfo = await handle.stat({ bigint: true });
     } catch {
       throw new Error(FILE_IDENTITY_UNVERIFIABLE);
     }
@@ -331,8 +314,7 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
     if (pathKey(currentCanonical) !== pathKey(this.#realTarget)) {
       throw new Error(FILE_CHANGED_DURING_READ);
     }
-    assertSameFile(this.#identity, fsEntryIdentity(pathInfo));
-    assertSameFile(this.#identity, fsEntryIdentity(handleInfo));
+    assertSameFile(this.#identity, pathInfo);
   }
 }
 
@@ -390,14 +372,14 @@ class ResolvedWorkspaceFileReadCapability implements ResolvedWorkspaceFileRead {
       if (current.relative.replaceAll("\\", "/") !== this.#resolvedPath) {
         throw new Error(FILE_CHANGED_DURING_READ);
       }
-      const identity = fsEntryIdentity(info);
+      const identity: FsEntryIdentity = info;
       let pathInfo;
       try {
         pathInfo = await stat(current.resolvedAbsolute, { bigint: true });
       } catch {
         throw new Error(FILE_IDENTITY_UNVERIFIABLE);
       }
-      assertSameFile(identity, fsEntryIdentity(pathInfo));
+      assertSameFile(identity, pathInfo);
       return new PreparedWorkspaceFileReadCapability({
         rootPath: this.#rootPath,
         realTarget: this.#realTarget,
@@ -434,28 +416,6 @@ export function prepareWorkspaceFileRead(
   return resolveWorkspaceFileRead(rootPath, relativePath).then((source) =>
     source.prepare(),
   );
-}
-
-// Reads a workspace-relative file's canonical identity and bytes from the one
-// resolution that passed the path guard.
-export async function readWorkspaceAssetSource(
-  rootPath: string,
-  relativePath: string,
-): Promise<WorkspaceAssetSource> {
-  return (await prepareWorkspaceFileRead(rootPath, relativePath)).readAsset();
-}
-
-// Reads a workspace-relative file's bytes for callers that do not classify
-// the source by its path.
-export async function readWorkspaceAsset(
-  rootPath: string,
-  relativePath: string,
-): Promise<{ bytes: Buffer; mediaType: string }> {
-  const { path: _path, ...asset } = await readWorkspaceAssetSource(
-    rootPath,
-    relativePath,
-  );
-  return asset;
 }
 
 // Text views (markdown/CSV/JSON/plain) read content over IPC rather than via a
