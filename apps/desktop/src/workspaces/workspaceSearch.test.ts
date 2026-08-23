@@ -3,6 +3,7 @@ import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  allowCanonicalMountSearchPaths,
   buildRipgrepArgs,
   createSearchRegistry,
   parseRipgrepLine,
@@ -561,5 +562,20 @@ describe("mountScopedIncludeGlob", () => {
     // Anchored path globs outside the projection cannot match under it.
     expect(mountScopedIncludeGlob("notes/**")).toBeNull();
     expect(mountScopedIncludeGlob("docs/plan.md")).toBeNull();
+  });
+});
+
+describe("allowCanonicalMountSearchPaths", () => {
+  it("keeps ordinary files while filtering registered mount projections", () => {
+    const allowed = allowCanonicalMountSearchPaths(
+      ["Alex", "Team"],
+      (path) => path === "shared-with-me/Alex/canonical.md",
+    );
+
+    expect(allowed("notes/local.md")).toBe(true);
+    expect(allowed("shared-with-me/Alex/canonical.md")).toBe(true);
+    expect(allowed("shared-with-me/Alex/recipient-only.md")).toBe(false);
+    expect(allowed("shared-with-me/Team/recipient-only.md")).toBe(false);
+    expect(allowed("shared-with-me/Unregistered/local.md")).toBe(true);
   });
 });

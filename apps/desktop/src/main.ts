@@ -823,6 +823,7 @@ import {
   saveWorkspaceSettingsFile,
 } from "./workspaces/workspaceSettingsFile";
 import {
+  allowCanonicalMountSearchPaths,
   createSearchRegistry,
   mountScopedIncludeGlob,
 } from "./workspaces/workspaceSearch";
@@ -11728,6 +11729,31 @@ function registerIpcHandlers(
         ])
       : undefined;
     if (!isCurrentSearch()) return;
+    const mounts = (
+      findWorkspace(workspace.workspaceId)?.shareMounts ?? []
+    ).filter((mount) => validMountLabel(mount.label));
+    const mountAllowPath =
+      mounts.length > 0
+        ? await shareSearchAllowPath(
+            mounts.map((mount) => ({
+              target: {
+                kind: "mount" as const,
+                workspaceId: workspace.workspaceId,
+                shareId: mount.shareId,
+              },
+              prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
+            })),
+          )
+        : undefined;
+    const ownedAllowPath =
+      standaloneAllowPath ??
+      (mountAllowPath
+        ? allowCanonicalMountSearchPaths(
+            mounts.map((mount) => mount.label),
+            mountAllowPath,
+          )
+        : undefined);
+    if (!isCurrentSearch()) return;
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (capture) {
       // Read-your-writes: the batch whose capture triggered this search must
@@ -11793,22 +11819,7 @@ function registerIpcHandlers(
         // capture ignores mounts), so mounted content searches through the
         // rg path, streamed AFTER the engine results under the SAME
         // searchId. Skipped when the workspace has no mounts.
-        const mounts = (
-          findWorkspace(workspace.workspaceId)?.shareMounts ?? []
-        ).filter((mount) => validMountLabel(mount.label));
         const searchMounts = mounts.length > 0;
-        const mountAllowPath = searchMounts
-          ? await shareSearchAllowPath(
-              mounts.map((mount) => ({
-                target: {
-                  kind: "mount" as const,
-                  workspaceId: workspace.workspaceId,
-                  shareId: mount.shareId,
-                },
-                prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
-              })),
-            )
-          : undefined;
         if (!isCurrentSearch()) return;
         if (isCurrentSearch()) {
           sender.send(
@@ -11920,7 +11931,7 @@ function registerIpcHandlers(
       },
       {
         isCurrent: isCurrentSearch,
-        allowPath: standaloneAllowPath,
+        allowPath: ownedAllowPath,
       },
     );
   });

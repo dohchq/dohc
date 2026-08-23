@@ -87,8 +87,8 @@ describe("ShareViewFiles main-process wiring", () => {
       "allowPath: mountAllowPath,",
       mountStartAt,
     );
-    const standalonePredicateAt = handler.indexOf(
-      "allowPath: standaloneAllowPath,",
+    const ownedPredicateAt = handler.indexOf(
+      "allowPath: ownedAllowPath,",
       fallbackStartAt,
     );
 
@@ -99,11 +99,12 @@ describe("ShareViewFiles main-process wiring", () => {
     expect(handler).toContain(
       "prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`",
     );
+    expect(handler).toContain("allowCanonicalMountSearchPaths(");
     expect(mountStartAt).toBeGreaterThan(standaloneAllowanceAt);
     expect(fallbackStartAt).toBeGreaterThan(mountStartAt);
     expect(mountPredicateAt).toBeGreaterThan(mountStartAt);
     expect(mountPredicateAt).toBeLessThan(fallbackStartAt);
-    expect(standalonePredicateAt).toBeGreaterThan(fallbackStartAt);
+    expect(ownedPredicateAt).toBeGreaterThan(fallbackStartAt);
   });
 
   it("routes plugin SDK reads through the shared-file owner", () => {
