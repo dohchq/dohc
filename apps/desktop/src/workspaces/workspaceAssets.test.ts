@@ -18,6 +18,7 @@ import {
   createWorkspaceTextExclusive,
   mediaTypeForExtension,
   readWorkspaceAsset,
+  readWorkspaceAssetSource,
   readWorkspaceText,
   resolveWorkspaceFile,
   restoreWorkspaceText,
@@ -70,6 +71,20 @@ describe("resolveWorkspaceFile containment", () => {
     // And the read paths built on it refuse too — nothing leaks via media/text.
     await expect(readWorkspaceAsset(root, "notes/link.txt")).rejects.toThrow(/escapes the workspace/);
     await expect(readWorkspaceText(root, "notes/link.txt")).rejects.toThrow(/escapes the workspace/);
+  });
+
+  it("returns the resolved source path with bytes read through an in-workspace alias", async () => {
+    const root = await makeWorkspace();
+    await writeFile(join(root, "notes", "data.csv"), "id,value\n1,canonical\n");
+    await symlink(
+      join(root, "notes", "data.csv"),
+      join(root, "notes", "notes.json"),
+    );
+
+    const source = await readWorkspaceAssetSource(root, "notes/notes.json");
+
+    expect(source.path).toBe("notes/data.csv");
+    expect(source.bytes.toString("utf8")).toBe("id,value\n1,canonical\n");
   });
 });
 

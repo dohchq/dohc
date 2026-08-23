@@ -14,10 +14,10 @@ export async function importOwnedWorkspaceDatabase(input: {
   const source = await createOwnedWorkspaceFileReader({
     workspace: input.workspace,
     files: input.files,
-  }).readCompleteText(input.sourcePath);
+  }).readCompleteSource(input.sourcePath);
   return importToDatabase(
     input.workspace.rootPath,
-    { path: input.sourcePath, body: source },
+    { path: source.path, body: source.bytes.toString("utf8") },
     input.databasePath,
     input.tableName,
   );

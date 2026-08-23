@@ -57,7 +57,11 @@ export async function resolveWorkspaceFile(
   rootPath: string,
   relativePath: string,
   access: "read" | "write" = "write",
-): Promise<{ realTarget: string; normalized: string }> {
+): Promise<{
+  realTarget: string;
+  normalized: string;
+  resolvedPath: string;
+}> {
   const validated =
     access === "read"
       ? validateUserReadPath(relativePath)
@@ -70,19 +74,24 @@ export async function resolveWorkspaceFile(
   // The reservation is therefore decided on where the path lands, and the
   // caller receives THAT resolution — resolving the spelling a second time
   // would hand back a target no rule was applied to.
-  const { resolvedAbsolute } = await assertResolvedWorkspacePath({
-    rootPath,
-    absolutePath: join(rootPath, validated.normalized),
-    spelled: relativePath,
-    label: "Asset path",
-    access,
-  });
+  const { relative: resolvedPath, resolvedAbsolute } =
+    await assertResolvedWorkspacePath({
+      rootPath,
+      absolutePath: join(rootPath, validated.normalized),
+      spelled: relativePath,
+      label: "Asset path",
+      access,
+    });
   // Every caller needs a file that is already there: the OS opener is handed
   // one, the editor's save renames onto one, and the database paths open one.
   // The walk answers for a target that does not exist yet, so the existence
   // proof is made here, on the canonical path.
   await stat(resolvedAbsolute);
-  return { realTarget: resolvedAbsolute, normalized: validated.normalized };
+  return {
+    realTarget: resolvedAbsolute,
+    normalized: validated.normalized,
+    resolvedPath: resolvedPath.replaceAll("\\", "/"),
+  };
 }
 
 // Media views buffer the whole file into the privileged main process before
@@ -90,12 +99,20 @@ export async function resolveWorkspaceFile(
 // reasoning as MAX_TEXT_BYTES, sized for real images/audio).
 export const WORKSPACE_ASSET_MAX_BYTES = 64 * 1024 * 1024;
 
-// Reads a workspace-relative file's bytes.
-export async function readWorkspaceAsset(
+export interface WorkspaceAssetSource {
+  /** The authoritative workspace-relative path after following aliases. */
+  path: string;
+  bytes: Buffer;
+  mediaType: string;
+}
+
+// Reads a workspace-relative file's canonical identity and bytes from the one
+// resolution that passed the path guard.
+export async function readWorkspaceAssetSource(
   rootPath: string,
   relativePath: string,
-): Promise<{ bytes: Buffer; mediaType: string }> {
-  const { realTarget, normalized } = await resolveWorkspaceFile(
+): Promise<WorkspaceAssetSource> {
+  const { realTarget, resolvedPath } = await resolveWorkspaceFile(
     rootPath,
     relativePath,
     "read",
@@ -105,9 +122,23 @@ export async function readWorkspaceAsset(
     throw new Error(`Asset too large to serve (${size} bytes): ${relativePath}`);
   }
   return {
+    path: resolvedPath,
     bytes: await readFile(realTarget),
-    mediaType: mediaTypeForExtension(normalized),
+    mediaType: mediaTypeForExtension(resolvedPath),
   };
+}
+
+// Reads a workspace-relative file's bytes for callers that do not classify
+// the source by its path.
+export async function readWorkspaceAsset(
+  rootPath: string,
+  relativePath: string,
+): Promise<{ bytes: Buffer; mediaType: string }> {
+  const { path: _path, ...asset } = await readWorkspaceAssetSource(
+    rootPath,
+    relativePath,
+  );
+  return asset;
 }
 
 // Text views (markdown/CSV/JSON/plain) read content over IPC rather than via a

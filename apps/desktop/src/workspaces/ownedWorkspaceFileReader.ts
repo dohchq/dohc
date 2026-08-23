@@ -11,10 +11,16 @@ import {
 import { shareViewIsPresent } from "./shareViewMarker";
 import { resolveShareMountPath } from "./shareMounts";
 import {
-  readWorkspaceAsset,
+  readWorkspaceAssetSource,
   readWorkspaceText,
   type WorkspaceTextReadResult,
 } from "./workspaceAssets";
+
+export interface OwnedWorkspaceFileSource {
+  /** The authoritative owner-relative path after following aliases. */
+  path: string;
+  bytes: Buffer;
+}
 
 export interface OwnedWorkspaceFileReader {
   resolveShare(path: string): Promise<{
@@ -25,7 +31,7 @@ export interface OwnedWorkspaceFileReader {
   readAsset(
     path: string,
   ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>>;
-  readCompleteText(path: string): Promise<string>;
+  readCompleteSource(path: string): Promise<OwnedWorkspaceFileSource>;
 }
 
 /** Reads local files from disk and received-share files from their owner store. */
@@ -64,14 +70,23 @@ export function createOwnedWorkspaceFileReader(input: {
         };
   }
 
-  async function readAsset(
-    path: string,
-  ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>> {
+  async function readAssetSource(path: string): Promise<{
+    path: string;
+    kind: "asset";
+    bytes: Buffer;
+    mediaType: string;
+  }> {
     const routed = await resolveShare(path);
     if (routed === null) {
+      const source = await readWorkspaceAssetSource(
+        input.workspace.rootPath,
+        path,
+      );
       return {
+        path: source.path,
         kind: "asset",
-        ...(await readWorkspaceAsset(input.workspace.rootPath, path)),
+        bytes: source.bytes,
+        mediaType: source.mediaType,
       };
     }
     const read = await input.files.read(routed.target, {
@@ -81,12 +96,21 @@ export function createOwnedWorkspaceFileReader(input: {
     if (read.kind !== "asset") {
       throw new Error("Shared asset read returned an invalid result.");
     }
-    return read;
+    return { path: routed.path, ...read };
   }
 
-  async function readCompleteText(path: string): Promise<string> {
-    const source = await readAsset(path);
-    return source.bytes.toString("utf8");
+  async function readAsset(
+    path: string,
+  ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>> {
+    const { path: _path, ...asset } = await readAssetSource(path);
+    return asset;
+  }
+
+  async function readCompleteSource(
+    path: string,
+  ): Promise<OwnedWorkspaceFileSource> {
+    const source = await readAssetSource(path);
+    return { path: source.path, bytes: source.bytes };
   }
 
   return {
@@ -109,6 +133,6 @@ export function createOwnedWorkspaceFileReader(input: {
 
     readAsset,
 
-    readCompleteText,
+    readCompleteSource,
   };
 }

@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import type { ImportDataInput } from "@dohc/sqlite-worker";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShareMountRecord } from "./registryStore";
 import {
   createShareViewFiles,
@@ -15,6 +16,24 @@ import { createTestScratch } from "./testTemp";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 
 const SOURCE_PATH = "shared-with-me/alice/data.csv";
+const importDataInputs = vi.hoisted(() => [] as ImportDataInput[]);
+
+vi.mock("@dohc/sqlite-worker", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/sqlite-worker")>();
+  return {
+    ...actual,
+    createSqliteEngine: async () => {
+      const engine = await actual.createSqliteEngine();
+      return {
+        ...engine,
+        importData: async (input: ImportDataInput) => {
+          importDataInputs.push(input);
+          return engine.importData(input);
+        },
+      };
+    },
+  };
+});
 
 function mount(): ShareMountRecord {
   return {
@@ -77,6 +96,10 @@ function ownerFiles(input: {
 }
 
 describe("owned database import", () => {
+  beforeEach(() => {
+    importDataInputs.length = 0;
+  });
+
   it("refuses leftover projection bytes after the mount registry becomes empty", async () => {
     const rootPath = await createTestScratch("dohc-owned-db-tombstone-");
     await mkdir(join(rootPath, "shared-with-me", "alice"), {
@@ -103,7 +126,7 @@ describe("owned database import", () => {
         databasePath: "data.sqlite",
         tableName: "rows",
       }),
-    ).rejects.toThrow(/cannot verify this mounted share/i);
+    ).rejects.toThrow(/no share owns it/i);
     expect(unexpectedRead).not.toHaveBeenCalled();
     expect(existsSync(join(rootPath, "data.sqlite"))).toBe(false);
   });
@@ -138,6 +161,93 @@ describe("owned database import", () => {
     const snapshot = await readDatabaseSnapshot(rootPath, "data.sqlite");
     expect(snapshot.tables[0]?.rows).toEqual([
       expect.objectContaining({ value: "canonical owner" }),
+    ]);
+  });
+
+  it("classifies and names a local alias by its resolved target", async () => {
+    const rootPath = await createTestScratch("dohc-owned-db-local-alias-");
+    const sourceDir = join(rootPath, "imports");
+    await mkdir(sourceDir, { recursive: true });
+    await writeFile(
+      join(sourceDir, "data.csv"),
+      "id,value\n1,canonical local\n",
+    );
+    await symlink(
+      join(sourceDir, "data.csv"),
+      join(sourceDir, "notes.json"),
+    );
+    const unexpectedRead = vi.fn(async () => {
+      throw new Error("A local source must not read a share owner.");
+    });
+
+    await expect(
+      importOwnedWorkspaceDatabase({
+        workspace: { workspaceId: "local-alias", rootPath },
+        files: { read: unexpectedRead },
+        sourcePath: "imports/notes.json",
+        databasePath: "local-alias.sqlite",
+        tableName: "rows",
+      }),
+    ).resolves.toMatchObject({ rowCount: 1 });
+
+    expect(importDataInputs).toHaveLength(1);
+    expect(importDataInputs[0]).toMatchObject({
+      name: "data.csv",
+      mediaType: "text/csv",
+      body: "id,value\n1,canonical local\n",
+    });
+    const snapshot = await readDatabaseSnapshot(
+      rootPath,
+      "local-alias.sqlite",
+    );
+    expect(snapshot.tables[0]?.rows).toEqual([
+      expect.objectContaining({ value: "canonical local" }),
+    ]);
+    expect(unexpectedRead).not.toHaveBeenCalled();
+  });
+
+  it("classifies and names a mount alias by its canonical owner path", async () => {
+    const rootPath = await createTestScratch("dohc-owned-db-mount-alias-");
+    const record = mount();
+    const workspace = {
+      workspaceId: "host-alias",
+      rootPath,
+      shareMounts: [record],
+    };
+    const mountRoot = join(rootPath, "shared-with-me", record.label);
+    await mkdir(mountRoot, { recursive: true });
+    await writeFile(join(mountRoot, "data.csv"), "stale projection");
+    await symlink(
+      join(mountRoot, "data.csv"),
+      join(mountRoot, "notes.json"),
+    );
+    const files = ownerFiles({
+      workspace,
+      sourceText: "id,value\n1,canonical owner alias\n",
+    });
+
+    await expect(
+      importOwnedWorkspaceDatabase({
+        workspace,
+        files,
+        sourcePath: "shared-with-me/alice/notes.json",
+        databasePath: "mount-alias.sqlite",
+        tableName: "rows",
+      }),
+    ).resolves.toMatchObject({ rowCount: 1 });
+
+    expect(importDataInputs).toHaveLength(1);
+    expect(importDataInputs[0]).toMatchObject({
+      name: "data.csv",
+      mediaType: "text/csv",
+      body: "id,value\n1,canonical owner alias\n",
+    });
+    const snapshot = await readDatabaseSnapshot(
+      rootPath,
+      "mount-alias.sqlite",
+    );
+    expect(snapshot.tables[0]?.rows).toEqual([
+      expect.objectContaining({ value: "canonical owner alias" }),
     ]);
   });
 
