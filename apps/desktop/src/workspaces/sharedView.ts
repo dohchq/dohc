@@ -769,6 +769,24 @@ export async function readCollisionRecordPaths(
   );
 }
 
+async function peekCollisionRecordPaths(
+  rootDir: string,
+  shareId: string,
+): Promise<Set<string>> {
+  return withExclusiveWorkspaceOperation(
+    collisionRecordPath(rootDir),
+    async () => {
+      const record = await readCollisionRecordUnlocked(rootDir, shareId);
+      if (record.shareId !== shareId) {
+        throw new Error(
+          `Share collision record belongs to ${record.shareId}, not ${shareId}.`,
+        );
+      }
+      return record.paths;
+    },
+  );
+}
+
 async function mutateCollisionRecord(
   rootDir: string,
   shareId: string,
@@ -811,7 +829,7 @@ export async function readSharedViewProjectionDebt(
 }> {
   const [pendingPaths, collisionPaths, pullInFlight] = await Promise.all([
     readPendingMaterializationPaths(rootDir),
-    readCollisionRecordPaths(rootDir, shareId),
+    peekCollisionRecordPaths(rootDir, shareId),
     pullMayBeInFlight(rootDir),
   ]);
   return { pendingPaths, collisionPaths, pullInFlight };

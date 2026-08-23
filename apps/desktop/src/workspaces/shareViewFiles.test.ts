@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
@@ -9,6 +9,7 @@ import {
   type ShareViewFilesDependencies,
 } from "./shareViewFiles";
 import {
+  captureSharedViewLocalDivergence,
   withShareViewRefreshLifecycleLock,
   writePendingMaterializationPaths,
 } from "./sharedView";
@@ -667,6 +668,71 @@ describe("ShareViewFiles", () => {
       pullInFlight: false,
     });
   });
+
+  it.each([
+    ["an invalid", "not json"],
+    [
+      "a stale",
+      JSON.stringify({ shareId: "share-old", paths: ["notes/stale.md"] }),
+    ],
+  ])(
+    "leaves %s collision record untouched for capture to quarantine",
+    async (_recordKind, serialized) => {
+      const rootPath = await workspaceRoot();
+      const metadataPath = join(rootPath, ".dohc");
+      const collisionPath = join(metadataPath, "share-collision-record.json");
+      await mkdir(metadataPath, { recursive: true });
+      await writeFile(collisionPath, serialized, "utf8");
+      const store = readStore({ text: "canonical\n" });
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => target(rootPath),
+        openStore: () => store,
+      });
+      const errorLog = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      try {
+        await expect(
+          files.projectionStatus({
+            kind: "standalone",
+            workspaceId: "workspace-a",
+          }),
+        ).resolves.toEqual({
+          state: "pending",
+          pendingPathCount: 0,
+          pendingPaths: [],
+          collisionPathCount: 0,
+          collisionPaths: [],
+          pullInFlight: false,
+        });
+        await expect(readFile(collisionPath, "utf8")).resolves.toBe(serialized);
+        expect(await readdir(metadataPath)).toEqual([
+          "share-collision-record.json",
+        ]);
+        expect(errorLog).not.toHaveBeenCalled();
+
+        await expect(
+          captureSharedViewLocalDivergence(
+            rootPath,
+            "workspace-a",
+            store,
+            true,
+            "share-a",
+          ),
+        ).resolves.toMatchObject({ collisionRecordQuarantined: true });
+        expect(errorLog).toHaveBeenCalledOnce();
+      } finally {
+        errorLog.mockRestore();
+      }
+      await expect(lstat(collisionPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readdir(metadataPath)).toEqual([
+        expect.stringMatching(/^share-collision-record\.json\.invalid-\d+$/),
+      ]);
+    },
+  );
 
   it("reports a committed change when only its folder projection fails", async () => {
     const rootPath = await workspaceRoot();
