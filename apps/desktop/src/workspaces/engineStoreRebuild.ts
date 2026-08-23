@@ -4,12 +4,12 @@ import { z } from "zod";
 import {
   access,
   mkdir,
+  open,
   readFile,
   rename as renameFile,
   rmdir,
   stat,
   unlink,
-  writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -20,6 +20,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { withKeyedStartLock } from "./sitePreviewLifecycle";
 
 const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
+const MOVE_IN_PROGRESS_TEMP = `${MOVE_IN_PROGRESS}.tmp`;
 const MOVE_COMPLETE = "MOVE_COMPLETE";
 const ENGINE_STORE_FILES = [
   "engine.db-shm",
@@ -106,7 +107,47 @@ async function captureMoveManifest(
 }
 
 async function readMoveManifest(path: string): Promise<EngineStoreMoveManifest> {
-  return parseMoveManifest(await readFile(path, "utf8"));
+  try {
+    return parseMoveManifest(await readFile(path, "utf8"));
+  } catch (cause) {
+    throw new Error(
+      `The recovery manifest at ${path} is unreadable or corrupt.`,
+      { cause },
+    );
+  }
+}
+
+async function writeMoveManifest(
+  backupDir: string,
+  inProgressMarker: string,
+  manifest: EngineStoreMoveManifest,
+  rename: typeof renameFile,
+): Promise<void> {
+  const tempMarker = join(backupDir, MOVE_IN_PROGRESS_TEMP);
+  const tempFile = await open(tempMarker, "wx");
+  try {
+    try {
+      await tempFile.writeFile(JSON.stringify(manifest), "utf8");
+      await tempFile.sync();
+    } finally {
+      await tempFile.close();
+    }
+    await rename(tempMarker, inProgressMarker);
+  } catch (error) {
+    await unlink(tempMarker).catch(() => undefined);
+    throw error;
+  }
+
+  if (process.platform === "win32") {
+    // Windows cannot fsync a directory handle the way POSIX can.
+    return;
+  }
+  const backupDirectory = await open(backupDir, "r");
+  try {
+    await backupDirectory.sync();
+  } finally {
+    await backupDirectory.close();
+  }
 }
 
 async function completeManifestMove(
@@ -217,9 +258,7 @@ export async function moveEngineStoreAside(
           { code: "ENOENT" },
         );
       }
-      await writeFile(inProgressMarker, JSON.stringify(manifest), {
-        flag: "wx",
-      });
+      await writeMoveManifest(backupDir, inProgressMarker, manifest, rename);
     } catch (error) {
       await rmdir(backupDir).catch(() => undefined);
       throw error;

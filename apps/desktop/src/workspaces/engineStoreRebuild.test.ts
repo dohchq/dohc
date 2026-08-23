@@ -104,6 +104,34 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
+  it("publishes a complete manifest before moving any store file", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-wal": "wal",
+      "engine.db-shm": "shm",
+    });
+    let renames = 0;
+
+    await expect(
+      moveEngineStoreAside(root, {
+        rename: async (from, to) => {
+          renames += 1;
+          await rename(from, to);
+          if (renames === 1) {
+            expect(from).toBe(join(backupDir, "MOVE_IN_PROGRESS.tmp"));
+            expect(to).toBe(join(backupDir, "MOVE_IN_PROGRESS"));
+            expect(
+              (await readMoveManifest()).files.map(({ name }) => name),
+            ).toEqual(["engine.db-shm", "engine.db-wal", "engine.db"]);
+          }
+        },
+      }),
+    ).resolves.toBe("moved");
+
+    expect(renames).toBe(5);
+    await expectCompleteStore();
+  });
+
   it("moves a database that has no sidecars", async () => {
     await seedStore({ "engine.db": "refused-store" });
 
@@ -150,6 +178,26 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
+  it("refuses a reservation that has only an unpublished manifest", async () => {
+    await seedStore({
+      "engine.db": "refused-store",
+      "engine.db-wal": "wal",
+      "engine.db-shm": "shm",
+    });
+    await mkdir(backupDir);
+    await writeFile(join(backupDir, "MOVE_IN_PROGRESS.tmp"), "partial");
+
+    await expect(moveEngineStoreAside(root)).resolves.toBe("backup-exists");
+
+    expect(await readdir(backupDir)).toEqual(["MOVE_IN_PROGRESS.tmp"]);
+    expect((await readdir(engineDir)).sort()).toEqual([
+      "engine.db",
+      "engine.db-shm",
+      "engine.db-wal",
+      "pre-v2-backup",
+    ]);
+  });
+
   it("resumes after a crash moved only SHM", async () => {
     await seedStore({
       "engine.db": "refused-store",
@@ -161,7 +209,7 @@ describe("moveEngineStoreAside", () => {
       moveEngineStoreAside(root, {
         rename: async (from, to) => {
           renames += 1;
-          if (renames === 2) throw new Error("host crash");
+          if (renames === 3) throw new Error("host crash");
           await rename(from, to);
         },
       }),
@@ -197,7 +245,7 @@ describe("moveEngineStoreAside", () => {
       moveEngineStoreAside(root, {
         rename: async (from, to) => {
           renames += 1;
-          if (renames === 3) throw new Error("host crash");
+          if (renames === 4) throw new Error("host crash");
           await rename(from, to);
         },
       }),
@@ -233,11 +281,14 @@ describe("moveEngineStoreAside", () => {
 
   it("releases a fresh reservation when the first move fails", async () => {
     await seedStore({ "engine.db": "refused-store" });
+    let renames = 0;
 
     await expect(
       moveEngineStoreAside(root, {
-        rename: async () => {
-          throw new Error("EACCES");
+        rename: async (from, to) => {
+          renames += 1;
+          if (renames === 2) throw new Error("EACCES");
+          await rename(from, to);
         },
       }),
     ).rejects.toThrow("EACCES");
@@ -295,7 +346,7 @@ describe("moveEngineStoreAside", () => {
       moveEngineStoreAside(root, {
         rename: async (from, to) => {
           renames += 1;
-          if (renames === 4) throw new Error("host crash");
+          if (renames === 5) throw new Error("host crash");
           await rename(from, to);
         },
       }),
@@ -311,6 +362,21 @@ describe("moveEngineStoreAside", () => {
     await completePendingEngineStoreMove(root);
 
     await expectCompleteStore();
+  });
+
+  it("names an unreadable recovery manifest and rejects once", async () => {
+    await mkdir(backupDir);
+    const manifestPath = join(backupDir, "MOVE_IN_PROGRESS");
+    await writeFile(manifestPath, '{"files":[');
+
+    const recovery = completePendingEngineStoreMove(root);
+
+    await expect(recovery).rejects.toMatchObject({
+      cause: expect.objectContaining({
+        message: `The recovery manifest at ${manifestPath} is unreadable or corrupt.`,
+        cause: expect.any(SyntaxError),
+      }),
+    });
   });
 
   it("leaves a new sidecar omitted from the manifest at the live location", async () => {
@@ -481,7 +547,7 @@ describe("moveEngineStoreAside", () => {
             moveEngineStoreAside(rootPath, {
               rename: async (from, to) => {
                 renames += 1;
-                if (renames === 3) throw moveError;
+                if (renames === 4) throw moveError;
                 await rename(from, to);
               },
             }),
