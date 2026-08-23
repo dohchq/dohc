@@ -7396,32 +7396,8 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = RefreshSharedViewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    const shareView = workspace.shareView;
-    if (!shareView) throw new Error("This workspace is not a shared view.");
-    const repaired = await withExclusiveWorkspaceOperation(
-      workspace.rootPath,
-      (_markWorkspaceChanged, lease) =>
-        shareViewFiles.reconcile(
-          lease,
-          { kind: "standalone", workspaceId: workspace.workspaceId },
-          "repair",
-        ),
-    );
-    if (repaired.kind !== "repair") {
-      throw new Error("Shared view repair returned an invalid result.");
-    }
-    const repairedPaths = repaired.repairedPaths;
-    if (shareView.ended) {
-      notifyRenderer();
-      return RefreshSharedViewResult.parse({
-        ok: true,
-        status: "ended",
-        changedPaths: repairedPaths,
-        excludedPaths: [],
-        unjournalablePaths: [],
-        refusedOps: 0,
-        refusedDetail: null,
-      });
+    if (!workspace.shareView) {
+      throw new Error("This workspace is not a shared view.");
     }
     // #646 PR2: the backstop this share's chat push docstring claims. A push
     // that failed — offline, a rotated session, a relay blip — is retried
@@ -7430,12 +7406,14 @@ function registerIpcHandlers(
     // Before the push, because the push needs the identity this writes. A
     // share view opened before #646 PR3-1 has none, and this is where it gains
     // one.
-    await recordShareViewIdentity(workspace).catch((error) => {
-      console.error("[desktop] share view enrolment:", error);
-    });
-    await pushShareViewChat(workspace).catch((error) => {
-      console.error("[desktop] share view chat push (refresh backstop):", error);
-    });
+    if (!workspace.shareView.ended) {
+      await recordShareViewIdentity(workspace).catch((error) => {
+        console.error("[desktop] share view enrolment:", error);
+      });
+      await pushShareViewChat(workspace).catch((error) => {
+        console.error("[desktop] share view chat push (refresh backstop):", error);
+      });
+    }
     let outcome;
     try {
       const reconciled = await withStaleSensitiveWorkspaceOperation(
@@ -7464,35 +7442,8 @@ function registerIpcHandlers(
             "Remove it, then open the share code again.",
         );
       }
-      if (repairedPaths > 0) {
-        return RefreshSharedViewResult.parse({
-          ok: false,
-          changedPaths: repairedPaths,
-          errorMessage: error instanceof Error ? error.message : String(error),
-        });
-      }
       throw error;
     }
-    outcome =
-      "ok" in outcome
-        ? outcome.ok
-          ? {
-              ...outcome,
-              status:
-                outcome.status === "unchanged" && repairedPaths > 0
-                  ? ("updated" as const)
-                  : outcome.status,
-              changedPaths: outcome.changedPaths + repairedPaths,
-            }
-          : { ...outcome, changedPaths: outcome.changedPaths + repairedPaths }
-        : {
-            ...outcome,
-            status:
-              outcome.status === "unchanged" && repairedPaths > 0
-                ? ("updated" as const)
-                : outcome.status,
-            changedPaths: outcome.changedPaths + repairedPaths,
-          };
     if ("ok" in outcome && !outcome.ok) {
       notifyRenderer();
       return RefreshSharedViewResult.parse(outcome);

@@ -45,7 +45,7 @@ import {
 //  - REAL: the versioned file state. Ops replay through VersionedLoopbackEngine
 //    as ordinary `versionedText.write` / `versionedText.delete` calls, and
 //    `versionedText.list` answers with true sha256 and contentKind. That is
-//    what `repairSharedViewProjection` compares disk against, so the repair
+//    what shared-view reconciliation compares disk against, so the repair
 //    tests exercise real state rather than a canned answer.
 //  - REAL: the relay HTTP conversation. The log is paged, blobs are fetched by
 //    sha256 and hash-verified, and the bearer token comes from what

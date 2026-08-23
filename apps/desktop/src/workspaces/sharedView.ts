@@ -50,6 +50,7 @@ export interface RefreshSharedViewOutcome {
   changedPaths: number;
   excludedPaths: string[];
   unjournalablePaths: UnjournalablePath[];
+  collisionRecordQuarantined?: boolean;
   // Ops the pull refused. The pull skips them and keeps going, so without
   // this the view silently stops carrying part of what the granter shares.
   refusedOps: number;
@@ -1558,66 +1559,6 @@ export async function captureStandaloneShareViewDivergence(input: {
   );
 }
 
-// Verify the materialized projection against the local store and repair any
-// drift. The pull only replays NEW relay deltas, so a mounted file modified
-// or deleted locally (a rogue tool writing straight to disk — every dohc
-// surface refuses) would otherwise persist while refreshes report
-// "unchanged", breaking the read-only live-copy contract. Returns how many
-// paths were re-materialized. Local ADDITIONS are left alone: they are
-// indistinguishable from user data and harmless to the projection contract.
-export async function repairSharedViewProjection(
-  rootDir: string,
-  workspaceId: string,
-  store: CaptureVersionedTextStore,
-): Promise<number> {
-  // A root that doesn't exist yet (first refresh materializes it) has
-  // nothing to repair.
-  const maybeRealRoot = await realpath(rootDir).catch(() => null);
-  if (maybeRealRoot === null) return 0;
-  const realRoot: string = maybeRealRoot;
-  const containsReal = (candidate: string) => isInside(realRoot, candidate);
-  const damaged: ShareViewChangedPath[] = [];
-  const main = await store.ensureMainVersion({ workspaceId });
-  const snapshots = await store.listTextFiles({
-    workspaceId,
-    versionId: main.id,
-  });
-  for (const snapshot of snapshots) {
-    const target = containedTarget(rootDir, snapshot.path);
-    const contentKind = snapshot.contentKind === "binary" ? "binary" : "text";
-    let intact = false;
-    try {
-      // REAL-parent containment before trusting anything on disk: a
-      // symlinked ancestor would redirect the read to attacker-controlled
-      // bytes that could pass the hash compare (CodeRabbit). Then lstat
-      // the leaf: a symlink is damage regardless of what it points at.
-      const realParent = await realpath(dirname(target));
-      if (containsReal(realParent)) {
-        const stat = await lstat(target);
-        if (stat.isFile()) {
-          const bytes = await readFile(target);
-          if (typeof snapshot.sha256 === "string" && snapshot.sha256.length > 0) {
-            intact =
-              createHash("sha256").update(bytes).digest("hex") === snapshot.sha256;
-          } else {
-            intact = bytes.toString("utf8") === snapshot.text;
-          }
-        }
-      }
-    } catch {
-      intact = false; // missing or unreadable — re-materialize
-    }
-    if (!intact) {
-      await healTamperedProjectionPath(realRoot, snapshot.path);
-      damaged.push({ path: snapshot.path, operation: "write", contentKind });
-    }
-  }
-  if (damaged.length > 0) {
-    await materializeSharedViewPaths(rootDir, workspaceId, damaged, store);
-  }
-  return damaged.length;
-}
-
 // One refresh pass: pull the share's filtered ops into the local store,
 // materialize what changed, then commit the cursor. Revocation (or a share
 // that stopped existing for this account) comes back as status "ended" —
@@ -1838,30 +1779,47 @@ export async function refreshSharedViewOnce(input: {
 // Keeping this function unlocked avoids reacquiring that same tail and
 // deadlocking the operation that already owns it.
 export async function reconcileStandaloneShareView(
-  input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
+  input: Parameters<typeof refreshSharedViewOnce>[0] & {
+    ended: boolean;
+    captured?: CaptureSharedViewLocalDivergenceOutcome;
+  },
 ): Promise<StandaloneShareViewRefreshOutcome> {
   let totalLocalChanges = 0;
   try {
-    const captured = await captureStandaloneShareViewDivergence(input);
+    const { captured: suppliedCapture, ...refreshInput } = input;
+    const captured =
+      suppliedCapture ?? (await captureStandaloneShareViewDivergence(input));
     totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-    const main = await input.store.ensureMainVersion({
-      workspaceId: input.workspaceId,
+    if (captured.collisionRecordQuarantined) {
+      return {
+        ok: true,
+        status: "unchanged",
+        changedPaths: totalLocalChanges,
+        excludedPaths: [],
+        unjournalablePaths: captured.unjournalablePaths,
+        refusedOps: 0,
+        refusedDetail: null,
+        collisionRecordQuarantined: true,
+      };
+    }
+    const main = await refreshInput.store.ensureMainVersion({
+      workspaceId: refreshInput.workspaceId,
     });
-    if (!input.store.listTextFileMetadata) {
+    if (!refreshInput.store.listTextFileMetadata) {
       throw new Error(
         "Shared view reconciliation requires file metadata listing support.",
       );
     }
     const preTrackedPaths = new Set(
       (
-        await input.store.listTextFileMetadata({
-          workspaceId: input.workspaceId,
+        await refreshInput.store.listTextFileMetadata({
+          workspaceId: refreshInput.workspaceId,
           versionId: main.id,
         })
       ).map((entry) => entry.path),
     );
     const outcome = await refreshSharedViewOnce({
-      ...input,
+      ...refreshInput,
       excludeFromMaterialization: new Set(
         captured.unjournalablePaths.map((path) => path.path),
       ),

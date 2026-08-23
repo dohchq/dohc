@@ -35,7 +35,6 @@ import {
   readSharedViewProjectionDebt,
   reconcileStandaloneShareView,
   refreshSharedViewOnce,
-  repairSharedViewProjection,
   type RefreshSharedViewOutcome,
   type StandaloneShareViewRefreshOutcome,
   withShareViewRefreshLifecycleLock,
@@ -165,7 +164,14 @@ export type ShareViewReconcileOutcome =
       >["unjournalablePaths"];
       collisionRecordQuarantined: boolean;
     }
-  | { kind: "repair"; repairedPaths: number }
+  | {
+      kind: "repair";
+      repairedPaths: number;
+      unjournalablePaths: Awaited<
+        ReturnType<typeof captureStandaloneShareViewDivergence>
+      >["unjournalablePaths"];
+      collisionRecordQuarantined: boolean;
+    }
   | {
       kind: "refresh";
       outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
@@ -994,153 +1000,156 @@ export function createShareViewFiles(
           await dependencies.assertProjectionRoot(target);
         }
         const store = dependencies.openStore(target);
-          if (request === "settle") {
-            if (target.kind !== "standalone") {
-              throw new SharedFileReadOnlyError(
-                "Mounted shares are read-only projections and have no local changes to settle.",
-              );
-            }
-            return {
-              kind: "settle",
-              ...(await captureStandaloneShareViewDivergence({
+        const capture = () =>
+          target.kind === "standalone"
+            ? captureStandaloneShareViewDivergence({
                 rootDir: target.rootPath,
                 workspaceId: target.storeWorkspaceId,
                 store,
                 pinnedSelector: target.grantedSelector,
                 shareId: target.shareId,
                 ended: target.ended,
-              })),
-            };
-          }
+              })
+            : captureSharedViewLocalDivergence(
+                target.rootPath,
+                target.storeWorkspaceId,
+                store,
+                false,
+                target.shareId,
+              );
 
-          if (request === "repair") {
-            const recovered =
-              target.kind === "standalone"
-                ? await captureStandaloneShareViewDivergence({
-                    rootDir: target.rootPath,
-                    workspaceId: target.storeWorkspaceId,
-                    store,
-                    pinnedSelector: target.grantedSelector,
-                    shareId: target.shareId,
-                    ended: target.ended,
-                  })
-                : await captureSharedViewLocalDivergence(
-                    target.rootPath,
-                    target.storeWorkspaceId,
-                    store,
-                    false,
-                    target.shareId,
-                  );
-            const verified = await repairSharedViewProjection(
-              target.rootPath,
-              target.storeWorkspaceId,
-              store,
+        if (request === "settle") {
+          if (target.kind !== "standalone") {
+            throw new SharedFileReadOnlyError(
+              "Mounted shares are read-only projections and have no local changes to settle.",
             );
-            return {
-              kind: "repair",
-              repairedPaths:
-                recovered.capturedPaths + recovered.repairedPaths + verified,
-            };
           }
+          return { kind: "settle", ...(await capture()) };
+        }
 
-          if (target.ended) {
-            return {
-              kind: "refresh",
-              outcome: {
-                status: "ended",
-                changedPaths: 0,
-                excludedPaths: [],
-                unjournalablePaths: [],
-                refusedOps: 0,
-                refusedDetail: null,
-              },
-            };
-          }
+        const recovered = await capture();
+        const localChanges =
+          recovered.capturedPaths + recovered.repairedPaths;
+
+        if (request === "repair") {
+          return {
+            kind: "repair",
+            repairedPaths: localChanges,
+            unjournalablePaths: recovered.unjournalablePaths,
+            collisionRecordQuarantined:
+              recovered.collisionRecordQuarantined,
+          };
+        }
+
+        const localOutcome = (
+          status: RefreshSharedViewOutcome["status"],
+        ): StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome => {
+          const outcome: RefreshSharedViewOutcome = {
+            status,
+            changedPaths: localChanges,
+            excludedPaths: [],
+            unjournalablePaths: recovered.unjournalablePaths,
+            collisionRecordQuarantined:
+              recovered.collisionRecordQuarantined,
+            refusedOps: 0,
+            refusedDetail: null,
+          };
+          return target.kind === "standalone"
+            ? {
+                ok: true,
+                ...outcome,
+                collisionRecordQuarantined:
+                  recovered.collisionRecordQuarantined,
+              }
+            : outcome;
+        };
+
+        let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
+        if (target.ended || recovered.collisionRecordQuarantined) {
+          outcome = localOutcome(target.ended ? "ended" : "unchanged");
+        } else {
           const relay = await dependencies.resolveRelay(target);
           if (relay === null) {
-            return {
-              kind: "refresh",
-              outcome: {
-                status: "unchanged",
-                changedPaths: 0,
-                excludedPaths: [],
-                unjournalablePaths: [],
-                refusedOps: 0,
-                refusedDetail: null,
-              },
-            };
-          }
-          const pull: Parameters<
-            typeof refreshSharedViewOnce
-          >[0]["pull"] = async (input) =>
-            dependencies.pull(target, relay, {
-              grantedSelector: input.grantedSelector,
-              recordRefusals: input.recordRefusals,
-              recordCollisions: input.recordCollisions,
-              recordChangedPaths: input.recordChangedPaths,
-            });
-          const recordRefusals = async (refusals: ShareViewRefusal[]) =>
-            dependencies.recordRefusals(target, refusals);
-
-          let outcome:
-            | StandaloneShareViewRefreshOutcome
-            | RefreshSharedViewOutcome;
-          if (target.kind === "standalone") {
-            outcome = await reconcileStandaloneShareView({
-              rootDir: target.rootPath,
-              workspaceId: target.storeWorkspaceId,
-              relay,
-              shareId: target.shareId,
-              pull,
-              store,
-              pinnedSelector: target.grantedSelector,
-              recordRefusals,
-              ended: target.ended,
-            });
+            outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
           } else {
-            const recovered = await captureSharedViewLocalDivergence(
-              target.rootPath,
-              target.storeWorkspaceId,
-              store,
-              false,
-              target.shareId,
-            );
-            const repaired = await repairSharedViewProjection(
-              target.rootPath,
-              target.storeWorkspaceId,
-              store,
-            );
-            const refreshed = await refreshSharedViewOnce({
-              rootDir: target.rootPath,
-              workspaceId: target.storeWorkspaceId,
-              relay,
-              shareId: target.shareId,
-              pull,
-              store,
-              pinnedSelector: target.grantedSelector,
-              recordRefusals,
-              trackPendingMaterialization: true,
-            });
-            outcome = {
-              ...refreshed,
-              status:
-                recovered.repairedPaths + repaired > 0 &&
-                refreshed.status !== "ended"
-                  ? "updated"
-                  : refreshed.status,
-              changedPaths:
-                refreshed.changedPaths + recovered.repairedPaths + repaired,
-            };
+            const pull: Parameters<
+              typeof refreshSharedViewOnce
+            >[0]["pull"] = async (input) =>
+              dependencies.pull(target, relay, {
+                grantedSelector: input.grantedSelector,
+                recordRefusals: input.recordRefusals,
+                recordCollisions: input.recordCollisions,
+                recordChangedPaths: input.recordChangedPaths,
+              });
+            const recordRefusals = async (refusals: ShareViewRefusal[]) =>
+              dependencies.recordRefusals(target, refusals);
+
+            if (target.kind === "standalone") {
+              outcome = await reconcileStandaloneShareView({
+                rootDir: target.rootPath,
+                workspaceId: target.storeWorkspaceId,
+                relay,
+                shareId: target.shareId,
+                pull,
+                store,
+                pinnedSelector: target.grantedSelector,
+                recordRefusals,
+                ended: false,
+                captured: recovered,
+              });
+            } else {
+              const main = await store.ensureMainVersion({
+                workspaceId: target.storeWorkspaceId,
+              });
+              if (!store.listTextFileMetadata) {
+                throw new Error(
+                  "Shared view reconciliation requires file metadata listing support.",
+                );
+              }
+              const preTrackedPaths = new Set(
+                (
+                  await store.listTextFileMetadata({
+                    workspaceId: target.storeWorkspaceId,
+                    versionId: main.id,
+                  })
+                ).map((entry) => entry.path),
+              );
+              const refreshed = await refreshSharedViewOnce({
+                rootDir: target.rootPath,
+                workspaceId: target.storeWorkspaceId,
+                relay,
+                shareId: target.shareId,
+                pull,
+                store,
+                pinnedSelector: target.grantedSelector,
+                recordRefusals,
+                excludeFromMaterialization: new Set(
+                  recovered.unjournalablePaths.map((path) => path.path),
+                ),
+                unjournalablePaths: recovered.unjournalablePaths,
+                trackPendingMaterialization: true,
+                preTrackedPaths,
+              });
+              outcome = {
+                ...refreshed,
+                status:
+                  localChanges > 0 && refreshed.status !== "ended"
+                    ? "updated"
+                    : refreshed.status,
+                changedPaths: refreshed.changedPaths + localChanges,
+              };
+            }
           }
-          if (
-            "ok" in outcome
-              ? outcome.ok && outcome.status === "ended"
-              : outcome.status === "ended"
-          ) {
-            await dependencies.markEnded(target);
-            await dependencies.retireTarget(target);
-          }
-          return { kind: "refresh", outcome };
+        }
+        if (
+          "ok" in outcome
+            ? outcome.ok && outcome.status === "ended"
+            : outcome.status === "ended"
+        ) {
+          await dependencies.markEnded(target);
+          await dependencies.retireTarget(target);
+        }
+        return { kind: "refresh", outcome };
       });
     },
 

@@ -35,8 +35,8 @@ import { isEngineTransportFailure } from "./shareViewEngineFailure";
 // THE PROJECTION IS NOT DOHC'S TO SPEND. A share view's folder holds two kinds
 // of file: the projection of the store, which this module rewrites freely, and
 // whatever the recipient put there themselves, which is their own data and
-// which no moment describes — `repairSharedViewProjection` leaves those alone
-// for exactly that reason. Every operation here therefore asks BOTH sides
+// which no moment describes. Reconciliation leaves those additions alone for
+// exactly that reason. Every operation here therefore asks BOTH sides
 // before it writes either, and refuses when it would touch content the store
 // cannot state. Refusing is the whole fix: dohc does not carry those files
 // along, and does not invent a trash to put them in.

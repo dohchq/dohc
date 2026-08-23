@@ -284,6 +284,86 @@ describe("ShareViewFiles", () => {
     expect(openStore).not.toHaveBeenCalled();
   });
 
+  it("repairs tracked files without replacing recipient-owned directories", async () => {
+    const rootPath = await workspaceRoot();
+    const trackedPath = join(rootPath, "docs", "note.md");
+    await mkdir(trackedPath, { recursive: true });
+    await writeFile(join(trackedPath, "mine.md"), "recipient\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/note.md", text: "canonical\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath, "view"),
+      openStore: () => store,
+    });
+
+    const outcome = await withStaleSensitiveWorkspaceOperation(
+      rootPath,
+      (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          "repair",
+        ),
+    );
+
+    expect(outcome).toMatchObject({
+      kind: "repair",
+      repairedPaths: 0,
+      collisionRecordQuarantined: false,
+      unjournalablePaths: [
+        { path: "docs/note.md", reason: "non-file-replacement" },
+      ],
+    });
+    await expect(
+      readFile(join(trackedPath, "mine.md"), "utf8"),
+    ).resolves.toBe("recipient\n");
+  });
+
+  it("repairs an ended view locally without resolving a relay", async () => {
+    const rootPath = await workspaceRoot();
+    await mkdir(join(rootPath, "docs"), { recursive: true });
+    await writeFile(join(rootPath, "docs", "note.md"), "changed\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/note.md", text: "canonical\n" }],
+    });
+    const resolveRelay = vi.fn(async () => {
+      throw new Error("relay resolution must not run for an ended view");
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => ({ ...target(rootPath, "edit"), ended: true }),
+      openStore: () => store,
+      resolveRelay,
+    });
+
+    const outcome = await withStaleSensitiveWorkspaceOperation(
+      rootPath,
+      (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          "refresh",
+        ),
+    );
+
+    expect(outcome).toMatchObject({
+      kind: "refresh",
+      outcome: {
+        ok: true,
+        status: "ended",
+        changedPaths: 1,
+        collisionRecordQuarantined: false,
+        unjournalablePaths: [],
+      },
+    });
+    expect(resolveRelay).not.toHaveBeenCalled();
+    await expect(readFile(join(rootPath, "docs", "note.md"), "utf8")).resolves.toBe(
+      "canonical\n",
+    );
+  });
+
   it("does not unmount a share removed while waiting for its lifecycle", async () => {
     const rootPath = await workspaceRoot();
     let current: ResolvedShareViewFilesTarget | null = mountTarget(rootPath);
