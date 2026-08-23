@@ -764,6 +764,7 @@ export const CHANNELS = {
   presencePoll: "desktop:presence-poll",
   presenceCancel: "desktop:presence-cancel",
   getSyncStatus: "desktop:get-sync-status",
+  rebuildEngineStore: "desktop:rebuild-engine-store",
   startAgentRun: "desktop:start-agent-run",
   endAgentRun: "desktop:end-agent-run",
   getAgentRunStatus: "desktop:get-agent-run-status",

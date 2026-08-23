@@ -12,7 +12,12 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SyncStatusResult, UpdateStateEvent } from "../../ipc/bridgeContract";
+import {
+  ENGINE_STORE_BACKUP_DIR,
+  engineStoreRefusalSentence,
+  type SyncStatusResult,
+  type UpdateStateEvent,
+} from "../../ipc/bridgeContract";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
@@ -94,6 +99,10 @@ export function NoticeCenter(props: {
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
+  // Opens the rebuild confirmation for a refused data store (#874). The
+  // shell owns the dialog and the move; the notice only announces the
+  // refusal and offers the way in.
+  onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
   // Changes a share recipient sent to this workspace, awaiting the granter
   // (#646 PR3a). One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -283,11 +292,21 @@ export function NoticeCenter(props: {
       });
     }
 
-    // Persistent while true (PR 0M-7): the flagged workspace's engine capture
-    // is its sole history recorder, so a failing capture means History is
-    // silently incomplete. Main clears the flag when a later capture
-    // succeeds; one notice per workspace by construction (per-workspace flag).
-    if (props.syncStatus?.historyCaptureFailed) {
+    if (props.syncStatus?.engineStoreRefused) {
+      next.push({
+        id: "engine-store-refused",
+        tone: "danger",
+        title: engineStoreRefusalSentence(props.syncStatus.engineStoreRefused),
+        body: `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds history from your files.`,
+        action: {
+          label: "Rebuild",
+          onClick: () => {
+            if (toggleRef.current) props.onRebuildEngineStore(toggleRef.current);
+          },
+        },
+        Icon: AlertTriangle,
+      });
+    } else if (props.syncStatus?.historyCaptureFailed) {
       next.push({
         id: "history-capture-failed",
         tone: "warning",
@@ -399,6 +418,7 @@ export function NoticeCenter(props: {
     props.onOpenConflicts,
     props.onOpenHistory,
     props.onOpenSettings,
+    props.onRebuildEngineStore,
     props.onReviewShareChanges,
     props.shareChangeNotices,
     props.syncStatus,

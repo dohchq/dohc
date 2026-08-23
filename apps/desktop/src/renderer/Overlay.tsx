@@ -1,4 +1,9 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  type HTMLAttributes,
+  type ReactNode,
+} from "react";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
 
 const FOCUSABLE_SELECTOR =
@@ -8,7 +13,14 @@ const FOCUSABLE_SELECTOR =
 // panel that swallows clicks. Used by the command palette, quick-open, new
 // file dialog, cloud panel, and plugin uninstall dialog so close/backdrop
 // behavior — and this keyboard behavior — stays identical everywhere.
-export function Overlay(props: { onClose: () => void; children: ReactNode }) {
+export function Overlay(props: {
+  onClose: () => void;
+  children: ReactNode;
+  panelProps?: Omit<
+    HTMLAttributes<HTMLDivElement>,
+    "children" | "className" | "onClick" | "tabIndex"
+  > & { "data-testid"?: string };
+}) {
   const panelRef = useRef<HTMLDivElement>(null);
   // A ref, not a dependency, so Escape and Tab always call this render's
   // onClose even though the keydown listener itself is only ever attached
@@ -26,7 +38,9 @@ export function Overlay(props: { onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     function focusableElements(): HTMLElement[] {
       const panel = panelRef.current;
-      return panel ? [...panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)] : [];
+      return panel
+        ? [...panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
+        : [];
     }
 
     function onKeyDown(event: KeyboardEvent): void {
@@ -40,7 +54,11 @@ export function Overlay(props: { onClose: () => void; children: ReactNode }) {
       const elements = focusableElements();
       const first = elements[0];
       const last = elements[elements.length - 1];
-      if (!first || !last) return;
+      if (!first || !last) {
+        event.preventDefault();
+        panelRef.current?.focus();
+        return;
+      }
       const active = document.activeElement;
       const insidePanel = active !== null && panelRef.current?.contains(active);
       if (event.shiftKey) {
@@ -65,7 +83,9 @@ export function Overlay(props: { onClose: () => void; children: ReactNode }) {
       onClick={props.onClose}
     >
       <div
+        {...props.panelProps}
         ref={panelRef}
+        tabIndex={-1}
         className="dohc-pop-in"
         onClick={(event) => event.stopPropagation()}
       >

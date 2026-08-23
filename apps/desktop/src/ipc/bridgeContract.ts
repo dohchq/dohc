@@ -7,7 +7,11 @@ import {
 import { z } from "zod";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
-import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
+import type {
+  ArtifactAssetDescriptor,
+  EngineStoreRefusal,
+} from "@dohc/workspace-engine-client";
+export type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import {
   CHATS_TAB_PATH,
   canonicalSingletonEditorTabPath,
@@ -817,7 +821,7 @@ export const ImportToDatabaseResult = z.object({
 });
 export type ImportToDatabaseResult = z.infer<typeof ImportToDatabaseResult>;
 
-export const SyncStatusResult = z.object({
+const SYNC_STATUS_BASE_FIELDS = {
   state: z.enum([
     "synced",
     "syncing",
@@ -831,11 +835,6 @@ export const SyncStatusResult = z.object({
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
-  // Additive (PR 0M-7): true while the workspace-engine capture — a flagged
-  // workspace's SOLE history recorder — is failing, so the notice center can
-  // say history is not being recorded. Optional so older producers/fixtures
-  // keep parsing.
-  historyCaptureFailed: z.boolean().optional(),
   // Additive (WS-H1 retirement Phase C): true when this workspace records NO
   // history at all — the engine is explicitly opted out and the legacy
   // recorder no longer exists. Drives the persistent "History is off"
@@ -868,6 +867,11 @@ export const SyncStatusResult = z.object({
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
+  // #882: increments whenever main retires this workspace's live
+  // editor sessions. Every renderer re-reads status after an activity ping,
+  // so the generation makes every mounted editor release its retired session.
+  // Required because workspaceActivity includes it in every status.
+  liveSessionsGeneration: z.number().int().nonnegative(),
   // Additive: files that are safe locally but cannot fit in the relay's
   // encoded payload limit. The notice center keeps this visible until a
   // later successful sync no longer reports the path.
@@ -881,9 +885,59 @@ export const SyncStatusResult = z.object({
       }),
     )
     .optional(),
-});
+};
+
+export const SyncStatusResult = z.union([
+  z.object({
+    ...SYNC_STATUS_BASE_FIELDS,
+    historyCaptureFailed: z.literal(true),
+    // A failed producer must say whether the engine refused the store. Null
+    // means history capture failed for another reason.
+    engineStoreRefused: z
+      .enum(["unsupported-fingerprint", "foreign-database"])
+      .nullable(),
+  }),
+  z
+    .object({
+      ...SYNC_STATUS_BASE_FIELDS,
+      historyCaptureFailed: z.literal(false).optional(),
+      engineStoreRefused: z.never().optional(),
+    })
+    .superRefine((status, context) => {
+      if (Object.hasOwn(status, "engineStoreRefused")) {
+        context.addIssue({
+          code: "custom",
+          path: ["engineStoreRefused"],
+          message: "A healthy status must omit the store refusal field.",
+        });
+      }
+    }),
+]);
 export type SyncStatusResult = z.infer<typeof SyncStatusResult>;
 
+export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
+
+export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
+  switch (cause) {
+    case "unsupported-fingerprint":
+      return "This workspace's data store is not in the format this version of dohc uses.";
+    case "foreign-database":
+      return "dohc cannot read this workspace's data store.";
+  }
+}
+
+export const RebuildEngineStorePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type RebuildEngineStorePayload = z.infer<
+  typeof RebuildEngineStorePayload
+>;
+
+export const RebuildEngineStoreResult = z.object({
+  outcome: z.enum(["moved", "backup-exists"]),
+  reopenFailed: z.string().min(1).max(2000).optional(),
+});
+export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
 
 // Engine history (PR 0M-5, workspace-engine alpha): flagged workspaces read
 // their timeline from ENGINE moments instead of legacy change sets. Every
@@ -4880,6 +4934,9 @@ export interface DohcDesktopBridge {
   presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
+  rebuildEngineStore(
+    payload: RebuildEngineStorePayload,
+  ): Promise<RebuildEngineStoreResult>;
   startAgentRun(payload: AgentRunPayload): Promise<StartAgentRunResult>;
   endAgentRun(payload: EndAgentRunPayload): Promise<void>;
   getAgentRunStatus(payload: AgentRunPayload): Promise<AgentRunStatusResult>;

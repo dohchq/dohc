@@ -803,6 +803,9 @@ describe("main-process chat authorization", () => {
       "writeWorkspaceAsset",
       "applyDatabaseEdit",
       "importToDatabase",
+      // #874: moves the workspace's engine database aside. Not a content
+      // write, but it relocates workspace state on disk — same boundary.
+      "rebuildEngineStore",
     ];
     const seams = [
       "createFolder(",
@@ -817,6 +820,7 @@ describe("main-process chat authorization", () => {
       "withExclusiveWorkspaceOperation(",
       "withStaleSensitiveWorkspaceOperation(",
       "engineCaptureFor(",
+      "rebuildEngineStoreRequest(",
     ];
 
     for (const channel of fileWrites) {
@@ -842,6 +846,18 @@ describe("main-process chat authorization", () => {
         `${channel}: the gate must precede the store`,
       ).toBeGreaterThan(gateAt);
     }
+  });
+
+  // #874: the rebuild moves a workspace's engine database aside. Main must
+  // derive the refusal from its OWN activity status. A renderer that can
+  // trigger the move on a HEALTHY store would silently detach the workspace's
+  // history and chats. engineStoreRebuild.test.ts behavior-tests ordering.
+  it("gates the engine-store rebuild on main's own refusal fact", () => {
+    const handler = handlerSource("rebuildEngineStore");
+    expect(handler).toContain("isStoreRefused: () =>");
+    expect(handler).toContain(
+      "activity.getStatus(workspace.workspaceId).engineStoreRefused",
+    );
   });
 
   // The write gate's own shape, pinned where it is defined. Same split as

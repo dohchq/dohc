@@ -288,6 +288,8 @@ import {
   WriteClipboardTextPayload,
   GetWorkspaceUiStateResult,
   SyncStatusResult,
+  RebuildEngineStorePayload,
+  RebuildEngineStoreResult,
   WorkspaceRegistryResult,
   WorkspaceSummary,
   WorkspaceGraphResult,
@@ -381,6 +383,14 @@ import {
   SHARED_WITH_ME_FOLDER,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
+import {
+  completePendingEngineStoreMove,
+  EngineStoreRecoveryFailedError,
+  moveEngineStoreAside,
+  rebuildEngineStoreRequest,
+  withEngineStoreRecovered,
+  withEngineStoreRecoveredUnderEngineStoreLock,
+} from "./workspaces/engineStoreRebuild";
 import {
   completeWorkspaceJoinBootstrap,
   effectiveHome,
@@ -574,7 +584,10 @@ import {
   engineMomentForIpc,
   versionConflictForIpc,
 } from "./ipc/engineHistoryIpc";
-import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
+import {
+  closeWorkspaceActivityAndRelay,
+  createWorkspaceActivity,
+} from "./workspaces/workspaceActivity";
 import type {
   WorkspaceEngineCapture,
   WorkspaceEngineYDocProviderSession,
@@ -583,6 +596,7 @@ import {
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
+  probeEngineStoreRefusal,
 } from "./workspaces/workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
@@ -622,12 +636,16 @@ import {
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
 } from "./workspaces/engineCaptureGate";
+import { coalesceDispatchScopedSync } from "./workspaces/dispatchScopedSync";
 import {
   readWorkspaceEnginePolicy,
   resolveEngineSearchPolicy,
 } from "./workspaces/workspaceEnginePolicyFile";
 import { queryWorkspaceSearchDaemon } from "./workspaces/workspaceSearchDaemon";
-import { createAgentIntegration } from "./agents/AgentIntegration";
+import {
+  createAgentIntegration,
+  type AgentRunRecord,
+} from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
@@ -2527,7 +2545,9 @@ const tryInVersionSessions = createTryInVersionSessions({
     }
     // No driver: a bare dohc-tracked run — the user's own agent tool does the
     // work in the folder and dohc attributes what it changes.
-    const run = await agentIntegration.startAgentRun(workspaceId);
+    const run = await startAgentRunWithWorkspaceActivity(
+      requireWorkspace(workspaceId),
+    );
     desktopMarks.measureSince(
       "try-in-version-run-start",
       "try-in-version-run-start-begin",
@@ -2568,7 +2588,11 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
       pluginDriversFor: (workspaceId) =>
         pluginAgentDriversByWorkspace.get(workspaceId)?.list() ?? [],
       agentDefaultsFor: workspaceAgentDefaults,
-      integration: agentIntegration,
+      integration: {
+        ...agentIntegration,
+        startAgentRun: (workspaceId) =>
+          startAgentRunWithWorkspaceActivity(requireWorkspace(workspaceId)),
+      },
       rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
       mcpFor: mcpRuntimeConfigFor,
     });
@@ -2796,117 +2820,193 @@ function syncDispatchWorkspaces(): ChatDispatchWorkspace[] {
 // attributed. Normal renderer/CLI opens retain activity for the app session.
 const dispatchScopedSyncs = new Map<string, Promise<boolean>>();
 const retainedWorkspaceActivities = new Set<string>();
+const engineStoreRebuildLocks = new Map<string, Promise<void>>();
 const workspaceActivityOpenPromises = new Map<
   string,
   Promise<SyncStatusResult>
 >();
 const workspaceActivityClosePromises = new Map<string, Promise<void>>();
 
-async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
-  const closing = workspaceActivityClosePromises.get(workspaceId);
-  if (closing) await closing.catch(() => undefined);
-  if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
-    activity.queueCloudSync(workspaceId);
-    return activity.engineCaptureFor(workspaceId) !== null;
-  }
-  const existing = dispatchScopedSyncs.get(workspaceId);
-  if (existing) return existing;
-  const workspace = findWorkspace(workspaceId);
-  if (!workspace || sharedViewOf(workspaceId)) return false;
-  const scoped = (async () => {
-    const { capture } = await captureForFlaggedWorkspace(
-      {
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        // Guarded above: a shared view already returned false.
-        shareView: false,
-      },
-      {
-        activeAgentRun: () => null,
-        onCaptureOutcome: () => undefined,
-      },
-      requireEngineSessions(),
-    );
-    if (!capture) return false;
-    try {
-      // A normal open may have started while the scoped capture was built.
-      // Yield ownership rather than opening a second relay sync engine.
-      if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
-        activity.queueCloudSync(workspaceId);
-        return activity.engineCaptureFor(workspaceId) !== null;
-      }
-      const engine = engineForWorkspace(workspace, capture);
-      if (!engine) return false;
-      try {
-        await engine.start();
-        return true;
-      } finally {
-        await engine.stop().catch(() => undefined);
-        const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
-        if (relayWorkspaceId) {
-          await closeRelayTransportWorkspace(relayWorkspaceId).catch(
-            () => undefined,
-          );
-        }
-      }
-    } finally {
-      await capture.stop().catch(() => undefined);
-    }
-  })();
-  dispatchScopedSyncs.set(workspaceId, scoped);
-  try {
-    return await scoped;
-  } finally {
-    if (dispatchScopedSyncs.get(workspaceId) === scoped) {
-      dispatchScopedSyncs.delete(workspaceId);
-    }
-  }
+function completePendingEngineStoreMoveForWorkspace(
+  workspace: Pick<CreatedWorkspace, "workspaceId">,
+  rootPath: string,
+): Promise<void> {
+  const sessions = requireEngineSessions();
+  return completePendingEngineStoreMove(rootPath, {
+    rebuildGate: {
+      begin: () => sessions.beginRebuild(workspace.workspaceId),
+      end: () => sessions.endRebuild(workspace.workspaceId),
+    },
+  });
 }
 
-async function ensureWorkspaceActivityOpen(
+async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
+  return coalesceDispatchScopedSync(
+    dispatchScopedSyncs,
+    workspaceId,
+    async () => {
+      const closing = workspaceActivityClosePromises.get(workspaceId);
+      if (closing) await closing.catch(() => undefined);
+      const workspace = findWorkspace(workspaceId);
+      if (!workspace || sharedViewOf(workspaceId)) return false;
+      try {
+        return await withEngineStoreRecovered(
+          engineStoreRebuildLocks,
+          workspace,
+          async () => {
+            if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
+              activity.queueCloudSync(workspaceId);
+              return activity.engineCaptureFor(workspaceId) !== null;
+            }
+            const { capture } = await captureForFlaggedWorkspace(
+              {
+                workspaceId: workspace.workspaceId,
+                rootPath: workspace.rootPath,
+                // Guarded above: a shared view already returned false.
+                shareView: false,
+              },
+              {
+                activeAgentRun: () => null,
+                onCaptureOutcome: () => undefined,
+              },
+              requireEngineSessions(),
+            );
+            if (!capture) return false;
+            try {
+              const engine = engineForWorkspace(workspace, capture);
+              if (!engine) return false;
+              try {
+                await engine.start();
+                return true;
+              } finally {
+                await engine.stop().catch(() => undefined);
+                const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
+                if (relayWorkspaceId) {
+                  await closeRelayTransportWorkspace(relayWorkspaceId).catch(
+                    () => undefined,
+                  );
+                }
+              }
+            } finally {
+              await capture.stop().catch(() => undefined);
+            }
+          },
+          (rootPath) =>
+            completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
+        );
+      } catch (error) {
+        if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
+        // The dispatch pump stops on false. A thrown sync error is logged, then
+        // the pump scans anyway and can open the still-split store directly.
+        console.error("[desktop] pending engine store move:", error);
+        return false;
+      }
+    },
+  );
+}
+
+interface WorkspaceActivityOpenOptions {
+  afterActivityOpen?: () => Promise<void>;
+  whileEngineStoreLockHeld?: () => Promise<void>;
+  // Runs after reopen recovery has settled (resumed and completed a partial
+  // move, or found nothing pending) but BEFORE activity.open starts the
+  // daemon-owned capture. The rebuild's own reopen uses this to release the
+  // request-scoped gate before capture.start()'s startup probe binds a
+  // session — otherwise that probe races the still-raised gate and
+  // self-refuses in the background (#882 round 19).
+  afterReopenRecoverySettled?: () => void;
+}
+
+async function ensureWorkspaceActivityOpenBody(
   workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
+  let status: SyncStatusResult;
   for (;;) {
-    const scoped = dispatchScopedSyncs.get(workspace.workspaceId);
-    if (scoped) {
-      await scoped.catch(() => undefined);
-      continue;
-    }
     const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
     if (closing) {
       await closing.catch(() => undefined);
       continue;
     }
     const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
-    if (existing) return existing;
-    // activity.open registers the workspace synchronously before its first
-    // await. With no yield after the checks above, a scoped scan can only
-    // start before us (and be observed on the next loop) or after us (and
-    // yield to the registered activity owner).
+    if (existing) {
+      status = await existing;
+      break;
+    }
     const opening = activity.open(workspace);
     workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
     try {
-      return await opening;
+      status = await opening;
+      break;
     } finally {
       if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
         workspaceActivityOpenPromises.delete(workspace.workspaceId);
       }
     }
   }
+  await options.whileEngineStoreLockHeld?.();
+  return status;
 }
 
-async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
+async function ensureWorkspaceActivityOpen(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  return withEngineStoreRecovered(
+    engineStoreRebuildLocks,
+    workspace,
+    () => ensureWorkspaceActivityOpenBody(workspace, options),
+    (rootPath) =>
+      completePendingEngineStoreMoveForWorkspace(workspace, rootPath),
+  );
+}
+
+async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  return withEngineStoreRecoveredUnderEngineStoreLock(
+    workspace,
+    () => ensureWorkspaceActivityOpenBody(workspace, options),
+    async (rootPath) => {
+      await completePendingEngineStoreMoveForWorkspace(workspace, rootPath);
+      // Recovery settled (resumed-and-completed, or an honest no-op) without
+      // throwing — release before the activity-open body below starts
+      // capture. A failed recovery throws out of the line above and never
+      // reaches this call, so the sticky-on-failure rule is untouched.
+      options.afterReopenRecoverySettled?.();
+    },
+  );
+}
+
+async function closeDispatchRunActivity(
+  workspaceId: string,
+  options: { notifyRenderer?: boolean } = {},
+): Promise<void> {
   const existing = workspaceActivityClosePromises.get(workspaceId);
   if (existing) return existing;
   const relayWorkspaceId =
     findWorkspace(workspaceId)?.remote?.remoteWorkspaceId;
-  const closing = activity.close(workspaceId);
+  const closing = closeWorkspaceActivityAndRelay({
+    closeActivity: () =>
+      activity.close(workspaceId, {
+        preserveStatus: true,
+        notify: options.notifyRenderer,
+      }),
+    ...(relayWorkspaceId
+      ? {
+          closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId),
+        }
+      : {}),
+    onRelayCloseError: (error) =>
+      console.error(
+        `[desktop] relay workspace close failed for ${relayWorkspaceId}:`,
+        error,
+      ),
+  });
   workspaceActivityClosePromises.set(workspaceId, closing);
   try {
     await closing;
-    if (relayWorkspaceId) {
-      await closeRelayTransportWorkspace(relayWorkspaceId);
-    }
   } finally {
     if (workspaceActivityClosePromises.get(workspaceId) === closing) {
       workspaceActivityClosePromises.delete(workspaceId);
@@ -3129,20 +3229,59 @@ const workspaceChatLifecycle = createWorkspaceChatLifecycle({
   },
 });
 
-async function openWorkspaceActivity(
+async function openWorkspaceActivityWith(
   workspace: CreatedWorkspace,
-  afterActivityOpen?: () => Promise<void>,
+  options: WorkspaceActivityOpenOptions,
+  ensureOpen: (
+    workspace: CreatedWorkspace,
+    options: WorkspaceActivityOpenOptions,
+  ) => Promise<SyncStatusResult>,
 ): Promise<SyncStatusResult> {
   retainedWorkspaceActivities.add(workspace.workspaceId);
   const result = await workspaceChatLifecycle.open(
     workspace,
-    () => ensureWorkspaceActivityOpen(workspace),
-    afterActivityOpen,
+    () => ensureOpen(workspace, options),
+    options.afterActivityOpen,
   );
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
   return result;
+}
+
+async function openWorkspaceActivity(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  return openWorkspaceActivityWith(
+    workspace,
+    options,
+    ensureWorkspaceActivityOpen,
+  );
+}
+
+async function openWorkspaceActivityUnderEngineStoreLock(
+  workspace: CreatedWorkspace,
+  options: WorkspaceActivityOpenOptions = {},
+): Promise<SyncStatusResult> {
+  return openWorkspaceActivityWith(
+    workspace,
+    options,
+    ensureWorkspaceActivityOpenUnderEngineStoreLock,
+  );
+}
+
+async function startAgentRunWithWorkspaceActivity(
+  workspace: CreatedWorkspace,
+): Promise<AgentRunRecord> {
+  let run: AgentRunRecord | undefined;
+  await openWorkspaceActivity(workspace, {
+    whileEngineStoreLockHeld: async () => {
+      run = await agentIntegration.startAgentRun(workspace.workspaceId);
+    },
+  });
+  if (!run) throw new Error("The agent run did not start.");
+  return run;
 }
 
 interface RunningPluginPanel {
@@ -3160,6 +3299,10 @@ const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
 const runningPluginPanels = new Map<string, RunningPluginPanel>();
 const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const pluginHostLifecycleLocks = new Map<string, Promise<void>>();
+const lastEngineStoreRebuildResult = new Map<
+  string,
+  RebuildEngineStoreResult
+>();
 
 /**
  * Registers a fresh SDK grant for one panel and wires its own file-watch
@@ -5836,14 +5979,16 @@ function registerIpcHandlers(
       // its start() is the first pull (materialize + cursor commit), and no
       // push can reach the relay before that pull succeeds — a fresh join can
       // never seed boilerplate into the remote or conflict against it.
-      await openWorkspaceActivity(created, async () => {
-        setWorkspaceRemote(created.workspaceId, {
-          serverUrl: credentials.serverUrl,
-          remoteWorkspaceId: parsed.workspaceId,
-          ownerUserId: credentials.userId,
-        });
-        await activity.enableCloud(created, { joinBootstrap: true });
-        completeWorkspaceJoinBootstrap(created.workspaceId);
+      await openWorkspaceActivity(created, {
+        afterActivityOpen: async () => {
+          setWorkspaceRemote(created.workspaceId, {
+            serverUrl: credentials.serverUrl,
+            remoteWorkspaceId: parsed.workspaceId,
+            ownerUserId: credentials.userId,
+          });
+          await activity.enableCloud(created, { joinBootstrap: true });
+          completeWorkspaceJoinBootstrap(created.workspaceId);
+        },
       });
     } catch (error) {
       // Failed-first-pull contract (0P-C gate fix, documented choice): roll
@@ -10869,6 +11014,65 @@ function registerIpcHandlers(
     return SyncStatusResult.parse(activity.getStatus(input.workspaceId));
   });
 
+  ipcMain.handle(CHANNELS.rebuildEngineStore, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = RebuildEngineStorePayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
+    return withKeyedStartLock(
+      engineStoreRebuildLocks,
+      workspace.workspaceId,
+      async () => {
+        const sessions = requireEngineSessions();
+        return RebuildEngineStoreResult.parse(
+          await rebuildEngineStoreRequest(workspace.rootPath, {
+            isStoreRefused: () =>
+              Boolean(
+                activity.getStatus(workspace.workspaceId).engineStoreRefused,
+              ),
+            hasActiveAgentRun: () =>
+              activity.hasAgentRun(workspace.workspaceId),
+            previousResult: () =>
+              lastEngineStoreRebuildResult.get(workspace.workspaceId),
+            rememberResult: (result) =>
+              lastEngineStoreRebuildResult.set(workspace.workspaceId, result),
+            closeActivity: async () => {
+              try {
+                await closeDispatchRunActivity(workspace.workspaceId, {
+                  notifyRenderer: false,
+                });
+              } catch (error) {
+                notifyRenderer();
+                throw error;
+              }
+            },
+            probeStoreRefusal: () =>
+              probeEngineStoreRefusal(
+                workspace.workspaceId,
+                workspace.rootPath,
+                sessions,
+              ),
+            rebuildGate: {
+              begin: () => sessions.beginRebuild(workspace.workspaceId),
+              end: () => sessions.endRebuild(workspace.workspaceId),
+            },
+            moveStoreAside: moveEngineStoreAside,
+            reopenActivity: async () => {
+              try {
+                await openWorkspaceActivityUnderEngineStoreLock(workspace, {
+                  afterReopenRecoverySettled: () =>
+                    sessions.endRebuild(workspace.workspaceId),
+                });
+              } finally {
+                notifyRenderer();
+              }
+            },
+          }),
+        );
+      },
+    );
+  });
+
   // Enabling agents starts a local run: the workspace must already be OPEN (the
   // watcher must be live for the run slot to attach), so open it first.
   ipcMain.handle(CHANNELS.startAgentRun, async (event, payload) => {
@@ -10877,8 +11081,9 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     assertAgentRunnableWorkspace(workspace.workspaceId);
     assertChatRunnerIdle(workspace.workspaceId);
-    await openWorkspaceActivity(workspace);
-    return StartAgentRunResult.parse(await agentIntegration.startAgentRun(input.workspaceId));
+    return StartAgentRunResult.parse(
+      await startAgentRunWithWorkspaceActivity(workspace),
+    );
   });
 
   ipcMain.handle(CHANNELS.endAgentRun, async (event, payload) => {

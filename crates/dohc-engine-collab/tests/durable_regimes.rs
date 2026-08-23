@@ -1343,8 +1343,14 @@ fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
     for i in 0..2u32 {
         let update = doc.plaintext_insert(i, "x");
         committed(
-            record_local_update(&mut ts.store, &key, &update, &NoFaults, 1_001 + i64::from(i))
-                .expect("rec"),
+            record_local_update(
+                &mut ts.store,
+                &key,
+                &update,
+                &NoFaults,
+                1_001 + i64::from(i),
+            )
+            .expect("rec"),
         );
     }
     committed(maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_010).expect("compact"));
@@ -1357,10 +1363,14 @@ fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
     // Nothing pending, healthy snapshot: close must be clean and idempotent —
     // Skipped, never a re-mint — across repeated calls.
     for now in [1_011i64, 1_012] {
-        let closed = close_session(&mut ts.store, &key, false, None, &NoFaults, now).expect("close");
+        let closed =
+            close_session(&mut ts.store, &key, false, None, &NoFaults, now).expect("close");
         match closed {
             TxnOutcome::Committed(CloseOutcome::Compacted(CompactOutcome::Skipped { pending })) => {
-                assert_eq!(pending, 0, "a healthy compacted lineage has nothing pending");
+                assert_eq!(
+                    pending, 0,
+                    "a healthy compacted lineage has nothing pending"
+                );
             }
             other => panic!("expected a clean Skipped close, got {other:?}"),
         }

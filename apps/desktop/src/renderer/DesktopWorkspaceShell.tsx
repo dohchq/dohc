@@ -34,8 +34,10 @@ import type {
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
+  EngineStoreRefusal,
   MyShareChangeRow,
   RefreshSharedViewResult,
+  RebuildEngineStoreResult,
   ShareProposalRow,
   SyncStatusResult,
   TryInVersionRunState,
@@ -43,6 +45,10 @@ import type {
   WorkspaceGraphResult,
   WorkspaceFileEntry,
   WorkspaceSummary,
+} from "../ipc/bridgeContract";
+import {
+  ENGINE_STORE_BACKUP_DIR,
+  engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
 import { formatSize } from "../plugins/pluginFormat";
 import {
@@ -91,7 +97,11 @@ import {
 } from "./settings/settingsRegistry";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
-import { SectionLabel } from "./ui/controls";
+import {
+  PrimaryButton,
+  SecondaryButton,
+  SectionLabel,
+} from "./ui/controls";
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
@@ -1468,7 +1478,11 @@ export function DesktopWorkspaceShell(props: {
   // or a failed capture build — every engine-history call can only error,
   // whatever the renderer's own capability read said.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
-    Boolean(status?.historyRecordingOff || status?.historyRecordingUnavailable);
+    Boolean(
+      status?.historyRecordingOff ||
+        status?.historyRecordingUnavailable ||
+        status?.engineStoreRefused,
+    );
   // Whether main's capture decision for THIS workspace has landed. The
   // surfaces that call on mount need it, and no reading of the status can
   // supply it:
@@ -2384,18 +2398,17 @@ export function DesktopWorkspaceShell(props: {
   ]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
+    const detail = error instanceof Error ? error.message.trim() : "";
     setShellError({
-      message: error instanceof Error ? error.message : fallback,
+      message:
+        detail && detail !== fallback && !detail.startsWith(`${fallback} `)
+          ? `${fallback} ${detail}`
+          : detail || fallback,
       retry: null,
     });
   }, []);
-  // What a failed snapshot lane owes the user, and `reportShellError` supplies
-  // one third of it. It shows the cause and DROPS the fallback, so three lanes
-  // that share one banner arrive as one backend sentence naming none of them —
-  // and the user cannot tell whether sync status, agent runs or the try run
-  // went stale. The lane says WHICH, the cause says why, and the control asks
-  // again: the three parts an error owes (copy.md), in that order, so the lane
-  // survives truncation.
+  // Snapshot lanes share one banner. Keep the lane in the message so the user
+  // can tell which value went stale, then show the cause and a retry control.
   //
   // The retry matters most on the first load. A sibling that fails while the
   // page succeeds renders the timeline, which hides History's own Try again —
@@ -2407,6 +2420,53 @@ export function DesktopWorkspaceShell(props: {
       setShellError({ message: cause ? `${lane} ${cause}` : lane, retry });
     },
     [],
+  );
+
+  // The result keeps the move outcome visible even when reopening fails.
+  const [engineRebuild, setEngineRebuild] = useState<
+    | { phase: "confirm"; refusal: EngineStoreRefusal }
+    | { phase: "moving"; refusal: EngineStoreRefusal }
+    | { phase: "complete"; result: RebuildEngineStoreResult }
+    | null
+  >(null);
+  // Bumped after an engine version operation or a main-process live-session
+  // retirement so mounted editors release their old session before reopening.
+  const [versionEpoch, setVersionEpoch] = useState(0);
+  const engineRebuildReturnFocusRef = useRef<HTMLButtonElement | null>(null);
+  const engineRebuildOpen = engineRebuild !== null;
+  useEffect(() => {
+    if (engineRebuildOpen) return;
+    engineRebuildReturnFocusRef.current?.focus();
+    engineRebuildReturnFocusRef.current = null;
+  }, [engineRebuildOpen]);
+  // Workspace-scoped guard (AGENTS.md): a slow response for workspace A must
+  // never repaint workspace B. Switching workspaces closes the dialog and
+  // invalidates any in-flight move's answer.
+  const engineRebuildToken = useRef(0);
+  const engineRebuildWorkspaceIdRef = useRef(workspaceId);
+  if (engineRebuildWorkspaceIdRef.current !== workspaceId) {
+    engineRebuildWorkspaceIdRef.current = workspaceId;
+    engineRebuildToken.current += 1;
+    if (engineRebuild !== null) setEngineRebuild(null);
+  }
+  const confirmEngineRebuild = useCallback(
+    async (refusal: EngineStoreRefusal) => {
+      const token = engineRebuildToken.current;
+      setEngineRebuild({ phase: "moving", refusal });
+      try {
+        const result = await bridge().rebuildEngineStore({ workspaceId });
+        if (engineRebuildToken.current !== token) return;
+        setEngineRebuild({ phase: "complete", result });
+      } catch (error) {
+        if (engineRebuildToken.current !== token) return;
+        setEngineRebuild(null);
+        reportShellError(
+          "dohc could not move this workspace's data store.",
+          error,
+        );
+      }
+    },
+    [workspaceId, reportShellError],
   );
 
   // Quiet, self-dismissing status line for import/share-mount summaries
@@ -2521,6 +2581,22 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  const liveSessionsGenerationRef = useRef<{
+    workspaceId: string;
+    generation: number | null;
+  }>({ workspaceId, generation: null });
+  if (liveSessionsGenerationRef.current.workspaceId !== workspaceId) {
+    liveSessionsGenerationRef.current = { workspaceId, generation: null };
+  }
+  useEffect(() => {
+    if (captureDecidedFor !== workspaceId || syncStatus === null) return;
+    const next = syncStatus.liveSessionsGeneration;
+    const previous = liveSessionsGenerationRef.current.generation;
+    liveSessionsGenerationRef.current.generation = next;
+    if (previous !== null && previous !== next) {
+      setVersionEpoch((epoch) => epoch + 1);
+    }
+  }, [captureDecidedFor, syncStatus, workspaceId]);
   const [agentActive, agentActiveLane] = useSnapshotLane(engineHistoryToken, false);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
@@ -2917,9 +2993,6 @@ export function DesktopWorkspaceShell(props: {
     captureDecidedFor === workspaceId && engineReadForWorkspace !== null;
   const captureAvailable =
     engineSurfacesExist && captureDecided && !statusSaysNoRecorder(syncStatus);
-  // Bumped after a version switch/merge/conflict resolution so open editors
-  // re-read their file content immediately (FileInspector refreshKey).
-  const [versionEpoch, setVersionEpoch] = useState(0);
   // An unreadable settings file reads as opted out, so the workspace records
   // nothing. That must never be silent — but the notice says so from MAIN's
   // open-time read (syncStatus.settingsWarning), the read that decided
@@ -6144,11 +6217,129 @@ export function DesktopWorkspaceShell(props: {
         shareChangeNotices={shareChangeNotices}
         onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
+        onRebuildEngineStore={(returnFocus) => {
+          const refusal = syncStatus?.engineStoreRefused;
+          if (!refusal) return;
+          engineRebuildReturnFocusRef.current = returnFocus;
+          setEngineRebuild({ phase: "confirm", refusal });
+        }}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
         onDismissAgentNotification={agentNotifs.dismiss}
       />
+
+      {engineRebuild ? (
+        <Overlay
+          onClose={() => {
+            if (engineRebuild.phase !== "moving") setEngineRebuild(null);
+          }}
+          panelProps={{
+            "data-testid": "engine-rebuild-dialog",
+            role: "dialog",
+            "aria-modal": true,
+            "aria-labelledby": "engine-rebuild-title",
+          }}
+        >
+          <div className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel">
+            <div className="p-4">
+              {engineRebuild.phase === "complete" &&
+              engineRebuild.result.outcome === "moved" ? (
+                <>
+                  <p
+                    id="engine-rebuild-title"
+                    className="m-0 text-sm text-ink"
+                  >
+                    Data store moved
+                  </p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    The old data store is at{" "}
+                    <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
+                    {engineRebuild.result.reopenFailed
+                      ? ` ${engineRebuild.result.reopenFailed}`
+                      : " dohc is rebuilding history from your files."}
+                  </p>
+                </>
+              ) : engineRebuild.phase === "complete" ? (
+                <>
+                  <p
+                    id="engine-rebuild-title"
+                    className="m-0 text-sm text-ink"
+                  >
+                    dohc did not move the data store
+                  </p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    A file or folder already exists at{" "}
+                    <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>.
+                    Move it away, then try again.
+                  </p>
+                  {engineRebuild.result.reopenFailed ? (
+                    <p className="mb-0 mt-2 text-xs text-muted">
+                      {engineRebuild.result.reopenFailed}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <p
+                    id="engine-rebuild-title"
+                    className="m-0 text-sm text-ink"
+                  >
+                    Move the old data store aside and rebuild?
+                  </p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    {engineStoreRefusalSentence(engineRebuild.refusal)} dohc
+                    moves it to{" "}
+                    <span className="font-mono">{ENGINE_STORE_BACKUP_DIR}</span>{" "}
+                    and rebuilds history from your files.
+                  </p>
+                  <p className="mb-0 mt-2 text-xs text-muted">
+                    The old data store stays in the backup location. History
+                    and chats stored only there will not appear in the rebuilt
+                    workspace. Your workspace files stay in place.
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
+              {engineRebuild.phase === "confirm" ||
+              engineRebuild.phase === "moving" ? (
+                <>
+                  <SecondaryButton
+                    autoFocus
+                    disabled={engineRebuild.phase === "moving"}
+                    onClick={() => setEngineRebuild(null)}
+                  >
+                    Cancel
+                  </SecondaryButton>
+                  <PrimaryButton
+                    data-testid="engine-rebuild-confirm"
+                    disabled={engineRebuild.phase === "moving"}
+                    onClick={() =>
+                      void confirmEngineRebuild(engineRebuild.refusal)
+                    }
+                  >
+                    {engineRebuild.phase === "moving"
+                      ? "Moving"
+                      : "Move and rebuild"}
+                  </PrimaryButton>
+                </>
+              ) : (
+                // Force a mount so autoFocus runs instead of reusing Cancel.
+                <SecondaryButton
+                  key="engine-rebuild-result"
+                  autoFocus
+                  onClick={() => setEngineRebuild(null)}
+                >
+                  {engineRebuild.result.outcome === "moved"
+                    ? "Done"
+                    : "Close"}
+                </SecondaryButton>
+              )}
+            </div>
+          </div>
+        </Overlay>
+      ) : null}
 
       {/* A blocked agent run's consent asks (the retired Agent panel's one
           load-bearing interaction). Floats wherever the user already is —
