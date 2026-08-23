@@ -111,5 +111,10 @@ describe("main-process engine store rebuild wiring", () => {
     expect(rebuild).toMatch(
       /moveStoreAside: \(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*moveEngineStoreAside\(rootPath\),\s*\),/,
     );
+    // Exactly one gate in the whole handler: only `moveStoreAside` may hold
+    // it. `probeStoreRefusal`, `closeActivity`, and `reopenActivity` each
+    // call into EngineWorkspaceSessions.run themselves — gating any of them
+    // too would make the rebuild refuse its own probe or reopen.
+    expect((rebuild.match(/withRebuildBoundGate\(/g) ?? []).length).toBe(1);
   });
 });
