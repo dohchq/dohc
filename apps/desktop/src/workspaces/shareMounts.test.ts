@@ -278,6 +278,12 @@ describe("mount labels", () => {
     const mount = { shareId: SHARE_ID, label: "alex" };
 
     await expect(
+      resolveShareMountPath(host, "shared-with-me/alex", [mount]),
+    ).resolves.toEqual({ mount, path: "" });
+    await expect(
+      resolveShareMountPath(host, "inbox", [mount]),
+    ).resolves.toEqual({ mount, path: "" });
+    await expect(
       resolveShareMountPath(host, "inbox/docs/brief.md", [mount]),
     ).resolves.toEqual({ mount, path: "docs/brief.md" });
     await expect(

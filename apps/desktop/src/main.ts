@@ -4718,24 +4718,7 @@ async function collectOwnedZipEntries(
       return collectShareTargetZipEntries({
         target: routed.target,
         rootName: basename(relativePath),
-        relativePath: routed.path,
-      });
-    }
-    const validated = validateUserReadPath(relativePath);
-    const normalized = validated.ok ? validated.normalized : relativePath;
-    const mountRoot = (workspace.shareMounts ?? []).find(
-      (mount) =>
-        validMountLabel(mount.label) &&
-        normalized === `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
-    );
-    if (mountRoot) {
-      return collectShareTargetZipEntries({
-        target: {
-          kind: "mount",
-          workspaceId: workspace.workspaceId,
-          shareId: mountRoot.shareId,
-        },
-        rootName: mountRoot.label,
+        ...(routed.path === "" ? {} : { relativePath: routed.path }),
       });
     }
   }
@@ -4801,9 +4784,7 @@ async function ensureOwnedProjectionCurrent(
   const routed = await shareViewFilesTargetForPath(workspace, relativePath);
   if (routed === null) return;
   const status = await shareViewFiles.projectionStatus(routed.target);
-  if (status.state === "current" || status.state === "unavailable") {
-    return;
-  }
+  if (status.state === "unavailable") return;
   await withExclusiveWorkspaceOperation(
     workspace.rootPath,
     (_markWorkspaceChanged, lease) =>
@@ -4828,23 +4809,23 @@ async function ensureAllOwnedProjectionsCurrent(
           workspaceId: workspace.workspaceId,
           shareId: mount.shareId,
         }));
-  const pending: ShareViewFilesTarget[] = [];
+  const repairable: ShareViewFilesTarget[] = [];
   for (const target of targets) {
     const status = await shareViewFiles.projectionStatus(target);
-    if (status.state === "pending") {
-      pending.push(target);
+    if (status.state !== "unavailable") {
+      repairable.push(target);
     }
   }
-  if (pending.length === 0) return;
+  if (repairable.length === 0) return;
   await withExclusiveWorkspaceOperation(
     workspace.rootPath,
     async (_markWorkspaceChanged, lease) => {
-      for (const target of pending) {
+      for (const target of repairable) {
         await shareViewFiles.reconcile(lease, target, "repair");
       }
     },
   );
-  for (const target of pending) {
+  for (const target of repairable) {
     if ((await shareViewFiles.projectionStatus(target)).state !== "current") {
       throw new Error(
         "Some shared files are still being restored. Refresh the shared view before you continue.",
@@ -7591,13 +7572,39 @@ function registerIpcHandlers(
       // The record removal filters the CURRENT set (never a stale snapshot).
       console.error(`[desktop] mount-share rollback for ${mount.label}:`, error);
       if (registered) {
-        await shareViewFiles
-          .unmount(lease, {
+        try {
+          await shareViewFiles.unmount(lease, {
             kind: "mount",
             workspaceId: workspace.workspaceId,
             shareId: mount.shareId,
-          })
-          .catch(() => undefined);
+          });
+        } catch (unmountError) {
+          console.error(
+            `[desktop] mount-share owner rollback failed for ${mount.label}:`,
+            unmountError,
+          );
+          try {
+            setWorkspaceShareMounts(
+              workspace.workspaceId,
+              (findWorkspace(workspace.workspaceId)?.shareMounts ?? []).filter(
+                (registeredMount) => registeredMount.shareId !== mount.shareId,
+              ),
+            );
+          } catch (registryError) {
+            console.error(
+              `[desktop] mount-share registry rollback failed for ${mount.label}:`,
+              registryError,
+            );
+          }
+          await removeMountFolder(workspace.rootPath, mount.label).catch(
+            (folderError) => {
+              console.error(
+                `[desktop] mount-share folder rollback failed for ${mount.label}:`,
+                folderError,
+              );
+            },
+          );
+        }
       } else {
         await removeMountFolder(workspace.rootPath, mount.label).catch(
           () => undefined,
