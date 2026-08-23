@@ -73,6 +73,7 @@ interface EventLogEntry {
   event: ChatStreamEvent;
   at: number;
   turnId?: number;
+  seq?: number;
   provisional?: boolean;
   truncated?: boolean;
 }
@@ -268,11 +269,16 @@ export function createChatWebApp(
   // This server's own monotonic turn identity -- assigned once per accepted
   // prompt, independent of whatever opaque turnId the underlying driver
   // generates internally (that one is not guaranteed comparable across
-  // drivers). Stamped on every published frame and returned in /message's
-  // 202 body, so a client that reconnects after a turn settled entirely
-  // while it was disconnected can still prove that, by identity, from the
-  // snapshot or a replayed history frame alone -- not only from a live tail.
+  // drivers). Stamped on every published control fact and returned in
+  // /message's 202 body so each fact names the turn it describes. The
+  // separate seq orders those facts for the client.
   let currentTurnId: number | undefined;
+  let seqCounter = 0;
+
+  function nextSeq(): number {
+    seqCounter += 1;
+    return seqCounter;
+  }
   // True from the moment a prompt is accepted until its turn settles
   // (turn-completed, or a fatal error). /message refuses a second prompt
   // while this is true instead of overlapping it on the single active turn
@@ -286,6 +292,32 @@ export function createChatWebApp(
   // is accepted.
   let pendingPrompt: { stopRequested: boolean } | null = null;
   let state: SessionStateEvent = { kind: "session-state", state: "closed" };
+
+  /** The one fact the client ever needs: is a send valid right now, is a
+   * stop valid right now, and what turn (if any) is that answer about. Pure
+   * -- computed fresh from existing state every time it's read, never
+   * cached or stored on anything. `canSend` mirrors message()'s own 409
+   * gate exactly; `canStop` mirrors the pill's existing closed/error check
+   * (Stop is always a safe no-op otherwise, so it stays clickable whenever
+   * the session itself is alive). */
+  function computeControls(): {
+    canSend: boolean;
+    canStop: boolean;
+    turnId: number | null;
+  } {
+    return {
+      canSend: !turnActive && !pendingPrompt,
+      canStop: state.state !== "closed" && state.state !== "error",
+      turnId: currentTurnId ?? null,
+    };
+  }
+
+  function attachControls(error: unknown): unknown {
+    if (error && typeof error === "object") {
+      return Object.assign(error, { controls: computeControls(), seq: nextSeq() });
+    }
+    return error;
+  }
   // Each entry's own publish time -- a replay renders it, not the moment
   // the reconnecting client happened to receive it, so history stays in
   // its real chronological order instead of collapsing to "now".
@@ -322,11 +354,19 @@ export function createChatWebApp(
     event: ChatStreamEvent,
     at: number,
     turnId: number | undefined,
+    seq: number | undefined,
     replay?: boolean,
   ): string {
     return (
       "data: " +
-      JSON.stringify({ ...event, at, turnId, ...(replay ? { replay: true } : {}) }) +
+      JSON.stringify({
+        ...event,
+        at,
+        turnId,
+        seq,
+        controls: computeControls(),
+        ...(replay ? { replay: true } : {}),
+      }) +
       "\n\n"
     );
   }
@@ -338,7 +378,17 @@ export function createChatWebApp(
    * "closed" with reason "Stopped") renders its card twice: once from this
    * snapshot, once from the same transition's own entry in the replay. */
   function snapshotFrame(): string {
-    return "data: " + JSON.stringify({ ...state, snapshot: true, turnId: currentTurnId }) + "\n\n";
+    return (
+      "data: " +
+      JSON.stringify({
+        ...state,
+        snapshot: true,
+        turnId: currentTurnId,
+        seq: seqCounter,
+        controls: computeControls(),
+      }) +
+      "\n\n"
+    );
   }
 
   /** Evicts oldest entries once the log exceeds its cap -- in whole turns:
@@ -366,7 +416,12 @@ export function createChatWebApp(
     // missing. At the front, so repeated bare-cap trims never stack a
     // second one.
     if (!cutAtBoundary && eventLog[0]?.event.kind !== "history-trimmed") {
-      eventLog.unshift({ event: { kind: "history-trimmed" }, at: Date.now() });
+      eventLog.unshift({
+        event: { kind: "history-trimmed" },
+        at: Date.now(),
+        turnId: currentTurnId,
+        seq: nextSeq(),
+      });
     }
   }
 
@@ -387,6 +442,7 @@ export function createChatWebApp(
     if (event.kind === "permission-request") pendingPermissions.add(event.requestId);
     if (event.kind === "permission-resolved") pendingPermissions.delete(event.requestId);
     const at = Date.now();
+    let seq: number;
     if (event.kind === "text-delta") {
       // The log coalesces streamed text into one entry per item; the live
       // broadcast below still carries just this delta. The stored copy is
@@ -394,10 +450,12 @@ export function createChatWebApp(
       // mutated as later deltas append.
       const key = event.stream + ":" + event.itemId;
       let open = openDeltas.get(key);
-      if (open && open.event.kind === "text-delta") {
+      if (open && open.event.kind === "text-delta" && open.seq !== undefined) {
         open.event.text += event.text;
+        seq = open.seq;
       } else {
-        open = { event: { ...event }, at, turnId: currentTurnId };
+        seq = nextSeq();
+        open = { event: { ...event }, at, turnId: currentTurnId, seq };
         eventLog.push(open);
         openDeltas.set(key, open);
         trimLog();
@@ -406,15 +464,21 @@ export function createChatWebApp(
         open.event.text = open.event.text.slice(-MAX_COALESCED_TEXT_CHARS);
         if (!open.truncated) {
           open.truncated = true;
-          eventLog.push({ event: { kind: "history-trimmed" }, at, turnId: currentTurnId });
+          eventLog.push({
+            event: { kind: "history-trimmed" },
+            at,
+            turnId: currentTurnId,
+            seq: nextSeq(),
+          });
           trimLog();
         }
       }
     } else {
-      eventLog.push({ event, at, turnId: currentTurnId });
+      seq = nextSeq();
+      eventLog.push({ event, at, turnId: currentTurnId, seq });
       trimLog();
     }
-    const encoded = frame(event, at, currentTurnId);
+    const encoded = frame(event, at, currentTurnId, seq);
     for (const client of clients) client.write(encoded);
   }
 
@@ -535,7 +599,7 @@ export function createChatWebApp(
     if (processSession) return processSession;
     const available = await Promise.resolve(driver.probe()).catch((error: unknown) => {
       // A Stop that arrived while the probe was in flight already recorded
-      // its intent (pendingPrompt.stopRequested) and already answered 204
+      // its intent (pendingPrompt.stopRequested) and already answered 200
       // -- if the probe goes on to reject anyway, that rejection is not
       // news the user asked about: report the stop as the outcome, not an
       // unrelated fatal error and a recovery card for nothing left to
@@ -612,7 +676,13 @@ export function createChatWebApp(
       // own message that caused them. Filled in on accept, dropped on
       // rejection -- never broadcast live here, only once accepted below,
       // same as before.
-      const reserved: { event: ChatStreamEvent; at: number; provisional?: boolean } = {
+      const reserved: {
+        event: ChatStreamEvent;
+        at: number;
+        turnId?: number;
+        seq?: number;
+        provisional?: boolean;
+      } = {
         event: { kind: "user-message", text: body.text, clientId },
         at: Date.now(),
         provisional: true,
@@ -682,6 +752,8 @@ export function createChatWebApp(
       // for one that in fact was.
       turnActive = true;
       reserved.provisional = false;
+      reserved.turnId = currentTurnId;
+      reserved.seq = nextSeq();
       // The reservation can have aged out of the buffer's cap while prompt()
       // was still pending (a very active turn ahead of it) -- put it back at
       // the end rather than lose the confirmation entirely.
@@ -690,12 +762,13 @@ export function createChatWebApp(
         eventLog.push(reserved);
         trimLog();
       }
-      const encoded = frame(reserved.event, reserved.at, currentTurnId);
+      const encoded = frame(reserved.event, reserved.at, reserved.turnId, reserved.seq);
       for (const client of clients) client.write(encoded);
       // A Stop that arrived while the prompt was still awaiting acceptance:
       // now that the driver holds the turn, the recorded intent becomes a
-      // real cancel. Best-effort like any cancel after Stop's own 204 -- a
-      // transport failure here must not fail the accepted /message.
+      // real cancel. Best-effort like any cancel after Stop's own 200
+      // response -- a transport failure here must not fail the accepted
+      // /message.
       if (inFlight.stopRequested) {
         await Promise.resolve(live.cancel()).catch(() => undefined);
       }
@@ -704,7 +777,9 @@ export function createChatWebApp(
         "content-type": "application/json; charset=utf-8",
         "x-content-type-options": "nosniff",
       });
-      response.end(JSON.stringify({ turnId: currentTurnId }));
+      response.end(
+        JSON.stringify({ turnId: currentTurnId, controls: computeControls(), seq: nextSeq() }),
+      );
     } finally {
       if (pendingPrompt === inFlight) pendingPrompt = null;
     }
@@ -740,7 +815,12 @@ export function createChatWebApp(
         pendingPrompt = null;
         publish({ kind: "session-state", state: "closed", reason: "Stopped" });
       }
-      writeEmpty(response, 204);
+      response.writeHead(200, {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(JSON.stringify({ controls: computeControls(), seq: nextSeq() }));
       return;
     }
     // The session and its context stay alive: this interrupts the current
@@ -759,7 +839,12 @@ export function createChatWebApp(
     // cancels the turn the moment it is accepted.
     if (pendingPrompt) pendingPrompt.stopRequested = true;
     await live.cancel();
-    writeEmpty(response, 204);
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    });
+    response.end(JSON.stringify({ controls: computeControls(), seq: nextSeq() }));
   }
 
   async function permission(
@@ -816,7 +901,7 @@ export function createChatWebApp(
     response.write(snapshotFrame());
     for (const entry of eventLog) {
       if (entry.provisional) continue;
-      response.write(frame(entry.event, entry.at, entry.turnId, true));
+      response.write(frame(entry.event, entry.at, entry.turnId, entry.seq, true));
     }
     clients.add(response);
     request.once("close", () => clients.delete(response));
@@ -848,11 +933,19 @@ export function createChatWebApp(
         throw requestError(401, "This chat session's request was not authorized.");
       }
       if (request.method === "POST" && url.pathname === "/message") {
-        await message(request, response);
+        try {
+          await message(request, response);
+        } catch (error) {
+          throw attachControls(error);
+        }
         return;
       }
       if (request.method === "POST" && url.pathname === "/stop") {
-        await stop(response);
+        try {
+          await stop(response);
+        } catch (error) {
+          throw attachControls(error);
+        }
         return;
       }
       const permissionMatch =
@@ -885,16 +978,27 @@ export function createChatWebApp(
       // body, a missing static asset, an unauthorized caller -- is a
       // transport problem, not a session problem, so it 4xx/5xx's the
       // request without touching session state.
-      const failure = error as Partial<RequestError> & { restartOnly?: boolean };
+      const failure = error as Partial<RequestError> & {
+        restartOnly?: boolean;
+        controls?: { canSend: boolean; canStop: boolean; turnId: number | null };
+        seq?: number;
+      };
       const message = errorMessage(error);
       if (!response.headersSent) {
-        if (failure.restartOnly) {
+        if (failure.controls !== undefined) {
           response.writeHead(failure.statusCode ?? 500, {
             "cache-control": "no-store",
             "content-type": "application/json; charset=utf-8",
             "x-content-type-options": "nosniff",
           });
-          response.end(JSON.stringify({ message, kind: "restartOnly" }));
+          response.end(
+            JSON.stringify({
+              message,
+              ...(failure.restartOnly ? { kind: "restartOnly" } : {}),
+              controls: failure.controls,
+              seq: failure.seq,
+            }),
+          );
         } else {
           writeError(response, failure.statusCode ?? 500, message);
         }

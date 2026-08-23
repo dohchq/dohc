@@ -224,9 +224,10 @@ function fakeDriver(
 interface EventStream {
   /** The event with its wire metadata stripped -- `at` (publish time),
    * `snapshot` (the initial connection-state frame's own marker), `replay`
-   * (a frame rebuilt from the log rather than happening now), and the
-   * server's `turnId` on events that do not already define that field --
-   * for every assertion that only cares about semantic content. */
+   * (a frame rebuilt from the log rather than happening now), `controls`
+   * and `seq` (the current control fact), and the server's `turnId` on
+   * events that do not already define that field -- for every assertion
+   * that only cares about semantic content. */
   next(): Promise<PluginAgentEvent | { kind: "user-message"; text: string; clientId: string }>;
   /** The exact wire object, `at`/`snapshot` included -- for the tests that
    * specifically pin those two fields. */
@@ -268,7 +269,14 @@ async function eventStream(url: string, token: string): Promise<EventStream> {
 
   return {
     async next() {
-      const { at: _at, snapshot: _snapshot, replay: _replay, ...rest } = await nextRaw();
+      const {
+        at: _at,
+        snapshot: _snapshot,
+        replay: _replay,
+        controls: _controls,
+        seq: _seq,
+        ...rest
+      } = await nextRaw();
       if (rest.kind === "turn-completed") {
         return rest as PluginAgentEvent;
       }
@@ -398,6 +406,121 @@ describe("Codex chat web app", () => {
     }
     expect(received).toEqual(events);
     await stream.close();
+  });
+
+  it("publishes current controls with increasing sequence numbers on every control channel", async () => {
+    const promptEntered = deferred();
+    const promptGate = deferred();
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => promptEntered.resolve(),
+      promptGate: () => promptGate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    const seqs: number[] = [];
+    const observe = (value: Record<string, unknown>): void => {
+      expect(value.seq).toEqual(expect.any(Number));
+      expect(Number.isInteger(value.seq)).toBe(true);
+      seqs.push(value.seq as number);
+    };
+
+    const initialSnapshot = await stream.nextRaw();
+    expect(initialSnapshot).toMatchObject({
+      kind: "session-state",
+      state: "closed",
+      snapshot: true,
+      controls: { canSend: true, canStop: false, turnId: null },
+    });
+    observe(initialSnapshot);
+
+    const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
+    await promptEntered.promise;
+    fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
+
+    const running = await stream.nextRaw();
+    expect(running).toMatchObject({
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(running);
+
+    promptGate.resolve();
+    const userMessage = await stream.nextRaw();
+    expect(userMessage).toMatchObject({
+      kind: "user-message",
+      text: "Hello",
+      clientId: "c1",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(userMessage);
+
+    const accepted = await sendPromise;
+    expect(accepted.status).toBe(202);
+    const acceptedBody = (await accepted.json()) as Record<string, unknown>;
+    expect(acceptedBody).toMatchObject({
+      turnId: 1,
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(acceptedBody);
+
+    const rejected = await post(url, "message", { text: "Too soon" }, token);
+    expect(rejected.status).toBe(409);
+    const rejectedBody = (await rejected.json()) as Record<string, unknown>;
+    expect(rejectedBody).toMatchObject({
+      message: "Wait for the current response to finish.",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(rejectedBody);
+
+    const stopped = await post(url, "stop", undefined, token);
+    expect(stopped.status).toBe(200);
+    const stoppedBody = (await stopped.json()) as Record<string, unknown>;
+    expect(stoppedBody).toMatchObject({
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    observe(stoppedBody);
+
+    fake.startInputs[0]?.onEvent({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "cancelled",
+    });
+    const completed = await stream.nextRaw();
+    expect(completed).toMatchObject({
+      kind: "turn-completed",
+      turnId: 1,
+      status: "cancelled",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+    });
+    observe(completed);
+
+    fake.startInputs[0]?.onEvent({ kind: "error", message: "Driver exited.", fatal: true });
+    const fatal = await stream.nextRaw();
+    expect(fatal).toMatchObject({
+      kind: "error",
+      message: "Driver exited.",
+      fatal: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+    });
+    observe(fatal);
+    await stream.close();
+
+    fake.startInputs[0]?.onEvent({ kind: "token-usage", used: 1, input: 1, output: 0 });
+    const reattached = await eventStream(url, token);
+    const reconnectSnapshot = await reattached.nextRaw();
+    expect(reconnectSnapshot).toMatchObject({
+      kind: "session-state",
+      state: "error",
+      snapshot: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+    });
+    observe(reconnectSnapshot);
+    await reattached.close();
+
+    for (let index = 1; index < seqs.length; index += 1) {
+      expect(seqs[index]).toBeGreaterThan(seqs[index - 1] as number);
+    }
   });
 
   it("caps replayed text while live clients receive each full delta", async () => {
@@ -803,7 +926,7 @@ describe("Codex chat web app", () => {
     await entered.promise;
     // Stop lands while the prompt is still awaiting acceptance: the
     // driver-level cancel it issues now has no turn to reach.
-    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
     expect(fake.sessions[0]?.cancelCalls).toBe(1);
 
     gate.resolve();
@@ -856,7 +979,7 @@ describe("Codex chat web app", () => {
     expect(acceptedResponse.status).toBe(202);
     expect(fake.sessions[0]?.promptCalls).toEqual(["First"]);
 
-    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
     expect(fake.sessions[0]?.cancelCalls).toBe(1);
   });
 
@@ -869,7 +992,7 @@ describe("Codex chat web app", () => {
     await post(url, "message", { text: "First" }, token);
     fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
 
-    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
     expect(fake.sessions[0]?.cancelCalls).toBe(1);
 
     expect(await post(url, "message", { text: "Second" }, token)).toMatchObject({ status: 202 });
@@ -886,7 +1009,7 @@ describe("Codex chat web app", () => {
     const { url, token } = await start(fake);
     await post(url, "message", { text: "First session" }, token);
 
-    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
     expect(fake.sessions[0]?.cancelCalls).toBe(1);
     // Never disposed -- the session and its context are still there.
     expect(fake.disposed).toEqual([]);
@@ -917,7 +1040,7 @@ describe("Codex chat web app", () => {
     // No turn active -- both concrete drivers document cancel() as a safe
     // no-op here, so this still calls it (simplest, and harmless) rather
     // than special-casing idle client-side.
-    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 204 });
+    expect(await post(url, "stop", undefined, token)).toMatchObject({ status: 200 });
     expect(fake.sessions[0]?.cancelCalls).toBe(1);
     expect(fake.disposed).toEqual([]);
 
@@ -1164,7 +1287,7 @@ describe("Codex chat web app", () => {
     fakeSession.answerPermissionError = new Error("The driver refused to answer.");
 
     const stopResponse = await post(url, "stop", undefined, token);
-    expect(stopResponse.status).toBe(204);
+    expect(stopResponse.status).toBe(200);
     expect(fake.disposed).toEqual([]);
 
     gate.resolve();
@@ -1196,7 +1319,7 @@ describe("Codex chat web app", () => {
     // re-added the id anyway, this would publish a second, bogus
     // cancellation for a request that was already fully settled.
     const secondStop = await post(url, "stop", undefined, token);
-    expect(secondStop.status).toBe(204);
+    expect(secondStop.status).toBe(200);
     const racedSecondCancel = await raceTimeout(stream.next(), 200);
     expect(racedSecondCancel).toBe("timeout");
 
@@ -1398,9 +1521,11 @@ describe("Codex chat web app", () => {
 
     const firstResponse = await post(url, "message", { text: "Hello" }, token);
     expect(firstResponse.status).toBe(503);
-    expect(await firstResponse.json()).toEqual({
+    expect(await firstResponse.json()).toMatchObject({
       message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       kind: "restartOnly",
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: expect.any(Number),
     });
     expect(await stream.next()).toEqual({
       kind: "error",
@@ -1410,9 +1535,11 @@ describe("Codex chat web app", () => {
     });
     const secondResponse = await post(url, "message", { text: "Hello again" }, token);
     expect(secondResponse.status).toBe(503);
-    expect(await secondResponse.json()).toEqual({
+    expect(await secondResponse.json()).toMatchObject({
       message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       kind: "restartOnly",
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: expect.any(Number),
     });
     expect(await stream.next()).toEqual({
       kind: "error",
@@ -1575,7 +1702,7 @@ describe("Codex chat web app", () => {
       expect(fake.sessions[0]?.cancelCalls).toBe(0);
 
       const authenticated = await post(url, "stop", undefined, token);
-      expect(authenticated.status).toBe(204);
+      expect(authenticated.status).toBe(200);
       expect(fake.sessions[0]?.cancelCalls).toBe(1);
     });
 
@@ -1633,7 +1760,7 @@ describe("Codex chat web app", () => {
       await probeEntered.promise;
 
       const stopResponse = await post(url, "stop", undefined, token);
-      expect(stopResponse.status).toBe(204);
+      expect(stopResponse.status).toBe(200);
 
       probeGate.resolve();
       const messageResponse = await messagePromise;
@@ -1658,14 +1785,16 @@ describe("Codex chat web app", () => {
       await probeEntered.promise;
 
       const stopResponse = await post(url, "stop", undefined, token);
-      expect(stopResponse.status).toBe(204);
+      expect(stopResponse.status).toBe(200);
 
       probeGate.reject(new Error("probe crashed"));
       const messageResponse = await messagePromise;
       expect(messageResponse.status).toBe(503);
-      expect(await messageResponse.text()).toBe(
-        "The Codex session was stopped while it started.",
-      );
+      expect(await messageResponse.json()).toMatchObject({
+        message: "The Codex session was stopped while it started.",
+        controls: { canSend: true, canStop: false, turnId: null },
+        seq: expect.any(Number),
+      });
       expect(fake.startInputs).toHaveLength(0);
 
       const stream = await eventStream(url, token);
@@ -1686,7 +1815,7 @@ describe("Codex chat web app", () => {
       await entered.promise;
 
       const stopResponse = await post(url, "stop", undefined, token);
-      expect(stopResponse.status).toBe(204);
+      expect(stopResponse.status).toBe(200);
 
       gate.resolve();
       const messageResponse = await messagePromise;
@@ -1712,7 +1841,7 @@ describe("Codex chat web app", () => {
       expect(fake.startInputs).toHaveLength(1);
 
       const stopResponse = await post(url, "stop", undefined, token);
-      expect(stopResponse.status).toBe(204);
+      expect(stopResponse.status).toBe(200);
       expect(fake.sessions[0]?.cancelCalls).toBe(1);
 
       const tooSoon = await post(url, "message", { text: "Too soon" }, token);
@@ -1832,10 +1961,10 @@ describe("Codex chat web app", () => {
       await entered.promise;
 
       const stopResponse = await post(url, "stop", undefined, token);
-      expect(stopResponse.status).toBe(204);
+      expect(stopResponse.status).toBe(200);
       // Without the fix, this never arrives: the pill would sit on
       // Starting with no closed event to bring it back, since /stop
-      // returned 204 without publishing anything for a session that was
+      // returned 200 without publishing anything for a session that was
       // still only pending.
       expect(await stream.next()).toEqual({
         kind: "session-state",

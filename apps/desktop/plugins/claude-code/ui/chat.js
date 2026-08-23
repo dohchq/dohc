@@ -45,83 +45,21 @@ const permissions = new Map();
 // submitting page's own connection sees it too), the echo confirms the
 // existing card instead of rendering a duplicate.
 const pendingMessages = new Map();
-// The one stored fact Send's availability derives from: is a turn active?
-// Session-state events set it authoritatively. A successful /message accept
-// sets it optimistically to bridge the gap before its running event arrives.
-// Failed requests leave it untouched because they did not start a turn.
-let turnActive = false;
-// Bumped by every setSessionState call (any state). A /message accept can
-// land asynchronously behind a Stop's cancellation, after the turn it
-// started has already completed (or the session has already closed or
-// failed) -- captured at send time and compared when that request's
-// response lands, so a late accept can no longer resurrect `turnActive`
-// once a fresher session-state fact has already superseded it.
-let stateVersion = 0;
-// The id of the most recent /message request whose own turn has not yet
-// been PROVEN settled -- 0 when none is outstanding.
-let pendingSendId = 0;
-let nextSendId = 0;
-// The server's own turnId for the send occupying pendingSendId, once its
-// 202 body reports it -- undefined until then (a send whose accept hasn't
-// landed yet has no turn identity to compare against).
-let pendingSendTurnId;
-// The most recent turnId this page knows about, from ANY source -- live,
-// replay, or the reconnect snapshot alike. Updated unconditionally by
-// every session-state (any state) and turn-completed frame. A Stop click
-// snapshots this to know which turn it targets; a pending send's own
-// turnId (once known) is compared against it too.
-let lastKnownTurnId;
-// True once Stop's currently pending click has been proven moot: the turn
-// it targeted (captured at click time) already settled, or the session
-// already ended, by identity rather than by which channel delivered the
-// news.
-let stopRetired = false;
-let pendingStopTurnId;
+// The only state this page keeps about Send/Stop validity: the highest
+// seq applied so far, and the controls fact that arrived with it. Every
+// server frame, the reconnect snapshot, and every /message and /stop
+// response body carry a {controls, seq} pair -- applying whichever has
+// the highest seq, and ignoring anything lower, is the ENTIRE mechanism.
+// A lost response body, a delayed old frame, the reconnect snapshot, and
+// two consecutive Stop clicks all resolve through this one comparison;
+// none of them need their own special case.
+let lastAppliedSeq = -1;
 
-function updateSendAvailability() {
-  sendButton.disabled = turnActive || pendingSendId !== 0;
-}
-
-function clearPendingSend() {
-  pendingSendId = 0;
-  pendingSendTurnId = undefined;
-}
-
-// A terminal fact settles a pending operation when its turnId is at least
-// as recent as the operation's own, in issue order. This is identity, not
-// delivery channel: live, replay, and the reconnect snapshot all carry
-// the server's real current/last turnId, so a turn that settled entirely
-// while this page was disconnected is exactly as provable on reconnect as
-// one witnessed live. A LATER turnId is proof by itself -- the server
-// never accepts a new prompt until the previous turn has settled -- and
-// an EARLIER turnId belongs to history this operation never depended on.
-function turnHasSettled(pendingTurnId, eventTurnId) {
-  return pendingTurnId !== undefined && eventTurnId !== undefined && eventTurnId >= pendingTurnId;
-}
-
-// True for a genuinely BUFFERED history frame -- not the reconnect's own
-// required snapshot (which always reports the CURRENT real state, and is
-// trustworthy regardless of turn identity) and not a live event. Only a
-// buffered replay frame can be OLD, unrelated history from an earlier,
-// already-superseded episode, and needs the turnId check below to tell
-// that apart from real news about an operation pending right now.
-function isBufferedHistory(options) {
-  return options.replay === true;
-}
-
-// closed/error are absolute -- the session really did end -- for the
-// reconnect snapshot and any live transition, since both report the
-// CURRENT truth regardless of which turn was in flight. A genuinely
-// buffered (options.replay) closed/error frame is different: it can be
-// old history from an earlier, already-ended episode replayed alongside a
-// CURRENT session that is still very much alive, so it still needs the
-// turnId check, or an old fatal error could wrongly retire a send or stop
-// that belongs to a session that never actually ended.
-function settlesOperation(pendingTurnId, state, options) {
-  if (state === "closed" || state === "error") {
-    return !isBufferedHistory(options) || turnHasSettled(pendingTurnId, options.turnId);
-  }
-  return state !== "running" && turnHasSettled(pendingTurnId, options.turnId);
+function applyControls(controls, seq) {
+  if (typeof seq !== "number" || seq <= lastAppliedSeq) return;
+  lastAppliedSeq = seq;
+  sendButton.disabled = !controls.canSend;
+  stopButton.disabled = !controls.canStop;
 }
 
 // `at` is the server's own publish time (every event carries it); replaying
@@ -183,7 +121,6 @@ function messageCard(author, text, className, at) {
 }
 
 function setSessionState(state, reason, options = {}) {
-  stateVersion += 1;
   const labels = {
     starting: "Starting",
     ready: "Ready",
@@ -194,27 +131,8 @@ function setSessionState(state, reason, options = {}) {
   const label = labels[state] || state;
   statePill.textContent = label;
   statePill.dataset.state = state;
-  stopButton.disabled = state === "closed" || state === "error";
-  turnActive = state === "running";
-  if (options.turnId !== undefined) lastKnownTurnId = options.turnId;
-  if (pendingSendId !== 0 && settlesOperation(pendingSendTurnId, state, options)) {
-    clearPendingSend();
-  }
-  if (!stopRetired && settlesOperation(pendingStopTurnId, state, options)) {
-    stopRetired = true;
-  }
-  updateSendAvailability();
-  // The initial connection snapshot applies to the pill only: the log
-  // replay right behind it (or a live event still to come) is what
-  // actually narrates the transcript. Announcing or rendering a card here
-  // too would duplicate whatever that replay is about to show.
   if (options.silent) return;
   announce(label);
-  // A closed state reaching here (not the silent initial snapshot) is
-  // always a real transition away from a session that existed -- an idle
-  // CLI process can exit with no reason at all, and without a boundary
-  // card here the next message would silently start a fresh, context-free
-  // session under what still looks like one continuous transcript.
   if (state === "closed") {
     recoveryCard(reason || "This session ended.", options.replay);
   }
@@ -468,16 +386,14 @@ function renderPermission(event) {
 }
 
 function renderEvent(event) {
+  applyControls(event.controls, event.seq);
   if (event.snapshot) {
-    // The current-state snapshot every new connection gets first, marked
-    // by the server. Applies to the pill only -- see the silent branch in
-    // setSessionState for why.
-    setSessionState(event.state, event.reason, { silent: true, turnId: event.turnId });
+    setSessionState(event.state, event.reason, { silent: true });
     return;
   }
   switch (event.kind) {
     case "session-state":
-      setSessionState(event.state, event.reason, { replay: event.replay, turnId: event.turnId });
+      setSessionState(event.state, event.reason, { replay: event.replay });
       break;
     case "user-message":
       renderUserMessage(event);
@@ -500,7 +416,7 @@ function renderEvent(event) {
         : event.used + " tokens used";
       break;
     case "turn-completed":
-      setSessionState("ready", undefined, { replay: event.replay, turnId: event.turnId });
+      setSessionState("ready", undefined, { replay: event.replay });
       // The session itself is still alive (the pill just went back to
       // Ready), so the next action is a retry -- "start a new session"
       // would be false here.
@@ -529,11 +445,7 @@ function renderEvent(event) {
       break;
     case "error":
       if (event.fatal) {
-        setSessionState("error", undefined, {
-          silent: event.replay,
-          replay: event.replay,
-          turnId: event.turnId,
-        });
+        setSessionState("error", undefined, { silent: event.replay });
         if (event.restartOnly) {
           restartRequiredCard(event.message, event.replay);
         } else {
@@ -588,11 +500,6 @@ function markMessageFailed(clientId, card, message) {
     hideEmptyState();
     transcript.append(card);
   }
-  // This attempt did not start a turn from this client's point of view. A
-  // 409 started nothing, and any other failure means the attempt failed.
-  // Re-deriving from the untouched turn fact preserves an earlier session
-  // event, a newer active turn, or the existing idle state.
-  updateSendAvailability();
 }
 
 composer.addEventListener("submit", async (event) => {
@@ -604,25 +511,16 @@ composer.addEventListener("submit", async (event) => {
   card.dataset.pending = "true";
   pendingMessages.set(clientId, card);
   messageInput.value = "";
-  const sendId = ++nextSendId;
-  pendingSendId = sendId;
-  pendingSendTurnId = undefined;
-  updateSendAvailability();
-  const stateVersionAtSend = stateVersion;
   try {
     const response = await fetch("/message", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
       body: JSON.stringify({ text, clientId }),
     });
-    const responseBody = await response.json().catch(() => null);
+    const body = await response.json().catch(() => null);
+    if (body) applyControls(body.controls, body.seq);
     if (!response.ok) {
-      // This attempt never started a turn -- clear its own pending-send
-      // slot (only if a newer send hasn't already claimed it) before
-      // annotating the card, so a plain failure with no session-state
-      // event of its own doesn't leave Send stuck disabled forever.
-      if (pendingSendId === sendId) clearPendingSend();
-      const restartOnly = responseBody && responseBody.kind === "restartOnly";
+      const restartOnly = body && body.kind === "restartOnly";
       markMessageFailed(
         clientId,
         card,
@@ -632,30 +530,8 @@ composer.addEventListener("submit", async (event) => {
             ? "Restart dohc to try again."
             : "This message was not sent. Send it again.",
       );
-    } else {
-      // Only mark the turn active if no session-state fact -- this turn
-      // completing, the session closing, a fatal error, or even a fresher
-      // running confirmation -- has landed since this request was sent. A
-      // late accept behind a Stop's cancellation must only annotate its own
-      // card; it never gets to resurrect Send once something fresher already
-      // settled it.
-      if (stateVersion === stateVersionAtSend) turnActive = true;
-      if (pendingSendId === sendId && responseBody && typeof responseBody.turnId !== "undefined") {
-        pendingSendTurnId = responseBody.turnId;
-        // A same-turn settlement (running -> ready, or turn-completed) can
-        // have already arrived over the separate SSE connection while
-        // this response's own body was still being read -- reconcile now
-        // that this send's own turnId is finally known, so a very fast
-        // turn can never strand Send disabled waiting for an event that
-        // already happened.
-        if (!turnActive && turnHasSettled(pendingSendTurnId, lastKnownTurnId)) {
-          clearPendingSend();
-        }
-      }
-      updateSendAvailability();
     }
   } catch {
-    if (pendingSendId === sendId) clearPendingSend();
     markMessageFailed(clientId, card, "This message was not sent. Send it again.");
   } finally {
     messageInput.focus();
@@ -670,35 +546,17 @@ messageInput.addEventListener("keydown", (event) => {
 });
 
 stopButton.addEventListener("click", async () => {
-  stopButton.disabled = true;
-  stopRetired = false;
-  pendingStopTurnId = lastKnownTurnId;
   try {
     const response = await fetch("/stop", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
     });
-    // A session-state fact -- the session closing, failing, or otherwise
-    // moving on -- that arrived since this click was issued already told
-    // the truth about Stop and the session. This response is stale: it
-    // must only settle a promise, never touch the button or append a card
-    // for a session this page has already explained.
-    if (stopRetired) return;
+    const body = await response.json().catch(() => null);
+    if (body) applyControls(body.controls, body.seq);
     if (!response.ok) {
-      stopButton.disabled = false;
       errorCard("dohc could not stop this session.");
-      return;
     }
-    // Stop now cancels the current turn rather than ending the session --
-    // if nothing was running, cancel() is a safe no-op with no event of
-    // its own to ever re-enable this button otherwise. A turn actually
-    // interrupted still settles asynchronously (its own turn-completed
-    // event drives the pill and Send back to ready); re-enabling Stop a
-    // little early alongside that is harmless.
-    stopButton.disabled = false;
   } catch {
-    if (stopRetired) return;
-    stopButton.disabled = false;
     errorCard("dohc could not stop this session.");
   }
 });
