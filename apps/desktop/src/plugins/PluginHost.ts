@@ -36,6 +36,32 @@ import { raceWithTimeout } from "./pluginShared";
 
 const DEACTIVATION_TIMEOUT_MS = 5_000;
 
+const pluginHostRecordBrand: unique symbol = Symbol("PluginHostRecord");
+const pluginHostStartBrand: unique symbol = Symbol("PluginHostStart");
+
+export interface PluginHostRecordToken {
+  readonly [pluginHostRecordBrand]: true;
+}
+
+export interface PluginHostStartEvidence {
+  readonly [pluginHostStartBrand]: true;
+  readonly pluginId: string;
+  readonly record: PluginHostRecordToken;
+}
+
+class HostRecordToken implements PluginHostRecordToken {
+  readonly [pluginHostRecordBrand] = true;
+}
+
+class HostStartEvidence implements PluginHostStartEvidence {
+  readonly [pluginHostStartBrand] = true;
+
+  constructor(
+    readonly pluginId: string,
+    readonly record: PluginHostRecordToken,
+  ) {}
+}
+
 export interface PluginHostOptions {
   stateDir: string;
   workspaceRoot: string;
@@ -121,6 +147,7 @@ interface PluginSpawn {
 }
 
 interface PluginRecord {
+  ownershipToken: PluginHostRecordToken;
   pluginId: string;
   pluginRoot: string;
   /** The discovered SOURCE directory's own name, passed explicitly into
@@ -231,7 +258,7 @@ export class PluginHost {
     // settings read or a sizes report needs to name.
     directoryName: string,
     manifest: DohcPluginManifest,
-  ): Promise<void> {
+  ): Promise<PluginHostStartEvidence> {
     // The manifest name is the plugin's identity — one identity, so state
     // and attribution can never drift from what the manifest declares.
     const pluginId = manifest.name;
@@ -245,7 +272,11 @@ export class PluginHost {
         this.options.stateDir,
         this.options.workspaceRoot,
       );
-      if (this.abortedStarts.delete(pluginId)) return;
+      if (this.abortedStarts.delete(pluginId)) {
+        throw new Error(
+          `Plugin "${pluginId}" was stopped before it started.`,
+        );
+      }
       if (!localState.ok) {
         throw new Error(
           `Plugin "${pluginId}" was not started. ${localState.warning}`,
@@ -258,6 +289,7 @@ export class PluginHost {
       }
 
       const record: PluginRecord = {
+        ownershipToken: new HostRecordToken(),
         pluginId,
         pluginRoot,
         directoryName,
@@ -267,6 +299,7 @@ export class PluginHost {
       };
       this.plugins.set(pluginId, record);
       this.spawn(record);
+      return new HostStartEvidence(pluginId, record.ownershipToken);
     } finally {
       this.pendingStarts.delete(pluginId);
       this.abortedStarts.delete(pluginId);
@@ -280,10 +313,25 @@ export class PluginHost {
     }
     const record = this.plugins.get(pluginId);
     if (!record) return;
+    await this.stopPluginRecord(record);
+  }
+
+  async stopRecord(
+    pluginId: string,
+    expected: PluginHostRecordToken,
+  ): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    if (!record || record.ownershipToken !== expected) return;
+    await this.stopPluginRecord(record);
+  }
+
+  private async stopPluginRecord(record: PluginRecord): Promise<void> {
     const spawn = record.current;
     if (!spawn?.transport) {
       if (spawn) await this.endSpawn(record, spawn);
-      this.plugins.delete(pluginId);
+      if (this.plugins.get(record.pluginId) === record) {
+        this.plugins.delete(record.pluginId);
+      }
       return;
     }
     if (spawn.shutdown) {
@@ -489,6 +537,10 @@ export class PluginHost {
 
   getStatus(pluginId: string): PluginRuntimeStatus | undefined {
     return this.plugins.get(pluginId)?.status;
+  }
+
+  currentRecord(pluginId: string): PluginHostRecordToken | undefined {
+    return this.plugins.get(pluginId)?.ownershipToken;
   }
 
   getStderrLog(pluginId: string): string[] {

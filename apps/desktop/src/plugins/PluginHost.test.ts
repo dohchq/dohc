@@ -15,6 +15,7 @@ import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { stopProcessTreePosix } from "../process/posixSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
+import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
@@ -304,6 +305,7 @@ function workspaceFileRouter(
       {
         pluginId,
         workspaceRoot,
+        reads: localWorkspaceSdkReads(workspaceRoot),
         spawnId,
         requestPath: "plugin-process",
         isWritable: () => true,
@@ -374,6 +376,7 @@ describe("PluginHost", () => {
           {
             pluginId,
             workspaceRoot: root,
+            reads: localWorkspaceSdkReads(root),
             spawnId,
             requestPath: "plugin-process",
             isWritable: () => true,
@@ -427,6 +430,7 @@ describe("PluginHost", () => {
           {
             pluginId,
             workspaceRoot: root,
+            reads: localWorkspaceSdkReads(root),
             spawnId,
             requestPath: "plugin-process",
             isWritable: () => true,
@@ -737,7 +741,33 @@ describe("PluginHost", () => {
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
   });
 
-  it("does not spawn when stop races a pending start", async () => {
+  it("mints start evidence for the exact current host record", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    const first = await host.start(helloPluginRoot, "hello-plugin", manifest);
+    expect(first.pluginId).toBe("hello-plugin");
+    expect(host.currentRecord("hello-plugin")).toBe(first.record);
+
+    await host.stop("hello-plugin");
+    expect(host.currentRecord("hello-plugin")).toBeUndefined();
+
+    const second = await host.start(helloPluginRoot, "hello-plugin", manifest);
+    expect(host.currentRecord("hello-plugin")).toBe(second.record);
+    expect(second.record).not.toBe(first.record);
+
+    await host.stopRecord("hello-plugin", first.record);
+    expect(host.currentRecord("hello-plugin")).toBe(second.record);
+  });
+
+  it("rejects a pending start that stop aborts before spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
     const host = trackHost({
@@ -753,13 +783,15 @@ describe("PluginHost", () => {
       await fixtureManifest(),
     );
     await host.stop("hello-plugin");
-    await start;
+    await expect(start).rejects.toThrow(
+      'Plugin "hello-plugin" was stopped before it started.',
+    );
 
     expect(harness.spawnedPluginIds).toEqual([]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
 
-  it("does not spawn when stopAll races a pending start", async () => {
+  it("rejects a pending start that stopAll aborts before spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
     const host = trackHost({
@@ -775,7 +807,12 @@ describe("PluginHost", () => {
       await fixtureManifest(),
     );
     const stopAll = host.stopAll();
-    await Promise.all([start, stopAll]);
+    await Promise.all([
+      expect(start).rejects.toThrow(
+        'Plugin "hello-plugin" was stopped before it started.',
+      ),
+      stopAll,
+    ]);
 
     expect(harness.spawnedPluginIds).toEqual([]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
@@ -1614,6 +1651,7 @@ describe("PluginHost", () => {
       {
         pluginId: "hello-plugin",
         workspaceRoot: root,
+        reads: localWorkspaceSdkReads(root),
         spawnId: authority.spawnId,
         requestPath: "panel",
         isWritable: () => true,
@@ -1712,6 +1750,7 @@ describe("PluginHost", () => {
       {
         pluginId: "hello-plugin",
         workspaceRoot: root,
+        reads: localWorkspaceSdkReads(root),
         spawnId,
         requestPath: "panel",
         isWritable: () => true,
@@ -1811,6 +1850,7 @@ describe("PluginHost", () => {
       {
         pluginId: "hello-plugin",
         workspaceRoot: root,
+        reads: localWorkspaceSdkReads(root),
         spawnId,
         requestPath: "panel",
         isWritable: () => true,
