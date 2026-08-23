@@ -269,19 +269,22 @@ async function eventStream(url: string, token: string): Promise<EventStream> {
 
   return {
     async next() {
-      const {
-        at: _at,
-        snapshot: _snapshot,
-        replay: _replay,
-        controls: _controls,
-        seq: _seq,
-        ...rest
-      } = await nextRaw();
-      if (rest.kind === "turn-completed") {
-        return rest as PluginAgentEvent;
+      for (;;) {
+        const {
+          at: _at,
+          snapshot: _snapshot,
+          replay: _replay,
+          controls: _controls,
+          seq: _seq,
+          ...rest
+        } = await nextRaw();
+        if (rest.kind === "controls") continue;
+        if (rest.kind === "turn-completed") {
+          return rest as PluginAgentEvent;
+        }
+        const { turnId: _turnId, ...event } = rest;
+        return event as PluginAgentEvent | { kind: "user-message"; text: string; clientId: string };
       }
-      const { turnId: _turnId, ...event } = rest;
-      return event as PluginAgentEvent | { kind: "user-message"; text: string; clientId: string };
     },
     nextRaw,
     async close() {
@@ -289,6 +292,13 @@ async function eventStream(url: string, token: string): Promise<EventStream> {
       await reader.cancel().catch(() => undefined);
     },
   };
+}
+
+async function nextRawEvent(stream: EventStream): Promise<Record<string, unknown>> {
+  for (;;) {
+    const event = await stream.nextRaw();
+    if (event.kind !== "controls") return event;
+  }
 }
 
 async function rawPost(url: string, path: string, init: RequestInit): Promise<Response> {
@@ -435,6 +445,12 @@ describe("Codex chat web app", () => {
 
     const sendPromise = post(url, "message", { text: "Hello", clientId: "c1" }, token);
     await promptEntered.promise;
+    const reservedControls = await stream.nextRaw();
+    expect(reservedControls).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: false, turnId: null },
+    });
+    observe(reservedControls);
     fake.startInputs[0]?.onEvent({ kind: "session-state", state: "running" });
 
     const running = await stream.nextRaw();
@@ -444,6 +460,37 @@ describe("Codex chat web app", () => {
       controls: { canSend: false, canStop: true, turnId: 1 },
     });
     observe(running);
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "Hel",
+    });
+    const firstDelta = await stream.nextRaw();
+    expect(firstDelta).toMatchObject({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "Hel",
+    });
+    observe(firstDelta);
+
+    fake.startInputs[0]?.onEvent({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "lo",
+    });
+    const secondDelta = await stream.nextRaw();
+    expect(secondDelta).toMatchObject({
+      kind: "text-delta",
+      itemId: "answer",
+      stream: "assistant",
+      text: "lo",
+    });
+    observe(secondDelta);
+    expect(secondDelta.seq).toBeGreaterThan(firstDelta.seq as number);
 
     promptGate.resolve();
     const userMessage = await stream.nextRaw();
@@ -516,11 +563,175 @@ describe("Codex chat web app", () => {
       controls: { canSend: true, canStop: false, turnId: 1 },
     });
     observe(reconnectSnapshot);
+    const replayed: Record<string, unknown>[] = [];
+    for (let index = 0; index < 7; index += 1) replayed.push(await reattached.nextRaw());
+    const replayedDeltas = replayed.filter(
+      (event) => event.kind === "text-delta" && event.itemId === "answer",
+    );
+    expect(replayedDeltas).toHaveLength(1);
+    expect(replayedDeltas[0]).toMatchObject({
+      stream: "assistant",
+      text: "Hello",
+      seq: firstDelta.seq,
+      replay: true,
+    });
     await reattached.close();
 
     for (let index = 1; index < seqs.length; index += 1) {
       expect(seqs[index]).toBeGreaterThan(seqs[index - 1] as number);
     }
+  });
+
+  it("publishes Send again after a stopped prompt finishes cleanup behind turn-completed", async () => {
+    const secondPromptEntered = deferred();
+    const secondPromptGate = deferred();
+    const secondCancelEntered = deferred();
+    const secondCancelGate = deferred();
+    let promptCalls = 0;
+    let cancelCalls = 0;
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => {
+        promptCalls += 1;
+        if (promptCalls === 2) secondPromptEntered.resolve();
+      },
+      promptGate: () => (promptCalls === 2 ? secondPromptGate.promise : Promise.resolve()),
+      onCancelEntered: () => {
+        cancelCalls += 1;
+        if (cancelCalls === 2) secondCancelEntered.resolve();
+      },
+      cancelGate: () => (cancelCalls === 2 ? secondCancelGate.promise : Promise.resolve()),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    expect((await post(url, "message", { text: "First", clientId: "c1" }, token)).status).toBe(
+      202,
+    );
+    expect(await stream.nextRaw()).toMatchObject({ kind: "controls" });
+    expect(await stream.nextRaw()).toMatchObject({ kind: "user-message", text: "First" });
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+    expect(await stream.nextRaw()).toMatchObject({ kind: "turn-completed" });
+
+    const messageResponse = post(url, "message", { text: "Second", clientId: "c2" }, token);
+    await secondPromptEntered.promise;
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    expect((await post(url, "stop", undefined, token)).status).toBe(200);
+
+    secondPromptGate.resolve();
+    expect(await stream.nextRaw()).toMatchObject({ kind: "user-message", text: "Second" });
+    await secondCancelEntered.promise;
+    fake.startInputs[0]?.onEvent({
+      kind: "turn-completed",
+      turnId: "turn-2",
+      status: "cancelled",
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "turn-completed",
+      turnId: 2,
+      status: "cancelled",
+      controls: { canSend: false, canStop: true, turnId: 2 },
+    });
+
+    secondCancelGate.resolve();
+    expect((await messageResponse).status).toBe(202);
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: true, canStop: true, turnId: 2 },
+    });
+    await stream.close();
+  });
+
+  it("publishes Send again after a startup failure releases the prompt reservation", async () => {
+    const fake = fakeDriver(undefined, {
+      startSessionError: new Error("Codex failed to spawn."),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    const response = await post(url, "message", { text: "Hello" }, token);
+    expect(response.status).toBe(503);
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: false, turnId: null },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "error",
+      message: "Codex failed to spawn.",
+      fatal: true,
+      controls: { canSend: false, canStop: false, turnId: null },
+    });
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: true, canStop: false, turnId: null },
+    });
+    await stream.close();
+  });
+
+  it("reservation of a prompt with no other frame emits a controls frame", async () => {
+    const probeEntered = deferred();
+    const probeGate = deferred();
+    const fake = fakeDriver(undefined, {
+      onProbeEntered: () => probeEntered.resolve(),
+      probeGate: () => probeGate.promise,
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    const messageResponse = post(url, "message", { text: "Hello" }, token);
+    await probeEntered.promise;
+    expect(await stream.nextRaw()).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: false, turnId: null },
+    });
+
+    probeGate.resolve();
+    expect((await messageResponse).status).toBe(202);
+    await stream.close();
+  });
+
+  it("reconnect after a reservation reports a seq newer than what was already applied", async () => {
+    const secondPromptEntered = deferred();
+    const secondPromptGate = deferred();
+    let promptCalls = 0;
+    const fake = fakeDriver(undefined, {
+      onPromptEntered: () => {
+        promptCalls += 1;
+        if (promptCalls === 2) secondPromptEntered.resolve();
+      },
+      promptGate: () => (promptCalls === 2 ? secondPromptGate.promise : Promise.resolve()),
+    });
+    const { url, token } = await start(fake);
+    const stream = await eventStream(url, token);
+    await stream.nextRaw(); // initial snapshot
+
+    expect((await post(url, "message", { text: "First" }, token)).status).toBe(202);
+    await stream.nextRaw(); // reservation controls
+    await stream.nextRaw(); // accepted user-message
+    fake.startInputs[0]?.onEvent({ kind: "turn-completed", turnId: "turn-1", status: "completed" });
+    await stream.nextRaw();
+
+    const secondMessage = post(url, "message", { text: "Second" }, token);
+    await secondPromptEntered.promise;
+    const reservation = await stream.nextRaw();
+    expect(reservation).toMatchObject({
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+    });
+    const reattached = await eventStream(url, token);
+    const snapshot = await reattached.nextRaw();
+    expect(snapshot.snapshot).toBe(true);
+    expect(snapshot.seq).toBeGreaterThan(reservation.seq as number);
+
+    secondPromptGate.resolve();
+    expect((await secondMessage).status).toBe(202);
+    await reattached.close();
+    await stream.close();
   });
 
   it("caps replayed text while live clients receive each full delta", async () => {
@@ -632,7 +843,7 @@ describe("Codex chat web app", () => {
 
     const reattached = await eventStream(url, token);
     await reattached.nextRaw(); // the initial snapshot
-    const replayed = await reattached.nextRaw();
+    const replayed = await nextRawEvent(reattached);
     expect(replayed.kind).toBe("user-message");
     expect(typeof replayed.at).toBe("number");
     expect(replayed.at as number).toBeGreaterThanOrEqual(before);
@@ -658,18 +869,18 @@ describe("Codex chat web app", () => {
     });
 
     const reattached = await eventStream(url, token);
-    expect(await reattached.nextRaw()).toMatchObject({
+    expect(await nextRawEvent(reattached)).toMatchObject({
       kind: "session-state",
       state: "ready",
       turnId: 2,
       snapshot: true,
     });
-    expect(await reattached.nextRaw()).toMatchObject({
+    expect(await nextRawEvent(reattached)).toMatchObject({
       kind: "user-message",
       text: "First",
       replay: true,
     });
-    expect(await reattached.nextRaw()).toMatchObject({
+    expect(await nextRawEvent(reattached)).toMatchObject({
       kind: "turn-completed",
       status: "completed",
       turnId: 1,
@@ -709,7 +920,7 @@ describe("Codex chat web app", () => {
     // The buffered replay carries the same transition again -- the client
     // must be able to tell these apart, or it renders the "Stopped" card
     // twice: once for the snapshot, once for the replayed event.
-    const closedReplay = await reattached.nextRaw();
+    const closedReplay = await nextRawEvent(reattached);
     expect(closedReplay).toMatchObject({
       kind: "session-state",
       state: "closed",
@@ -743,13 +954,13 @@ describe("Codex chat web app", () => {
 
       const reattached = await eventStream(url, token);
       await reattached.nextRaw(); // the initial closed snapshot
-      const userMessage = await reattached.nextRaw();
+      const userMessage = await nextRawEvent(reattached);
       expect(userMessage).toMatchObject({
         kind: "user-message",
         text: "Hello",
         clientId: "c1",
       });
-      const running = await reattached.nextRaw();
+      const running = await nextRawEvent(reattached);
       expect(running).toMatchObject({ kind: "session-state", state: "running" });
       expect(userMessage.at as number).toBeLessThanOrEqual(running.at as number);
       await reattached.close();
@@ -758,11 +969,11 @@ describe("Codex chat web app", () => {
     }
   });
 
-  it("replays nothing for a reservation the driver hasn't accepted yet, but carries it in order once it has", async () => {
+  it("replays no message for a reservation the driver hasn't accepted yet, but carries it in order once it has", async () => {
     // A reconnect landing in the exact window between the reservation and
     // the driver's accept would have no live fetch on THAT connection to
-    // ever mark the send failed -- it must see nothing at all for it, not
-    // an unconfirmed message rendered as if it were sent.
+    // ever mark the send failed -- it must see no message for it, not an
+    // unconfirmed message rendered as if it were sent.
     const entered = deferred();
     const gate = deferred();
     const fake = fakeDriver(undefined, {
@@ -776,7 +987,7 @@ describe("Codex chat web app", () => {
 
     const reattached = await eventStream(url, token);
     expect((await reattached.nextRaw()).snapshot).toBe(true);
-    const raced = await raceTimeout(reattached.nextRaw(), 200);
+    const raced = await raceTimeout(nextRawEvent(reattached), 200);
     expect(raced).toBe("timeout");
     await reattached.close();
 
@@ -801,12 +1012,12 @@ describe("Codex chat web app", () => {
 
     const reattached = await eventStream(url, token);
     expect((await reattached.nextRaw()).snapshot).toBe(true);
-    const replayed = await reattached.nextRaw();
+    const replayed = await nextRawEvent(reattached);
     expect(replayed.kind).toBe("user-message");
     expect(replayed.replay).toBe(true);
 
     fake.startInputs[0]?.onEvent({ kind: "error", message: "boom", fatal: false });
-    const live = await reattached.nextRaw();
+    const live = await nextRawEvent(reattached);
     expect(live.kind).toBe("error");
     expect(live.replay).toBeUndefined();
     await reattached.close();

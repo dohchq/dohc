@@ -63,11 +63,16 @@ interface LauncherUnavailableErrorEvent {
   restartOnly: true;
 }
 
+interface ControlsChangedEvent {
+  kind: "controls";
+}
+
 type ChatStreamEvent =
   | PluginAgentEvent
   | UserMessageEvent
   | HistoryTrimmedEvent
-  | LauncherUnavailableErrorEvent;
+  | LauncherUnavailableErrorEvent
+  | ControlsChangedEvent;
 
 interface EventLogEntry {
   event: ChatStreamEvent;
@@ -312,6 +317,37 @@ export function createChatWebApp(
     };
   }
 
+  // The last controls fact actually broadcast to connected clients (never a
+  // per-connection snapshot or a per-requester response body -- see frame()
+  // below, the only place that updates this). Compared against on every
+  // pendingPrompt/turnActive mutation that happens OUTSIDE a publish() call
+  // of its own: if the derived fact differs, publish one, so a connected
+  // page always learns the change even when the response body that would
+  // also have carried it is lost, delayed, or never read.
+  let lastPublishedControls = computeControls();
+
+  function controlsEqual(
+    a: { canSend: boolean; canStop: boolean; turnId: number | null },
+    b: { canSend: boolean; canStop: boolean; turnId: number | null },
+  ): boolean {
+    return a.canSend === b.canSend && a.canStop === b.canStop && a.turnId === b.turnId;
+  }
+
+  /** Call after any pendingPrompt/turnActive assignment that is NOT already
+   * immediately followed (synchronously) by its own publish()/frame() call
+   * for some other event -- those already recompute controls fresh and
+   * announce the change as a side effect; calling this there too would only
+   * be redundant, not wrong, so it is reserved for sites that otherwise
+   * have no announcement: message()'s reservation and finally-block release,
+   * plus shutdown()'s release before it awaits disposal. A no-op
+   * `{ kind: "controls" }` event carries nothing but the fact itself --
+   * ChatStreamEvent's existing local union gains this one new shape. */
+  function syncControls(): void {
+    const next = computeControls();
+    if (controlsEqual(next, lastPublishedControls)) return;
+    publish({ kind: "controls" });
+  }
+
   function attachControls(error: unknown): unknown {
     if (error && typeof error === "object") {
       return Object.assign(error, { controls: computeControls(), seq: nextSeq() });
@@ -357,6 +393,8 @@ export function createChatWebApp(
     seq: number | undefined,
     replay?: boolean,
   ): string {
+    const controls = computeControls();
+    lastPublishedControls = controls;
     return (
       "data: " +
       JSON.stringify({
@@ -364,7 +402,7 @@ export function createChatWebApp(
         at,
         turnId,
         seq,
-        controls: computeControls(),
+        controls,
         ...(replay ? { replay: true } : {}),
       }) +
       "\n\n"
@@ -384,7 +422,7 @@ export function createChatWebApp(
         ...state,
         snapshot: true,
         turnId: currentTurnId,
-        seq: seqCounter,
+        seq: nextSeq(),
         controls: computeControls(),
       }) +
       "\n\n"
@@ -442,7 +480,7 @@ export function createChatWebApp(
     if (event.kind === "permission-request") pendingPermissions.add(event.requestId);
     if (event.kind === "permission-resolved") pendingPermissions.delete(event.requestId);
     const at = Date.now();
-    let seq: number;
+    let liveSeq: number;
     if (event.kind === "text-delta") {
       // The log coalesces streamed text into one entry per item; the live
       // broadcast below still carries just this delta. The stored copy is
@@ -452,13 +490,14 @@ export function createChatWebApp(
       let open = openDeltas.get(key);
       if (open && open.event.kind === "text-delta" && open.seq !== undefined) {
         open.event.text += event.text;
-        seq = open.seq;
+        liveSeq = nextSeq();
       } else {
-        seq = nextSeq();
-        open = { event: { ...event }, at, turnId: currentTurnId, seq };
+        const entrySeq = nextSeq();
+        open = { event: { ...event }, at, turnId: currentTurnId, seq: entrySeq };
         eventLog.push(open);
         openDeltas.set(key, open);
         trimLog();
+        liveSeq = entrySeq;
       }
       if (open.event.kind === "text-delta" && open.event.text.length > MAX_COALESCED_TEXT_CHARS) {
         open.event.text = open.event.text.slice(-MAX_COALESCED_TEXT_CHARS);
@@ -474,11 +513,11 @@ export function createChatWebApp(
         }
       }
     } else {
-      seq = nextSeq();
-      eventLog.push({ event, at, turnId: currentTurnId, seq });
+      liveSeq = nextSeq();
+      eventLog.push({ event, at, turnId: currentTurnId, seq: liveSeq });
       trimLog();
     }
-    const encoded = frame(event, at, currentTurnId, seq);
+    const encoded = frame(event, at, currentTurnId, liveSeq);
     for (const client of clients) client.write(encoded);
   }
 
@@ -665,6 +704,7 @@ export function createChatWebApp(
     }
     const inFlight = { stopRequested: false };
     pendingPrompt = inFlight;
+    syncControls();
     const clientId =
       typeof body.clientId === "string" && body.clientId ? body.clientId : randomUUID();
     try {
@@ -781,6 +821,7 @@ export function createChatWebApp(
       );
     } finally {
       if (pendingPrompt === inFlight) pendingPrompt = null;
+      syncControls();
     }
   }
 
@@ -1047,6 +1088,7 @@ export function createChatWebApp(
     // AFTER the restart has already reclaimed the slot by the time the
     // old one settles.
     pendingPrompt = null;
+    syncControls();
     // Guarded: a rejection here must not skip the cleanup below and leave
     // the server listening (and the session's process running) after
     // teardown.

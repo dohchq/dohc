@@ -59,12 +59,18 @@ async function loadChatModule(options: { reload?: boolean } = {}): Promise<{
   return { module: mod, eventSource: lastEventSource };
 }
 
-function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -829,6 +835,87 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     await flushMicrotasks();
 
     expect(textOf(".error-card")).toContain("dohc could not stop this session.");
+    expect(stopButton.disabled).toBe(false);
+  });
+
+  it("Stop 1 rejects during turn 2 -- no stale failure card", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = (() => stopResponse.promise) as typeof fetch;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 1,
+    });
+    stopButton.click();
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      turnId: 1,
+      status: "completed",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 2,
+    });
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 2 },
+      seq: 3,
+    });
+
+    stopResponse.reject(new Error("The old Stop request lost its connection."));
+    await flushMicrotasks();
+
+    expect(document.querySelectorAll(".error-card")).toHaveLength(0);
+    expect(sendButton.disabled).toBe(true);
+    expect(stopButton.disabled).toBe(false);
+  });
+
+  it("Stop 1's old failure response arrives during turn 2 -- no stale failure card", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = (() => stopResponse.promise) as typeof fetch;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 1,
+    });
+    stopButton.click();
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      turnId: 1,
+      status: "completed",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 2,
+    });
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 2 },
+      seq: 3,
+    });
+
+    stopResponse.resolve(
+      new Response(
+        JSON.stringify({
+          message: "Stop failed.",
+          controls: { canSend: true, canStop: true, turnId: 1 },
+          seq: 2,
+        }),
+        { status: 500 },
+      ),
+    );
+    await flushMicrotasks();
+
+    expect(document.querySelectorAll(".error-card")).toHaveLength(0);
+    expect(sendButton.disabled).toBe(true);
     expect(stopButton.disabled).toBe(false);
   });
 });

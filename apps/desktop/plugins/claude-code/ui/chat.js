@@ -546,6 +546,7 @@ messageInput.addEventListener("keydown", (event) => {
 });
 
 stopButton.addEventListener("click", async () => {
+  const seqAtSend = lastAppliedSeq;
   try {
     const response = await fetch("/stop", {
       method: "POST",
@@ -554,9 +555,18 @@ stopButton.addEventListener("click", async () => {
     const body = await response.json().catch(() => null);
     if (body) applyControls(body.controls, body.seq);
     if (!response.ok) {
-      errorCard("dohc could not stop this session.");
+      // A failure whose own seq (or, if the body was lost, this attempt's
+      // seq at send time) is older than the latest fact this page has
+      // since applied is stale: something newer already told the truth
+      // about this session, and this response is not news.
+      const responseSeq = body && typeof body.seq === "number" ? body.seq : seqAtSend;
+      if (responseSeq >= lastAppliedSeq) {
+        errorCard("dohc could not stop this session.");
+      }
     }
   } catch {
-    errorCard("dohc could not stop this session.");
+    if (seqAtSend >= lastAppliedSeq) {
+      errorCard("dohc could not stop this session.");
+    }
   }
 });
