@@ -524,6 +524,8 @@ import {
   mountRootFor,
   mountStoreWorkspaceIdFor,
   classifyShareMountRefreshError,
+  overlayCanonicalShareMountFiles,
+  refuseMoveAcrossShareMount,
   removeMountFolder,
   resolveShareMountPath,
   shareMountResultRow,
@@ -4590,42 +4592,21 @@ async function listOwnedWorkspaceFiles(
       workspaceId: workspace.workspaceId,
     });
   }
-  const listed = await listFiles(workspace.rootPath);
-  const files = [...listed.files];
-  const folders = [...(listed.folders ?? [])];
-  for (const mount of workspace.shareMounts ?? []) {
-    if (!validMountLabel(mount.label)) continue;
-    const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
-    const underMount = (path: string) =>
-      path === prefix || path.startsWith(`${prefix}/`);
-    const retainedFiles = files.filter((file) => !underMount(file.path));
-    const retainedFolders = folders.filter((folder) => !underMount(folder));
-    files.length = 0;
-    files.push(...retainedFiles);
-    folders.length = 0;
-    folders.push(...retainedFolders, prefix);
-    const canonical = await shareViewFiles.list({
-      kind: "mount",
-      workspaceId: workspace.workspaceId,
-      shareId: mount.shareId,
-    });
-    files.push(
-      ...canonical.files.map((file) => ({
-        ...file,
-        path: `${prefix}/${file.path}`,
-      })),
-    );
-    folders.push(
-      ...(canonical.folders ?? []).map((folder) => `${prefix}/${folder}`),
-    );
-  }
-  files.sort((left, right) => left.path.localeCompare(right.path));
-  return {
-    files,
-    folders: [...new Set(folders)].sort((left, right) =>
-      left.localeCompare(right),
-    ),
-  };
+  return overlayCanonicalShareMountFiles({
+    disk: await listFiles(workspace.rootPath),
+    mounts: workspace.shareMounts ?? [],
+    listCanonical: (mount) =>
+      shareViewFiles.list({
+        kind: "mount",
+        workspaceId: workspace.workspaceId,
+        shareId: mount.shareId,
+      }),
+    onFailure: (mount, error) =>
+      console.error(
+        `[desktop] could not list mounted share "${mount.label}" (${mount.shareId})`,
+        error,
+      ),
+  });
 }
 
 function ownedWorkspaceGraphSource(
@@ -5454,6 +5435,14 @@ function registerIpcHandlers(
     return withExclusiveWorkspaceOperation(
       workspace.rootPath,
       async (markWorkspaceChanged, lease) => {
+        if (shareView === null) {
+          await refuseMoveAcrossShareMount(
+            workspace.rootPath,
+            input.fromPath,
+            input.toPath,
+            workspace.shareMounts ?? [],
+          );
+        }
         // Flagged workspaces coordinate single-file renames through the engine
         // FIRST so the file keeps its stable object id (linked Chats survive the
         // rename). Anything the engine declines — folders, binary, untracked —

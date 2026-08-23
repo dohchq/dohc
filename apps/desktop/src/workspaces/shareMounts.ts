@@ -138,6 +138,79 @@ export async function resolveShareMountPath(
   return null;
 }
 
+export async function refuseMoveAcrossShareMount(
+  hostRoot: string,
+  fromPath: string,
+  toPath: string,
+  mounts: readonly Pick<ShareMountRecord, "shareId" | "label">[],
+): Promise<void> {
+  const [source, destination] = await Promise.all([
+    resolveShareMountPath(hostRoot, fromPath, mounts),
+    resolveShareMountPath(hostRoot, toPath, mounts),
+  ]);
+  if (source === null && destination === null) return;
+  throw new Error(
+    "A mounted share is read-only. Move the item somewhere outside the mounted share.",
+  );
+}
+
+export async function overlayCanonicalShareMountFiles<
+  FileEntry extends { path: string },
+  Mount extends Pick<ShareMountRecord, "shareId" | "label">,
+>(input: {
+  disk: { files: readonly FileEntry[]; folders?: readonly string[] };
+  mounts: readonly Mount[];
+  listCanonical: (
+    mount: Mount,
+  ) => Promise<{ files: readonly FileEntry[]; folders?: readonly string[] }>;
+  onFailure?: (mount: Mount, error: unknown) => void;
+}): Promise<{ files: FileEntry[]; folders: string[] }> {
+  const files = [...input.disk.files];
+  const folders = [...(input.disk.folders ?? [])];
+  for (const mount of input.mounts) {
+    if (!validMountLabel(mount.label)) continue;
+    const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+    const comparedPrefix = process.platform === "win32" ? prefix.toLowerCase() : prefix;
+    const underMount = (path: string) => {
+      const comparedPath = process.platform === "win32" ? path.toLowerCase() : path;
+      return (
+        comparedPath === comparedPrefix ||
+        comparedPath.startsWith(`${comparedPrefix}/`)
+      );
+    };
+    const retainedFiles = files.filter((file) => !underMount(file.path));
+    const retainedFolders = folders.filter((folder) => !underMount(folder));
+    files.length = 0;
+    files.push(...retainedFiles);
+    folders.length = 0;
+    folders.push(...retainedFolders, prefix);
+
+    let canonical: Awaited<ReturnType<typeof input.listCanonical>>;
+    try {
+      canonical = await input.listCanonical(mount);
+    } catch (error) {
+      input.onFailure?.(mount, error);
+      continue;
+    }
+    files.push(
+      ...canonical.files.map((file) => ({
+        ...file,
+        path: `${prefix}/${file.path}`,
+      })),
+    );
+    folders.push(
+      ...(canonical.folders ?? []).map((folder) => `${prefix}/${folder}`),
+    );
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  return {
+    files,
+    folders: [...new Set(folders)].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  };
+}
+
 // The REAL-path guard the lexical check above cannot give: refuses a
 // symlinked shared-with-me or label directory (at either component) before
 // any materialization. A refresh writes relay-controlled bytes, so a link

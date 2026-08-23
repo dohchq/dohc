@@ -22,7 +22,9 @@ import {
   mountRootFor,
   mountStoreWorkspaceIdFor,
   removeMountFolder,
+  refuseMoveAcrossShareMount,
   resolveShareMountPath,
+  overlayCanonicalShareMountFiles,
   validMountLabel,
 } from "./shareMounts";
 import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
@@ -289,6 +291,70 @@ describe("mount labels", () => {
     await expect(
       resolveShareMountPath(host, "notes/ordinary.md", [mount]),
     ).resolves.toBeNull();
+  });
+
+  it("refuses a move when either resolved endpoint belongs to a mount", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    await mkdir(join(mountRootFor(host, "alex"), "docs"), { recursive: true });
+    await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
+    const mounts = [{ shareId: SHARE_ID, label: "alex" }];
+
+    await expect(
+      refuseMoveAcrossShareMount(host, "notes/local.md", "inbox/docs/local.md", mounts),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseMoveAcrossShareMount(host, "inbox/docs/shared.md", "notes/shared.md", mounts),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseMoveAcrossShareMount(host, "notes/a.md", "notes/b.md", mounts),
+    ).resolves.toBeUndefined();
+  });
+
+  it("isolates a failed canonical listing to its mount", async () => {
+    const failures: string[] = [];
+    const mounts = [
+      { shareId: "damaged", label: "alex" },
+      { shareId: "healthy", label: "sam" },
+    ];
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "notes/local.md", size: 5 },
+            { path: "shared-with-me/alex/recipient-only.md", size: 10 },
+            { path: "shared-with-me/sam/stale.md", size: 11 },
+          ],
+          folders: [
+            "notes",
+            "shared-with-me/alex",
+            "shared-with-me/sam",
+          ],
+        },
+        mounts,
+        listCanonical: async (mount) => {
+          if (mount.shareId === "damaged") throw new Error("broken store");
+          return {
+            files: [{ path: "docs/canonical.md", size: 12 }],
+            folders: ["docs"],
+          };
+        },
+        onFailure: (mount) => failures.push(mount.shareId),
+      }),
+    ).resolves.toEqual({
+      files: [
+        { path: "notes/local.md", size: 5 },
+        { path: "shared-with-me/sam/docs/canonical.md", size: 12 },
+      ],
+      folders: [
+        "notes",
+        "shared-with-me/alex",
+        "shared-with-me/sam",
+        "shared-with-me/sam/docs",
+      ],
+    });
+    expect(failures).toEqual(["damaged"]);
   });
 });
 
