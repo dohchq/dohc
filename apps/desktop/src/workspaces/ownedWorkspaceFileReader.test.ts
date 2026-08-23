@@ -10,11 +10,9 @@ import {
 } from "./shareViewFiles";
 import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
 import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
-import {
-  importToDatabase,
-  readDatabaseSnapshot,
-} from "./workspaceDatabase";
+import { readDatabaseSnapshot } from "./workspaceDatabase";
 import { createTestScratch } from "./testTemp";
+import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 
 const SOURCE_PATH = "shared-with-me/alice/data.csv";
 
@@ -78,20 +76,6 @@ function ownerFiles(input: {
   });
 }
 
-async function importThroughOwner(input: {
-  rootPath: string;
-  reader: ReturnType<typeof createOwnedWorkspaceFileReader>;
-}) {
-  const source = await input.reader.readText(SOURCE_PATH);
-  if (source.truncated) throw new Error("Test source was truncated.");
-  return importToDatabase(
-    input.rootPath,
-    { path: SOURCE_PATH, body: source.text },
-    "data.sqlite",
-    "rows",
-  );
-}
-
 describe("owned database import", () => {
   it("refuses leftover projection bytes after the mount registry becomes empty", async () => {
     const rootPath = await createTestScratch("dohc-owned-db-tombstone-");
@@ -114,9 +98,13 @@ describe("owned database import", () => {
       files: { read: unexpectedRead },
     });
 
-    await expect(importThroughOwner({ rootPath, reader })).rejects.toThrow(
-      /cannot verify this mounted share/i,
-    );
+    await expect(
+      reader.importDatabase({
+        sourcePath: SOURCE_PATH,
+        databasePath: "data.sqlite",
+        tableName: "rows",
+      }),
+    ).rejects.toThrow(/cannot verify this mounted share/i);
     expect(unexpectedRead).not.toHaveBeenCalled();
     expect(existsSync(join(rootPath, "data.sqlite"))).toBe(false);
   });
@@ -142,11 +130,40 @@ describe("owned database import", () => {
     });
     const reader = createOwnedWorkspaceFileReader({ workspace, files });
 
-    await importThroughOwner({ rootPath, reader });
+    await reader.importDatabase({
+      sourcePath: SOURCE_PATH,
+      databasePath: "data.sqlite",
+      tableName: "rows",
+    });
 
     const snapshot = await readDatabaseSnapshot(rootPath, "data.sqlite");
     expect(snapshot.tables[0]?.rows).toEqual([
       expect.objectContaining({ value: "canonical owner" }),
     ]);
+  });
+
+  it("imports a complete local source larger than the text editor limit", async () => {
+    const rootPath = await createTestScratch("dohc-owned-db-large-");
+    const sourcePath = "large.csv";
+    await writeFile(
+      join(rootPath, sourcePath),
+      `id,value\n1,${"x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1)}\n2,complete\n`,
+    );
+    const unexpectedRead = vi.fn(async () => {
+      throw new Error("Local imports must not ask the share owner.");
+    });
+    const reader = createOwnedWorkspaceFileReader({
+      workspace: { workspaceId: "local-large", rootPath },
+      files: { read: unexpectedRead },
+    });
+
+    await expect(
+      reader.importDatabase({
+        sourcePath,
+        databasePath: "large.sqlite",
+        tableName: "rows",
+      }),
+    ).resolves.toMatchObject({ path: "large.sqlite", rowCount: 2 });
+    expect(unexpectedRead).not.toHaveBeenCalled();
   });
 });

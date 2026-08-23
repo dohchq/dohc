@@ -1,4 +1,5 @@
 import type {
+  ShareViewFileReadOutcome,
   ShareViewFiles,
   ShareViewFilesTarget,
 } from "./shareViewFiles";
@@ -9,9 +10,11 @@ import {
 import { shareViewIsPresent } from "./shareViewMarker";
 import { resolveShareMountPath } from "./shareMounts";
 import {
+  readWorkspaceAsset,
   readWorkspaceText,
   type WorkspaceTextReadResult,
 } from "./workspaceAssets";
+import { importToDatabase } from "./workspaceDatabase";
 
 export interface OwnedWorkspaceFileReader {
   resolveShare(path: string): Promise<{
@@ -19,6 +22,15 @@ export interface OwnedWorkspaceFileReader {
     path: string;
   } | null>;
   readText(path: string): Promise<WorkspaceTextReadResult>;
+  readAsset(
+    path: string,
+  ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>>;
+  readCompleteText(path: string): Promise<string>;
+  importDatabase(input: {
+    sourcePath: string;
+    databasePath: string;
+    tableName: string;
+  }): Promise<{ path: string; tableName: string; rowCount: number }>;
 }
 
 /** Reads local files from disk and received-share files from their owner store. */
@@ -57,6 +69,31 @@ export function createOwnedWorkspaceFileReader(input: {
         };
   }
 
+  async function readAsset(
+    path: string,
+  ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>> {
+    const routed = await resolveShare(path);
+    if (routed === null) {
+      return {
+        kind: "asset",
+        ...(await readWorkspaceAsset(input.workspace.rootPath, path)),
+      };
+    }
+    const read = await input.files.read(routed.target, {
+      kind: "asset",
+      path: routed.path,
+    });
+    if (read.kind !== "asset") {
+      throw new Error("Shared asset read returned an invalid result.");
+    }
+    return read;
+  }
+
+  async function readCompleteText(path: string): Promise<string> {
+    const source = await readAsset(path);
+    return source.bytes.toString("utf8");
+  }
+
   return {
     resolveShare,
 
@@ -73,6 +110,19 @@ export function createOwnedWorkspaceFileReader(input: {
         throw new Error("Shared text read returned an invalid result.");
       }
       return read;
+    },
+
+    readAsset,
+
+    readCompleteText,
+
+    async importDatabase({ sourcePath, databasePath, tableName }) {
+      return importToDatabase(
+        input.workspace.rootPath,
+        { path: sourcePath, body: await readCompleteText(sourcePath) },
+        databasePath,
+        tableName,
+      );
     },
   };
 }

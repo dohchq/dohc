@@ -756,7 +756,6 @@ import {
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
   mediaTypeForExtension,
-  readWorkspaceAsset,
   readWorkspaceText,
   resolveWorkspaceFile,
   withExclusiveWorkspaceOperation,
@@ -778,10 +777,7 @@ import {
 } from "./workspaces/shareViewFilesTarget";
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
-import {
-  applyDatabaseEdit,
-  importToDatabase,
-} from "./workspaces/workspaceDatabase";
+import { applyDatabaseEdit } from "./workspaces/workspaceDatabase";
 import {
   readWorkspaceGraph,
   readWorkspaceBacklinks,
@@ -4532,18 +4528,10 @@ async function readOwnedWorkspaceAsset(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
   relativePath: string,
 ) {
-  const routed = await shareViewFilesTargetForPath(workspace, relativePath);
-  if (routed === null) {
-    return readWorkspaceAsset(workspace.rootPath, relativePath);
-  }
-  const read = await shareViewFiles.read(routed.target, {
-    kind: "asset",
-    path: routed.path,
-  });
-  if (read.kind !== "asset") {
-    throw new Error("Shared asset read returned an invalid result.");
-  }
-  return read;
+  return createOwnedWorkspaceFileReader({
+    workspace,
+    files: shareViewFiles,
+  }).readAsset(relativePath);
 }
 
 async function listOwnedWorkspaceFiles(
@@ -7735,22 +7723,15 @@ function registerIpcHandlers(
     const input = ImportToDatabasePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    const source = await readOwnedWorkspaceText(
-      workspace,
-      input.sourceRelativePath,
-    );
-    if (source.truncated) {
-      throw new Error(
-        "This file is too large to import. Choose a file smaller than 2 MB.",
-      );
-    }
     return ImportToDatabaseResult.parse(
-      await importToDatabase(
-        workspace.rootPath,
-        { path: input.sourceRelativePath, body: source.text },
-        input.databaseRelativePath,
-        input.tableName,
-      ),
+      await createOwnedWorkspaceFileReader({
+        workspace,
+        files: shareViewFiles,
+      }).importDatabase({
+        sourcePath: input.sourceRelativePath,
+        databasePath: input.databaseRelativePath,
+        tableName: input.tableName,
+      }),
     );
   });
 
