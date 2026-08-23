@@ -10981,6 +10981,7 @@ function registerIpcHandlers(
       engineStoreRebuildLocks,
       workspace.workspaceId,
       async () => {
+        const sessions = requireEngineSessions();
         return RebuildEngineStoreResult.parse(
           await rebuildEngineStoreRequest(workspace.rootPath, {
             isStoreRefused: () =>
@@ -11007,13 +11008,13 @@ function registerIpcHandlers(
               probeEngineStoreRefusal(
                 workspace.workspaceId,
                 workspace.rootPath,
-                requireEngineSessions(),
+                sessions,
               ),
-            // Reopen recovery lowers this gate before activity.open binds.
-            moveStoreAside: (rootPath) => {
-              requireEngineSessions().beginRebuild(workspace.workspaceId);
-              return moveEngineStoreAside(rootPath);
+            rebuildGate: {
+              begin: () => sessions.beginRebuild(workspace.workspaceId),
+              end: () => sessions.endRebuild(workspace.workspaceId),
             },
+            moveStoreAside: moveEngineStoreAside,
             reopenActivity: async () => {
               try {
                 await openWorkspaceActivityUnderEngineStoreLock(workspace);

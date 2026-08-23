@@ -62,8 +62,10 @@ describe("main-process engine store rebuild wiring", () => {
     );
     expect(rebuild).toContain("withKeyedStartLock(");
     expect(rebuild).toContain("openWorkspaceActivityUnderEngineStoreLock(");
-    expect(rebuild).toContain("requireEngineSessions().beginRebuild(");
-    expect(rebuild).toContain("moveEngineStoreAside(rootPath)");
+    expect(rebuild).toContain("begin: () => sessions.beginRebuild(");
+    expect(rebuild).toContain("end: () => sessions.endRebuild(");
+    expect(rebuild).toContain("moveStoreAside: moveEngineStoreAside");
+    expect(rebuild).not.toContain("requireEngineSessions().beginRebuild(");
   });
 
   it("claims agent runs through the lock-owning open boundary", () => {

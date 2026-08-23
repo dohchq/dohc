@@ -123,6 +123,37 @@ function deferred() {
   return { promise, resolve };
 }
 
+function mockRebuildGate() {
+  return { begin: vi.fn(), end: vi.fn() };
+}
+
+function createRealRebuildGate() {
+  const workspace = { workspaceId: "workspace", rootPath: root };
+  const client: EngineDaemonClient = {
+    close() {},
+    async sendRequest(request) {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "handle-1" } };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      throw new Error(`Unexpected request: ${request.method}`);
+    },
+  };
+  const sessions = new EngineWorkspaceSessions({
+    currentClient: () => client,
+  });
+  return {
+    rebuildGate: {
+      begin: () => sessions.beginRebuild(workspace.workspaceId),
+      end: () => sessions.endRebuild(workspace.workspaceId),
+    },
+    sessions,
+    workspace,
+  };
+}
+
 describe("moveEngineStoreAside", () => {
   it("keeps the TypeScript store files in sync with the Rust source list", () => {
     expect(
@@ -1248,6 +1279,7 @@ describe("moveEngineStoreAside", () => {
               workspace,
               openActivity,
             ),
+          rebuildGate: mockRebuildGate(),
         }),
     );
 
@@ -1330,6 +1362,7 @@ describe("moveEngineStoreAside", () => {
               order.push("rebuild-reopen-finished");
             },
           ),
+        rebuildGate: mockRebuildGate(),
       }),
     );
 
@@ -1403,6 +1436,7 @@ describe("moveEngineStoreAside", () => {
           probeStoreRefusal: async () => "foreign-database",
           moveStoreAside,
           reopenActivity,
+          rebuildGate: mockRebuildGate(),
         }),
     );
     await Promise.resolve();
@@ -1432,6 +1466,7 @@ describe("rebuildEngineStore", () => {
       closeActivity: vi.fn(async () => undefined),
       reopenActivity: vi.fn(async () => undefined),
       moveStoreAside: vi.fn(async () => "moved" as const),
+      rebuildGate: mockRebuildGate(),
       ...overrides,
     };
   }
@@ -1449,6 +1484,8 @@ describe("rebuildEngineStore", () => {
     expect(d.closeActivity).toHaveBeenCalledOnce();
     expect(d.moveStoreAside).not.toHaveBeenCalled();
     expect(d.reopenActivity).toHaveBeenCalledOnce();
+    expect(d.rebuildGate.begin).not.toHaveBeenCalled();
+    expect(d.rebuildGate.end).toHaveBeenCalledOnce();
   });
 
   it("rethrows a probe failure beside a completed prior backup", async () => {
@@ -1490,7 +1527,60 @@ describe("rebuildEngineStore", () => {
     expect(order).toEqual(["close", "probe", "move", "reopen"]);
   });
 
-  it("blocks direct engine runs until reopen recovery finishes", async () => {
+  it.each(["moved", "backup-exists"] as const)(
+    "releases the rebuild gate after the move returns %s",
+    async (outcome) => {
+      const { rebuildGate, sessions, workspace } = createRealRebuildGate();
+
+      await rebuildEngineStoreRequest(root, {
+        isStoreRefused: () => true,
+        hasActiveAgentRun: () => false,
+        previousResult: () => undefined,
+        rememberResult: vi.fn(),
+        closeActivity: vi.fn(async () => undefined),
+        probeStoreRefusal: vi.fn(async () => "foreign-database" as const),
+        moveStoreAside: vi.fn(async () => outcome),
+        reopenActivity: vi.fn(async () => undefined),
+        rebuildGate,
+      });
+
+      await expect(
+        sessions.run(workspace, async () => "opened"),
+      ).resolves.toBe("opened");
+    },
+  );
+
+  it("keeps the rebuild gate raised when reopen recovery fails", async () => {
+    const { rebuildGate, sessions, workspace } = createRealRebuildGate();
+    const recoveryError = new EngineStoreRecoveryFailedError(
+      new Error("rename denied"),
+    );
+
+    await expect(
+      rebuildEngineStoreRequest(root, {
+        isStoreRefused: () => true,
+        hasActiveAgentRun: () => false,
+        previousResult: () => undefined,
+        rememberResult: vi.fn(),
+        closeActivity: vi.fn(async () => undefined),
+        probeStoreRefusal: vi.fn(async () => "foreign-database" as const),
+        moveStoreAside: vi.fn(async () => "moved" as const),
+        reopenActivity: vi.fn(async () => {
+          throw recoveryError;
+        }),
+        rebuildGate,
+      }),
+    ).resolves.toEqual({
+      outcome: "moved",
+      reopenFailed: recoveryError.message,
+    });
+
+    await expect(
+      sessions.run(workspace, async () => "unexpected"),
+    ).rejects.toEqual(new EngineWorkspaceRebuildingError(workspace.workspaceId));
+  });
+
+  it("releases the rebuild gate after reopen recovery completes a failed move", async () => {
     await seedStore({
       "engine.db": "refused-store",
       "engine.db-journal": "journal",
@@ -1541,7 +1631,15 @@ describe("rebuildEngineStore", () => {
         requests.filter((request) => request.method === "workspace.open"),
       ).toHaveLength(1);
     };
-    const rebuilding = rebuildEngineStore(root, {
+    const rebuildGate = {
+      begin: () => sessions.beginRebuild(workspace.workspaceId),
+      end: () => sessions.endRebuild(workspace.workspaceId),
+    };
+    const rebuilding = rebuildEngineStoreRequest(root, {
+      isStoreRefused: () => true,
+      hasActiveAgentRun: () => false,
+      previousResult: () => undefined,
+      rememberResult: vi.fn(),
       closeActivity: () => sessions.closeWorkspace(workspace.workspaceId),
       probeStoreRefusal: async () => {
         await sessions.run(workspace, async () => {
@@ -1551,7 +1649,6 @@ describe("rebuildEngineStore", () => {
         return "foreign-database";
       },
       moveStoreAside: async (rootPath) => {
-        sessions.beginRebuild(workspace.workspaceId);
         return moveEngineStoreAside(rootPath, {
           rename: async (from, to) => {
             if (to === join(backupDir, "engine.db")) {
@@ -1572,10 +1669,12 @@ describe("rebuildEngineStore", () => {
       reopenActivity: () =>
         withEngineStoreRecoveredUnderEngineStoreLock(
           workspace,
-          () =>
-            sessions.run(workspace, async () => {
+          async () => {
+            await expectCompleteStore();
+            return await sessions.run(workspace, async () => {
               operations.push("reopen");
-            }),
+            });
+          },
           async (rootPath) => {
             await completePendingEngineStoreMove(rootPath, {
               rename: async (from, to) => {
@@ -1585,13 +1684,11 @@ describe("rebuildEngineStore", () => {
                 }
                 await rename(from, to);
               },
-              rebuildGate: {
-                begin: () => sessions.beginRebuild(workspace.workspaceId),
-                end: () => sessions.endRebuild(workspace.workspaceId),
-              },
+              rebuildGate,
             });
           },
         ),
+      rebuildGate,
     });
 
     try {
@@ -1622,6 +1719,9 @@ describe("rebuildEngineStore", () => {
       requests.filter((request) => request.method === "workspace.open"),
     ).toHaveLength(2);
     await expectCompleteStore();
+    await expect(
+      sessions.run(workspace, async () => "opened-after-rebuild"),
+    ).resolves.toBe("opened-after-rebuild");
   });
 
   it("stops before probe, move, or reopen when close rejects", async () => {
@@ -1811,6 +1911,7 @@ describe("rebuildEngineStore", () => {
           probeStoreRefusal,
           moveStoreAside,
           reopenActivity,
+          rebuildGate: mockRebuildGate(),
         }),
       );
 
@@ -1843,6 +1944,7 @@ describe("rebuildEngineStore", () => {
         probeStoreRefusal: vi.fn(async () => null),
         moveStoreAside,
         reopenActivity: vi.fn(async () => undefined),
+        rebuildGate: mockRebuildGate(),
       }),
     ).resolves.toBe(previous);
 
@@ -1863,6 +1965,7 @@ describe("rebuildEngineStore", () => {
         probeStoreRefusal: vi.fn(async () => "foreign-database" as const),
         moveStoreAside,
         reopenActivity: vi.fn(async () => undefined),
+        rebuildGate: mockRebuildGate(),
       }),
     ).rejects.toMatchObject({
       name: "EngineStoreRebuildRequestError",
@@ -1888,6 +1991,7 @@ describe("rebuildEngineStore", () => {
         probeStoreRefusal: vi.fn(async () => "foreign-database" as const),
         moveStoreAside,
         reopenActivity,
+        rebuildGate: mockRebuildGate(),
       }),
     ).rejects.toThrow(
       "An agent is working in this workspace. Wait for it to finish, then try again.",

@@ -526,6 +526,7 @@ export interface RebuildEngineStoreDependencies {
   closeActivity: () => Promise<void>;
   reopenActivity: () => Promise<void>;
   moveStoreAside: (rootPath: string) => Promise<MoveOutcome>;
+  rebuildGate: { begin: () => void; end: () => void };
 }
 
 export async function rebuildEngineStore(
@@ -548,6 +549,7 @@ export async function rebuildEngineStore(
       throw new EngineStoreRebuildRequestError("not-refused");
     }
     moveAttempted = true;
+    deps.rebuildGate.begin();
     outcome = await deps.moveStoreAside(rootPath);
   } catch (error) {
     operationError = error;
@@ -556,6 +558,9 @@ export async function rebuildEngineStore(
       await deps.reopenActivity();
     } catch (error) {
       reopenError = error;
+    }
+    if (!(reopenError instanceof EngineStoreRecoveryFailedError)) {
+      deps.rebuildGate.end();
     }
   }
 
