@@ -128,6 +128,18 @@ export class EngineWorkspaceSessionsClosedError extends Error {
   }
 }
 
+export class EngineWorkspaceRebuildingError extends Error {
+  readonly workspaceId: string;
+
+  constructor(workspaceId: string) {
+    super(
+      `Rust engine cannot open workspace ${workspaceId} while its data store is rebuilding. Try again shortly.`,
+    );
+    this.name = "EngineWorkspaceRebuildingError";
+    this.workspaceId = workspaceId;
+  }
+}
+
 // A retry limit was reached: the run stopped STARTING retries. The last
 // failure rides as the cause.
 //
@@ -280,6 +292,7 @@ export class EngineWorkspaceSessions {
   private readonly preparations = new Map<string, Promise<void>>();
   private readonly captureAuthors = new Map<string, AgentAuthor | null>();
   private readonly shareMounts = new Set<string>();
+  private readonly rebuildingWorkspaces = new Set<string>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly now: () => number;
@@ -710,6 +723,14 @@ export class EngineWorkspaceSessions {
     this.shareMounts.add(workspaceId);
   }
 
+  beginRebuild(workspaceId: string): void {
+    this.rebuildingWorkspaces.add(workspaceId);
+  }
+
+  endRebuild(workspaceId: string): void {
+    this.rebuildingWorkspaces.delete(workspaceId);
+  }
+
   async closeWorkspace(workspaceId: string): Promise<void> {
     this.captureAuthors.delete(workspaceId);
     this.shareMounts.delete(workspaceId);
@@ -761,6 +782,9 @@ export class EngineWorkspaceSessions {
     for (;;) {
       if (!this.acceptingRuns) {
         throw new EngineWorkspaceSessionsClosedError();
+      }
+      if (this.rebuildingWorkspaces.has(workspaceId)) {
+        throw new EngineWorkspaceRebuildingError(workspaceId);
       }
       const entry = this.entry(workspaceId);
       if (entry.closing) {

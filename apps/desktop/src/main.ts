@@ -383,6 +383,7 @@ import {
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
+  completePendingEngineStoreMove,
   EngineStoreRecoveryFailedError,
   moveEngineStoreAside,
   rebuildEngineStoreRequest,
@@ -2774,6 +2775,19 @@ const workspaceActivityOpenPromises = new Map<
 >();
 const workspaceActivityClosePromises = new Map<string, Promise<void>>();
 
+async function withRebuildBoundGate<T>(
+  workspaceId: string,
+  body: () => Promise<T>,
+): Promise<T> {
+  const sessions = requireEngineSessions();
+  sessions.beginRebuild(workspaceId);
+  try {
+    return await body();
+  } finally {
+    sessions.endRebuild(workspaceId);
+  }
+}
+
 async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   const closing = workspaceActivityClosePromises.get(workspaceId);
   if (closing) await closing.catch(() => undefined);
@@ -2834,6 +2848,10 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
           }
         }
       },
+      (rootPath) =>
+        withRebuildBoundGate(workspace.workspaceId, () =>
+          completePendingEngineStoreMove(rootPath),
+        ),
     );
   } catch (error) {
     if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
@@ -2872,6 +2890,10 @@ async function ensureWorkspaceActivityOpen(
         }
       }
     },
+    (rootPath) =>
+      withRebuildBoundGate(workspace.workspaceId, () =>
+        completePendingEngineStoreMove(rootPath),
+      ),
   );
 }
 
@@ -10890,7 +10912,10 @@ function registerIpcHandlers(
                 workspace.rootPath,
                 requireEngineSessions(),
               ),
-            moveStoreAside: moveEngineStoreAside,
+            moveStoreAside: (rootPath) =>
+              withRebuildBoundGate(workspace.workspaceId, () =>
+                moveEngineStoreAside(rootPath),
+              ),
             reopenActivity: async () => {
               try {
                 await openWorkspaceActivity(workspace, undefined, true);

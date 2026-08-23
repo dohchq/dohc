@@ -80,4 +80,36 @@ describe("main-process engine store rebuild wiring", () => {
     );
     expect(gate).not.toContain("catch");
   });
+
+  it("marks only store moves as rebuilding so probe and reopen can bind", () => {
+    const helper = sourceBetween(
+      "async function withRebuildBoundGate<T>(",
+      "async function syncWorkspaceForDispatch(",
+    );
+    const dispatch = sourceBetween(
+      "async function syncWorkspaceForDispatch(",
+      "async function ensureWorkspaceActivityOpen(",
+    );
+    const open = sourceBetween(
+      "async function ensureWorkspaceActivityOpen(",
+      "async function closeDispatchRunActivity(",
+    );
+    const rebuild = sourceBetween(
+      "ipcMain.handle(CHANNELS.rebuildEngineStore,",
+      "ipcMain.handle(CHANNELS.startAgentRun,",
+    );
+
+    expect(helper).toMatch(
+      /beginRebuild\(workspaceId\);\s*try \{\s*return await body\(\);\s*\} finally \{\s*sessions\.endRebuild\(workspaceId\);/,
+    );
+    expect(dispatch).toMatch(
+      /\},\s*\(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*completePendingEngineStoreMove\(rootPath\),\s*\),\s*\);/,
+    );
+    expect(open).toMatch(
+      /\},\s*\(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*completePendingEngineStoreMove\(rootPath\),\s*\),\s*\);/,
+    );
+    expect(rebuild).toMatch(
+      /moveStoreAside: \(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*moveEngineStoreAside\(rootPath\),\s*\),/,
+    );
+  });
 });

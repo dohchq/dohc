@@ -24,6 +24,7 @@ import {
 } from "./engineDaemonLifecycle";
 import {
   EngineWorkspaceRebindError,
+  EngineWorkspaceRebuildingError,
   EngineWorkspaceRetryDeadlineError,
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
@@ -660,6 +661,102 @@ describe("EngineWorkspaceSessions", () => {
       "Rust engine workspace sessions are closed.",
     );
     expect(openCount).toBe(1);
+  });
+
+  it("refuses one workspace while its store is rebuilding", async () => {
+    const workspace = await tempWorkspace();
+    const otherWorkspace = await tempWorkspace("other-workspace");
+    const requests: Request[] = [];
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          return {
+            id: request.id,
+            result: { workspace: "handle-1" },
+          };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    await sessions.run(workspace, async () => undefined);
+    const operation = vi.fn(async () => "unexpected");
+
+    sessions.beginRebuild(workspace.workspaceId);
+    try {
+      await expect(sessions.run(workspace, operation)).rejects.toEqual(
+        new EngineWorkspaceRebuildingError(workspace.workspaceId),
+      );
+      expect(operation).not.toHaveBeenCalled();
+      expect(requests).toHaveLength(1);
+      await expect(
+        sessions.run(otherWorkspace, async () => "other-opened"),
+      ).resolves.toBe("other-opened");
+      expect(requests).toHaveLength(2);
+    } finally {
+      sessions.endRebuild(workspace.workspaceId);
+    }
+
+    await expect(
+      sessions.run(workspace, async () => "opened"),
+    ).resolves.toBe("opened");
+    expect(requests).toHaveLength(2);
+  });
+
+  it("refuses a run that was waiting for close when rebuilding starts", async () => {
+    const workspace = await tempWorkspace();
+    const closeStarted = deferred<void>();
+    const finishClose = deferred<void>();
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          closeStarted.resolve();
+          await finishClose.promise;
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    await sessions.run(workspace, async () => undefined);
+
+    const closing = sessions.closeWorkspace(workspace.workspaceId);
+    await closeStarted.promise;
+    const operation = vi.fn(async () => "unexpected");
+    const queuedRun = sessions.run(workspace, operation);
+    sessions.beginRebuild(workspace.workspaceId);
+    finishClose.resolve();
+    await closing;
+
+    try {
+      await expect(queuedRun).rejects.toEqual(
+        new EngineWorkspaceRebuildingError(workspace.workspaceId),
+      );
+      expect(operation).not.toHaveBeenCalled();
+      expect(openCount).toBe(1);
+    } finally {
+      sessions.endRebuild(workspace.workspaceId);
+    }
+
+    await expect(
+      sessions.run(workspace, async () => "opened"),
+    ).resolves.toBe("opened");
+    expect(openCount).toBe(2);
   });
 
   it("bounds every workspace open with a daemon deadline", async () => {

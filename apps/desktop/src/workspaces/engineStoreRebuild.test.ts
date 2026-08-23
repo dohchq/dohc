@@ -8,6 +8,11 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  EngineWorkspaceRebuildingError,
+  EngineWorkspaceSessions,
+  type EngineDaemonClient,
+} from "@dohc/workspace-engine-client/daemon";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import {
   completePendingEngineStoreMove,
@@ -130,6 +135,33 @@ describe("moveEngineStoreAside", () => {
 
     expect(renames).toBe(5);
     await expectCompleteStore();
+  });
+
+  it("flushes moved files and the completion marker before returning", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const events: string[] = [];
+
+    const outcome = await moveEngineStoreAside(root, {
+      rename: async (from, to) => {
+        await rename(from, to);
+        events.push(`rename:${from}->${to}`);
+      },
+      syncDirectory: async (path) => {
+        events.push(`sync:${path}`);
+      },
+    });
+    events.push(`return:${outcome}`);
+
+    expect(events).toEqual([
+      `rename:${join(backupDir, "MOVE_IN_PROGRESS.tmp")}->${join(backupDir, "MOVE_IN_PROGRESS")}`,
+      `sync:${backupDir}`,
+      `rename:${join(engineDir, "engine.db")}->${join(backupDir, "engine.db")}`,
+      `sync:${engineDir}`,
+      `sync:${backupDir}`,
+      `rename:${join(backupDir, "MOVE_IN_PROGRESS")}->${join(backupDir, "MOVE_COMPLETE")}`,
+      `sync:${backupDir}`,
+      "return:moved",
+    ]);
   });
 
   it("moves a database that has no sidecars", async () => {
@@ -710,6 +742,87 @@ describe("rebuildEngineStore", () => {
       outcome: "moved",
     });
     expect(order).toEqual(["close", "probe", "move", "reopen"]);
+  });
+
+  it("blocks direct engine runs only while the rebuild moves the store", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const workspace = { workspaceId: "workspace", rootPath: root };
+    const moveStarted = deferred();
+    const finishMove = deferred();
+    const requests: Parameters<EngineDaemonClient["sendRequest"]>[0][] = [];
+    const operations: string[] = [];
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          return {
+            id: request.id,
+            result: { workspace: `handle-${requests.length}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    const rebuilding = rebuildEngineStore(root, {
+      closeActivity: () => sessions.closeWorkspace(workspace.workspaceId),
+      probeStoreRefusal: async () => {
+        await sessions.run(workspace, async () => {
+          operations.push("probe");
+        });
+        await sessions.closeWorkspace(workspace.workspaceId);
+        return "foreign-database";
+      },
+      moveStoreAside: async (rootPath) => {
+        sessions.beginRebuild(workspace.workspaceId);
+        try {
+          return await moveEngineStoreAside(rootPath, {
+            rename: async (from, to) => {
+              if (to === join(backupDir, "engine.db")) {
+                moveStarted.resolve();
+                await finishMove.promise;
+              }
+              await rename(from, to);
+            },
+          });
+        } finally {
+          sessions.endRebuild(workspace.workspaceId);
+        }
+      },
+      reopenActivity: async () => {
+        await sessions.run(workspace, async () => {
+          operations.push("reopen");
+        });
+      },
+    });
+    await moveStarted.promise;
+
+    try {
+      await expect(
+        sessions.run(workspace, async () => {
+          operations.push("during-move");
+        }),
+      ).rejects.toEqual(
+        new EngineWorkspaceRebuildingError(workspace.workspaceId),
+      );
+      expect(
+        requests.filter((request) => request.method === "workspace.open"),
+      ).toHaveLength(1);
+    } finally {
+      finishMove.resolve();
+    }
+
+    await expect(rebuilding).resolves.toEqual({ outcome: "moved" });
+    expect(operations).toEqual(["probe", "reopen"]);
+    expect(
+      requests.filter((request) => request.method === "workspace.open"),
+    ).toHaveLength(2);
   });
 
   it("stops before probe, move, or reopen when close rejects", async () => {

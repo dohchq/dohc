@@ -40,6 +40,11 @@ const engineStoreMoveManifestSchema = z.object({
   ),
 });
 type EngineStoreMoveManifest = z.infer<typeof engineStoreMoveManifestSchema>;
+type EngineStoreMoveFileSystem = {
+  rename: typeof renameFile;
+  syncDirectory: (path: string) => Promise<void>;
+};
+type EngineStoreMoveDependencies = Partial<EngineStoreMoveFileSystem>;
 
 export class EngineStoreRecoveryFailedError extends Error {
   constructor(cause: unknown) {
@@ -117,11 +122,33 @@ async function readMoveManifest(path: string): Promise<EngineStoreMoveManifest> 
   }
 }
 
+async function syncDirectory(path: string): Promise<void> {
+  if (process.platform === "win32") {
+    // Windows cannot fsync a directory handle the way POSIX can.
+    return;
+  }
+  const directory = await open(path, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+function moveFileSystem(
+  deps: EngineStoreMoveDependencies,
+): EngineStoreMoveFileSystem {
+  return {
+    rename: deps.rename ?? renameFile,
+    syncDirectory: deps.syncDirectory ?? syncDirectory,
+  };
+}
+
 async function writeMoveManifest(
   backupDir: string,
   inProgressMarker: string,
   manifest: EngineStoreMoveManifest,
-  rename: typeof renameFile,
+  fileSystem: EngineStoreMoveFileSystem,
 ): Promise<void> {
   const tempMarker = join(backupDir, MOVE_IN_PROGRESS_TEMP);
   const tempFile = await open(tempMarker, "wx");
@@ -132,22 +159,13 @@ async function writeMoveManifest(
     } finally {
       await tempFile.close();
     }
-    await rename(tempMarker, inProgressMarker);
+    await fileSystem.rename(tempMarker, inProgressMarker);
   } catch (error) {
     await unlink(tempMarker).catch(() => undefined);
     throw error;
   }
 
-  if (process.platform === "win32") {
-    // Windows cannot fsync a directory handle the way POSIX can.
-    return;
-  }
-  const backupDirectory = await open(backupDir, "r");
-  try {
-    await backupDirectory.sync();
-  } finally {
-    await backupDirectory.close();
-  }
+  await fileSystem.syncDirectory(backupDir);
 }
 
 async function completeManifestMove(
@@ -156,7 +174,7 @@ async function completeManifestMove(
   inProgressMarker: string,
   completeMarker: string,
   manifest: EngineStoreMoveManifest,
-  rename: typeof renameFile,
+  fileSystem: EngineStoreMoveFileSystem,
   onMoved?: () => void,
 ): Promise<void> {
   for (const name of ENGINE_STORE_FILES) {
@@ -176,20 +194,24 @@ async function completeManifestMove(
     }
 
     try {
-      await rename(from, to);
+      await fileSystem.rename(from, to);
       onMoved?.();
     } catch (error) {
       if (errorCode(error) !== "ENOENT") throw error;
     }
   }
-  await rename(inProgressMarker, completeMarker);
+  await fileSystem.syncDirectory(engineDir);
+  await fileSystem.syncDirectory(backupDir);
+  await fileSystem.rename(inProgressMarker, completeMarker);
+  await fileSystem.syncDirectory(backupDir);
 }
 
 export async function completePendingEngineStoreMove(
   rootPath: string,
-  deps: { rename?: typeof renameFile } = {},
+  deps: EngineStoreMoveDependencies = {},
 ): Promise<void> {
   try {
+    const fileSystem = moveFileSystem(deps);
     const backupDir = join(rootPath, ENGINE_STORE_BACKUP_DIR);
     const inProgressMarker = join(backupDir, MOVE_IN_PROGRESS);
     const completeMarker = join(backupDir, MOVE_COMPLETE);
@@ -202,7 +224,7 @@ export async function completePendingEngineStoreMove(
       inProgressMarker,
       completeMarker,
       manifest,
-      deps.rename ?? renameFile,
+      fileSystem,
     );
   } catch (error) {
     throw new EngineStoreRecoveryFailedError(error);
@@ -228,9 +250,9 @@ export async function withEngineStoreRecovered<T>(
 
 export async function moveEngineStoreAside(
   rootPath: string,
-  deps: { rename?: typeof renameFile } = {},
+  deps: EngineStoreMoveDependencies = {},
 ): Promise<MoveOutcome> {
-  const rename = deps.rename ?? renameFile;
+  const fileSystem = moveFileSystem(deps);
   const engineDir = join(rootPath, ".dohc", "engine");
   const backupDir = join(rootPath, ENGINE_STORE_BACKUP_DIR);
   const inProgressMarker = join(backupDir, MOVE_IN_PROGRESS);
@@ -258,7 +280,12 @@ export async function moveEngineStoreAside(
           { code: "ENOENT" },
         );
       }
-      await writeMoveManifest(backupDir, inProgressMarker, manifest, rename);
+      await writeMoveManifest(
+        backupDir,
+        inProgressMarker,
+        manifest,
+        fileSystem,
+      );
     } catch (error) {
       await rmdir(backupDir).catch(() => undefined);
       throw error;
@@ -275,7 +302,7 @@ export async function moveEngineStoreAside(
       inProgressMarker,
       completeMarker,
       manifest,
-      rename,
+      fileSystem,
       () => {
         movedAny = true;
       },
