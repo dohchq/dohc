@@ -17,13 +17,10 @@ import type {
   ShareViewFileReadRequest,
   ShareViewFilesTarget,
 } from "./shareViewFiles";
-import {
-  createOwnedWorkspaceFileReader,
-  type OwnedWorkspaceFileReader,
-} from "./ownedWorkspaceFileReader";
 import { createOwnedWorkspaceSdkReadPort } from "./ownedWorkspaceSdkReadPort";
+import { createOwnedWorkspaceSdkReads } from "./ownedWorkspaceSdkReads";
 import { invokeWorkspaceSdkHost } from "./workspaceSdkHost";
-import { PreparedWorkspaceFileRead } from "./workspaceAssets";
+import { WORKSPACE_ASSET_MAX_BYTES } from "./workspaceAssets";
 import {
   readDatabaseSnapshot,
   readDatabaseSnapshotFromBytes,
@@ -74,13 +71,6 @@ function shareTarget(shareId: string): ShareViewFilesTarget {
 function shareId(target: ShareViewFilesTarget): string {
   if (target.kind !== "mount") throw new Error("Expected a mount target");
   return target.shareId;
-}
-
-function readDatabaseThroughOwner(reader: OwnedWorkspaceFileReader) {
-  return async (path: string) => {
-    const source = await reader.readCompleteSource(path);
-    return readDatabaseSnapshotFromBytes(path, source.bytes);
-  };
 }
 
 async function unusedDatabaseRead(): Promise<never> {
@@ -338,27 +328,14 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       },
     );
     const mount = mounts[0]!;
-    const reader = createOwnedWorkspaceFileReader({
+    const port = createOwnedWorkspaceSdkReads({
       workspace: {
         workspaceId: WORKSPACE_ID,
         rootPath: root,
         shareMounts: [mount],
       },
       files: { read: readOwner },
-    });
-    const port = createOwnedWorkspaceSdkReadPort({
-      readText: async () => {
-        throw new Error("unused");
-      },
       listFiles: () => listFiles(root),
-      readDatabase: readDatabaseThroughOwner(reader),
-      hasShareState: true,
-      searchSources: [
-        {
-          target: shareTarget(mount.shareId),
-          prefix: "shared-with-me/healthy",
-        },
-      ],
       repairProjection: async () => {},
     });
     const context = {
@@ -409,53 +386,24 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
     }
   });
 
-  it("keeps an SDK database read with its prepared local owner after alias retargeting", async () => {
-    const root = await createTestScratch("dohc-sdk-database-retarget-");
+  it("reads current WAL state from a local database owner", async () => {
+    const root = await createTestScratch("dohc-sdk-local-database-wal-");
     roots.push(root);
-    const localPath = join(root, "data", "local.sqlite");
-    const cachePath = join(
-      root,
-      "shared-with-me",
-      "owner",
-      "cache.sqlite",
-    );
-    const aliasPath = join(root, "source.sqlite");
     await mkdir(join(root, "data"), { recursive: true });
-    await mkdir(join(root, "shared-with-me", "owner"), { recursive: true });
-    seedDatabase(localPath, "local owner");
-    seedDatabase(cachePath, "recipient cache");
-    await symlink(localPath, aliasPath, "file");
-
-    const unexpectedOwnerRead = vi.fn(async () => {
-      throw new Error("An unowned projection must not become local bytes.");
-    });
-    const reader = createOwnedWorkspaceFileReader({
-      workspace: {
-        workspaceId: WORKSPACE_ID,
-        rootPath: root,
-        shareMounts: [],
-      },
-      files: { read: unexpectedOwnerRead },
-    });
-    const port = createOwnedWorkspaceSdkReadPort({
-      readText: async () => {
-        throw new Error("unused");
-      },
+    const databasePath = join(root, "data", "local.sqlite");
+    seedDatabase(databasePath, "main file");
+    await symlink(databasePath, join(root, "source.sqlite"));
+    const database = new DatabaseSync(databasePath);
+    database.exec(
+      "PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'local wal';",
+    );
+    const port = createOwnedWorkspaceSdkReads({
+      workspace: { workspaceId: WORKSPACE_ID, rootPath: root },
+      files: { read: vi.fn() },
       listFiles: () => listFiles(root),
-      readDatabase: readDatabaseThroughOwner(reader),
-      hasShareState: true,
-      searchSources: [],
       repairProjection: async () => {},
     });
 
-    const originalReadAsset = PreparedWorkspaceFileRead.prototype.readAsset;
-    const retarget = vi
-      .spyOn(PreparedWorkspaceFileRead.prototype, "readAsset")
-      .mockImplementation(async function (this: PreparedWorkspaceFileRead) {
-        await rm(aliasPath);
-        await symlink(cachePath, aliasPath, "file");
-        return originalReadAsset.call(this);
-      });
     try {
       await expect(
         invokeWorkspaceSdkHost(
@@ -473,17 +421,46 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
         tables: [
           {
             name: "sentinel",
-            rows: [expect.objectContaining({ marker: "local owner" })],
+            rows: [expect.objectContaining({ marker: "local wal" })],
           },
         ],
       });
-      expect(unexpectedOwnerRead).not.toHaveBeenCalled();
-      await expect(reader.readCompleteSource("source.sqlite")).rejects.toThrow(
-        /no share owns it/i,
-      );
     } finally {
-      retarget.mockRestore();
+      database.close();
     }
+  });
+
+  it("reads a valid local database larger than the asset limit", async () => {
+    const root = await createTestScratch("dohc-sdk-local-database-large-");
+    roots.push(root);
+    const databasePath = join(root, "large.sqlite");
+    const database = new DatabaseSync(databasePath);
+    database.exec(
+      `CREATE TABLE payload (data BLOB); INSERT INTO payload VALUES (zeroblob(${WORKSPACE_ASSET_MAX_BYTES + 1}));`,
+    );
+    database.close();
+    const port = createOwnedWorkspaceSdkReads({
+      workspace: { workspaceId: WORKSPACE_ID, rootPath: root },
+      files: { read: vi.fn() },
+      listFiles: () => listFiles(root),
+      repairProjection: async () => {},
+    });
+
+    await expect(
+      invokeWorkspaceSdkHost(
+        {
+          workspaceRoot: root,
+          writable: false,
+          author: USER_AUTHOR,
+          reads: port,
+        },
+        "databases.read",
+        { path: "large.sqlite" },
+      ),
+    ).resolves.toMatchObject({
+      path: "large.sqlite",
+      tables: [{ name: "payload" }],
+    });
   });
 
   it("removes its private database snapshot when SQLite rejects owner bytes", async () => {

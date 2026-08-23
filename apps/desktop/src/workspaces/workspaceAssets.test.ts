@@ -86,6 +86,17 @@ describe("resolveWorkspaceFile containment", () => {
     expect(source.path).toBe("notes/data.csv");
     expect(source.bytes.toString("utf8")).toBe("id,value\n1,canonical\n");
   });
+
+  it("keeps an asset alias media type from the requested path", async () => {
+    const root = await makeWorkspace();
+    await writeFile(join(root, "notes", "blob"), "image bytes");
+    await symlink(join(root, "notes", "blob"), join(root, "notes", "cover.png"));
+
+    const source = await readWorkspaceAssetSource(root, "notes/cover.png");
+
+    expect(source.path).toBe("notes/blob");
+    expect(source.mediaType).toBe("image/png");
+  });
 });
 
 describe("size caps", () => {

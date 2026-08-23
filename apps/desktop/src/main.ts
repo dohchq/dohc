@@ -690,7 +690,7 @@ import {
 } from "./plugins/PluginPipeline";
 import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
-import { createOwnedWorkspaceSdkReadPort } from "./workspaces/ownedWorkspaceSdkReadPort";
+import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkReads";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
@@ -780,10 +780,7 @@ import {
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
 import { importOwnedWorkspaceDatabase } from "./workspaces/ownedWorkspaceDatabaseImport";
-import {
-  applyDatabaseEdit,
-  readDatabaseSnapshotFromBytes,
-} from "./workspaces/workspaceDatabase";
+import { applyDatabaseEdit } from "./workspaces/workspaceDatabase";
 import {
   readWorkspaceGraph,
   readWorkspaceBacklinks,
@@ -4576,39 +4573,10 @@ async function listOwnedWorkspaceFiles(
 function ownedWorkspaceReads(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
 ) {
-  const fileReader = createOwnedWorkspaceFileReader({
+  return createOwnedWorkspaceSdkReads({
     workspace,
     files: shareViewFiles,
-  });
-  const mounts = storedShareMounts(workspace);
-  const searchSources = shareViewIsPresent(workspace.shareView)
-    ? [
-        {
-          target: {
-            kind: "standalone" as const,
-            workspaceId: workspace.workspaceId,
-          },
-        },
-      ]
-    : mounts
-        .filter((mount) => usableShareMountRecord(mounts, mount))
-        .map((mount) => ({
-          target: {
-            kind: "mount" as const,
-            workspaceId: workspace.workspaceId,
-            shareId: mount.shareId,
-          },
-          prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
-        }));
-  return createOwnedWorkspaceSdkReadPort({
-    readText: (path) => fileReader.readText(path),
     listFiles: () => listOwnedWorkspaceFiles(workspace),
-    readDatabase: async (path) => {
-      const source = await fileReader.readCompleteSource(path);
-      return readDatabaseSnapshotFromBytes(path, source.bytes);
-    },
-    hasShareState: workspaceHasReceivedShareState(workspace),
-    searchSources,
     repairProjection: (target) =>
       ensureOwnedProjectionTargetCurrent({
         rootPath: workspace.rootPath,

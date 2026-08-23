@@ -18,7 +18,7 @@ import { SharePinInvalidError } from "./shareViewRecords";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import type { ShareMountRecord } from "./registryStore";
 import {
-  prepareWorkspaceFileRead,
+  resolveWorkspaceFileRead,
   type PreparedWorkspaceFileRead,
 } from "./workspaceAssets";
 
@@ -292,14 +292,14 @@ export async function prepareShareProjectionRead<Mount>(
   mounts: readonly Mount[],
   hasMountRegistry: boolean,
 ): Promise<PreparedShareProjectionRead<Mount>> {
-  const source = await prepareWorkspaceFileRead(hostRoot, relativePath);
+  const source = await resolveWorkspaceFileRead(hostRoot, relativePath);
   if (mounts.length === 0 && !hasMountRegistry) {
-    return { kind: "local", source };
+    return { kind: "local", source: await source.prepare() };
   }
   const resolved = classifyResolvedShareProjectionPath(source.path, mounts);
   return resolved.kind === "mount"
     ? { kind: "mount", mount: resolved.mount, path: resolved.path }
-    : { kind: "local", source };
+    : { kind: "local", source: await source.prepare() };
 }
 
 /**

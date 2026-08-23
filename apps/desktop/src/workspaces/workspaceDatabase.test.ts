@@ -1,8 +1,14 @@
 import { databaseOpLogPath } from "@dohc/workspace-core";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { applyDatabaseEdit, importToDatabase, readDatabaseSnapshot } from "./workspaceDatabase";
+import { prepareWorkspaceFileRead } from "./workspaceAssets";
+import {
+  applyDatabaseEdit,
+  importToDatabase,
+  readDatabaseSnapshot,
+  readPreparedDatabaseSnapshot,
+} from "./workspaceDatabase";
 import { createTestScratch } from "./testTemp";
 
 let root: string;
@@ -181,5 +187,28 @@ describe("containment of '..'-prefixed names", () => {
 
     const snapshot = await readDatabaseSnapshot(root, "..cache/wallet.sqlite");
     expect(snapshot.tables.find((t) => t.name === "transactions")?.rows).toHaveLength(2);
+  });
+});
+
+describe("prepared local database reads", () => {
+  it("refuses a canonical pathname replacement even when it names the same file", async () => {
+    await importToDatabase(root, WALLET_SOURCE, "data.sqlite", "transactions");
+    const dataPath = join(root, "data.sqlite");
+    const projectionPath = join(
+      root,
+      "shared-with-me",
+      "alice",
+      "data.sqlite",
+    );
+    await mkdir(join(root, "shared-with-me", "alice"), { recursive: true });
+    await link(dataPath, projectionPath);
+    const prepared = await prepareWorkspaceFileRead(root, "data.sqlite");
+
+    await rm(dataPath);
+    await symlink(projectionPath, dataPath);
+
+    await expect(
+      readPreparedDatabaseSnapshot("data.sqlite", prepared),
+    ).rejects.toThrow(/file changed/i);
   });
 });

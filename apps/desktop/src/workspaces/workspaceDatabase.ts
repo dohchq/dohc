@@ -22,7 +22,10 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { isInside } from "../security/pathContainment";
-import { resolveWorkspaceFile } from "./workspaceAssets";
+import {
+  resolveWorkspaceFile,
+  type PreparedWorkspaceFileRead,
+} from "./workspaceAssets";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
@@ -115,8 +118,15 @@ export async function readDatabaseSnapshot(
     relativePath,
     "read",
   );
+  return readDatabaseSnapshotAtPath(realTarget, normalized);
+}
+
+function readDatabaseSnapshotAtPath(
+  absolutePath: string,
+  resultPath: string,
+): DatabaseSnapshotView {
   const { DatabaseSync } = nodeSqlite();
-  const db = new DatabaseSync(realTarget, { readOnly: true });
+  const db = new DatabaseSync(absolutePath, { readOnly: true });
   try {
     const tableNames = db
       .prepare(
@@ -146,10 +156,26 @@ export async function readDatabaseSnapshot(
       }
       return { name, columns, rows: sanitizeRows(rows) };
     });
-    return { path: normalized, tables };
+    return { path: resultPath, tables };
   } finally {
     db.close();
   }
+}
+
+/**
+ * Open a local database through the file identity that owner routing judged.
+ * The verified handle stays open while SQLite reads the path, so a replacement
+ * detected immediately before or after the snapshot refuses the result.
+ * node:sqlite has no file-descriptor input, so an external actor could still
+ * replace and restore the exact pathname during this synchronous call.
+ */
+export function readPreparedDatabaseSnapshot(
+  requestedPath: string,
+  source: PreparedWorkspaceFileRead,
+): Promise<DatabaseSnapshotView> {
+  return source.withVerifiedPath((absolutePath) =>
+    readDatabaseSnapshotAtPath(absolutePath, requestedPath),
+  );
 }
 
 // Received-share databases are owned by the share's canonical store, not by

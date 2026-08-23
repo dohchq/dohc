@@ -1,4 +1,4 @@
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ShareMountRecord } from "./registryStore";
@@ -6,6 +6,7 @@ import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
 import type { ShareViewFiles } from "./shareViewFiles";
 import { prepareShareProjectionRead } from "./shareMounts";
 import { createTestScratch } from "./testTemp";
+import { WORKSPACE_ASSET_MAX_BYTES } from "./workspaceAssets";
 
 describe("owned workspace complete source reads", () => {
   it("pairs local bytes with the resolved target path", async () => {
@@ -66,6 +67,31 @@ describe("owned workspace complete source reads", () => {
     );
   });
 
+  it("reads a missing mount projection from its owner without a local stat", async () => {
+    const rootPath = await createTestScratch("dohc-owned-file-missing-mount-");
+    const mount: ShareMountRecord = {
+      shareId: "share-missing-projection",
+      label: "alice",
+      granterEmail: "alice@example.com",
+      relayUrl: "https://relay.example.com",
+      grantedSelector: { access: "view", paths: [], versionId: null },
+    };
+    const ownerBytes = Buffer.from("owner bytes");
+    const read = vi.fn(async () => ({
+      kind: "asset" as const,
+      bytes: ownerBytes,
+      mediaType: "application/octet-stream",
+    }));
+
+    const source = await createOwnedWorkspaceFileReader({
+      workspace: { workspaceId: "host", rootPath, shareMounts: [mount] },
+      files: { read: read as ShareViewFiles["read"] },
+    }).readCompleteSource("shared-with-me/alice/missing.bin");
+
+    expect(source).toEqual({ path: "missing.bin", bytes: ownerBytes });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
   it("keeps a prepared local read local when its alias is retargeted into the projection", async () => {
     const rootPath = await createTestScratch("dohc-owned-file-retarget-");
     const localPath = join(rootPath, "imports", "data.csv");
@@ -103,5 +129,67 @@ describe("owned workspace complete source reads", () => {
     await expect(
       prepareShareProjectionRead(rootPath, "source.csv", [], true),
     ).rejects.toThrow(/no share owns it/i);
+  });
+
+  it("refuses a prepared local read when its canonical target becomes a projection symlink", async () => {
+    const rootPath = await createTestScratch("dohc-owned-file-target-swap-");
+    const localPath = join(rootPath, "imports", "data.csv");
+    const cachePath = join(rootPath, "shared-with-me", "alice", "data.csv");
+    await mkdir(join(rootPath, "imports"), { recursive: true });
+    await mkdir(join(rootPath, "shared-with-me", "alice"), {
+      recursive: true,
+    });
+    await writeFile(localPath, "id,value\n1,local owner\n");
+    await writeFile(cachePath, "id,value\n1,recipient cache\n");
+    const prepared = await prepareShareProjectionRead(
+      rootPath,
+      "imports/data.csv",
+      [],
+      true,
+    );
+    if (prepared.kind !== "local") throw new Error("Expected a local read.");
+
+    await rm(localPath);
+    await symlink(cachePath, localPath);
+
+    await expect(prepared.source.readAsset()).rejects.toThrow(/file changed/i);
+  });
+
+  it("refuses a prepared local read when its canonical target becomes an outside symlink", async () => {
+    const rootPath = await createTestScratch("dohc-owned-file-outside-swap-");
+    const outside = await createTestScratch("dohc-owned-file-outside-");
+    const localPath = join(rootPath, "data.csv");
+    const outsidePath = join(outside, "secret.csv");
+    await writeFile(localPath, "id,value\n1,local owner\n");
+    await writeFile(outsidePath, "id,value\n1,outside secret\n");
+    const prepared = await prepareShareProjectionRead(
+      rootPath,
+      "data.csv",
+      [],
+      true,
+    );
+    if (prepared.kind !== "local") throw new Error("Expected a local read.");
+
+    await rm(localPath);
+    await symlink(outsidePath, localPath);
+
+    await expect(prepared.source.readAsset()).rejects.toThrow(/file changed/i);
+  });
+
+  it("bounds a prepared asset read after the file grows in place", async () => {
+    const rootPath = await createTestScratch("dohc-owned-file-growth-");
+    const localPath = join(rootPath, "growing.bin");
+    await writeFile(localPath, "small");
+    const prepared = await prepareShareProjectionRead(
+      rootPath,
+      "growing.bin",
+      [],
+      false,
+    );
+    if (prepared.kind !== "local") throw new Error("Expected a local read.");
+
+    await truncate(localPath, WORKSPACE_ASSET_MAX_BYTES + 1);
+
+    await expect(prepared.source.readAsset()).rejects.toThrow(/too large/i);
   });
 });

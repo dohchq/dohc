@@ -107,24 +107,4 @@ describe("ShareViewFiles main-process wiring", () => {
     expect(mountPredicateAt).toBeLessThan(fallbackStartAt);
     expect(ownedPredicateAt).toBeGreaterThan(fallbackStartAt);
   });
-
-  it("routes plugin SDK reads through the shared-file owner", () => {
-    const reads = functionSource("function ownedWorkspaceReads(");
-    const invoke = functionSource("async function invokeWorkspacePluginSdk(");
-
-    expect(reads).toContain("fileReader.readText(path)");
-    expect(reads).toContain("listOwnedWorkspaceFiles(workspace)");
-    expect(reads).toContain("createOwnedWorkspaceSdkReadPort({");
-    expect(reads).toContain("fileReader.readCompleteSource(path)");
-    expect(reads).toContain(
-      "readDatabaseSnapshotFromBytes(path, source.bytes)",
-    );
-    expect(invoke).toContain("reads: ownedWorkspaceReads(workspace)");
-
-    const database = handlerSource("readWorkspaceDatabase");
-    expect(database).toContain(
-      "ownedWorkspaceReads(workspace).readDatabase(input.relativePath)",
-    );
-    expect(database).not.toContain("readDatabaseSnapshot(");
-  });
 });

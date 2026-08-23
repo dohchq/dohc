@@ -1,13 +1,15 @@
 import {
+  sameFsEntry,
+  type FsEntryIdentity,
   validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
+import type { FileHandle } from "node:fs/promises";
 import {
   mkdir,
   open,
-  readFile,
   realpath,
   rename,
   rm,
@@ -123,91 +125,286 @@ export interface WorkspaceAssetSource {
   mediaType: string;
 }
 
-async function readWorkspaceAssetTarget(
-  realTarget: string,
-  resolvedPath: string,
-  spelledPath: string,
-): Promise<WorkspaceAssetSource> {
-  const { size } = await stat(realTarget);
-  if (size > WORKSPACE_ASSET_MAX_BYTES) {
-    throw new Error(`Asset too large to serve (${size} bytes): ${spelledPath}`);
-  }
-  return {
-    path: resolvedPath,
-    bytes: await readFile(realTarget),
-    mediaType: mediaTypeForExtension(resolvedPath),
-  };
+const FILE_CHANGED_DURING_READ =
+  "This file changed while dohc was reading it. Try again.";
+const FILE_IDENTITY_UNVERIFIABLE =
+  "dohc could not confirm this is the same file. Try again.";
+
+function fsEntryIdentity(info: {
+  dev: number | bigint;
+  ino: number | bigint;
+}): FsEntryIdentity {
+  return { dev: BigInt(info.dev), ino: BigInt(info.ino) };
 }
 
-/**
- * One guarded workspace-file resolution, kept with every later read.
- *
- * The canonical absolute target is private so callers cannot separate the
- * path that passed containment from the operation that uses it. In
- * particular, an ownership router can classify `path` and then read through
- * this object without following the caller's alias a second time.
- */
-export class PreparedWorkspaceFileRead {
+function assertSameFile(
+  expected: FsEntryIdentity,
+  actual: FsEntryIdentity,
+): void {
+  const comparison = sameFsEntry(expected, actual);
+  if (comparison === "replaced") {
+    throw new Error(FILE_CHANGED_DURING_READ);
+  }
+  if (comparison === "unknown") {
+    throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+  }
+}
+
+async function readHandleBounded(
+  handle: FileHandle,
+  maxBytes: number,
+): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let total = 0;
+  while (total < buffer.length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      total,
+      buffer.length - total,
+      total,
+    );
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  const bytes = buffer.subarray(0, total);
+  return total < maxBytes / 2 ? Buffer.from(bytes) : bytes;
+}
+
+/** A read bound to the file identity captured after owner classification. */
+export interface PreparedWorkspaceFileRead {
+  readonly path: string;
+  readAsset(): Promise<WorkspaceAssetSource>;
+  readText(): Promise<WorkspaceTextReadResult>;
+  withVerifiedPath<T>(run: (absolutePath: string) => T): Promise<T>;
+}
+
+export interface ResolvedWorkspaceFileRead {
+  /** Canonical path for owner classification; no local file is opened yet. */
+  readonly path: string;
+  prepare(): Promise<PreparedWorkspaceFileRead>;
+}
+
+class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
   readonly #rootPath: string;
   readonly #realTarget: string;
   readonly #resolvedPath: string;
   readonly #spelledPath: string;
+  readonly #requestedPath: string;
+  readonly #identity: FsEntryIdentity;
 
-  private constructor(input: {
+  constructor(input: {
     rootPath: string;
     realTarget: string;
     resolvedPath: string;
     spelledPath: string;
+    requestedPath: string;
+    identity: FsEntryIdentity;
   }) {
     this.#rootPath = input.rootPath;
     this.#realTarget = input.realTarget;
     this.#resolvedPath = input.resolvedPath;
     this.#spelledPath = input.spelledPath;
+    this.#requestedPath = input.requestedPath;
+    this.#identity = input.identity;
   }
 
   get path(): string {
     return this.#resolvedPath;
   }
 
-  static async prepare(
-    rootPath: string,
-    relativePath: string,
-  ): Promise<PreparedWorkspaceFileRead> {
-    const { realTarget, resolvedPath } = await resolveWorkspaceFileTarget(
-      rootPath,
-      relativePath,
-      "read",
-    );
-    return new PreparedWorkspaceFileRead({
-      rootPath,
-      realTarget,
-      resolvedPath,
-      spelledPath: relativePath,
-    });
+  async #openVerified(): Promise<FileHandle> {
+    let handle: FileHandle;
+    try {
+      handle = await open(this.#realTarget, "r");
+    } catch {
+      throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+    }
+    try {
+      let info;
+      try {
+        info = await handle.stat({ bigint: true });
+      } catch {
+        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+      }
+      assertSameFile(this.#identity, fsEntryIdentity(info));
+      return handle;
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
+  async #withVerifiedHandle<T>(
+    run: (handle: FileHandle) => T | Promise<T>,
+  ): Promise<T> {
+    const handle = await this.#openVerified();
+    try {
+      const result = await run(handle);
+      let info;
+      try {
+        info = await handle.stat({ bigint: true });
+      } catch {
+        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+      }
+      assertSameFile(this.#identity, fsEntryIdentity(info));
+      return result;
+    } finally {
+      await handle.close();
+    }
   }
 
   readAsset(): Promise<WorkspaceAssetSource> {
-    return readWorkspaceAssetTarget(
-      this.#realTarget,
-      this.#resolvedPath,
-      this.#spelledPath,
-    );
+    return this.#withVerifiedHandle(async (handle) => {
+      const bytes = await readHandleBounded(handle, WORKSPACE_ASSET_MAX_BYTES);
+      if (bytes.length > WORKSPACE_ASSET_MAX_BYTES) {
+        throw new Error(
+          `Asset too large to serve (more than ${WORKSPACE_ASSET_MAX_BYTES} bytes): ${this.#spelledPath}`,
+        );
+      }
+      return {
+        path: this.#resolvedPath,
+        bytes,
+        mediaType: mediaTypeForExtension(this.#requestedPath),
+      };
+    });
   }
 
   readText(): Promise<WorkspaceTextReadResult> {
     return withOrderedWorkspaceTargetPath(
       this.#rootPath,
       this.#realTarget,
-      () => readTextTarget(this.#realTarget),
+      () => this.#withVerifiedHandle(readTextHandle),
     );
   }
+
+  withVerifiedPath<T>(run: (absolutePath: string) => T): Promise<T> {
+    return this.#withVerifiedHandle(async (handle) => {
+      await this.#assertCanonicalPathNamesHandle(handle);
+      const result = run(this.#realTarget);
+      await this.#assertCanonicalPathNamesHandle(handle);
+      return result;
+    });
+  }
+
+  async #assertCanonicalPathNamesHandle(handle: FileHandle): Promise<void> {
+    let currentCanonical: string;
+    let pathInfo;
+    let handleInfo;
+    try {
+      currentCanonical = await realpath(this.#realTarget);
+      pathInfo = await stat(this.#realTarget, { bigint: true });
+      handleInfo = await handle.stat({ bigint: true });
+    } catch {
+      throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+    }
+    const pathKey = (value: string) =>
+      process.platform === "win32" ? value.toLowerCase() : value;
+    if (pathKey(currentCanonical) !== pathKey(this.#realTarget)) {
+      throw new Error(FILE_CHANGED_DURING_READ);
+    }
+    assertSameFile(this.#identity, fsEntryIdentity(pathInfo));
+    assertSameFile(this.#identity, fsEntryIdentity(handleInfo));
+  }
+}
+
+class ResolvedWorkspaceFileReadCapability implements ResolvedWorkspaceFileRead {
+  readonly #rootPath: string;
+  readonly #realTarget: string;
+  readonly #resolvedPath: string;
+  readonly #requestedPath: string;
+  readonly #spelledPath: string;
+
+  constructor(
+    rootPath: string,
+    realTarget: string,
+    resolvedPath: string,
+    requestedPath: string,
+    spelledPath: string,
+  ) {
+    this.#rootPath = rootPath;
+    this.#realTarget = realTarget;
+    this.#resolvedPath = resolvedPath;
+    this.#requestedPath = requestedPath;
+    this.#spelledPath = spelledPath;
+  }
+
+  get path(): string {
+    return this.#resolvedPath;
+  }
+
+  async prepare(): Promise<PreparedWorkspaceFileRead> {
+    let handle: FileHandle;
+    try {
+      handle = await open(this.#realTarget, "r");
+    } catch {
+      throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+    }
+    try {
+      const info = await handle.stat({ bigint: true });
+      if (!info.isFile()) {
+        throw new Error(
+          `This path is not a file: ${this.#spelledPath}. Choose a file and try again.`,
+        );
+      }
+      let current: Awaited<ReturnType<typeof assertResolvedWorkspacePath>>;
+      try {
+        current = await assertResolvedWorkspacePath({
+          rootPath: this.#rootPath,
+          absolutePath: this.#realTarget,
+          spelled: this.#spelledPath,
+          label: "File path",
+          access: "read",
+        });
+      } catch {
+        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+      }
+      if (current.relative.replaceAll("\\", "/") !== this.#resolvedPath) {
+        throw new Error(FILE_CHANGED_DURING_READ);
+      }
+      const identity = fsEntryIdentity(info);
+      let pathInfo;
+      try {
+        pathInfo = await stat(current.resolvedAbsolute, { bigint: true });
+      } catch {
+        throw new Error(FILE_IDENTITY_UNVERIFIABLE);
+      }
+      assertSameFile(identity, fsEntryIdentity(pathInfo));
+      return new PreparedWorkspaceFileReadCapability({
+        rootPath: this.#rootPath,
+        realTarget: this.#realTarget,
+        resolvedPath: this.#resolvedPath,
+        requestedPath: this.#requestedPath,
+        spelledPath: this.#spelledPath,
+        identity,
+      });
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+export async function resolveWorkspaceFileRead(
+  rootPath: string,
+  relativePath: string,
+): Promise<ResolvedWorkspaceFileRead> {
+  const { realTarget, normalized, resolvedPath } =
+    await resolveWorkspaceFileTarget(rootPath, relativePath, "read");
+  return new ResolvedWorkspaceFileReadCapability(
+    rootPath,
+    realTarget,
+    resolvedPath,
+    normalized,
+    relativePath,
+  );
 }
 
 export function prepareWorkspaceFileRead(
   rootPath: string,
   relativePath: string,
 ): Promise<PreparedWorkspaceFileRead> {
-  return PreparedWorkspaceFileRead.prepare(rootPath, relativePath);
+  return resolveWorkspaceFileRead(rootPath, relativePath).then((source) =>
+    source.prepare(),
+  );
 }
 
 // Reads a workspace-relative file's canonical identity and bytes from the one
@@ -580,30 +777,24 @@ export function createOrderedWorkspaceTextAccess(deps: {
   };
 }
 
+async function readTextHandle(
+  handle: FileHandle,
+): Promise<WorkspaceTextReadResult> {
+  const info = await handle.stat();
+  if (!info.isFile()) {
+    throw new Error("This path is not a file. Choose a file and try again.");
+  }
+  const buffer = await readHandleBounded(handle, MAX_TEXT_BYTES);
+  return workspaceTextReadResultFromBytes(
+    buffer,
+    Math.max(buffer.length, info.size),
+  );
+}
+
 async function readTextTarget(target: string): Promise<WorkspaceTextReadResult> {
   const handle = await open(target, "r");
   try {
-    const info = await handle.stat();
-    if (!info.isFile()) {
-      throw new Error(`Text path is not a file: ${target}`);
-    }
-    // Only the first MAX_TEXT_BYTES (+1 byte to detect overflow) enters memory.
-    const buffer = Buffer.alloc(MAX_TEXT_BYTES + 1);
-    let totalBytesRead = 0;
-    while (totalBytesRead < buffer.length) {
-      const { bytesRead } = await handle.read(
-        buffer,
-        totalBytesRead,
-        buffer.length - totalBytesRead,
-        totalBytesRead,
-      );
-      if (bytesRead === 0) break;
-      totalBytesRead += bytesRead;
-    }
-    return workspaceTextReadResultFromBytes(
-      buffer.subarray(0, totalBytesRead),
-      Math.max(totalBytesRead, info.size),
-    );
+    return await readTextHandle(handle);
   } finally {
     await handle.close();
   }

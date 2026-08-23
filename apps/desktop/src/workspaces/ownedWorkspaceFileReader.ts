@@ -17,6 +17,11 @@ import type {
   PreparedWorkspaceFileRead,
   WorkspaceTextReadResult,
 } from "./workspaceAssets";
+import {
+  readDatabaseSnapshotFromBytes,
+  readPreparedDatabaseSnapshot,
+  type DatabaseSnapshotView,
+} from "./workspaceDatabase";
 
 export interface OwnedWorkspaceFileSource {
   /** The authoritative owner-relative path after following aliases. */
@@ -34,6 +39,7 @@ export interface OwnedWorkspaceFileReader {
     path: string,
   ): Promise<Extract<ShareViewFileReadOutcome, { kind: "asset" }>>;
   readCompleteSource(path: string): Promise<OwnedWorkspaceFileSource>;
+  readDatabase(path: string): Promise<DatabaseSnapshotView>;
 }
 
 /** Reads local files from disk and received-share files from their owner store. */
@@ -167,5 +173,20 @@ export function createOwnedWorkspaceFileReader(input: {
     readAsset,
 
     readCompleteSource,
+
+    async readDatabase(path) {
+      const prepared = await prepareRead(path);
+      if (prepared.kind === "local") {
+        return readPreparedDatabaseSnapshot(path, prepared.source);
+      }
+      const read = await input.files.read(prepared.target, {
+        kind: "asset",
+        path: prepared.path,
+      });
+      if (read.kind !== "asset") {
+        throw new Error("Shared database read returned an invalid result.");
+      }
+      return readDatabaseSnapshotFromBytes(path, read.bytes);
+    },
   };
 }
