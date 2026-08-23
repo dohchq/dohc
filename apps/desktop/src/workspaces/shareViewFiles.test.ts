@@ -427,6 +427,20 @@ describe("ShareViewFiles", () => {
       await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
         "recipient data\n",
       );
+      await expect(
+        files.projectionStatus({
+          kind: "mount",
+          workspaceId: "host-a",
+          shareId: "share-a",
+        }),
+      ).resolves.toEqual({
+        state: "pending",
+        pendingPathCount: 1,
+        pendingPaths: [path],
+        collisionPathCount: 0,
+        collisionPaths: [],
+        pullInFlight: false,
+      });
       expect(result).toMatchObject({
         kind: "refresh",
         outcome: {
@@ -436,6 +450,24 @@ describe("ShareViewFiles", () => {
           collisionRecordQuarantined: true,
         },
       });
+
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "repair",
+        ),
+      );
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
+        "granter new\n",
+      );
+      await expect(
+        files.projectionStatus({
+          kind: "mount",
+          workspaceId: "host-a",
+          shareId: "share-a",
+        }),
+      ).resolves.toEqual({ state: "current" });
     } finally {
       errorLog.mockRestore();
     }

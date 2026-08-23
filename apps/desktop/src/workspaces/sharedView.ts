@@ -1710,8 +1710,9 @@ export async function refreshSharedViewOnce(input: {
     await recordChangedPaths(pull.changedPaths.map((change) => change.path));
   }
   const unjournalablePaths = [...(input.unjournalablePaths ?? [])];
+  let collisionRecordedPaths = new Set<string>();
   if (input.preTrackedPaths !== undefined) {
-    const collisionRecordedPaths = await readCollisionRecordPaths(
+    collisionRecordedPaths = await readCollisionRecordPaths(
       input.rootDir,
       input.shareId,
     );
@@ -1765,10 +1766,14 @@ export async function refreshSharedViewOnce(input: {
     (change) => change.path,
   );
   if (input.trackPendingMaterialization) {
-    // Excluded collisions have their own durable record and will not be
-    // materialized in this pass. Remove every accumulated materialization
-    // count so projection status reports the collision once, not as two debts.
-    await clearAllPendingMaterializationPaths(input.rootDir, excludedPaths);
+    // A collision record is durable debt of its own. Clear duplicate pending
+    // counts only for those paths. Other exclusions, including the one-pass
+    // protection after a damaged collision record is quarantined, must keep
+    // their pending debt until a later capture materializes them.
+    await clearAllPendingMaterializationPaths(
+      input.rootDir,
+      excludedPaths.filter((path) => collisionRecordedPaths.has(path)),
+    );
   }
   await materializeSharedViewPaths(
     input.rootDir,
