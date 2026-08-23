@@ -529,16 +529,14 @@ import {
   removeShareMountProjection,
   reservedShareMountLabels,
   resolveShareMountPath,
-  resolveShareProjectionPath,
   shareMountRecordsForId,
   shareMountResultRow,
   usableShareMountRecord,
 } from "./workspaces/shareMounts";
 import {
-  ownedZipProjectionPlan,
-  type OwnedZipSelection,
+  collectOwnedWorkspaceZipEntries,
 } from "./workspaces/ownedWorkspaceZip";
-import { createOwnedStaticSiteFileSource } from "./workspaces/ownedStaticSiteFileSource";
+import { prepareOwnedStaticSitePreview } from "./workspaces/ownedStaticSiteFileSource";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import {
   RelayUnauthorizedError,
@@ -654,8 +652,6 @@ import {
 } from "./agents/liveAgentDispatchStore";
 import {
   buildOutputSiteRoot,
-  staticPreviewOwnerFiles,
-  staticPreviewTargetForSite,
   getSitePackage,
   listSitePackages,
   requireExactSiteRoot,
@@ -808,7 +804,6 @@ import {
   writeChatBookmarkProjection,
 } from "./workspaces/chatBookmarkProjectionWrite";
 import {
-  collectZipEntries,
   copyIntoWorkspace,
   createFile,
   createFolder,
@@ -1387,58 +1382,26 @@ async function startPreviewForSiteUnlocked(
   }
 
   if (input.mode === "static") {
-    const target = staticPreviewTargetForSite(input.site, {
+    const target = await prepareOwnedStaticSitePreview({
+      site: input.site,
       sharedView: input.sharedView,
+      resolveOwner: (path) =>
+        shareViewFilesTargetForPath(requireWorkspace(input.workspaceId), path),
+      readOwner: async (ownerTarget, ownerPath) => {
+        const read = await shareViewFiles.read(ownerTarget, {
+          kind: "asset",
+          path: ownerPath,
+        });
+        if (read.kind !== "asset") {
+          throw new Error("Shared site file returned an invalid result.");
+        }
+        return read.bytes;
+      },
     });
-    const entry = target.entry ?? undefined;
-    if ((input.sharedView || input.site.authority.kind === "share") && !entry) {
-      throw new Error(
-        "This shared site does not include a built artifact. Ask the owner to build and share it again.",
-      );
-    }
-    const ownerFiles =
-      input.sharedView || input.site.authority.kind === "share"
-        ? staticPreviewOwnerFiles(input.site, target)
-        : null;
-    if (ownerFiles !== null && entry && !ownerFiles.has(entry)) {
-      throw new Error(
-        "This shared site is missing its entry file. Ask the owner to share it again.",
-      );
-    }
-    const fileSource =
-      ownerFiles === null
-        ? null
-        : await (async () => {
-            const workspace = requireWorkspace(input.workspaceId);
-            const routedRoot = await shareViewFilesTargetForPath(
-              workspace,
-              target.root,
-            );
-            if (routedRoot === null) {
-              throw new Error(
-                "This shared site changed before the preview started. Refresh the workspace.",
-              );
-            }
-            return createOwnedStaticSiteFileSource({
-              servedPaths: ownerFiles.keys(),
-              target: routedRoot.target,
-              ownerRootPath: routedRoot.path,
-              read: async (ownerTarget, ownerPath) => {
-                const read = await shareViewFiles.read(ownerTarget, {
-                  kind: "asset",
-                  path: ownerPath,
-                });
-                if (read.kind !== "asset") {
-                  throw new Error("Shared site file returned an invalid result.");
-                }
-                return read.bytes;
-              },
-            });
-          })();
     const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
       authority: input.site.authority,
-      entry,
-      ...(fileSource === null ? {} : { fileSource }),
+      entry: target.entry,
+      ...(target.fileSource ? { fileSource: target.fileSource } : {}),
     });
     await rememberCurrentSitePreviewHandle(input, handle);
     return {
@@ -4752,104 +4715,11 @@ async function collectOwnedZipEntries(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
   relativePath?: string,
 ): Promise<{ entries: ZipEntry[]; baseName: string }> {
-  if (shareViewIsPresent(workspace.shareView)) {
-    return collectShareTargetZipEntries({
-      target: { kind: "standalone", workspaceId: workspace.workspaceId },
-      rootName: basename(workspace.rootPath),
-      relativePath,
-    });
-  }
-  const mounts = storedShareMounts(workspace);
-  const hasMountRegistry = workspace.shareMounts !== undefined;
-  let selection: OwnedZipSelection = {
-    kind: "workspace-root",
-    archiveRoot: null,
-  };
-  if (relativePath !== undefined) {
-    selection = { kind: "local" };
-    if (hasMountRegistry) {
-      const resolved = await resolveShareProjectionPath(
-        workspace.rootPath,
-        relativePath,
-        mounts,
-      );
-      if (resolved.kind === "mount") {
-        return collectShareTargetZipEntries({
-          target: {
-            kind: "mount",
-            workspaceId: workspace.workspaceId,
-            shareId: resolved.mount.shareId,
-          },
-          rootName: basename(relativePath),
-          ...(resolved.path === "" ? {} : { relativePath: resolved.path }),
-        });
-      }
-      const validated = validateUserReadPath(relativePath);
-      if (validated.ok && resolved.kind === "workspace-root") {
-        selection = {
-          kind: "workspace-root",
-          archiveRoot: basename(validated.normalized),
-        };
-      } else if (validated.ok && resolved.kind === "projection-root") {
-        selection = {
-          kind: "projection-root",
-          archiveRoot: basename(validated.normalized),
-        };
-      }
-    }
-  }
-  const projection = hasMountRegistry
-    ? ownedZipProjectionPlan(selection)
-    : null;
-  const disk =
-    selection.kind === "projection-root"
-      ? {
-          entries: [],
-          baseName:
-            selection.archiveRoot.replace(/\.[^.]+$/, "") ||
-            selection.archiveRoot,
-        }
-      : await collectZipEntries(
-          workspace.rootPath,
-          relativePath,
-          projection === null
-            ? undefined
-            : { includeArchivePath: projection.keepDiskEntry },
-        );
-  if (projection === null) return disk;
-  let entries = disk.entries.filter((entry) =>
-    projection.keepDiskEntry(entry.path),
-  );
-  if (projection.includesMounts) {
-    for (const mount of mounts) {
-      if (!usableShareMountRecord(mounts, mount)) continue;
-      const archivePrefix = projection.mountArchivePrefix(mount.label);
-      if (archivePrefix === null) continue;
-      const canonical = await collectShareTargetZipEntries({
-        target: {
-          kind: "mount",
-          workspaceId: workspace.workspaceId,
-          shareId: mount.shareId,
-        },
-        rootName: mount.label,
-      });
-      entries.push(
-        ...canonical.entries.map((entry) => ({
-          ...entry,
-          path: `${archivePrefix}/${entry.path}`,
-        })),
-      );
-    }
-  }
-  const totalBytes = entries.reduce(
-    (total, entry) => total + entry.data.byteLength,
-    0,
-  );
-  if (entries.length > MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
-    throw new Error(ZIP_TOO_LARGE_REFUSAL);
-  }
-  entries.sort((left, right) => left.path.localeCompare(right.path));
-  return { entries, baseName: disk.baseName };
+  return collectOwnedWorkspaceZipEntries({
+    workspace,
+    ...(relativePath === undefined ? {} : { relativePath }),
+    collectShare: collectShareTargetZipEntries,
+  });
 }
 
 async function ensureOwnedProjectionCurrent(

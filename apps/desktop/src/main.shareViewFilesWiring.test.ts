@@ -20,15 +20,6 @@ function handlerSource(channel: string): string {
 }
 
 describe("ShareViewFiles main-process wiring", () => {
-  it("exports an exact mount root through its owner without an empty relative path", () => {
-    const collect = functionSource("async function collectOwnedZipEntries(");
-
-    expect(collect).toContain(
-      '...(resolved.path === "" ? {} : { relativePath: resolved.path }),',
-    );
-    expect(collect).not.toContain("const mountRoot =");
-  });
-
   it("falls back to registry and folder cleanup when registered unmount fails", () => {
     const handler = handlerSource("mountShare");
     const registeredAt = handler.indexOf("if (registered) {");
