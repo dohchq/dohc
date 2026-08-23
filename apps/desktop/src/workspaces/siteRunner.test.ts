@@ -20,6 +20,7 @@ import { createTestScratch } from "./testTemp";
 import { buildOutputSiteRoot } from "./sitePackage";
 import {
   assertLoopbackOnlyDevServerCommand,
+  BUILD_HARD_KILL_GRACE_MS,
   buildSite,
   detectBuildOutput,
   detectDevUrl,
@@ -1282,6 +1283,46 @@ describe("buildSite", () => {
     },
   );
 
+  // The wrapper stays alive for WRAPPER_LIFETIME_MS after echoing the
+  // descendant's pid, and buildSite takes a real Win32_Process snapshot
+  // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
+  // real attempts to observe the descendant Start-Process just created,
+  // instead of racing the wrapper's own spawn with a single shot.
+  //
+  // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild already
+  // awaits the taskkill subprocess to completion before buildSite returns,
+  // so by the time the test starts polling, that subprocess has already
+  // finished — it does not race a still-running taskkill. Measured
+  // 2026-08-23 under combined desktop+mcp 8-worker load (N=29 successful
+  // captures, one separate run's buildSite call itself hit its own
+  // BUILD_TIMEOUT_MS under the same load and never reached this wait — a
+  // different, unaddressed failure mode, not this one): the target process
+  // was confirmed absent on the very first check every time,
+  // min/median/p95/max all 0-1ms. 500ms is 500x that observed maximum, real
+  // headroom over the measured range and not a growing pad chasing a flake
+  // this wait was never the cause of — it does not claim the OS has
+  // finished all of a forced termination's own async teardown by then, only
+  // that the process stops answering process.kill(pid, 0) this fast in
+  // every run measured.
+  const CAPTURE_INTERVAL_MS = 100;
+  const WRAPPER_LIFETIME_MS = 2_000;
+  const PROCESS_DEATH_TIMEOUT_MS = 500;
+  const BUILD_TIMEOUT_MS = 15_000;
+  // Real-process spawn/kill overhead none of the numbers above cover:
+  // process creation, PowerShell startup, and OS scheduling jitter under an
+  // already-loaded suite.
+  const SPAWN_OVERHEAD_MS = 5_000;
+  // The worst case isn't the happy path (WRAPPER_LIFETIME_MS then a
+  // near-instant kill) — it's buildSite's own timeout path: BUILD_TIMEOUT_MS
+  // to fire, then stopChild's SIGTERM-then-SIGKILL sequence taking up to
+  // BUILD_HARD_KILL_GRACE_MS to finish, before buildSite even returns and
+  // this test reaches its own PROCESS_DEATH_TIMEOUT_MS wait.
+  const WIN32_DESCENDANT_TEST_TIMEOUT_MS =
+    BUILD_TIMEOUT_MS +
+    BUILD_HARD_KILL_GRACE_MS +
+    PROCESS_DEATH_TIMEOUT_MS +
+    SPAWN_OVERHEAD_MS;
+
   it.runIf(process.platform === "win32")(
     "stops a descendant a successful build wrapper backgrounds and leaves behind (win32)",
     async () => {
@@ -1291,29 +1332,6 @@ describe("buildSite", () => {
       // already exited — taskkill /PID <dead wrapper> /T then has nothing
       // live to walk from, exactly the gap stopChild's win32 branch closes
       // by reaching each periodically-captured descendant pid directly.
-      //
-      // The wrapper stays alive for WRAPPER_LIFETIME_MS after echoing the
-      // descendant's pid, and buildSite takes a real Win32_Process snapshot
-      // every CAPTURE_INTERVAL_MS — WRAPPER_LIFETIME_MS / CAPTURE_INTERVAL_MS
-      // real attempts to observe the descendant Start-Process just created,
-      // instead of racing the wrapper's own spawn with a single shot.
-      //
-      // PROCESS_DEATH_TIMEOUT_MS is not padding a slow wait: stopChild
-      // already awaits taskkill to completion before buildSite returns, so
-      // by the time this test starts polling, the descendant is either
-      // already dead or was never captured at all (nothing left to wait
-      // for — it sleeps 60 real seconds either way). Measured 2026-08-23
-      // under combined desktop+mcp 8-worker load (N=29 successful captures,
-      // one separate run's buildSite call itself hit its own BUILD_TIMEOUT_MS
-      // under the same load and never reached this wait — a different,
-      // unaddressed failure mode, not this one): death was confirmed on the
-      // very first check every time, min/median/p95/max all 0-1ms. 500ms is
-      // real headroom over that measured range, not a growing pad chasing a
-      // flake this wait was never the cause of.
-      const CAPTURE_INTERVAL_MS = 100;
-      const WRAPPER_LIFETIME_MS = 2_000;
-      const PROCESS_DEATH_TIMEOUT_MS = 500;
-      const BUILD_TIMEOUT_MS = 15_000;
       await mkdir(join(root, "site"), { recursive: true });
       const script = [
         "$psExe = Join-Path $PSHOME 'powershell.exe'",
@@ -1348,7 +1366,7 @@ describe("buildSite", () => {
         }
       }
     },
-    20_000, // Real-process test ceiling: WRAPPER_LIFETIME_MS + PROCESS_DEATH_TIMEOUT_MS plus headroom for process spawn overhead.
+    WIN32_DESCENDANT_TEST_TIMEOUT_MS,
   );
 
   it("reports failed builds without stale output", async () => {

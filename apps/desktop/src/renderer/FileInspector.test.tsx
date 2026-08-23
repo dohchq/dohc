@@ -159,13 +159,27 @@ const MAX_FRAME_PUMPS = 5;
 // instead of hanging forever waiting for a tick nothing will deliver.
 async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
   let done = false;
-  void pending.then(() => {
-    done = true;
-  });
+  // Both branches, not just fulfillment: this derived promise must not
+  // become an unhandled rejection when `pending` itself rejects. The
+  // caller's own `return pending` below is where a rejection is meant to
+  // surface.
+  pending.then(
+    () => {
+      done = true;
+    },
+    () => {
+      done = true;
+    },
+  );
   for (let i = 0; i < MAX_FRAME_PUMPS && !done; i++) {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
     });
+  }
+  if (!done) {
+    throw new Error(
+      `user-event action did not settle within MAX_FRAME_PUMPS=${MAX_FRAME_PUMPS} frames`,
+    );
   }
   return pending;
 }
@@ -174,6 +188,19 @@ async function advanceAutosaveDebounce(): Promise<void> {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS);
   });
+}
+
+// A few of the tests below still need shouldAdvanceTime rather than a bare
+// vi.useFakeTimers(): verified empirically, not tied to one specific
+// mechanism — removing auto-advance hangs them (React's own effect
+// scheduling or update batching needs real macrotask progress a frozen
+// fake clock never delivers on its own; user-event/editor chrome can too,
+// see settleUserEventAction for the cases that pump instead). The
+// debounce or write each of those tests actually pins still fires from
+// its own explicit advance either way, so auto-advance changes nothing
+// they check.
+function useAutoAdvancingFakeTimers(): void {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
 }
 
 // Build legacy app-model path markers through interpolation so this test does
@@ -3623,11 +3650,7 @@ describe("markdown editor unmount flush", () => {
     // seam must remain safe even before React applies a peer snapshot.
     buffer.subscribe = () => () => {};
     const publishDraft = vi.spyOn(buffer, "publishDraft");
-    // shouldAdvanceTime stays: the WYSIWYG editor's onDirty callback and this
-    // pane's own registration both need real macrotask progress a frozen
-    // fake clock never delivers. Both debounces below still fire from an
-    // explicit advance, so auto-advance changes nothing this test checks.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    useAutoAdvancingFakeTimers();
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       render(
@@ -3637,16 +3660,11 @@ describe("markdown editor unmount flush", () => {
         />,
       );
       await screen.findByTestId("view-markdown");
-      await user.click(screen.getByTestId("markdown-edit-toggle"));
+      await user.click(await findEnabledMarkdownEditToggle());
       const editor = screen.getByTestId("markdown-editor");
 
       await user.click(editor);
       await user.keyboard("{End}First");
-      // The WYSIWYG editor reports the edit on a frame, which arms the
-      // debounce; fire each explicitly.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
-      });
       await advanceAutosaveDebounce();
       await waitFor(() =>
         expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
@@ -3654,9 +3672,6 @@ describe("markdown editor unmount flush", () => {
       await user.keyboard("{End}Queued");
       // The second debounce expires behind the held first write; the queued
       // write must not reach the bridge yet.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
-      });
       await advanceAutosaveDebounce();
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
@@ -3711,10 +3726,7 @@ describe("markdown editor unmount flush", () => {
       const buffer = getSharedLocalDocument(
         documentVersionKey("ws-1", path, undefined),
       );
-      // shouldAdvanceTime stays: the WYSIWYG editor's onDirty callback needs
-      // real macrotask progress a frozen fake clock never delivers. The
-      // first write still fires from an explicit advance either way.
-      vi.useFakeTimers({ shouldAdvanceTime: true });
+      useAutoAdvancingFakeTimers();
       try {
         const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
         const view = render(
@@ -3722,7 +3734,7 @@ describe("markdown editor unmount flush", () => {
         );
         if (markdown) {
           await screen.findByTestId("view-markdown");
-          await user.click(screen.getByTestId("markdown-edit-toggle"));
+          await user.click(await findEnabledMarkdownEditToggle());
         }
         const surface = markdown
           ? screen.getByTestId("markdown-editor")
@@ -3732,18 +3744,19 @@ describe("markdown editor unmount flush", () => {
 
         await user.click(surface);
         await user.keyboard("{End} first");
-        // The WYSIWYG editor reports the edit on a frame, which arms the
-        // debounce; the plain source editor arms it directly.
-        if (markdown) {
-          await act(async () => {
-            await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
-          });
-        }
         await advanceAutosaveDebounce();
         await waitFor(() =>
           expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
         );
+
         await user.keyboard("{End} queued");
+        // Discriminating assertion: auto-advance could in principle have
+        // already expired the second debounce and enqueued a normal
+        // autosave writer, which would satisfy the assertions below for the
+        // wrong reason (a timer-driven write, not the unmount flush this
+        // test pins). Assert it hasn't: this fails loudly instead of
+        // passing through that path.
+        expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
         view.unmount();
 
         const peerBody = markdown ? "# Peer newest\n" : "Peer newest";
@@ -4711,17 +4724,17 @@ describe("markdown editor unmount flush", () => {
     );
     const content = await findTextEditorContent();
 
-    // shouldAdvanceTime stays here: the flush this test drives crosses a
-    // registerDraftFlush passive effect and a save-state update, both of
-    // which need real macrotask progress a frozen fake clock never delivers
-    // (a bare vi.useFakeTimers() hangs at the flush registration). The
-    // debounce this test pins fires from an explicit advance either way, so
-    // auto-advance drifting ahead of it changes nothing this test checks.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    useAutoAdvancingFakeTimers();
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     await user.click(content);
     await user.keyboard("One");
     await waitFor(() => expect(flush).not.toBeNull());
+    // Discriminating assertion: auto-advance could in principle expire the
+    // debounce during the typing above and let a normal autosave — not the
+    // flush below — produce the held first write. Assert it hasn't: this
+    // fails loudly instead of letting an autosave satisfy the assertions
+    // below for the wrong reason.
+    expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(0);
 
     let flushSettled = false;
     const flushPromise = flush!().then(() => {
@@ -5680,12 +5693,7 @@ describe("markdown editor unmount flush", () => {
     fireEvent.click(await findEnabledMarkdownEditToggle());
     const source = await findSourceEditor();
 
-    // shouldAdvanceTime stays here: the markdown source path re-projects
-    // through a requestAnimationFrame (see the showSource effect in
-    // FileInspector.tsx) that needs real macrotask progress a frozen fake
-    // clock never delivers. The debounce this test pins fires from an
-    // explicit advance either way, so auto-advance changes nothing it checks.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    useAutoAdvancingFakeTimers();
     fireEvent.change(source, { target: { value: `${source.value}Draft` } });
     await advanceAutosaveDebounce();
     await waitFor(() =>
@@ -10426,10 +10434,9 @@ describe("markdown document opening state", () => {
   });
 
   it("sets aside the live WYSIWYG draft when an older in-flight save conflicts", async () => {
-    // shouldAdvanceTime stays: the WYSIWYG editor's onDirty callback needs
-    // real macrotask progress a frozen fake clock never delivers. ONE_FRAME_MS
-    // stays far under the debounce, so firing it cannot itself issue a save.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // ONE_FRAME_MS below stays far under the debounce, so firing it cannot
+    // itself issue a save.
+    useAutoAdvancingFakeTimers();
     try {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       const bridge = makeHeldOpenBridge();
