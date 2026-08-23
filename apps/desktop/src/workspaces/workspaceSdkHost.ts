@@ -60,8 +60,13 @@ export interface WorkspaceSdkReadPort {
     files: Awaited<ReturnType<typeof listFiles>>["files"];
     folders?: readonly string[];
   }>;
-  searchAllowPath(): Promise<(path: string) => boolean>;
+  prepareSearch(path?: string): Promise<WorkspaceSdkSearchView>;
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
+}
+
+export interface WorkspaceSdkSearchView {
+  includeGlob?: string;
+  allowPath(path: string): boolean;
 }
 
 const MAX_LIST_RESULTS = 10_000;
@@ -168,13 +173,12 @@ async function listVisibleFiles(context: WorkspaceSdkHostContext, params: unknow
 
 async function requestedIncludeGlob(
   workspaceRoot: string,
-  requestedPath: unknown,
+  requestedPath: string | undefined,
 ): Promise<string | undefined> {
-  if (requestedPath === undefined || requestedPath === ".") return undefined;
-  const path = sdkWorkspacePath(requestedPath);
-  const literalGlob = path.replace(/([*?[\]{}!\\])/g, "\\$1");
+  if (requestedPath === undefined) return undefined;
+  const literalGlob = requestedPath.replace(/([*?[\]{}!\\])/g, "\\$1");
   try {
-    if ((await stat(join(workspaceRoot, path))).isFile()) return literalGlob;
+    if ((await stat(join(workspaceRoot, requestedPath))).isFile()) return literalGlob;
   } catch {
     // A missing path simply produces no rg matches through the directory glob.
   }
@@ -184,7 +188,19 @@ async function requestedIncludeGlob(
 async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: unknown) {
   const input = record(params);
   const query = text(input.query, "query", 2_000);
-  const includeGlob = await requestedIncludeGlob(context.workspaceRoot, input.path);
+  const requestedPath =
+    input.path === undefined || input.path === "."
+      ? undefined
+      : sdkWorkspacePath(input.path);
+  const searchView = context.reads
+    ? await context.reads.prepareSearch(requestedPath)
+    : {
+        includeGlob: await requestedIncludeGlob(
+          context.workspaceRoot,
+          requestedPath,
+        ),
+        allowPath: undefined,
+      };
   const requestedLimit =
     typeof input.limit === "number" && Number.isInteger(input.limit)
       ? input.limit
@@ -196,11 +212,8 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
     ...(typeof input.wholeWord === "boolean" ? { wholeWord: input.wholeWord } : {}),
     ...(typeof input.regex === "boolean" ? { regex: input.regex } : {}),
     ...(typeof input.excludeGlob === "string" ? { excludeGlob: input.excludeGlob } : {}),
-    ...(includeGlob ? { includeGlob } : {}),
+    ...(searchView.includeGlob ? { includeGlob: searchView.includeGlob } : {}),
   };
-  const allowPath = context.reads
-    ? await context.reads.searchAllowPath()
-    : undefined;
   const root = await realpath(context.workspaceRoot);
   if (context.signal?.aborted) {
     throw new Error("The surface that owns this SDK request is no longer active.");
@@ -228,7 +241,7 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
       realRoot: root,
       searchId: `workspace-sdk-${Date.now()}`,
       request,
-      ...(allowPath ? { allowPath } : {}),
+      ...(searchView.allowPath ? { allowPath: searchView.allowPath } : {}),
       onBatch(batch) {
         for (const entry of batch.entries) {
           entries.push(entry);

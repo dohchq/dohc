@@ -154,7 +154,7 @@ describe("invokePluginSdkHost", () => {
           throw new Error(`File not found: ${path}`);
         },
         listFiles: async () => ({ files: [] }),
-        searchAllowPath: async () => () => false,
+        prepareSearch: async () => ({ allowPath: () => false }),
         readDatabase: async (path) => {
           throw new Error(`File not found: ${path}`);
         },

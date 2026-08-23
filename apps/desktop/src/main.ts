@@ -685,7 +685,7 @@ import {
 } from "./plugins/PluginPipeline";
 import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
 import { invokePluginSdkHost } from "./plugins/pluginSdkHost";
-import type { WorkspaceSdkReadPort } from "./workspaces/workspaceSdkHost";
+import { createOwnedWorkspaceSdkReadPort } from "./workspaces/ownedWorkspaceSdkReadPort";
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
@@ -4607,27 +4607,42 @@ async function listOwnedWorkspaceFiles(
 
 function ownedWorkspaceSdkReads(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-): WorkspaceSdkReadPort {
-  let listed: ReturnType<typeof listOwnedWorkspaceFiles> | null = null;
-  const listFilesOnce = () => {
-    listed ??= listOwnedWorkspaceFiles(workspace);
-    return listed;
-  };
-  return {
+) {
+  const searchSources = shareViewIsPresent(workspace.shareView)
+    ? [
+        {
+          target: {
+            kind: "standalone" as const,
+            workspaceId: workspace.workspaceId,
+          },
+        },
+      ]
+    : (workspace.shareMounts ?? [])
+        .filter((mount) => validMountLabel(mount.label))
+        .map((mount) => ({
+          target: {
+            kind: "mount" as const,
+            workspaceId: workspace.workspaceId,
+            shareId: mount.shareId,
+          },
+          prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
+        }));
+  return createOwnedWorkspaceSdkReadPort({
+    workspaceRoot: workspace.rootPath,
     readText: (path) => readOwnedWorkspaceText(workspace, path),
-    listFiles: listFilesOnce,
-    searchAllowPath: async () => {
-      await ensureAllOwnedProjectionsCurrent(workspace);
-      const allowed = new Set(
-        (await listFilesOnce()).files.map((file) => searchPathKey(file.path)),
-      );
-      return (path) => allowed.has(searchPathKey(path));
-    },
-    readDatabase: async (path) => {
-      await ensureOwnedProjectionCurrent(workspace, path);
-      return readDatabaseSnapshot(workspace.rootPath, path);
-    },
-  };
+    listFiles: () => listOwnedWorkspaceFiles(workspace),
+    resolveShare: (path) => shareViewFilesTargetForPath(workspace, path),
+    readShareAsset: (target, path) =>
+      shareViewFiles.read(target, { kind: "asset", path }),
+    searchSources,
+    repairProjection: (target) =>
+      ensureOwnedProjectionTargetCurrent(workspace, target),
+    onSearchSourceFailure: (source, error) =>
+      console.error(
+        `[desktop] could not prepare ${source.prefix ?? "the shared view"} for plugin search`,
+        error,
+      ),
+  });
 }
 
 function ownedWorkspaceGraphSource(
@@ -4793,7 +4808,14 @@ async function ensureOwnedProjectionCurrent(
 ): Promise<void> {
   const routed = await shareViewFilesTargetForPath(workspace, relativePath);
   if (routed === null) return;
-  const status = await shareViewFiles.projectionStatus(routed.target);
+  await ensureOwnedProjectionTargetCurrent(workspace, routed.target);
+}
+
+async function ensureOwnedProjectionTargetCurrent(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  target: ShareViewFilesTarget,
+): Promise<void> {
+  const status = await shareViewFiles.projectionStatus(target);
   if (status.state === "unavailable") {
     throw new Error(
       "dohc cannot verify these shared files because the share record is damaged. Remove the share. Add it again.",
@@ -4802,10 +4824,10 @@ async function ensureOwnedProjectionCurrent(
   const repaired = await withExclusiveWorkspaceOperation(
     workspace.rootPath,
     (_markWorkspaceChanged, lease) =>
-      shareViewFiles.reconcile(lease, routed.target, "repair"),
+      shareViewFiles.reconcile(lease, target, "repair"),
   );
   assertOwnedProjectionRepair(repaired);
-  if ((await shareViewFiles.projectionStatus(routed.target)).state !== "current") {
+  if ((await shareViewFiles.projectionStatus(target)).state !== "current") {
     throw new Error(
       "This shared file is still being restored to its folder. Try again after the shared view finishes repairing.",
     );

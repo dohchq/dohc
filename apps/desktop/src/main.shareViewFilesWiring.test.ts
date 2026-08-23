@@ -51,13 +51,15 @@ describe("ShareViewFiles main-process wiring", () => {
   });
 
   it("repairs available projections before disk-only reads even when status says current", () => {
-    const one = functionSource("async function ensureOwnedProjectionCurrent(");
+    const one = functionSource(
+      "async function ensureOwnedProjectionTargetCurrent(",
+    );
     const all = functionSource("async function ensureAllOwnedProjectionsCurrent(");
 
     expect(one).toContain('if (status.state === "unavailable") {');
     expect(one).not.toContain('status.state === "current"');
     expect(one).toContain(
-      'shareViewFiles.reconcile(lease, routed.target, "repair")',
+      'shareViewFiles.reconcile(lease, target, "repair")',
     );
 
     expect(all).not.toContain('status.state === "pending"');
@@ -113,9 +115,10 @@ describe("ShareViewFiles main-process wiring", () => {
 
     expect(reads).toContain("readOwnedWorkspaceText(workspace, path)");
     expect(reads).toContain("listOwnedWorkspaceFiles(workspace)");
-    expect(reads).toContain("ensureAllOwnedProjectionsCurrent(workspace)");
-    expect(reads).toContain("ensureOwnedProjectionCurrent(workspace, path)");
-    expect(reads).toContain("readDatabaseSnapshot(workspace.rootPath, path)");
+    expect(reads).toContain("createOwnedWorkspaceSdkReadPort({");
+    expect(reads).toContain("ensureOwnedProjectionTargetCurrent(workspace, target)");
+    expect(reads).toContain("shareViewFiles.read(target, { kind: \"asset\", path })");
+    expect(reads).not.toContain("ensureAllOwnedProjectionsCurrent(workspace)");
     expect(invoke).toContain("reads: ownedWorkspaceSdkReads(workspace)");
     expect(invoke).not.toContain("ensureAllOwnedProjectionsCurrent");
   });

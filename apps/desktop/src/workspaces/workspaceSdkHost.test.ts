@@ -88,7 +88,9 @@ describe("workspace SDK host authority", () => {
         files: [{ path: "notes/today.md", kind: "file" }],
         folders: ["notes"],
       }),
-      searchAllowPath: async () => (path) => path === "notes/today.md",
+      prepareSearch: async () => ({
+        allowPath: (path) => path === "notes/today.md",
+      }),
       readDatabase: async (path) => {
         if (path !== "canonical.sqlite") throw new Error(`File not found: ${path}`);
         return { path, tables: [] };

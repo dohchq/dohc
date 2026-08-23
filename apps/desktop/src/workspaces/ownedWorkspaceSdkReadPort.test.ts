@@ -1,0 +1,357 @@
+import { createRequire } from "node:module";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import { overlayCanonicalShareMountFiles, resolveShareMountPath } from "./shareMounts";
+import type {
+  ShareViewFileReadOutcome,
+  ShareViewFilesTarget,
+} from "./shareViewFiles";
+import { createOwnedWorkspaceSdkReadPort } from "./ownedWorkspaceSdkReadPort";
+import { invokeWorkspaceSdkHost } from "./workspaceSdkHost";
+import {
+  readDatabaseSnapshot,
+  readDatabaseSnapshotFromBytes,
+} from "./workspaceDatabase";
+import { listFiles } from "./workspaceFiles";
+import { createTestScratch } from "./testTemp";
+
+const USER_AUTHOR: ChangeAuthor = { kind: "user", userId: "local" };
+const WORKSPACE_ID = "workspace-sdk-owner-test";
+const HEALTHY_SHARE_ID = "healthy-share";
+const DAMAGED_SHARE_ID = "damaged-share";
+const mounts = [
+  { shareId: HEALTHY_SHARE_ID, label: "healthy" },
+  { shareId: DAMAGED_SHARE_ID, label: "damaged" },
+];
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => {
+    exec(sql: string): void;
+    close(): void;
+  };
+};
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
+
+function seedDatabase(path: string, marker: string): void {
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(
+      `CREATE TABLE sentinel (id TEXT PRIMARY KEY, marker TEXT); INSERT INTO sentinel VALUES ('1', '${marker}');`,
+    );
+  } finally {
+    database.close();
+  }
+}
+
+function shareTarget(shareId: string): ShareViewFilesTarget {
+  return { kind: "mount", workspaceId: WORKSPACE_ID, shareId };
+}
+
+function shareId(target: ShareViewFilesTarget): string {
+  if (target.kind !== "mount") throw new Error("Expected a mount target");
+  return target.shareId;
+}
+
+describe("createOwnedWorkspaceSdkReadPort", () => {
+  it("keeps ordinary and healthy search results when another mount is damaged", async () => {
+    const root = await createTestScratch("dohc-sdk-search-owner-");
+    roots.push(root);
+    await mkdir(join(root, "notes"), { recursive: true });
+    await mkdir(join(root, "shared-with-me", "healthy"), { recursive: true });
+    await mkdir(join(root, "shared-with-me", "damaged"), { recursive: true });
+    await writeFile(join(root, "notes", "ordinary.md"), "ordinary needle\n");
+    await writeFile(
+      join(root, "shared-with-me", "damaged", "recipient-only.md"),
+      "damaged needle\n",
+    );
+
+    const healthyCanonical: ListWorkspaceFilesResult = {
+      files: [{ path: "missing.md", kind: "file" as const }],
+      folders: [] as string[],
+    };
+    const listCanonical = vi.fn(async (mount: (typeof mounts)[number]) => {
+      if (mount.shareId === DAMAGED_SHARE_ID) throw new Error("damaged owner");
+      return healthyCanonical;
+    });
+    const repaired: string[] = [];
+    const failures: string[] = [];
+    const port = createOwnedWorkspaceSdkReadPort({
+      workspaceRoot: root,
+      readText: async () => {
+        throw new Error("unused");
+      },
+      listFiles: async () =>
+        overlayCanonicalShareMountFiles({
+          disk: await listFiles(root),
+          mounts,
+          listCanonical,
+        }),
+      resolveShare: async (path) => {
+        const routed = await resolveShareMountPath(root, path, mounts);
+        return routed === null
+          ? null
+          : { target: shareTarget(routed.mount.shareId), path: routed.path };
+      },
+      readShareAsset: async () => {
+        throw new Error("unused");
+      },
+      searchSources: mounts.map((mount) => ({
+        target: shareTarget(mount.shareId),
+        prefix: `shared-with-me/${mount.label}`,
+      })),
+      repairProjection: async (target) => {
+        const id = shareId(target);
+        repaired.push(id);
+        if (id === DAMAGED_SHARE_ID) throw new Error("damaged projection");
+        await writeFile(
+          join(root, "shared-with-me", "healthy", "missing.md"),
+          "healthy needle\n",
+        );
+      },
+      onSearchSourceFailure: (source) => failures.push(shareId(source.target)),
+    });
+    const context = {
+      workspaceRoot: root,
+      writable: false,
+      author: USER_AUTHOR,
+      reads: port,
+    };
+
+    const allResults = await invokeWorkspaceSdkHost(
+      context,
+      "workspace.search",
+      { query: "needle" },
+    );
+    expect(allResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "notes/ordinary.md" }),
+        expect.objectContaining({ path: "shared-with-me/healthy/missing.md" }),
+      ]),
+    );
+    expect(allResults).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "shared-with-me/damaged/recipient-only.md",
+        }),
+      ]),
+    );
+    expect(repaired).toEqual([HEALTHY_SHARE_ID, DAMAGED_SHARE_ID]);
+    expect(failures).toEqual([DAMAGED_SHARE_ID]);
+  });
+
+  it("classifies a missing projected canonical file as a file after repair", async () => {
+    const root = await createTestScratch("dohc-sdk-search-scope-");
+    roots.push(root);
+    const mountRoot = join(root, "shared-with-me", "healthy");
+    await mkdir(mountRoot, { recursive: true });
+    const mount = mounts[0]!;
+    const canonical: ListWorkspaceFilesResult = {
+      files: [{ path: "restored.md", kind: "file" as const }],
+      folders: [] as string[],
+    };
+    const port = createOwnedWorkspaceSdkReadPort({
+      workspaceRoot: root,
+      readText: async () => {
+        throw new Error("unused");
+      },
+      listFiles: async () =>
+        overlayCanonicalShareMountFiles({
+          disk: await listFiles(root),
+          mounts: [mount],
+          listCanonical: async () => canonical,
+        }),
+      resolveShare: async (path) => {
+        const routed = await resolveShareMountPath(root, path, [mount]);
+        return routed === null
+          ? null
+          : { target: shareTarget(mount.shareId), path: routed.path };
+      },
+      readShareAsset: async () => {
+        throw new Error("unused");
+      },
+      searchSources: [
+        {
+          target: shareTarget(mount.shareId),
+          prefix: "shared-with-me/healthy",
+        },
+      ],
+      repairProjection: async () => {
+        await writeFile(join(mountRoot, "restored.md"), "restored needle\n");
+      },
+    });
+
+    await expect(
+      invokeWorkspaceSdkHost(
+        {
+          workspaceRoot: root,
+          writable: false,
+          author: USER_AUTHOR,
+          reads: port,
+        },
+        "workspace.search",
+        {
+          query: "needle",
+          path:
+            process.platform === "win32"
+              ? "SHARED-WITH-ME/HEALTHY/RESTORED.MD"
+              : "shared-with-me/healthy/restored.md",
+        },
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({ path: "shared-with-me/healthy/restored.md" }),
+    ]);
+  });
+
+  it("reads a shared database from owner bytes and refuses a recipient-only database", async () => {
+    const root = await createTestScratch("dohc-sdk-database-owner-");
+    roots.push(root);
+    const mountRoot = join(root, "shared-with-me", "healthy");
+    await mkdir(mountRoot, { recursive: true });
+    const canonicalSeed = join(root, "canonical-seed.sqlite");
+    seedDatabase(canonicalSeed, "canonical owner");
+    const canonicalWalMode = new DatabaseSync(canonicalSeed);
+    canonicalWalMode.exec("PRAGMA journal_mode = WAL;");
+    canonicalWalMode.close();
+    const canonicalBytes = await readFile(canonicalSeed);
+    const projectionPath = join(mountRoot, "canonical.sqlite");
+    seedDatabase(projectionPath, "projection main");
+    const recipientOnlyPath = join(mountRoot, "recipient-only.sqlite");
+    seedDatabase(recipientOnlyPath, "recipient only");
+    await symlink(projectionPath, join(root, "shared-alias.sqlite"), "file");
+    const projection = new DatabaseSync(projectionPath);
+    projection.exec(
+      "PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'projection wal';",
+    );
+    await expect(readFile(`${projectionPath}-wal`)).resolves.not.toHaveLength(0);
+    await expect(
+      readDatabaseSnapshot(
+        root,
+        "shared-with-me/healthy/canonical.sqlite",
+      ),
+    ).resolves.toMatchObject({
+      tables: [
+        {
+          name: "sentinel",
+          rows: [expect.objectContaining({ marker: "projection wal" })],
+        },
+      ],
+    });
+
+    const readShareAsset = vi.fn(
+      async (_target: ShareViewFilesTarget, path: string) => {
+        if (path !== "canonical.sqlite") throw new Error(`Shared file not found: ${path}`);
+        return {
+          kind: "asset" as const,
+          bytes: canonicalBytes,
+          mediaType: "application/octet-stream",
+        } satisfies ShareViewFileReadOutcome;
+      },
+    );
+    const mount = mounts[0]!;
+    const port = createOwnedWorkspaceSdkReadPort({
+      workspaceRoot: root,
+      readText: async () => {
+        throw new Error("unused");
+      },
+      listFiles: () => listFiles(root),
+      resolveShare: async (path) => {
+        const routed = await resolveShareMountPath(root, path, [mount]);
+        return routed === null
+          ? null
+          : { target: shareTarget(mount.shareId), path: routed.path };
+      },
+      readShareAsset,
+      searchSources: [
+        {
+          target: shareTarget(mount.shareId),
+          prefix: "shared-with-me/healthy",
+        },
+      ],
+      repairProjection: async () => {},
+    });
+    const context = {
+      workspaceRoot: root,
+      writable: false,
+      author: USER_AUTHOR,
+      reads: port,
+    };
+
+    try {
+      const snapshot = await invokeWorkspaceSdkHost(context, "databases.read", {
+        path: "shared-with-me/healthy/canonical.sqlite",
+      });
+      expect(snapshot).toMatchObject({
+        path: "shared-with-me/healthy/canonical.sqlite",
+        tables: [
+          {
+            name: "sentinel",
+            rows: [expect.objectContaining({ marker: "canonical owner" })],
+          },
+        ],
+      });
+      expect(readShareAsset).toHaveBeenCalledTimes(1);
+
+      const aliasSnapshot = await invokeWorkspaceSdkHost(
+        context,
+        "databases.read",
+        { path: "shared-alias.sqlite" },
+      );
+      expect(aliasSnapshot).toMatchObject({
+        path: "shared-alias.sqlite",
+        tables: [
+          {
+            name: "sentinel",
+            rows: [expect.objectContaining({ marker: "canonical owner" })],
+          },
+        ],
+      });
+
+      await expect(
+        invokeWorkspaceSdkHost(context, "databases.read", {
+          path: "shared-with-me/healthy/recipient-only.sqlite",
+        }),
+      ).rejects.toThrow(/shared file not found/i);
+      expect(readShareAsset).toHaveBeenCalledTimes(3);
+    } finally {
+      projection.close();
+    }
+  });
+
+  it("removes its private database snapshot when SQLite rejects owner bytes", async () => {
+    const prefix = "dohc-database-snapshot-";
+    const before = new Set(
+      (await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)),
+    );
+
+    await expect(
+      readDatabaseSnapshotFromBytes(
+        "shared-with-me/healthy/broken.sqlite",
+        Buffer.from("not a sqlite database"),
+      ),
+    ).rejects.toThrow();
+
+    const after = new Set(
+      (await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)),
+    );
+    expect(after).toEqual(before);
+  });
+});

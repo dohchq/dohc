@@ -8,8 +8,18 @@ import {
   type DatabaseRowOp,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
-import { appendFile, link, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceFile } from "./workspaceAssets";
@@ -139,6 +149,28 @@ export async function readDatabaseSnapshot(
     return { path: normalized, tables };
   } finally {
     db.close();
+  }
+}
+
+// Received-share databases are owned by the share's canonical store, not by
+// their visible projection. SQLite needs a filesystem path, so give it a
+// private, short-lived copy containing only the owner's main database bytes.
+// Projection WAL/journal sidecars never enter this directory.
+export async function readDatabaseSnapshotFromBytes(
+  relativePath: string,
+  bytes: Uint8Array,
+): Promise<DatabaseSnapshotView> {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "dohc-database-snapshot-"));
+  try {
+    const temporaryPath = "snapshot.sqlite";
+    await writeFile(join(temporaryRoot, temporaryPath), bytes, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    const snapshot = await readDatabaseSnapshot(temporaryRoot, temporaryPath);
+    return { ...snapshot, path: relativePath };
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
   }
 }
 
