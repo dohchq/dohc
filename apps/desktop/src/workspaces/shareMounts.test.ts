@@ -23,6 +23,7 @@ import {
   mountStoreWorkspaceIdFor,
   removeMountFolder,
   removeShareMountProjection,
+  refuseImportIntoShareProjection,
   refuseMoveAcrossShareMount,
   resolveShareMountPath,
   resolveShareProjectionPath,
@@ -490,6 +491,63 @@ describe("mount labels", () => {
         [],
         true,
       ),
+    ).rejects.toThrow(/saved details are invalid/i);
+  });
+
+  it("refuses imports into a mount through its projection path or an alias", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
+    const mounts = [{ shareId: SHARE_ID, label: "alex" }];
+
+    await expect(
+      refuseImportIntoShareProjection(
+        host,
+        "shared-with-me/alex",
+        mounts,
+        true,
+      ),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseImportIntoShareProjection(host, "inbox", mounts, true),
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseImportIntoShareProjection(host, "notes", mounts, true),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses imports into unowned projection paths when share state remains", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan"), {
+      recursive: true,
+    });
+    await symlink(
+      join(host, SHARED_WITH_ME_FOLDER),
+      join(host, "projection-alias"),
+      "dir",
+    );
+
+    await expect(
+      refuseImportIntoShareProjection(
+        host,
+        "shared-with-me/orphan",
+        [],
+        true,
+      ),
+      "MUTATION: an empty ownership tombstone must not turn stale projection bytes into a local import destination",
+    ).rejects.toThrow(/saved details are invalid/i);
+    await expect(
+      refuseImportIntoShareProjection(host, "projection-alias", [], true),
+      "MUTATION: a projection alias must not bypass an empty ownership tombstone",
+    ).rejects.toThrow(/mounted share is read-only/i);
+    await expect(
+      refuseImportIntoShareProjection(
+        host,
+        "shared-with-me/damaged",
+        [{ shareId: SHARE_ID, label: null } as never],
+        true,
+      ),
+      "MUTATION: a damaged record must not let its projection become a local import destination",
     ).rejects.toThrow(/saved details are invalid/i);
   });
 

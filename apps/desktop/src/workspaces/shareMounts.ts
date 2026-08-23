@@ -308,6 +308,31 @@ export async function refuseMoveAcrossShareMount(
   );
 }
 
+/** Refuse an import destination owned by the read-only share projection. */
+export async function refuseImportIntoShareProjection(
+  hostRoot: string,
+  targetDir: string | undefined,
+  mounts: readonly Pick<ShareMountRecord, "shareId" | "label">[],
+  hasMountRegistry: boolean,
+): Promise<void> {
+  if (targetDir === undefined || targetDir === "") return;
+  if (mounts.length === 0 && !hasMountRegistry) return;
+  const destination = await resolveShareProjectionPath(
+    hostRoot,
+    targetDir,
+    mounts,
+  );
+  if (
+    destination.kind === "local" ||
+    destination.kind === "workspace-root"
+  ) {
+    return;
+  }
+  throw new Error(
+    "A mounted share is read-only. Import the files into a folder outside the mounted share.",
+  );
+}
+
 export async function overlayCanonicalShareMountFiles<
   FileEntry extends { path: string },
   Mount,

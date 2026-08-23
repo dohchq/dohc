@@ -524,6 +524,7 @@ import {
   classifyShareMountRefreshError,
   overlayCanonicalShareMountFiles,
   planShareMountRemoval,
+  refuseImportIntoShareProjection,
   refuseMoveAcrossShareMount,
   removeMountFolder,
   removeShareMountProjection,
@@ -5700,9 +5701,17 @@ function registerIpcHandlers(
       absolutePaths: string[],
       screenAgainstRoots: string[] | null,
     ) =>
-      withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) =>
-        shareView === null
-          ? screenAgainstRoots === null
+      withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
+        if (shareView === null) {
+          const currentWorkspace =
+            findWorkspace(workspace.workspaceId) ?? workspace;
+          await refuseImportIntoShareProjection(
+            workspace.rootPath,
+            input.targetDir,
+            storedShareMounts(currentWorkspace),
+            shareMountRegistryIsPresent(currentWorkspace),
+          );
+          return screenAgainstRoots === null
             ? copyIntoWorkspace(
                 workspace.rootPath,
                 absolutePaths,
@@ -5713,20 +5722,21 @@ function registerIpcHandlers(
                 absolutePaths,
                 screenAgainstRoots,
                 input.targetDir,
-              )
-          : shareViewImportResult(
-              await shareViewFiles.change(
-                lease,
-                { kind: "standalone", workspaceId: workspace.workspaceId },
-                {
-                  kind: "import",
-                  absolutePaths,
-                  screenAgainstRoots,
-                  targetDir: input.targetDir,
-                },
-              ),
-            ),
-      );
+              );
+        }
+        return shareViewImportResult(
+          await shareViewFiles.change(
+            lease,
+            { kind: "standalone", workspaceId: workspace.workspaceId },
+            {
+              kind: "import",
+              absolutePaths,
+              screenAgainstRoots,
+              targetDir: input.targetDir,
+            },
+          ),
+        );
+      });
     // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
     // note on the payload) re-validated by the drag-in screen — regular
     // files only, never any registered workspace's .dohc metadata. The
