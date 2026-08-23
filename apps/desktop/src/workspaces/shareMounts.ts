@@ -64,7 +64,7 @@ export function validMountLabel(label: unknown): label is string {
 // Derive a mount label from the granter: the email local part reduced to a
 // conservative charset, deduplicated against existing labels the same way
 // imports deduplicate basenames ("alex", "alex (2)", …).
-export function mountLabelFor(
+function mountLabelFor(
   granterEmail: string | null,
   existingLabels: readonly string[],
 ): string {
@@ -117,13 +117,25 @@ function storedMountLabel(mount: unknown): string | null {
 // Allocation reserves every stored string, not only records healthy enough
 // to use. A damaged record still claims its spelling until it is removed;
 // reusing that label would make two registry records name one projection.
-export function reservedShareMountLabels<Mount>(
+function reservedShareMountLabels<Mount>(
   mounts: readonly Mount[],
 ): string[] {
   return mounts.flatMap((mount) => {
     const label = storedMountLabel(mount);
     return label === null ? [] : [label];
   });
+}
+
+/** Allocate one label without adopting a registry or disk-owned name. */
+export function allocateShareMountLabel<Mount>(input: {
+  storedMounts: readonly Mount[];
+  onDiskNames: readonly string[];
+  granterEmail: string | null;
+}): string {
+  return mountLabelFor(input.granterEmail, [
+    ...reservedShareMountLabels(input.storedMounts),
+    ...input.onDiskNames,
+  ]);
 }
 
 // Mount labels are allocated case-insensitively on every platform. Keep the

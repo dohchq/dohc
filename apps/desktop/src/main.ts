@@ -518,8 +518,8 @@ import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
   assertMountableSelector,
   assertRealMountRoot,
+  allocateShareMountLabel,
   createMountDirectory,
-  mountLabelFor,
   mountStoreWorkspaceIdFor,
   classifyShareMountRefreshError,
   overlayCanonicalShareMountFiles,
@@ -527,7 +527,6 @@ import {
   refuseMoveAcrossShareMount,
   removeMountFolder,
   removeShareMountProjection,
-  reservedShareMountLabels,
   resolveShareMountPath,
   shareMountRecordsForId,
   shareMountResultRow,
@@ -7449,10 +7448,11 @@ function registerIpcHandlers(
     const onDisk = await readdir(sharedWithMeDir).catch(() => [] as string[]);
     const mount = {
       shareId: parsed.shareId,
-      label: mountLabelFor(info.granterEmail, [
-        ...reservedShareMountLabels(existing),
-        ...onDisk,
-      ]),
+      label: allocateShareMountLabel({
+        storedMounts: existing,
+        onDiskNames: onDisk,
+        granterEmail: info.granterEmail,
+      }),
       granterEmail: info.granterEmail,
       relayUrl,
       recipientEmail: credentials.email ?? null,

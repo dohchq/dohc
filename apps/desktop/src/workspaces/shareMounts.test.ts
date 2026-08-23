@@ -15,15 +15,14 @@ import {
 } from "../testing/shareViewLoopbackTransport";
 import {
   assertMountableSelector,
+  allocateShareMountLabel,
   classifyShareMountRefreshError,
   shareMountResultRow,
   createMountDirectory,
-  mountLabelFor,
   mountRootFor,
   mountStoreWorkspaceIdFor,
   removeMountFolder,
   removeShareMountProjection,
-  reservedShareMountLabels,
   refuseMoveAcrossShareMount,
   resolveShareMountPath,
   resolveShareProjectionPath,
@@ -220,33 +219,57 @@ class FakeShareRelay {
 
 describe("mount labels", () => {
   it("derives a safe label from the granter email and deduplicates", () => {
-    expect(mountLabelFor("alex@example.com", [])).toBe("alex");
-    expect(mountLabelFor("alex@example.com", ["alex"])).toBe("alex (2)");
-    expect(mountLabelFor("alex@example.com", ["alex", "alex (2)"])).toBe("alex (3)");
-    expect(mountLabelFor("Wild! Chars?@x.com", [])).toBe("wild-chars");
-    expect(mountLabelFor(null, [])).toBe("share");
-    expect(mountLabelFor("...@x.com", [])).toBe("share");
+    const allocate = (
+      granterEmail: string | null,
+      onDiskNames: readonly string[] = [],
+    ) =>
+      allocateShareMountLabel({
+        storedMounts: [],
+        onDiskNames,
+        granterEmail,
+      });
+    expect(allocate("alex@example.com")).toBe("alex");
+    expect(allocate("alex@example.com", ["alex"])).toBe("alex (2)");
+    expect(allocate("alex@example.com", ["alex", "alex (2)"])).toBe(
+      "alex (3)",
+    );
+    expect(allocate("Wild! Chars?@x.com")).toBe("wild-chars");
+    expect(allocate(null)).toBe("share");
+    expect(allocate("...@x.com")).toBe("share");
     // A secret-shaped local part must not become a label the read
     // classifier would suppress (prod.env -> secret).
-    expect(mountLabelFor("prod.env@example.com", [])).toBe("prod-env");
-    expect(mountLabelFor(".env@example.com", [])).toBe("env");
+    expect(allocate("prod.env@example.com")).toBe("prod-env");
+    expect(allocate(".env@example.com")).toBe("env");
   });
 
-  it("reserves labels held by duplicate damaged records", () => {
+  it("reserves every string label held by damaged registry records", () => {
     const damaged = [
       { shareId: SHARE_ID, label: "alex" },
       { shareId: SHARE_ID, label: "sam" },
+      { shareId: 7, label: "alex (2)" },
       { shareId: "missing-label", label: null },
     ];
     expect(usableShareMountRecord(damaged, damaged[0]!)).toBe(false);
     expect(usableShareMountRecord(damaged, damaged[1]!)).toBe(false);
+    expect(usableShareMountRecord(damaged, damaged[2]!)).toBe(false);
 
     expect(
-      mountLabelFor(
-        "alex@example.com",
-        reservedShareMountLabels(damaged),
-      ),
-    ).toBe("alex (2)");
+      allocateShareMountLabel({
+        storedMounts: damaged,
+        onDiskNames: [],
+        granterEmail: "alex@example.com",
+      }),
+    ).toBe("alex (3)");
+  });
+
+  it("reserves on-disk names in the same allocation", () => {
+    expect(
+      allocateShareMountLabel({
+        storedMounts: [{ shareId: "share-a", label: "alex" }],
+        onDiskNames: ["alex (2)"],
+        granterEmail: "alex@example.com",
+      }),
+    ).toBe("alex (3)");
   });
 
   it("refuses traversal, separators, reserved and secret-shaped labels", () => {
