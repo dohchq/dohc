@@ -36,6 +36,32 @@ import { raceWithTimeout } from "./pluginShared";
 
 const DEACTIVATION_TIMEOUT_MS = 5_000;
 
+const pluginHostRecordBrand: unique symbol = Symbol("PluginHostRecord");
+const pluginHostStartBrand: unique symbol = Symbol("PluginHostStart");
+
+export interface PluginHostRecordToken {
+  readonly [pluginHostRecordBrand]: true;
+}
+
+export interface PluginHostStartEvidence {
+  readonly [pluginHostStartBrand]: true;
+  readonly pluginId: string;
+  readonly record: PluginHostRecordToken;
+}
+
+class HostRecordToken implements PluginHostRecordToken {
+  readonly [pluginHostRecordBrand] = true;
+}
+
+class HostStartEvidence implements PluginHostStartEvidence {
+  readonly [pluginHostStartBrand] = true;
+
+  constructor(
+    readonly pluginId: string,
+    readonly record: PluginHostRecordToken,
+  ) {}
+}
+
 export interface PluginHostOptions {
   stateDir: string;
   workspaceRoot: string;
@@ -121,6 +147,7 @@ interface PluginSpawn {
 }
 
 interface PluginRecord {
+  ownershipToken: PluginHostRecordToken;
   pluginId: string;
   pluginRoot: string;
   /** The discovered SOURCE directory's own name, passed explicitly into
@@ -231,7 +258,7 @@ export class PluginHost {
     // settings read or a sizes report needs to name.
     directoryName: string,
     manifest: DohcPluginManifest,
-  ): Promise<void> {
+  ): Promise<PluginHostStartEvidence> {
     // The manifest name is the plugin's identity — one identity, so state
     // and attribution can never drift from what the manifest declares.
     const pluginId = manifest.name;
@@ -262,6 +289,7 @@ export class PluginHost {
       }
 
       const record: PluginRecord = {
+        ownershipToken: new HostRecordToken(),
         pluginId,
         pluginRoot,
         directoryName,
@@ -271,6 +299,7 @@ export class PluginHost {
       };
       this.plugins.set(pluginId, record);
       this.spawn(record);
+      return new HostStartEvidence(pluginId, record.ownershipToken);
     } finally {
       this.pendingStarts.delete(pluginId);
       this.abortedStarts.delete(pluginId);
@@ -493,6 +522,10 @@ export class PluginHost {
 
   getStatus(pluginId: string): PluginRuntimeStatus | undefined {
     return this.plugins.get(pluginId)?.status;
+  }
+
+  currentRecord(pluginId: string): PluginHostRecordToken | undefined {
+    return this.plugins.get(pluginId)?.ownershipToken;
   }
 
   getStderrLog(pluginId: string): string[] {

@@ -737,6 +737,29 @@ describe("PluginHost", () => {
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
   });
 
+  it("mints start evidence for the exact current host record", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    const first = await host.start(helloPluginRoot, "hello-plugin", manifest);
+    expect(first.pluginId).toBe("hello-plugin");
+    expect(host.currentRecord("hello-plugin")).toBe(first.record);
+
+    await host.stop("hello-plugin");
+    expect(host.currentRecord("hello-plugin")).toBeUndefined();
+
+    const second = await host.start(helloPluginRoot, "hello-plugin", manifest);
+    expect(host.currentRecord("hello-plugin")).toBe(second.record);
+    expect(second.record).not.toBe(first.record);
+  });
+
   it("rejects a pending start that stop aborts before spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();
