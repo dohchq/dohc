@@ -31,9 +31,7 @@ describe("resolveRegisteredShareViewFilesTarget", () => {
       }),
     ).toBe(true);
     expect(workspaceHasReceivedShareState({ shareMounts: {} })).toBe(true);
-    expect(() => storedShareMounts({ shareMounts: {} })).toThrow(
-      /registry is invalid/i,
-    );
+    expect(storedShareMounts({ shareMounts: {} })).toEqual([]);
   });
 
   it("resolves a valid mount to its own store and projected root", () => {

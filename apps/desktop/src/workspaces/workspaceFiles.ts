@@ -1034,6 +1034,9 @@ export const ZIP_TOO_LARGE_REFUSAL =
 export async function collectZipEntries(
   rootPath: string,
   relativePath?: string,
+  options?: {
+    includeArchivePath?(path: string): boolean;
+  },
 ): Promise<{ entries: ZipEntry[]; baseName: string }> {
   const realRoot = await realpath(rootPath);
   let startAbsolute = realRoot;
@@ -1128,6 +1131,7 @@ export async function collectZipEntries(
       if (dirent.isSymbolicLink()) continue;
       const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
       const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
+      if (options?.includeArchivePath?.(archivePath) === false) continue;
       if (dirent.isDirectory()) {
         if (!IGNORED_DIRS.has(dirent.name)) {
           await walk(join(dir, dirent.name), relPath, archivePath);
@@ -1144,7 +1148,7 @@ export async function collectZipEntries(
   const startRel = relativePath === undefined ? "" : prefixRel;
   if ((await stat(startAbsolute)).isDirectory()) {
     await walk(startAbsolute, startRel, prefix);
-  } else {
+  } else if (options?.includeArchivePath?.(prefix) !== false) {
     await add(startAbsolute, prefix);
   }
   return { entries, baseName };

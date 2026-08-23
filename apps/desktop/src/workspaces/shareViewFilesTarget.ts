@@ -22,12 +22,13 @@ export function storedShareMounts(
   workspace: Pick<ShareViewFilesWorkspaceRecord, "shareMounts">,
 ): readonly ShareMountRecord[] {
   if (workspace.shareMounts === undefined) return [];
-  if (!Array.isArray(workspace.shareMounts)) {
-    throw new Error(
-      "dohc cannot verify mounted shares because their saved registry is invalid.",
-    );
-  }
-  return workspace.shareMounts as ShareMountRecord[];
+  // A malformed field carries no usable owner identity, but it still proves
+  // the reserved projection has share history. Decode it as an empty owner
+  // set so ordinary local files remain usable while projection reads/listings
+  // continue to fail closed through workspaceHasReceivedShareState.
+  return Array.isArray(workspace.shareMounts)
+    ? (workspace.shareMounts as ShareMountRecord[])
+    : [];
 }
 
 export function workspaceHasReceivedShareState(

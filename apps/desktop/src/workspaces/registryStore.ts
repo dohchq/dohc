@@ -514,8 +514,11 @@ export function createRegistryStore(registryFile: string) {
       const registry = read();
       const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      if (shareMounts.length === 0) delete entry.shareMounts;
-      else entry.shareMounts = shareMounts;
+      // Keep an empty set as a durable ownership tombstone. A last unmount
+      // can leave its projection folder behind when safe removal is refused;
+      // deleting the field would immediately promote those known share bytes
+      // to ordinary local authority on the next read.
+      entry.shareMounts = shareMounts;
       write(registry);
     },
 

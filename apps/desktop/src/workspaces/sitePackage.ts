@@ -3131,6 +3131,19 @@ export function staticPreviewTargetForSite(
   return ownedStaticEntryTarget(site);
 }
 
+/** Files the owner listing permits the static server to expose. */
+export function staticPreviewOwnerFiles(
+  site: SitePackageInfo,
+  target: ReturnType<typeof staticPreviewTargetForSite>,
+): ReadonlyMap<string, string> {
+  const files = new Map<string, string>();
+  for (const workspacePath of site.sourceFiles) {
+    const servedPath = pathRelativeToArtifact(target.root, workspacePath);
+    if (servedPath) files.set(servedPath, workspacePath);
+  }
+  return files;
+}
+
 function packagePathFor(root: string, sourceFiles: string[]): string | null {
   const packagePath = joinSitePath(root, "package.json");
   return sourceFiles.includes(packagePath) ? packagePath : null;

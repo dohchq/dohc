@@ -565,6 +565,12 @@ describe("collectZipEntries", () => {
       ),
     );
     await expect(collectZipEntries(root, "many")).rejects.toThrow(/Export too large/);
+    await expect(
+      collectZipEntries(root, "many", {
+        includeArchivePath: () => false,
+      }),
+      "MUTATION: excluded projection files are buffered before owner replacement",
+    ).resolves.toMatchObject({ entries: [] });
     // 30s because this one writes 2001 real files — an I/O budget, not a logic
     // budget (#372). Scoped to this test: the other 58 in this file measured
     // under 1s on a loaded box, and a file-wide bump would multiply how long a

@@ -25,9 +25,10 @@ import {
   removeShareMountProjection,
   refuseMoveAcrossShareMount,
   resolveShareMountPath,
+  resolveShareProjectionPath,
   overlayCanonicalShareMountFiles,
   planShareMountRemoval,
-  uniqueShareMountForId,
+  usableShareMountRecord,
   validMountLabel,
 } from "./shareMounts";
 import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
@@ -296,6 +297,24 @@ describe("mount labels", () => {
     ).resolves.toBeNull();
   });
 
+  it("classifies aliases to the projection and workspace roots", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER), { recursive: true });
+    await symlink(
+      join(host, SHARED_WITH_ME_FOLDER),
+      join(host, "projection-alias"),
+      "dir",
+    );
+    await symlink(host, join(host, "workspace-alias"), "dir");
+
+    await expect(
+      resolveShareProjectionPath(host, "projection-alias", []),
+    ).resolves.toEqual({ kind: "projection-root" });
+    await expect(
+      resolveShareProjectionPath(host, "workspace-alias", []),
+    ).resolves.toEqual({ kind: "workspace-root" });
+  });
+
   it("refuses a disk path claimed by an invalid registry label", async () => {
     const host = await tempHostRoot();
     await mkdir(join(host, SHARED_WITH_ME_FOLDER, ".env", "docs"), {
@@ -330,7 +349,7 @@ describe("mount labels", () => {
   it("refuses a disk path claimed by more than one registry record", async () => {
     const host = await tempHostRoot();
     await createMountDirectory(host, "alex");
-    const labels = process.platform === "win32" ? ["alex", "Alex"] : ["alex", "alex"];
+    const labels = ["alex", "Alex"];
 
     await expect(
       resolveShareMountPath(
@@ -345,25 +364,14 @@ describe("mount labels", () => {
     ).rejects.toThrow(/saved details are invalid/);
   });
 
-  it("refuses a share id claimed by more than one mount record", () => {
-    expect(
-      () =>
-        uniqueShareMountForId(
-          [
-            { shareId: SHARE_ID, label: "alex" },
-            { shareId: SHARE_ID, label: "sam" },
-          ],
-          SHARE_ID,
-        ),
-      "MUTATION: first-match target resolution gives an ambiguous id authority over one mount",
-    ).toThrow(/saved details are invalid/);
-    expect(
-      uniqueShareMountForId(
-        [{ shareId: SHARE_ID, label: "alex" }],
-        SHARE_ID,
-      ),
-    ).toEqual({ shareId: SHARE_ID, label: "alex" });
-    expect(uniqueShareMountForId([], SHARE_ID)).toBeNull();
+  it("never gives case-colliding labels separate owner authority", () => {
+    const mounts = [
+      { shareId: "first", label: "alex" },
+      { shareId: "second", label: "Alex" },
+    ];
+
+    expect(usableShareMountRecord(mounts, mounts[0]!)).toBe(false);
+    expect(usableShareMountRecord(mounts, mounts[1]!)).toBe(false);
   });
 
   it("plans ambiguous or unusable records for registry-only removal", () => {
@@ -476,6 +484,25 @@ describe("mount labels", () => {
     expect(failures).toEqual([
       expect.objectContaining({ message: expect.stringMatching(/invalid/i) }),
     ]);
+  });
+
+  it("keeps local files but hides the projection for an empty owner set", async () => {
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "notes/local.md" },
+            { path: "shared-with-me/orphan/recipient-only.md" },
+          ],
+          folders: ["notes", "shared-with-me/orphan"],
+        },
+        mounts: [],
+        listCanonical: async () => ({ files: [] }),
+      }),
+    ).resolves.toEqual({
+      files: [{ path: "notes/local.md" }],
+      folders: ["notes"],
+    });
   });
 
   it("hides an ambiguous projection claimed by two mount records", async () => {

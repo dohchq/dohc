@@ -24,7 +24,7 @@ describe("ShareViewFiles main-process wiring", () => {
     const collect = functionSource("async function collectOwnedZipEntries(");
 
     expect(collect).toContain(
-      '...(routed.path === "" ? {} : { relativePath: routed.path }),',
+      '...(resolved.path === "" ? {} : { relativePath: resolved.path }),',
     );
     expect(collect).not.toContain("const mountRoot =");
   });

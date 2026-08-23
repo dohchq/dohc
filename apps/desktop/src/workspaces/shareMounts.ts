@@ -114,6 +114,14 @@ function storedMountLabel(mount: unknown): string | null {
   return typeof label === "string" ? label : null;
 }
 
+// Mount labels are allocated case-insensitively on every platform. Keep the
+// authority check equally conservative: default macOS filesystems alias case
+// just like Windows, and a hand-edited registry must not let two owners claim
+// one physical projection even on a case-sensitive host.
+function mountLabelKey(label: string): string {
+  return label.toLowerCase();
+}
+
 export function shareMountRecordsForId<Mount>(
   mounts: readonly Mount[],
   shareId: string,
@@ -124,15 +132,6 @@ export function shareMountRecordsForId<Mount>(
   );
 }
 
-export function uniqueShareMountForId<Mount>(
-  mounts: readonly Mount[],
-  shareId: string,
-): (Mount & { shareId: string }) | null {
-  const matches = shareMountRecordsForId(mounts, shareId);
-  if (matches.length > 1) throw new Error(INVALID_SHARE_MOUNT_DETAILS);
-  return matches[0] ?? null;
-}
-
 export function usableShareMountRecord<Mount>(
   mounts: readonly Mount[],
   mount: Mount,
@@ -141,17 +140,11 @@ export function usableShareMountRecord<Mount>(
   const label = mountField(mount, "label");
   if (!validShareMountId(shareId) || !validMountLabel(label)) return false;
   if (shareMountRecordsForId(mounts, shareId).length !== 1) return false;
-  const key =
-    process.platform === "win32"
-      ? label.toLowerCase()
-      : label;
+  const key = mountLabelKey(label);
   return (
     mounts.filter((candidate) => {
       const candidateLabel = storedMountLabel(candidate);
-      if (candidateLabel === null) return false;
-      return process.platform === "win32"
-        ? candidateLabel.toLowerCase() === key
-        : candidateLabel === key;
+      return candidateLabel !== null && mountLabelKey(candidateLabel) === key;
     }).length === 1
   );
 }
@@ -184,12 +177,75 @@ export function planShareMountRemoval<Mount>(
   };
 }
 
+export type ResolvedShareProjectionPath<Mount> =
+  | { kind: "workspace-root" }
+  | { kind: "projection-root" }
+  | { kind: "local" }
+  | {
+      kind: "mount";
+      mount: Mount & { shareId: string; label: string };
+      path: string;
+    };
+
+/** Decide which owner controls a path after resolving aliases and symlinks. */
+export async function resolveShareProjectionPath<Mount>(
+  hostRoot: string,
+  relativePath: string,
+  mounts: readonly Mount[],
+): Promise<ResolvedShareProjectionPath<Mount>> {
+  const validated = validateUserReadPath(relativePath);
+  if (!validated.ok) return { kind: "local" };
+  const resolved = await assertResolvedWorkspacePath({
+    rootPath: hostRoot,
+    absolutePath: join(hostRoot, validated.normalized),
+    spelled: relativePath,
+    label: "Shared file path",
+    access: "read",
+  });
+  const normalizedPath = resolved.relative.replaceAll("\\", "/");
+  if (normalizedPath === "") return { kind: "workspace-root" };
+  if (isSharedWithMePath(normalizedPath) && !normalizedPath.includes("/")) {
+    return { kind: "projection-root" };
+  }
+  const comparedPath = mountLabelKey(normalizedPath);
+  const matches = mounts.filter((mount) => {
+    const label = storedMountLabel(mount);
+    if (label === null) return false;
+    const prefix = `${SHARED_WITH_ME_FOLDER}/${label}`;
+    const comparedPrefix = mountLabelKey(prefix);
+    return (
+      comparedPath === comparedPrefix ||
+      comparedPath.startsWith(`${comparedPrefix}/`)
+    );
+  });
+  if (matches.length === 0) {
+    if (isSharedWithMePath(normalizedPath)) {
+      throw new Error(INVALID_SHARE_MOUNT_DETAILS);
+    }
+    return { kind: "local" };
+  }
+  if (matches.length !== 1 || !usableShareMountRecord(mounts, matches[0]!)) {
+    throw new Error(INVALID_SHARE_MOUNT_DETAILS);
+  }
+  const mount = matches[0]!;
+  const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+  const comparedPrefix = mountLabelKey(prefix);
+  return {
+    kind: "mount",
+    mount,
+    path:
+      comparedPath === comparedPrefix
+        ? ""
+        : normalizedPath.split("/").slice(2).join("/"),
+  };
+}
+
 /**
  * Resolve a workspace read to the mount that owns its real destination.
  *
  * Authority follows the resolved path, not its spelling: a symlink or a
- * Windows case/short-name alias into shared-with-me must still read the
- * mount's canonical store instead of bypassing it through the disk copy.
+ * filesystem alias into shared-with-me must still read the mount's canonical
+ * store instead of bypassing it through the disk copy.
  */
 export async function resolveShareMountPath<Mount>(
   hostRoot: string,
@@ -201,54 +257,14 @@ export async function resolveShareMountPath<Mount>(
   path: string;
 } | null> {
   if (mounts.length === 0 && !hasMountRegistry) return null;
-  const validated = validateUserReadPath(relativePath);
-  if (!validated.ok) return null;
-  const resolved = await assertResolvedWorkspacePath({
-    rootPath: hostRoot,
-    absolutePath: join(hostRoot, validated.normalized),
-    spelled: relativePath,
-    label: "Shared file path",
-    access: "read",
-  });
-  const comparedPath =
-    process.platform === "win32"
-      ? resolved.relative.toLowerCase()
-      : resolved.relative;
-  const matches = mounts.filter((mount) => {
-    const label = storedMountLabel(mount);
-    if (label === null) return false;
-    const prefix = `${SHARED_WITH_ME_FOLDER}/${label}`;
-    const comparedPrefix =
-      process.platform === "win32" ? prefix.toLowerCase() : prefix;
-    return (
-      comparedPath === comparedPrefix ||
-      comparedPath.startsWith(`${comparedPrefix}/`)
-    );
-  });
-  if (matches.length === 0) {
-    if (
-      hasMountRegistry &&
-      isSharedWithMePath(resolved.relative) &&
-      resolved.relative.replaceAll("\\", "/").includes("/")
-    ) {
-      throw new Error(INVALID_SHARE_MOUNT_DETAILS);
-    }
-    return null;
-  }
-  if (matches.length !== 1 || !usableShareMountRecord(mounts, matches[0]!)) {
-    throw new Error(INVALID_SHARE_MOUNT_DETAILS);
-  }
-  const mount = matches[0]!;
-  const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
-  const comparedPrefix =
-    process.platform === "win32" ? prefix.toLowerCase() : prefix;
-  return {
-    mount,
-    path:
-      comparedPath === comparedPrefix
-        ? ""
-        : resolved.relative.slice(prefix.length + 1),
-  };
+  const resolved = await resolveShareProjectionPath(
+    hostRoot,
+    relativePath,
+    mounts,
+  );
+  return resolved.kind === "mount"
+    ? { mount: resolved.mount, path: resolved.path }
+    : null;
 }
 
 export async function refuseMoveAcrossShareMount(
