@@ -1,9 +1,11 @@
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
   rename,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -206,6 +208,60 @@ describe("moveEngineStoreAside", () => {
       "engine.db",
       "engine.db-shm",
       "engine.db-wal",
+      "pre-v2-backup",
+    ]);
+  });
+
+  it("refuses a file at the backup path and leaves the live store untouched", async () => {
+    await seedStore({ "engine.db": "refused-store", "engine.db-wal": "wal" });
+    await writeFile(backupDir, "occupied");
+
+    await expect(moveEngineStoreAside(root)).resolves.toBe("backup-exists");
+
+    expect((await lstat(backupDir)).isFile()).toBe(true);
+    expect(await readFile(backupDir, "utf8")).toBe("occupied");
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
+    );
+    expect(await readFile(join(engineDir, "engine.db-wal"), "utf8")).toBe(
+      "wal",
+    );
+    expect((await readdir(engineDir)).sort()).toEqual([
+      "engine.db",
+      "engine.db-wal",
+      "pre-v2-backup",
+    ]);
+  });
+
+  it("refuses a symlink at the backup path without following it", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const target = join(root, "other-backup");
+    await mkdir(target);
+    await writeFile(join(target, "sentinel"), "untouched");
+    await symlink(
+      target,
+      backupDir,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await writeMoveManifest(["engine.db"]);
+    const marker = await readFile(join(target, "MOVE_IN_PROGRESS"), "utf8");
+
+    await expect(moveEngineStoreAside(root)).resolves.toBe("backup-exists");
+
+    expect((await lstat(backupDir)).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(target, "sentinel"), "utf8")).toBe("untouched");
+    expect(await readFile(join(target, "MOVE_IN_PROGRESS"), "utf8")).toBe(
+      marker,
+    );
+    expect((await readdir(target)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
+      "sentinel",
+    ]);
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
+    );
+    expect((await readdir(engineDir)).sort()).toEqual([
+      "engine.db",
       "pre-v2-backup",
     ]);
   });

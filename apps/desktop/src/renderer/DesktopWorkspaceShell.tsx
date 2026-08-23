@@ -2426,6 +2426,13 @@ export function DesktopWorkspaceShell(props: {
     | { phase: "backup-exists"; reopenFailed?: string }
     | null
   >(null);
+  const engineRebuildReturnFocusRef = useRef<HTMLElement | null>(null);
+  const engineRebuildOpen = engineRebuild !== null;
+  useEffect(() => {
+    if (engineRebuildOpen) return;
+    engineRebuildReturnFocusRef.current?.focus();
+    engineRebuildReturnFocusRef.current = null;
+  }, [engineRebuildOpen]);
   // Workspace-scoped guard (AGENTS.md): a slow response for workspace A must
   // never repaint workspace B. Switching workspaces closes the dialog and
   // invalidates any in-flight move's answer.
@@ -6191,7 +6198,13 @@ export function DesktopWorkspaceShell(props: {
         shareChangeNotices={shareChangeNotices}
         onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
-        onRebuildEngineStore={() => setEngineRebuild({ phase: "confirm" })}
+        onRebuildEngineStore={() => {
+          engineRebuildReturnFocusRef.current =
+            document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
+          setEngineRebuild({ phase: "confirm" });
+        }}
         onToggleTheme={toggleTheme}
         onContextMenu={() => void showWorkbenchMenu("status")}
         agentNotifications={agentNotifs.notifications}
@@ -6203,14 +6216,14 @@ export function DesktopWorkspaceShell(props: {
           onClose={() => {
             if (engineRebuild.phase !== "moving") setEngineRebuild(null);
           }}
+          panelProps={{
+            "data-testid": "engine-rebuild-dialog",
+            role: "dialog",
+            "aria-modal": true,
+            "aria-labelledby": "engine-rebuild-title",
+          }}
         >
-          <div
-            data-testid="engine-rebuild-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="engine-rebuild-title"
-            className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel"
-          >
+          <div className="dohc-elevated flex w-[min(440px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-line bg-panel">
             <div className="p-4">
               {engineRebuild.phase === "moved" ? (
                 <>
@@ -6273,6 +6286,7 @@ export function DesktopWorkspaceShell(props: {
               engineRebuild.phase === "moving" ? (
                 <>
                   <SecondaryButton
+                    autoFocus
                     disabled={engineRebuild.phase === "moving"}
                     onClick={() => setEngineRebuild(null)}
                   >

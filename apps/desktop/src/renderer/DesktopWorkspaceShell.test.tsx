@@ -6001,6 +6001,80 @@ describe("engine store recovery", () => {
     return { user, dialog: await screen.findByTestId("engine-rebuild-dialog") };
   }
 
+  it("keeps focus in the dialog during the move and restores it after close", async () => {
+    const decision = deferred<RebuildEngineStoreResult>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => refusedStatus);
+    bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+    bridge.rebuildEngineStore = vi.fn(() => decision.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    const user = userEvent.setup();
+    render(
+      <>
+        <button
+          type="button"
+          onClick={() => {
+            fireEvent.click(
+              within(
+                screen.getByTestId("notice-engine-store-refused"),
+              ).getByRole("button", { name: "Rebuild" }),
+            );
+          }}
+        >
+          Open rebuild test dialog
+        </button>
+        <DesktopWorkspaceShell
+          workspace={WORKSPACE}
+          workspaces={[WORKSPACE]}
+          onSwitchWorkspace={() => {}}
+        />
+      </>,
+    );
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const trigger = screen.getByRole("button", {
+      name: "Open rebuild test dialog",
+    });
+
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByTestId("engine-rebuild-dialog");
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Move and rebuild" }),
+    );
+    expect(
+      (within(dialog).getByRole("button", {
+        name: "Cancel",
+      }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (within(dialog).getByRole("button", {
+        name: "Moving",
+      }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    await user.tab();
+
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(dialog);
+
+    await act(async () => {
+      decision.resolve({ outcome: "moved" });
+      await decision.promise;
+    });
+    await user.click(
+      await within(dialog).findByRole("button", { name: "Done" }),
+    );
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it("confirms before moving, names the destination, then names the reverse path", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => refusedStatus);

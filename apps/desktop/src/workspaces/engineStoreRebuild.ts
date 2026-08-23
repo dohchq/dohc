@@ -3,6 +3,7 @@ import type { Stats } from "node:fs";
 import { z } from "zod";
 import {
   access,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -264,6 +265,8 @@ export async function moveEngineStoreAside(
     freshReservation = true;
   } catch (error) {
     if (errorCode(error) !== "EEXIST") throw error;
+    const entry = await lstat(backupDir);
+    if (!entry.isDirectory()) return "backup-exists";
     // A completed or unmarked path is not ours to overwrite.
     if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) {
       return "backup-exists";
