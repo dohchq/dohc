@@ -1793,11 +1793,63 @@ export async function refreshSharedViewOnce(input: {
   };
 }
 
+type ShareViewRefreshCompositionInput = Omit<
+  Parameters<typeof refreshSharedViewOnce>[0],
+  | "excludeFromMaterialization"
+  | "unjournalablePaths"
+  | "trackPendingMaterialization"
+  | "preTrackedPaths"
+>;
+
+export async function refreshCapturedShareView(
+  input: ShareViewRefreshCompositionInput & {
+    captured: CaptureSharedViewLocalDivergenceOutcome;
+  },
+): Promise<RefreshSharedViewOutcome & { collisionRecordQuarantined: boolean }> {
+  const { captured, ...refreshInput } = input;
+  const localChanges = captured.capturedPaths + captured.repairedPaths;
+  const main = await refreshInput.store.ensureMainVersion({
+    workspaceId: refreshInput.workspaceId,
+  });
+  if (!refreshInput.store.listTextFileMetadata) {
+    throw new Error(
+      "Shared view reconciliation requires file metadata listing support.",
+    );
+  }
+  const preTrackedPaths = new Set(
+    (
+      await refreshInput.store.listTextFileMetadata({
+        workspaceId: refreshInput.workspaceId,
+        versionId: main.id,
+      })
+    ).map((entry) => entry.path),
+  );
+  const outcome = await refreshSharedViewOnce({
+    ...refreshInput,
+    excludeFromMaterialization: new Set([
+      ...captured.unjournalablePaths.map((path) => path.path),
+      ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
+    ]),
+    unjournalablePaths: captured.unjournalablePaths,
+    trackPendingMaterialization: true,
+    preTrackedPaths,
+  });
+  return {
+    ...outcome,
+    collisionRecordQuarantined: captured.collisionRecordQuarantined,
+    status:
+      outcome.status === "unchanged" && localChanges > 0
+        ? "updated"
+        : outcome.status,
+    changedPaths: outcome.changedPaths + localChanges,
+  };
+}
+
 // The ShareViewFiles owner holds the refresh lifecycle lock around this body.
 // Keeping this function unlocked avoids reacquiring that same tail and
 // deadlocking the operation that already owns it.
 export async function reconcileStandaloneShareView(
-  input: Parameters<typeof refreshSharedViewOnce>[0] & {
+  input: ShareViewRefreshCompositionInput & {
     ended: boolean;
     captured?: CaptureSharedViewLocalDivergenceOutcome;
   },
@@ -1808,43 +1860,13 @@ export async function reconcileStandaloneShareView(
     const captured =
       suppliedCapture ?? (await captureStandaloneShareViewDivergence(input));
     totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-    const main = await refreshInput.store.ensureMainVersion({
-      workspaceId: refreshInput.workspaceId,
-    });
-    if (!refreshInput.store.listTextFileMetadata) {
-      throw new Error(
-        "Shared view reconciliation requires file metadata listing support.",
-      );
-    }
-    const preTrackedPaths = new Set(
-      (
-        await refreshInput.store.listTextFileMetadata({
-          workspaceId: refreshInput.workspaceId,
-          versionId: main.id,
-        })
-      ).map((entry) => entry.path),
-    );
-    const outcome = await refreshSharedViewOnce({
+    const outcome = await refreshCapturedShareView({
       ...refreshInput,
-      excludeFromMaterialization: new Set(
-        [
-          ...captured.unjournalablePaths.map((path) => path.path),
-          ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
-        ],
-      ),
-      unjournalablePaths: captured.unjournalablePaths,
-      trackPendingMaterialization: true,
-      preTrackedPaths,
+      captured,
     });
     return {
       ok: true,
       ...outcome,
-      collisionRecordQuarantined: captured.collisionRecordQuarantined,
-      status:
-        outcome.status === "unchanged" && totalLocalChanges > 0
-          ? "updated"
-          : outcome.status,
-      changedPaths: outcome.changedPaths + totalLocalChanges,
     };
   } catch (error) {
     // A damaged pin never heals on retry; main.ts turns it into a specific

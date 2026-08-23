@@ -365,6 +365,108 @@ describe("ShareViewFiles", () => {
     );
   });
 
+  it("keeps mounted recipient data after quarantining a malformed collision record", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "docs/collision.md";
+    await mkdir(join(rootPath, "docs"), { recursive: true });
+    await writeFile(join(rootPath, path), "recipient data\n", "utf8");
+    await mkdir(join(rootPath, ".dohc"), { recursive: true });
+    await writeFile(
+      join(rootPath, ".dohc", "share-collision-record.json"),
+      "not json",
+      "utf8",
+    );
+    const store = mutableTextStore({
+      initial: [{ path, text: "granter old\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => mountTarget(rootPath),
+      openStore: () => store,
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull: async () => {
+        await store.writeTextFile({
+          workspaceId: "host-a:share-a",
+          versionId: "main",
+          path,
+          text: "granter new\n",
+          metadata: { origin: "sync" },
+        });
+        return {
+          fetched: 1,
+          applied: 1,
+          skipped: 0,
+          refusals: [],
+          refusalCount: 0,
+          changedPaths: [
+            { path, operation: "write" as const, contentKind: "text" as const },
+          ],
+          nextCursor: 1,
+          commitCursor: async () => undefined,
+        };
+      },
+    });
+    const errorLog = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    try {
+      const result = await withStaleSensitiveWorkspaceOperation(
+        rootPath,
+        (lease) =>
+          files.reconcile(
+            lease,
+            { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+            "refresh",
+          ),
+      );
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
+        "recipient data\n",
+      );
+      expect(result).toMatchObject({
+        kind: "refresh",
+        outcome: {
+          status: "updated",
+          changedPaths: 1,
+          excludedPaths: [path],
+          collisionRecordQuarantined: true,
+        },
+      });
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  it("propagates a mounted refresh failure", async () => {
+    const rootPath = await workspaceRoot();
+    const relayFailure = new Error("relay pull failed");
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => mountTarget(rootPath),
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull: async () => {
+        throw relayFailure;
+      },
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "refresh",
+        ),
+      ),
+    ).rejects.toBe(relayFailure);
+  });
+
   it("does not unmount a share removed while waiting for its lifecycle", async () => {
     const rootPath = await workspaceRoot();
     let current: ResolvedShareViewFilesTarget | null = mountTarget(rootPath);

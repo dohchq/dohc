@@ -34,6 +34,7 @@ import {
   captureSharedViewLocalDivergence,
   readSharedViewProjectionDebt,
   reconcileStandaloneShareView,
+  refreshCapturedShareView,
   refreshSharedViewOnce,
   type RefreshSharedViewOutcome,
   type StandaloneShareViewRefreshOutcome,
@@ -1098,23 +1099,7 @@ export function createShareViewFiles(
                 captured: recovered,
               });
             } else {
-              const main = await store.ensureMainVersion({
-                workspaceId: target.storeWorkspaceId,
-              });
-              if (!store.listTextFileMetadata) {
-                throw new Error(
-                  "Shared view reconciliation requires file metadata listing support.",
-                );
-              }
-              const preTrackedPaths = new Set(
-                (
-                  await store.listTextFileMetadata({
-                    workspaceId: target.storeWorkspaceId,
-                    versionId: main.id,
-                  })
-                ).map((entry) => entry.path),
-              );
-              const refreshed = await refreshSharedViewOnce({
+              outcome = await refreshCapturedShareView({
                 rootDir: target.rootPath,
                 workspaceId: target.storeWorkspaceId,
                 relay,
@@ -1123,26 +1108,8 @@ export function createShareViewFiles(
                 store,
                 pinnedSelector: target.grantedSelector,
                 recordRefusals,
-                excludeFromMaterialization: new Set(
-                  [
-                    ...recovered.unjournalablePaths.map((path) => path.path),
-                    ...(recovered.collisionRecordQuarantined
-                      ? preTrackedPaths
-                      : []),
-                  ],
-                ),
-                unjournalablePaths: recovered.unjournalablePaths,
-                trackPendingMaterialization: true,
-                preTrackedPaths,
+                captured: recovered,
               });
-              outcome = {
-                ...refreshed,
-                status:
-                  localChanges > 0 && refreshed.status !== "ended"
-                    ? "updated"
-                    : refreshed.status,
-                changedPaths: refreshed.changedPaths + localChanges,
-              };
             }
           }
         }
