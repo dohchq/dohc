@@ -125,12 +125,8 @@ import {
   ListOfferedPluginsResult,
   AddOfferedPluginPayload,
   AddOfferedPluginResult,
-  ListSitesPayload,
-  ListSitesResult,
   GetSitePreviewLogsPayload,
   GetSitePreviewLogsResult,
-  SitePackagePayload,
-  SitePackageResult,
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
@@ -320,6 +316,7 @@ import {
   SEARCH_EVENT_MAX_ENTRIES,
   type EngineYDocSaveStateName,
 } from "./ipc/channels";
+import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -689,10 +686,10 @@ import {
 } from "./workspaces/siteRunner";
 import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
+  assertActiveWorkspaceForSite,
   createSitePreviewLifecycle,
   createSitePreviewStartRegistry,
   stopSitePreviewForRequest,
-  withActiveWorkspaceForSiteRead,
   withKeyedStartLock,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
@@ -5195,6 +5192,27 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   }
 }
 
+const senderWorkspaceAuthority = {
+  requireTrustedSender(event: IpcMainInvokeEvent): number {
+    assertTrustedSender(event);
+    return event.sender.id;
+  },
+
+  requireActiveWorkspace(
+    senderId: number,
+    workspaceId: string,
+    subject: string,
+  ) {
+    const workspace = requireWorkspace(workspaceId);
+    assertActiveWorkspaceForSite(
+      activeWorkspaceIdBySender.get(senderId),
+      workspace.workspaceId,
+      subject,
+    );
+    return workspace;
+  },
+};
+
 function requireAuthorizedWorkspace(
   event: IpcMainInvokeEvent,
   workspaceId: string,
@@ -7892,51 +7910,23 @@ function registerIpcHandlers(
     );
   });
 
-  ipcMain.handle(CHANNELS.listSites, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListSitesPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // requireWorkspace only proves input.workspaceId is a REGISTERED
-    // workspace somewhere in this app instance, not that it's the one
-    // this sender's own window is currently showing — a stale or
-    // compromised renderer could otherwise enumerate another workspace's
-    // site paths, titles, diagnostics, and dependency manifests just by
-    // naming its id, the same gap startSitePreview/getSitePreviewLogs
-    // below already guard against.
-    return ListSitesResult.parse({
-      sites: await withActiveWorkspaceForSiteRead(
-        activeWorkspaceIdBySender.get(event.sender.id),
-        workspace.workspaceId,
-        async () => {
-          return listOwnedSitePackages(workspace);
-        },
-      ),
-    });
-  });
-
-  ipcMain.handle(CHANNELS.getSitePackage, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SitePackagePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // Same active-workspace check as listSites just above — without it, a
-    // stale or compromised renderer can read another workspace's full
-    // package-script bodies and share manifest by naming its id.
-    return SitePackageResult.parse(
-      await withActiveWorkspaceForSiteRead(
-        activeWorkspaceIdBySender.get(event.sender.id),
-        workspace.workspaceId,
-        async () => {
-          const sites = await listOwnedSitePackages(workspace);
-          return getSitePackage(
+  for (const [channel, handler] of Object.entries(
+    createSitesIpcHandlers({
+      authority: senderWorkspaceAuthority,
+      catalog: {
+        list: listOwnedSitePackages,
+        get: async (workspace, path, effectiveMode) =>
+          getSitePackage(
             workspace.rootPath,
-            input.path,
-            sites,
-            input.effectivePreviewMode,
-          );
-        },
-      ),
-    );
-  });
+            path,
+            await listOwnedSitePackages(workspace),
+            effectiveMode,
+          ),
+      },
+    }),
+  )) {
+    ipcMain.handle(channel, handler);
+  }
 
   ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
     assertTrustedSender(event);
