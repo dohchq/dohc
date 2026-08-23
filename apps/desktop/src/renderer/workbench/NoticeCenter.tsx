@@ -102,7 +102,7 @@ export function NoticeCenter(props: {
   // Opens the rebuild confirmation for a refused data store (#874). The
   // shell owns the dialog and the move; the notice only announces the
   // refusal and offers the way in.
-  onRebuildEngineStore: () => void;
+  onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
   // Changes a share recipient sent to this workspace, awaiting the granter
   // (#646 PR3a). One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -298,7 +298,12 @@ export function NoticeCenter(props: {
         tone: "danger",
         title: engineStoreRefusalSentence(props.syncStatus.engineStoreRefused),
         body: `Your files are untouched. Rebuild moves the data store to ${ENGINE_STORE_BACKUP_DIR} and rebuilds history from your files.`,
-        action: { label: "Rebuild", onClick: props.onRebuildEngineStore },
+        action: {
+          label: "Rebuild",
+          onClick: () => {
+            if (toggleRef.current) props.onRebuildEngineStore(toggleRef.current);
+          },
+        },
         Icon: AlertTriangle,
       });
     } else if (props.syncStatus?.historyCaptureFailed) {

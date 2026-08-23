@@ -2397,18 +2397,17 @@ export function DesktopWorkspaceShell(props: {
   ]);
 
   const reportShellError = useCallback((fallback: string, error: unknown) => {
+    const detail = error instanceof Error ? error.message.trim() : "";
     setShellError({
-      message: error instanceof Error ? error.message : fallback,
+      message:
+        detail && detail !== fallback && !detail.startsWith(`${fallback} `)
+          ? `${fallback} ${detail}`
+          : detail || fallback,
       retry: null,
     });
   }, []);
-  // What a failed snapshot lane owes the user, and `reportShellError` supplies
-  // one third of it. It shows the cause and DROPS the fallback, so three lanes
-  // that share one banner arrive as one backend sentence naming none of them —
-  // and the user cannot tell whether sync status, agent runs or the try run
-  // went stale. The lane says WHICH, the cause says why, and the control asks
-  // again: the three parts an error owes (copy.md), in that order, so the lane
-  // survives truncation.
+  // Snapshot lanes share one banner. Keep the lane in the message so the user
+  // can tell which value went stale, then show the cause and a retry control.
   //
   // The retry matters most on the first load. A sibling that fails while the
   // page succeeds renders the timeline, which hides History's own Try again —
@@ -2433,7 +2432,7 @@ export function DesktopWorkspaceShell(props: {
   // Bumped after an engine version operation or a main-process live-session
   // retirement so mounted editors release their old session before reopening.
   const [versionEpoch, setVersionEpoch] = useState(0);
-  const engineRebuildReturnFocusRef = useRef<HTMLElement | null>(null);
+  const engineRebuildReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
   useEffect(() => {
     if (engineRebuildOpen) return;
@@ -6221,13 +6220,10 @@ export function DesktopWorkspaceShell(props: {
         shareChangeNotices={shareChangeNotices}
         onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
-        onRebuildEngineStore={() => {
+        onRebuildEngineStore={(returnFocus) => {
           const refusal = syncStatus?.engineStoreRefused;
           if (!refusal) return;
-          engineRebuildReturnFocusRef.current =
-            document.activeElement instanceof HTMLElement
-              ? document.activeElement
-              : null;
+          engineRebuildReturnFocusRef.current = returnFocus;
           setEngineRebuild({ phase: "confirm", refusal });
         }}
         onToggleTheme={toggleTheme}
@@ -6300,8 +6296,9 @@ export function DesktopWorkspaceShell(props: {
                     and rebuilds history from your files.
                   </p>
                   <p className="mb-0 mt-2 text-xs text-muted">
-                    Past history and chats stay in the moved data store. Your
-                    files are untouched.
+                    The old data store stays in the backup location. History
+                    and chats stored only there will not appear in the rebuilt
+                    workspace. Your workspace files stay in place.
                   </p>
                 </>
               )}

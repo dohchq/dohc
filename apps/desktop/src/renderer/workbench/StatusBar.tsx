@@ -43,7 +43,7 @@ export function StatusBar(props: {
   onOpenSettings: () => void;
   // Opens the rebuild confirmation for a refused data store (#874); the
   // shell owns the dialog, the notice center offers the way in.
-  onRebuildEngineStore: () => void;
+  onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
   onToggleTheme: () => void;
   onContextMenu: () => void;
   agentNotifications?: readonly AgentNotification[];

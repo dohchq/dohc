@@ -207,6 +207,7 @@ describe("moveEngineStoreAside", () => {
     expect(events).toEqual([
       `rename:${join(backupDir, "MOVE_IN_PROGRESS.tmp")}->${join(backupDir, "MOVE_IN_PROGRESS")}`,
       `sync:${backupDir}`,
+      `sync:${engineDir}`,
       `rename:${join(engineDir, "engine.db")}->${join(backupDir, "engine.db")}`,
       `sync:${backupDir}`,
       `sync:${engineDir}`,
@@ -424,6 +425,50 @@ describe("moveEngineStoreAside", () => {
     );
   });
 
+  it("does not raise the rebuild gate when no pending move exists", async () => {
+    const workspace = { workspaceId: "workspace", rootPath: root };
+    const recoveryInspected = deferred();
+    const finishRecoveryInspection = deferred();
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "handle-1" } };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    await sessions.run(workspace, async () => "initially-bound");
+
+    const recovery = completePendingEngineStoreMove(root, {
+      lstat: async (path) => {
+        recoveryInspected.resolve();
+        await finishRecoveryInspection.promise;
+        return lstat(path);
+      },
+      rebuildGate: {
+        begin: () => sessions.beginRebuild(workspace.workspaceId),
+        end: () => sessions.endRebuild(workspace.workspaceId),
+      },
+    });
+    await recoveryInspected.promise;
+    const liveRun = sessions.run(workspace, async () => "bound");
+
+    try {
+      await expect(liveRun).resolves.toBe("bound");
+    } finally {
+      finishRecoveryInspection.resolve();
+      await recovery;
+      await sessions.closeAll();
+    }
+  });
+
   it("refuses a reservation that has only an unpublished manifest", async () => {
     await seedStore({
       "engine.db": "refused-store",
@@ -593,6 +638,41 @@ describe("moveEngineStoreAside", () => {
     );
   });
 
+  it("reports both the move failure and a reservation cleanup failure", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const moveError = new Error("rename denied");
+    const cleanupError = Object.assign(new Error("marker unlink denied"), {
+      code: "EACCES",
+    });
+
+    const failure = await moveEngineStoreAside(root, {
+      rename: async (from, to) => {
+        if (from === join(engineDir, "engine.db")) throw moveError;
+        await rename(from, to);
+      },
+      unlink: async (path) => {
+        if (path === join(backupDir, "MOVE_IN_PROGRESS")) throw cleanupError;
+        await unlink(path);
+      },
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure).toMatchObject({
+      message:
+        "The data store move failed, and dohc could not remove its unused rebuild reservation.",
+      cause: moveError,
+    });
+    expect((failure as AggregateError).errors).toEqual(
+      expect.arrayContaining([moveError, cleanupError]),
+    );
+    expect(await readFile(join(backupDir, "MOVE_IN_PROGRESS"), "utf8")).not.toBe(
+      "",
+    );
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
+      "refused-store",
+    );
+  });
+
   it("releases a fresh stale manifest when the first entry drifts and retries from a new capture", async () => {
     await seedStore({ "engine.db": "refused-store" });
     const source = join(engineDir, "engine.db");
@@ -679,6 +759,37 @@ describe("moveEngineStoreAside", () => {
     });
 
     expect(await readFile(sidecar, "utf8")).toBe("new-wal");
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
+      "engine.db",
+    ]);
+  });
+
+  it("keeps a renamed replacement incomplete when the source changes during rename", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const source = join(engineDir, "engine.db");
+    const destination = join(backupDir, "engine.db");
+    const replacement = "replacement-store-with-different-metadata";
+
+    await expect(
+      moveEngineStoreAside(root, {
+        rename: async (from, to) => {
+          if (from === source) {
+            await unlink(from);
+            await writeFile(from, replacement);
+          }
+          await rename(from, to);
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "EngineStoreManifestDriftError",
+      message: expect.stringContaining(destination),
+    });
+
+    expect(await readFile(destination, "utf8")).toBe(replacement);
+    await expect(readFile(source, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     expect((await readdir(backupDir)).sort()).toEqual([
       "MOVE_IN_PROGRESS",
       "engine.db",
@@ -858,6 +969,30 @@ describe("moveEngineStoreAside", () => {
     ]);
   });
 
+  it("refuses a backup symlink instead of unlinking its matching live source", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const source = join(engineDir, "engine.db");
+    const destination = join(backupDir, "engine.db");
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    await symlink(source, destination, "file");
+
+    await expect(completePendingEngineStoreMove(root)).rejects.toMatchObject({
+      name: "EngineStoreRecoveryFailedError",
+      cause: expect.objectContaining({
+        name: "EngineStoreManifestDriftError",
+        message: expect.stringContaining(destination),
+      }),
+    });
+
+    expect((await lstat(destination)).isSymbolicLink()).toBe(true);
+    expect(await readFile(source, "utf8")).toBe("refused-store");
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
+      "engine.db",
+    ]);
+  });
+
   it("preserves a good source duplicate when the backup copy drifted", async () => {
     await seedStore({ "engine.db": "refused-store" });
     const capturedTime = new Date("2025-01-02T03:04:05.000Z");
@@ -1005,6 +1140,41 @@ describe("moveEngineStoreAside", () => {
     } finally {
       await activity.stopAll();
     }
+  });
+
+  it("keeps the rebuild gate raised when pending recovery fails", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    const workspace = { workspaceId: "workspace", rootPath: root };
+    const renameError = new Error("rename denied");
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        if (request.method === "workspace.open") {
+          return { id: request.id, result: { workspace: "unexpected" } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+
+    await expect(
+      completePendingEngineStoreMove(root, {
+        rename: async () => {
+          throw renameError;
+        },
+        rebuildGate: {
+          begin: () => sessions.beginRebuild(workspace.workspaceId),
+          end: () => sessions.endRebuild(workspace.workspaceId),
+        },
+      }),
+    ).rejects.toMatchObject({ cause: renameError });
+    await expect(
+      sessions.run(workspace, async () => "unexpected"),
+    ).rejects.toEqual(new EngineWorkspaceRebuildingError(workspace.workspaceId));
   });
 
   it("recovers a pending move before a dispatch-scoped capture can open a new store", async () => {
@@ -1435,20 +1605,19 @@ describe("rebuildEngineStore", () => {
               operations.push("reopen");
             }),
           async (rootPath) => {
-            sessions.beginRebuild(workspace.workspaceId);
-            try {
-              await completePendingEngineStoreMove(rootPath, {
-                rename: async (from, to) => {
-                  if (to === join(backupDir, "engine.db")) {
-                    recoveryStarted.resolve();
-                    await finishRecovery.promise;
-                  }
-                  await rename(from, to);
-                },
-              });
-            } finally {
-              sessions.endRebuild(workspace.workspaceId);
-            }
+            await completePendingEngineStoreMove(rootPath, {
+              rename: async (from, to) => {
+                if (to === join(backupDir, "engine.db")) {
+                  recoveryStarted.resolve();
+                  await finishRecovery.promise;
+                }
+                await rename(from, to);
+              },
+              rebuildGate: {
+                begin: () => sessions.beginRebuild(workspace.workspaceId),
+                end: () => sessions.endRebuild(workspace.workspaceId),
+              },
+            });
           },
         ),
     });

@@ -98,7 +98,7 @@ describe("main-process engine store rebuild wiring", () => {
       "export async function withEngineStoreRecovered<T>(",
     );
     const gateEnd = rebuildSource.indexOf(
-      "export async function moveEngineStoreAside(",
+      "async function throwAfterReservationCleanup(",
       gateStart,
     );
     const gate = rebuildSource.slice(gateStart, gateEnd);
@@ -110,10 +110,6 @@ describe("main-process engine store rebuild wiring", () => {
   });
 
   it("keeps the gate raised from the store move through reopen recovery", () => {
-    const helper = sourceBetween(
-      "async function withRebuildBoundGate<T>(",
-      "async function syncWorkspaceForDispatch(",
-    );
     const dispatch = sourceBetween(
       "async function syncWorkspaceForDispatch(",
       "async function ensureWorkspaceActivityOpen(",
@@ -126,16 +122,28 @@ describe("main-process engine store rebuild wiring", () => {
       "ipcMain.handle(CHANNELS.rebuildEngineStore,",
       "ipcMain.handle(CHANNELS.startAgentRun,",
     );
+    const recoveryStart = rebuildSource.indexOf(
+      "export async function completePendingEngineStoreMove(",
+    );
+    const recoveryEnd = rebuildSource.indexOf(
+      "export async function withEngineStoreRecovered<T>(",
+      recoveryStart,
+    );
+    const recovery = rebuildSource.slice(recoveryStart, recoveryEnd);
 
-    expect(helper).toMatch(
-      /beginRebuild\(workspaceId\);\s*const result = await body\(\);\s*sessions\.endRebuild\(workspaceId\);\s*return result;/,
+    expect(mainSource).not.toContain("withRebuildBoundGate");
+    expect(dispatch).toContain("completePendingEngineStoreMove(rootPath, {");
+    expect(dispatch).toContain("rebuildGate: {");
+    expect(open).toContain("completePendingEngineStoreMove(rootPath, {");
+    expect(open).toContain("rebuildGate: {");
+    expect(recovery.indexOf("MOVE_IN_PROGRESS")).toBeLessThan(
+      recovery.indexOf("deps.rebuildGate?.begin()"),
     );
-    expect(helper).not.toContain("finally");
-    expect(dispatch).toMatch(
-      /\},\s*\(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*completePendingEngineStoreMove\(rootPath\),\s*\),\s*\);/,
+    expect(recovery.indexOf("deps.rebuildGate?.begin()")).toBeLessThan(
+      recovery.indexOf("await readMoveManifest(inProgressMarker)"),
     );
-    expect(open).toMatch(
-      /\},\s*\(rootPath\) =>\s*withRebuildBoundGate\(workspace\.workspaceId, \(\) =>\s*completePendingEngineStoreMove\(rootPath\),\s*\),\s*\);/,
+    expect(recovery.indexOf("await completeManifestMove(")).toBeLessThan(
+      recovery.indexOf("deps.rebuildGate?.end()"),
     );
     expect(rebuild).toMatch(
       /moveStoreAside: \(rootPath\) => \{\s*requireEngineSessions\(\)\.beginRebuild\(workspace\.workspaceId\);\s*return moveEngineStoreAside\(rootPath\);\s*\},/,
@@ -145,7 +153,6 @@ describe("main-process engine store rebuild wiring", () => {
     // A handler-wide bracket would make the probe or reopen refuse itself.
     expect((rebuild.match(/beginRebuild\(/g) ?? []).length).toBe(1);
     expect(rebuild).not.toContain("endRebuild(");
-    expect(rebuild).not.toContain("withRebuildBoundGate(");
   });
 
   it("claims every agent run while the workspace rebuild lock is still held", () => {

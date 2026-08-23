@@ -2788,17 +2788,6 @@ const workspaceActivityOpenPromises = new Map<
 >();
 const workspaceActivityClosePromises = new Map<string, Promise<void>>();
 
-async function withRebuildBoundGate<T>(
-  workspaceId: string,
-  body: () => Promise<T>,
-): Promise<T> {
-  const sessions = requireEngineSessions();
-  sessions.beginRebuild(workspaceId);
-  const result = await body();
-  sessions.endRebuild(workspaceId);
-  return result;
-}
-
 async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   return coalesceDispatchScopedSync(
     dispatchScopedSyncs,
@@ -2851,10 +2840,15 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
               await capture.stop().catch(() => undefined);
             }
           },
-          (rootPath) =>
-            withRebuildBoundGate(workspace.workspaceId, () =>
-              completePendingEngineStoreMove(rootPath),
-            ),
+          (rootPath) => {
+            const sessions = requireEngineSessions();
+            return completePendingEngineStoreMove(rootPath, {
+              rebuildGate: {
+                begin: () => sessions.beginRebuild(workspace.workspaceId),
+                end: () => sessions.endRebuild(workspace.workspaceId),
+              },
+            });
+          },
         );
       } catch (error) {
         if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
@@ -2908,10 +2902,15 @@ async function ensureWorkspaceActivityOpen(
       await options.whileEngineStoreLockHeld?.();
       return status;
     },
-    (rootPath) =>
-      withRebuildBoundGate(workspace.workspaceId, () =>
-        completePendingEngineStoreMove(rootPath),
-      ),
+    (rootPath) => {
+      const sessions = requireEngineSessions();
+      return completePendingEngineStoreMove(rootPath, {
+        rebuildGate: {
+          begin: () => sessions.beginRebuild(workspace.workspaceId),
+          end: () => sessions.endRebuild(workspace.workspaceId),
+        },
+      });
+    },
   );
 }
 

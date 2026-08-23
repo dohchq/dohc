@@ -9,7 +9,6 @@ import {
   readFile,
   rename as renameFile,
   rmdir,
-  stat,
   unlink,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -47,9 +46,17 @@ type EngineStoreMoveManifest = z.infer<typeof engineStoreMoveManifestSchema>;
 type EngineStoreMoveFileSystem = {
   lstat: (path: string) => Promise<Stats>;
   rename: typeof renameFile;
+  rmdir: typeof rmdir;
   syncDirectory: (path: string) => Promise<void>;
+  unlink: typeof unlink;
 };
 type EngineStoreMoveDependencies = Partial<EngineStoreMoveFileSystem>;
+type EngineStoreRecoveryDependencies = EngineStoreMoveDependencies & {
+  rebuildGate?: {
+    begin: () => void;
+    end: () => void;
+  };
+};
 
 class EngineStoreManifestDriftError extends Error {
   constructor(path: string, cause?: unknown) {
@@ -92,17 +99,6 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function statIfExists(
-  path: string,
-): Promise<Stats | null> {
-  try {
-    return await stat(path);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return null;
-    throw error;
-  }
-}
-
 async function lstatIfExists(
   path: string,
   fileSystem: EngineStoreMoveFileSystem,
@@ -121,6 +117,7 @@ function matchesManifestEntry(
 ): boolean {
   return (
     metadata !== null &&
+    metadata.isFile() &&
     metadata.size === entry.size &&
     metadata.mtimeMs === entry.mtimeMs
   );
@@ -140,11 +137,16 @@ function parseMoveManifest(contents: string): EngineStoreMoveManifest {
 
 async function captureMoveManifest(
   engineDir: string,
+  fileSystem: EngineStoreMoveFileSystem,
 ): Promise<EngineStoreMoveManifest> {
   const files: EngineStoreMoveManifest["files"] = [];
   for (const name of ENGINE_STORE_FILES) {
-    const metadata = await statIfExists(join(engineDir, name));
+    const path = join(engineDir, name);
+    const metadata = await lstatIfExists(path, fileSystem);
     if (metadata) {
+      if (!metadata.isFile()) {
+        throw new EngineStoreManifestDriftError(path);
+      }
       files.push({ name, size: metadata.size, mtimeMs: metadata.mtimeMs });
     }
   }
@@ -181,7 +183,9 @@ function moveFileSystem(
   return {
     lstat: deps.lstat ?? lstat,
     rename: deps.rename ?? renameFile,
+    rmdir: deps.rmdir ?? rmdir,
     syncDirectory: deps.syncDirectory ?? syncDirectory,
+    unlink: deps.unlink ?? unlink,
   };
 }
 
@@ -202,7 +206,7 @@ async function writeMoveManifest(
     }
     await fileSystem.rename(tempMarker, inProgressMarker);
   } catch (error) {
-    await unlink(tempMarker).catch(() => undefined);
+    await fileSystem.unlink(tempMarker).catch(() => undefined);
     throw error;
   }
 
@@ -251,28 +255,37 @@ async function completeManifestMove(
     if (!entry) continue;
     const from = join(engineDir, entry.name);
     const to = join(backupDir, entry.name);
-    const backup = await statIfExists(to);
+    const backup = await lstatIfExists(to, fileSystem);
     if (backup !== null) {
       if (!matchesManifestEntry(backup, entry)) {
         throw new EngineStoreManifestDriftError(to);
       }
-      const duplicate = await statIfExists(from);
+      const duplicate = await lstatIfExists(from, fileSystem);
       if (duplicate === null) continue;
       if (!matchesManifestEntry(duplicate, entry)) {
         throw new EngineStoreManifestDriftError(from);
       }
-      await unlink(from);
+      await fileSystem.unlink(from);
       continue;
     }
 
-    const live = await statIfExists(from);
-    if (!matchesManifestEntry(live, entry)) {
+    const live = await lstatIfExists(from, fileSystem);
+    if (live === null || !matchesManifestEntry(live, entry)) {
       throw new EngineStoreManifestDriftError(from);
     }
 
     try {
       await fileSystem.rename(from, to);
       onMoved?.();
+      const moved = await lstatIfExists(to, fileSystem);
+      if (
+        moved === null ||
+        !moved.isFile() ||
+        moved.size !== live.size ||
+        moved.mtimeMs !== live.mtimeMs
+      ) {
+        throw new EngineStoreManifestDriftError(to);
+      }
     } catch (error) {
       if (errorCode(error) === "ENOENT") {
         throw new EngineStoreManifestDriftError(from, error);
@@ -292,7 +305,7 @@ async function completeManifestMove(
 
 export async function completePendingEngineStoreMove(
   rootPath: string,
-  deps: EngineStoreMoveDependencies = {},
+  deps: EngineStoreRecoveryDependencies = {},
 ): Promise<void> {
   try {
     const fileSystem = moveFileSystem(deps);
@@ -303,6 +316,7 @@ export async function completePendingEngineStoreMove(
     const completeMarker = join(backupDir, MOVE_COMPLETE);
     if ((await exists(completeMarker)) || !(await exists(inProgressMarker))) return;
 
+    deps.rebuildGate?.begin();
     const manifest = await readMoveManifest(inProgressMarker);
     await completeManifestMove(
       join(rootPath, ".dohc", "engine"),
@@ -312,6 +326,7 @@ export async function completePendingEngineStoreMove(
       manifest,
       fileSystem,
     );
+    deps.rebuildGate?.end();
   } catch (error) {
     throw new EngineStoreRecoveryFailedError(error);
   }
@@ -332,6 +347,43 @@ export async function withEngineStoreRecovered<T>(
   };
   if (alreadySerialized) return recovered();
   return withKeyedStartLock(locks, workspace.workspaceId, recovered);
+}
+
+async function throwAfterReservationCleanup(
+  engineDir: string,
+  backupDir: string,
+  inProgressMarker: string,
+  triggeringError: unknown,
+  fileSystem: EngineStoreMoveFileSystem,
+): Promise<never> {
+  const cleanupErrors: unknown[] = [];
+  for (const path of [
+    join(backupDir, MOVE_IN_PROGRESS_TEMP),
+    inProgressMarker,
+  ]) {
+    try {
+      await fileSystem.unlink(path);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") cleanupErrors.push(error);
+    }
+  }
+  try {
+    await fileSystem.rmdir(backupDir);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") cleanupErrors.push(error);
+  }
+  try {
+    await fileSystem.syncDirectory(engineDir);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+
+  if (cleanupErrors.length === 0) throw triggeringError;
+  throw new AggregateError(
+    [triggeringError, ...cleanupErrors],
+    "The data store move failed, and dohc could not remove its unused rebuild reservation.",
+    { cause: triggeringError },
+  );
 }
 
 export async function moveEngineStoreAside(
@@ -360,7 +412,7 @@ export async function moveEngineStoreAside(
   let manifest: EngineStoreMoveManifest;
   if (freshReservation) {
     try {
-      manifest = await captureMoveManifest(engineDir);
+      manifest = await captureMoveManifest(engineDir, fileSystem);
       if (!manifest.files.some(({ name }) => name === "engine.db")) {
         const liveDatabase = join(engineDir, "engine.db");
         throw Object.assign(
@@ -374,8 +426,15 @@ export async function moveEngineStoreAside(
         manifest,
         fileSystem,
       );
+      await fileSystem.syncDirectory(engineDir);
     } catch (error) {
-      await rmdir(backupDir).catch(() => undefined);
+      await throwAfterReservationCleanup(
+        engineDir,
+        backupDir,
+        inProgressMarker,
+        error,
+        fileSystem,
+      );
       throw error;
     }
   } else {
@@ -398,8 +457,13 @@ export async function moveEngineStoreAside(
     return "moved";
   } catch (error) {
     if (freshReservation && !movedAny) {
-      await unlink(inProgressMarker).catch(() => undefined);
-      await rmdir(backupDir).catch(() => undefined);
+      await throwAfterReservationCleanup(
+        engineDir,
+        backupDir,
+        inProgressMarker,
+        error,
+        fileSystem,
+      );
     }
     throw error;
   }

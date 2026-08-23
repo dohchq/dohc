@@ -6013,35 +6013,14 @@ describe("engine store recovery", () => {
     bridge.rebuildEngineStore = vi.fn(() => decision.promise);
     vi.stubGlobal("dohcDesktop", bridge);
     const user = userEvent.setup();
-    render(
-      <>
-        <button
-          type="button"
-          onClick={() => {
-            fireEvent.click(
-              within(
-                screen.getByTestId("notice-engine-store-refused"),
-              ).getByRole("button", { name: "Rebuild" }),
-            );
-          }}
-        >
-          Open rebuild test dialog
-        </button>
-        <DesktopWorkspaceShell
-          workspace={WORKSPACE}
-          workspaces={[WORKSPACE]}
-          onSwitchWorkspace={() => {}}
-        />
-      </>,
+    renderShell(bridge);
+    const trigger = await screen.findByTestId("notice-center-toggle");
+    await user.click(trigger);
+    await user.click(
+      within(
+        await screen.findByTestId("notice-engine-store-refused"),
+      ).getByRole("button", { name: "Rebuild" }),
     );
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    const trigger = screen.getByRole("button", {
-      name: "Open rebuild test dialog",
-    });
-
-    trigger.focus();
-    expect(document.activeElement).toBe(trigger);
-    fireEvent.click(trigger);
 
     const dialog = await screen.findByTestId("engine-rebuild-dialog");
     expect(dialog.contains(document.activeElement)).toBe(true);
@@ -6103,7 +6082,7 @@ describe("engine store recovery", () => {
     );
     expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(dialog.textContent).toContain(
-      "Past history and chats stay in the moved data store.",
+      "The old data store stays in the backup location. History and chats stored only there will not appear in the rebuilt workspace. Your workspace files stay in place.",
     );
     expect(bridge.rebuildEngineStore).not.toHaveBeenCalled();
 
@@ -6537,7 +6516,9 @@ describe("engine store recovery", () => {
     );
     expect(
       (await screen.findByTestId("workspace-shell-error")).textContent,
-    ).toContain("EACCES: permission denied");
+    ).toContain(
+      "dohc could not move this workspace's data store. EACCES: permission denied",
+    );
     expect(screen.queryByTestId("engine-rebuild-dialog")).toBeNull();
   });
 
