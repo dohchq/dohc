@@ -8,7 +8,8 @@ import {
   PLUGIN_INSTALL_TIMEOUT_MS,
   type PluginPnpmPaths,
 } from "./pluginSourceSnapshot";
-import { delay, errorMessage, isInside } from "./pluginShared";
+import { isInside } from "../security/pathContainment";
+import { delay, errorMessage } from "./pluginShared";
 
 const MAX_LOG_ENTRIES = 500;
 const PLUGIN_INSTALL_SERVICE_NAME = "dohc.plugin.install";

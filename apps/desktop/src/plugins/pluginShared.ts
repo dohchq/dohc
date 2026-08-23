@@ -1,5 +1,4 @@
 import { rename, rm } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
 
 /**
  * Helpers every plugin pipeline module used to carry its own copy of.
@@ -71,19 +70,6 @@ export function awaitCommandClaimsDrainedWithDeadline(
     void drained.then((lower) => lower()).catch(() => undefined);
     return () => {};
   });
-}
-
-export function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const pathFromParent = relative(parent, child);
-  // The ".." has to be a whole segment. Testing the prefix alone rejected
-  // real contained names — a child under "..cache/" is inside the root.
-  return (
-    pathFromParent.length > 0 &&
-    !isAbsolute(pathFromParent) &&
-    pathFromParent !== ".." &&
-    !pathFromParent.startsWith(`..${sep}`)
-  );
 }
 
 export const WINDOWS_RENAME_RETRY_DELAYS_MS = [100, 150, 200, 250, 300] as const;

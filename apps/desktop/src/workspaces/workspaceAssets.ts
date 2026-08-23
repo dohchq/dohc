@@ -14,8 +14,9 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { TextDecoder } from "node:util";
+import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
@@ -40,17 +41,6 @@ const MEDIA_TYPES: Record<string, string> = {
 export function mediaTypeForExtension(path: string): string {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   return MEDIA_TYPES[ext] ?? "application/octet-stream";
-}
-
-function isInside(parent: string, child: string): boolean {
-  if (child === parent) return true;
-  const rel = relative(parent, child);
-  return (
-    rel.length > 0 &&
-    !isAbsolute(rel) &&
-    !rel.startsWith("..") &&
-    !rel.startsWith(sep)
-  );
 }
 
 function assertWriteNotAborted(signal?: AbortSignal): void {

@@ -18,9 +18,9 @@ import {
   type DohcPluginManifest,
 } from "./pluginManifestSchema";
 import { workspaceStateKey } from "./pluginLocalState";
+import { isInside } from "../security/pathContainment";
 import {
   errorMessage,
-  isInside,
   lexicalCompare,
   removeStaging,
   renameWithWindowsRetry,
@@ -626,13 +626,6 @@ async function validatePluginRoot(
   }
 
   const resolvedPluginRoot = resolve(pluginRoot);
-  if (!isInside(pluginsRoot, resolvedPluginRoot)) {
-    throw new SnapshotError(
-      "invalid-plugin-root",
-      `Plugin root at ${resolvedPluginRoot} is outside the workspace plugins tree at ${pluginsRoot}.`,
-      resolvedPluginRoot,
-    );
-  }
   const realPluginRoot = await inspectRealDirectory(
     resolvedPluginRoot,
     "Plugin root",
@@ -641,7 +634,7 @@ async function validatePluginRoot(
   if (!isInside(realPluginsRoot, realPluginRoot)) {
     throw new SnapshotError(
       "invalid-plugin-root",
-      `Plugin root at ${resolvedPluginRoot} resolves outside the real source tree at ${realPluginsRoot}.`,
+      `Plugin root at ${resolvedPluginRoot} resolves outside the workspace plugins tree at ${realPluginsRoot}.`,
       resolvedPluginRoot,
     );
   }

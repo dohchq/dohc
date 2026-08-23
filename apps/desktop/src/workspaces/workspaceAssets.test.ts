@@ -1060,3 +1060,14 @@ describe("mediaTypeForExtension", () => {
     expect(mediaTypeForExtension("script.js")).toBe("application/octet-stream");
   });
 });
+
+describe("containment of '..'-prefixed names", () => {
+  it("writes an asset into a directory whose NAME starts with '..'", async () => {
+    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
+    const root = await makeWorkspace();
+    await writeWorkspaceAsset(root, "..cache/pixel.png", new Uint8Array([1, 2, 3]));
+    expect(
+      new Uint8Array(await readFile(join(root, "..cache", "pixel.png"))),
+    ).toEqual(new Uint8Array([1, 2, 3]));
+  });
+});
