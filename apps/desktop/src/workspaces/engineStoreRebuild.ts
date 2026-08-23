@@ -223,7 +223,11 @@ async function completeManifestMove(
     if (!entry) continue;
     const from = join(engineDir, entry.name);
     const to = join(backupDir, entry.name);
-    if (await exists(to)) {
+    const backup = await statIfExists(to);
+    if (backup !== null) {
+      if (!matchesManifestEntry(backup, entry)) {
+        throw new EngineStoreManifestDriftError(to);
+      }
       const duplicate = await statIfExists(from);
       if (duplicate === null) continue;
       if (!matchesManifestEntry(duplicate, entry)) {
@@ -361,11 +365,7 @@ export async function moveEngineStoreAside(
     );
     return "moved";
   } catch (error) {
-    if (
-      freshReservation &&
-      !movedAny &&
-      !(error instanceof EngineStoreManifestDriftError)
-    ) {
+    if (freshReservation && !movedAny) {
       await unlink(inProgressMarker).catch(() => undefined);
       await rmdir(backupDir).catch(() => undefined);
     }

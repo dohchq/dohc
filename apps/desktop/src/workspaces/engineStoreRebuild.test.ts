@@ -21,6 +21,7 @@ import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
 import {
   completePendingEngineStoreMove,
   EngineStoreCloseFailedError,
+  EngineStoreAgentRunActiveError,
   EngineStoreNotRefusedError,
   EngineStoreRecoveryFailedError,
   moveEngineStoreAside,
@@ -562,6 +563,42 @@ describe("moveEngineStoreAside", () => {
     );
   });
 
+  it("releases a fresh stale manifest when the first entry drifts and retries from a new capture", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const source = join(engineDir, "engine.db");
+    const inProgressMarker = join(backupDir, "MOVE_IN_PROGRESS");
+    let changedAfterManifest = false;
+
+    await expect(
+      moveEngineStoreAside(root, {
+        syncDirectory: async (path) => {
+          if (path !== backupDir || changedAfterManifest) return;
+          const manifest = await readMoveManifest();
+          expect(manifest.files[0]?.name).toBe("engine.db");
+          changedAfterManifest = true;
+          await writeFile(source, "changed-before-the-first-move");
+        },
+      }),
+    ).rejects.toMatchObject({ name: "EngineStoreManifestDriftError" });
+
+    expect(await readFile(source, "utf8")).toBe(
+      "changed-before-the-first-move",
+    );
+    await expect(readFile(inProgressMarker, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(readdir(backupDir)).rejects.toMatchObject({ code: "ENOENT" });
+
+    await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
+    expect(await readFile(join(backupDir, "engine.db"), "utf8")).toBe(
+      "changed-before-the-first-move",
+    );
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_COMPLETE",
+      "engine.db",
+    ]);
+  });
+
   it("keeps a partial backup when a resumed move fails", async () => {
     await seedStore({
       "engine.db": "refused-store",
@@ -685,6 +722,37 @@ describe("moveEngineStoreAside", () => {
     expect(await readFile(destination, "utf8")).toBe(backupContents);
     expect((await readdir(backupDir)).sort()).toEqual([
       "MOVE_COMPLETE",
+      "engine.db",
+    ]);
+  });
+
+  it("preserves a good source duplicate when the backup copy drifted", async () => {
+    await seedStore({ "engine.db": "refused-store" });
+    const capturedTime = new Date("2025-01-02T03:04:05.000Z");
+    const source = join(engineDir, "engine.db");
+    const destination = join(backupDir, "engine.db");
+    await utimes(source, capturedTime, capturedTime);
+    await mkdir(backupDir);
+    await writeMoveManifest(["engine.db"]);
+    await rename(source, destination);
+    await writeFile(source, "refused-store");
+    await utimes(source, capturedTime, capturedTime);
+    await writeFile(destination, "corrupt-backup-copy-with-a-different-size");
+    const sourceContents = await readFile(source, "utf8");
+    const backupContents = await readFile(destination, "utf8");
+
+    await expect(completePendingEngineStoreMove(root)).rejects.toMatchObject({
+      name: "EngineStoreRecoveryFailedError",
+      cause: expect.objectContaining({
+        name: "EngineStoreManifestDriftError",
+        message: expect.stringContaining(destination),
+      }),
+    });
+
+    expect(await readFile(source, "utf8")).toBe(sourceContents);
+    expect(await readFile(destination, "utf8")).toBe(backupContents);
+    expect((await readdir(backupDir)).sort()).toEqual([
+      "MOVE_IN_PROGRESS",
       "engine.db",
     ]);
   });
@@ -1005,6 +1073,77 @@ describe("moveEngineStoreAside", () => {
       "activity.open:2:start",
       "activity.open:2:end",
       "rebuild-reopen-finished",
+    ]);
+    await activity.stopAll();
+  });
+
+  it("holds the workspace lock through an agent-run claim so a queued rebuild refuses", async () => {
+    const locks = new Map<string, Promise<void>>();
+    const currentWorkspace = {
+      workspaceId: "workspace",
+      rootPath: root,
+      kind: "personal" as const,
+      mode: "local-first" as const,
+    };
+    const openFinished = deferred();
+    const finishClaim = deferred();
+    const activity = createWorkspaceActivity(() => {});
+    const closeActivity = vi.fn(async () => {
+      await activity.close(currentWorkspace.workspaceId);
+    });
+    const moveStoreAside = vi.fn(async () => "moved" as const);
+    const reopenActivity = vi.fn(async () => {
+      await activity.open(currentWorkspace);
+    });
+    const starting = withEngineStoreRecovered(
+      locks,
+      currentWorkspace,
+      false,
+      async () => {
+        await activity.open(currentWorkspace);
+        openFinished.resolve();
+        await finishClaim.promise;
+        expect(
+          await activity.claimAgentRun(currentWorkspace.workspaceId, {
+            agentId: "dohc-mcp",
+            onBehalfOf: "local",
+            agentRunId: "run-1",
+          }),
+        ).toBe(true);
+      },
+    );
+    await openFinished.promise;
+
+    const rebuilding = withKeyedStartLock(
+      locks,
+      currentWorkspace.workspaceId,
+      () =>
+        rebuildEngineStoreRequest(root, {
+          isStoreRefused: () => true,
+          hasActiveAgentRun: () =>
+            activity.hasAgentRun(currentWorkspace.workspaceId),
+          previousResult: () => undefined,
+          rememberResult: vi.fn(),
+          closeActivity,
+          probeStoreRefusal: async () => "foreign-database",
+          moveStoreAside,
+          reopenActivity,
+        }),
+    );
+    await Promise.resolve();
+    expect(closeActivity).not.toHaveBeenCalled();
+
+    finishClaim.resolve();
+    await starting;
+    expect(activity.hasAgentRun(currentWorkspace.workspaceId)).toBe(true);
+    await expect(rebuilding).rejects.toBeInstanceOf(
+      EngineStoreAgentRunActiveError,
+    );
+    expect(closeActivity).not.toHaveBeenCalled();
+    expect(moveStoreAside).not.toHaveBeenCalled();
+    expect(reopenActivity).not.toHaveBeenCalled();
+    expect(activity.listOpenWorkspaceIds()).toEqual([
+      currentWorkspace.workspaceId,
     ]);
     await activity.stopAll();
   });

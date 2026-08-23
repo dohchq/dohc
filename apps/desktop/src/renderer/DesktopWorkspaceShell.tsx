@@ -2430,8 +2430,8 @@ export function DesktopWorkspaceShell(props: {
     | { phase: "backup-exists"; reopenFailed?: string }
     | null
   >(null);
-  // Bumped after an engine version operation or a rebuild that closed sessions
-  // so mounted editors release their old engine session before opening another.
+  // Bumped after an engine version operation or a main-process live-session
+  // retirement so mounted editors release their old session before reopening.
   const [versionEpoch, setVersionEpoch] = useState(0);
   const engineRebuildReturnFocusRef = useRef<HTMLElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
@@ -2461,9 +2461,6 @@ export function DesktopWorkspaceShell(props: {
           phase: result.outcome,
           ...(result.reopenFailed ? { reopenFailed: result.reopenFailed } : {}),
         });
-        if (result.sessionsClosed) {
-          setVersionEpoch((epoch) => epoch + 1);
-        }
       } catch (error) {
         if (engineRebuildToken.current !== token) return;
         setEngineRebuild(null);
@@ -2588,6 +2585,22 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  const liveSessionsGenerationRef = useRef<{
+    workspaceId: string;
+    generation: number | null;
+  }>({ workspaceId, generation: null });
+  if (liveSessionsGenerationRef.current.workspaceId !== workspaceId) {
+    liveSessionsGenerationRef.current = { workspaceId, generation: null };
+  }
+  useEffect(() => {
+    if (captureDecidedFor !== workspaceId || syncStatus === null) return;
+    const next = syncStatus.liveSessionsGeneration ?? 0;
+    const previous = liveSessionsGenerationRef.current.generation;
+    liveSessionsGenerationRef.current.generation = next;
+    if (previous !== null && previous !== next) {
+      setVersionEpoch((epoch) => epoch + 1);
+    }
+  }, [captureDecidedFor, syncStatus, workspaceId]);
   const [agentActive, agentActiveLane] = useSnapshotLane(engineHistoryToken, false);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the

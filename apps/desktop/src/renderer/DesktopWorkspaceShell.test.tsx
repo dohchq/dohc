@@ -292,7 +292,7 @@ function deferred<T>() {
 }
 
 function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
-  let activityCallback: (() => void) | null = null;
+  const activityCallbacks = new Set<() => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
   let pluginPanelOpenedCallback:
@@ -302,7 +302,9 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     | ((event: PluginWebAppOpenedEvent) => void)
     | null = null;
   return {
-    emitWorkspaceActivity: () => activityCallback?.(),
+    emitWorkspaceActivity: () => {
+      for (const callback of [...activityCallbacks]) callback();
+    },
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
       pluginPanelOpenedCallback?.(event),
@@ -554,9 +556,9 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       }),
     ),
     onWorkspaceActivity: vi.fn((callback: () => void) => {
-      activityCallback = callback;
+      activityCallbacks.add(callback);
       return () => {
-        activityCallback = null;
+        activityCallbacks.delete(callback);
       };
     }),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
@@ -6157,11 +6159,18 @@ describe("engine store recovery", () => {
     "reopens a mounted live document after a %s result and sends the next edit to the fresh session",
     async (outcome) => {
       const rebuild = deferred<RebuildEngineStoreResult>();
+      let liveSessionsGeneration = 0;
       const bridge = makeEngineBridge(
         Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
       );
-      bridge.openWorkspace = vi.fn(async () => refusedStatus);
-      bridge.getSyncStatus = vi.fn(async () => refusedStatus);
+      bridge.openWorkspace = vi.fn(async () => ({
+        ...refusedStatus,
+        liveSessionsGeneration,
+      }));
+      bridge.getSyncStatus = vi.fn(async () => ({
+        ...refusedStatus,
+        liveSessionsGeneration,
+      }));
       bridge.rebuildEngineStore = vi.fn(() => rebuild.promise);
       const sessionIds: string[] = [];
       const openEngineYDocSession = vi.fn(
@@ -6210,6 +6219,8 @@ describe("engine store recovery", () => {
       expect(closeEngineYDocSession).not.toHaveBeenCalled();
 
       await act(async () => {
+        liveSessionsGeneration += 1;
+        bridge.emitWorkspaceActivity();
         rebuild.resolve({ outcome, sessionsClosed: true });
         await rebuild.promise;
       });
@@ -6230,6 +6241,194 @@ describe("engine store recovery", () => {
       );
     },
   );
+
+  it("remounts live editors in every shell when one shell rebuilds the workspace", async () => {
+    const rebuild = deferred<RebuildEngineStoreResult>();
+    let liveSessionsGeneration = 0;
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    bridge.openWorkspace = vi.fn(async () => ({
+      ...refusedStatus,
+      liveSessionsGeneration,
+    }));
+    bridge.getSyncStatus = vi.fn(async () => ({
+      ...refusedStatus,
+      liveSessionsGeneration,
+    }));
+    bridge.rebuildEngineStore = vi.fn(() => rebuild.promise);
+    const openedSessions: Array<{
+      path: string;
+      sessionId: string;
+      workspaceId: string;
+    }> = [];
+    const openEngineYDocSession = vi.fn(
+      async (payload: {
+        path: string;
+        sessionId: string;
+        workspaceId: string;
+      }) => {
+        openedSessions.push(payload);
+        const doc = markdownToYDoc("# Doc\n");
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
+      },
+    );
+    const closeEngineYDocSession = vi.fn(
+      async (_payload: { sessionId: string }) => undefined,
+    );
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession,
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const first = render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
+    bridge.getWorkspaceUiState.mockResolvedValue(
+      storedStateWithTabs(["b.md"], "b.md"),
+    );
+    const second = render(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={[WORKSPACE]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
+    expect(openedSessions.slice(0, 2).map(({ path }) => path).sort()).toEqual([
+      "a.md",
+      "b.md",
+    ]);
+
+    const user = userEvent.setup();
+    await user.click(
+      await within(first.container).findByTestId("notice-center-toggle"),
+    );
+    await user.click(
+      within(
+        await within(first.container).findByTestId(
+          "notice-engine-store-refused",
+        ),
+      ).getByRole("button", { name: "Rebuild" }),
+    );
+    await user.click(
+      within(
+        within(first.container).getByTestId("engine-rebuild-dialog"),
+      ).getByRole("button", { name: "Move and rebuild" }),
+    );
+    await waitFor(() => expect(bridge.rebuildEngineStore).toHaveBeenCalledOnce());
+
+    const originalSessionIds = openedSessions
+      .slice(0, 2)
+      .map(({ sessionId }) => sessionId)
+      .sort();
+    await act(async () => {
+      liveSessionsGeneration = 1;
+      bridge.emitWorkspaceActivity();
+      rebuild.resolve({ outcome: "moved", sessionsClosed: true });
+      await rebuild.promise;
+    });
+
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(closeEngineYDocSession).toHaveBeenCalledTimes(2));
+    expect(
+      closeEngineYDocSession.mock.calls
+        .map(([payload]) => payload.sessionId)
+        .sort(),
+    ).toEqual(originalSessionIds);
+    expect(
+      openedSessions.slice(2).map(({ path }) => path).sort(),
+    ).toEqual(["a.md", "b.md"]);
+    expect(
+      openedSessions
+        .slice(2)
+        .map(({ sessionId }) => sessionId)
+        .sort(),
+    ).not.toEqual(originalSessionIds);
+    second.unmount();
+  });
+
+  it("baselines the live-session generation when the shell switches workspaces", async () => {
+    const workspaceB: Workspace = {
+      ...WORKSPACE,
+      workspaceId: "ws-shell-b",
+      rootPath: "/home/ice/dohc/b",
+    };
+    let currentStatus: SyncStatusResult = {
+      ...SYNC_STATUS,
+      liveSessionsGeneration: 5,
+    };
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
+    );
+    bridge.openWorkspace = vi.fn(async () => currentStatus);
+    bridge.getSyncStatus = vi.fn(async () => currentStatus);
+    const openEngineYDocSession = vi.fn(
+      async (_payload: { workspaceId: string }) => {
+        const doc = markdownToYDoc("# Doc\n");
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(doc),
+          lineageGeneration: 1,
+        };
+      },
+    );
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    });
+    const view = renderShell(bridge, WORKSPACE, [WORKSPACE, workspaceB]);
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
+
+    currentStatus = { ...SYNC_STATUS, liveSessionsGeneration: 0 };
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={workspaceB}
+        workspaces={[WORKSPACE, workspaceB]}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        openEngineYDocSession.mock.calls.filter(
+          ([payload]) => payload.workspaceId === workspaceB.workspaceId,
+        ),
+      ).toHaveLength(1),
+    );
+    await waitFor(() =>
+      expect(bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: workspaceB.workspaceId,
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      openEngineYDocSession.mock.calls.filter(
+        ([payload]) => payload.workspaceId === workspaceB.workspaceId,
+      ),
+    ).toHaveLength(1);
+  });
 
   it("keeps a mounted live document on its current session when the rebuild rejects", async () => {
     const bridge = makeEngineBridge(

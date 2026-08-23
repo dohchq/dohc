@@ -149,10 +149,13 @@ export function createWorkspaceActivity(
 ) {
   const watched = new Map<string, WatchedWorkspace>();
   const preservedStatuses = new Map<string, SyncStatusResult>();
+  const liveSessionsGenerations = new Map<string, number>();
 
   function statusFor(workspaceId: string): SyncStatusResult {
+    const liveSessionsGeneration =
+      liveSessionsGenerations.get(workspaceId) ?? 0;
     const preserved = preservedStatuses.get(workspaceId);
-    if (preserved) return preserved;
+    if (preserved) return { ...preserved, liveSessionsGeneration };
     const w = watched.get(workspaceId);
     const cloud = options.cloudStateFor?.(workspaceId) ?? {
       enabled: false,
@@ -185,6 +188,7 @@ export function createWorkspaceActivity(
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
       syncFailing: snap?.syncFailing ?? false,
+      liveSessionsGeneration,
     };
     if (historyCaptureFailure) {
       return {
@@ -362,7 +366,7 @@ export function createWorkspaceActivity(
   // folder/registry state without tearing down every other workspace.
   async function close(
     workspaceId: string,
-    closeOptions: { preserveStatus?: boolean } = {},
+    closeOptions: { preserveStatus?: boolean; notify?: boolean } = {},
   ): Promise<void> {
     const entry = watched.get(workspaceId);
     if (!entry) return;
@@ -381,10 +385,16 @@ export function createWorkspaceActivity(
         entry.capture?.settleAndCloseAllLiveSessions(),
       ),
     ]);
+    if (entry.capture) {
+      liveSessionsGenerations.set(
+        workspaceId,
+        (liveSessionsGenerations.get(workspaceId) ?? 0) + 1,
+      );
+    }
     const captureStopped = await Promise.allSettled([
       Promise.resolve().then(() => entry.capture?.stop()),
     ]);
-    notify();
+    if (closeOptions.notify !== false) notify();
     const failed = [...stopped, ...liveSessionsRetired, ...captureStopped].find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );

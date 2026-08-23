@@ -24,8 +24,8 @@ describe("main-process engine store rebuild wiring", () => {
     );
 
     expect(close).toContain("closeWorkspaceActivityAndRelay({");
-    expect(close).toContain(
-      "closeActivity: () => activity.close(workspaceId, { preserveStatus: true })",
+    expect(close).toMatch(
+      /closeActivity: \(\) =>\s*activity\.close\(workspaceId, \{\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
     );
     expect(close).toContain(
       "closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId)",
@@ -74,7 +74,9 @@ describe("main-process engine store rebuild wiring", () => {
 
     expect(open).toContain("return withEngineStoreRecovered(");
     expect(open).toContain("engineStoreRebuildLocks,");
-    expect(open).toContain("engineStoreMoveAlreadySerialized,");
+    expect(open).toContain(
+      "options.engineStoreMoveAlreadySerialized ?? false,",
+    );
     expect(open.indexOf("withEngineStoreRecovered(")).toBeLessThan(
       open.indexOf("activity.open(workspace)"),
     );
@@ -83,8 +85,10 @@ describe("main-process engine store rebuild wiring", () => {
     expect(rebuild).toContain("withKeyedStartLock(");
     expect(rebuild).toContain("engineStoreRebuildLocks,");
     expect(rebuild).toContain("rebuildEngineStoreRequest(workspace.rootPath,");
-    expect(rebuild).toContain(
-      "openWorkspaceActivity(workspace, undefined, true)",
+    expect(rebuild).toContain("engineStoreMoveAlreadySerialized: true");
+    expect(rebuild).toContain("notifyRenderer: false");
+    expect(rebuild).toMatch(
+      /catch \(error\) \{\s*notifyRenderer\(\);\s*throw error;/,
     );
     expect(rebuild).toMatch(
       /hasActiveAgentRun: \(\) =>\s*activity\.hasAgentRun\(workspace\.workspaceId\)/,
@@ -142,5 +146,51 @@ describe("main-process engine store rebuild wiring", () => {
     expect((rebuild.match(/beginRebuild\(/g) ?? []).length).toBe(1);
     expect(rebuild).not.toContain("endRebuild(");
     expect(rebuild).not.toContain("withRebuildBoundGate(");
+  });
+
+  it("claims every agent run while the workspace rebuild lock is still held", () => {
+    const open = sourceBetween(
+      "async function ensureWorkspaceActivityOpen(",
+      "async function closeDispatchRunActivity(",
+    );
+    const helper = sourceBetween(
+      "async function startAgentRunWithWorkspaceActivity(",
+      "interface RunningPluginPanel",
+    );
+    const tryInVersion = sourceBetween(
+      "const tryInVersionSessions = createTryInVersionSessions({",
+      "async function workspaceAgentDefaults(",
+    );
+    const sessionManager = sourceBetween(
+      "async function agentSessionManager(",
+      "// Linked Chats",
+    );
+    const ipc = sourceBetween(
+      "ipcMain.handle(CHANNELS.startAgentRun,",
+      "ipcMain.handle(CHANNELS.endAgentRun,",
+    );
+
+    expect(open).toContain("whileEngineStoreLockHeld");
+    expect(open).toContain("await options.whileEngineStoreLockHeld?.()");
+    expect(open.indexOf("await opening")).toBeLessThan(
+      open.indexOf("await options.whileEngineStoreLockHeld?.()"),
+    );
+    expect(open.indexOf("await existing")).toBeLessThan(
+      open.indexOf("await options.whileEngineStoreLockHeld?.()"),
+    );
+    expect(helper).toContain("await openWorkspaceActivity(workspace, {");
+    expect(helper).toContain("whileEngineStoreLockHeld: async () => {");
+    expect(helper).toContain("await agentIntegration.startAgentRun(");
+    expect(tryInVersion).toMatch(
+      /startAgentRunWithWorkspaceActivity\(\s*requireWorkspace\(workspaceId\),\s*\)/,
+    );
+    expect(tryInVersion).not.toContain(
+      "agentIntegration.startAgentRun(workspaceId)",
+    );
+    expect(sessionManager).toMatch(
+      /startAgentRunWithWorkspaceActivity\(requireWorkspace\(workspaceId\)\)/,
+    );
+    expect(ipc).toContain("startAgentRunWithWorkspaceActivity(workspace)");
+    expect(ipc).not.toContain("agentIntegration.startAgentRun(");
   });
 });

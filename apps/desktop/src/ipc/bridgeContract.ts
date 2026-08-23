@@ -867,6 +867,11 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
+  // Additive (#882): increments whenever main retires this workspace's live
+  // editor sessions. Every renderer re-reads status after an activity ping,
+  // so the generation makes every mounted editor release its retired session.
+  // Optional so older producers and fixtures keep parsing.
+  liveSessionsGeneration: z.number().int().nonnegative().optional(),
   // Additive: files that are safe locally but cannot fit in the relay's
   // encoded payload limit. The notice center keeps this visible until a
   // later successful sync no longer reports the path.

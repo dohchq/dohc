@@ -640,7 +640,10 @@ import {
   resolveEngineSearchPolicy,
 } from "./workspaces/workspaceEnginePolicyFile";
 import { queryWorkspaceSearchDaemon } from "./workspaces/workspaceSearchDaemon";
-import { createAgentIntegration } from "./agents/AgentIntegration";
+import {
+  createAgentIntegration,
+  type AgentRunRecord,
+} from "./agents/AgentIntegration";
 import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
@@ -2503,7 +2506,9 @@ const tryInVersionSessions = createTryInVersionSessions({
     }
     // No driver: a bare dohc-tracked run — the user's own agent tool does the
     // work in the folder and dohc attributes what it changes.
-    const run = await agentIntegration.startAgentRun(workspaceId);
+    const run = await startAgentRunWithWorkspaceActivity(
+      requireWorkspace(workspaceId),
+    );
     desktopMarks.measureSince(
       "try-in-version-run-start",
       "try-in-version-run-start-begin",
@@ -2544,7 +2549,11 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
       pluginDriversFor: (workspaceId) =>
         pluginAgentDriversByWorkspace.get(workspaceId)?.list() ?? [],
       agentDefaultsFor: workspaceAgentDefaults,
-      integration: agentIntegration,
+      integration: {
+        ...agentIntegration,
+        startAgentRun: (workspaceId) =>
+          startAgentRunWithWorkspaceActivity(requireWorkspace(workspaceId)),
+      },
       rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
       mcpFor: mcpRuntimeConfigFor,
     });
@@ -2858,15 +2867,22 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   );
 }
 
+interface WorkspaceActivityOpenOptions {
+  afterActivityOpen?: () => Promise<void>;
+  engineStoreMoveAlreadySerialized?: boolean;
+  whileEngineStoreLockHeld?: () => Promise<void>;
+}
+
 async function ensureWorkspaceActivityOpen(
   workspace: CreatedWorkspace,
-  engineStoreMoveAlreadySerialized = false,
+  options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
   return withEngineStoreRecovered(
     engineStoreRebuildLocks,
     workspace,
-    engineStoreMoveAlreadySerialized,
+    options.engineStoreMoveAlreadySerialized ?? false,
     async () => {
+      let status: SyncStatusResult;
       for (;;) {
         const closing = workspaceActivityClosePromises.get(workspace.workspaceId);
         if (closing) {
@@ -2874,17 +2890,23 @@ async function ensureWorkspaceActivityOpen(
           continue;
         }
         const existing = workspaceActivityOpenPromises.get(workspace.workspaceId);
-        if (existing) return existing;
+        if (existing) {
+          status = await existing;
+          break;
+        }
         const opening = activity.open(workspace);
         workspaceActivityOpenPromises.set(workspace.workspaceId, opening);
         try {
-          return await opening;
+          status = await opening;
+          break;
         } finally {
           if (workspaceActivityOpenPromises.get(workspace.workspaceId) === opening) {
             workspaceActivityOpenPromises.delete(workspace.workspaceId);
           }
         }
       }
+      await options.whileEngineStoreLockHeld?.();
+      return status;
     },
     (rootPath) =>
       withRebuildBoundGate(workspace.workspaceId, () =>
@@ -2893,13 +2915,20 @@ async function ensureWorkspaceActivityOpen(
   );
 }
 
-async function closeDispatchRunActivity(workspaceId: string): Promise<void> {
+async function closeDispatchRunActivity(
+  workspaceId: string,
+  options: { notifyRenderer?: boolean } = {},
+): Promise<void> {
   const existing = workspaceActivityClosePromises.get(workspaceId);
   if (existing) return existing;
   const relayWorkspaceId =
     findWorkspace(workspaceId)?.remote?.remoteWorkspaceId;
   const closing = closeWorkspaceActivityAndRelay({
-    closeActivity: () => activity.close(workspaceId, { preserveStatus: true }),
+    closeActivity: () =>
+      activity.close(workspaceId, {
+        preserveStatus: true,
+        notify: options.notifyRenderer,
+      }),
     ...(relayWorkspaceId
       ? {
           closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId),
@@ -3138,8 +3167,7 @@ const workspaceChatLifecycle = createWorkspaceChatLifecycle({
 
 async function openWorkspaceActivity(
   workspace: CreatedWorkspace,
-  afterActivityOpen?: () => Promise<void>,
-  engineStoreMoveAlreadySerialized = false,
+  options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
   retainedWorkspaceActivities.add(workspace.workspaceId);
   const result = await workspaceChatLifecycle.open(
@@ -3147,14 +3175,27 @@ async function openWorkspaceActivity(
     () =>
       ensureWorkspaceActivityOpen(
         workspace,
-        engineStoreMoveAlreadySerialized,
+        options,
       ),
-    afterActivityOpen,
+    options.afterActivityOpen,
   );
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
   return result;
+}
+
+async function startAgentRunWithWorkspaceActivity(
+  workspace: CreatedWorkspace,
+): Promise<AgentRunRecord> {
+  let run: AgentRunRecord | undefined;
+  await openWorkspaceActivity(workspace, {
+    whileEngineStoreLockHeld: async () => {
+      run = await agentIntegration.startAgentRun(workspace.workspaceId);
+    },
+  });
+  if (!run) throw new Error("The agent run did not start.");
+  return run;
 }
 
 interface RunningPluginPanel {
@@ -5857,14 +5898,16 @@ function registerIpcHandlers(
       // its start() is the first pull (materialize + cursor commit), and no
       // push can reach the relay before that pull succeeds — a fresh join can
       // never seed boilerplate into the remote or conflict against it.
-      await openWorkspaceActivity(created, async () => {
-        setWorkspaceRemote(created.workspaceId, {
-          serverUrl: credentials.serverUrl,
-          remoteWorkspaceId: parsed.workspaceId,
-          ownerUserId: credentials.userId,
-        });
-        await activity.enableCloud(created, { joinBootstrap: true });
-        completeWorkspaceJoinBootstrap(created.workspaceId);
+      await openWorkspaceActivity(created, {
+        afterActivityOpen: async () => {
+          setWorkspaceRemote(created.workspaceId, {
+            serverUrl: credentials.serverUrl,
+            remoteWorkspaceId: parsed.workspaceId,
+            ownerUserId: credentials.userId,
+          });
+          await activity.enableCloud(created, { joinBootstrap: true });
+          completeWorkspaceJoinBootstrap(created.workspaceId);
+        },
       });
     } catch (error) {
       // Failed-first-pull contract (0P-C gate fix, documented choice): roll
@@ -10911,8 +10954,16 @@ function registerIpcHandlers(
               lastEngineStoreRebuildResult.get(workspace.workspaceId),
             rememberResult: (result) =>
               lastEngineStoreRebuildResult.set(workspace.workspaceId, result),
-            closeActivity: () =>
-              closeDispatchRunActivity(workspace.workspaceId),
+            closeActivity: async () => {
+              try {
+                await closeDispatchRunActivity(workspace.workspaceId, {
+                  notifyRenderer: false,
+                });
+              } catch (error) {
+                notifyRenderer();
+                throw error;
+              }
+            },
             probeStoreRefusal: () =>
               probeEngineStoreRefusal(
                 workspace.workspaceId,
@@ -10926,7 +10977,9 @@ function registerIpcHandlers(
             },
             reopenActivity: async () => {
               try {
-                await openWorkspaceActivity(workspace, undefined, true);
+                await openWorkspaceActivity(workspace, {
+                  engineStoreMoveAlreadySerialized: true,
+                });
               } finally {
                 notifyRenderer();
               }
@@ -10945,8 +10998,9 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     assertAgentRunnableWorkspace(workspace.workspaceId);
     assertChatRunnerIdle(workspace.workspaceId);
-    await openWorkspaceActivity(workspace);
-    return StartAgentRunResult.parse(await agentIntegration.startAgentRun(input.workspaceId));
+    return StartAgentRunResult.parse(
+      await startAgentRunWithWorkspaceActivity(workspace),
+    );
   });
 
   ipcMain.handle(CHANNELS.endAgentRun, async (event, payload) => {

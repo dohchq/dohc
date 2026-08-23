@@ -482,6 +482,40 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     expect(activity.getStatus("activity-test").engineStoreRefused).toBeUndefined();
   });
 
+  it("keeps live-session retirement generations current across preserved closes and reopens", async () => {
+    const retireLiveSessions = vi.fn(async () => undefined);
+    const notify = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      captureFor: () => ({
+        capture: {
+          start: vi.fn(),
+          captureBatch: vi.fn(),
+          settleAndCloseAllLiveSessions: retireLiveSessions,
+          stop: vi.fn(async () => undefined),
+        } as never,
+        shareView: false,
+      }),
+    });
+
+    expect((await activity.open(workspace())).liveSessionsGeneration).toBe(0);
+    notify.mockClear();
+    await activity.close("activity-test", { preserveStatus: true });
+    expect(retireLiveSessions).toHaveBeenCalledOnce();
+    expect(activity.getStatus("activity-test").liveSessionsGeneration).toBe(1);
+    expect(notify).toHaveBeenCalledOnce();
+
+    expect((await activity.open(workspace())).liveSessionsGeneration).toBe(1);
+    notify.mockClear();
+    await activity.close("activity-test", {
+      preserveStatus: true,
+      notify: false,
+    });
+    expect(retireLiveSessions).toHaveBeenCalledTimes(2);
+    expect(activity.getStatus("activity-test").liveSessionsGeneration).toBe(2);
+    expect(notify).not.toHaveBeenCalled();
+    await activity.stopAll();
+  });
+
   it("logs a relay close failure after local activity closes without rejecting", async () => {
     const relayError = new Error("relay close failed");
     const onRelayCloseError = vi.fn();

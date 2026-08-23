@@ -1842,6 +1842,15 @@ describe("sync status IPC contract (#505, #540)", () => {
     expect(SyncStatusResult.parse(status).sharingDeclined).toEqual(
       status.sharingDeclined,
     );
+    expect(
+      SyncStatusResult.parse({ ...status, liveSessionsGeneration: 3 })
+        .liveSessionsGeneration,
+    ).toBe(3);
+    expect(
+      SyncStatusResult.safeParse({ ...status, liveSessionsGeneration: -1 })
+        .success,
+    ).toBe(false);
+    expect(SyncStatusResult.safeParse(status).success).toBe(true);
     // The recorder cause fields are required because omission would claim the
     // user chose the failure or that this is not a shared view.
     const { historyRecordingUnavailable: _dropped, ...withoutFailureCause } = status;
