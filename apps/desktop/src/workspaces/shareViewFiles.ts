@@ -1065,8 +1065,8 @@ export function createShareViewFiles(
         };
 
         let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
-        if (target.ended || recovered.collisionRecordQuarantined) {
-          outcome = localOutcome(target.ended ? "ended" : "unchanged");
+        if (target.ended) {
+          outcome = localOutcome("ended");
         } else {
           const relay = await dependencies.resolveRelay(target);
           if (relay === null) {
@@ -1124,7 +1124,12 @@ export function createShareViewFiles(
                 pinnedSelector: target.grantedSelector,
                 recordRefusals,
                 excludeFromMaterialization: new Set(
-                  recovered.unjournalablePaths.map((path) => path.path),
+                  [
+                    ...recovered.unjournalablePaths.map((path) => path.path),
+                    ...(recovered.collisionRecordQuarantined
+                      ? preTrackedPaths
+                      : []),
+                  ],
                 ),
                 unjournalablePaths: recovered.unjournalablePaths,
                 trackPendingMaterialization: true,

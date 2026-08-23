@@ -1808,18 +1808,6 @@ export async function reconcileStandaloneShareView(
     const captured =
       suppliedCapture ?? (await captureStandaloneShareViewDivergence(input));
     totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-    if (captured.collisionRecordQuarantined) {
-      return {
-        ok: true,
-        status: "unchanged",
-        changedPaths: totalLocalChanges,
-        excludedPaths: [],
-        unjournalablePaths: captured.unjournalablePaths,
-        refusedOps: 0,
-        refusedDetail: null,
-        collisionRecordQuarantined: true,
-      };
-    }
     const main = await refreshInput.store.ensureMainVersion({
       workspaceId: refreshInput.workspaceId,
     });
@@ -1839,7 +1827,10 @@ export async function reconcileStandaloneShareView(
     const outcome = await refreshSharedViewOnce({
       ...refreshInput,
       excludeFromMaterialization: new Set(
-        captured.unjournalablePaths.map((path) => path.path),
+        [
+          ...captured.unjournalablePaths.map((path) => path.path),
+          ...(captured.collisionRecordQuarantined ? preTrackedPaths : []),
+        ],
       ),
       unjournalablePaths: captured.unjournalablePaths,
       trackPendingMaterialization: true,
