@@ -66,6 +66,7 @@ let readdirCalls: string[] = [];
 let observeRealpath: ((path: string) => void) | null = null;
 let realpathOverride: ((path: string, resolved: string) => string | null) | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
+let failReaddirPathOnce: { path: string; error: Error } | null = null;
 let collisionRecordRenameTargets: string[] = [];
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -73,6 +74,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     readdir: (async (path: Parameters<typeof readdir>[0], options?: unknown) => {
       readdirCalls.push(String(path));
+      const failure = failReaddirPathOnce;
+      if (failure !== null && String(path) === failure.path) {
+        failReaddirPathOnce = null;
+        throw failure.error;
+      }
       return actual.readdir(path as string, options as never);
     }) as typeof readdir,
     realpath: (async (
@@ -168,12 +174,14 @@ beforeEach(() => {
   observeRealpath = null;
   realpathOverride = null;
   failRenameToPathOnce = null;
+  failReaddirPathOnce = null;
   collisionRecordRenameTargets = [];
 });
 
 afterEach(async () => {
   realpathOverride = null;
   failRenameToPathOnce = null;
+  failReaddirPathOnce = null;
   collisionRecordRenameTargets = [];
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
@@ -358,6 +366,97 @@ class FakeShareRelay {
 }
 
 describe("shared view refresh", () => {
+  it("does not heal a malformed canonical path outside the projection", async () => {
+    const rootDir = await tempRoot();
+    const outside = await tempRoot();
+    const outsideLink = join(
+      dirname(rootDir),
+      `${basename(rootDir)}-outside-link`,
+    );
+    roots.push(outsideLink);
+    await symlink(outside, outsideLink, "dir");
+    const maliciousPath = `../${basename(outsideLink)}/child.md`;
+    const harness = daemonHarness(new FakeShareRelay());
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    const malformedStore: typeof store = {
+      ...store,
+      async listTextFileMetadata() {
+        return [
+          {
+            path: maliciousPath,
+            objectId: "malformed-object",
+            contentKind: "text",
+            byteLength: 1,
+            sha256: "0".repeat(64),
+            updatedAtMs: 1,
+            latestMomentId: "malformed-moment",
+            hasYdocMarker: false,
+          },
+        ];
+      },
+    };
+
+    try {
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          malformedStore,
+          false,
+          SHARE_ID,
+        ),
+      ).rejects.toThrow(/escapes the workspace/);
+      await expect(
+        lstat(outsideLink),
+        "MUTATION: projection healing removes a link outside the projection",
+      ).resolves.toBeDefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("refuses a folder delete when its projection cannot be read", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/plans/one.md";
+    relay.addWrite(path, "one\n");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    failReaddirPathOnce = {
+      path: join(rootDir, "docs", "plans"),
+      error: Object.assign(new Error("projection directory is unreadable"), {
+        code: "EACCES",
+      }),
+    };
+
+    try {
+      await expect(
+        applyShareViewPathDelete({
+          workspaceId: WORKSPACE,
+          rootPath: rootDir,
+          relativePath: "docs/plans",
+          shareViewStore: () => store,
+        }),
+        "MUTATION: an unreadable directory looks empty and is deleted recursively",
+      ).rejects.toThrow("projection directory is unreadable");
+      await expect(readFile(join(rootDir, path), "utf8")).resolves.toBe("one\n");
+      const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+      await expect(
+        store.listTextFileMetadata!({
+          workspaceId: WORKSPACE,
+          versionId: main.id,
+        }),
+      ).resolves.toEqual([expect.objectContaining({ path })]);
+    } finally {
+      await store.close();
+    }
+  });
+
   it("captures an out-of-app modification through the standalone refresh", async () => {
     const rootDir = await tempRoot();
     const relay = new FakeShareRelay();

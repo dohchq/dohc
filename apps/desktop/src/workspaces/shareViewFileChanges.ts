@@ -827,7 +827,11 @@ async function projectionFilesUnder(
   async function walk(relative: string): Promise<void> {
     const entries = await readdir(join(rootPath, relative), {
       withFileTypes: true,
-    }).catch(() => []);
+    }).catch((error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return [];
+      throw error;
+    });
     for (const entry of entries) {
       const child = `${relative}/${entry.name}`;
       if (entry.isDirectory()) await walk(child);
@@ -900,7 +904,12 @@ async function shareViewPaths(
   workspaceId: string,
   versionId: string,
 ): Promise<Map<string, "text" | "binary">> {
-  const snapshots = await store.listTextFiles({ workspaceId, versionId });
+  if (store.listTextFileMetadata === undefined) {
+    throw new Error(
+      "Shared view file changes require engine metadata listing support.",
+    );
+  }
+  const snapshots = await store.listTextFileMetadata({ workspaceId, versionId });
   return new Map(
     snapshots.map((snapshot) => [
       snapshot.path,

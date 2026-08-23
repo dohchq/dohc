@@ -805,6 +805,7 @@ import {
   MAX_ZIP_ENTRIES,
   MAX_ZIP_TOTAL_BYTES,
   movePath,
+  ZIP_TOO_LARGE_REFUSAL,
 } from "./workspaces/workspaceFiles";
 import { explorerMenuEntries } from "./workspaces/explorerMenu";
 import { buildStoreZip, type ZipEntry } from "./workspaces/zipWriter";
@@ -4693,9 +4694,7 @@ async function collectShareTargetZipEntries(input: {
       entries.length >= MAX_ZIP_ENTRIES ||
       totalBytes > MAX_ZIP_TOTAL_BYTES
     ) {
-      throw new Error(
-        `Export too large (over ${MAX_ZIP_ENTRIES} files or 256MB) — export a smaller folder`,
-      );
+      throw new Error(ZIP_TOO_LARGE_REFUSAL);
     }
     const archivePath =
       selectedPath === undefined
@@ -4781,9 +4780,7 @@ async function collectOwnedZipEntries(
     0,
   );
   if (entries.length > MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
-    throw new Error(
-      `Export too large (over ${MAX_ZIP_ENTRIES} files or 256MB) — export a smaller folder`,
-    );
+    throw new Error(ZIP_TOO_LARGE_REFUSAL);
   }
   entries.sort((left, right) => left.path.localeCompare(right.path));
   return { entries, baseName: disk.baseName };

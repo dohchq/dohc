@@ -116,26 +116,32 @@ export async function resolveShareMountPath(
     process.platform === "win32"
       ? resolved.relative.toLowerCase()
       : resolved.relative;
-  for (const mount of mounts) {
-    if (!validMountLabel(mount.label)) continue;
+  const matches = mounts.filter((mount) => {
     const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
     const comparedPrefix =
       process.platform === "win32" ? prefix.toLowerCase() : prefix;
-    if (
-      comparedPath !== comparedPrefix &&
-      !comparedPath.startsWith(`${comparedPrefix}/`)
-    ) {
-      continue;
-    }
-    return {
-      mount,
-      path:
-        comparedPath === comparedPrefix
-          ? ""
-          : resolved.relative.slice(prefix.length + 1),
-    };
+    return (
+      comparedPath === comparedPrefix ||
+      comparedPath.startsWith(`${comparedPrefix}/`)
+    );
+  });
+  if (matches.length === 0) return null;
+  if (matches.length !== 1 || !validMountLabel(matches[0]!.label)) {
+    throw new Error(
+      "dohc cannot verify this mounted share because its saved details are invalid. Remove the share. Add it again.",
+    );
   }
-  return null;
+  const mount = matches[0]!;
+  const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+  const comparedPrefix =
+    process.platform === "win32" ? prefix.toLowerCase() : prefix;
+  return {
+    mount,
+    path:
+      comparedPath === comparedPrefix
+        ? ""
+        : resolved.relative.slice(prefix.length + 1),
+  };
 }
 
 export async function refuseMoveAcrossShareMount(

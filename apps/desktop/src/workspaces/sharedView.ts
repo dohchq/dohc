@@ -125,10 +125,13 @@ async function healTamperedProjectionPath(
   realRoot: string,
   relativePath: string,
 ): Promise<void> {
+  if (classifyEngineFilePath(relativePath).kind !== "tracked") return;
+  const containedRoot = resolve(realRoot);
   let current = realRoot;
   const segments = relativePath.split("/");
   for (let index = 0; index < segments.length; index += 1) {
     current = resolve(current, segments[index]!);
+    if (!isInside(containedRoot, current)) return;
     const stat = await lstat(current).catch(() => null);
     if (stat === null) return;
     if (stat.isSymbolicLink()) {

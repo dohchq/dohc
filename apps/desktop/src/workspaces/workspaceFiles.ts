@@ -1017,6 +1017,9 @@ export async function moveIntoWorkspaceTrash(
 // archive (the container itself tops out at 65k entries / 4GB — zipWriter).
 export const MAX_ZIP_ENTRIES = 2000;
 export const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
+export const ZIP_TOO_LARGE_REFUSAL =
+  `Export too large (over ${MAX_ZIP_ENTRIES} files or ` +
+  `${MAX_ZIP_TOTAL_BYTES / (1024 * 1024)}MB). Export a smaller folder.`;
 
 // Gathers the zip entries for a workspace export: the whole workspace, one
 // folder, or one file. Ignored segments (.dohc, .git, node_modules) and
@@ -1097,9 +1100,7 @@ export async function collectZipEntries(
       }
       totalBytes += st.size;
       if (entries.length >= MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
-        throw new Error(
-          `Export too large (over ${MAX_ZIP_ENTRIES} files or 256MB) — export a smaller folder`,
-        );
+        throw new Error(ZIP_TOO_LARGE_REFUSAL);
       }
       const data = Buffer.alloc(st.size);
       let read = 0;

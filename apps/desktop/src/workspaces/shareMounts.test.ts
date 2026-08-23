@@ -293,6 +293,38 @@ describe("mount labels", () => {
     ).resolves.toBeNull();
   });
 
+  it("refuses a disk path claimed by an invalid registry label", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, ".env", "docs"), {
+      recursive: true,
+    });
+
+    await expect(
+      resolveShareMountPath(host, "shared-with-me/.env/docs/brief.md", [
+        { shareId: SHARE_ID, label: ".env" },
+      ]),
+      "MUTATION: skipping an invalid matching label lets the caller read the projection from disk",
+    ).rejects.toThrow(/saved details are invalid/);
+  });
+
+  it("refuses a disk path claimed by more than one registry record", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    const labels = process.platform === "win32" ? ["alex", "Alex"] : ["alex", "alex"];
+
+    await expect(
+      resolveShareMountPath(
+        host,
+        "shared-with-me/alex/docs/brief.md",
+        labels.map((label, index) => ({
+          shareId: `share-${index + 1}`,
+          label,
+        })),
+      ),
+      "MUTATION: first-match routing sends an ambiguous mount path to an arbitrary share",
+    ).rejects.toThrow(/saved details are invalid/);
+  });
+
   it("refuses a move when either resolved endpoint belongs to a mount", async () => {
     const host = await tempHostRoot();
     await createMountDirectory(host, "alex");

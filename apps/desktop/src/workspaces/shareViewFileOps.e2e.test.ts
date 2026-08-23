@@ -31,7 +31,11 @@ import {
   applyShareViewPathMove,
   applyShareViewTextWrite,
 } from "./shareViewFileChanges";
-import { createShareViewFiles, shareViewFilesStore } from "./shareViewFiles";
+import {
+  createShareViewFiles,
+  shareViewFilesStore,
+  type ResolvedShareViewFilesTarget,
+} from "./shareViewFiles";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import { createFile, movePath } from "./workspaceFiles";
 
@@ -156,7 +160,7 @@ function shareViewFilesOwner(
     kind: "standalone" as const,
     workspaceId: harnessed.workspaceId,
   };
-  const resolved = {
+  const resolved: ResolvedShareViewFilesTarget = {
     ...requested,
     storeWorkspaceId: harnessed.workspaceId,
     schedulingRootPath: harnessed.rootPath,

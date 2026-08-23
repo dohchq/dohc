@@ -361,11 +361,11 @@ export function createSearchRegistry(deps: {
       request: WorkspaceSearchRequest,
       onBatch: (batch: SearchBatch) => void,
       options: {
-        isCurrent?: () => boolean;
+        isCurrent: () => boolean;
         allowPath?: (path: string) => boolean;
-      } = {},
+      },
     ): Promise<void> {
-      const { isCurrent = () => true, allowPath } = options;
+      const { isCurrent, allowPath } = options;
       const realRoot = await realpath(rootPath);
       if (!(await stat(realRoot)).isDirectory()) {
         throw new Error("Workspace root is not a directory");
