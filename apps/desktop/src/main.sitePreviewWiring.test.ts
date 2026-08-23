@@ -197,20 +197,28 @@ describe("site preview main-process wiring", () => {
     // cannot be imported directly under Vitest, so this only pins that
     // each handler routes its actual read through that function rather
     // than reimplementing the guard inline.
-    for (const [channel, readCall] of [
-      ["listSites", "listSitePackages(workspace.rootPath)"],
-      ["getSitePackage", "getSitePackage(workspace.rootPath, input.path,"],
+    for (const [channel, projectionCall, readCall] of [
+      [
+        "listSites",
+        "await ensureAllOwnedProjectionsCurrent(workspace);",
+        "return listSitePackages(workspace.rootPath);",
+      ],
+      [
+        "getSitePackage",
+        "await ensureOwnedProjectionCurrent(workspace, input.path);",
+        "return getSitePackage(",
+      ],
     ] as const) {
       const handler = handlerSource(channel);
       const guardAt = handler.indexOf("await withActiveWorkspaceForSiteRead(");
+      const projectionAt = handler.indexOf(projectionCall);
       const readAt = handler.indexOf(readCall);
       expect(guardAt).toBeGreaterThanOrEqual(0);
-      // The read call must sit textually INSIDE withActiveWorkspaceForSiteRead's
-      // own arguments (its deferred callback), not hoisted out and merely
-      // referenced — that's what actually defers the read until after the
-      // guard runs, not just the presence of the guard's name somewhere in
-      // the handler.
-      expect(readAt).toBeGreaterThan(guardAt);
+      expect(projectionAt).toBeGreaterThan(guardAt);
+      // Both projection repair and the disk reader must stay inside the
+      // deferred callback. Repair has to finish first, or a site read can
+      // observe an old shared-view folder after authorization succeeds.
+      expect(readAt).toBeGreaterThan(projectionAt);
     }
   });
 

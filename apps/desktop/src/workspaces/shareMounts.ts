@@ -1,25 +1,18 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { validateUserWritePath } from "@dohc/workspace-core";
+import { validateUserReadPath, validateUserWritePath } from "@dohc/workspace-core";
 import { isInside } from "../security/pathContainment";
 // See the note in workspaceGraph.ts: the path floor is a cross-process security
-// contract with a Rust twin, not engine state. SyncRelayConnection stays on the
-// oracle -- that one IS engine surface and migrates with the relay work.
+// contract with a Rust twin, not engine state.
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
-import type { ShareMountRecord } from "./registryStore";
 import type { ShareViewSelector } from "./shareViewInfo";
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import { ShareMountStatusRow } from "../ipc/bridgeContract";
-import {
-  SharePinInvalidError,
-  refreshSharedViewOnce,
-  repairSharedViewProjection,
-  type RefreshSharedViewOutcome,
-} from "./sharedView";
-import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
+import { SharePinInvalidError } from "./shareViewRecords";
+import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import type { ShareMountRecord } from "./registryStore";
 
 // Share mounts: the receive side of a relay share materialized INSIDE a host
 // workspace as shared-with-me/<label>/ — ordinary read-only files the user's
@@ -94,13 +87,67 @@ export function mountRootFor(hostRoot: string, label: string): string {
   return target;
 }
 
+/**
+ * Resolve a workspace read to the mount that owns its real destination.
+ *
+ * Authority follows the resolved path, not its spelling: a symlink or a
+ * Windows case/short-name alias into shared-with-me must still read the
+ * mount's canonical store instead of bypassing it through the disk copy.
+ */
+export async function resolveShareMountPath(
+  hostRoot: string,
+  relativePath: string,
+  mounts: readonly Pick<ShareMountRecord, "shareId" | "label">[],
+): Promise<{
+  mount: Pick<ShareMountRecord, "shareId" | "label">;
+  path: string;
+} | null> {
+  if (mounts.length === 0) return null;
+  const validated = validateUserReadPath(relativePath);
+  if (!validated.ok) return null;
+  const resolved = await assertResolvedWorkspacePath({
+    rootPath: hostRoot,
+    absolutePath: join(hostRoot, validated.normalized),
+    spelled: relativePath,
+    label: "Shared file path",
+    access: "read",
+  });
+  const comparedPath =
+    process.platform === "win32"
+      ? resolved.relative.toLowerCase()
+      : resolved.relative;
+  for (const mount of mounts) {
+    if (!validMountLabel(mount.label)) continue;
+    const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+    const comparedPrefix =
+      process.platform === "win32" ? prefix.toLowerCase() : prefix;
+    if (
+      comparedPath !== comparedPrefix &&
+      !comparedPath.startsWith(`${comparedPrefix}/`)
+    ) {
+      continue;
+    }
+    return {
+      mount,
+      path:
+        comparedPath === comparedPrefix
+          ? ""
+          : resolved.relative.slice(prefix.length + 1),
+    };
+  }
+  return null;
+}
+
 // The REAL-path guard the lexical check above cannot give: refuses a
 // symlinked shared-with-me or label directory (at either component) before
 // any materialization. A refresh writes relay-controlled bytes, so a link
 // planted at either level must never redirect those writes outside the
 // workspace (gpt-5.6-sol P1). The workspace root itself is realpath'd first,
 // so ancestor system symlinks above the workspace stay legal.
-async function assertRealMountRoot(hostRoot: string, label: string): Promise<void> {
+export async function assertRealMountRoot(
+  hostRoot: string,
+  label: string,
+): Promise<void> {
   const realHost = await realpath(hostRoot);
   for (const relative of [
     SHARED_WITH_ME_FOLDER,
@@ -172,18 +219,6 @@ export function mountStoreWorkspaceIdFor(
   return `share-mount-${shareId}-${hostDigest(hostWorkspaceId)}`;
 }
 
-export function relayTargetForShareMount(
-  hostWorkspaceId: string,
-  hostRoot: string,
-  mount: Pick<ShareMountRecord, "shareId" | "label">,
-): { workspaceId: string; rootPath: string; shareMount: true } {
-  return {
-    workspaceId: mountStoreWorkspaceIdFor(hostWorkspaceId, mount.shareId),
-    rootPath: mountRootFor(hostRoot, mount.label),
-    shareMount: true,
-  };
-}
-
 /**
  * One refresh result row, built so the wire schema can always carry it.
  *
@@ -245,82 +280,6 @@ export function classifyShareMountRefreshError(
   }
   if (error instanceof SharePinInvalidError) return { kind: "row", status: "damaged" };
   return { kind: "row", status: "unchanged" };
-}
-
-// One refresh pass for one mount: pull the share's filtered ops into the
-// mount's nested store, materialize under shared-with-me/<label>/, commit
-// the cursor. Same crash-safe ordering as the standalone shared view
-// (materialize before commit; re-replay is idempotent). Revocation comes
-// back as status "ended" with the files left exactly as they were.
-export async function refreshShareMountOnce(input: {
-  hostWorkspaceId: string;
-  hostRoot: string;
-  mount: Pick<ShareMountRecord, "shareId" | "label">;
-  relay: SyncRelayConnection;
-  pull: Parameters<typeof refreshSharedViewOnce>[0]["pull"];
-  // Read from the mount record before this pull, exactly as a standalone
-  // view does.
-  pinnedSelector: unknown;
-  // Same durable skip record a standalone view keeps, written to the MOUNT's
-  // record: a mount's pulls commit past a refused op too.
-  recordRefusals: Parameters<typeof refreshSharedViewOnce>[0]["recordRefusals"];
-  openStore: (workspace: {
-    workspaceId: string;
-    rootPath: string;
-  }) => CaptureVersionedTextStore;
-}): Promise<RefreshSharedViewOutcome> {
-  const rootDir = mountRootFor(input.hostRoot, input.mount.label);
-  await assertRealMountRoot(input.hostRoot, input.mount.label);
-  const storeWorkspaceId = mountStoreWorkspaceIdFor(
-    input.hostWorkspaceId,
-    input.mount.shareId,
-  );
-  // A mount's store is a workspace of its own (synthetic id, nested root), so
-  // this refresh owns it and closes it below. The standalone shared-view
-  // callers deliberately do NOT close theirs: there the store is the user's
-  // live workspace session, and closing it would tear down capture mid-use.
-  const store = input.openStore({ workspaceId: storeWorkspaceId, rootPath: rootDir });
-  // Repair BEFORE pulling: the pull only replays deltas, so a file tampered
-  // on disk (rogue tool — every dohc surface refuses these writes) must be
-  // re-projected from the mount's store or refreshes would report
-  // "unchanged" over broken content. Running the repair first also
-  // self-heals a tampered directory chain (planted symlinks removed and the
-  // real tree rebuilt) so the pull materializes onto a healthy projection
-  // instead of wedging on its containment guards.
-  try {
-    const repaired = await repairSharedViewProjection(
-      rootDir,
-      storeWorkspaceId,
-      store,
-    );
-    const outcome = await refreshSharedViewOnce({
-      rootDir,
-      workspaceId: storeWorkspaceId,
-      relay: input.relay,
-      shareId: input.mount.shareId,
-      pull: input.pull,
-      pinnedSelector: input.pinnedSelector,
-      recordRefusals: input.recordRefusals,
-      store,
-    });
-    if (repaired === 0) return outcome;
-    return {
-      status: outcome.status === "ended" ? "ended" : "updated",
-      changedPaths: outcome.changedPaths + repaired,
-      excludedPaths: outcome.excludedPaths,
-      unjournalablePaths: outcome.unjournalablePaths,
-      // A repair changes what the projection holds, never why the pull
-      // refused an op: those carry through untouched.
-      refusedOps: outcome.refusedOps,
-      refusedDetail: outcome.refusedDetail,
-    };
-  } finally {
-    // Best-effort, like every other session teardown in this flow: a failing
-    // close must not discard a refresh that already materialized and committed
-    // its cursor, or mountShare would roll back and delete the folder it just
-    // wrote.
-    await store.close().catch(() => undefined);
-  }
 }
 
 // Unmount: delete the projection folder (nested engine store included). The

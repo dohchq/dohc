@@ -537,7 +537,7 @@ export interface ShareViewDaemonHarness {
   readonly routes: RelayTransportRouteGuard;
   /**
    * The relay connection a production caller passes down to
-   * refreshSharedViewOnce / refreshShareMountOnce. It deliberately carries NO
+   * refreshSharedViewOnce / ShareViewFiles mount reconciliation. It carries NO
    * `fetch`: the only route to the relay double is through the daemon
    * transport, so nothing in the exercised path can quietly bypass it.
    */

@@ -614,8 +614,8 @@ const MAX_IMPORT_PATHS = 100;
 
 // OS drag-in import: the screen below, then the picker-grade copy — the
 // same basename-only, COPYFILE_EXCL `copyIntoWorkspace` the import dialog
-// uses. A share view runs the same screen and writes its engine store
-// instead (`workspaceFileOps.ts`).
+// uses. A share view runs the same screen and writes its engine store through
+// ShareViewFiles instead.
 export async function importDroppedPaths(
   rootPath: string,
   absolutePaths: string[],
@@ -1015,8 +1015,8 @@ export async function moveIntoWorkspaceTrash(
 
 // Export bounds: policy caps for what main will buffer into one in-memory
 // archive (the container itself tops out at 65k entries / 4GB — zipWriter).
-const MAX_ZIP_ENTRIES = 2000;
-const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
+export const MAX_ZIP_ENTRIES = 2000;
+export const MAX_ZIP_TOTAL_BYTES = 256 * 1024 * 1024;
 
 // Gathers the zip entries for a workspace export: the whole workspace, one
 // folder, or one file. Ignored segments (.dohc, .git, node_modules) and

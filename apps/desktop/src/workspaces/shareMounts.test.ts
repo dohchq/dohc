@@ -3,7 +3,7 @@ import {
   RefreshShareMountsResult,
   ShareMountStatusRow,
 } from "../ipc/bridgeContract";
-import { SharePinInvalidError } from "./sharedView";
+import { SharePinInvalidError } from "./shareViewRecords";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
@@ -21,11 +21,11 @@ import {
   mountLabelFor,
   mountRootFor,
   mountStoreWorkspaceIdFor,
-  refreshShareMountOnce as refreshShareMountOnceWithPull,
-  relayTargetForShareMount,
   removeMountFolder,
+  resolveShareMountPath,
   validMountLabel,
 } from "./shareMounts";
+import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // These tests drive the pull with the selector a mount record pins. No paths
@@ -82,7 +82,7 @@ async function ensureMountFolder(hostRoot: string, label: string): Promise<void>
 // store. Binding the relay route before the refresh is what production does
 // too (see engineRelayClient.test.ts), and it is what makes `workspace.open`
 // carry the mount's relay configuration and captureMode.
-async function refreshShareMountOnce(
+async function refreshShareMount(
   harness: ShareViewDaemonHarness,
   input: {
     hostRoot: string;
@@ -95,13 +95,13 @@ async function refreshShareMountOnce(
   },
 ) {
   await ensureMountFolder(input.hostRoot, input.mount.label);
-  const target = relayTargetForShareMount(
-    HOST_WORKSPACE,
-    input.hostRoot,
-    input.mount,
-  );
+  const target = {
+    workspaceId: mountStoreWorkspaceIdFor(HOST_WORKSPACE, input.mount.shareId),
+    rootPath: mountRootFor(input.hostRoot, input.mount.label),
+    shareMount: true as const,
+  };
   const pull = harness.pullFor(target);
-  return await refreshShareMountOnceWithPull({
+  return await refreshShareMountThroughOwnerForTest({
     hostWorkspaceId: HOST_WORKSPACE,
     hostRoot: input.hostRoot,
     mount: input.mount,
@@ -269,9 +269,24 @@ describe("mount labels", () => {
       join(host, SHARED_WITH_ME_FOLDER, "..cache"),
     );
   });
+
+  it("routes a symlinked spelling to the mount that owns its real path", async () => {
+    const host = await tempHostRoot();
+    await createMountDirectory(host, "alex");
+    await mkdir(join(mountRootFor(host, "alex"), "docs"), { recursive: true });
+    await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
+    const mount = { shareId: SHARE_ID, label: "alex" };
+
+    await expect(
+      resolveShareMountPath(host, "inbox/docs/brief.md", [mount]),
+    ).resolves.toEqual({ mount, path: "docs/brief.md" });
+    await expect(
+      resolveShareMountPath(host, "notes/ordinary.md", [mount]),
+    ).resolves.toBeNull();
+  });
 });
 
-describe("refreshShareMountOnce", () => {
+describe("refreshShareMount", () => {
   it("materializes shared files under shared-with-me/<label>/ and reports statuses", async () => {
     const host = await tempHostRoot();
     const relay = new FakeShareRelay();
@@ -279,7 +294,7 @@ describe("refreshShareMountOnce", () => {
     relay.addWrite("docs/brief.md", "the brief");
     relay.addWrite("docs/deep/notes.md", "deep notes");
 
-    const first = await refreshShareMountOnce(harness, {
+    const first = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -300,7 +315,7 @@ describe("refreshShareMountOnce", () => {
       }),
     );
 
-    const second = await refreshShareMountOnce(harness, {
+    const second = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -314,7 +329,7 @@ describe("refreshShareMountOnce", () => {
     });
 
     relay.addWrite("docs/brief.md", "the brief v2");
-    const third = await refreshShareMountOnce(harness, {
+    const third = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -334,7 +349,7 @@ describe("refreshShareMountOnce", () => {
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "the brief");
 
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
       openStore: (workspace) => {
@@ -369,13 +384,13 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("plan.md", "keep me");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
 
     relay.ended = true;
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -402,7 +417,7 @@ describe("refreshShareMountOnce", () => {
     const hostA = await tempHostRoot();
     await symlink(elsewhere, join(hostA, SHARED_WITH_ME_FOLDER), "dir");
     await expect(
-      refreshShareMountOnce(harness, {
+      refreshShareMount(harness, {
         hostRoot: hostA,
         mount: { shareId: SHARE_ID, label: "alex" },
       }),
@@ -414,7 +429,7 @@ describe("refreshShareMountOnce", () => {
     await mkdir(join(hostB, SHARED_WITH_ME_FOLDER), { recursive: true });
     await symlink(elsewhere, join(hostB, SHARED_WITH_ME_FOLDER, "alex"), "dir");
     await expect(
-      refreshShareMountOnce(harness, {
+      refreshShareMount(harness, {
         hostRoot: hostB,
         mount: { shareId: SHARE_ID, label: "alex" },
       }),
@@ -429,7 +444,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -441,7 +456,7 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs/brief.md"));
     await symlink(join(elsewhere, "victim.md"), join(mountRoot, "docs/brief.md"), "file");
     relay.addWrite("docs/brief.md", "v2");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -454,7 +469,7 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addWrite("docs/brief.md", "v3");
-    const healed = await refreshShareMountOnce(harness, {
+    const healed = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -468,15 +483,16 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "authoritative");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
     const mounted = join(host, SHARED_WITH_ME_FOLDER, "alex", "docs/brief.md");
-    const target = relayTargetForShareMount(HOST_WORKSPACE, host, {
-      shareId: SHARE_ID,
-      label: "alex",
-    });
+    const target = {
+      workspaceId: mountStoreWorkspaceIdFor(HOST_WORKSPACE, SHARE_ID),
+      rootPath: mountRootFor(host, "alex"),
+      shareMount: true as const,
+    };
     const storeBefore = harness.openStore(target);
     const momentIdsBefore = (
       await storeBefore.listMoments({ workspaceId: target.workspaceId, limit: 100 })
@@ -486,7 +502,7 @@ describe("refreshShareMountOnce", () => {
 
     // A rogue tool edits the mounted file directly; the relay is unchanged.
     await writeFile(mounted, "defaced");
-    const repaired = await refreshShareMountOnce(harness, {
+    const repaired = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -512,7 +528,7 @@ describe("refreshShareMountOnce", () => {
     expect(momentIdsBeforeDelete.length).toBeGreaterThan(0);
     await storeBeforeDelete.close();
     await rm(mounted);
-    const restored = await refreshShareMountOnce(harness, {
+    const restored = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -531,7 +547,7 @@ describe("refreshShareMountOnce", () => {
     await storeAfterDelete.close();
 
     // An untouched projection stays "unchanged" — no busy repainting.
-    const quiet = await refreshShareMountOnce(harness, {
+    const quiet = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -551,7 +567,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/top.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -562,7 +578,7 @@ describe("refreshShareMountOnce", () => {
     // link first, so the deep write lands inside the workspace and nothing
     // is ever created through the link.
     relay.addWrite("docs/deep/file.md", "payload");
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -591,7 +607,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -601,7 +617,7 @@ describe("refreshShareMountOnce", () => {
     // rebuild the real chain instead of wedging on ENOTDIR.
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await writeFile(join(mountRoot, "docs"), "squatter");
-    const healed = await refreshShareMountOnce(harness, {
+    const healed = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -615,7 +631,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMountOnce(harness, {
+    await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -628,7 +644,7 @@ describe("refreshShareMountOnce", () => {
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
     relay.addDelete("docs/brief.md");
-    const outcome = await refreshShareMountOnce(harness, {
+    const outcome = await refreshShareMount(harness, {
       hostRoot: host,
       mount: { shareId: SHARE_ID, label: "alex" },
     });
@@ -679,7 +695,7 @@ describe("refreshShareMountOnce", () => {
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     await expect(
-      refreshShareMountOnce(harness, {
+      refreshShareMount(harness, {
         hostRoot: host,
         mount: { shareId: SHARE_ID, label: "../../etc" },
       }),

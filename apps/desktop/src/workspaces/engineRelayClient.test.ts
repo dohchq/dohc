@@ -31,9 +31,10 @@ import {
 } from "./engineRelayClient";
 import {
   createMountDirectory,
-  refreshShareMountOnce,
-  relayTargetForShareMount,
+  mountRootFor,
+  mountStoreWorkspaceIdFor,
 } from "./shareMounts";
+import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
 import { syncJoinedSharedChannels } from "./sharedChannels";
 import { refreshSharedViewOnce } from "./sharedView";
 
@@ -1175,6 +1176,50 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("records a page's projection debt before committing its cursor, even when a later page fails", async () => {
+    let pulls = 0;
+    const calls: string[] = [];
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.commitCursor") {
+        calls.push("commitCursor");
+        return { committed: true };
+      }
+      if (request.method !== "share.view.pull") return undefined;
+      pulls += 1;
+      if (pulls > 1) throw new Error("relay went away mid-page");
+      return {
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        refusals: [],
+        refusalCount: 0,
+        hasMore: true,
+        nextCursor: 1,
+        changedPaths: [
+          { path: "docs/page-one.md", operation: "write", contentKind: "text" },
+        ],
+        pendingCursor: { kind: "shareView", token: "share-cursor-1" },
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    await expect(
+      client.pullShareView({
+        shareId: "share-view",
+        grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
+        recordChangedPaths: async (paths) => {
+          calls.push(`recordChangedPaths:${paths.join(",")}`);
+        },
+      }),
+    ).rejects.toThrow();
+
+    expect(
+      calls,
+      "MUTATION: recording after the commit could lose projection debt for an applied page",
+    ).toEqual(["recordChangedPaths:docs/page-one.md", "commitCursor"]);
+    await sessions.closeAll();
+  });
+
   it("materializes a share view through the injected daemon store", async () => {
     const body = "read from daemon";
     const daemon = new MockDaemon((request) => {
@@ -1259,15 +1304,19 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("opens a share mount's nested store and pulls it through the daemon", async () => {
+  it("opens an owner-managed share mount store with capture disabled", async () => {
     const { rootPath, daemon, routes, sessions, live, relay } = await harness();
     const mount = { shareId: "share-mounted", label: "alex" };
     await createMountDirectory(rootPath, mount.label);
-    const target = relayTargetForShareMount("workspace-a", rootPath, mount);
+    const target = {
+      workspaceId: mountStoreWorkspaceIdFor("workspace-a", mount.shareId),
+      rootPath: mountRootFor(rootPath, mount.label),
+      shareMount: true as const,
+    };
     const mountRelay = live.bind({ ...target, relay });
 
     await expect(
-      refreshShareMountOnce({
+      refreshShareMountThroughOwnerForTest({
         hostWorkspaceId: "workspace-a",
         hostRoot: rootPath,
         mount,
@@ -1292,15 +1341,21 @@ describe("EngineRelayClient", () => {
     });
 
     expect(routes.modeFor(target.workspaceId)).toBe("daemon");
+    const ownerOpenIndex = daemon.requests.findIndex(
+      (request) =>
+        request.method === "workspace.open" &&
+        request.params &&
+        typeof request.params === "object" &&
+        !Array.isArray(request.params) &&
+        request.params.workspaceId === target.workspaceId,
+    );
+    const pullIndex = daemon.requests.findIndex(
+      (request) => request.method === "share.view.pull",
+    );
+    expect(ownerOpenIndex).toBeGreaterThanOrEqual(0);
+    expect(ownerOpenIndex).toBeLessThan(pullIndex);
     expect(
-      daemon.requests.find(
-        (request) =>
-          request.method === "workspace.open" &&
-          request.params &&
-          typeof request.params === "object" &&
-          !Array.isArray(request.params) &&
-          request.params.workspaceId === target.workspaceId,
-      )?.params,
+      daemon.requests[ownerOpenIndex]?.params,
     ).toMatchObject({
       rootDir: target.rootPath,
       workspaceId: target.workspaceId,
@@ -1314,11 +1369,6 @@ describe("EngineRelayClient", () => {
       workspaceId: target.workspaceId,
       shareId: mount.shareId,
     });
-    // The mount OWNS its nested store, so its close must be the last thing it
-    // does — after sync.commitCursor. `some(...)` would not prove that: the
-    // relay client forces its own workspace.close before the pull when it
-    // rebinds, so a mount that never closed its store would still pass.
-    expect(daemon.requests.at(-1)?.method).toBe("workspace.close");
     await sessions.closeAll();
   });
 

@@ -94,6 +94,7 @@ export function NoticeCenter(props: {
   // Opens the conflict review dialog (0P-C): the notice's "Review" action
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
+  onRefreshShareView: () => void;
   // Changes a share recipient sent to this workspace, awaiting the granter
   // (#646 PR3a). One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -249,6 +250,18 @@ export function NoticeCenter(props: {
       });
     }
 
+    if (props.syncStatus?.shareProjection?.state === "pending") {
+      next.push({
+        id: "share-projection-pending",
+        tone: "warning",
+        title: "Shared files need repair",
+        body:
+          "Some shared files are not current in this folder. Refresh the shared view to repair them.",
+        action: { label: "Refresh", onClick: props.onRefreshShareView },
+        Icon: AlertTriangle,
+      });
+    }
+
     if (state === "conflict") {
       next.push({
         id: "sync-conflict",
@@ -398,6 +411,7 @@ export function NoticeCenter(props: {
     props.onDismissAgentNotification,
     props.onOpenConflicts,
     props.onOpenHistory,
+    props.onRefreshShareView,
     props.onOpenSettings,
     props.onReviewShareChanges,
     props.shareChangeNotices,

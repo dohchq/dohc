@@ -4,9 +4,11 @@ import {
   normalizeAbsolutePath,
   preferredBuildOutput,
   type WatcherEvent,
+  validateUserReadPath,
   validateUserWritePath,
   validateWorkspaceRootChoice,
 } from "@dohc/workspace-core";
+import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { randomUUID } from "node:crypto";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -507,23 +509,21 @@ import {
 } from "./workspaces/syncCode";
 import {
   assertShareChangesJournalable,
-  captureStandaloneShareViewDivergence,
   SharePinInvalidError,
   recordedShareSelector,
-  refreshStandaloneShareViewOnce,
   shareViewIdentitySelector,
-  withShareViewRefreshLifecycleLock,
-} from "./workspaces/sharedView";
+} from "./workspaces/shareViewRecords";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
   assertMountableSelector,
+  assertRealMountRoot,
   createMountDirectory,
   mountLabelFor,
+  mountRootFor,
   mountStoreWorkspaceIdFor,
-  relayTargetForShareMount,
-  refreshShareMountOnce,
   classifyShareMountRefreshError,
   removeMountFolder,
+  resolveShareMountPath,
   shareMountResultRow,
   validMountLabel,
 } from "./workspaces/shareMounts";
@@ -753,8 +753,15 @@ import {
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
   writeWorkspaceAsset,
+  writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
-import { routeWorkspaceTextWrite } from "./workspaces/workspaceTextWrite";
+import {
+  createShareViewFiles,
+  type ResolvedShareViewFilesTarget,
+  type ShareViewFileChangeOutcome,
+  type ShareViewFileChangeValue,
+  type ShareViewFilesTarget,
+} from "./workspaces/shareViewFiles";
 import {
   applyDatabaseEdit,
   importToDatabase,
@@ -780,16 +787,20 @@ import {
   archiveChatBookmarkProjection,
   writeChatBookmarkProjection,
 } from "./workspaces/chatBookmarkProjectionWrite";
-import { collectZipEntries, listFiles } from "./workspaces/workspaceFiles";
-import { explorerMenuEntries } from "./workspaces/explorerMenu";
 import {
-  routeWorkspaceFileCreate,
-  routeWorkspaceFileImport,
-  routeWorkspaceFolderCreate,
-  routeWorkspacePathDelete,
-  routeWorkspacePathMove,
-} from "./workspaces/workspaceFileOps";
-import { buildStoreZip } from "./workspaces/zipWriter";
+  collectZipEntries,
+  copyIntoWorkspace,
+  createFile,
+  createFolder,
+  deletePath,
+  importDroppedPaths,
+  listFiles,
+  MAX_ZIP_ENTRIES,
+  MAX_ZIP_TOTAL_BYTES,
+  movePath,
+} from "./workspaces/workspaceFiles";
+import { explorerMenuEntries } from "./workspaces/explorerMenu";
+import { buildStoreZip, type ZipEntry } from "./workspaces/zipWriter";
 import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
 import {
   DEFAULT_USER_SETTINGS,
@@ -895,8 +906,8 @@ function sharedViewOf(workspaceId: string): {
 // The workspace write boundary, over the rule in `shareWriteGate.ts`. It
 // refuses on the PRESENCE of a share view at every level, which is what the
 // 27 handlers behind it need: they write the workspace FOLDER, and a share
-// view's folder is a projection of its engine store. The one write a share
-// view does admit is routed elsewhere — see `CHANNELS.writeWorkspaceText`.
+// view's folder is a projection of its engine store. The file changes an edit
+// grant admits are routed through ShareViewFiles instead of this disk gate.
 function assertWritableWorkspace(workspace: { workspaceId: string }): void {
   const refusal = workspaceWriteRefusal(findWorkspace(workspace.workspaceId)?.shareView);
   if (refusal) throw new Error(refusal);
@@ -3333,7 +3344,7 @@ async function requirePluginEngineCapture(workspaceId: string) {
   return { workspace, capture };
 }
 
-function invokeWorkspacePluginSdk(input: {
+async function invokeWorkspacePluginSdk(input: {
   workspaceId: string;
   pluginId: string;
   spawnId: string;
@@ -3347,6 +3358,14 @@ function invokeWorkspacePluginSdk(input: {
   params?: unknown;
 }): Promise<unknown> {
   const workspace = requireWorkspace(input.workspaceId);
+  if (
+    input.method === "files.read" ||
+    input.method === "files.list" ||
+    input.method === "workspace.search" ||
+    input.method === "databases.read"
+  ) {
+    await ensureAllOwnedProjectionsCurrent(workspace);
+  }
   return invokePluginSdkHost(
     {
       pluginId: input.pluginId,
@@ -4327,11 +4346,581 @@ function requireEngineSessions(): EngineWorkspaceSessions {
 function sharedViewStoreFor(workspace: {
   workspaceId: string;
   rootPath: string;
+  shareMount?: true;
 }) {
   if (!rustEngineWorkspaceSessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
   }
   return createCaptureLiveStores(workspace, rustEngineWorkspaceSessions).store;
+}
+
+function resolveShareViewFilesTarget(
+  target: ShareViewFilesTarget,
+): ResolvedShareViewFilesTarget | null {
+  const workspace = findWorkspace(target.workspaceId);
+  if (!workspace) return null;
+  if (target.kind === "standalone") {
+    if (!shareViewIsPresent(workspace.shareView)) return null;
+    const record: Record<string, unknown> = isRecordValue(workspace.shareView)
+      ? workspace.shareView
+      : {};
+    return {
+      kind: "standalone",
+      workspaceId: workspace.workspaceId,
+      storeWorkspaceId: workspace.workspaceId,
+      schedulingRootPath: workspace.rootPath,
+      rootPath: workspace.rootPath,
+      shareId:
+        typeof record.shareId === "string" && record.shareId.length > 0
+          ? record.shareId
+          : null,
+      granterEmail:
+        typeof record.granterEmail === "string" ? record.granterEmail : null,
+      grantedSelector: record.grantedSelector,
+      ended: record.ended === true,
+      relayUrl: typeof record.relayUrl === "string" ? record.relayUrl : null,
+    };
+  }
+  const mount = workspace.shareMounts?.find(
+    (candidate) => candidate.shareId === target.shareId,
+  );
+  if (!mount) return null;
+  return {
+    kind: "mount",
+    workspaceId: workspace.workspaceId,
+    storeWorkspaceId: mountStoreWorkspaceIdFor(
+      workspace.workspaceId,
+      mount.shareId,
+    ),
+    schedulingRootPath: workspace.rootPath,
+    rootPath: validMountLabel(mount.label)
+      ? mountRootFor(workspace.rootPath, mount.label)
+      : workspace.rootPath,
+    shareId: mount.shareId,
+    granterEmail: mount.granterEmail,
+    grantedSelector: mount.grantedSelector,
+    ended: mount.ended === true,
+    relayUrl: mount.relayUrl,
+    recipientEmail: mount.recipientEmail ?? null,
+    mountLabel: mount.label,
+  };
+}
+
+const shareViewFiles = createShareViewFiles({
+  resolveTarget: resolveShareViewFilesTarget,
+  openStore: (target) =>
+    sharedViewStoreFor({
+      workspaceId: target.storeWorkspaceId,
+      rootPath: target.rootPath,
+      ...(target.kind === "mount" ? { shareMount: true as const } : {}),
+    }),
+  resolveRelay: async (target) => {
+    await warmCredentialCache().catch(() => undefined);
+    const credentials = cachedCredentials;
+    if (!credentials?.relayUrl) {
+      if (target.kind === "standalone") {
+        throw new Error("Sign in to dohc Cloud first.");
+      }
+      return null;
+    }
+    if (
+      (target.relayUrl &&
+        !relayUrlsMatch(credentials.relayUrl, target.relayUrl)) ||
+      (target.kind === "mount" &&
+        target.recipientEmail != null &&
+        credentials.email != null &&
+        credentials.email !== target.recipientEmail)
+    ) {
+      return null;
+    }
+    return { baseUrl: credentials.relayUrl, token: credentials.token };
+  },
+  pull: async (target, relay, input) =>
+    relayClientForWorkspace({
+      workspaceId: target.storeWorkspaceId,
+      rootPath: target.rootPath,
+      ...(target.kind === "mount" ? { shareMount: true as const } : {}),
+      relay,
+    }).pullShareView({
+      shareId: target.shareId,
+      grantedSelector: input.grantedSelector,
+      recordRefusals: input.recordRefusals,
+      recordCollisions: input.recordCollisions,
+      recordChangedPaths: input.recordChangedPaths,
+    }),
+  recordRefusals: async (target, refusals) => {
+    const recorder =
+      target.kind === "standalone"
+        ? createShareSkipRecorder({
+            current: () => findWorkspace(target.workspaceId)?.shareView,
+            persist: (next) => setWorkspaceShareView(target.workspaceId, next),
+          })
+        : createShareSkipRecorder({
+            current: () =>
+              findWorkspace(target.workspaceId)?.shareMounts?.find(
+                (mount) => mount.shareId === target.shareId,
+              ),
+            persist: (next) =>
+              setWorkspaceShareMounts(
+                target.workspaceId,
+                (findWorkspace(target.workspaceId)?.shareMounts ?? []).map(
+                  (mount) =>
+                    mount.shareId === target.shareId ? next : mount,
+                ),
+              ),
+          });
+    await recorder([...refusals]);
+  },
+  markEnded: async (target) => {
+    if (target.kind === "standalone") {
+      endWorkspaceShareView(target.workspaceId);
+      return;
+    }
+    setWorkspaceShareMounts(
+      target.workspaceId,
+      (findWorkspace(target.workspaceId)?.shareMounts ?? []).map((mount) =>
+        mount.shareId === target.shareId ? { ...mount, ended: true } : mount,
+      ),
+    );
+  },
+  retireTarget: async (target) => {
+    await closeRelayTransportWorkspace(target.storeWorkspaceId).catch(
+      () => undefined,
+    );
+  },
+  assertProjectionRoot: async (target) => {
+    if (target.kind !== "mount") return;
+    if (!target.mountLabel) throw new Error("Share mount record has no label.");
+    await assertRealMountRoot(target.schedulingRootPath, target.mountLabel);
+  },
+  removeMount: async (target) => {
+    if (target.kind !== "mount" || !target.mountLabel) {
+      throw new Error("Only a registered share mount can be removed.");
+    }
+    await closeRelayTransportWorkspace(target.storeWorkspaceId);
+    const folderRemovable = validMountLabel(target.mountLabel);
+    if (folderRemovable) {
+      await removeMountFolder(target.schedulingRootPath, target.mountLabel);
+    }
+    setWorkspaceShareMounts(
+      target.workspaceId,
+      (findWorkspace(target.workspaceId)?.shareMounts ?? []).filter(
+        (mount) => mount.shareId !== target.shareId,
+      ),
+    );
+    return { folderLeft: !folderRemovable };
+  },
+});
+
+async function shareViewFilesTargetForPath(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  relativePath: string,
+): Promise<{ target: ShareViewFilesTarget; path: string } | null> {
+  if (shareViewIsPresent(workspace.shareView)) {
+    return {
+      target: { kind: "standalone", workspaceId: workspace.workspaceId },
+      path: relativePath,
+    };
+  }
+  const resolved = await resolveShareMountPath(
+    workspace.rootPath,
+    relativePath,
+    workspace.shareMounts ?? [],
+  );
+  return resolved === null
+    ? null
+    : {
+        target: {
+          kind: "mount",
+          workspaceId: workspace.workspaceId,
+          shareId: resolved.mount.shareId,
+        },
+        path: resolved.path,
+      };
+}
+
+async function readOwnedWorkspaceText(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  relativePath: string,
+) {
+  const routed = await shareViewFilesTargetForPath(workspace, relativePath);
+  if (routed === null) {
+    return readWorkspaceText(workspace.rootPath, relativePath);
+  }
+  const read = await shareViewFiles.read(routed.target, {
+    kind: "text",
+    path: routed.path,
+  });
+  if (read.kind !== "text") {
+    throw new Error("Shared text read returned an invalid result.");
+  }
+  return read;
+}
+
+async function readOwnedWorkspaceAsset(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  relativePath: string,
+) {
+  const routed = await shareViewFilesTargetForPath(workspace, relativePath);
+  if (routed === null) {
+    return readWorkspaceAsset(workspace.rootPath, relativePath);
+  }
+  const read = await shareViewFiles.read(routed.target, {
+    kind: "asset",
+    path: routed.path,
+  });
+  if (read.kind !== "asset") {
+    throw new Error("Shared asset read returned an invalid result.");
+  }
+  return read;
+}
+
+async function listOwnedWorkspaceFiles(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+) {
+  if (shareViewIsPresent(workspace.shareView)) {
+    return shareViewFiles.list({
+      kind: "standalone",
+      workspaceId: workspace.workspaceId,
+    });
+  }
+  const listed = await listFiles(workspace.rootPath);
+  const files = [...listed.files];
+  const folders = [...(listed.folders ?? [])];
+  for (const mount of workspace.shareMounts ?? []) {
+    if (!validMountLabel(mount.label)) continue;
+    const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+    const underMount = (path: string) =>
+      path === prefix || path.startsWith(`${prefix}/`);
+    const retainedFiles = files.filter((file) => !underMount(file.path));
+    const retainedFolders = folders.filter((folder) => !underMount(folder));
+    files.length = 0;
+    files.push(...retainedFiles);
+    folders.length = 0;
+    folders.push(...retainedFolders, prefix);
+    const canonical = await shareViewFiles.list({
+      kind: "mount",
+      workspaceId: workspace.workspaceId,
+      shareId: mount.shareId,
+    });
+    files.push(
+      ...canonical.files.map((file) => ({
+        ...file,
+        path: `${prefix}/${file.path}`,
+      })),
+    );
+    folders.push(
+      ...(canonical.folders ?? []).map((folder) => `${prefix}/${folder}`),
+    );
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  return {
+    files,
+    folders: [...new Set(folders)].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  };
+}
+
+function ownedWorkspaceGraphSource(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+) {
+  return {
+    list: () => listOwnedWorkspaceFiles(workspace),
+    readText: (path: string) => readOwnedWorkspaceText(workspace, path),
+  };
+}
+
+async function collectShareTargetZipEntries(input: {
+  target: ShareViewFilesTarget;
+  rootName: string;
+  relativePath?: string;
+}): Promise<{ entries: ZipEntry[]; baseName: string }> {
+  const listed = await shareViewFiles.list(input.target);
+  let selectedPath: string | undefined;
+  if (input.relativePath !== undefined) {
+    const validated = validateUserReadPath(input.relativePath);
+    if (!validated.ok) {
+      throw new Error(
+        `Invalid export path (${validated.reason}): ${input.relativePath}`,
+      );
+    }
+    selectedPath = validated.normalized;
+    if (classifyEngineFilePathForRead(selectedPath).kind === "secret") {
+      throw new Error(
+        `Secret files never leave the workspace in an export: ${selectedPath}`,
+      );
+    }
+  }
+  const selected = listed.files.filter(
+    (file) =>
+      selectedPath === undefined ||
+      file.path === selectedPath ||
+      file.path.startsWith(`${selectedPath}/`),
+  );
+  if (
+    selectedPath !== undefined &&
+    selected.length === 0 &&
+    !(listed.folders ?? []).includes(selectedPath)
+  ) {
+    throw new Error(`Export path does not exist: ${selectedPath}`);
+  }
+  const entries: ZipEntry[] = [];
+  let totalBytes = 0;
+  for (const file of selected) {
+    if (classifyEngineFilePathForRead(file.path).kind === "secret") continue;
+    const read = await shareViewFiles.read(input.target, {
+      kind: "asset",
+      path: file.path,
+    });
+    if (read.kind !== "asset") {
+      throw new Error("Shared export read returned an invalid result.");
+    }
+    totalBytes += read.bytes.byteLength;
+    if (
+      entries.length >= MAX_ZIP_ENTRIES ||
+      totalBytes > MAX_ZIP_TOTAL_BYTES
+    ) {
+      throw new Error(
+        `Export too large (over ${MAX_ZIP_ENTRIES} files or 256MB) — export a smaller folder`,
+      );
+    }
+    const archivePath =
+      selectedPath === undefined
+        ? file.path
+        : file.path === selectedPath
+          ? basename(selectedPath)
+          : `${basename(selectedPath)}/${file.path.slice(selectedPath.length + 1)}`;
+    entries.push({ path: archivePath, data: read.bytes });
+  }
+  const name =
+    selectedPath === undefined ? input.rootName : basename(selectedPath);
+  return {
+    entries,
+    baseName: name.replace(/\.[^.]+$/, "") || name,
+  };
+}
+
+async function collectOwnedZipEntries(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  relativePath?: string,
+): Promise<{ entries: ZipEntry[]; baseName: string }> {
+  if (shareViewIsPresent(workspace.shareView)) {
+    return collectShareTargetZipEntries({
+      target: { kind: "standalone", workspaceId: workspace.workspaceId },
+      rootName: basename(workspace.rootPath),
+      relativePath,
+    });
+  }
+  if (relativePath !== undefined) {
+    const routed = await shareViewFilesTargetForPath(workspace, relativePath);
+    if (routed?.target.kind === "mount") {
+      return collectShareTargetZipEntries({
+        target: routed.target,
+        rootName: basename(relativePath),
+        relativePath: routed.path,
+      });
+    }
+    const validated = validateUserReadPath(relativePath);
+    const normalized = validated.ok ? validated.normalized : relativePath;
+    const mountRoot = (workspace.shareMounts ?? []).find(
+      (mount) =>
+        validMountLabel(mount.label) &&
+        normalized === `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
+    );
+    if (mountRoot) {
+      return collectShareTargetZipEntries({
+        target: {
+          kind: "mount",
+          workspaceId: workspace.workspaceId,
+          shareId: mountRoot.shareId,
+        },
+        rootName: mountRoot.label,
+      });
+    }
+  }
+  const disk = await collectZipEntries(workspace.rootPath, relativePath);
+  if ((workspace.shareMounts ?? []).length === 0) return disk;
+  const selectedPath =
+    relativePath === undefined
+      ? undefined
+      : (() => {
+          const validated = validateUserReadPath(relativePath);
+          return validated.ok ? validated.normalized : undefined;
+        })();
+  let entries = [...disk.entries];
+  for (const mount of workspace.shareMounts ?? []) {
+    if (!validMountLabel(mount.label)) continue;
+    const workspacePrefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+    if (
+      selectedPath !== undefined &&
+      workspacePrefix !== selectedPath &&
+      !workspacePrefix.startsWith(`${selectedPath}/`)
+    ) {
+      continue;
+    }
+    const archivePrefix =
+      selectedPath === undefined
+        ? workspacePrefix
+        : `${basename(selectedPath)}/${workspacePrefix.slice(selectedPath.length + 1)}`;
+    entries = entries.filter(
+      (entry) => !entry.path.startsWith(`${archivePrefix}/`),
+    );
+    const canonical = await collectShareTargetZipEntries({
+      target: {
+        kind: "mount",
+        workspaceId: workspace.workspaceId,
+        shareId: mount.shareId,
+      },
+      rootName: mount.label,
+    });
+    entries.push(
+      ...canonical.entries.map((entry) => ({
+        ...entry,
+        path: `${archivePrefix}/${entry.path}`,
+      })),
+    );
+  }
+  const totalBytes = entries.reduce(
+    (total, entry) => total + entry.data.byteLength,
+    0,
+  );
+  if (entries.length > MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
+    throw new Error(
+      `Export too large (over ${MAX_ZIP_ENTRIES} files or 256MB) — export a smaller folder`,
+    );
+  }
+  entries.sort((left, right) => left.path.localeCompare(right.path));
+  return { entries, baseName: disk.baseName };
+}
+
+async function ensureOwnedProjectionCurrent(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  relativePath: string,
+): Promise<void> {
+  const routed = await shareViewFilesTargetForPath(workspace, relativePath);
+  if (routed === null) return;
+  const status = await shareViewFiles.projectionStatus(routed.target);
+  if (status.state === "current" || status.state === "unavailable") {
+    return;
+  }
+  await withExclusiveWorkspaceOperation(
+    workspace.rootPath,
+    (_markWorkspaceChanged, lease) =>
+      shareViewFiles.reconcile(lease, routed.target, "repair"),
+  );
+  if ((await shareViewFiles.projectionStatus(routed.target)).state !== "current") {
+    throw new Error(
+      "This shared file is still being restored to its folder. Try again after the shared view finishes repairing.",
+    );
+  }
+}
+
+async function ensureAllOwnedProjectionsCurrent(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+): Promise<void> {
+  const targets: ShareViewFilesTarget[] = shareViewIsPresent(workspace.shareView)
+    ? [{ kind: "standalone", workspaceId: workspace.workspaceId }]
+    : (workspace.shareMounts ?? [])
+        .filter((mount) => validMountLabel(mount.label))
+        .map((mount) => ({
+          kind: "mount" as const,
+          workspaceId: workspace.workspaceId,
+          shareId: mount.shareId,
+        }));
+  const pending: ShareViewFilesTarget[] = [];
+  for (const target of targets) {
+    const status = await shareViewFiles.projectionStatus(target);
+    if (status.state === "pending") {
+      pending.push(target);
+    }
+  }
+  if (pending.length === 0) return;
+  await withExclusiveWorkspaceOperation(
+    workspace.rootPath,
+    async (_markWorkspaceChanged, lease) => {
+      for (const target of pending) {
+        await shareViewFiles.reconcile(lease, target, "repair");
+      }
+    },
+  );
+  for (const target of pending) {
+    if ((await shareViewFiles.projectionStatus(target)).state !== "current") {
+      throw new Error(
+        "Some shared files are still being restored. Refresh the shared view before you continue.",
+      );
+    }
+  }
+}
+
+async function syncStatusWithOwnedProjection(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  status: SyncStatusResult,
+): Promise<SyncStatusResult> {
+  if (!shareViewIsPresent(workspace.shareView)) return status;
+  const projection = await shareViewFiles.projectionStatus({
+    kind: "standalone",
+    workspaceId: workspace.workspaceId,
+  });
+  if (projection.state === "unavailable") return status;
+  return {
+    ...status,
+    shareProjection:
+      projection.state === "current"
+        ? { state: "current" }
+        : projection,
+  };
+}
+
+function committedShareViewChangeValue(
+  outcome: ShareViewFileChangeOutcome,
+): ShareViewFileChangeValue {
+  if (outcome.status === "committed") {
+    if (outcome.projection === "pending") notifyRenderer();
+    return outcome.value;
+  }
+  notifyRenderer();
+  console.error("[desktop] shared file change did not finish cleanly", outcome);
+  if (outcome.status === "partial") {
+    throw new Error(
+      "Part of the shared file change completed before the operation stopped. Refresh the shared view before you continue.",
+    );
+  }
+  throw new Error(
+    "dohc could not confirm whether the shared file changed. Refresh the shared view before you continue.",
+  );
+}
+
+function shareViewImportResult(
+  outcome: ShareViewFileChangeOutcome,
+  sourceCount: number,
+): { imported: string[]; skipped: number } {
+  if (outcome.status === "committed") {
+    if (outcome.projection === "pending") notifyRenderer();
+    if (
+      typeof outcome.value !== "object" ||
+      outcome.value === null ||
+      !("imported" in outcome.value) ||
+      !("skipped" in outcome.value)
+    ) {
+      throw new Error("Shared file import returned an invalid result.");
+    }
+    return outcome.value as { imported: string[]; skipped: number };
+  }
+  notifyRenderer();
+  console.error("[desktop] shared file import did not finish cleanly", outcome);
+  if (outcome.status === "partial") {
+    const imported = outcome.effects
+      .filter((effect) => effect.before === "absent" && effect.after === "present")
+      .map((effect) => effect.path);
+    return {
+      imported,
+      skipped: Math.max(0, sourceCount - imported.length),
+    };
+  }
+  throw new Error(
+    "dohc could not confirm which shared files were imported. Do not retry the whole import. Refresh the shared view, then choose only files that are still missing.",
+  );
 }
 
 async function closeRelayTransportWorkspace(workspaceId: string): Promise<void> {
@@ -4768,28 +5357,39 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListWorkspaceFilesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return ListWorkspaceFilesResult.parse(await listFiles(workspace.rootPath));
+    return ListWorkspaceFilesResult.parse(
+      await listOwnedWorkspaceFiles(workspace),
+    );
   });
 
   ipcMain.handle(CHANNELS.createWorkspaceFile, async (event, payload) => {
     assertTrustedSender(event);
     const input = CreateWorkspaceFilePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // Routed like the text save (#802): a share view's create is decided at
-    // the seam that would otherwise write, where `routeWorkspaceFileCreate`
-    // asks `shareViewTakesLocalWrites` and refuses every level but edit.
-    // Every other workspace takes the ordinary refusal, unchanged.
     const shareView = sharedViewOf(workspace.workspaceId);
     if (shareView === null) assertWritableWorkspace(workspace);
-    return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await routeWorkspaceFileCreate({
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        relativePath: input.relativePath,
-        initialText: input.initialText,
-        shareView,
-        shareViewStore: () => sharedViewStoreFor(workspace),
-      });
+    return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
+      const path =
+        shareView === null
+          ? await createFile(
+              workspace.rootPath,
+              input.relativePath,
+              input.initialText,
+            )
+          : committedShareViewChangeValue(
+              await shareViewFiles.change(
+                lease,
+                { kind: "standalone", workspaceId: workspace.workspaceId },
+                {
+                  kind: "create",
+                  path: input.relativePath,
+                  initialText: input.initialText,
+                },
+              ),
+            );
+      if (typeof path !== "string") {
+        throw new Error("Shared file create returned an invalid result.");
+      }
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
@@ -4798,19 +5398,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CreateWorkspaceFolderPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // A share view is refused here at EVERY level, as it always was — the
-    // engine has no folder object, so there is no moment for a routed create
-    // to write. It goes through the router only so the refusal can say that
-    // instead of pointing at the granter for a change nothing could send.
-    // `routeWorkspaceFolderCreate` decides on the share view's PRESENCE.
-    const shareView = sharedViewOf(workspace.workspaceId);
-    if (shareView === null) assertWritableWorkspace(workspace);
+    assertWritableWorkspace(workspace);
     return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await routeWorkspaceFolderCreate({
-        rootPath: workspace.rootPath,
-        relativePath: input.relativePath,
-        shareView,
-      });
+      const path = await createFolder(workspace.rootPath, input.relativePath);
       return CreateWorkspaceFileResult.parse({ path });
     });
   });
@@ -4819,12 +5409,11 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = MoveWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // Routed like the text save (#802). See createWorkspaceFile above.
     const shareView = sharedViewOf(workspace.workspaceId);
     if (shareView === null) assertWritableWorkspace(workspace);
     return withExclusiveWorkspaceOperation(
       workspace.rootPath,
-      async (markWorkspaceChanged) => {
+      async (markWorkspaceChanged, lease) => {
         // Flagged workspaces coordinate single-file renames through the engine
         // FIRST so the file keeps its stable object id (linked Chats survive the
         // rename). Anything the engine declines — folders, binary, untracked —
@@ -4851,14 +5440,30 @@ function registerIpcHandlers(
           ? await capture.beginFileRename(input.fromPath, input.toPath)
           : null;
         try {
-          const path = await routeWorkspacePathMove({
-            workspaceId: workspace.workspaceId,
-            rootPath: workspace.rootPath,
-            fromPath: input.fromPath,
-            toPath: input.toPath,
-            shareView,
-            shareViewStore: () => sharedViewStoreFor(workspace),
-          });
+          const path =
+            shareView === null
+              ? await movePath(
+                  workspace.rootPath,
+                  input.fromPath,
+                  input.toPath,
+                )
+              : committedShareViewChangeValue(
+                  await shareViewFiles.change(
+                    lease,
+                    {
+                      kind: "standalone",
+                      workspaceId: workspace.workspaceId,
+                    },
+                    {
+                      kind: "move",
+                      fromPath: input.fromPath,
+                      toPath: input.toPath,
+                    },
+                  ),
+                );
+          if (typeof path !== "string") {
+            throw new Error("Shared file move returned an invalid result.");
+          }
           markWorkspaceChanged();
           await finishRename?.(true);
           return CreateWorkspaceFileResult.parse({ path });
@@ -4874,19 +5479,21 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = DeleteWorkspacePathPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // Routed like the text save (#802). See createWorkspaceFile above.
     const shareView = sharedViewOf(workspace.workspaceId);
     if (shareView === null) assertWritableWorkspace(workspace);
     return withExclusiveWorkspaceOperation(
       workspace.rootPath,
-      async (markWorkspaceChanged) => {
+      async (markWorkspaceChanged, lease) => {
         // WS-G2-C-2 (gate fix 3): a live Y.Doc session over the path being removed
         // would, on a later settle, resurrect the file / orphan the object. Flush +
         // release it (and any session under a deleted folder) BEFORE the disk delete
         // so no stale settle can write the old path afterward.
-        const finishDebts = await activity
-          .engineCaptureFor(workspace.workspaceId)
-          ?.settleAndCloseLiveSessionsForPath(input.relativePath);
+        const finishDebts =
+          shareView === null
+            ? await activity
+                .engineCaptureFor(workspace.workspaceId)
+                ?.settleAndCloseLiveSessionsForPath(input.relativePath)
+            : undefined;
         // shell.trashItem first (recoverable on every platform); deletePath
         // falls back to the workspace's .dohc/trash where the OS rejects
         // (cross-filesystem mounts) — never a hard delete either way.
@@ -4896,14 +5503,30 @@ function registerIpcHandlers(
         // handle that blocks the write can block the trash and the fallback
         // move, and a failed delete leaves a file that still owes its write.
         try {
-          const result = await routeWorkspacePathDelete({
-            workspaceId: workspace.workspaceId,
-            rootPath: workspace.rootPath,
-            relativePath: input.relativePath,
-            trashItem: (p) => shell.trashItem(p),
-            shareView,
-            shareViewStore: () => sharedViewStoreFor(workspace),
-          });
+          const result =
+            shareView === null
+              ? await deletePath(
+                  workspace.rootPath,
+                  input.relativePath,
+                  (path) => shell.trashItem(path),
+                )
+              : committedShareViewChangeValue(
+                  await shareViewFiles.change(
+                    lease,
+                    {
+                      kind: "standalone",
+                      workspaceId: workspace.workspaceId,
+                    },
+                    { kind: "delete", path: input.relativePath },
+                  ),
+                );
+          if (
+            typeof result !== "object" ||
+            result === null ||
+            !("trashed" in result)
+          ) {
+            throw new Error("Shared file delete returned an invalid result.");
+          }
           markWorkspaceChanged();
           // `deletePath` matches its own disk target against the CANONICAL form
           // `validateUserWritePath` normalizes to (a trailing slash stripped, for
@@ -4933,8 +5556,8 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     // Gather + bound BEFORE asking where to save: an over-limit export
     // refuses without ever showing a dialog.
-    const { entries, baseName } = await collectZipEntries(
-      workspace.rootPath,
+    const { entries, baseName } = await collectOwnedZipEntries(
+      workspace,
       input.relativePath,
     );
     // Test seam (DOHC_TEST_PICK_PATH precedent): native save dialogs cannot
@@ -5093,6 +5716,7 @@ function registerIpcHandlers(
     if (chosen === "open-externally" && input.path) {
       // Containment before the OS sees the path (resolveWorkspaceFile:
       // validate + realpath + inside-root), same rule as openFileExternally.
+      await ensureOwnedProjectionCurrent(workspace, input.path);
       const { realTarget } = await resolveWorkspaceFile(
         workspace.rootPath,
         input.path,
@@ -5183,23 +5807,39 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ImportWorkspaceFilesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // Routed like the text save (#802). See createWorkspaceFile above.
     const shareView = sharedViewOf(workspace.workspaceId);
     if (shareView === null) assertWritableWorkspace(workspace);
     const importInto = (
       absolutePaths: string[],
       screenAgainstRoots: string[] | null,
     ) =>
-      withStaleSensitiveWorkspaceOperation(workspace.rootPath, () =>
-        routeWorkspaceFileImport({
-          workspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath,
-          absolutePaths,
-          screenAgainstRoots,
-          targetDir: input.targetDir,
-          shareView,
-          shareViewStore: () => sharedViewStoreFor(workspace),
-        }),
+      withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) =>
+        shareView === null
+          ? screenAgainstRoots === null
+            ? copyIntoWorkspace(
+                workspace.rootPath,
+                absolutePaths,
+                input.targetDir,
+              )
+            : importDroppedPaths(
+                workspace.rootPath,
+                absolutePaths,
+                screenAgainstRoots,
+                input.targetDir,
+              )
+          : shareViewImportResult(
+              await shareViewFiles.change(
+                lease,
+                { kind: "standalone", workspaceId: workspace.workspaceId },
+                {
+                  kind: "import",
+                  absolutePaths,
+                  screenAgainstRoots,
+                  targetDir: input.targetDir,
+                },
+              ),
+              absolutePaths.length,
+            ),
       );
     // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
     // note on the payload) re-validated by the drag-in screen — regular
@@ -5236,7 +5876,7 @@ function registerIpcHandlers(
     const input = ReadWorkspaceTextPayload.parse(payload);
     const workspace = requireAuthorizedWorkspace(event, input.workspaceId);
     return ReadWorkspaceTextResult.parse(
-      await readWorkspaceText(workspace.rootPath, input.relativePath),
+      await readOwnedWorkspaceText(workspace, input.relativePath),
     );
   });
 
@@ -5244,13 +5884,6 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = WriteWorkspaceTextPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    // The ONE write a share view admits, and the only handler that does not
-    // take the blanket refusal (#646 PR3). A share view's text save is
-    // decided at the seam that would otherwise write —
-    // `routeWorkspaceTextWrite` asks `shareViewTakesLocalWrites` and throws
-    // `SharedFileReadOnlyError` for every level but edit, for an ended share,
-    // and for a grant this process cannot read. Every OTHER workspace takes
-    // the ordinary refusal, unchanged.
     const shareView = sharedViewOf(workspace.workspaceId);
     if (shareView === null) assertWritableWorkspace(workspace);
     const writePath = validateUserWritePath(input.relativePath);
@@ -5265,17 +5898,30 @@ function registerIpcHandlers(
         );
       }
     }
-    return WriteWorkspaceTextResult.parse(
-      await routeWorkspaceTextWrite({
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        relativePath: input.relativePath,
-        text: input.text,
-        expectedContentHash: input.expectedContentHash,
-        shareView,
-        shareViewStore: () => sharedViewStoreFor(workspace),
-      }),
+    const result = await withStaleSensitiveWorkspaceOperation(
+      workspace.rootPath,
+      async (lease) =>
+        shareView === null
+          ? writeWorkspaceText(
+              workspace.rootPath,
+              input.relativePath,
+              input.text,
+              input.expectedContentHash,
+            )
+          : committedShareViewChangeValue(
+              await shareViewFiles.change(
+                lease,
+                { kind: "standalone", workspaceId: workspace.workspaceId },
+                {
+                  kind: "save",
+                  path: input.relativePath,
+                  text: input.text,
+                  expectedContentHash: input.expectedContentHash,
+                },
+              ),
+            ),
     );
+    return WriteWorkspaceTextResult.parse(result);
   });
 
   ipcMain.handle(CHANNELS.writeWorkspaceAsset, async (event, payload) => {
@@ -5356,6 +6002,7 @@ function registerIpcHandlers(
     // Resolve+contain first: only a real file inside the workspace can be
     // handed to the OS opener — never an arbitrary path or URL. window.open
     // remains fully denied; this is the only sanctioned external-open path.
+    await ensureOwnedProjectionCurrent(workspace, input.relativePath);
     const { realTarget } = await resolveWorkspaceFile(
       workspace.rootPath,
       input.relativePath,
@@ -5369,7 +6016,10 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ReadWorkspaceGraphPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    const graph = await readWorkspaceGraph(workspace.rootPath);
+    const graph = await readWorkspaceGraph(
+      workspace.rootPath,
+      ownedWorkspaceGraphSource(workspace),
+    );
     if (!input.includeChatMentions) return WorkspaceGraphResult.parse(graph);
     const { workspace: engineWorkspace } = await requireEngineCapture(
       input.workspaceId,
@@ -5519,7 +6169,11 @@ function registerIpcHandlers(
     const input = GetBacklinksPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     return GetBacklinksResult.parse({
-      sources: await readWorkspaceBacklinks(workspace.rootPath, input.path),
+      sources: await readWorkspaceBacklinks(
+        workspace.rootPath,
+        input.path,
+        ownedWorkspaceGraphSource(workspace),
+      ),
     });
   });
 
@@ -5527,7 +6181,7 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListWorkspaceHeadingsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    const source = await readWorkspaceText(workspace.rootPath, input.path);
+    const source = await readOwnedWorkspaceText(workspace, input.path);
     return ListWorkspaceHeadingsResult.parse({
       headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)),
     });
@@ -6467,7 +7121,7 @@ function registerIpcHandlers(
       currentText:
         op.currentPath === null
           ? null
-          : await readWorkspaceText(workspace.rootPath, op.currentPath).then(
+          : await readOwnedWorkspaceText(workspace, op.currentPath).then(
               (read) => (read.truncated ? null : read.text),
               // A file this surface cannot read as text is "no current side",
               // which the review states rather than failing.
@@ -6511,28 +7165,23 @@ function registerIpcHandlers(
       input.workspaceId,
       requireShareViewProposalScope,
     );
-    const store = sharedViewStoreFor(scope.workspace);
-    const captured = await withShareViewRefreshLifecycleLock(
+    const reconciled = await withStaleSensitiveWorkspaceOperation(
       scope.workspace.rootPath,
-      async () =>
-        captureStandaloneShareViewDivergence({
-          rootDir: scope.workspace.rootPath,
-          workspaceId: scope.workspace.workspaceId,
-          store,
-          pinnedSelector: isRecordValue(scope.workspace.shareView)
-            ? scope.workspace.shareView.grantedSelector
-            : null,
-          shareId: scope.shareId,
-          ended:
-            isRecordValue(scope.workspace.shareView) &&
-            scope.workspace.shareView.ended === true,
-        }),
+      (lease) =>
+        shareViewFiles.reconcile(
+          lease,
+          { kind: "standalone", workspaceId: scope.workspace.workspaceId },
+          "settle",
+        ),
     );
-    assertShareChangesJournalable(captured.unjournalablePaths);
+    if (reconciled.kind !== "settle") {
+      throw new Error("Shared file settlement returned an invalid result.");
+    }
+    assertShareChangesJournalable(reconciled.unjournalablePaths);
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
     return resolveSubmitShareChangesResult(
-      captured.capturedPaths + captured.repairedPaths,
+      reconciled.capturedPaths + reconciled.repairedPaths,
       () =>
         relayClientForWorkspace({
           workspaceId: scope.workspace.workspaceId,
@@ -6593,44 +7242,6 @@ function registerIpcHandlers(
     }
     return WithdrawShareChangesResult.parse({ state: settled.state });
   });
-
-  // Where a share pull's refusals become durable. Called before the cursor
-  // that skips past them is committed, so a later page that fails cannot take
-  // an earlier page's reason with it, and a restart still shows it. Merging is
-  // idempotent by origin coordinate, because a re-fetched page repeats
-  // refusals the record already holds.
-  //
-  // Persist per PAGE, notify per PULL: see createShareSkipRecorder, which
-  // holds no notifier at all. Each pull site below broadcasts once, when it
-  // settles.
-  function recordShareViewRefusals(
-    workspaceId: string,
-  ): (refusals: readonly ShareViewRefusal[]) => Promise<void> {
-    return createShareSkipRecorder({
-      current: () => findWorkspace(workspaceId)?.shareView,
-      persist: (next) => setWorkspaceShareView(workspaceId, next),
-    });
-  }
-
-  // The same durable record for a MOUNTED share, on the mount's own row.
-  function recordShareMountRefusals(
-    workspaceId: string,
-    shareId: string,
-  ): (refusals: readonly ShareViewRefusal[]) => Promise<void> {
-    return createShareSkipRecorder({
-      current: () =>
-        findWorkspace(workspaceId)?.shareMounts?.find(
-          (mount) => mount.shareId === shareId,
-        ),
-      persist: (next) =>
-        setWorkspaceShareMounts(
-          workspaceId,
-          (findWorkspace(workspaceId)?.shareMounts ?? []).map((mount) =>
-            mount.shareId === shareId ? next : mount,
-          ),
-        ),
-    });
-  }
 
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
@@ -6710,11 +7321,6 @@ function registerIpcHandlers(
     });
     refreshNativeWorkspaceSurfaces();
     try {
-      const daemonRelay = relayClientForWorkspace({
-        workspaceId: created.workspaceId,
-        rootPath: created.rootPath,
-        relay,
-      });
       // Before the first pull: a share view that writes back needs its own
       // sync identity, and the pull is what gives it the share cursor that
       // makes local writes journal.
@@ -6727,27 +7333,22 @@ function registerIpcHandlers(
           console.error("[desktop] share view identity:", error);
         },
       );
-      const store = sharedViewStoreFor(created);
-      const outcome = await refreshStandaloneShareViewOnce({
-        rootDir: created.rootPath,
-        workspaceId: created.workspaceId,
-        relay,
-        shareId: parsed.shareId,
-        store,
-        ended: false,
-        // Just pinned on the record above; the refresh reads it back through
-        // the same defensive parse every later refresh uses.
-        pinnedSelector: info.selector,
-        recordRefusals: recordShareViewRefusals(created.workspaceId),
-        pull: async (input) =>
-          await daemonRelay.pullShareView({
-            shareId: input.shareId,
-            grantedSelector: input.grantedSelector,
-            recordRefusals: input.recordRefusals,
-            recordCollisions: input.recordCollisions,
-          }),
-      });
-      if (!outcome.ok) throw new Error(outcome.errorMessage);
+      const reconciled = await withStaleSensitiveWorkspaceOperation(
+        created.rootPath,
+        (lease) =>
+          shareViewFiles.reconcile(
+            lease,
+            { kind: "standalone", workspaceId: created.workspaceId },
+            "refresh",
+          ),
+      );
+      if (reconciled.kind !== "refresh") {
+        throw new Error("Shared view refresh returned an invalid result.");
+      }
+      const outcome = reconciled.outcome;
+      if ("ok" in outcome && !outcome.ok) {
+        throw new Error(outcome.errorMessage);
+      }
       if (outcome.status === "ended") {
         throw new ShareUnavailableError();
       }
@@ -6797,46 +7398,31 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     const shareView = workspace.shareView;
     if (!shareView) throw new Error("This workspace is not a shared view.");
+    const repaired = await withExclusiveWorkspaceOperation(
+      workspace.rootPath,
+      (_markWorkspaceChanged, lease) =>
+        shareViewFiles.reconcile(
+          lease,
+          { kind: "standalone", workspaceId: workspace.workspaceId },
+          "repair",
+        ),
+    );
+    if (repaired.kind !== "repair") {
+      throw new Error("Shared view repair returned an invalid result.");
+    }
+    const repairedPaths = repaired.repairedPaths;
     if (shareView.ended) {
+      notifyRenderer();
       return RefreshSharedViewResult.parse({
         ok: true,
         status: "ended",
-        changedPaths: 0,
+        changedPaths: repairedPaths,
         excludedPaths: [],
         unjournalablePaths: [],
         refusedOps: 0,
         refusedDetail: null,
       });
     }
-    await warmCredentialCache();
-    if (!cachedCredentials?.relayUrl) throw new Error("Sign in to dohc Cloud first.");
-    // Only refresh against the share's ORIGIN relay. Signed into a different
-    // relay, a 404 there means "wrong server", not "share ended" — so skip
-    // the refresh (leaving the view active) rather than flip it to ended.
-    if (
-      shareView.relayUrl &&
-      !relayUrlsMatch(cachedCredentials.relayUrl, shareView.relayUrl)
-    ) {
-      return RefreshSharedViewResult.parse({
-        ok: true,
-        status: "unchanged",
-        changedPaths: 0,
-        excludedPaths: [],
-        unjournalablePaths: [],
-        refusedOps: 0,
-        refusedDetail: null,
-      });
-    }
-    const relay = {
-      baseUrl: cachedCredentials.relayUrl,
-      token: cachedCredentials.token,
-    };
-    const daemonRelay = relayClientForWorkspace({
-      workspaceId: workspace.workspaceId,
-      rootPath: workspace.rootPath,
-      relay,
-    });
-    let outcome;
     // #646 PR2: the backstop this share's chat push docstring claims. A push
     // that failed — offline, a rotated session, a relay blip — is retried
     // here, before the pull, so a refresh drains the backlog instead of
@@ -6850,25 +7436,21 @@ function registerIpcHandlers(
     await pushShareViewChat(workspace).catch((error) => {
       console.error("[desktop] share view chat push (refresh backstop):", error);
     });
+    let outcome;
     try {
-      const store = sharedViewStoreFor(workspace);
-      outcome = await refreshStandaloneShareViewOnce({
-        rootDir: workspace.rootPath,
-        workspaceId: workspace.workspaceId,
-        relay,
-        shareId: shareView.shareId,
-        store,
-        ended: shareView.ended ?? false,
-        pinnedSelector: shareView.grantedSelector,
-        recordRefusals: recordShareViewRefusals(workspace.workspaceId),
-        pull: async (input) =>
-          await daemonRelay.pullShareView({
-            shareId: input.shareId,
-            grantedSelector: input.grantedSelector,
-            recordRefusals: input.recordRefusals,
-            recordCollisions: input.recordCollisions,
-          }),
-      });
+      const reconciled = await withStaleSensitiveWorkspaceOperation(
+        workspace.rootPath,
+        (lease) =>
+          shareViewFiles.reconcile(
+            lease,
+            { kind: "standalone", workspaceId: workspace.workspaceId },
+            "refresh",
+          ),
+      );
+      if (reconciled.kind !== "refresh") {
+        throw new Error("Shared view refresh returned an invalid result.");
+      }
+      outcome = reconciled.outcome;
     } catch (error) {
       // A pull that failed on a later page still persisted the refusals its
       // earlier pages recorded, so the renderer is told once here too.
@@ -6882,22 +7464,40 @@ function registerIpcHandlers(
             "Remove it, then open the share code again.",
         );
       }
+      if (repairedPaths > 0) {
+        return RefreshSharedViewResult.parse({
+          ok: false,
+          changedPaths: repairedPaths,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      }
       throw error;
     }
-    if (!outcome.ok) {
+    outcome =
+      "ok" in outcome
+        ? outcome.ok
+          ? {
+              ...outcome,
+              status:
+                outcome.status === "unchanged" && repairedPaths > 0
+                  ? ("updated" as const)
+                  : outcome.status,
+              changedPaths: outcome.changedPaths + repairedPaths,
+            }
+          : { ...outcome, changedPaths: outcome.changedPaths + repairedPaths }
+        : {
+            ...outcome,
+            status:
+              outcome.status === "unchanged" && repairedPaths > 0
+                ? ("updated" as const)
+                : outcome.status,
+            changedPaths: outcome.changedPaths + repairedPaths,
+          };
+    if ("ok" in outcome && !outcome.ok) {
       notifyRenderer();
       return RefreshSharedViewResult.parse(outcome);
     }
-    if (outcome.status === "ended") {
-      // Persist the honest end state: the view stays readable and stops
-      // refreshing; the notice survives restarts.
-      //
-      // Merged into the CURRENT record, never the pre-pull snapshot above:
-      // the pull that ended may have recorded refusals on its way, and
-      // writing the snapshot back would drop them.
-      endWorkspaceShareView(workspace.workspaceId);
-      refreshNativeWorkspaceSurfaces();
-    }
+    if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
     notifyRenderer();
     return RefreshSharedViewResult.parse(outcome);
   });
@@ -6936,7 +7536,10 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     // A mount changes the host tree — shared views cannot host mounts.
     assertWritableWorkspace(workspace);
-    return withShareMountLock(workspace.workspaceId, async () => {
+    return withExclusiveWorkspaceOperation(
+      workspace.rootPath,
+      (_markWorkspaceChanged, lease) =>
+        withShareMountLock(workspace.workspaceId, async () => {
     const parsed = parseShareCode(input.shareCode);
     if (!parsed) {
       throw new Error("That doesn't look like a share code. Copy it again and retry.");
@@ -6993,11 +7596,7 @@ function registerIpcHandlers(
       grantedSelector: info.selector,
     };
     await createMountDirectory(workspace.rootPath, mount.label);
-    const mountRelayTarget = relayTargetForShareMount(
-      workspace.workspaceId,
-      workspace.rootPath,
-      mount,
-    );
+    let registered = false;
     try {
       // Inside the rollback scope: a failed registry write (ENOSPC, perms)
       // must also remove the just-created folder — the app deliberately
@@ -7007,30 +7606,20 @@ function registerIpcHandlers(
         ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
         mount,
       ]);
-      const daemonRelay = relayClientForWorkspace({
-        ...mountRelayTarget,
-        relay,
-      });
-      const outcome = await refreshShareMountOnce({
-        hostWorkspaceId: workspace.workspaceId,
-        hostRoot: workspace.rootPath,
-        mount,
-        relay,
-        openStore: sharedViewStoreFor,
-        // Just pinned on the record above; read back through the same
-        // defensive parse every later refresh uses.
-        pinnedSelector: info.selector,
-        recordRefusals: recordShareMountRefusals(
-          workspace.workspaceId,
-          parsed.shareId,
-        ),
-        pull: async (input) =>
-          await daemonRelay.pullShareView({
-            shareId: input.shareId,
-            grantedSelector: input.grantedSelector,
-            recordRefusals: input.recordRefusals,
-          }),
-      });
+      registered = true;
+      const reconciled = await shareViewFiles.reconcile(
+        lease,
+        {
+          kind: "mount",
+          workspaceId: workspace.workspaceId,
+          shareId: mount.shareId,
+        },
+        "refresh",
+      );
+      if (reconciled.kind !== "refresh" || "ok" in reconciled.outcome) {
+        throw new Error("Share mount refresh returned an invalid result.");
+      }
+      const outcome = reconciled.outcome;
       if (outcome.status === "ended") throw new ShareUnavailableError();
       refreshNativeWorkspaceSurfaces();
       notifyRenderer();
@@ -7050,17 +7639,19 @@ function registerIpcHandlers(
       // Rollback both sides — a failed mount leaves no record and no folder.
       // The record removal filters the CURRENT set (never a stale snapshot).
       console.error(`[desktop] mount-share rollback for ${mount.label}:`, error);
-      try {
-        const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-        setWorkspaceShareMounts(
-          workspace.workspaceId,
-          current.filter((m) => m.shareId !== mount.shareId),
+      if (registered) {
+        await shareViewFiles
+          .unmount(lease, {
+            kind: "mount",
+            workspaceId: workspace.workspaceId,
+            shareId: mount.shareId,
+          })
+          .catch(() => undefined);
+      } else {
+        await removeMountFolder(workspace.rootPath, mount.label).catch(
+          () => undefined,
         );
-      } catch {}
-      await closeRelayTransportWorkspace(mountRelayTarget.workspaceId).catch(
-        () => undefined,
-      );
-      await removeMountFolder(workspace.rootPath, mount.label).catch(() => undefined);
+      }
       notifyRenderer();
       if (error instanceof ShareUnavailableError) {
         throw new Error(
@@ -7071,127 +7662,86 @@ function registerIpcHandlers(
         "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
       );
     }
-    });
+        }),
+    );
   });
 
   ipcMain.handle(CHANNELS.refreshShareMounts, async (event, payload) => {
     assertTrustedSender(event);
     const input = RefreshShareMountsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return withShareMountLock(workspace.workspaceId, async () => {
-    const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    const results: Array<{
-      shareId: string;
-      label: string;
-      status: "updated" | "unchanged" | "ended" | "damaged";
-      changedPaths: number;
-    }> = [];
-    // Every row goes through the bounded builder. A record whose identity the
-    // wire schema cannot carry is dropped from the REPORT rather than allowed
-    // to fail the parse at the end and discard every other mount's status.
-    const pushMountResult = (
-      mount: { shareId: unknown; label: unknown },
-      status: "updated" | "unchanged" | "ended" | "damaged",
-      changedPaths: number,
-    ): void => {
-      const row = shareMountResultRow({
-        shareId: mount.shareId,
-        label: mount.label,
-        status,
-        changedPaths,
-      });
-      if (row) results.push(row);
-    };
-    if (mounts.length === 0) {
-      return RefreshShareMountsResult.parse({ results });
-    }
-    await warmCredentialCache().catch(() => undefined);
-    // ONE credentials snapshot for the whole loop: a sign-out/sign-in while
-    // an awaited refresh runs must never pair the old relay URL with a new
-    // account's token (gpt-5.6-sol P1).
-    const credentials = cachedCredentials;
-    // One notification for the whole pass, in a finally: mounts whose pulls
-    // persisted refusals before a later mount threw must still reach the UI,
-    // and the per-page recorders deliberately broadcast nothing.
-    try {
-    for (const mount of mounts) {
-      if (mount.ended) {
-        pushMountResult(mount, "ended", 0);
-        continue;
-      }
-      // Offline, signed out, signed into a DIFFERENT relay, or signed into a
-      // different ACCOUNT: skip — recipient routes 404 identically for "not
-      // yours" and "revoked", so refreshing under the wrong identity would
-      // permanently (and wrongly) stamp the mount ended.
-      if (
-        !credentials?.relayUrl ||
-        !relayUrlsMatch(credentials.relayUrl, mount.relayUrl) ||
-        (mount.recipientEmail != null &&
-          credentials.email != null &&
-          credentials.email !== mount.recipientEmail)
-      ) {
-        pushMountResult(mount, "unchanged", 0);
-        continue;
-      }
-      try {
-        const relay = {
-          baseUrl: credentials.relayUrl,
-          token: credentials.token,
-        };
-        const mountRelayTarget = relayTargetForShareMount(
-          workspace.workspaceId,
-          workspace.rootPath,
-          mount,
-        );
-        const daemonRelay = relayClientForWorkspace({
-          ...mountRelayTarget,
-          relay,
-        });
-        const outcome = await refreshShareMountOnce({
-          hostWorkspaceId: workspace.workspaceId,
-          hostRoot: workspace.rootPath,
-          mount,
-          relay,
-          openStore: sharedViewStoreFor,
-          pinnedSelector: mount.grantedSelector,
-          recordRefusals: recordShareMountRefusals(
-            workspace.workspaceId,
-            mount.shareId,
-          ),
-          pull: async (input) =>
-            await daemonRelay.pullShareView({
-              shareId: input.shareId,
-              grantedSelector: input.grantedSelector,
-              recordRefusals: input.recordRefusals,
-            }),
-        });
-        if (outcome.status === "ended") {
-          await closeRelayTransportWorkspace(mountRelayTarget.workspaceId).catch(
-            () => undefined,
-          );
-          const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-          setWorkspaceShareMounts(
-            workspace.workspaceId,
-            current.map((m) => (m.shareId === mount.shareId ? { ...m, ended: true } : m)),
-          );
-        }
-        pushMountResult(mount, outcome.status, outcome.changedPaths);
-      } catch (error) {
-        // An expired session must SURFACE, not read as "refreshed, nothing
-        // new" — a manual Refresh Share would otherwise report success
-        // forever while every pull 401s (codex P2).
-        const verdict = classifyShareMountRefreshError(error);
-        if (verdict.kind === "abort") throw new Error(verdict.message);
-        // One mount's failure must not stop the others.
-        console.error(`[desktop] share-mount refresh failed for ${mount.label}:`, error);
-        pushMountResult(mount, verdict.status, 0);
-      }
-    }
-    return RefreshShareMountsResult.parse({ results });
-    } finally {
-      notifyRenderer();
-    }
-    });
+    return withExclusiveWorkspaceOperation(
+      workspace.rootPath,
+      (_markWorkspaceChanged, lease) =>
+        withShareMountLock(workspace.workspaceId, async () => {
+          const mounts =
+            findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+          const results: Array<{
+            shareId: string;
+            label: string;
+            status: "updated" | "unchanged" | "ended" | "damaged";
+            changedPaths: number;
+          }> = [];
+          const pushMountResult = (
+            mount: { shareId: unknown; label: unknown },
+            status: "updated" | "unchanged" | "ended" | "damaged",
+            changedPaths: number,
+          ): void => {
+            const row = shareMountResultRow({
+              shareId: mount.shareId,
+              label: mount.label,
+              status,
+              changedPaths,
+            });
+            if (row) results.push(row);
+          };
+          try {
+            for (const mount of mounts) {
+              if (mount.ended) {
+                pushMountResult(mount, "ended", 0);
+                continue;
+              }
+              try {
+                const reconciled = await shareViewFiles.reconcile(
+                  lease,
+                  {
+                    kind: "mount",
+                    workspaceId: workspace.workspaceId,
+                    shareId: mount.shareId,
+                  },
+                  "refresh",
+                );
+                if (
+                  reconciled.kind !== "refresh" ||
+                  "ok" in reconciled.outcome
+                ) {
+                  throw new Error(
+                    "Share mount refresh returned an invalid result.",
+                  );
+                }
+                pushMountResult(
+                  mount,
+                  reconciled.outcome.status,
+                  reconciled.outcome.changedPaths,
+                );
+              } catch (error) {
+                const verdict = classifyShareMountRefreshError(error);
+                if (verdict.kind === "abort") {
+                  throw new Error(verdict.message);
+                }
+                console.error(
+                  `[desktop] share-mount refresh failed for ${mount.label}:`,
+                  error,
+                );
+                pushMountResult(mount, verdict.status, 0);
+              }
+            }
+            return RefreshShareMountsResult.parse({ results });
+          } finally {
+            notifyRenderer();
+          }
+        }),
+    );
   });
 
   ipcMain.handle(CHANNELS.unmountShare, async (event, payload) => {
@@ -7199,45 +7749,38 @@ function registerIpcHandlers(
     const input = UnmountSharePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    return withShareMountLock(workspace.workspaceId, async () => {
-    const mounts = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    const mount = mounts.find((m) => m.shareId === input.shareId);
-    if (!mount) throw new Error("This share is not added to this workspace.");
-    // Disk first, record second: a crash between the two leaves a record
-    // whose folder is gone — refresh simply re-materializes or reports
-    // ended — never an orphaned folder that looks like local files. The
-    // record removal filters the CURRENT set (the lock serializes mount
-    // operations, so no writer can interleave here anyway).
-    await closeRelayTransportWorkspace(
-      mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
+    return withExclusiveWorkspaceOperation(
+      workspace.rootPath,
+      (_markWorkspaceChanged, lease) =>
+        withShareMountLock(workspace.workspaceId, async () => {
+          const mount = (
+            findWorkspace(workspace.workspaceId)?.shareMounts ?? []
+          ).find((candidate) => candidate.shareId === input.shareId);
+          if (!mount) {
+            throw new Error("This share is not added to this workspace.");
+          }
+          const removed = await shareViewFiles.unmount(lease, {
+            kind: "mount",
+            workspaceId: workspace.workspaceId,
+            shareId: mount.shareId,
+          });
+          refreshNativeWorkspaceSurfaces();
+          notifyRenderer();
+          return UnmountShareResult.parse({
+            workspace: workspaceSummaryFor(
+              requireWorkspace(workspace.workspaceId),
+            ),
+            ...(removed.folderLeft ? { folderLeft: true as const } : {}),
+          });
+        }),
     );
-    // A record whose label this app would never materialize through gets
-    // RECORD cleanup only. Deleting a folder named by an unusable label is
-    // the exact move the validator exists to refuse, so the record goes and
-    // the folder is reported, never touched. Without this the record could
-    // not be removed at all: the folder path would throw and strand it.
-    const folderRemovable = validMountLabel(mount.label);
-    if (folderRemovable) {
-      await removeMountFolder(workspace.rootPath, mount.label);
-    }
-    const current = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    setWorkspaceShareMounts(
-      workspace.workspaceId,
-      current.filter((m) => m.shareId !== mount.shareId),
-    );
-    refreshNativeWorkspaceSurfaces();
-    notifyRenderer();
-    return UnmountShareResult.parse({
-      workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
-      ...(folderRemovable ? {} : { folderLeft: true as const }),
-    });
-    });
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {
     assertTrustedSender(event);
     const input = ReadWorkspaceDatabasePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    await ensureOwnedProjectionCurrent(workspace, input.relativePath);
     return DatabaseSnapshotResult.parse(
       await readDatabaseSnapshot(workspace.rootPath, input.relativePath),
     );
@@ -7290,7 +7833,10 @@ function registerIpcHandlers(
       sites: await withActiveWorkspaceForSiteRead(
         activeWorkspaceIdBySender.get(event.sender.id),
         workspace.workspaceId,
-        () => listSitePackages(workspace.rootPath),
+        async () => {
+          await ensureAllOwnedProjectionsCurrent(workspace);
+          return listSitePackages(workspace.rootPath);
+        },
       ),
     });
   });
@@ -7306,7 +7852,15 @@ function registerIpcHandlers(
       await withActiveWorkspaceForSiteRead(
         activeWorkspaceIdBySender.get(event.sender.id),
         workspace.workspaceId,
-        () => getSitePackage(workspace.rootPath, input.path, undefined, input.effectivePreviewMode),
+        async () => {
+          await ensureOwnedProjectionCurrent(workspace, input.path);
+          return getSitePackage(
+            workspace.rootPath,
+            input.path,
+            undefined,
+            input.effectivePreviewMode,
+          );
+        },
       ),
     );
   });
@@ -7343,6 +7897,7 @@ function registerIpcHandlers(
           "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
         );
       }
+      await ensureOwnedProjectionCurrent(workspace, input.siteRoot);
       const site = requireExactSiteRoot(
         await getSitePackage(workspace.rootPath, input.siteRoot),
         input.siteRoot,
@@ -8555,7 +9110,12 @@ function registerIpcHandlers(
       await stopPluginWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();
-    const status = SyncStatusResult.parse(await openWorkspaceActivity(workspace));
+    const status = SyncStatusResult.parse(
+      await syncStatusWithOwnedProjection(
+        workspace,
+        await openWorkspaceActivity(workspace),
+      ),
+    );
     // A later openWorkspace call from this same sender can have switched to
     // a different workspace while the await above was pending — its own
     // handler already started stopping this workspace's plugins (the
@@ -9009,7 +9569,7 @@ function registerIpcHandlers(
         resolved.push({ objectId, pathHint: resolvedPath });
         continue;
       }
-      const source = await readWorkspaceText(workspace.rootPath, resolvedPath);
+      const source = await readOwnedWorkspaceText(workspace, resolvedPath);
       const heading = findWorkspaceHeading(extractWorkspaceHeadings(source.text), {
         anchor: reference.headingAnchor,
         occurrence: reference.headingOccurrence,
@@ -10833,11 +11393,16 @@ function registerIpcHandlers(
     return undefined;
   });
 
-  ipcMain.handle(CHANNELS.getSyncStatus, (event, payload) => {
+  ipcMain.handle(CHANNELS.getSyncStatus, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListWorkspaceFilesPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    return SyncStatusResult.parse(activity.getStatus(input.workspaceId));
+    const workspace = requireWorkspace(input.workspaceId);
+    return SyncStatusResult.parse(
+      await syncStatusWithOwnedProjection(
+        workspace,
+        activity.getStatus(input.workspaceId),
+      ),
+    );
   });
 
   // Enabling agents starts a local run: the workspace must already be OPEN (the
@@ -11113,6 +11678,8 @@ function registerIpcHandlers(
       !sender.isDestroyed() &&
       rendererGeneration(sender.id) === generation &&
       latestSearchIdBySender.get(sender.id) === input.searchId;
+    await ensureAllOwnedProjectionsCurrent(workspace);
+    if (!isCurrentSearch()) return;
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (capture) {
       // Read-your-writes: the batch whose capture triggered this search must
@@ -12160,8 +12727,8 @@ if (!app.requestSingleInstanceLock()) {
         const workspace = findWorkspace(url.hostname);
         if (!workspace) return new Response("Unknown workspace", { status: 404 });
         const relPath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-        const { bytes, mediaType } = await readWorkspaceAsset(
-          workspace.rootPath,
+        const { bytes, mediaType } = await readOwnedWorkspaceAsset(
+          workspace,
           relPath,
         );
         // A Uint8Array VIEW over the Buffer's memory — not a second full copy.

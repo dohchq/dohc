@@ -9,7 +9,7 @@ import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 //   main's `assertWritableWorkspace` decides whether a write handler runs at
 //   all. Read it too widely and someone else's files become writable.
 //
-//   `routeWorkspaceTextWrite` decides where the write lands. Read it too
+//   `ShareViewFiles.change` decides where the write lands. Read it too
 //   narrowly and the recipient edits a file whose change nothing journals, so
 //   nothing can ever be sent.
 //
@@ -47,18 +47,18 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
  * Why an ordinary workspace write handler must refuse, or null when it may
  * run. `main`'s `assertWritableWorkspace` is one line over this.
  *
- * PRESENCE, at EVERY level. The handlers this guards write the workspace
- * FOLDER — create, rename, move, delete, import, assets, database edits, the
- * plugin pipeline — and a share view's folder is a projection of its engine
- * store. A raw-disk write there would leave the projection describing content
- * no moment states, so nothing the recipient could ever send, and the next
- * pull would overwrite it.
+ * PRESENCE, at EVERY level. The handlers this guards write workspace state
+ * outside the received-share file owner — assets, database edits, plugin
+ * state, settings, and similar disk-backed surfaces. A raw-disk write into a
+ * shared view would leave the projection describing content no moment states,
+ * so nothing the recipient could ever send, and the next pull would overwrite
+ * it.
  *
- * The ONE write a share view admits is the recipient's text edit, and it does
- * not come through here. It is routed to the engine at
- * `routeWorkspaceTextWrite`, which asks `shareViewTakesLocalWrites` at the
- * seam that would otherwise write. Widening THIS rule to the same level would
- * have opened every handler above with it.
+ * File changes admitted by an edit grant do not come through here. They route
+ * to the engine through `ShareViewFiles.change`, which asks
+ * `shareViewTakesLocalWrites` at the seam that would otherwise write.
+ * Widening THIS rule to the same level would open every guarded handler with
+ * it.
  *
  * The input is the registry marker, and it is read for presence alone. The
  * level is deliberately not consulted: a rule that cannot see the level

@@ -67,6 +67,7 @@ function renderBar(
       onConnectCloud={() => {}}
       onOpenHistory={props.onOpenHistory ?? (() => {})}
       onOpenConflicts={props.onOpenConflicts ?? (() => {})}
+      onRefreshShareView={props.onRefreshShareView ?? (() => {})}
       {...(props.agentNotifications ? { agentNotifications: props.agentNotifications } : {})}
       {...(props.onDismissAgentNotification
         ? { onDismissAgentNotification: props.onDismissAgentNotification }
@@ -202,6 +203,38 @@ describe("sync status surface", () => {
 });
 
 describe("notice center", () => {
+  it("offers to repair shared files whose folder projection is pending", async () => {
+    const onRefreshShareView = vi.fn();
+    renderBar({
+      syncStatus: {
+        state: "synced",
+        pendingChangeCount: 0,
+        lastSyncedAtMs: null,
+        historyRecordingUnavailable: false,
+        historyShareView: true,
+        shareProjection: {
+          state: "pending",
+          pendingPathCount: 2,
+          pendingPaths: ["notes/one.md", "notes/two.md"],
+          collisionPathCount: 0,
+          collisionPaths: [],
+          pullInFlight: false,
+        },
+      },
+      onRefreshShareView,
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-share-projection-pending");
+    expect(notice.textContent).toContain("Shared files need repair");
+    expect(notice.textContent).toContain(
+      "Some shared files are not current in this folder. Refresh the shared view to repair them.",
+    );
+
+    await userEvent.click(within(notice).getByRole("button", { name: "Refresh" }));
+    expect(onRefreshShareView).toHaveBeenCalledOnce();
+  });
+
   it("keeps a clear notice for each file that is too large to sync", async () => {
     renderBar({
       syncStatus: {
@@ -480,6 +513,7 @@ describe("notice center", () => {
         onConnectCloud={() => {}}
         onOpenHistory={() => {}}
         onOpenConflicts={() => {}}
+        onRefreshShareView={() => {}}
         onOpenSettings={() => {}}
         onToggleTheme={() => {}}
         onContextMenu={() => {}}

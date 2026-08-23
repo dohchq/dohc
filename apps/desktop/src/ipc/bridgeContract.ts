@@ -868,6 +868,22 @@ export const SyncStatusResult = z.object({
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
+  // Additive: a shared view can have canonical file state that has not yet
+  // reached its local folder. The producer bounds each path sample while the
+  // counts report the full repair debt.
+  shareProjection: z
+    .discriminatedUnion("state", [
+      z.object({ state: z.literal("current") }),
+      z.object({
+        state: z.literal("pending"),
+        pendingPathCount: z.number().int().nonnegative(),
+        pendingPaths: z.array(PATH_STRING),
+        collisionPathCount: z.number().int().nonnegative(),
+        collisionPaths: z.array(PATH_STRING),
+        pullInFlight: z.boolean(),
+      }),
+    ])
+    .optional(),
   // Additive: files that are safe locally but cannot fit in the relay's
   // encoded payload limit. The notice center keeps this visible until a
   // later successful sync no longer reports the path.

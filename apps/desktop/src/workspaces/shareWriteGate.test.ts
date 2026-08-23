@@ -53,7 +53,7 @@ describe("shareViewTakesLocalWrites", () => {
 //
 // The level cannot widen it, and this is the property that matters: an EDIT
 // share view is refused here exactly as a view share is. The one write a
-// share view admits is routed to the engine at `routeWorkspaceTextWrite`,
+// share view admits is routed to the engine through `ShareViewFiles.change`,
 // which asks `shareViewTakesLocalWrites` instead.
 describe("workspaceWriteRefusal", () => {
   it("lets an ordinary workspace write", () => {

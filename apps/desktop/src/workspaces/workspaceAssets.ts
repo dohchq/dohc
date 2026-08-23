@@ -88,7 +88,7 @@ export async function resolveWorkspaceFile(
 // Media views buffer the whole file into the privileged main process before
 // serving — cap it so one oversized file can't OOM/freeze the app (same
 // reasoning as MAX_TEXT_BYTES, sized for real images/audio).
-const MAX_ASSET_BYTES = 64 * 1024 * 1024;
+export const WORKSPACE_ASSET_MAX_BYTES = 64 * 1024 * 1024;
 
 // Reads a workspace-relative file's bytes.
 export async function readWorkspaceAsset(
@@ -101,7 +101,7 @@ export async function readWorkspaceAsset(
     "read",
   );
   const { size } = await stat(realTarget);
-  if (size > MAX_ASSET_BYTES) {
+  if (size > WORKSPACE_ASSET_MAX_BYTES) {
     throw new Error(`Asset too large to serve (${size} bytes): ${relativePath}`);
   }
   return {
@@ -208,6 +208,18 @@ type WorkspaceOperationState = {
   queue: WorkspaceOperationEntry[];
 };
 
+declare const workspaceOperationLeaseBrand: unique symbol;
+
+/**
+ * Proof that an operation holds the process-wide scheduler for one workspace
+ * root. Received-share mutations require this proof so they cannot bypass the
+ * same admission boundary used by ordinary workspace writes.
+ */
+export interface WorkspaceOperationLease {
+  readonly rootPath: string;
+  readonly [workspaceOperationLeaseBrand]: true;
+}
+
 class WorkspaceOperationSupersededError extends Error {
   constructor() {
     super(
@@ -266,7 +278,10 @@ export function createWorkspaceOperationScheduler() {
   const enqueue = <T>(
     rootPath: string,
     mode: "shared" | "exclusive",
-    operation: (markChanged: () => void) => Promise<T>,
+    operation: (
+      markChanged: () => void,
+      lease: WorkspaceOperationLease,
+    ) => Promise<T>,
     staleSensitive = false,
   ): Promise<T> => {
     const key = pathKey(rootPath);
@@ -288,9 +303,13 @@ export function createWorkspaceOperationScheduler() {
           }
           let changed = false;
           try {
-            const value = await operation(() => {
-              changed = true;
-            });
+            const lease = { rootPath } as WorkspaceOperationLease;
+            const value = await operation(
+              () => {
+                changed = true;
+              },
+              lease,
+            );
             if (mode === "exclusive") changed = true;
             resolve(value);
           } catch (error) {
@@ -307,11 +326,22 @@ export function createWorkspaceOperationScheduler() {
   return {
     shared: <T>(rootPath: string, operation: () => Promise<T>) =>
       enqueue(rootPath, "shared", () => operation()),
-    staleSensitiveShared: <T>(rootPath: string, operation: () => Promise<T>) =>
-      enqueue(rootPath, "shared", () => operation(), true),
+    staleSensitiveShared: <T>(
+      rootPath: string,
+      operation: (lease: WorkspaceOperationLease) => Promise<T>,
+    ) =>
+      enqueue(
+        rootPath,
+        "shared",
+        (_markChanged, lease) => operation(lease),
+        true,
+      ),
     exclusive: <T>(
       rootPath: string,
-      operation: (markChanged: () => void) => Promise<T>,
+      operation: (
+        markChanged: () => void,
+        lease: WorkspaceOperationLease,
+      ) => Promise<T>,
     ) => enqueue(rootPath, "exclusive", operation),
   };
 }
@@ -522,14 +552,17 @@ export function withOrderedWorkspaceTargetPath<T>(
 
 export function withExclusiveWorkspaceOperation<T>(
   rootPath: string,
-  operation: (markChanged: () => void) => Promise<T>,
+  operation: (
+    markChanged: () => void,
+    lease: WorkspaceOperationLease,
+  ) => Promise<T>,
 ): Promise<T> {
   return workspaceOperationScheduler.exclusive(rootPath, operation);
 }
 
 export function withStaleSensitiveWorkspaceOperation<T>(
   rootPath: string,
-  operation: () => Promise<T>,
+  operation: (lease: WorkspaceOperationLease) => Promise<T>,
 ): Promise<T> {
   return workspaceOperationScheduler.staleSensitiveShared(rootPath, operation);
 }

@@ -6,7 +6,6 @@ import {
   EngineDaemonLifecycle,
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
-import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   EngineRelayClient,
@@ -17,11 +16,11 @@ import {
   captureSharedViewLocalDivergence,
   materializeSharedViewPaths,
 } from "./sharedView";
-import { readWorkspaceText } from "./workspaceAssets";
+import { readWorkspaceText, writeWorkspaceText } from "./workspaceAssets";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
-import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
+import { applyShareViewTextWrite } from "./shareViewTextChange";
 
 // The seam the desktop e2e exposed and every unit test missed (#646 PR3a).
 //
@@ -32,9 +31,8 @@ import { routeWorkspaceTextWrite } from "./workspaceTextWrite";
 // nothing in the suite noticed, because nothing in the suite drove a real
 // store through the real write path.
 //
-// So this suite drives `routeWorkspaceTextWrite` — the function main's
-// `writeWorkspaceText` handler calls — against a real daemon, and asserts the
-// journal rather than the return value.
+// So this suite drives the mutation primitive that ShareViewFiles owns against
+// a real daemon, and asserts the journal rather than the return value.
 
 const engine = requireEngineBinaryOrSkip();
 const SHARE_ID = "share-e2e";
@@ -180,13 +178,12 @@ describe("share-view text writes through the real store", () => {
       const seeded = await seedSharedFile(view, path, "granter\n");
       const journalBefore = replicationLogRows(view.rootPath);
 
-      const result = await routeWorkspaceTextWrite({
+      const result = await applyShareViewTextWrite({
         workspaceId: view.workspaceId,
         rootPath: view.rootPath,
         relativePath: path,
         text: "recipient\n",
         expectedContentHash: seeded.contentHash,
-        shareView: { access: "edit", ended: false },
         shareViewStore: () => view.store,
       });
 
@@ -222,13 +219,12 @@ describe("share-view text writes through the real store", () => {
       };
 
       await expect(
-        routeWorkspaceTextWrite({
+        applyShareViewTextWrite({
           workspaceId: view.workspaceId,
           rootPath: view.rootPath,
           relativePath: path,
           text: "recipient\n",
           expectedContentHash: seeded.contentHash,
-          shareView: { access: "edit", ended: false },
           shareViewStore: () => failingStore,
         }),
       ).rejects.toThrow("simulated crash after store write");
@@ -274,14 +270,13 @@ describe("share-view text writes through the real store", () => {
       const seeded = await seedSharedFile(view, path, "granter\n");
       const journalBefore = replicationLogRows(view.rootPath);
 
-      const result = await routeWorkspaceTextWrite({
+      const result = await applyShareViewTextWrite({
         workspaceId: view.workspaceId,
         rootPath: view.rootPath,
         relativePath: path,
         text: "recipient\n",
         expectedContentHash:
           "0000000000000000000000000000000000000000000000000000000000000000",
-        shareView: { access: "edit", ended: false },
         shareViewStore: () => view.store,
       });
 
@@ -301,12 +296,8 @@ describe("share-view text writes through the real store", () => {
     60_000,
   );
 
-  // A comment recipient's save is refused, and this suite deliberately does
-  // NOT spend a real daemon proving it: `routeWorkspaceTextWrite` throws
-  // before it resolves a store at all, so the daemon would witness nothing and
-  // the follow-up assertions would be true by construction. The rule itself is
-  // executed in `shareWriteGate.test.ts`, and the refusal at this seam in
-  // `workspaceTextWrite.test.ts`.
+  // Authority is covered at the ShareViewFiles owner. These daemon tests stay
+  // on the mutation primitive and prove only store/projection behavior.
 
   it.skipIf(engine.missing)(
     "leaves an ordinary workspace's save to disk, where the watcher records it",
@@ -320,17 +311,12 @@ describe("share-view text writes through the real store", () => {
       // write's moment below.
       const before = await momentIdsFor(workspace, path);
 
-      const result = await routeWorkspaceTextWrite({
-        workspaceId: workspace.workspaceId,
-        rootPath: workspace.rootPath,
-        relativePath: path,
-        text: "after\n",
-        expectedContentHash: read.contentHash ?? "",
-        shareView: null,
-        // A real store, so the assertion below fails on a moment rather than
-        // on an unavailable seam.
-        shareViewStore: () => workspace.store,
-      });
+      const result = await writeWorkspaceText(
+        workspace.rootPath,
+        path,
+        "after\n",
+        read.contentHash ?? "",
+      );
 
       expect(result.status).toBe("written");
       await expect(readFile(join(workspace.rootPath, path), "utf8")).resolves.toBe(

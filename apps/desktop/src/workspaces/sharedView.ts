@@ -17,12 +17,6 @@ import { isInside } from "../security/pathContainment";
 import { existingAncestor } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
-  isShareAccessValue,
-  isShareablePathList,
-  isValidShareVersionId,
-} from "@dohc/security-contract/share-selector";
-import type { ShareViewSelector } from "./shareViewInfo";
-import {
   ShareUnavailableError,
   type PullShareViewResult,
   type ShareViewChangedPath,
@@ -30,17 +24,19 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import type { ShareViewSelector } from "./shareViewInfo";
 import {
   withExclusiveWorkspaceOperation,
   withOrderedWorkspaceTargetPath,
 } from "./workspaceAssets";
 import { readDiskContent, type DiskTextState } from "./workspaceEngineCapture";
-import {
-  MAX_ENGINE_CAPTURE_BINARY_BYTES,
-  MAX_ENGINE_CAPTURE_TEXT_BYTES,
-} from "./workspaceEngineCaptureLimits";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
-import { formatSize } from "../plugins/pluginFormat";
+import {
+  recordedShareSelector,
+  SharePinInvalidError,
+  unjournalablePathMessages,
+  type UnjournalablePath,
+} from "./shareViewRecords";
 
 // The receive side of a relay share (PR 18): a shared view is a local
 // engine store fed EXCLUSIVELY by the share's filtered op log — no watcher,
@@ -66,116 +62,11 @@ export type StandaloneShareViewRefreshOutcome =
   | ({ ok: true; collisionRecordQuarantined: boolean } & RefreshSharedViewOutcome)
   | { ok: false; changedPaths: number; errorMessage: string };
 
-export interface UnjournalablePath {
-  path: string;
-  reason:
-    | "oversized-text"
-    | "oversized-binary"
-    | "non-utf8"
-    | "non-file-replacement"
-    | "local-collision"
-    | "unreadable";
-}
-
 export interface CaptureSharedViewLocalDivergenceOutcome {
   capturedPaths: number;
   repairedPaths: number;
   unjournalablePaths: UnjournalablePath[];
   collisionRecordQuarantined: boolean;
-}
-
-function namedPaths(paths: readonly UnjournalablePath[]): string {
-  const named = paths.slice(0, 3).map((entry) => entry.path).join(", ");
-  return paths.length > 3 ? `${named}, and ${paths.length - 3} more` : named;
-}
-
-export function unjournalablePathMessages(
-  paths: readonly UnjournalablePath[],
-): string[] {
-  const groups = new Map<UnjournalablePath["reason"], UnjournalablePath[]>();
-  for (const path of paths) {
-    const group = groups.get(path.reason) ?? [];
-    group.push(path);
-    groups.set(path.reason, group);
-  }
-  const messages: string[] = [];
-  for (const reason of [
-    "oversized-text",
-    "oversized-binary",
-    "non-utf8",
-    "non-file-replacement",
-    "local-collision",
-    "unreadable",
-  ] as const) {
-    const group = groups.get(reason);
-    if (!group || group.length === 0) continue;
-    const names = namedPaths(group);
-    const one = group.length === 1;
-    if (reason === "oversized-text") {
-      messages.push(
-        `${names} ${one ? "is" : "are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text limit. ` +
-          `Make ${one ? "this file" : "these files"} smaller.`,
-      );
-    } else if (reason === "oversized-binary") {
-      messages.push(
-        `${names} ${one ? "is" : "are"} larger than the ${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary limit. ` +
-          `Make ${one ? "this file" : "these files"} smaller.`,
-      );
-    } else if (reason === "non-utf8") {
-      messages.push(
-        `${names} ${one ? "is" : "are"} not readable as text. ` +
-          `Save ${one ? "this file" : "these files"} as UTF-8 text.`,
-      );
-    } else if (reason === "non-file-replacement") {
-      messages.push(
-        `${names} ${one ? "replaces a tracked file" : "replace tracked files"} with a folder or another entry. ` +
-          `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}.`,
-      );
-    } else if (reason === "local-collision") {
-      messages.push(
-        `${names} ${one ? "already has a file" : "already have files"} from this machine. ` +
-          `Move or remove ${one ? "this file" : "these files"} to receive the shared ${one ? "file" : "files"}.`,
-      );
-    } else {
-      messages.push(
-        `dohc could not read ${names}. ` +
-          `Close anything using ${one ? "this file" : "these files"}, or wait.`,
-      );
-    }
-  }
-  return messages;
-}
-
-export function assertShareChangesJournalable(
-  paths: readonly UnjournalablePath[],
-): void {
-  if (paths.length === 0) return;
-  const one = paths.length === 1;
-  throw new Error(
-    `dohc did not send your changes. ${unjournalablePathMessages(paths).join(" ")} ` +
-      `Fix ${one ? "this file" : "these files"}, then send your changes again.`,
-  );
-}
-
-/**
- * Raised when a share record carries no readable pinned selector, so the
- * refresh did NOT pull.
- *
- * The pin is part of the record contract: both accept paths resolve a
- * selector from the relay and write it with the record, so a record without
- * one is damaged. It is NOT repaired from the relay. Re-asking would let a
- * relay that can damage or race a record restate a wider selector and have
- * that become the pin — the exact widening the pin exists to stop. The way
- * back is the accept flow, which pins before the record exists.
- */
-export class SharePinInvalidError extends Error {
-  constructor(readonly shareId: string) {
-    super(
-      `Share ${shareId} has no readable pinned selector; ` +
-        "its record is damaged and the share must be added again.",
-    );
-    this.name = "SharePinInvalidError";
-  }
 }
 
 // Capture failing mid-pass still leaves whatever it fixed before the throw —
@@ -214,97 +105,6 @@ class SharedViewTargetResolutionError extends Error {
   }
 }
 
-/**
- * A registry record is data, not a contract: read the pinned selector back
- * defensively, against the relay's OWN rules for the selector it issued.
- * Anything the relay could not have issued is damage and reads as null, which
- * fails the refresh closed rather than reaching the engine.
- *
- * The user never sees or chooses this scope. Pinning only stops the relay
- * from restating a wider one on a later pull.
- */
-export function recordedShareSelector(
-  value: unknown,
-): ShareViewSelector | null {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const candidate = value as {
-    paths?: unknown;
-    versionId?: unknown;
-    access?: unknown;
-  };
-  if (!Array.isArray(candidate.paths)) return null;
-  // One rule, one place: a path the relay could not have issued (empty,
-  // unnormalized, untracked, secret) must not read back as a granted one.
-  if (!isShareablePathList(candidate.paths)) return null;
-  // The version dimension decides whether a no-paths selector grants the whole
-  // tracked workspace, so a version id the relay could not have issued ("",
-  // " v1", or an unbounded one) must never read as one. Same rule, same place,
-  // as the relay applies at creation.
-  if (candidate.versionId !== null && !isValidShareVersionId(candidate.versionId)) {
-    return null;
-  }
-  // Selects nothing, by the relay's own rule: `validateShareSelector` refuses
-  // to create a selector with neither a path nor a version, and
-  // `pathVisibleThroughShare` serves nothing through one.
-  if (candidate.paths.length === 0 && candidate.versionId === null) return null;
-  // The level is part of the pin (#646). A record whose level the relay could
-  // not have issued is damaged the same way a bad version id is, and the
-  // refresh fails closed rather than pulling at a level nobody granted.
-  if (!isShareAccessValue(candidate.access)) return null;
-  return {
-    paths: [...(candidate.paths as string[])],
-    versionId: isValidShareVersionId(candidate.versionId)
-      ? candidate.versionId
-      : null,
-    access: candidate.access,
-  };
-}
-
-/**
- * The selector to enroll this share view's sync identity with (#646 PR3-1),
- * or null when it must not enroll.
- *
- * A share view replicates through its SHARE, so it needs a sync identity of
- * its own before a local write can journal or a push can leave. This decides
- * whether to ask for one, and it fails closed on every tri-state — the same
- * guard sequence the chat push-back and the refresh already use:
- *
- * - no share view record, or the share has ended;
- * - a pinned grant this build cannot read completely (a damaged record);
- * - no dohc Cloud credentials;
- * - a session signed into a relay that is not this share's origin;
- * - a `view` share, which may push nothing, so it needs no identity and must
- *   not be given one.
- *
- * Returning null means SKIP, never fail. A share view that cannot enroll is
- * still readable, and its local writes stay local.
- */
-export function shareViewIdentitySelector(input: {
-  shareView:
-    | {
-        grantedSelector?: unknown;
-        ended?: boolean;
-        relayUrl?: string | null;
-      }
-    | null
-    | undefined;
-  relayUrl: string | null | undefined;
-  relayUrlsMatch: (left: string, right: string) => boolean;
-}): ShareViewSelector | null {
-  const { shareView, relayUrl, relayUrlsMatch } = input;
-  if (!shareView || shareView.ended === true) return null;
-  const grantedSelector = recordedShareSelector(shareView.grantedSelector);
-  if (!grantedSelector) return null;
-  if (grantedSelector.access === "view") return null;
-  if (!relayUrl) return null;
-  if (shareView.relayUrl && !relayUrlsMatch(relayUrl, shareView.relayUrl)) {
-    return null;
-  }
-  return grantedSelector;
-}
-
 // Containment before any disk write: the engine already restricts paths to
 // validated workspace-relative ones, but a defense layer this close to
 // fs writes is cheap and permanent.
@@ -317,11 +117,36 @@ function containedTarget(rootDir: string, relativePath: string): string {
   return target;
 }
 
+// A read-only projection may safely discard structural tampering because its
+// canonical bytes live in the store. Remove links as links, and remove only
+// non-directory ancestors; leave ordinary leaf files for collision handling.
+async function healTamperedProjectionPath(
+  realRoot: string,
+  relativePath: string,
+): Promise<void> {
+  let current = realRoot;
+  const segments = relativePath.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    current = resolve(current, segments[index]!);
+    const stat = await lstat(current).catch(() => null);
+    if (stat === null) return;
+    if (stat.isSymbolicLink()) {
+      await rm(current, { force: true });
+      return;
+    }
+    const isAncestor = index < segments.length - 1;
+    if (isAncestor && !stat.isDirectory()) {
+      await rm(current, { recursive: true, force: true });
+      return;
+    }
+  }
+}
+
 // Exported so a caller that must ask "what is at this path?" BEFORE it acts
 // resolves it exactly the way materialization itself will — an ancestor
 // symlink can then never make a guard look at one entry while the write or
-// removal that follows touches another. `workspaceFileOps.ts`'s in-app
-// rename and delete are that caller (#861).
+// removal that follows touches another. ShareViewFiles' in-app rename and
+// delete primitives are those callers (#861).
 export async function resolvedShareViewTarget(
   rootDir: string,
   relativePath: string,
@@ -798,6 +623,26 @@ export async function clearPendingMaterializationPaths(
   );
 }
 
+async function clearAllPendingMaterializationPaths(
+  rootDir: string,
+  paths: readonly string[],
+): Promise<void> {
+  if (paths.length === 0) return;
+  await withExclusiveWorkspaceOperation(
+    pendingMaterializationPath(rootDir),
+    async () => {
+      await ensureRealMetadataDirectory(rootDir);
+      const counts = await readPendingFileUnlocked(rootDir);
+      for (const path of new Set(paths)) delete counts[path];
+      if (Object.keys(counts).length === 0) {
+        await rm(pendingMaterializationPath(rootDir), { force: true });
+      } else {
+        await writePendingFileUnlocked(rootDir, counts);
+      }
+    },
+  );
+}
+
 const INVALID_COLLISION_RECORD = "Invalid share collision record.";
 
 async function readCollisionRecordUnlocked(
@@ -955,6 +800,22 @@ export function clearCollisionRecordPaths(
   );
 }
 
+export async function readSharedViewProjectionDebt(
+  rootDir: string,
+  shareId: string,
+): Promise<{
+  pendingPaths: Set<string>;
+  collisionPaths: Set<string>;
+  pullInFlight: boolean;
+}> {
+  const [pendingPaths, collisionPaths, pullInFlight] = await Promise.all([
+    readPendingMaterializationPaths(rootDir),
+    readCollisionRecordPaths(rootDir, shareId),
+    pullMayBeInFlight(rootDir),
+  ]);
+  return { pendingPaths, collisionPaths, pullInFlight };
+}
+
 async function pathConfirmedAbsentOnDisk(resolvedTarget: string): Promise<boolean> {
   try {
     await lstat(resolvedTarget);
@@ -1020,7 +881,10 @@ export async function captureSharedViewLocalDivergence(
   store: CaptureVersionedTextStore,
   allowLocalJournaling: boolean,
   shareId: string,
-  testHooks?: { beforeCaptureWrite?: (path: string) => Promise<void> },
+  options?: {
+    beforeCaptureWrite?: (path: string) => Promise<void>;
+    paths?: readonly string[];
+  },
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const realRoot = await realpath(rootDir).catch(() => null);
   if (realRoot === null) {
@@ -1036,19 +900,32 @@ export async function captureSharedViewLocalDivergence(
   if (!store.listTextFileMetadata) {
     throw new Error("Shared view reconciliation requires file metadata listing support.");
   }
-  const tracked = await store.listTextFileMetadata({
-    workspaceId,
-    versionId: main.id,
-  });
+  const pathIsInScope = (path: string) =>
+    options?.paths === undefined ||
+    options.paths.some(
+      (scope) => path === scope || path.startsWith(`${scope}/`),
+    );
+  const tracked = (
+    await store.listTextFileMetadata({
+      workspaceId,
+      versionId: main.id,
+    })
+  ).filter((entry) => pathIsInScope(entry.path));
   const pendingState = await readPendingMaterializationPathsForCapture(
     rootDir,
     tracked.map((entry) => entry.path),
   );
-  const pendingPaths = pendingState.paths;
+  const pendingPaths = new Set(
+    [...pendingState.paths].filter(pathIsInScope),
+  );
   let collisionRecordQuarantined = false;
-  const collisionRecordedPaths = await readCollisionRecordPaths(rootDir, shareId, () => {
-    collisionRecordQuarantined = true;
-  });
+  const collisionRecordedPaths = new Set(
+    [
+      ...(await readCollisionRecordPaths(rootDir, shareId, () => {
+        collisionRecordQuarantined = true;
+      })),
+    ].filter(pathIsInScope),
+  );
   if (collisionRecordQuarantined) {
     // A quarantined record cannot identify which paths it protected. Do no
     // mutations in this pass so the caller can show the notice before the
@@ -1059,6 +936,14 @@ export async function captureSharedViewLocalDivergence(
       unjournalablePaths: [],
       collisionRecordQuarantined: true,
     };
+  }
+  if (!allowLocalJournaling) {
+    // Capture resolves real parents before it repairs missing tracked paths.
+    // Heal structural obstructions first so that safety check cannot wedge a
+    // read-only mount on a planted link or a file squatting on a directory.
+    for (const entry of tracked) {
+      await healTamperedProjectionPath(realRoot, entry.path);
+    }
   }
   const trackedPathSet = new Set(tracked.map((entry) => entry.path));
 
@@ -1484,7 +1369,7 @@ export async function captureSharedViewLocalDivergence(
           );
           return "repaired" as const;
         }
-        await testHooks?.beforeCaptureWrite?.(entry.path);
+        await options?.beforeCaptureWrite?.(entry.path);
         await writeDiskContentToStore({
           store,
           workspaceId,
@@ -1630,6 +1515,13 @@ export async function captureSharedViewLocalDivergence(
   }
 
   if (resolvedCollisionPaths.length > 0) {
+    // A pull can record the same collision on more than one applied page or
+    // retry. Once the recipient resolves that collision, none of those
+    // recovery counts describe outstanding materialization work anymore.
+    await clearAllPendingMaterializationPaths(
+      rootDir,
+      resolvedCollisionPaths,
+    );
     await clearCollisionRecordPaths(rootDir, shareId, resolvedCollisionPaths);
   }
 
@@ -1648,6 +1540,7 @@ export async function captureStandaloneShareViewDivergence(input: {
   pinnedSelector: unknown;
   shareId: string;
   ended: boolean;
+  paths?: readonly string[];
 }): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
@@ -1661,6 +1554,7 @@ export async function captureStandaloneShareViewDivergence(input: {
     input.store,
     allowLocalJournaling,
     input.shareId,
+    input.paths === undefined ? undefined : { paths: input.paths },
   );
 }
 
@@ -1682,32 +1576,6 @@ export async function repairSharedViewProjection(
   if (maybeRealRoot === null) return 0;
   const realRoot: string = maybeRealRoot;
   const containsReal = (candidate: string) => isInside(realRoot, candidate);
-  // Self-heal a tampered tree: remove the first symlinked component on the
-  // path (AS A LINK — rm without recursive never follows) so the
-  // re-materialization below can rebuild the real directory chain instead
-  // of wedging on the containment guard.
-  async function healTamperedAncestors(relativePath: string): Promise<void> {
-    let current: string = realRoot;
-    const segments = relativePath.split("/");
-    for (let index = 0; index < segments.length; index += 1) {
-      current = resolve(current, segments[index]!);
-      const stat = await lstat(current).catch(() => null);
-      if (stat === null) return; // chain ends — nothing deeper exists
-      if (stat.isSymbolicLink()) {
-        await rm(current, { force: true });
-        return;
-      }
-      // An ANCESTOR that is not a directory (a file squatting on the path)
-      // blocks mkdir the same way a symlink misroutes it — remove it so the
-      // real chain can rebuild. The final component is the target itself;
-      // preparedTarget removes and recreates that one.
-      const isAncestor = index < segments.length - 1;
-      if (isAncestor && !stat.isDirectory()) {
-        await rm(current, { recursive: true, force: true });
-        return;
-      }
-    }
-  }
   const damaged: ShareViewChangedPath[] = [];
   const main = await store.ensureMainVersion({ workspaceId });
   const snapshots = await store.listTextFiles({
@@ -1740,7 +1608,7 @@ export async function repairSharedViewProjection(
       intact = false; // missing or unreadable — re-materialize
     }
     if (!intact) {
-      await healTamperedAncestors(snapshot.path);
+      await healTamperedProjectionPath(realRoot, snapshot.path);
       damaged.push({ path: snapshot.path, operation: "write", contentKind });
     }
   }
@@ -1770,6 +1638,7 @@ export async function refreshSharedViewOnce(input: {
     grantedSelector: ShareViewSelector;
     recordRefusals: (refusals: ShareViewRefusal[]) => Promise<void>;
     recordCollisions?: (paths: readonly string[]) => Promise<void>;
+    recordChangedPaths?: (paths: readonly string[]) => Promise<void>;
   }) => Promise<PullShareViewResult>;
   // Required at the factory boundary for the same reason: every rooted caller
   // must explicitly select its store implementation.
@@ -1792,6 +1661,17 @@ export async function refreshSharedViewOnce(input: {
   if (input.trackPendingMaterialization) {
     await writePullInFlightMarker(input.rootDir);
   }
+  const recordedChangedPaths = new Set<string>();
+  const recordChangedPaths = input.trackPendingMaterialization
+    ? async (paths: readonly string[]) => {
+        const newPaths = [...new Set(paths)].filter(
+          (path) => !recordedChangedPaths.has(path),
+        );
+        if (newPaths.length === 0) return;
+        await writePendingMaterializationPaths(input.rootDir, newPaths);
+        for (const path of newPaths) recordedChangedPaths.add(path);
+      }
+    : undefined;
   let pull;
   try {
     pull = await input.pull({
@@ -1801,6 +1681,7 @@ export async function refreshSharedViewOnce(input: {
       shareId: input.shareId,
       grantedSelector,
       recordRefusals: input.recordRefusals,
+      recordChangedPaths,
       recordCollisions:
         input.preTrackedPaths === undefined
           ? undefined
@@ -1849,6 +1730,12 @@ export async function refreshSharedViewOnce(input: {
   const materializationExclusions = new Set(
     input.excludeFromMaterialization ?? [],
   );
+  if (recordChangedPaths) {
+    // Non-daemon test adapters and alternate transports may not implement the
+    // page callback yet. Persist anything the completed pull returned before
+    // touching the projection; the daemon path records it earlier, per page.
+    await recordChangedPaths(pull.changedPaths.map((change) => change.path));
+  }
   const unjournalablePaths = [...(input.unjournalablePaths ?? [])];
   if (input.preTrackedPaths !== undefined) {
     const collisionRecordedPaths = await readCollisionRecordPaths(
@@ -1905,10 +1792,10 @@ export async function refreshSharedViewOnce(input: {
     (change) => change.path,
   );
   if (input.trackPendingMaterialization) {
-    await writePendingMaterializationPaths(
-      input.rootDir,
-      pendingMaterializationPaths,
-    );
+    // Excluded collisions have their own durable record and will not be
+    // materialized in this pass. Remove every accumulated materialization
+    // count so projection status reports the collision once, not as two debts.
+    await clearAllPendingMaterializationPaths(input.rootDir, excludedPaths);
   }
   await materializeSharedViewPaths(
     input.rootDir,
@@ -1917,7 +1804,11 @@ export async function refreshSharedViewOnce(input: {
     input.store,
   );
   if (input.trackPendingMaterialization) {
-    await clearPendingMaterializationPaths(
+    // The latest canonical value discharges every earlier attempt recorded
+    // for this path. A page retried after failing before cursor commit can
+    // increment its debt more than once, so decrementing once would leave a
+    // clean projection reported as pending.
+    await clearAllPendingMaterializationPaths(
       input.rootDir,
       pendingMaterializationPaths,
     );
@@ -1943,69 +1834,72 @@ export async function refreshSharedViewOnce(input: {
   };
 }
 
-export async function refreshStandaloneShareViewOnce(
+// The ShareViewFiles owner holds the refresh lifecycle lock around this body.
+// Keeping this function unlocked avoids reacquiring that same tail and
+// deadlocking the operation that already owns it.
+export async function reconcileStandaloneShareView(
   input: Parameters<typeof refreshSharedViewOnce>[0] & { ended: boolean },
 ): Promise<StandaloneShareViewRefreshOutcome> {
-  return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
-    let totalLocalChanges = 0;
-    try {
-      const captured = await captureStandaloneShareViewDivergence(input);
-      totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
-      const main = await input.store.ensureMainVersion({
-        workspaceId: input.workspaceId,
-      });
-      if (!input.store.listTextFileMetadata) {
-        throw new Error("Shared view reconciliation requires file metadata listing support.");
-      }
-      const preTrackedPaths = new Set(
-        (
-          await input.store.listTextFileMetadata({
-            workspaceId: input.workspaceId,
-            versionId: main.id,
-          })
-        ).map((entry) => entry.path),
+  let totalLocalChanges = 0;
+  try {
+    const captured = await captureStandaloneShareViewDivergence(input);
+    totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
+    const main = await input.store.ensureMainVersion({
+      workspaceId: input.workspaceId,
+    });
+    if (!input.store.listTextFileMetadata) {
+      throw new Error(
+        "Shared view reconciliation requires file metadata listing support.",
       );
-      const outcome = await refreshSharedViewOnce({
-        ...input,
-        excludeFromMaterialization: new Set(
-          captured.unjournalablePaths.map((path) => path.path),
-        ),
-        unjournalablePaths: captured.unjournalablePaths,
-        trackPendingMaterialization: true,
-        preTrackedPaths,
-      });
-      return {
-        ok: true,
-        ...outcome,
-        collisionRecordQuarantined: captured.collisionRecordQuarantined,
-        status:
-          outcome.status === "unchanged" && totalLocalChanges > 0
-            ? "updated"
-            : outcome.status,
-        changedPaths: outcome.changedPaths + totalLocalChanges,
-      };
-    } catch (error) {
-      // A damaged pin never heals on retry; main.ts turns it into a specific
-      // "record is damaged" message and depends on it escaping as a
-      // rejection, not becoming a generic outcome.
-      if (error instanceof SharePinInvalidError) throw error;
-      if (error instanceof CapturePartialFailureError) {
-        return {
-          ok: false,
-          changedPaths: error.capturedPaths + error.repairedPaths,
-          errorMessage:
-            error.reason === "unreadable"
-              ? (unjournalablePathMessages([
-                  { path: error.path, reason: "unreadable" },
-                ])[0] ?? error.message)
-              : error.message,
-        };
-      }
+    }
+    const preTrackedPaths = new Set(
+      (
+        await input.store.listTextFileMetadata({
+          workspaceId: input.workspaceId,
+          versionId: main.id,
+        })
+      ).map((entry) => entry.path),
+    );
+    const outcome = await refreshSharedViewOnce({
+      ...input,
+      excludeFromMaterialization: new Set(
+        captured.unjournalablePaths.map((path) => path.path),
+      ),
+      unjournalablePaths: captured.unjournalablePaths,
+      trackPendingMaterialization: true,
+      preTrackedPaths,
+    });
+    return {
+      ok: true,
+      ...outcome,
+      collisionRecordQuarantined: captured.collisionRecordQuarantined,
+      status:
+        outcome.status === "unchanged" && totalLocalChanges > 0
+          ? "updated"
+          : outcome.status,
+      changedPaths: outcome.changedPaths + totalLocalChanges,
+    };
+  } catch (error) {
+    // A damaged pin never heals on retry; main.ts turns it into a specific
+    // "record is damaged" message and depends on it escaping as a
+    // rejection, not becoming a generic outcome.
+    if (error instanceof SharePinInvalidError) throw error;
+    if (error instanceof CapturePartialFailureError) {
       return {
         ok: false,
-        changedPaths: totalLocalChanges,
-        errorMessage: error instanceof Error ? error.message : String(error),
+        changedPaths: error.capturedPaths + error.repairedPaths,
+        errorMessage:
+          error.reason === "unreadable"
+            ? (unjournalablePathMessages([
+                { path: error.path, reason: "unreadable" },
+              ])[0] ?? error.message)
+            : error.message,
       };
     }
-  });
+    return {
+      ok: false,
+      changedPaths: totalLocalChanges,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
 }

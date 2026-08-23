@@ -40,6 +40,11 @@ export interface MarkdownGraphDocument {
   truncated?: boolean;
 }
 
+export interface WorkspaceGraphFileSource {
+  list(): Promise<{ files: readonly { path: string }[] }>;
+  readText(path: string): Promise<{ text: string; truncated: boolean }>;
+}
+
 // One mention of the target file inside a source document: the line that
 // contains the link, trimmed to a readable length, plus the [start, end)
 // character range WITHIN `text` that the link occupies (so the UI can
@@ -827,7 +832,20 @@ export function computeBacklinks(
 async function readGraphText(
   rootPath: string,
   relativePath: string,
+  source?: WorkspaceGraphFileSource,
 ): Promise<{ text: string; truncated: boolean; bytesRead: number }> {
+  if (source) {
+    const result = await source.readText(relativePath);
+    const bytes = Buffer.from(result.text, "utf8");
+    const slice = bytes.subarray(0, MAX_GRAPH_FILE_TEXT_BYTES);
+    return {
+      text: slice.toString("utf8"),
+      truncated:
+        result.truncated || bytes.byteLength > MAX_GRAPH_FILE_TEXT_BYTES,
+      bytesRead: slice.byteLength,
+    };
+  }
+
   const { realTarget } = await resolveWorkspaceFile(rootPath, relativePath, "read");
   const handle = await open(realTarget, "r");
   try {
@@ -850,13 +868,16 @@ async function readGraphText(
 // caps the graph enforces) so both the graph and backlinks read from one place.
 // `graphPaths` keeps the FULL scanned set (all kinds) — link resolution indexes
 // against it so a markdown link to a non-markdown file still resolves.
-async function loadGraphDocuments(rootPath: string): Promise<{
+async function loadGraphDocuments(
+  rootPath: string,
+  source?: WorkspaceGraphFileSource,
+): Promise<{
   docs: MarkdownGraphDocument[];
   graphPaths: string[];
   scannedFileCount: number;
   omittedFileCount: number;
 }> {
-  const listed = await listFiles(rootPath);
+  const listed = source ? await source.list() : await listFiles(rootPath);
   // Enforce the engine secret floor at the loader so EVERY graph/backlinks
   // consumer inherits it: a secret- or ignored-classified file (the whole
   // `.env` family, incl. markdown-extensioned variants like `.env.local.md`,
@@ -880,7 +901,7 @@ async function loadGraphDocuments(rootPath: string): Promise<{
   for (let index = 0; index < selected.length; index++) {
     const path = selected[index];
     try {
-      const result = await readGraphText(rootPath, path);
+      const result = await readGraphText(rootPath, path, source);
       if (totalTextBytes + result.bytesRead > MAX_GRAPH_TOTAL_TEXT_BYTES) {
         omittedFileCount += selected.length - index;
         break;
@@ -901,9 +922,12 @@ async function loadGraphDocuments(rootPath: string): Promise<{
   };
 }
 
-export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGraph> {
+export async function readWorkspaceGraph(
+  rootPath: string,
+  source?: WorkspaceGraphFileSource,
+): Promise<WorkspaceGraph> {
   const { docs, graphPaths, scannedFileCount, omittedFileCount } =
-    await loadGraphDocuments(rootPath);
+    await loadGraphDocuments(rootPath, source);
   return buildMarkdownGraph(docs, {
     allPaths: graphPaths,
     omittedFileCount,
@@ -918,7 +942,8 @@ export async function readWorkspaceGraph(rootPath: string): Promise<WorkspaceGra
 export async function readWorkspaceBacklinks(
   rootPath: string,
   targetPath: string,
+  source?: WorkspaceGraphFileSource,
 ): Promise<BacklinkSource[]> {
-  const { docs, graphPaths } = await loadGraphDocuments(rootPath);
+  const { docs, graphPaths } = await loadGraphDocuments(rootPath, source);
   return computeBacklinks(docs, targetPath, { allPaths: graphPaths });
 }

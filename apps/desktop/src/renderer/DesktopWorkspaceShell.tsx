@@ -4747,7 +4747,7 @@ export function DesktopWorkspaceShell(props: {
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
   }, [workspaceId]);
   const refreshShareView = useCallback(async () => {
-    if (!shareView || shareViewEnded || shareViewDamaged) return;
+    if (!shareView || shareViewDamaged) return;
     const token = ++shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
@@ -6141,6 +6141,7 @@ export function DesktopWorkspaceShell(props: {
         onConnectCloud={() => setCloudOpen(true)}
         onOpenHistory={openHistoryView}
         onOpenConflicts={() => setConflictReviewOpen(true)}
+        onRefreshShareView={() => void refreshShareView()}
         shareChangeNotices={shareChangeNotices}
         onReviewShareChanges={setReviewProposalId}
         onOpenSettings={() => openSettings()}
