@@ -172,6 +172,20 @@ describe("shareMountRootForSite", () => {
 });
 
 describe("listSitePackages", () => {
+  it("discovers sites only from an owner-provided file listing", async () => {
+    await mkdir(join(root, "shared-with-me", "alex", "local-site"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(root, "shared-with-me", "alex", "local-site", "package.json"),
+      JSON.stringify({ scripts: { dev: "vite" } }),
+    );
+
+    expect(await listSitePackages(root, { files: [], folders: [] })).toEqual(
+      [],
+    );
+  });
+
   it("serves a configured subdirectory entry from its containing directory", async () => {
     await mkdir(join(root, "public", "assets"), { recursive: true });
     await writeFile(

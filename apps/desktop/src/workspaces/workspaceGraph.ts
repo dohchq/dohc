@@ -836,6 +836,14 @@ async function readGraphText(
 ): Promise<{ text: string; truncated: boolean; bytesRead: number }> {
   if (source) {
     const result = await source.readText(relativePath);
+    const sourceBytes = Buffer.byteLength(result.text, "utf8");
+    if (sourceBytes <= MAX_GRAPH_FILE_TEXT_BYTES) {
+      return {
+        text: result.text,
+        truncated: result.truncated,
+        bytesRead: sourceBytes,
+      };
+    }
     const bytes = Buffer.alloc(MAX_GRAPH_FILE_TEXT_BYTES);
     const bytesRead = bytes.write(
       result.text,
@@ -845,9 +853,7 @@ async function readGraphText(
     );
     return {
       text: bytes.subarray(0, bytesRead).toString("utf8"),
-      truncated:
-        result.truncated ||
-        Buffer.byteLength(result.text, "utf8") > MAX_GRAPH_FILE_TEXT_BYTES,
+      truncated: true,
       bytesRead,
     };
   }

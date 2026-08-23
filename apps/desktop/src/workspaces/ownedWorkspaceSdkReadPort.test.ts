@@ -72,6 +72,63 @@ function shareId(target: ShareViewFilesTarget): string {
 }
 
 describe("createOwnedWorkspaceSdkReadPort", () => {
+  it("skips a full owner listing for an unrestricted local search", async () => {
+    const listOwnedFiles = vi.fn(async () => ({ files: [] }));
+    const port = createOwnedWorkspaceSdkReadPort({
+      workspaceRoot: "unused",
+      readText: async () => {
+        throw new Error("unused");
+      },
+      listFiles: listOwnedFiles,
+      resolveShare: async () => null,
+      readShareAsset: async () => {
+        throw new Error("unused");
+      },
+      hasShareState: false,
+      searchSources: [],
+      repairProjection: async () => {
+        throw new Error("unused");
+      },
+    });
+
+    const view = await port.prepareSearch();
+    expect(view.listing).toBeNull();
+    expect(view.allowPath("any/local/path.md")).toBe(true);
+    expect(listOwnedFiles).not.toHaveBeenCalled();
+  });
+
+  it("lists through the owner when damaged share state has no search source", async () => {
+    const listOwnedFiles = vi.fn(async () => ({
+      files: [{ path: "notes/local.md", kind: "file" as const }],
+      folders: ["notes"],
+    }));
+    const port = createOwnedWorkspaceSdkReadPort({
+      workspaceRoot: "unused",
+      readText: async () => {
+        throw new Error("unused");
+      },
+      listFiles: listOwnedFiles,
+      resolveShare: async () => null,
+      readShareAsset: async () => {
+        throw new Error("unused");
+      },
+      hasShareState: true,
+      searchSources: [],
+      repairProjection: async () => {
+        throw new Error("unused");
+      },
+    });
+
+    const view = await port.prepareSearch();
+    expect(view.listing).toEqual({
+      files: [{ path: "notes/local.md", kind: "file" }],
+      folders: ["notes"],
+    });
+    expect(view.allowPath("notes/local.md")).toBe(true);
+    expect(view.allowPath("shared-with-me/damaged/stale.md")).toBe(false);
+    expect(listOwnedFiles).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps ordinary and healthy search results when another mount is damaged", async () => {
     const root = await createTestScratch("dohc-sdk-search-owner-");
     roots.push(root);
@@ -114,6 +171,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       readShareAsset: async () => {
         throw new Error("unused");
       },
+      hasShareState: true,
       searchSources: mounts.map((mount) => ({
         target: shareTarget(mount.shareId),
         prefix: `shared-with-me/${mount.label}`,
@@ -135,6 +193,23 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       author: USER_AUTHOR,
       reads: port,
     };
+
+    const prepared = await port.prepareSearch();
+    expect(prepared.listing?.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "notes/ordinary.md" }),
+        expect.objectContaining({ path: "shared-with-me/healthy/missing.md" }),
+      ]),
+    );
+    expect(prepared.listing?.files).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "shared-with-me/damaged/recipient-only.md",
+        }),
+      ]),
+    );
+    repaired.length = 0;
+    failures.length = 0;
 
     const allResults = await invokeWorkspaceSdkHost(
       context,
@@ -188,6 +263,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       readShareAsset: async () => {
         throw new Error("unused");
       },
+      hasShareState: true,
       searchSources: [
         {
           target: shareTarget(mount.shareId),
@@ -280,6 +356,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           : { target: shareTarget(mount.shareId), path: routed.path };
       },
       readShareAsset,
+      hasShareState: true,
       searchSources: [
         {
           target: shareTarget(mount.shareId),

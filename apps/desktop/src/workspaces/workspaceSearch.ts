@@ -73,27 +73,6 @@ export function mountScopedIncludeGlob(
   return null;
 }
 
-export function allowCanonicalMountSearchPaths(
-  mountLabels: readonly string[],
-  isCanonical: (path: string) => boolean,
-): (path: string) => boolean {
-  const key =
-    process.platform === "win32"
-      ? (path: string) => path.toLowerCase()
-      : (path: string) => path;
-  const prefixes = mountLabels.map((label) =>
-    key(`shared-with-me/${label}`),
-  );
-  return (path) => {
-    const candidate = key(path);
-    const belongsToMount = prefixes.some(
-      (prefix) =>
-        candidate === prefix || candidate.startsWith(`${prefix}/`),
-    );
-    return !belongsToMount || isCanonical(path);
-  };
-}
-
 export interface SearchResultEntry {
   // Workspace-relative, forward-slashed, validateUserReadPath-clean.
   path: string;

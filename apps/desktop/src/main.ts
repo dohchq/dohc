@@ -513,7 +513,6 @@ import {
   SharePinInvalidError,
   recordedShareSelector,
   shareViewIdentitySelector,
-  unjournalablePathMessages,
 } from "./workspaces/shareViewRecords";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
@@ -521,14 +520,17 @@ import {
   assertRealMountRoot,
   createMountDirectory,
   mountLabelFor,
-  mountRootFor,
   mountStoreWorkspaceIdFor,
   classifyShareMountRefreshError,
   overlayCanonicalShareMountFiles,
+  planShareMountRemoval,
   refuseMoveAcrossShareMount,
   removeMountFolder,
+  removeShareMountProjection,
   resolveShareMountPath,
+  shareMountRecordsForId,
   shareMountResultRow,
+  usableShareMountRecord,
   validMountLabel,
 } from "./workspaces/shareMounts";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
@@ -763,16 +765,19 @@ import {
 import {
   createShareViewFiles,
   shareViewFilesStore,
-  type ResolvedShareViewFilesTarget,
   type ShareViewFileChangeOutcome,
   type ShareViewFileChangeValue,
   type ShareViewFilesTarget,
-  type ShareViewReconcileOutcome,
 } from "./workspaces/shareViewFiles";
+import {
+  resolveRegisteredShareViewFilesTarget,
+  storedShareMounts,
+  workspaceHasReceivedShareState,
+} from "./workspaces/shareViewFilesTarget";
+import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import {
   applyDatabaseEdit,
   importToDatabase,
-  readDatabaseSnapshot,
 } from "./workspaces/workspaceDatabase";
 import {
   readWorkspaceGraph,
@@ -823,7 +828,6 @@ import {
   saveWorkspaceSettingsFile,
 } from "./workspaces/workspaceSettingsFile";
 import {
-  allowCanonicalMountSearchPaths,
   createSearchRegistry,
   mountScopedIncludeGlob,
 } from "./workspaces/workspaceSearch";
@@ -3378,7 +3382,8 @@ async function invokeWorkspacePluginSdk(input: {
       declaredWebApps: registeredPlugin(input.workspaceId, input.pluginId)
         ?.manifest.webApps,
       isWritable: input.isWritable,
-      reads: ownedWorkspaceSdkReads(workspace),
+      /** Main supplies this read authority. Plugins cannot select or widen it. */
+      reads: ownedWorkspaceReads(workspace),
       writeAvailable: async () => {
         try {
           const workspaceForWrite = requireWorkspace(input.workspaceId);
@@ -4358,54 +4363,11 @@ function sharedViewStoreFor(workspace: {
 
 function resolveShareViewFilesTarget(
   target: ShareViewFilesTarget,
-): ResolvedShareViewFilesTarget | null {
-  const workspace = findWorkspace(target.workspaceId);
-  if (!workspace) return null;
-  if (target.kind === "standalone") {
-    if (!shareViewIsPresent(workspace.shareView)) return null;
-    const record: Record<string, unknown> = isRecordValue(workspace.shareView)
-      ? workspace.shareView
-      : {};
-    return {
-      kind: "standalone",
-      workspaceId: workspace.workspaceId,
-      storeWorkspaceId: workspace.workspaceId,
-      schedulingRootPath: workspace.rootPath,
-      rootPath: workspace.rootPath,
-      shareId:
-        typeof record.shareId === "string" && record.shareId.length > 0
-          ? record.shareId
-          : null,
-      granterEmail:
-        typeof record.granterEmail === "string" ? record.granterEmail : null,
-      grantedSelector: record.grantedSelector,
-      ended: record.ended === true,
-      relayUrl: typeof record.relayUrl === "string" ? record.relayUrl : null,
-    };
-  }
-  const mount = workspace.shareMounts?.find(
-    (candidate) => candidate.shareId === target.shareId,
+) {
+  return resolveRegisteredShareViewFilesTarget(
+    findWorkspace(target.workspaceId),
+    target,
   );
-  if (!mount) return null;
-  return {
-    kind: "mount",
-    workspaceId: workspace.workspaceId,
-    storeWorkspaceId: mountStoreWorkspaceIdFor(
-      workspace.workspaceId,
-      mount.shareId,
-    ),
-    schedulingRootPath: workspace.rootPath,
-    rootPath: validMountLabel(mount.label)
-      ? mountRootFor(workspace.rootPath, mount.label)
-      : workspace.rootPath,
-    shareId: mount.shareId,
-    granterEmail: mount.granterEmail,
-    grantedSelector: mount.grantedSelector,
-    ended: mount.ended === true,
-    relayUrl: mount.relayUrl,
-    recipientEmail: mount.recipientEmail ?? null,
-    mountLabel: mount.label,
-  };
 }
 
 const shareViewFiles = createShareViewFiles({
@@ -4460,18 +4422,24 @@ const shareViewFiles = createShareViewFiles({
             persist: (next) => setWorkspaceShareView(target.workspaceId, next),
           })
         : createShareSkipRecorder({
-            current: () =>
-              findWorkspace(target.workspaceId)?.shareMounts?.find(
-                (mount) => mount.shareId === target.shareId,
-              ),
-            persist: (next) =>
+            current: () => {
+              const mounts = storedShareMounts(
+                findWorkspace(target.workspaceId) ?? {},
+              );
+              return shareMountRecordsForId(mounts, target.shareId)[0];
+            },
+            persist: (next) => {
+              const mounts = storedShareMounts(
+                findWorkspace(target.workspaceId) ?? {},
+              );
+              const matches = new Set(
+                shareMountRecordsForId(mounts, target.shareId),
+              );
               setWorkspaceShareMounts(
                 target.workspaceId,
-                (findWorkspace(target.workspaceId)?.shareMounts ?? []).map(
-                  (mount) =>
-                    mount.shareId === target.shareId ? next : mount,
-                ),
-              ),
+                mounts.map((mount) => (matches.has(mount) ? next : mount)),
+              );
+            },
           });
     await recorder([...refusals]);
   },
@@ -4480,10 +4448,14 @@ const shareViewFiles = createShareViewFiles({
       endWorkspaceShareView(target.workspaceId);
       return;
     }
+    const mounts = storedShareMounts(
+      findWorkspace(target.workspaceId) ?? {},
+    );
+    const matches = new Set(shareMountRecordsForId(mounts, target.shareId));
     setWorkspaceShareMounts(
       target.workspaceId,
-      (findWorkspace(target.workspaceId)?.shareMounts ?? []).map((mount) =>
-        mount.shareId === target.shareId ? { ...mount, ended: true } : mount,
+      mounts.map((mount) =>
+        matches.has(mount) ? { ...mount, ended: true } : mount,
       ),
     );
   },
@@ -4502,19 +4474,29 @@ const shareViewFiles = createShareViewFiles({
       throw new Error("Only a registered share mount can be removed.");
     }
     await closeRelayTransportWorkspace(target.storeWorkspaceId);
-    const folderRemovable = validMountLabel(target.mountLabel);
-    if (folderRemovable) {
-      await removeMountFolder(target.schedulingRootPath, target.mountLabel);
+    const removed = await removeShareMountProjection(
+      target.schedulingRootPath,
+      target.mountLabel,
+    );
+    if (removed.error) {
+      console.error(
+        `[desktop] could not remove share mount folder ${target.mountLabel}:`,
+        removed.error,
+      );
     }
+    const mounts = storedShareMounts(
+      findWorkspace(target.workspaceId) ?? {},
+    );
+    const matches = new Set(shareMountRecordsForId(mounts, target.shareId));
     setWorkspaceShareMounts(
       target.workspaceId,
-      (findWorkspace(target.workspaceId)?.shareMounts ?? []).filter(
-        (mount) => mount.shareId !== target.shareId,
-      ),
+      mounts.filter((mount) => !matches.has(mount)),
     );
-    return { folderLeft: !folderRemovable };
+    return { folderLeft: removed.folderLeft };
   },
 });
+const ensureOwnedProjectionTargetCurrent =
+  createOwnedProjectionRepairer(shareViewFiles);
 
 async function shareViewFilesTargetForPath(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
@@ -4529,7 +4511,8 @@ async function shareViewFilesTargetForPath(
   const resolved = await resolveShareMountPath(
     workspace.rootPath,
     relativePath,
-    workspace.shareMounts ?? [],
+    storedShareMounts(workspace),
+    workspace.shareMounts !== undefined,
   );
   return resolved === null
     ? null
@@ -4588,26 +4571,34 @@ async function listOwnedWorkspaceFiles(
       workspaceId: workspace.workspaceId,
     });
   }
+  const mounts = storedShareMounts(workspace);
+  const disk = await listFiles(workspace.rootPath);
+  if (workspace.shareMounts === undefined) return disk;
   return overlayCanonicalShareMountFiles({
-    disk: await listFiles(workspace.rootPath),
-    mounts: workspace.shareMounts ?? [],
+    disk,
+    mounts,
     listCanonical: (mount) =>
       shareViewFiles.list({
         kind: "mount",
         workspaceId: workspace.workspaceId,
         shareId: mount.shareId,
       }),
-    onFailure: (mount, error) =>
+    onFailure: (mount, error) => {
+      const identity = isRecordValue(mount)
+        ? `"${String(mount.label)}" (${String(mount.shareId)})`
+        : "from an unreadable registry record";
       console.error(
-        `[desktop] could not list mounted share "${mount.label}" (${mount.shareId})`,
+        `[desktop] could not list mounted share ${identity}`,
         error,
-      ),
+      );
+    },
   });
 }
 
-function ownedWorkspaceSdkReads(
+function ownedWorkspaceReads(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
 ) {
+  const mounts = storedShareMounts(workspace);
   const searchSources = shareViewIsPresent(workspace.shareView)
     ? [
         {
@@ -4617,8 +4608,8 @@ function ownedWorkspaceSdkReads(
           },
         },
       ]
-    : (workspace.shareMounts ?? [])
-        .filter((mount) => validMountLabel(mount.label))
+    : mounts
+        .filter((mount) => usableShareMountRecord(mounts, mount))
         .map((mount) => ({
           target: {
             kind: "mount" as const,
@@ -4634,26 +4625,33 @@ function ownedWorkspaceSdkReads(
     resolveShare: (path) => shareViewFilesTargetForPath(workspace, path),
     readShareAsset: (target, path) =>
       shareViewFiles.read(target, { kind: "asset", path }),
+    hasShareState: workspaceHasReceivedShareState(workspace),
     searchSources,
     repairProjection: (target) =>
-      ensureOwnedProjectionTargetCurrent(workspace, target),
+      ensureOwnedProjectionTargetCurrent({
+        rootPath: workspace.rootPath,
+        target,
+      }),
     onSearchSourceFailure: (source, error) =>
       console.error(
-        `[desktop] could not prepare ${source.prefix ?? "the shared view"} for plugin search`,
+        `[desktop] could not prepare ${source.prefix ?? "the shared view"} for an owned workspace read`,
         error,
       ),
   });
 }
 
+async function listOwnedSitePackages(
+  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+) {
+  const reads = ownedWorkspaceReads(workspace);
+  const searchView = await reads.prepareSearch();
+  return listSitePackages(workspace.rootPath, searchView.listing ?? undefined);
+}
+
 function ownedWorkspaceGraphSource(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
 ) {
-  const needsOwner =
-    shareViewIsPresent(workspace.shareView) ||
-    (workspace.shareMounts ?? []).some((mount) =>
-      validMountLabel(mount.label),
-    );
-  if (!needsOwner) return undefined;
+  if (!workspaceHasReceivedShareState(workspace)) return undefined;
   return {
     list: () => listOwnedWorkspaceFiles(workspace),
     readText: (path: string) => readOwnedWorkspaceText(workspace, path),
@@ -4750,7 +4748,8 @@ async function collectOwnedZipEntries(
     }
   }
   const disk = await collectZipEntries(workspace.rootPath, relativePath);
-  if ((workspace.shareMounts ?? []).length === 0) return disk;
+  const mounts = storedShareMounts(workspace);
+  if (workspace.shareMounts === undefined) return disk;
   const selectedPath =
     relativePath === undefined
       ? undefined
@@ -4758,10 +4757,13 @@ async function collectOwnedZipEntries(
           const validated = validateUserReadPath(relativePath);
           return validated.ok ? validated.normalized : undefined;
         })();
-  let entries = [...disk.entries];
-  for (const mount of workspace.shareMounts ?? []) {
-    if (!validMountLabel(mount.label)) continue;
-    const workspacePrefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+  let entries = disk.entries.filter(
+    (entry) => !isSharedWithMePath(entry.path),
+  );
+  for (const mount of mounts) {
+    const storedLabel = isRecordValue(mount) ? mount.label : undefined;
+    if (typeof storedLabel !== "string") continue;
+    const workspacePrefix = `${SHARED_WITH_ME_FOLDER}/${storedLabel}`;
     if (
       selectedPath !== undefined &&
       workspacePrefix !== selectedPath &&
@@ -4773,9 +4775,7 @@ async function collectOwnedZipEntries(
       selectedPath === undefined
         ? workspacePrefix
         : `${basename(selectedPath)}/${workspacePrefix.slice(selectedPath.length + 1)}`;
-    entries = entries.filter(
-      (entry) => !entry.path.startsWith(`${archivePrefix}/`),
-    );
+    if (!usableShareMountRecord(mounts, mount)) continue;
     const canonical = await collectShareTargetZipEntries({
       target: {
         kind: "mount",
@@ -4808,112 +4808,10 @@ async function ensureOwnedProjectionCurrent(
 ): Promise<void> {
   const routed = await shareViewFilesTargetForPath(workspace, relativePath);
   if (routed === null) return;
-  await ensureOwnedProjectionTargetCurrent(workspace, routed.target);
-}
-
-async function ensureOwnedProjectionTargetCurrent(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-  target: ShareViewFilesTarget,
-): Promise<void> {
-  const status = await shareViewFiles.projectionStatus(target);
-  if (status.state === "unavailable") {
-    throw new Error(
-      "dohc cannot verify these shared files because the share record is damaged. Remove the share. Add it again.",
-    );
-  }
-  const repaired = await withExclusiveWorkspaceOperation(
-    workspace.rootPath,
-    (_markWorkspaceChanged, lease) =>
-      shareViewFiles.reconcile(lease, target, "repair"),
-  );
-  assertOwnedProjectionRepair(repaired);
-  if ((await shareViewFiles.projectionStatus(target)).state !== "current") {
-    throw new Error(
-      "This shared file is still being restored to its folder. Try again after the shared view finishes repairing.",
-    );
-  }
-}
-
-function assertOwnedProjectionRepair(
-  outcome: ShareViewReconcileOutcome,
-): asserts outcome is Extract<ShareViewReconcileOutcome, { kind: "repair" }> {
-  if (outcome.kind !== "repair") {
-    throw new Error("Shared file repair returned an invalid result.");
-  }
-  if (outcome.collisionRecordQuarantined) {
-    throw new Error(
-      "dohc found a damaged shared file recovery record. Refresh shared files. Retry this action.",
-    );
-  }
-  if (outcome.unjournalablePaths.length > 0) {
-    throw new Error(
-      unjournalablePathMessages(outcome.unjournalablePaths).join(" "),
-    );
-  }
-}
-
-async function ensureAllOwnedProjectionsCurrent(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-): Promise<void> {
-  const targets: ShareViewFilesTarget[] = shareViewIsPresent(workspace.shareView)
-    ? [{ kind: "standalone", workspaceId: workspace.workspaceId }]
-    : (workspace.shareMounts ?? [])
-        .filter((mount) => validMountLabel(mount.label))
-        .map((mount) => ({
-          kind: "mount" as const,
-          workspaceId: workspace.workspaceId,
-          shareId: mount.shareId,
-        }));
-  for (const target of targets) {
-    const status = await shareViewFiles.projectionStatus(target);
-    if (status.state === "unavailable") {
-      throw new Error(
-        "dohc cannot verify these shared files because the share record is damaged. Remove the share. Add it again.",
-      );
-    }
-  }
-  if (targets.length === 0) return;
-  await withExclusiveWorkspaceOperation(
-    workspace.rootPath,
-    async (_markWorkspaceChanged, lease) => {
-      for (const target of targets) {
-        const repaired = await shareViewFiles.reconcile(
-          lease,
-          target,
-          "repair",
-        );
-        assertOwnedProjectionRepair(repaired);
-      }
-    },
-  );
-  for (const target of targets) {
-    if ((await shareViewFiles.projectionStatus(target)).state !== "current") {
-      throw new Error(
-        "Some shared files are still being restored. Refresh the shared view before you continue.",
-      );
-    }
-  }
-}
-
-function searchPathKey(path: string): string {
-  return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
-async function shareSearchAllowPath(
-  sources: readonly {
-    target: ShareViewFilesTarget;
-    prefix?: string;
-  }[],
-): Promise<(path: string) => boolean> {
-  const allowedPaths = new Set<string>();
-  for (const { target, prefix } of sources) {
-    const listed = await shareViewFiles.list(target);
-    for (const file of listed.files) {
-      const path = prefix ? `${prefix}/${file.path}` : file.path;
-      allowedPaths.add(searchPathKey(path));
-    }
-  }
-  return (path) => allowedPaths.has(searchPathKey(path));
+  await ensureOwnedProjectionTargetCurrent({
+    rootPath: workspace.rootPath,
+    target: routed.target,
+  });
 }
 
 async function syncStatusWithOwnedProjection(
@@ -5485,7 +5383,7 @@ function registerIpcHandlers(
             workspace.rootPath,
             input.fromPath,
             input.toPath,
-            workspace.shareMounts ?? [],
+            storedShareMounts(workspace),
           );
         }
         // Flagged workspaces coordinate single-file renames through the engine
@@ -5759,9 +5657,14 @@ function registerIpcHandlers(
       const isMountPath =
         !isSharedView && !!input.path && isSharedWithMePath(input.path);
       const mountForPath = isMountPath
-        ? (registryEntry?.shareMounts ?? []).find(
-            (mount) => input.path === `shared-with-me/${mount.label}`,
-          )
+        ? (() => {
+            const mounts = storedShareMounts(registryEntry ?? {});
+            return mounts
+              .filter((mount) => usableShareMountRecord(mounts, mount))
+              .find(
+                (mount) => input.path === `shared-with-me/${mount.label}`,
+              );
+          })()
         : undefined;
       const template: Electron.MenuItemConstructorOptions[] = explorerMenuEntries({
         kind: input.kind,
@@ -6969,9 +6872,10 @@ function registerIpcHandlers(
     }
     if (
       input.shareId !== undefined &&
-      !(workspace.shareMounts ?? []).some(
-        (mount) => mount.shareId === input.shareId,
-      )
+      shareMountRecordsForId(
+        storedShareMounts(workspace),
+        input.shareId,
+      ).length === 0
     ) {
       throw new Error("That share is not mounted in this workspace.");
     }
@@ -7587,8 +7491,10 @@ function registerIpcHandlers(
       );
     }
     const relay = { baseUrl: relayUrl, token: credentials.token };
-    const existing = findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
-    if (existing.some((mount) => mount.shareId === parsed.shareId)) {
+    const existing = storedShareMounts(
+      findWorkspace(workspace.workspaceId) ?? {},
+    );
+    if (shareMountRecordsForId(existing, parsed.shareId).length > 0) {
       throw new Error("This share is already added to this workspace.");
     }
     let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
@@ -7624,7 +7530,11 @@ function registerIpcHandlers(
     const mount = {
       shareId: parsed.shareId,
       label: mountLabelFor(info.granterEmail, [
-        ...existing.map((m) => m.label),
+        ...existing
+          .filter((candidate) =>
+            usableShareMountRecord(existing, candidate),
+          )
+          .map((candidate) => candidate.label),
         ...onDisk,
       ]),
       granterEmail: info.granterEmail,
@@ -7641,7 +7551,7 @@ function registerIpcHandlers(
       // refuses to adopt or delete unrecorded shared-with-me folders, so an
       // orphan here would be permanent (codex P2).
       setWorkspaceShareMounts(workspace.workspaceId, [
-        ...(findWorkspace(workspace.workspaceId)?.shareMounts ?? []),
+        ...storedShareMounts(findWorkspace(workspace.workspaceId) ?? {}),
         mount,
       ]);
       registered = true;
@@ -7692,8 +7602,14 @@ function registerIpcHandlers(
           try {
             setWorkspaceShareMounts(
               workspace.workspaceId,
-              (findWorkspace(workspace.workspaceId)?.shareMounts ?? []).filter(
-                (registeredMount) => registeredMount.shareId !== mount.shareId,
+              storedShareMounts(
+                findWorkspace(workspace.workspaceId) ?? {},
+              ).filter(
+                (registeredMount) =>
+                  !shareMountRecordsForId(
+                    [registeredMount],
+                    mount.shareId,
+                  ).length,
               ),
             );
           } catch (registryError) {
@@ -7736,8 +7652,9 @@ function registerIpcHandlers(
     const input = RefreshShareMountsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     return withShareMountLock(workspace.workspaceId, async () => {
-          const mounts =
-            findWorkspace(workspace.workspaceId)?.shareMounts ?? [];
+          const mounts = storedShareMounts(
+            findWorkspace(workspace.workspaceId) ?? {},
+          );
           const results: Array<{
             shareId: string;
             label: string;
@@ -7745,10 +7662,11 @@ function registerIpcHandlers(
             changedPaths: number;
           }> = [];
           const pushMountResult = (
-            mount: { shareId: unknown; label: unknown },
+            mount: unknown,
             status: "updated" | "unchanged" | "ended" | "damaged",
             changedPaths: number,
           ): void => {
+            if (!isRecordValue(mount)) return;
             const row = shareMountResultRow({
               shareId: mount.shareId,
               label: mount.label,
@@ -7759,6 +7677,10 @@ function registerIpcHandlers(
           };
           try {
             for (const mount of mounts) {
+              if (!usableShareMountRecord(mounts, mount)) {
+                pushMountResult(mount, "damaged", 0);
+                continue;
+              }
               if (mount.ended) {
                 pushMountResult(mount, "ended", 0);
                 continue;
@@ -7820,12 +7742,34 @@ function registerIpcHandlers(
       withExclusiveWorkspaceOperation(
         workspace.rootPath,
         async (_markWorkspaceChanged, lease) => {
-          const mount = (
-            findWorkspace(workspace.workspaceId)?.shareMounts ?? []
-          ).find((candidate) => candidate.shareId === input.shareId);
-          if (!mount) {
+          const registeredMounts = storedShareMounts(
+            findWorkspace(workspace.workspaceId) ?? {},
+          );
+          const removal = planShareMountRemoval(
+            registeredMounts,
+            input.shareId,
+          );
+          if (removal.kind === "missing") {
             throw new Error("This share is not added to this workspace.");
           }
+          if (removal.kind === "registry-only") {
+            await closeRelayTransportWorkspace(
+              mountStoreWorkspaceIdFor(workspace.workspaceId, input.shareId),
+            );
+            setWorkspaceShareMounts(
+              workspace.workspaceId,
+              removal.remaining,
+            );
+            refreshNativeWorkspaceSurfaces();
+            notifyRenderer();
+            return UnmountShareResult.parse({
+              workspace: workspaceSummaryFor(
+                requireWorkspace(workspace.workspaceId),
+              ),
+              folderLeft: true,
+            });
+          }
+          const mount = removal.mount;
           const removed = await shareViewFiles.unmount(lease, {
             kind: "mount",
             workspaceId: workspace.workspaceId,
@@ -7848,9 +7792,8 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ReadWorkspaceDatabasePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    await ensureOwnedProjectionCurrent(workspace, input.relativePath);
     return DatabaseSnapshotResult.parse(
-      await readDatabaseSnapshot(workspace.rootPath, input.relativePath),
+      await ownedWorkspaceReads(workspace).readDatabase(input.relativePath),
     );
   });
 
@@ -7902,8 +7845,7 @@ function registerIpcHandlers(
         activeWorkspaceIdBySender.get(event.sender.id),
         workspace.workspaceId,
         async () => {
-          await ensureAllOwnedProjectionsCurrent(workspace);
-          return listSitePackages(workspace.rootPath);
+          return listOwnedSitePackages(workspace);
         },
       ),
     });
@@ -7921,11 +7863,11 @@ function registerIpcHandlers(
         activeWorkspaceIdBySender.get(event.sender.id),
         workspace.workspaceId,
         async () => {
-          await ensureOwnedProjectionCurrent(workspace, input.path);
+          const sites = await listOwnedSitePackages(workspace);
           return getSitePackage(
             workspace.rootPath,
             input.path,
-            undefined,
+            sites,
             input.effectivePreviewMode,
           );
         },
@@ -7965,9 +7907,14 @@ function registerIpcHandlers(
           "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
         );
       }
-      await ensureOwnedProjectionCurrent(workspace, input.siteRoot);
+      const sites = await listOwnedSitePackages(workspace);
       const site = requireExactSiteRoot(
-        await getSitePackage(workspace.rootPath, input.siteRoot),
+        await getSitePackage(
+          workspace.rootPath,
+          input.siteRoot,
+          sites,
+          input.mode,
+        ),
         input.siteRoot,
       );
       const started = await startPreviewForSite({
@@ -11746,44 +11693,16 @@ function registerIpcHandlers(
       !sender.isDestroyed() &&
       rendererGeneration(sender.id) === generation &&
       latestSearchIdBySender.get(sender.id) === input.searchId;
-    await ensureAllOwnedProjectionsCurrent(workspace);
+    const ownedSearchView = await ownedWorkspaceReads(
+      workspace,
+    ).prepareSearch();
     if (!isCurrentSearch()) return;
-    const standaloneAllowPath = shareViewIsPresent(workspace.shareView)
-      ? await shareSearchAllowPath([
-          {
-            target: {
-              kind: "standalone",
-              workspaceId: workspace.workspaceId,
-            },
-          },
-        ])
-      : undefined;
-    if (!isCurrentSearch()) return;
-    const mounts = (
-      findWorkspace(workspace.workspaceId)?.shareMounts ?? []
-    ).filter((mount) => validMountLabel(mount.label));
-    const mountAllowPath =
-      mounts.length > 0
-        ? await shareSearchAllowPath(
-            mounts.map((mount) => ({
-              target: {
-                kind: "mount" as const,
-                workspaceId: workspace.workspaceId,
-                shareId: mount.shareId,
-              },
-              prefix: `${SHARED_WITH_ME_FOLDER}/${mount.label}`,
-            })),
-          )
-        : undefined;
-    const ownedAllowPath =
-      standaloneAllowPath ??
-      (mountAllowPath
-        ? allowCanonicalMountSearchPaths(
-            mounts.map((mount) => mount.label),
-            mountAllowPath,
-          )
-        : undefined);
-    if (!isCurrentSearch()) return;
+    const registeredMounts = storedShareMounts(
+      findWorkspace(workspace.workspaceId) ?? {},
+    );
+    const mounts = registeredMounts.filter((mount) =>
+      usableShareMountRecord(registeredMounts, mount),
+    );
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (capture) {
       // Read-your-writes: the batch whose capture triggered this search must
@@ -11924,7 +11843,7 @@ function registerIpcHandlers(
             },
             {
               isCurrent: isCurrentSearch,
-              allowPath: mountAllowPath,
+              allowPath: ownedSearchView.allowPath,
             },
           );
         }
@@ -11961,7 +11880,7 @@ function registerIpcHandlers(
       },
       {
         isCurrent: isCurrentSearch,
-        allowPath: ownedAllowPath,
+        allowPath: ownedSearchView.allowPath,
       },
     );
   });

@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createShareViewDaemonHarness,
   type ShareViewDaemonHarness,
@@ -22,9 +22,12 @@ import {
   mountRootFor,
   mountStoreWorkspaceIdFor,
   removeMountFolder,
+  removeShareMountProjection,
   refuseMoveAcrossShareMount,
   resolveShareMountPath,
   overlayCanonicalShareMountFiles,
+  planShareMountRemoval,
+  uniqueShareMountForId,
   validMountLabel,
 } from "./shareMounts";
 import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
@@ -307,6 +310,23 @@ describe("mount labels", () => {
     ).rejects.toThrow(/saved details are invalid/);
   });
 
+  it("refuses an unclaimed projection path when a mount registry exists", async () => {
+    const host = await tempHostRoot();
+    await mkdir(join(host, SHARED_WITH_ME_FOLDER, "orphan", "docs"), {
+      recursive: true,
+    });
+
+    await expect(
+      resolveShareMountPath(
+        host,
+        "shared-with-me/orphan/docs/brief.md",
+        [],
+        true,
+      ),
+      "MUTATION: an empty but present registry lets stale projection bytes fall through to disk",
+    ).rejects.toThrow(/saved details are invalid/);
+  });
+
   it("refuses a disk path claimed by more than one registry record", async () => {
     const host = await tempHostRoot();
     await createMountDirectory(host, "alex");
@@ -323,6 +343,48 @@ describe("mount labels", () => {
       ),
       "MUTATION: first-match routing sends an ambiguous mount path to an arbitrary share",
     ).rejects.toThrow(/saved details are invalid/);
+  });
+
+  it("refuses a share id claimed by more than one mount record", () => {
+    expect(
+      () =>
+        uniqueShareMountForId(
+          [
+            { shareId: SHARE_ID, label: "alex" },
+            { shareId: SHARE_ID, label: "sam" },
+          ],
+          SHARE_ID,
+        ),
+      "MUTATION: first-match target resolution gives an ambiguous id authority over one mount",
+    ).toThrow(/saved details are invalid/);
+    expect(
+      uniqueShareMountForId(
+        [{ shareId: SHARE_ID, label: "alex" }],
+        SHARE_ID,
+      ),
+    ).toEqual({ shareId: SHARE_ID, label: "alex" });
+    expect(uniqueShareMountForId([], SHARE_ID)).toBeNull();
+  });
+
+  it("plans ambiguous or unusable records for registry-only removal", () => {
+    const healthy = { shareId: "healthy", label: "healthy" };
+    const duplicateOne = { shareId: SHARE_ID, label: "alex" };
+    const duplicateTwo = { shareId: SHARE_ID, label: "sam" };
+    expect(
+      planShareMountRemoval(
+        [healthy, duplicateOne, duplicateTwo],
+        SHARE_ID,
+      ),
+    ).toEqual({ kind: "registry-only", remaining: [healthy] });
+    expect(
+      planShareMountRemoval(
+        [healthy, { shareId: "damaged", label: ".env" }],
+        "damaged",
+      ),
+    ).toEqual({ kind: "registry-only", remaining: [healthy] });
+    expect(planShareMountRemoval([healthy], "missing")).toEqual({
+      kind: "missing",
+    });
   });
 
   it("refuses a move when either resolved endpoint belongs to a mount", async () => {
@@ -387,6 +449,80 @@ describe("mount labels", () => {
       ],
     });
     expect(failures).toEqual(["damaged"]);
+  });
+
+  it("hides disk entries for an invalid mount record", async () => {
+    const listCanonical = vi.fn();
+    const failures: unknown[] = [];
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "notes/local.md", size: 5 },
+            { path: "shared-with-me/.env/recipient-only.md", size: 10 },
+          ],
+          folders: ["notes", "shared-with-me/.env"],
+        },
+        mounts: [{ shareId: "invalid", label: ".env" }],
+        listCanonical,
+        onFailure: (_mount, error) => failures.push(error),
+      }),
+    ).resolves.toEqual({
+      files: [{ path: "notes/local.md", size: 5 }],
+      folders: ["notes"],
+    });
+    expect(listCanonical).not.toHaveBeenCalled();
+    expect(failures).toEqual([
+      expect.objectContaining({ message: expect.stringMatching(/invalid/i) }),
+    ]);
+  });
+
+  it("hides an ambiguous projection claimed by two mount records", async () => {
+    const listCanonical = vi.fn();
+    const mounts = [
+      { shareId: "first", label: "owner" },
+      { shareId: "second", label: "owner" },
+    ];
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [{ path: "shared-with-me/owner/stale.md" }],
+          folders: ["shared-with-me/owner"],
+        },
+        mounts,
+        listCanonical,
+      }),
+    ).resolves.toEqual({ files: [], folders: [] });
+    expect(listCanonical).not.toHaveBeenCalled();
+  });
+
+  it("contains malformed records and still overlays a later healthy mount", async () => {
+    const failures: unknown[] = [];
+    const malformed = { shareId: "damaged", label: null } as never;
+    const healthy = { shareId: "healthy", label: "healthy" };
+
+    await expect(
+      overlayCanonicalShareMountFiles({
+        disk: {
+          files: [
+            { path: "shared-with-me/unknown/recipient-only.md" },
+            { path: "shared-with-me/healthy/stale.md" },
+          ],
+          folders: ["shared-with-me/unknown", "shared-with-me/healthy"],
+        },
+        mounts: [malformed, healthy],
+        listCanonical: async (mount) => ({
+          files: [{ path: `${mount.shareId}.md` }],
+        }),
+        onFailure: (_mount, error) => failures.push(error),
+      }),
+    ).resolves.toEqual({
+      files: [{ path: "shared-with-me/healthy/healthy.md" }],
+      folders: ["shared-with-me/healthy"],
+    });
+    expect(failures).toHaveLength(1);
   });
 });
 
@@ -826,6 +962,21 @@ describe("removeMountFolder", () => {
     const host = await tempHostRoot();
     await expect(removeMountFolder(host, "..")).rejects.toThrow(
       /Invalid share mount label/,
+    );
+  });
+
+  it("leaves the folder present when the container is a symlink", async () => {
+    const host = await tempHostRoot();
+    const elsewhere = await tempHostRoot();
+    await mkdir(join(elsewhere, "alex"));
+    await writeFile(join(elsewhere, "alex", "victim.md"), "untouched");
+    await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
+
+    await expect(
+      removeShareMountProjection(host, "alex"),
+    ).resolves.toMatchObject({ folderLeft: true, error: expect.any(Error) });
+    expect(await readFile(join(elsewhere, "alex", "victim.md"), "utf8")).toBe(
+      "untouched",
     );
   });
 });

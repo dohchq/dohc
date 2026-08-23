@@ -13317,9 +13317,7 @@ describe("file transfers", () => {
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
 
-    expect((await screen.findByTestId("shell-notice")).textContent).toContain(
-      "Imported 2 files before the import stopped",
-    );
+    await screen.findByText(/Imported 2 files before the import stopped/);
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(1),
     );

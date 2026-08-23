@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { validateUserReadPath, validateUserWritePath } from "@dohc/workspace-core";
+import {
+  isSharedWithMePath,
+  validateUserReadPath,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
 import { isInside } from "../security/pathContainment";
 // See the note in workspaceGraph.ts: the path floor is a cross-process security
 // contract with a Rust twin, not engine state.
@@ -31,11 +35,23 @@ import type { ShareMountRecord } from "./registryStore";
 // Folder-name budget for a mount label; generous but bounded (labels become
 // one path component under shared-with-me/).
 const MOUNT_LABEL_MAX = 64;
+const SHARE_ID_MAX = 200;
+const INVALID_SHARE_MOUNT_DETAILS =
+  "dohc cannot verify this mounted share because its saved details are invalid. Remove the share. Add it again.";
 
 // A mount label must be exactly one safe path segment. The registry file is
 // data, not a write path into the tree — labels are re-validated on every
 // use so an edited registry cannot smuggle traversal into materialization.
-export function validMountLabel(label: string): boolean {
+export function validShareMountId(shareId: unknown): shareId is string {
+  return (
+    typeof shareId === "string" &&
+    shareId.length > 0 &&
+    shareId.length <= SHARE_ID_MAX
+  );
+}
+
+export function validMountLabel(label: unknown): label is string {
+  if (typeof label !== "string") return false;
   if (label.length === 0 || label.length > MOUNT_LABEL_MAX) return false;
   const validated = validateUserWritePath(label);
   // A secret-shaped label (".env", "prod.env") would have the read
@@ -87,6 +103,87 @@ export function mountRootFor(hostRoot: string, label: string): string {
   return target;
 }
 
+function mountField(mount: unknown, field: "shareId" | "label"): unknown {
+  return typeof mount === "object" && mount !== null && !Array.isArray(mount)
+    ? (mount as Record<string, unknown>)[field]
+    : undefined;
+}
+
+function storedMountLabel(mount: unknown): string | null {
+  const label = mountField(mount, "label");
+  return typeof label === "string" ? label : null;
+}
+
+export function shareMountRecordsForId<Mount>(
+  mounts: readonly Mount[],
+  shareId: string,
+): Array<Mount & { shareId: string }> {
+  return mounts.filter(
+    (mount): mount is Mount & { shareId: string } =>
+      mountField(mount, "shareId") === shareId,
+  );
+}
+
+export function uniqueShareMountForId<Mount>(
+  mounts: readonly Mount[],
+  shareId: string,
+): (Mount & { shareId: string }) | null {
+  const matches = shareMountRecordsForId(mounts, shareId);
+  if (matches.length > 1) throw new Error(INVALID_SHARE_MOUNT_DETAILS);
+  return matches[0] ?? null;
+}
+
+export function usableShareMountRecord<Mount>(
+  mounts: readonly Mount[],
+  mount: Mount,
+): mount is Mount & { shareId: string; label: string } {
+  const shareId = mountField(mount, "shareId");
+  const label = mountField(mount, "label");
+  if (!validShareMountId(shareId) || !validMountLabel(label)) return false;
+  if (shareMountRecordsForId(mounts, shareId).length !== 1) return false;
+  const key =
+    process.platform === "win32"
+      ? label.toLowerCase()
+      : label;
+  return (
+    mounts.filter((candidate) => {
+      const candidateLabel = storedMountLabel(candidate);
+      if (candidateLabel === null) return false;
+      return process.platform === "win32"
+        ? candidateLabel.toLowerCase() === key
+        : candidateLabel === key;
+    }).length === 1
+  );
+}
+
+export function planShareMountRemoval<Mount>(
+  mounts: readonly Mount[],
+  shareId: string,
+):
+  | { kind: "missing" }
+  | {
+      kind: "registry-only";
+      remaining: Mount[];
+    }
+  | {
+      kind: "owner";
+      mount: Mount & { shareId: string; label: string };
+    } {
+  const matches = shareMountRecordsForId(mounts, shareId);
+  if (matches.length === 0) return { kind: "missing" };
+  if (
+    matches.length === 1 &&
+    usableShareMountRecord(mounts, matches[0]!)
+  ) {
+    return { kind: "owner", mount: matches[0]! };
+  }
+  const damaged = new Set<Mount>(matches);
+  return {
+    kind: "registry-only",
+    remaining: mounts.filter((mount) => !damaged.has(mount)),
+  };
+}
+
 /**
  * Resolve a workspace read to the mount that owns its real destination.
  *
@@ -94,15 +191,16 @@ export function mountRootFor(hostRoot: string, label: string): string {
  * Windows case/short-name alias into shared-with-me must still read the
  * mount's canonical store instead of bypassing it through the disk copy.
  */
-export async function resolveShareMountPath(
+export async function resolveShareMountPath<Mount>(
   hostRoot: string,
   relativePath: string,
-  mounts: readonly Pick<ShareMountRecord, "shareId" | "label">[],
+  mounts: readonly Mount[],
+  hasMountRegistry = mounts.length > 0,
 ): Promise<{
-  mount: Pick<ShareMountRecord, "shareId" | "label">;
+  mount: Mount & { shareId: string; label: string };
   path: string;
 } | null> {
-  if (mounts.length === 0) return null;
+  if (mounts.length === 0 && !hasMountRegistry) return null;
   const validated = validateUserReadPath(relativePath);
   if (!validated.ok) return null;
   const resolved = await assertResolvedWorkspacePath({
@@ -117,7 +215,9 @@ export async function resolveShareMountPath(
       ? resolved.relative.toLowerCase()
       : resolved.relative;
   const matches = mounts.filter((mount) => {
-    const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
+    const label = storedMountLabel(mount);
+    if (label === null) return false;
+    const prefix = `${SHARED_WITH_ME_FOLDER}/${label}`;
     const comparedPrefix =
       process.platform === "win32" ? prefix.toLowerCase() : prefix;
     return (
@@ -125,11 +225,18 @@ export async function resolveShareMountPath(
       comparedPath.startsWith(`${comparedPrefix}/`)
     );
   });
-  if (matches.length === 0) return null;
-  if (matches.length !== 1 || !validMountLabel(matches[0]!.label)) {
-    throw new Error(
-      "dohc cannot verify this mounted share because its saved details are invalid. Remove the share. Add it again.",
-    );
+  if (matches.length === 0) {
+    if (
+      hasMountRegistry &&
+      isSharedWithMePath(resolved.relative) &&
+      resolved.relative.replaceAll("\\", "/").includes("/")
+    ) {
+      throw new Error(INVALID_SHARE_MOUNT_DETAILS);
+    }
+    return null;
+  }
+  if (matches.length !== 1 || !usableShareMountRecord(mounts, matches[0]!)) {
+    throw new Error(INVALID_SHARE_MOUNT_DETAILS);
   }
   const mount = matches[0]!;
   const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
@@ -162,34 +269,38 @@ export async function refuseMoveAcrossShareMount(
 
 export async function overlayCanonicalShareMountFiles<
   FileEntry extends { path: string },
-  Mount extends Pick<ShareMountRecord, "shareId" | "label">,
+  Mount,
 >(input: {
   disk: { files: readonly FileEntry[]; folders?: readonly string[] };
   mounts: readonly Mount[];
   listCanonical: (
-    mount: Mount,
+    mount: Mount & { shareId: string; label: string },
   ) => Promise<{ files: readonly FileEntry[]; folders?: readonly string[] }>;
   onFailure?: (mount: Mount, error: unknown) => void;
 }): Promise<{ files: FileEntry[]; folders: string[] }> {
-  const files = [...input.disk.files];
-  const folders = [...(input.disk.folders ?? [])];
+  // The projection is only a materialized cache. Remove it wholesale before
+  // adding owner listings: a malformed record may not carry a label that can
+  // identify its stale disk prefix, and preserving that unknown prefix would
+  // turn registry damage into recipient-owned bytes becoming authoritative.
+  const files = input.disk.files.filter(
+    (file) => !isSharedWithMePath(file.path),
+  );
+  const folders = (input.disk.folders ?? []).filter((folder) => {
+    if (!isSharedWithMePath(folder)) return true;
+    return !folder.replaceAll("\\", "/").includes("/");
+  });
   for (const mount of input.mounts) {
-    if (!validMountLabel(mount.label)) continue;
-    const prefix = `${SHARED_WITH_ME_FOLDER}/${mount.label}`;
-    const comparedPrefix = process.platform === "win32" ? prefix.toLowerCase() : prefix;
-    const underMount = (path: string) => {
-      const comparedPath = process.platform === "win32" ? path.toLowerCase() : path;
-      return (
-        comparedPath === comparedPrefix ||
-        comparedPath.startsWith(`${comparedPrefix}/`)
-      );
-    };
-    const retainedFiles = files.filter((file) => !underMount(file.path));
-    const retainedFolders = folders.filter((folder) => !underMount(folder));
-    files.length = 0;
-    files.push(...retainedFiles);
-    folders.length = 0;
-    folders.push(...retainedFolders, prefix);
+    const label = storedMountLabel(mount);
+    if (label === null) {
+      input.onFailure?.(mount, new Error(INVALID_SHARE_MOUNT_DETAILS));
+      continue;
+    }
+    if (!usableShareMountRecord(input.mounts, mount)) {
+      input.onFailure?.(mount, new Error(INVALID_SHARE_MOUNT_DETAILS));
+      continue;
+    }
+    const prefix = `${SHARED_WITH_ME_FOLDER}/${label}`;
+    folders.push(prefix);
 
     let canonical: Awaited<ReturnType<typeof input.listCanonical>>;
     try {
@@ -390,4 +501,17 @@ export async function removeMountFolder(
     return;
   }
   await rm(leaf, { recursive: true, force: true });
+}
+
+export async function removeShareMountProjection(
+  hostRoot: string,
+  label: unknown,
+): Promise<{ folderLeft: boolean; error?: unknown }> {
+  if (!validMountLabel(label)) return { folderLeft: true };
+  try {
+    await removeMountFolder(hostRoot, label);
+    return { folderLeft: false };
+  } catch (error) {
+    return { folderLeft: true, error };
+  }
 }
