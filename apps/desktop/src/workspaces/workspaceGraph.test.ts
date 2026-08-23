@@ -301,6 +301,25 @@ describe("readWorkspaceGraph", () => {
     ]);
   });
 
+  it("bounds text copied from a supplied canonical source", async () => {
+    const source = {
+      async list() {
+        return { files: [{ path: "large.md" }] };
+      },
+      async readText() {
+        return {
+          text: `# Large\n${"x".repeat(600 * 1024)}`,
+          truncated: false,
+        };
+      },
+    };
+
+    await expect(readWorkspaceGraph(root, source)).resolves.toMatchObject({
+      scannedFileCount: 1,
+      truncatedFileCount: 1,
+    });
+  });
+
   it("includes all real files from the workspace listing", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await mkdir(join(root, "notes"), { recursive: true });

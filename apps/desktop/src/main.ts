@@ -4631,6 +4631,12 @@ function ownedWorkspaceSdkReads(
 function ownedWorkspaceGraphSource(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
 ) {
+  const needsOwner =
+    shareViewIsPresent(workspace.shareView) ||
+    (workspace.shareMounts ?? []).some((mount) =>
+      validMountLabel(mount.label),
+    );
+  if (!needsOwner) return undefined;
   return {
     list: () => listOwnedWorkspaceFiles(workspace),
     readText: (path: string) => readOwnedWorkspaceText(workspace, path),
@@ -4930,8 +4936,7 @@ function committedShareViewChangeValue(
 
 function shareViewImportResult(
   outcome: ShareViewFileChangeOutcome,
-  sourceCount: number,
-): { imported: string[]; skipped: number } {
+): { imported: string[]; skipped: number; interrupted?: true } {
   if (outcome.status === "committed") {
     if (outcome.projection === "pending") notifyRenderer();
     if (
@@ -4952,7 +4957,8 @@ function shareViewImportResult(
       .map((effect) => effect.path);
     return {
       imported,
-      skipped: Math.max(0, sourceCount - imported.length),
+      skipped: 0,
+      interrupted: true,
     };
   }
   throw new Error(
@@ -5886,7 +5892,6 @@ function registerIpcHandlers(
                   targetDir: input.targetDir,
                 },
               ),
-              absolutePaths.length,
             ),
       );
     // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
@@ -7225,6 +7230,11 @@ function registerIpcHandlers(
     if (reconciled.kind !== "settle") {
       throw new Error("Shared file settlement returned an invalid result.");
     }
+    if (reconciled.collisionRecordQuarantined) {
+      throw new Error(
+        "dohc found a damaged shared file recovery record. Refresh shared files. Then send your changes again.",
+      );
+    }
     assertShareChangesJournalable(reconciled.unjournalablePaths);
     // The engine owns the submit: it reads this replica's own journal, so it
     // has to be the process holding the store.
@@ -7444,8 +7454,13 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = RefreshSharedViewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    if (!workspace.shareView) {
+    if (!shareViewIsPresent(workspace.shareView)) {
       throw new Error("This workspace is not a shared view.");
+    }
+    if (!workspace.shareView) {
+      throw new Error(
+        "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
+      );
     }
     // #646 PR2: the backstop this share's chat push docstring claims. A push
     // that failed — offline, a rotated session, a relay blip — is retried

@@ -30,6 +30,7 @@ import type {
   DmRecord,
   EngineMomentRecord,
   FileChatThreadRecord,
+  ImportWorkspaceFilesResult,
   ListEngineMomentsResult,
   ListFileChatsResult,
   ListMyShareChangesResult,
@@ -448,7 +449,12 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     createWorkspaceFolder: vi.fn(async (payload: { relativePath: string }) => ({
       path: payload.relativePath,
     })),
-    importWorkspaceFiles: vi.fn(async () => ({ imported: ["imported.md"], skipped: 0 })),
+    importWorkspaceFiles: vi.fn(
+      async (): Promise<ImportWorkspaceFilesResult> => ({
+        imported: ["imported.md"],
+        skipped: 0,
+      }),
+    ),
     exportWorkspaceZip: vi.fn(async () => ({ path: "/tmp/workspace.zip" })),
     showExplorerMenu: vi.fn(async (): Promise<ShowExplorerMenuResult> => null),
     showWorkbenchMenu: vi.fn(async (): Promise<ShowWorkbenchMenuResult> => null),
@@ -13293,6 +13299,27 @@ describe("file transfers", () => {
         workspaceId: "ws-shell-test",
       });
     });
+  });
+
+  it("reports an interrupted shared import separately from ordinary skips", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.importWorkspaceFiles.mockResolvedValueOnce({
+      imported: ["one.md", "two.md"],
+      skipped: 0,
+      interrupted: true,
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(await screen.findByText("Import files"));
+
+    expect((await screen.findByTestId("shell-notice")).textContent).toContain(
+      "Imported 2 files before the import stopped",
+    );
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(1),
+    );
   });
 
   it("checks for desktop updates from the command palette", async () => {

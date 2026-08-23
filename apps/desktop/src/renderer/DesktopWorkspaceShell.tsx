@@ -34,6 +34,7 @@ import type {
   DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
+  ImportWorkspaceFilesResult,
   MyShareChangeRow,
   RefreshSharedViewResult,
   ShareProposalRow,
@@ -3060,7 +3061,7 @@ export function DesktopWorkspaceShell(props: {
   // where, and how many sources were skipped — never a silent shrink.
   const importFiles = useCallback(
     async (droppedPaths?: string[], targetDir?: string) => {
-      let outcome: { imported: string[]; skipped: number };
+      let outcome: ImportWorkspaceFilesResult;
       try {
         outcome = await bridge().importWorkspaceFiles({
           workspaceId,
@@ -3072,6 +3073,22 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       const count = outcome.imported.length;
+      if (outcome.interrupted) {
+        showShellNotice(
+          count === 0
+            ? "The import stopped before dohc could confirm any files. Refresh the shared view before you try again."
+            : `Imported ${count} ${count === 1 ? "file" : "files"} before the import stopped. Refresh the shared view before you continue.`,
+        );
+        try {
+          await refreshFiles();
+        } catch (error) {
+          reportShellError(
+            "The import stopped, and the Explorer could not refresh.",
+            error,
+          );
+        }
+        return;
+      }
       if (count === 0 && outcome.skipped === 0) return; // cancelled dialog
       const skippedSuffix =
         outcome.skipped > 0 ? ` (${outcome.skipped} skipped)` : "";

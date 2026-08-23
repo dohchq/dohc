@@ -494,6 +494,10 @@ export const ImportWorkspaceFilesResult = z.object({
   // collision budget exhausted) — surfaced so the import summary can say
   // "2 skipped" instead of the batch silently shrinking.
   skipped: z.number().int().min(0),
+  // Some files landed before the owner lost a trustworthy completion result.
+  // This is not an ordinary skip: the Explorer must refresh before the user
+  // decides what, if anything, to retry.
+  interrupted: z.literal(true).optional(),
 });
 export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult
