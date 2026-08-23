@@ -218,7 +218,7 @@ test("the Claude Code plugin serves its chat and answers a tool permission", asy
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + credentials.token },
     });
-    expect(authorized.status).toBe(204);
+    expect(authorized.status).toBe(200);
 
     // The page itself never carries the token: a local process that only
     // fetches "/" (or a rebound page reading its own same-origin response)

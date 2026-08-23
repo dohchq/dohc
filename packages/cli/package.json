@@ -7,6 +7,8 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./client": "./src/client.ts",
+    "./errors": "./src/errors.ts",
     "./protocol": "./src/protocol.ts",
     "./render": "./src/render.ts",
     "./thread-markdown": "./src/threadMarkdown.ts"

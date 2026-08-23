@@ -45,6 +45,22 @@ const permissions = new Map();
 // submitting page's own connection sees it too), the echo confirms the
 // existing card instead of rendering a duplicate.
 const pendingMessages = new Map();
+// The only state this page keeps about Send/Stop validity: the highest
+// seq applied so far, and the controls fact that arrived with it. Every
+// server frame, the reconnect snapshot, and every /message and /stop
+// response body carry a {controls, seq} pair -- applying whichever has
+// the highest seq, and ignoring anything lower, is the ENTIRE mechanism.
+// A lost response body, a delayed old frame, the reconnect snapshot, and
+// two consecutive Stop clicks all resolve through this one comparison;
+// none of them need their own special case.
+let lastAppliedSeq = -1;
+
+function applyControls(controls, seq) {
+  if (typeof seq !== "number" || seq <= lastAppliedSeq) return;
+  lastAppliedSeq = seq;
+  sendButton.disabled = !controls.canSend;
+  stopButton.disabled = !controls.canStop;
+}
 
 // `at` is the server's own publish time (every event carries it); replaying
 // history must render when it really happened, not the reconnect moment.
@@ -61,8 +77,17 @@ function hideEmptyState() {
   emptyState.hidden = true;
 }
 
+// Batched to one real scroll per frame: reading scrollHeight forces
+// layout, and a streamed reply calls this once per delta -- per-call
+// scrolling made long answers quadratic in layout work.
+let scrollScheduled = false;
 function scrollToLatest() {
-  transcript.scrollTop = transcript.scrollHeight;
+  if (scrollScheduled) return;
+  scrollScheduled = true;
+  requestAnimationFrame(() => {
+    scrollScheduled = false;
+    transcript.scrollTop = transcript.scrollHeight;
+  });
 }
 
 // The transcript itself carries no aria-live: a streamed reply fires one
@@ -106,84 +131,75 @@ function setSessionState(state, reason, options = {}) {
   const label = labels[state] || state;
   statePill.textContent = label;
   statePill.dataset.state = state;
-  stopButton.disabled = state === "closed" || state === "error";
-  // Send re-enables only once the turn settles (back to Ready) or the
-  // session ends -- not on the message's own 202, which lands well before
-  // the driver's turn actually finishes.
-  sendButton.disabled = state === "running";
-  // The initial connection snapshot applies to the pill only: the log
-  // replay right behind it (or a live event still to come) is what
-  // actually narrates the transcript. Announcing or rendering a card here
-  // too would duplicate whatever that replay is about to show.
   if (options.silent) return;
   announce(label);
-  // A closed state reaching here (not the silent initial snapshot) is
-  // always a real transition away from a session that existed -- an idle
-  // CLI process can exit with no reason at all, and without a boundary
-  // card here the next message would silently start a fresh, context-free
-  // session under what still looks like one continuous transcript.
   if (state === "closed") {
-    recoveryCard(reason || "This session ended.");
+    recoveryCard(reason || "This session ended.", options.replay);
   }
 }
 
+// A live error card is an alert: role="alert" is what a screen reader
+// actually hears -- the status region above only ever speaks the state
+// label ("Error"), so without it the explanation and next step render
+// silently. A replayed card (a reconnect rebuilding history the reader
+// already heard) has no live-region semantics.
+// nextAction names what the user can do now, and it must be true for the
+// state the card reports: "start a new session" only when the session
+// actually ended, "try again" when only the turn failed.
+function errorCard(message, nextAction, replay) {
+  hideEmptyState();
+  const card = document.createElement("section");
+  card.className = "error-card";
+  if (!replay) card.setAttribute("role", "alert");
+  if (nextAction) {
+    const heading = document.createElement("strong");
+    heading.textContent = message;
+    const next = document.createElement("p");
+    next.className = "next-action";
+    next.textContent = nextAction;
+    card.append(heading, next);
+  } else {
+    const text = document.createElement("p");
+    text.textContent = message;
+    card.append(text);
+  }
+  transcript.append(card);
+  scrollToLatest();
+}
+
 // The session actually ended: sending a message means starting over.
-function recoveryCard(message) {
-  hideEmptyState();
-  const card = document.createElement("section");
-  card.className = "error-card";
-  const heading = document.createElement("strong");
-  heading.textContent = message;
-  const next = document.createElement("p");
-  next.className = "next-action";
-  next.textContent = "Send a message to start a new session.";
-  card.append(heading, next);
-  transcript.append(card);
-  scrollToLatest();
+function recoveryCard(message, replay) {
+  errorCard(message, "Send a message to start a new session.", replay);
 }
 
-// A turn failed, but the session itself is still alive (setSessionState
-// already went back to Ready by the time this renders) -- recoveryCard's
-// "start a new session" line would be false here, since there isn't a new
-// one to start.
-function failedTurnCard(message) {
-  hideEmptyState();
-  const card = document.createElement("section");
-  card.className = "error-card";
-  const heading = document.createElement("strong");
-  heading.textContent = message;
-  const next = document.createElement("p");
-  next.className = "next-action";
-  next.textContent = "Send a message to try again.";
-  card.append(heading, next);
-  transcript.append(card);
-  scrollToLatest();
-}
-
-function transientError(message) {
-  hideEmptyState();
-  const card = document.createElement("section");
-  card.className = "error-card";
-  const text = document.createElement("p");
-  text.textContent = message;
-  card.append(text);
-  transcript.append(card);
-  scrollToLatest();
+// The launcher itself is what's missing, not this session's context --
+// unlike every other fatal error, sending another message can never
+// recover this one until dohc itself restarts. recoveryCard's "Send a
+// message to start a new session" would be a false instruction here; load
+// this repo's dohc-interface skill before touching this string.
+function restartRequiredCard(message, replay) {
+  errorCard(message, "Restart dohc to try again.", replay);
 }
 
 function renderText(event) {
   const key = event.stream + ":" + event.itemId;
-  let body = textItems.get(key);
-  if (!body) {
-    ({ body } = messageCard(
+  let tail = textItems.get(key);
+  if (!tail) {
+    const { body } = messageCard(
       event.stream === "reasoning" ? "Reasoning" : "Claude Code",
       "",
       event.stream === "reasoning" ? "agent reasoning" : "agent",
       event.at,
-    ));
-    textItems.set(key, body);
+    );
+    // One Text node per streamed message, grown in place: `textContent +=`
+    // re-serialized and replaced the whole accumulated reply on every
+    // delta (quadratic over a long answer), and appending a node per delta
+    // left thousands of Text children behind.
+    tail = document.createTextNode("");
+    body.append(tail);
+    textItems.set(key, tail);
   }
-  body.textContent += event.text;
+  tail.appendData(event.text);
   scrollToLatest();
 }
 
@@ -370,16 +386,14 @@ function renderPermission(event) {
 }
 
 function renderEvent(event) {
+  applyControls(event.controls, event.seq);
   if (event.snapshot) {
-    // The current-state snapshot every new connection gets first, marked
-    // by the server. Applies to the pill only -- see the silent branch in
-    // setSessionState for why.
     setSessionState(event.state, event.reason, { silent: true });
     return;
   }
   switch (event.kind) {
     case "session-state":
-      setSessionState(event.state, event.reason);
+      setSessionState(event.state, event.reason, { replay: event.replay });
       break;
     case "user-message":
       renderUserMessage(event);
@@ -402,16 +416,41 @@ function renderEvent(event) {
         : event.used + " tokens used";
       break;
     case "turn-completed":
-      setSessionState("ready");
-      if (event.status === "failed") failedTurnCard(event.errorMessage || "This response failed.");
+      setSessionState("ready", undefined, { replay: event.replay });
+      // The session itself is still alive (the pill just went back to
+      // Ready), so the next action is a retry -- "start a new session"
+      // would be false here.
+      if (event.status === "failed") {
+        errorCard(
+          event.errorMessage || "This response failed.",
+          "Send a message to try again.",
+          event.replay,
+        );
+      }
       break;
+    case "history-trimmed": {
+      // The server's log could not keep this replay whole (one turn
+      // outgrew the whole buffer): say so instead of starting mid-turn as
+      // if nothing were missing.
+      hideEmptyState();
+      const notice = document.createElement("p");
+      notice.className = "notice";
+      notice.textContent = "Only recent messages are shown. Earlier ones were trimmed to save memory.";
+      transcript.append(notice);
+      scrollToLatest();
+      break;
+    }
     case "auth":
       if (event.detail) messageCard("Claude Code", event.detail, "agent", event.at);
       break;
     case "error":
       if (event.fatal) {
-        setSessionState("error");
-        recoveryCard(event.message);
+        setSessionState("error", undefined, { silent: event.replay });
+        if (event.restartOnly) {
+          restartRequiredCard(event.message, event.replay);
+        } else {
+          recoveryCard(event.message, event.replay);
+        }
       } else {
         messageCard("Claude Code", event.message, "agent", event.at);
         announce(event.message);
@@ -447,7 +486,7 @@ events.addEventListener("error", () => {
   statePill.dataset.state = "starting";
 });
 
-function markMessageFailed(clientId, card, message, reenable = true) {
+function markMessageFailed(clientId, card, message) {
   pendingMessages.delete(clientId);
   card.dataset.failed = "true";
   const note = document.createElement("p");
@@ -461,10 +500,6 @@ function markMessageFailed(clientId, card, message, reenable = true) {
     hideEmptyState();
     transcript.append(card);
   }
-  // A 409 means a turn really is still active server-side: re-enabling here
-  // would just let the user fire another message that also 409s. Leave it
-  // disabled and let the eventual settled session-state event restore it.
-  if (reenable) sendButton.disabled = false;
 }
 
 composer.addEventListener("submit", async (event) => {
@@ -476,26 +511,26 @@ composer.addEventListener("submit", async (event) => {
   card.dataset.pending = "true";
   pendingMessages.set(clientId, card);
   messageInput.value = "";
-  sendButton.disabled = true;
   try {
     const response = await fetch("/message", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
       body: JSON.stringify({ text, clientId }),
     });
+    const body = await response.json().catch(() => null);
+    if (body) applyControls(body.controls, body.seq);
     if (!response.ok) {
+      const restartOnly = body && body.kind === "restartOnly";
       markMessageFailed(
         clientId,
         card,
         response.status === 409
           ? "Wait for the current response to finish."
-          : "This message was not sent. Send it again.",
-        response.status !== 409,
+          : restartOnly
+            ? "Restart dohc to try again."
+            : "This message was not sent. Send it again.",
       );
     }
-    // A successful 202 leaves Send disabled: the session-state:running
-    // event that follows drives it, and re-enables Send once the turn
-    // actually settles rather than as soon as the request lands.
   } catch {
     markMessageFailed(clientId, card, "This message was not sent. Send it again.");
   } finally {
@@ -511,26 +546,27 @@ messageInput.addEventListener("keydown", (event) => {
 });
 
 stopButton.addEventListener("click", async () => {
-  stopButton.disabled = true;
+  const seqAtSend = lastAppliedSeq;
   try {
     const response = await fetch("/stop", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + TOKEN },
     });
+    const body = await response.json().catch(() => null);
+    if (body) applyControls(body.controls, body.seq);
     if (!response.ok) {
-      stopButton.disabled = false;
-      transientError("dohc could not stop this session.");
-      return;
+      // A failure whose own seq (or, if the body was lost, this attempt's
+      // seq at send time) is older than the latest fact this page has
+      // since applied is stale: something newer already told the truth
+      // about this session, and this response is not news.
+      const responseSeq = body && typeof body.seq === "number" ? body.seq : seqAtSend;
+      if (responseSeq >= lastAppliedSeq) {
+        errorCard("dohc could not stop this session.");
+      }
     }
-    // Stop now cancels the current turn rather than ending the session --
-    // if nothing was running, cancel() is a safe no-op with no event of
-    // its own to ever re-enable this button otherwise. A turn actually
-    // interrupted still settles asynchronously (its own turn-completed
-    // event drives the pill and Send back to ready); re-enabling Stop a
-    // little early alongside that is harmless.
-    stopButton.disabled = false;
   } catch {
-    stopButton.disabled = false;
-    transientError("dohc could not stop this session.");
+    if (seqAtSend >= lastAppliedSeq) {
+      errorCard("dohc could not stop this session.");
+    }
   }
 });

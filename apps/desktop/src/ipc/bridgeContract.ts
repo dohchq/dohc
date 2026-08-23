@@ -3888,12 +3888,18 @@ export type AgentRunStatusResult = z.infer<typeof AgentRunStatusResult>;
 
 // The copyable MCP config the user pastes into their AI tool. Main owns the
 // real command/args (the renderer never invents a path or argv).
-export const McpConfigResult = z.object({
-  command: z.string(),
-  args: z.array(z.string()),
-  workspacePath: z.string(),
-  home: z.string(),
-});
+export const McpConfigResult = z.union([
+  z.object({
+    unavailable: z.literal(true),
+    message: z.string(),
+  }),
+  z.object({
+    command: z.string(),
+    args: z.array(z.string()),
+    workspacePath: z.string(),
+    home: z.string(),
+  }),
+]);
 export type McpConfigResult = z.infer<typeof McpConfigResult>;
 
 const AgentPermissionKindSchema = z.enum([

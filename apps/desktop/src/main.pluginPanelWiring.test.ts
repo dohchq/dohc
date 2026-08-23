@@ -334,6 +334,26 @@ describe("plugin panel main-process wiring", () => {
     expect(willQuit).toContain("const pluginStop = stopAllPluginWorkspaces();");
   });
 
+  it("passes the derived plugin-host environment to the production utility process", () => {
+    const pipeline = functionSource("function createPluginPipeline(");
+    const spawnAt = pipeline.indexOf("spawnTransport: (callbacks) => {");
+    const spawnEnd = pipeline.indexOf("\n    },", spawnAt);
+    const spawnTransport = pipeline.slice(spawnAt, spawnEnd);
+    const environmentBinding = /const\s+(\w+)\s*=\s*pluginHostEnvFor\(/.exec(
+      spawnTransport,
+    )?.[1];
+    const forkAt = spawnTransport.indexOf("utilityProcess.fork(");
+    const forkEnd = spawnTransport.indexOf("\n      );", forkAt);
+    const fork = spawnTransport.slice(forkAt, forkEnd);
+
+    expect(spawnAt).toBeGreaterThan(-1);
+    expect(spawnEnd).toBeGreaterThan(spawnAt);
+    expect(environmentBinding).toBeDefined();
+    expect(forkAt).toBeGreaterThan(-1);
+    expect(forkEnd).toBeGreaterThan(forkAt);
+    expect(fork).toContain(`env: ${environmentBinding},`);
+  });
+
   it("derives panel writability from the current workspace on every invocation", () => {
     const invoke = handler("invokePluginPanelSdk");
 

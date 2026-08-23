@@ -18,11 +18,17 @@ import type {
 
 const CHAT_WEB_APP_ID = "chat";
 // A memory guard, not a measured retention target -- no healthy turn size
-// was measured before choosing 500. A turn longer than this replays
-// starting mid-turn on reconnect, not from the beginning: ui/chat.js resets
-// its transcript on every EventSource open and rebuilds it purely from
-// what this log currently holds.
+// was measured before choosing 500. ui/chat.js resets its transcript on
+// every EventSource open and rebuilds it purely from what this log
+// currently holds, so what the log evicts decides what a reload can still
+// replay coherently: streamed text coalesces into one entry per item (see
+// publish), and eviction drops whole turns (see trimLog), so a replay
+// starts at a turn boundary instead of mid-sentence.
 const MAX_BUFFERED_EVENTS = 500;
+// Bounds what one coalesced entry can retain, so the entry cap above stays
+// a real memory guard. Replays keep the newest text and receive a notice
+// when an item's earlier text no longer fits.
+const MAX_COALESCED_TEXT_CHARS = 256 * 1024;
 
 type SessionStateEvent = Extract<PluginAgentEvent, { kind: "session-state" }>;
 
@@ -37,7 +43,44 @@ interface UserMessageEvent {
   clientId: string;
 }
 
-type ChatStreamEvent = PluginAgentEvent | UserMessageEvent;
+/** Log-only marker left where buffered history is incomplete: the page
+ * renders it as a notice that earlier messages are missing. Never broadcast
+ * live -- it only exists in the replayed log. */
+interface HistoryTrimmedEvent {
+  kind: "history-trimmed";
+}
+
+/** A fatal error whose only real recovery is restarting dohc itself --
+ * sending another message can never fix it, since nothing changes until
+ * the launcher this session needs becomes available again. Distinguished
+ * from an ordinary fatal error so the client can show the one action that
+ * actually works, instead of the generic (and here, false) "send a
+ * message to start a new session". */
+interface LauncherUnavailableErrorEvent {
+  kind: "error";
+  message: string;
+  fatal: true;
+  restartOnly: true;
+}
+
+interface ControlsChangedEvent {
+  kind: "controls";
+}
+
+type ChatStreamEvent =
+  | PluginAgentEvent
+  | UserMessageEvent
+  | HistoryTrimmedEvent
+  | LauncherUnavailableErrorEvent
+  | ControlsChangedEvent;
+
+interface EventLogEntry {
+  event: ChatStreamEvent;
+  at: number;
+  seq?: number;
+  provisional?: boolean;
+  truncated?: boolean;
+}
 
 export interface ChatWebApp {
   startWebApp(webAppId: string, instanceKey: string | null): Promise<PluginWebAppStart>;
@@ -67,6 +110,12 @@ function errorMessage(error: unknown): string {
 // rather than the desktop's, and cloud-aware tools have no runtime
 // environment. See both plugins' README.md.
 function mcpConfig(workspaceRoot: string): { command: string; args: string[] } {
+  if (process.env.DOHC_MCP_COMMAND_UNAVAILABLE === "1") {
+    throw Object.assign(
+      new Error("dohc could not prepare its MCP launcher. Restart dohc to try again."),
+      { restartOnly: true as const },
+    );
+  }
   return {
     command: process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp",
     args: ["--workspace", workspaceRoot],
@@ -220,12 +269,90 @@ export function createChatWebApp(
   let sessionStart: Promise<PluginAgentSession> | null = null;
   let sessionGeneration = 0;
   let processSession: PluginAgentSession | null = null;
+  let turnSequence = 0;
+  // This server's own monotonic turn identity -- assigned once per accepted
+  // prompt, independent of whatever opaque turnId the underlying driver
+  // generates internally (that one is not guaranteed comparable across
+  // drivers). Included in every published control fact so each fact names
+  // the turn it describes. The separate seq orders those facts for the
+  // client.
+  let currentTurnId: number | undefined;
+  let seqCounter = 0;
+
+  function nextSeq(): number {
+    seqCounter += 1;
+    return seqCounter;
+  }
   // True from the moment a prompt is accepted until its turn settles
   // (turn-completed, or a fatal error). /message refuses a second prompt
   // while this is true instead of overlapping it on the single active turn
   // both concrete drivers track.
   let turnActive = false;
+  // Set while a /message's prompt() call is still awaiting the driver's
+  // accept. A Stop landing in that window has no turn to interrupt yet --
+  // the driver holds no turn id until prompt() resolves, so its cancel()
+  // is a no-op and the turn would run on after a successful-looking Stop.
+  // Instead the stop is recorded here and honored the moment the prompt
+  // is accepted.
+  let pendingPrompt: { stopRequested: boolean } | null = null;
   let state: SessionStateEvent = { kind: "session-state", state: "closed" };
+
+  /** The one fact the client ever needs: is a send valid right now, is a
+   * stop valid right now, and what turn (if any) is that answer about. Pure
+   * -- computed fresh from existing state every time it's read, never
+   * cached or stored on anything. `canSend` mirrors message()'s own 409
+   * gate exactly. `canStop` includes a claimed prompt before the session
+   * opens; after that, Stop stays available while the session is alive. */
+  function computeControls(): {
+    canSend: boolean;
+    canStop: boolean;
+    turnId: number | null;
+  } {
+    return {
+      canSend: !turnActive && !pendingPrompt,
+      canStop: pendingPrompt !== null || (state.state !== "closed" && state.state !== "error"),
+      turnId: currentTurnId ?? null,
+    };
+  }
+
+  // The last controls fact actually broadcast to connected clients (never a
+  // per-connection snapshot or a per-requester response body -- see frame()
+  // below, the only place that updates this). Compared against on every
+  // pendingPrompt/turnActive/currentTurnId mutation outside a broadcast
+  // of its own: if the derived fact differs, broadcast one, so a connected
+  // page always learns the change even when the response body that would
+  // also have carried it is lost, delayed, or never read.
+  let lastPublishedControls = computeControls();
+
+  function controlsEqual(
+    a: { canSend: boolean; canStop: boolean; turnId: number | null },
+    b: { canSend: boolean; canStop: boolean; turnId: number | null },
+  ): boolean {
+    return a.canSend === b.canSend && a.canStop === b.canStop && a.turnId === b.turnId;
+  }
+
+  /** Call after any pendingPrompt/turnActive/currentTurnId assignment not
+   * immediately followed (synchronously) by its own broadcast/frame() call
+   * for some other event -- those already recompute controls fresh and
+   * announce the change as a side effect; calling this there too would only
+   * be redundant, not wrong, so it is reserved for sites that otherwise
+   * have no announcement: message()'s reservation, turn-id assignment and
+   * finally-block release, plus shutdown()'s release before it awaits
+   * disposal. A no-op
+   * `{ kind: "controls" }` event carries nothing but the fact itself --
+   * ChatStreamEvent's existing local union gains this one new shape. */
+  function syncControls(): void {
+    const next = computeControls();
+    if (controlsEqual(next, lastPublishedControls)) return;
+    broadcastLive({ kind: "controls" }, Date.now(), nextSeq());
+  }
+
+  function attachControls(error: unknown): unknown {
+    if (error && typeof error === "object") {
+      return Object.assign(error, { controls: computeControls(), seq: nextSeq() });
+    }
+    return error;
+  }
   // Each entry's own publish time -- a replay renders it, not the moment
   // the reconnecting client happened to receive it, so history stays in
   // its real chronological order instead of collapsing to "now".
@@ -236,7 +363,13 @@ export function createChatWebApp(
   // unconfirmed send as if it were accepted, with no live fetch left on
   // that connection to ever mark it failed if the driver goes on to reject
   // it. Live clients still see it normally, once it's actually confirmed.
-  const eventLog: Array<{ event: ChatStreamEvent; at: number; provisional?: boolean }> = [];
+  const eventLog: EventLogEntry[] = [];
+  // The log entry currently accumulating each item's streamed text, keyed
+  // by "stream:itemId". Live clients still get every delta as its own
+  // frame; only the log coalesces, so a single long streamed reply is one
+  // bounded entry the log keeps or evicts whole. Cleared when its turn
+  // settles, and pruned when eviction drops the entry it points at.
+  const openDeltas = new Map<string, EventLogEntry>();
   const clients = new Set<ServerResponse>();
   const pendingPermissions = new Set<string>();
   // A request permission() has claimed (removed from pendingPermissions, so
@@ -248,8 +381,34 @@ export function createChatWebApp(
   // session left behind it.
   const claimedPermissions = new Set<string>();
 
-  function frame(event: ChatStreamEvent, at: number): string {
-    return "data: " + JSON.stringify({ ...event, at }) + "\n\n";
+  /** replay marks a frame rebuilt from the buffered log for a new
+   * connection, as opposed to one happening now: the page renders replayed
+   * failures quietly (role="status") instead of re-alerting a screen
+   * reader to history it already heard. */
+  function frame(
+    event: ChatStreamEvent,
+    at: number,
+    seq: number | undefined,
+    replay?: boolean,
+  ): string {
+    const controls = computeControls();
+    lastPublishedControls = controls;
+    return (
+      "data: " +
+      JSON.stringify({
+        ...event,
+        at,
+        seq,
+        controls,
+        ...(replay ? { replay: true } : {}),
+      }) +
+      "\n\n"
+    );
+  }
+
+  function broadcastLive(event: ChatStreamEvent, at: number, seq: number): void {
+    const encoded = frame(event, at, seq);
+    for (const client of clients) client.write(encoded);
   }
 
   /** The current-state snapshot every new connection gets first, marked so
@@ -259,12 +418,48 @@ export function createChatWebApp(
    * "closed" with reason "Stopped") renders its card twice: once from this
    * snapshot, once from the same transition's own entry in the replay. */
   function snapshotFrame(): string {
-    return "data: " + JSON.stringify({ ...state, snapshot: true }) + "\n\n";
+    return (
+      "data: " +
+      JSON.stringify({
+        ...state,
+        snapshot: true,
+        seq: nextSeq(),
+        controls: computeControls(),
+      }) +
+      "\n\n"
+    );
   }
 
+  /** Evicts oldest entries once the log exceeds its cap -- in whole turns:
+   * the cut extends forward to the next user-message, so a replay starts
+   * at a turn boundary rather than with an answer whose question is gone.
+   * When no boundary remains ahead of the cut (a single turn larger than
+   * the whole cap), it falls back to the bare cap; entries are whole cards
+   * either way, never a fragment of one. */
   function trimLog(): void {
-    if (eventLog.length > MAX_BUFFERED_EVENTS) {
-      eventLog.splice(0, eventLog.length - MAX_BUFFERED_EVENTS);
+    if (eventLog.length <= MAX_BUFFERED_EVENTS) return;
+    let cut = eventLog.length - MAX_BUFFERED_EVENTS;
+    let boundary = cut;
+    while (boundary < eventLog.length && eventLog[boundary].event.kind !== "user-message") {
+      boundary += 1;
+    }
+    const cutAtBoundary = boundary < eventLog.length;
+    if (cutAtBoundary) cut = boundary;
+    for (const dropped of eventLog.splice(0, cut)) {
+      if (dropped.event.kind !== "text-delta") continue;
+      const key = dropped.event.stream + ":" + dropped.event.itemId;
+      if (openDeltas.get(key) === dropped) openDeltas.delete(key);
+    }
+    // A cut that could not reach a boundary starts the replay mid-turn --
+    // leave a marker saying so instead of replaying as if nothing were
+    // missing. At the front, so repeated bare-cap trims never stack a
+    // second one.
+    if (!cutAtBoundary && eventLog[0]?.event.kind !== "history-trimmed") {
+      eventLog.unshift({
+        event: { kind: "history-trimmed" },
+        at: Date.now(),
+        seq: nextSeq(),
+      });
     }
   }
 
@@ -280,17 +475,51 @@ export function createChatWebApp(
     // later message refused with a stale 409 forever.
     if (event.kind === "turn-completed" || (event.kind !== "user-message" && sessionEnded(event))) {
       turnActive = false;
+      openDeltas.clear();
     }
     if (event.kind === "permission-request") pendingPermissions.add(event.requestId);
     if (event.kind === "permission-resolved") pendingPermissions.delete(event.requestId);
     const at = Date.now();
-    eventLog.push({ event, at });
-    trimLog();
-    const encoded = frame(event, at);
-    for (const client of clients) client.write(encoded);
+    let liveSeq: number;
+    if (event.kind === "text-delta") {
+      // The log coalesces streamed text into one entry per item; the live
+      // broadcast below still carries just this delta. The stored copy is
+      // this server's own object -- never the driver's, which must not be
+      // mutated as later deltas append.
+      const key = event.stream + ":" + event.itemId;
+      let open = openDeltas.get(key);
+      if (open && open.event.kind === "text-delta" && open.seq !== undefined) {
+        open.event.text += event.text;
+        liveSeq = nextSeq();
+      } else {
+        const entrySeq = nextSeq();
+        open = { event: { ...event }, at, seq: entrySeq };
+        eventLog.push(open);
+        openDeltas.set(key, open);
+        trimLog();
+        liveSeq = entrySeq;
+      }
+      if (open.event.kind === "text-delta" && open.event.text.length > MAX_COALESCED_TEXT_CHARS) {
+        open.event.text = open.event.text.slice(-MAX_COALESCED_TEXT_CHARS);
+        if (!open.truncated) {
+          open.truncated = true;
+          eventLog.push({
+            event: { kind: "history-trimmed" },
+            at,
+            seq: nextSeq(),
+          });
+          trimLog();
+        }
+      }
+    } else {
+      liveSeq = nextSeq();
+      eventLog.push({ event, at, seq: liveSeq });
+      trimLog();
+    }
+    broadcastLive(event, at, liveSeq);
   }
 
-  function sessionEnded(event: PluginAgentEvent): boolean {
+  function sessionEnded(event: ChatStreamEvent): boolean {
     return (
       (event.kind === "error" && event.fatal) ||
       (event.kind === "session-state" && (event.state === "error" || event.state === "closed"))
@@ -315,6 +544,7 @@ export function createChatWebApp(
     const generation = ++sessionGeneration;
     settlePendingPermissions();
     turnActive = false;
+    openDeltas.clear();
     // Set once this driver.startSession call itself ends before it even
     // resolves (a session that fails during its own handshake).
     let ended = false;
@@ -360,14 +590,27 @@ export function createChatWebApp(
         },
       });
     } catch (error) {
+      const restartOnly =
+        error instanceof Error && "restartOnly" in error && error.restartOnly === true;
       // Both concrete drivers publish "starting" synchronously before this
       // can reject (a spawn failure, an init or handshake error). Without a
       // terminal event here, the pill would sit on Starting forever with
       // Stop still enabled and no session behind it to stop.
       if (generation === sessionGeneration) {
-        publish({ kind: "error", message: errorMessage(error), fatal: true });
+        publish(
+          restartOnly
+            ? { kind: "error", message: errorMessage(error), fatal: true, restartOnly: true }
+            : { kind: "error", message: errorMessage(error), fatal: true },
+        );
       }
-      throw requestError(503, errorMessage(error));
+      // Carried onward on the thrown error too: the outer request handler
+      // (not this function) is what actually shapes the HTTP response
+      // body, and needs to know this failure's kind to give the fetch
+      // path the same truthful action the SSE path already renders.
+      throw Object.assign(
+        requestError(503, errorMessage(error)),
+        restartOnly ? { restartOnly: true } : {},
+      );
     } finally {
       starting = false;
     }
@@ -391,11 +634,29 @@ export function createChatWebApp(
 
   async function liveSession(): Promise<PluginAgentSession> {
     if (processSession) return processSession;
-    const available = await Promise.resolve(driver.probe()).catch((error: unknown) => {
-      const message = errorMessage(error);
+    const probeResult = await Promise.resolve(driver.probe()).then(
+      (available) => ({ ok: true as const, available }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    // A Stop that arrived while the probe was still in flight has no
+    // sessionStart yet for stop() to abandon on its own -- pendingPrompt
+    // .stopRequested is the only record of it, and this is the first point
+    // after that await where message() can honor it, before this attempt
+    // goes on to start a session nobody wants anymore. Nothing async
+    // separates this line from the decision, a few lines down, to actually
+    // start that session -- one check covers the whole stretch. If the probe
+    // rejected too, that rejection is not news the user asked about: report
+    // the stop as the outcome, not an unrelated fatal error and a recovery
+    // card for nothing left to recover.
+    if (pendingPrompt?.stopRequested) {
+      throw requestError(503, "The Claude Code session was stopped while it started.");
+    }
+    if (!probeResult.ok) {
+      const message = errorMessage(probeResult.error);
       publish({ kind: "error", message, fatal: true });
       throw requestError(503, message);
-    });
+    }
+    const available = probeResult.available;
     if (!available.installed) {
       // The provider's own diagnostic (often a raw "spawn claude ENOENT")
       // always exists for a probe that reports not-installed, so it used to
@@ -431,56 +692,131 @@ export function createChatWebApp(
     if (!isRecord(body) || typeof body.text !== "string" || body.text.trim() === "") {
       throw requestError(400, "Enter a message before sending.");
     }
-    if (turnActive) {
+    // pendingPrompt gates alongside turnActive: a prompt still awaiting the
+    // driver's accept holds the single active turn just as much as an
+    // accepted one -- admitting a second prompt in that window would
+    // overlap the drivers' one tracked turn and steal the stop intent
+    // recorded for the first.
+    if (turnActive || pendingPrompt) {
       throw requestError(409, "Wait for the current response to finish.");
     }
+    const inFlight = { stopRequested: false };
+    pendingPrompt = inFlight;
+    syncControls();
     const clientId =
       typeof body.clientId === "string" && body.clientId ? body.clientId : randomUUID();
-    const live = await liveSession();
-    // Reserve this turn's own position in the replay log before invoking
-    // the driver: prompt() can itself publish turn events (through onEvent)
-    // before it resolves, and those must never replay ahead of the user's
-    // own message that caused them. Filled in on accept, dropped on
-    // rejection -- never broadcast live here, only once accepted below,
-    // same as before.
-    const reserved: { event: ChatStreamEvent; at: number; provisional?: boolean } = {
-      event: { kind: "user-message", text: body.text, clientId },
-      at: Date.now(),
-      provisional: true,
-    };
-    eventLog.push(reserved);
-    trimLog();
     try {
-      await live.prompt({ text: body.text });
-    } catch (error) {
-      const index = eventLog.indexOf(reserved);
-      if (index !== -1) eventLog.splice(index, 1);
-      if (processSession === live) {
-        processSession = null;
-        settlePendingPermissions();
-      }
-      const message = errorMessage(error);
-      publish({ kind: "error", message, fatal: true });
-      await Promise.resolve(live.dispose()).catch(() => undefined);
-      throw requestError(500, message);
-    }
-    // Published only now that the driver actually accepted it: a reconnect
-    // must never replay a message that was never really sent, and the
-    // submitting page's own optimistic card must never be told "not sent"
-    // for one that in fact was.
-    turnActive = true;
-    reserved.at = Date.now();
-    reserved.provisional = false;
-    // The reservation can have aged out of the buffer's cap while prompt()
-    // was still pending (a very active turn ahead of it) -- put it back at
-    // the end rather than lose the confirmation entirely.
-    if (!eventLog.includes(reserved)) {
+      const live = await liveSession();
+      // Reserve this turn's own position in the replay log before invoking
+      // the driver: prompt() can itself publish turn events (through onEvent)
+      // before it resolves, and those must never replay ahead of the user's
+      // own message that caused them. Filled in on accept, dropped on
+      // rejection -- never broadcast live here, only once accepted below,
+      // same as before.
+      const reserved: {
+        event: ChatStreamEvent;
+        at: number;
+        seq?: number;
+        provisional?: boolean;
+      } = {
+        event: { kind: "user-message", text: body.text, clientId },
+        at: Date.now(),
+        provisional: true,
+      };
       eventLog.push(reserved);
       trimLog();
+      // Drops the reservation and the rest of this orphaned turn's OWN
+      // events (a stray "running" state, deltas) -- while
+      // pendingPrompt/turnActive gate every other /message, nothing but
+      // this turn's own driver can have added anything past this point.
+      // Used both when prompt() itself rejects and when it resolves into a
+      // session that died out from under it. A genuine terminal event
+      // (fatal error, or session-state closed/error) can already be
+      // sitting in that same tail -- the session's own onEvent handler
+      // published it independently of this call, before prompt() ever
+      // settled -- and it is the ONLY place a reconnect ever sees why the
+      // session ended, so it is kept, in its original position, not swept
+      // away with the rest of the orphaned turn.
+      const dropOrphanedReservation = (): void => {
+        const index = eventLog.indexOf(reserved);
+        if (index === -1) return;
+        for (const entry of eventLog.splice(index)) {
+          if (sessionEnded(entry.event)) {
+            eventLog.push(entry);
+            continue;
+          }
+          if (entry.event.kind !== "text-delta") continue;
+          const key = entry.event.stream + ":" + entry.event.itemId;
+          if (openDeltas.get(key) === entry) openDeltas.delete(key);
+        }
+      };
+      // Assigned before the call, not after it resolves: prompt() can
+      // itself publish events (through onEvent) while it is still
+      // pending, and those must carry this turn's real identity, not a
+      // stale leftover from whatever the previous turn was.
+      currentTurnId = ++turnSequence;
+      syncControls();
+      try {
+        await live.prompt({ text: body.text });
+      } catch (error) {
+        dropOrphanedReservation();
+        if (processSession === live) {
+          processSession = null;
+          settlePendingPermissions();
+        }
+        const message = errorMessage(error);
+        publish({ kind: "error", message, fatal: true });
+        await Promise.resolve(live.dispose()).catch(() => undefined);
+        throw requestError(500, message);
+      }
+      // prompt() can resolve successfully even though the session itself
+      // ended while it was still pending: a fatal error or a bare "closed"
+      // arriving through the session's own onEvent handler already
+      // published the real terminal card and cleared processSession,
+      // independently of this call. Marking the turn active here would
+      // leave nothing left to ever emit turn-completed, stranding every
+      // later /message behind a 409 forever -- treat it exactly like a
+      // rejection instead, without publishing a second, redundant terminal
+      // event (the client already has the real one).
+      if (processSession !== live) {
+        dropOrphanedReservation();
+        await Promise.resolve(live.dispose()).catch(() => undefined);
+        throw requestError(500, "The session ended before this message could be confirmed.");
+      }
+      // Published only now that the driver actually accepted it: a reconnect
+      // must never replay a message that was never really sent, and the
+      // submitting page's own optimistic card must never be told "not sent"
+      // for one that in fact was.
+      turnActive = true;
+      reserved.provisional = false;
+      reserved.seq = nextSeq();
+      // The reservation can have aged out of the buffer's cap while prompt()
+      // was still pending (a very active turn ahead of it) -- put it back at
+      // the end rather than lose the confirmation entirely.
+      if (!eventLog.includes(reserved)) {
+        reserved.at = Date.now();
+        eventLog.push(reserved);
+        trimLog();
+      }
+      broadcastLive(reserved.event, reserved.at, reserved.seq);
+      // A Stop that arrived while the prompt was still awaiting acceptance:
+      // now that the driver holds the turn, the recorded intent becomes a
+      // real cancel. Best-effort like any cancel after Stop's own 200
+      // response -- a transport failure here must not fail the accepted
+      // /message.
+      if (inFlight.stopRequested) {
+        await Promise.resolve(live.cancel()).catch(() => undefined);
+      }
+      response.writeHead(202, {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(JSON.stringify({ controls: computeControls(), seq: nextSeq() }));
+    } finally {
+      if (pendingPrompt === inFlight) pendingPrompt = null;
+      syncControls();
     }
-    const encoded = frame(reserved.event, reserved.at);
-    for (const client of clients) client.write(encoded);
-    writeEmpty(response, 202);
   }
 
   async function stop(response: ServerResponse): Promise<void> {
@@ -489,6 +825,16 @@ export function createChatWebApp(
       // No live session: if a start is still pending, abort it -- there is
       // no session or context yet to preserve, only an attempt to give up
       // on.
+      // A prompt still awaiting the driver's probe has no sessionStart yet
+      // for the branch below to abandon -- pendingPrompt.stopRequested is
+      // the only record of the stop in that window, honored the moment
+      // liveSession()'s own probe-await resolves (see there). Marking it
+      // here is a no-op for the sessionStart branch just below: that one
+      // still abandons its attempt through the sessionGeneration bump, and
+      // nulls pendingPrompt outright (deliberately, so a fresh /message is
+      // accepted immediately rather than waiting for the doomed handshake to
+      // unwind -- do not change that).
+      if (pendingPrompt) pendingPrompt.stopRequested = true;
       if (sessionStart) {
         // The generation bump dooms the pending attempt -- once
         // driver.startSession resolves it disposes itself instead of
@@ -499,9 +845,16 @@ export function createChatWebApp(
         // bring it back.
         sessionGeneration += 1;
         sessionStart = null;
+        // message()'s identity guard keeps its cleanup from clearing a newer reservation.
+        pendingPrompt = null;
         publish({ kind: "session-state", state: "closed", reason: "Stopped" });
       }
-      writeEmpty(response, 204);
+      response.writeHead(200, {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-content-type-options": "nosniff",
+      });
+      response.end(JSON.stringify({ controls: computeControls(), seq: nextSeq() }));
       return;
     }
     // The session and its context stay alive: this interrupts the current
@@ -515,8 +868,17 @@ export function createChatWebApp(
     // arrives; cancel() is a documented no-op on both concrete drivers
     // when nothing was running.
     settlePendingPermissions();
+    // A prompt still awaiting the driver's accept has no turn id yet, so
+    // the cancel() below cannot reach it. Record the stop so message()
+    // cancels the turn the moment it is accepted.
+    if (pendingPrompt) pendingPrompt.stopRequested = true;
     await live.cancel();
-    writeEmpty(response, 204);
+    response.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    });
+    response.end(JSON.stringify({ controls: computeControls(), seq: nextSeq() }));
   }
 
   async function permission(
@@ -573,7 +935,7 @@ export function createChatWebApp(
     response.write(snapshotFrame());
     for (const entry of eventLog) {
       if (entry.provisional) continue;
-      response.write(frame(entry.event, entry.at));
+      response.write(frame(entry.event, entry.at, entry.seq, true));
     }
     clients.add(response);
     request.once("close", () => clients.delete(response));
@@ -605,11 +967,19 @@ export function createChatWebApp(
         throw requestError(401, "This chat session's request was not authorized.");
       }
       if (request.method === "POST" && url.pathname === "/message") {
-        await message(request, response);
+        try {
+          await message(request, response);
+        } catch (error) {
+          throw attachControls(error);
+        }
         return;
       }
       if (request.method === "POST" && url.pathname === "/stop") {
-        await stop(response);
+        try {
+          await stop(response);
+        } catch (error) {
+          throw attachControls(error);
+        }
         return;
       }
       const permissionMatch =
@@ -642,10 +1012,33 @@ export function createChatWebApp(
       // body, a missing static asset, an unauthorized caller -- is a
       // transport problem, not a session problem, so it 4xx/5xx's the
       // request without touching session state.
-      const failure = error as Partial<RequestError>;
+      const failure = error as Partial<RequestError> & {
+        restartOnly?: boolean;
+        controls?: { canSend: boolean; canStop: boolean; turnId: number | null };
+        seq?: number;
+      };
       const message = errorMessage(error);
-      if (!response.headersSent) writeError(response, failure.statusCode ?? 500, message);
-      else response.end();
+      if (!response.headersSent) {
+        if (failure.controls !== undefined) {
+          response.writeHead(failure.statusCode ?? 500, {
+            "cache-control": "no-store",
+            "content-type": "application/json; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          });
+          response.end(
+            JSON.stringify({
+              message,
+              ...(failure.restartOnly ? { kind: "restartOnly" } : {}),
+              controls: failure.controls,
+              seq: failure.seq,
+            }),
+          );
+        } else {
+          writeError(response, failure.statusCode ?? 500, message);
+        }
+      } else {
+        response.end();
+      }
     }
   }
 
@@ -679,6 +1072,17 @@ export function createChatWebApp(
     settlePendingPermissions();
     turnActive = false;
     sessionStart = null;
+    // A message() still awaiting the driver's accept when teardown runs
+    // holds a reservation for a session that no longer exists -- release
+    // it here exactly like the Stop-during-startup path does, or a
+    // restarted server 409s every message until that abandoned prompt()
+    // call itself eventually settles (which can be indefinite, against a
+    // hung driver). message()'s own identity-checked finally
+    // (`pendingPrompt === inFlight`) still no-ops safely if a request from
+    // AFTER the restart has already reclaimed the slot by the time the
+    // old one settles.
+    pendingPrompt = null;
+    syncControls();
     // Guarded: a rejection here must not skip the cleanup below and leave
     // the server listening (and the session's process running) after
     // teardown.
@@ -686,6 +1090,7 @@ export function createChatWebApp(
     for (const client of clients) client.end();
     clients.clear();
     eventLog.length = 0;
+    openDeltas.clear();
     state = { kind: "session-state", state: "closed" };
     const runningServer = server;
     server = null;

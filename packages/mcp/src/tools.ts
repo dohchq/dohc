@@ -44,10 +44,8 @@ import {
   isSharedWithMePath,
   safeRelativeConfigPath,
 } from "@dohc/workspace-core";
-import {
-  DohcCliError,
-  sendCliRequest,
-} from "@dohc/cli";
+import { sendCliRequest } from "@dohc/cli/client";
+import { DohcCliError } from "@dohc/cli/errors";
 import {
   CLI_PROTOCOL_VERSION,
   parseCliResult,

@@ -632,9 +632,14 @@ import type { AgentSessionManager } from "./agents/AgentSessionManager";
 import { createTryInVersionSessions } from "./agents/tryInVersion";
 import {
   createChatDispatchService,
+  isAppImageBoot,
+  pluginHostEnvFor,
+  resolveDohcCliBinDirectory,
+  resolveDohcMcpCommand,
   type ChatDispatchPresenceInput,
   type ChatDispatchWorkspace,
 } from "./agents/chatDispatchService";
+import { refreshLinuxStableCliBin } from "./agents/linuxStableCliBin";
 import { CHAT_AGENT_PRESENCE_TOPIC } from "./collab/agentPresence";
 import {
   createLiveAgentDispatchStore,
@@ -1037,6 +1042,8 @@ function notifyPluginPanelSdkEvent(event: unknown): void {
   }
 }
 
+let linuxStableCliBinDir: string | undefined;
+
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
@@ -1068,6 +1075,12 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
     spawnTransport: (callbacks) => {
+      const dohcMcpCommand = resolveDohcMcpCommand({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        linuxStableCliBinDir,
+      });
+      const pluginHostEnv = pluginHostEnvFor(dohcMcpCommand, process.env);
       const child = utilityProcess.fork(
         join(import.meta.dirname, "plugin-host.js"),
         [],
@@ -1075,6 +1088,12 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
           cwd: callbacks.pluginRoot,
           serviceName: "dohc-plugin-host",
           stdio: ["ignore", "ignore", "pipe"],
+          // The driver plugins' chat session configs read this seam for the
+          // dohc-mcp command they hand the user's AI tool. Only main knows
+          // whether this install is packaged and where its stable launcher
+          // lives. If that launcher is unavailable, the host gets an explicit
+          // marker and no command it could leak into a spawned process.
+          env: pluginHostEnv,
         },
       );
       return createPluginUtilityTransport(child, callbacks);
@@ -2232,8 +2251,9 @@ async function runSharedChannelSyncPass(
 // The copyable MCP launch config for a workspace. The user's AI tool spawns the
 // dohc MCP stdio server with these args; --workspace scopes every tool to this
 // root (path containment), --home points it at the desktop registry/state dir.
-// DOHC_MCP_COMMAND lets a packaged build override the launcher with its shipped
-// binary; the default `dohc-mcp` is the @dohc/mcp bin on PATH.
+// The command comes from resolveDohcMcpCommand: a packaged install's own
+// shipped cli-bin launcher by absolute path, the workspace bin `dohc-mcp` in
+// dev, with DOHC_MCP_COMMAND as the explicit override.
 // The MCP profile a workspace hands out (#646): `null` for a workspace this
 // machine owns, and the share's level for a share view.
 //
@@ -2253,16 +2273,24 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const MCP_LAUNCHER_UNAVAILABLE_MESSAGE =
+  "dohc could not prepare its MCP launcher. Restart dohc to try again.";
+
 function mcpConfigFor(
   rootPath: string,
   shareAccess: ShareAccess | null,
-): {
-  command: string;
-  args: string[];
-  workspacePath: string;
-  home: string;
-} {
-  const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
+): McpConfigResult {
+  const command = resolveDohcMcpCommand({
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    linuxStableCliBinDir,
+  });
+  if (command === null) {
+    return {
+      unavailable: true,
+      message: MCP_LAUNCHER_UNAVAILABLE_MESSAGE,
+    };
+  }
   const home = stateDir();
   const args = ["--workspace", rootPath, "--home", home];
   // A share view hands out the MCP profile for its level (#646): the launched
@@ -2288,6 +2316,7 @@ async function mcpRuntimeConfigFor(rootPath: string): Promise<{
   // but if a runtime MCP is ever spawned for one it must carry the share's
   // level — never the full local profile.
   const config = mcpConfigFor(rootPath, mcpShareAccessOf(workspace?.shareView));
+  if ("unavailable" in config) throw new Error(config.message);
   const env = mcpCloudEnvironment({
     workspace,
     credentials: cachedCredentials,
@@ -12124,6 +12153,20 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(async () => {
+    if (app.isPackaged && process.platform === "linux" && isAppImageBoot()) {
+      // A failed refresh must not block startup or discard an intact pair
+      // from an earlier boot. With no usable pair, report the launcher
+      // unavailable instead of exposing the AppImage mount path.
+      linuxStableCliBinDir = await refreshLinuxStableCliBin({
+        resourcesCliBinDir: resolveDohcCliBinDirectory({
+          appRoot: app.getAppPath(),
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+        }),
+        targetDir: join(stateDir(), "cli-bin"),
+        onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
+      });
+    }
     if (!(await startRustEngineDaemon())) return;
     // BrowserWindow and Dock APIs are only safe after Electron is ready.
     nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
