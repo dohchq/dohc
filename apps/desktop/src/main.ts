@@ -512,6 +512,7 @@ import {
   SharePinInvalidError,
   recordedShareSelector,
   shareViewIdentitySelector,
+  unjournalablePathMessages,
 } from "./workspaces/shareViewRecords";
 import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
@@ -761,6 +762,7 @@ import {
   type ShareViewFileChangeOutcome,
   type ShareViewFileChangeValue,
   type ShareViewFilesTarget,
+  type ShareViewReconcileOutcome,
 } from "./workspaces/shareViewFiles";
 import {
   applyDatabaseEdit,
@@ -4784,15 +4786,38 @@ async function ensureOwnedProjectionCurrent(
   const routed = await shareViewFilesTargetForPath(workspace, relativePath);
   if (routed === null) return;
   const status = await shareViewFiles.projectionStatus(routed.target);
-  if (status.state === "unavailable") return;
-  await withExclusiveWorkspaceOperation(
+  if (status.state === "unavailable") {
+    throw new Error(
+      "dohc cannot verify these shared files because the share record is damaged. Remove the share. Add it again.",
+    );
+  }
+  const repaired = await withExclusiveWorkspaceOperation(
     workspace.rootPath,
     (_markWorkspaceChanged, lease) =>
       shareViewFiles.reconcile(lease, routed.target, "repair"),
   );
+  assertOwnedProjectionRepair(repaired);
   if ((await shareViewFiles.projectionStatus(routed.target)).state !== "current") {
     throw new Error(
       "This shared file is still being restored to its folder. Try again after the shared view finishes repairing.",
+    );
+  }
+}
+
+function assertOwnedProjectionRepair(
+  outcome: ShareViewReconcileOutcome,
+): asserts outcome is Extract<ShareViewReconcileOutcome, { kind: "repair" }> {
+  if (outcome.kind !== "repair") {
+    throw new Error("Shared file repair returned an invalid result.");
+  }
+  if (outcome.collisionRecordQuarantined) {
+    throw new Error(
+      "dohc found a damaged shared file recovery record. Refresh shared files. Retry this action.",
+    );
+  }
+  if (outcome.unjournalablePaths.length > 0) {
+    throw new Error(
+      unjournalablePathMessages(outcome.unjournalablePaths).join(" "),
     );
   }
 }
@@ -4809,23 +4834,29 @@ async function ensureAllOwnedProjectionsCurrent(
           workspaceId: workspace.workspaceId,
           shareId: mount.shareId,
         }));
-  const repairable: ShareViewFilesTarget[] = [];
   for (const target of targets) {
     const status = await shareViewFiles.projectionStatus(target);
-    if (status.state !== "unavailable") {
-      repairable.push(target);
+    if (status.state === "unavailable") {
+      throw new Error(
+        "dohc cannot verify these shared files because the share record is damaged. Remove the share. Add it again.",
+      );
     }
   }
-  if (repairable.length === 0) return;
+  if (targets.length === 0) return;
   await withExclusiveWorkspaceOperation(
     workspace.rootPath,
     async (_markWorkspaceChanged, lease) => {
-      for (const target of repairable) {
-        await shareViewFiles.reconcile(lease, target, "repair");
+      for (const target of targets) {
+        const repaired = await shareViewFiles.reconcile(
+          lease,
+          target,
+          "repair",
+        );
+        assertOwnedProjectionRepair(repaired);
       }
     },
   );
-  for (const target of repairable) {
+  for (const target of targets) {
     if ((await shareViewFiles.projectionStatus(target)).state !== "current") {
       throw new Error(
         "Some shared files are still being restored. Refresh the shared view before you continue.",

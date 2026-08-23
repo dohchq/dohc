@@ -54,16 +54,17 @@ describe("ShareViewFiles main-process wiring", () => {
     const one = functionSource("async function ensureOwnedProjectionCurrent(");
     const all = functionSource("async function ensureAllOwnedProjectionsCurrent(");
 
-    expect(one).toContain('if (status.state === "unavailable") return;');
+    expect(one).toContain('if (status.state === "unavailable") {');
     expect(one).not.toContain('status.state === "current"');
     expect(one).toContain(
       'shareViewFiles.reconcile(lease, routed.target, "repair")',
     );
 
     expect(all).not.toContain('status.state === "pending"');
-    expect(all).toContain('status.state !== "unavailable"');
+    expect(all).toContain('status.state === "unavailable"');
     expect(all).toContain(
-      'await shareViewFiles.reconcile(lease, target, "repair");',
+      "const repaired = await shareViewFiles.reconcile(",
     );
+    expect(all).toContain("assertOwnedProjectionRepair(repaired);");
   });
 });
