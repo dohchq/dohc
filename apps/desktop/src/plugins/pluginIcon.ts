@@ -1,5 +1,5 @@
 import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { errorMessage } from "./pluginShared";
 
@@ -34,14 +34,12 @@ export async function verifyPluginIcon(
   declaredPath: string,
 ): Promise<PluginIconCheck> {
   const iconPath = resolve(pluginRoot, ...declaredPath.split("/"));
-  if (
-    isAbsolute(declaredPath) ||
-    declaredPath.split(/[\\/]/u).some((segment) => segment === "..")
-  ) {
+  if (!isInside(pluginRoot, iconPath)) {
     return refused(
       `plugin icon at ${iconPath} is outside the plugin root at ${pluginRoot}`,
     );
   }
+
   let iconStats;
   try {
     iconStats = await lstat(iconPath);
