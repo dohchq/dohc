@@ -67,6 +67,10 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => voi
   return { promise, resolve };
 }
 
+async function flushMicrotasks(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function sendEvent(eventSource: FakeEventSource, data: unknown): void {
   eventSource.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) }));
 }
@@ -438,7 +442,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     // concrete drivers, so no turn-completed event ever arrives to
     // re-enable this button otherwise.
     settleFetch(new Response(null, { status: 204 }));
-    await pending;
+    await flushMicrotasks();
 
     expect(stopButton.disabled).toBe(false);
   });
@@ -468,7 +472,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(sendButton.disabled).toBe(true);
 
     messageResponse.resolve(new Response(null, { status: 202 }));
-    await messageResponse.promise;
+    await flushMicrotasks();
     expect(sendButton.disabled).toBe(true);
 
     sendEvent(eventSource, { kind: "turn-completed" });
@@ -494,7 +498,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(stopButton.disabled).toBe(true);
 
     stopResponse.resolve(new Response(null, { status: 200 }));
-    await stopResponse.promise;
+    await flushMicrotasks();
     expect(stopButton.disabled).toBe(true);
   });
 
@@ -518,9 +522,32 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     const errorCardsBefore = document.querySelectorAll(".error-card").length;
 
     stopResponse.resolve(new Response(null, { status: 500 }));
-    await stopResponse.promise;
+    await flushMicrotasks();
     expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore);
     expect(stopButton.disabled).toBe(true);
+  });
+
+  it("shows a Stop failure after a benign starting/ready transition, not just after the session ends", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopEntered = deferred();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/stop") throw new Error(`Unexpected fetch: ${url}`);
+      stopEntered.resolve();
+      return stopResponse.promise;
+    }) as typeof fetch;
+
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+    stopButton.click();
+    await stopEntered.promise;
+
+    sendEvent(eventSource, { kind: "session-state", state: "ready" });
+    const errorCardsBefore = document.querySelectorAll(".error-card").length;
+
+    stopResponse.resolve(new Response(null, { status: 500 }));
+    await flushMicrotasks();
+    expect(document.querySelectorAll(".error-card")).toHaveLength(errorCardsBefore + 1);
+    expect(stopButton.disabled).toBe(false);
   });
 
   it("keeps Send enabled when a stopped turn completes before its delayed acceptance arrives", async () => {
@@ -564,7 +591,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     await stopResponse.promise;
 
     messageResponse.resolve(new Response(null, { status: 202 }));
-    await messageResponse.promise;
+    await flushMicrotasks();
     expect(sendButton.disabled).toBe(false);
   });
 
@@ -619,7 +646,7 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     // unwound handshake produces. Without the fix this unconditionally
     // re-enables Send while the second turn is still running.
     settleFirst(new Response(null, { status: 503 }));
-    await pendingFirst;
+    await flushMicrotasks();
     expect(sendButton.disabled).toBe(true);
 
     // The second turn actually settling is what correctly restores Send.
@@ -670,14 +697,14 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(sendButton.disabled).toBe(true);
 
     settleSecond(new Response(null, { status: 409 }));
-    await pendingSecond;
+    await flushMicrotasks();
     expect(sendButton.disabled).toBe(false);
 
     // The fatal event is the last session-state update. Generation checks made
     // the retry's 409 and first request's late 500 both refuse to restore Send.
     // The user could recover only by reloading the page.
     settleFirst(new Response(null, { status: 500 }));
-    await pendingFirst;
+    await flushMicrotasks();
     expect(sendButton.disabled).toBe(false);
   });
 });

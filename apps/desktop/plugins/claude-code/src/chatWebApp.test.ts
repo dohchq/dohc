@@ -1349,7 +1349,12 @@ describe("Claude Code chat web app", () => {
       message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
       fatal: true,
     });
-    expect(await raceTimeout(stream.next(), 200)).toBe("timeout");
+    expect((await post(url, "message", { text: "Hello again" }, token)).status).toBe(503);
+    expect(await stream.next()).toEqual({
+      kind: "error",
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      fatal: true,
+    });
     expect(fake.startInputs).toHaveLength(0);
     await stream.close();
   });

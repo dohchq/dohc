@@ -57,6 +57,13 @@ let turnActive = false;
 // response lands, so a late accept can no longer resurrect `turnActive`
 // once a fresher session-state fact has already superseded it.
 let stateVersion = 0;
+// Bumped only when the fact this Stop click cares about is truly settled:
+// the session ending outright (closed, a fatal error) or a turn actually
+// completing (turn-completed). Deliberately narrower than stateVersion,
+// which also bumps on ordinary starting/ready handshake noise -- a Stop
+// response landing after nothing more than that is still real news the
+// user needs to see, not a stale echo of an ended session.
+let stopStateVersion = 0;
 
 // The id of the most recent /message request whose own turn has not yet
 // been PROVEN settled -- 0 when none is outstanding. A 202 alone is not
@@ -163,6 +170,7 @@ function setSessionState(state, reason, options = {}) {
   if (state === "closed" || state === "error" || (wasActive && !turnActive)) {
     clearPendingSend();
   }
+  if (state === "closed" || state === "error") stopStateVersion += 1;
   updateSendAvailability();
   // The initial connection snapshot applies to the pill only: the log
   // replay right behind it (or a live event still to come) is what
@@ -457,6 +465,7 @@ function renderEvent(event) {
       // it -- see the composer submit handler below). Cleared explicitly
       // rather than relying only on setSessionState's wasActive check.
       clearPendingSend();
+      stopStateVersion += 1;
       setSessionState("ready");
       // The session itself is still alive (the pill just went back to
       // Ready), so the next action is a retry -- "start a new session"
@@ -605,7 +614,7 @@ messageInput.addEventListener("keydown", (event) => {
 
 stopButton.addEventListener("click", async () => {
   stopButton.disabled = true;
-  const stateVersionAtStop = stateVersion;
+  const stopStateVersionAtStop = stopStateVersion;
   try {
     const response = await fetch("/stop", {
       method: "POST",
@@ -616,7 +625,7 @@ stopButton.addEventListener("click", async () => {
     // the truth about Stop and the session. This response is stale: it
     // must only settle a promise, never touch the button or append a card
     // for a session this page has already explained.
-    if (stateVersion !== stateVersionAtStop) return;
+    if (stopStateVersion !== stopStateVersionAtStop) return;
     if (!response.ok) {
       stopButton.disabled = false;
       errorCard("dohc could not stop this session.");
@@ -630,7 +639,7 @@ stopButton.addEventListener("click", async () => {
     // little early alongside that is harmless.
     stopButton.disabled = false;
   } catch {
-    if (stateVersion !== stateVersionAtStop) return;
+    if (stopStateVersion !== stopStateVersionAtStop) return;
     stopButton.disabled = false;
     errorCard("dohc could not stop this session.");
   }
