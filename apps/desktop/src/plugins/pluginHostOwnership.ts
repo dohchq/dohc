@@ -147,14 +147,6 @@ interface StopOpportunity {
   readonly record: PluginHostRecordToken;
 }
 
-let nextEpoch = 1;
-
-function newEpoch(): number {
-  const epoch = nextEpoch;
-  nextEpoch += 1;
-  return epoch;
-}
-
 function signal(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((resolvePromise) => {
@@ -206,29 +198,55 @@ function idle(state: PluginOwnershipState): boolean {
 }
 
 const startCommand = Symbol("startCommand");
-const runCommandChange = Symbol("runCommandChange");
 const startSurface = Symbol("startSurface");
-const runSurfaceChange = Symbol("runSurfaceChange");
+const beginAuthorityChange = Symbol("beginAuthorityChange");
 const releaseSurface = Symbol("releaseSurface");
 const runReservedChange = Symbol("runReservedChange");
 const cancelReservedChange = Symbol("cancelReservedChange");
 const stopChange = Symbol("stopChange");
 const completeChange = Symbol("completeChange");
 
-class CommandAuthority implements PluginHostCommandAuthority {
-  readonly [commandAuthorityBrand] = true;
-  readonly released = signal();
+abstract class StartChangeAuthority {
   active = true;
-  epoch: number;
-  overranDrain = false;
-  startUsed = false;
-  startPromise: Promise<PluginHostStartOutcome<unknown>> | null = null;
   readonly changePromises: Promise<unknown>[] = [];
 
   constructor(
     readonly owner: PluginHostOwnership,
     readonly state: PluginOwnershipState,
-  ) {
+    readonly inactiveMessage: string,
+  ) {}
+
+  runChange<T>(
+    operation: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostChangeCompletion<T>>,
+  ): Promise<T> {
+    if (!this.active) {
+      return Promise.reject(new Error(this.inactiveMessage));
+    }
+    const changed = this.owner[beginAuthorityChange](this, operation);
+    this.changePromises.push(changed);
+    return changed;
+  }
+
+  invalidate(): void {
+    this.active = false;
+  }
+}
+
+class CommandAuthority
+  extends StartChangeAuthority
+  implements PluginHostCommandAuthority
+{
+  readonly [commandAuthorityBrand] = true;
+  readonly released = signal();
+  epoch: number;
+  overranDrain = false;
+  startUsed = false;
+  startPromise: Promise<PluginHostStartOutcome<unknown>> | null = null;
+
+  constructor(owner: PluginHostOwnership, state: PluginOwnershipState) {
+    super(owner, state, "Command authority is no longer active.");
     this.epoch = state.epoch;
   }
 
@@ -244,53 +262,28 @@ class CommandAuthority implements PluginHostCommandAuthority {
     return started;
   }
 
-  runChange<T>(
-    operation: (
-      change: PluginHostChangeAuthority,
-    ) => Promise<PluginHostChangeCompletion<T>>,
-  ): Promise<T> {
-    if (!this.active) {
-      return Promise.reject(new Error("Command authority is no longer active."));
-    }
-    const changed = this.owner[runCommandChange](this, operation);
-    this.changePromises.push(changed);
-    return changed;
-  }
-
-  invalidate(): void {
+  override invalidate(): void {
     if (!this.active) return;
-    this.active = false;
+    super.invalidate();
     this.released.resolve();
   }
 }
 
-class SurfaceStartAuthority implements PluginHostSurfaceStartAuthority {
+class SurfaceStartAuthority
+  extends StartChangeAuthority
+  implements PluginHostSurfaceStartAuthority
+{
   readonly [surfaceStartAuthorityBrand] = true;
-  active = true;
-  readonly changePromises: Promise<unknown>[] = [];
 
   constructor(
-    readonly owner: PluginHostOwnership,
+    owner: PluginHostOwnership,
     readonly lease: SurfaceLease,
-  ) {}
-
-  runChange<T>(
-    operation: (
-      change: PluginHostChangeAuthority,
-    ) => Promise<PluginHostChangeCompletion<T>>,
-  ): Promise<T> {
-    if (!this.active) {
-      return Promise.reject(
-        new Error("Surface start authority is no longer active."),
-      );
-    }
-    const changed = this.owner[runSurfaceChange](this, operation);
-    this.changePromises.push(changed);
-    return changed;
-  }
-
-  invalidate(): void {
-    this.active = false;
+  ) {
+    super(
+      owner,
+      lease.state,
+      "Surface start authority is no longer active.",
+    );
   }
 }
 
@@ -362,18 +355,12 @@ class SurfaceLease implements PluginHostSurfaceLease {
     this.startUsed = true;
     const started = this.owner[startSurface](this, enqueue);
     this.startPromise = started;
-    void started.then(
-      () => {
-        this.startEnqueued = false;
-        this.overranStart = false;
-        this.startSettled.resolve();
-      },
-      () => {
-        this.startEnqueued = false;
-        this.overranStart = false;
-        this.startSettled.resolve();
-      },
-    );
+    const settleStart = () => {
+      this.startEnqueued = false;
+      this.overranStart = false;
+      this.startSettled.resolve();
+    };
+    void started.then(settleStart, settleStart);
     return started;
   }
 
@@ -416,7 +403,7 @@ class ChangeAuthority implements PluginHostChangeAuthority {
     readonly owner: PluginHostOwnership,
     readonly state: PluginOwnershipState,
     epoch: number,
-    readonly origin: CommandAuthority | SurfaceStartAuthority | undefined,
+    readonly origin: StartChangeAuthority | undefined,
     readonly preserveOnDemand: boolean,
   ) {
     this.epoch = epoch;
@@ -567,22 +554,13 @@ export class PluginHostOwnership {
     return { kind: "admitted", value: result.value };
   }
 
-  [runCommandChange]<T>(
-    authority: CommandAuthority,
+  [beginAuthorityChange]<T>(
+    authority: StartChangeAuthority,
     operation: (
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
     return this.#beginChange(authority.state, authority, operation);
-  }
-
-  [runSurfaceChange]<T>(
-    authority: SurfaceStartAuthority,
-    operation: (
-      change: PluginHostChangeAuthority,
-    ) => Promise<PluginHostChangeCompletion<T>>,
-  ): Promise<T> {
-    return this.#beginChange(authority.lease.state, authority, operation);
   }
 
   async [startSurface]<T>(
@@ -649,11 +627,6 @@ export class PluginHostOwnership {
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
-    if (!reservation.active) {
-      return Promise.reject(
-        new Error("Change reservation is no longer active."),
-      );
-    }
     reservation.invalidate();
     reservation.state.pendingChanges.delete(reservation);
     return this.#beginChange(reservation.state, undefined, operation);
@@ -756,7 +729,7 @@ export class PluginHostOwnership {
 
   #beginChange<T>(
     state: PluginOwnershipState,
-    origin: CommandAuthority | SurfaceStartAuthority | undefined,
+    origin: StartChangeAuthority | undefined,
     operation: (
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
@@ -882,28 +855,17 @@ export class PluginHostOwnership {
         ? { kind: "refused", reason: "change-in-progress" }
         : undefined;
     if (result.kind === "existing") return refusal;
-    return this.#acceptStartEvidence(state, epoch, result.evidence, refusal);
-  }
-
-  async #acceptStartEvidence(
-    state: PluginOwnershipState,
-    epoch: number,
-    evidence: PluginHostStartEvidence,
-    refusal: PluginHostAdmissionRefusal | undefined,
-  ): Promise<PluginHostAdmissionRefusal | undefined> {
-    this.#consumeStartEvidence(state.pluginId, evidence);
-    if (refusal) {
-      await this.#discardStartEvidence(state.pluginId, evidence.record);
-      return refusal;
-    }
-    if (this.#host.currentRecord(state.pluginId) !== evidence.record) {
-      throw new Error(
-        `Plugin host start evidence does not name the current "${state.pluginId}" record.`,
-      );
-    }
-    if (state.adoptedRecord === evidence.record) return undefined;
-    state.onDemand = { epoch, record: evidence.record };
-    return undefined;
+    await this.#settleExactStartEvidence(
+      state,
+      result.evidence,
+      refusal !== undefined,
+      (record) => {
+        if (state.adoptedRecord !== record) {
+          state.onDemand = { epoch, record };
+        }
+      },
+    );
+    return refusal;
   }
 
   async #adoptChangeCompletion(
@@ -915,29 +877,40 @@ export class PluginHostOwnership {
       !change.active ||
       change.state.epoch !== change.epoch;
     if (evidence !== null) {
-      this.#consumeStartEvidence(change.state.pluginId, evidence);
-      if (superseded) {
-        await this.#discardStartEvidence(
-          change.state.pluginId,
-          evidence.record,
-        );
-        return;
-      }
-      if (
-        this.#host.currentRecord(change.state.pluginId) !== evidence.record
-      ) {
-        throw new Error(
-          `Plugin host start evidence does not name the current "${change.state.pluginId}" record.`,
-        );
-      }
-      change.state.adoptedRecord = evidence.record;
-      change.state.onDemand = null;
+      await this.#settleExactStartEvidence(
+        change.state,
+        evidence,
+        superseded,
+        (record) => {
+          change.state.adoptedRecord = record;
+          change.state.onDemand = null;
+        },
+      );
       return;
     }
     if (superseded) return;
     change.state.adoptedRecord =
       this.#host.currentRecord(change.state.pluginId) ?? null;
     change.state.onDemand = null;
+  }
+
+  async #settleExactStartEvidence(
+    state: PluginOwnershipState,
+    evidence: PluginHostStartEvidence,
+    superseded: boolean,
+    accept: (record: PluginHostRecordToken) => void,
+  ): Promise<void> {
+    this.#consumeStartEvidence(state.pluginId, evidence);
+    if (superseded) {
+      await this.#discardStartEvidence(state.pluginId, evidence.record);
+      return;
+    }
+    if (this.#host.currentRecord(state.pluginId) !== evidence.record) {
+      throw new Error(
+        `Plugin host start evidence does not name the current "${state.pluginId}" record.`,
+      );
+    }
+    accept(evidence.record);
   }
 
   #consumeStartEvidence(
@@ -981,7 +954,7 @@ export class PluginHostOwnership {
     if (existing) return existing;
     const state: PluginOwnershipState = {
       pluginId,
-      epoch: newEpoch(),
+      epoch: 0,
       commands: new Set(),
       surfaces: new Set(),
       pendingChanges: new Set(),
@@ -1021,7 +994,7 @@ export class PluginHostOwnership {
     }
     const currentRecord = this.#host.currentRecord(opportunity.state.pluginId);
     if (currentRecord !== opportunity.record) {
-      opportunity.state.epoch = newEpoch();
+      opportunity.state.epoch += 1;
       opportunity.state.onDemand = null;
       opportunity.state.adoptedRecord = null;
       return;
@@ -1042,26 +1015,19 @@ export class PluginHostOwnership {
     epoch: number,
   ): Promise<HostStopAttempt> {
     if (state.stopInFlight) {
-      return Promise.resolve({
-        kind: "failed",
-        error: new Error(`Plugin "${state.pluginId}" is already stopping`),
-      });
+      throw new Error(
+        `Invariant violation: plugin "${state.pluginId}" is already stopping`,
+      );
     }
-    let resolveAttempt!: (attempt: HostStopAttempt) => void;
-    const attempt = new Promise<HostStopAttempt>((resolve) => {
-      resolveAttempt = resolve;
-    });
+    let attempt!: Promise<HostStopAttempt>;
+    attempt = this.#performHostStop(state, epoch)
+      .catch(
+        (error: unknown): HostStopAttempt => ({ kind: "failed", error }),
+      )
+      .finally(() => {
+        if (state.stopInFlight === attempt) state.stopInFlight = null;
+      });
     state.stopInFlight = attempt;
-    void this.#performHostStop(state, epoch).then(
-      (result) => {
-        if (state.stopInFlight === attempt) state.stopInFlight = null;
-        resolveAttempt(result);
-      },
-      (error: unknown) => {
-        if (state.stopInFlight === attempt) state.stopInFlight = null;
-        resolveAttempt({ kind: "failed", error });
-      },
-    );
     return attempt;
   }
 
@@ -1088,7 +1054,7 @@ export class PluginHostOwnership {
           ),
       };
     }
-    state.epoch = newEpoch();
+    state.epoch += 1;
     state.onDemand = null;
     state.adoptedRecord = null;
     return stopError === undefined
@@ -1125,7 +1091,6 @@ export class PluginHostOwnership {
       state.changes.clear();
       state.onDemand = null;
       state.adoptedRecord = null;
-      state.epoch = newEpoch();
       state.stopInFlight = null;
     }
     this.#states.clear();

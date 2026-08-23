@@ -383,32 +383,6 @@ describe("workspace SDK host authority", () => {
     ).resolves.toContainEqual(expect.objectContaining({ path: "notes/[draft].txt" }));
   });
 
-  it("rejects a malformed search owner before starting ripgrep", async () => {
-    const root = await workspace();
-    const searchStarter = vi.fn<SdkSearchStarter>((options) => {
-      options.onBatch({
-        searchId: options.searchId,
-        entries: [],
-        done: true,
-        limitHit: false,
-      });
-      return { searchId: options.searchId, kill: vi.fn() };
-    });
-    const reads: WorkspaceSdkReadPort = {
-      ...localWorkspaceSdkReads(root),
-      prepareSearch: async () => ({ allowPath: null }) as never,
-    };
-
-    await expect(
-      invokeWorkspaceSdkHost(
-        hostContext(root, { reads, searchStarter }),
-        "workspace.search",
-        { query: "hello" },
-      ),
-    ).rejects.toThrow(/allowPath must be a function/i);
-    expect(searchStarter).not.toHaveBeenCalled();
-  });
-
   it("kills an in-flight search when surface authority is revoked", async () => {
     const root = await workspace();
     const controller = new AbortController();

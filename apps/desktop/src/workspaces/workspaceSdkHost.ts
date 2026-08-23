@@ -178,9 +178,6 @@ async function searchVisibleWorkspace(context: WorkspaceSdkHostContext, params: 
       ? undefined
       : sdkWorkspacePath(input.path);
   const searchView = await context.reads.prepareSearch(requestedPath);
-  if (typeof searchView.allowPath !== "function") {
-    throw new Error("Workspace search allowPath must be a function.");
-  }
   const requestedLimit =
     typeof input.limit === "number" && Number.isInteger(input.limit)
       ? input.limit

@@ -229,6 +229,38 @@ describe("PluginHostOwnership", () => {
     expect(host.calls).toEqual(["stop:example-plugin"]);
   });
 
+  it("supersedes a nested change that stops during another stop", async () => {
+    const host = new FakePluginHost();
+    host.start("example-plugin");
+    const stopBegan = deferred<void>();
+    const stopAllowed = deferred<void>();
+    host.stopImpl = async (pluginId) => {
+      stopBegan.resolve();
+      await stopAllowed.promise;
+      host.records.delete(pluginId);
+    };
+    const owner = new PluginHostOwnership(host);
+
+    const result = owner.runChange("example-plugin", async (first) => {
+      const firstStop = first.stop();
+      await stopBegan.promise;
+      const second = owner.runChange("example-plugin", async (nested) =>
+        nested.preserve(await nested.stop()),
+      );
+      stopAllowed.resolve();
+      return first.preserve({
+        first: await firstStop,
+        second: await second,
+      });
+    });
+
+    await expect(result).resolves.toEqual({
+      first: { kind: "stopped", drained: true },
+      second: { kind: "superseded", drained: true },
+    });
+    expect(host.calls).toEqual(["stop:example-plugin"]);
+  });
+
   it("runs a command in one scope and releases it on rejection", async () => {
     const owner = new PluginHostOwnership(new FakePluginHost());
     const commandError = new Error("command failed");
@@ -324,6 +356,30 @@ describe("PluginHostOwnership", () => {
     await command;
     expect(stopOutcome).toEqual({ kind: "refused", reason: "self-drain" });
     expect(host.calls).toEqual([]);
+  });
+
+  it("bounds a foreign change started inside a command by the drain deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakePluginHost();
+      host.start("example-plugin");
+      const owner = new PluginHostOwnership(host, { drainTimeoutMs: 25 });
+
+      const command = owner.runCommand("example-plugin", async () =>
+        owner.runChange("example-plugin", async (change) =>
+          change.preserve(await change.stop()),
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(command).resolves.toEqual({
+        kind: "completed",
+        value: { kind: "stopped", drained: false },
+      });
+      expect(host.calls).toEqual(["stop:example-plugin"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops at the drain deadline but refuses commands until the late scope exits", async () => {
@@ -537,6 +593,42 @@ describe("PluginHostOwnership", () => {
     await first.release();
     await second.release();
     expect(host.calls).toEqual(["stop:example-plugin"]);
+  });
+
+  it("refuses and removes a surface start that overruns a foreign change drain", async () => {
+    vi.useFakeTimers();
+    try {
+      const host = new FakePluginHost();
+      host.start("example-plugin");
+      const owner = new PluginHostOwnership(host, { drainTimeoutMs: 25 });
+      const surface = surfaceLease(owner);
+      const startAllowed = deferred<void>();
+      const start = surface.start(async () => {
+        await startAllowed.promise;
+        return coldStart(host, "example-plugin", "replacement");
+      });
+      const change = owner.runChange("example-plugin", async (authority) =>
+        authority.preserve(await authority.stop()),
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(change).resolves.toEqual({ kind: "stopped", drained: false });
+      expect(host.calls).toEqual(["stop:example-plugin"]);
+
+      startAllowed.resolve();
+      await expect(start).resolves.toEqual({
+        kind: "refused",
+        reason: "change-in-progress",
+      });
+      expect(host.currentRecord("example-plugin")).toBeUndefined();
+      expect(host.calls).toEqual([
+        "stop:example-plugin",
+        "stop-record:example-plugin",
+      ]);
+      await surface.release();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("allows only one start call per surface lease", async () => {
