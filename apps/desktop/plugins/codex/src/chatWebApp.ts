@@ -72,6 +72,7 @@ type ChatStreamEvent =
 interface EventLogEntry {
   event: ChatStreamEvent;
   at: number;
+  turnId?: number;
   provisional?: boolean;
   truncated?: boolean;
 }
@@ -317,10 +318,15 @@ export function createChatWebApp(
    * connection, as opposed to one happening now: the page renders replayed
    * failures quietly (role="status") instead of re-alerting a screen
    * reader to history it already heard. */
-  function frame(event: ChatStreamEvent, at: number, replay?: boolean): string {
+  function frame(
+    event: ChatStreamEvent,
+    at: number,
+    turnId: number | undefined,
+    replay?: boolean,
+  ): string {
     return (
       "data: " +
-      JSON.stringify({ ...event, at, turnId: currentTurnId, ...(replay ? { replay: true } : {}) }) +
+      JSON.stringify({ ...event, at, turnId, ...(replay ? { replay: true } : {}) }) +
       "\n\n"
     );
   }
@@ -391,7 +397,7 @@ export function createChatWebApp(
       if (open && open.event.kind === "text-delta") {
         open.event.text += event.text;
       } else {
-        open = { event: { ...event }, at };
+        open = { event: { ...event }, at, turnId: currentTurnId };
         eventLog.push(open);
         openDeltas.set(key, open);
         trimLog();
@@ -400,15 +406,15 @@ export function createChatWebApp(
         open.event.text = open.event.text.slice(-MAX_COALESCED_TEXT_CHARS);
         if (!open.truncated) {
           open.truncated = true;
-          eventLog.push({ event: { kind: "history-trimmed" }, at });
+          eventLog.push({ event: { kind: "history-trimmed" }, at, turnId: currentTurnId });
           trimLog();
         }
       }
     } else {
-      eventLog.push({ event, at });
+      eventLog.push({ event, at, turnId: currentTurnId });
       trimLog();
     }
-    const encoded = frame(event, at);
+    const encoded = frame(event, at, currentTurnId);
     for (const client of clients) client.write(encoded);
   }
 
@@ -683,7 +689,7 @@ export function createChatWebApp(
         eventLog.push(reserved);
         trimLog();
       }
-      const encoded = frame(reserved.event, reserved.at);
+      const encoded = frame(reserved.event, reserved.at, currentTurnId);
       for (const client of clients) client.write(encoded);
       // A Stop that arrived while the prompt was still awaiting acceptance:
       // now that the driver holds the turn, the recorded intent becomes a
@@ -809,7 +815,7 @@ export function createChatWebApp(
     response.write(snapshotFrame());
     for (const entry of eventLog) {
       if (entry.provisional) continue;
-      response.write(frame(entry.event, entry.at, true));
+      response.write(frame(entry.event, entry.at, entry.turnId, true));
     }
     clients.add(response);
     request.once("close", () => clients.delete(response));

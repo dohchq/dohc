@@ -517,6 +517,44 @@ describe("Claude Code chat web app", () => {
     await reattached.close();
   });
 
+  it("replays each buffered frame with the turn identity it was published with", async () => {
+    const fake = fakeDriver();
+    const { url, token } = await start(fake);
+
+    expect((await post(url, "message", { text: "First" }, token)).status).toBe(202);
+    fake.startInputs[0]?.onEvent({
+      kind: "turn-completed",
+      turnId: "turn-1",
+      status: "completed",
+    });
+    expect((await post(url, "message", { text: "Second" }, token)).status).toBe(202);
+    fake.startInputs[0]?.onEvent({
+      kind: "turn-completed",
+      turnId: "turn-2",
+      status: "completed",
+    });
+
+    const reattached = await eventStream(url, token);
+    expect(await reattached.nextRaw()).toMatchObject({
+      kind: "session-state",
+      state: "ready",
+      turnId: 2,
+      snapshot: true,
+    });
+    expect(await reattached.nextRaw()).toMatchObject({
+      kind: "user-message",
+      text: "First",
+      replay: true,
+    });
+    expect(await reattached.nextRaw()).toMatchObject({
+      kind: "turn-completed",
+      status: "completed",
+      turnId: 1,
+      replay: true,
+    });
+    await reattached.close();
+  });
+
   it("marks the initial connection snapshot, so a reasoned terminal state renders exactly one card, not two", async () => {
     // Stop only produces a reasoned "closed" event now while a session is
     // still starting (there is no session or context yet to preserve, only
