@@ -672,11 +672,10 @@ import {
 } from "./agents/liveAgentDispatchStore";
 import {
   buildOutputSiteRoot,
-  getSitePackage,
-  listSitePackages,
   requireExactSiteRoot,
   type SitePackageInfo,
 } from "./workspaces/sitePackage";
+import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
 import {
   buildSite,
   startSiteDevServer,
@@ -4759,13 +4758,15 @@ function ownedWorkspaceReads(
   });
 }
 
-async function listOwnedSitePackages(
-  workspace: NonNullable<ReturnType<typeof findWorkspace>>,
-) {
-  const reads = ownedWorkspaceReads(workspace);
-  const searchView = await reads.prepareSearch();
-  return listSitePackages(workspace.rootPath, searchView.listing ?? undefined);
-}
+const ownedSiteCatalog = createOwnedSiteCatalog({
+  async listOwnedFiles(
+    workspace: NonNullable<ReturnType<typeof findWorkspace>>,
+  ) {
+    const reads = ownedWorkspaceReads(workspace);
+    const searchView = await reads.prepareSearch();
+    return searchView.listing ?? reads.listFiles();
+  },
+});
 
 function ownedWorkspaceGraphSource(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
@@ -7913,16 +7914,7 @@ function registerIpcHandlers(
   for (const [channel, handler] of Object.entries(
     createSitesIpcHandlers({
       authority: senderWorkspaceAuthority,
-      catalog: {
-        list: listOwnedSitePackages,
-        get: async (workspace, path, effectiveMode) =>
-          getSitePackage(
-            workspace.rootPath,
-            path,
-            await listOwnedSitePackages(workspace),
-            effectiveMode,
-          ),
-      },
+      catalog: ownedSiteCatalog,
     }),
   )) {
     ipcMain.handle(channel, handler);
@@ -7960,12 +7952,10 @@ function registerIpcHandlers(
           "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
         );
       }
-      const sites = await listOwnedSitePackages(workspace);
       const site = requireExactSiteRoot(
-        await getSitePackage(
-          workspace.rootPath,
+        await ownedSiteCatalog.get(
+          workspace,
           input.siteRoot,
-          sites,
           input.mode,
         ),
         input.siteRoot,

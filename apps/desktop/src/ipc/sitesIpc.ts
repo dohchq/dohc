@@ -1,16 +1,22 @@
+import type { OwnedSiteCatalog } from "../workspaces/ownedSiteCatalog";
 import {
   ListSitesPayload,
   ListSitesResult,
   SitePackagePayload,
   SitePackageResult,
-  type SitePackageInfo,
-  type SitePreviewMode,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
-import {
-  createMainIpcHandler,
-  type MainIpcHandlerRecord,
-} from "./mainIpcHandler";
+
+type Awaitable<Value> = Value | Promise<Value>;
+
+type SitesIpcHandler<Event, Result = unknown> = (
+  event: Event,
+  payload: unknown,
+) => Promise<Result>;
+
+type SitesIpcHandlerRecord<Event> = Readonly<
+  Record<string, SitesIpcHandler<Event>>
+>;
 
 export interface SitesIpcWorkspace {
   workspaceId: string;
@@ -29,14 +35,7 @@ export interface SitesIpcDependencies<
       subject: string,
     ): Workspace;
   };
-  catalog: {
-    list(workspace: Workspace): Promise<SitePackageInfo[]>;
-    get(
-      workspace: Workspace,
-      path: string,
-      effectiveMode: SitePreviewMode | null | undefined,
-    ): Promise<SitePackageInfo | null>;
-  };
+  catalog: OwnedSiteCatalog<Workspace>;
 }
 
 export function createSitesIpcHandlers<
@@ -45,36 +44,45 @@ export function createSitesIpcHandlers<
   Workspace extends SitesIpcWorkspace,
 >(
   dependencies: SitesIpcDependencies<Event, Sender, Workspace>,
-): MainIpcHandlerRecord<Event> {
-  const authorize = (sender: Sender, payload: { workspaceId: string }) =>
-    dependencies.authority.requireActiveWorkspace(
-      sender,
-      payload.workspaceId,
-      "sites request",
-    );
+): SitesIpcHandlerRecord<Event> {
+  const handle = <
+    Payload extends { workspaceId: string },
+    RawResult,
+    Result,
+  >(input: {
+    parse(payload: unknown): Payload;
+    run(workspace: Workspace, payload: Payload): Awaitable<RawResult>;
+    validate(result: RawResult): Result;
+  }): SitesIpcHandler<Event, Result> =>
+    async (event, rawPayload) => {
+      const sender = dependencies.authority.requireTrustedSender(event);
+      const payload = input.parse(rawPayload);
+      const workspace = dependencies.authority.requireActiveWorkspace(
+        sender,
+        payload.workspaceId,
+        "sites request",
+      );
+      const result = await input.run(workspace, payload);
+      return input.validate(result);
+    };
+
   return {
-    [CHANNELS.listSites]: createMainIpcHandler({
-      requireTrustedSender: dependencies.authority.requireTrustedSender,
-      parsePayload: ListSitesPayload.parse,
-      authorize,
-      gate: { kind: "read-only" },
+    [CHANNELS.listSites]: handle({
+      parse: ListSitesPayload.parse,
       run: async (workspace) => ({
         sites: await dependencies.catalog.list(workspace),
       }),
-      parseResult: ListSitesResult.parse,
+      validate: ListSitesResult.parse,
     }),
-    [CHANNELS.getSitePackage]: createMainIpcHandler({
-      requireTrustedSender: dependencies.authority.requireTrustedSender,
-      parsePayload: SitePackagePayload.parse,
-      authorize,
-      gate: { kind: "read-only" },
+    [CHANNELS.getSitePackage]: handle({
+      parse: SitePackagePayload.parse,
       run: (workspace, payload) =>
         dependencies.catalog.get(
           workspace,
           payload.path,
           payload.effectivePreviewMode,
         ),
-      parseResult: SitePackageResult.parse,
+      validate: SitePackageResult.parse,
     }),
   };
 }

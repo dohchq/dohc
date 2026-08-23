@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SitePackageInfo, SitePreviewMode } from "./bridgeContract";
+import type { SitePackageInfo } from "../workspaces/sitePackage";
+import type { SitePreviewMode } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import {
   createSitesIpcHandlers,

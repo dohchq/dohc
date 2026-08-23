@@ -146,16 +146,17 @@ describe("site preview main-process wiring", () => {
     const lookupAt = handler.indexOf(
       "const site = requireExactSiteRoot(",
     );
-    const ownedSitesAt = handler.indexOf(
-      "const sites = await listOwnedSitePackages(workspace);",
+    const ownedSiteAt = handler.indexOf(
+      "await ownedSiteCatalog.get(",
+      lookupAt,
     );
-    const getSitePackageAt = handler.indexOf("await getSitePackage(", lookupAt);
-    const startAt = handler.indexOf("const started = await startPreviewForSite({", lookupAt);
-    expect(ownedSitesAt).toBeGreaterThanOrEqual(0);
+    const startAt = handler.indexOf(
+      "const started = await startPreviewForSite({",
+      lookupAt,
+    );
     expect(lookupAt).toBeGreaterThanOrEqual(0);
-    expect(lookupAt).toBeGreaterThan(ownedSitesAt);
-    expect(getSitePackageAt).toBeGreaterThan(lookupAt);
-    expect(startAt).toBeGreaterThan(getSitePackageAt);
+    expect(ownedSiteAt).toBeGreaterThan(lookupAt);
+    expect(startAt).toBeGreaterThan(ownedSiteAt);
   });
 
   it("rejects a stale nested root before starting its detected ancestor", async () => {
