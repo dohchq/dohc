@@ -216,7 +216,7 @@ test("the Codex plugin serves its chat and sends a message to Codex", async () =
         authorization: "Bearer " + credentials.token,
       },
     });
-    expect(authorized.status).toBe(204);
+    expect(authorized.status).toBe(200);
 
     // The page itself never carries the token: a local process that only
     // fetches "/" (or a rebound page reading its own same-origin response)

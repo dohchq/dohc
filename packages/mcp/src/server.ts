@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // The dohc MCP server. The DESKTOP runs this; the user's AI tool (Claude Code,
 // Codex) is the client, launching it as a stdio child via its own config:
 //   { mcpServers: { dohc: { command, args: ["--workspace", root, "--home", home] } } }

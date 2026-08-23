@@ -41,7 +41,7 @@ async function loadChatModule(options: { reload?: boolean } = {}): Promise<{
     </main>
     <div id="status"></div>
     <span id="session-state"></span>
-    <button id="stop" type="button"></button>
+    <button id="stop" type="button" disabled></button>
     <form id="composer">
       <textarea id="message"></textarea>
       <button id="send" type="submit"></button>
@@ -59,12 +59,22 @@ async function loadChatModule(options: { reload?: boolean } = {}): Promise<{
   return { module: mod, eventSource: lastEventSource };
 }
 
-function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function sendEvent(eventSource: FakeEventSource, data: unknown): void {
@@ -177,7 +187,14 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
   it("renders a replayed event's own publish time, not the reconnect moment", async () => {
     const { eventSource } = await loadChatModule();
     const at = new Date("2020-01-01T03:04:00Z").getTime();
-    sendEvent(eventSource, { kind: "auth", event: "account-updated", detail: "Logged in.", at });
+    sendEvent(eventSource, {
+      kind: "auth",
+      event: "account-updated",
+      detail: "Logged in.",
+      at,
+      controls: { canSend: true, canStop: true, turnId: null },
+      seq: 1,
+    });
     expect(textOf(".message .timestamp")).toBe(
       new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     );
@@ -191,20 +208,41 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
       requestType: "command",
       title: "Run tests",
       options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+      controls: { canSend: true, canStop: true, turnId: null },
+      seq: 1,
     });
-    sendEvent(eventSource, { kind: "permission-resolved", requestId: "r1", decision: "allow_always" });
+    sendEvent(eventSource, {
+      kind: "permission-resolved",
+      requestId: "r1",
+      decision: "allow_always",
+      controls: { canSend: true, canStop: true, turnId: null },
+      seq: 2,
+    });
     expect(textOf(".permission-actions .timestamp")).toBe("Allowed for session");
   });
 
   it("applies the initial snapshot to the pill without a transcript card, even for a reasoned closed state", async () => {
     const { eventSource } = await loadChatModule();
-    sendEvent(eventSource, { kind: "session-state", state: "closed", reason: "Stopped", snapshot: true });
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+      snapshot: true,
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: 1,
+    });
     expect(textOf("#session-state")).toBe("Closed");
     expect(document.querySelectorAll(".error-card")).toHaveLength(0);
 
     // The same transition arriving as a real (non-snapshot) event does
     // render the card -- that is what actually narrates the transcript.
-    sendEvent(eventSource, { kind: "session-state", state: "closed", reason: "Stopped" });
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: 2,
+    });
     expect(document.querySelectorAll(".error-card")).toHaveLength(1);
   });
 
@@ -212,20 +250,69 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     const { eventSource } = await loadChatModule();
     // Not the initial snapshot -- a real, later transition, exactly what an
     // idle CLI process exiting on its own looks like: closed, no reason.
-    sendEvent(eventSource, { kind: "session-state", state: "closed" });
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "closed",
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: 1,
+    });
     expect(textOf("#session-state")).toBe("Closed");
     const card = document.querySelector(".error-card");
     expect(card).not.toBeNull();
+    expect(card?.getAttribute("role")).toBe("alert");
     expect(card?.textContent).toContain("This session ended.");
     expect(card?.textContent).toContain("Send a message to start a new session.");
   });
 
+  it("announces a fatal failure as an alert carrying the explanation and next step", async () => {
+    // The live status region only ever speaks the state label ("Error");
+    // the alert role on the recovery card is what actually carries the
+    // failure text and the next step to a screen reader.
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "Claude Code exited unexpectedly.",
+      fatal: true,
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: 1,
+    });
+    expect(textOf("#session-state")).toBe("Error");
+    const card = document.querySelector(".error-card");
+    expect(card).not.toBeNull();
+    expect(card?.getAttribute("role")).toBe("alert");
+    expect(card?.textContent).toContain("Claude Code exited unexpectedly.");
+    expect(card?.textContent).toContain("Send a message to start a new session.");
+  });
+
+  it("renders the restart-only next action for the MCP launcher error, not the generic resume instruction", async () => {
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      fatal: true,
+      restartOnly: true,
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: 1,
+    });
+
+    const nextAction = textOf(".error-card .next-action");
+    expect(nextAction).toBe("Restart dohc to try again.");
+    expect(nextAction).not.toBe("Send a message to start a new session.");
+  });
+
   it("renders a fallback failure line for a failed turn with no errorMessage, so it doesn't look like it succeeded", async () => {
     const { eventSource } = await loadChatModule();
-    sendEvent(eventSource, { kind: "turn-completed", turnId: "t1", status: "failed" });
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      turnId: 1,
+      status: "failed",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 1,
+    });
     expect(textOf("#session-state")).toBe("Ready");
     const card = document.querySelector(".error-card");
     expect(card).not.toBeNull();
+    expect(card?.getAttribute("role")).toBe("alert");
     expect(card?.textContent).toContain("This response failed.");
   });
 
@@ -235,9 +322,127 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
       kind: "item",
       phase: "completed",
       item: { id: "tool-1", type: "command", title: "Run tests", status: "failed" },
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 1,
     });
     const status = document.querySelector(".activity-status");
     expect(status?.textContent).toBe("Failed");
+  });
+
+  it("keeps replayed failures out of live regions while live failures alert", async () => {
+    // A reconnect's replay rebuilds cards the reader already heard; only a
+    // failure happening now may interrupt as an alert.
+    const { eventSource } = await loadChatModule();
+    const priorStatus = textOf("#status");
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "Old failure.",
+      fatal: true,
+      replay: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+      seq: 1,
+    });
+    expect(textOf("#status")).toBe(priorStatus);
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "closed",
+      reason: "Stopped",
+      replay: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+      seq: 2,
+    });
+    for (const card of document.querySelectorAll(".error-card")) {
+      expect(card.getAttribute("role")).toBeNull();
+    }
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "New failure.",
+      fatal: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+      seq: 3,
+    });
+    expect(textOf("#status")).toBe("Error");
+    const cards = document.querySelectorAll(".error-card");
+    expect(cards).toHaveLength(3);
+    expect(cards[2]?.getAttribute("role")).toBe("alert");
+    expect(cards[2]?.textContent).toContain("New failure.");
+  });
+
+  it("says earlier messages are missing when the replay was trimmed", async () => {
+    const { eventSource } = await loadChatModule();
+    sendEvent(eventSource, {
+      kind: "history-trimmed",
+      replay: true,
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 1,
+    });
+    const notice = document.querySelector(".notice");
+    expect(notice?.textContent).toBe(
+      "Only recent messages are shown. Earlier ones were trimmed to save memory.",
+    );
+  });
+
+  it("renders a streamed reply's fragments in order, each stream in its own card", async () => {
+    const { eventSource } = await loadChatModule();
+    let full = "";
+    for (let index = 0; index < 40; index += 1) {
+      const text = "word" + index + " ";
+      full += text;
+      sendEvent(eventSource, {
+        kind: "text-delta",
+        itemId: "i1",
+        stream: "assistant",
+        text,
+        controls: { canSend: false, canStop: true, turnId: 1 },
+        seq: 1,
+      });
+    }
+    expect(textOf(".message.agent:not(.reasoning) .message-body")).toBe(full);
+    // The reasoning stream renders separately, not appended into the reply.
+    sendEvent(eventSource, {
+      kind: "text-delta",
+      itemId: "i1",
+      stream: "reasoning",
+      text: "thinking",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 2,
+    });
+    expect(textOf(".message.reasoning .message-body")).toBe("thinking");
+    expect(textOf(".message.agent:not(.reasoning) .message-body")).toBe(full);
+    // All 40 fragments grew one Text node in place -- per-delta appends
+    // would leave one child per fragment behind.
+    const body = document.querySelector(".message.agent:not(.reasoning) .message-body");
+    expect(body?.childNodes.length).toBe(1);
+  });
+
+  it("batches transcript scrolling to one layout read per frame while a reply streams", async () => {
+    // Reading scrollHeight forces layout; doing it once per delta made a
+    // long streamed answer quadratic. The scroll is batched through
+    // requestAnimationFrame instead.
+    const { eventSource } = await loadChatModule();
+    const transcriptElement = document.querySelector("#transcript");
+    if (!transcriptElement) throw new Error("The transcript is missing.");
+    let layoutReads = 0;
+    Object.defineProperty(transcriptElement, "scrollHeight", {
+      configurable: true,
+      get: () => {
+        layoutReads += 1;
+        return 1000;
+      },
+    });
+    for (let index = 0; index < 50; index += 1) {
+      sendEvent(eventSource, {
+        kind: "text-delta",
+        itemId: "i1",
+        stream: "assistant",
+        text: "x",
+        controls: { canSend: false, canStop: true, turnId: 1 },
+        seq: 1,
+      });
+    }
+    expect(layoutReads).toBe(0);
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    expect(layoutReads).toBe(1);
   });
 
   it("keeps a pending message's card recoverable across a reconnect that races its request", async () => {
@@ -279,10 +484,24 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     // Awaiting the same promise the submit handler itself awaits: its
     // continuation was registered first, so it has already run once this
     // resolves (promise reactions fire in registration order).
-    settleFetch(new Response(null, { status: 202 }));
+    settleFetch(
+      new Response(
+        JSON.stringify({
+          controls: { canSend: false, canStop: true, turnId: 1 },
+          seq: 1,
+        }),
+        { status: 202 },
+      ),
+    );
     await pending;
     const clientId = (JSON.parse(capturedBody ?? "{}") as { clientId?: string }).clientId;
-    sendEvent(eventSource, { kind: "user-message", text: "Hello", clientId });
+    sendEvent(eventSource, {
+      kind: "user-message",
+      text: "Hello",
+      clientId,
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 2,
+    });
 
     // The exact same node comes back -- not a fresh lookalike card. Without
     // the fix, resetTranscript's pendingMessages.clear() loses the
@@ -319,8 +538,18 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     eventSource.dispatchEvent(new Event("open"));
     expect(document.querySelector(".message.user")).toBeNull();
 
-    settleFetch(new Response(null, { status: 500 }));
+    settleFetch(
+      new Response(
+        JSON.stringify({
+          message: "The message failed.",
+          controls: { canSend: true, canStop: false, turnId: null },
+          seq: 1,
+        }),
+        { status: 500 },
+      ),
+    );
     await pending;
+    await flushMicrotasks();
 
     // The exact same node comes back, now carrying the failure notice --
     // not a lookalike, and not silently lost. Without the fix,
@@ -335,25 +564,360 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     );
   });
 
-  it("re-enables Stop after a successful cancel, with no turn-completed event of its own to bring it back", async () => {
+  it("shows restart-only guidance on the optimistic message when the launcher is unavailable", async () => {
     await loadChatModule();
-    let settleFetch!: (response: Response) => void;
-    const pending = new Promise<Response>((resolve) => {
-      settleFetch = resolve;
-    });
-    globalThis.fetch = (() => pending) as typeof fetch;
+    const messageEntered = deferred();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = ((url: string) => {
+      if (url !== "/message") throw new Error(`Unexpected fetch: ${url}`);
+      messageEntered.resolve();
+      return messageResponse.promise;
+    }) as typeof fetch;
 
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    await messageEntered.promise;
+
+    messageResponse.resolve(
+      new Response(
+        JSON.stringify({
+          message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+          kind: "restartOnly",
+          controls: { canSend: true, canStop: false, turnId: null },
+          seq: 1,
+        }),
+        { status: 503 },
+      ),
+    );
+    await flushMicrotasks();
+
+    expect(textOf(".message.user .send-failed")).toBe("Restart dohc to try again.");
+  });
+
+  it("keeps Send disabled when an older terminal frame arrives after a newer message acceptance", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = (() => messageResponse.promise) as typeof fetch;
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    messageResponse.resolve(
+      new Response(
+        JSON.stringify({
+          controls: { canSend: false, canStop: true, turnId: 1 },
+          seq: 5,
+        }),
+        { status: 202 },
+      ),
+    );
+    await flushMicrotasks();
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      controls: { canSend: true, canStop: true, turnId: null },
+      seq: 4,
+    });
+    expect(textOf("#session-state")).toBe("Ready");
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 6,
+    });
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it("follows server controls for Stop when message acceptance arrives before starting", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = (() => messageResponse.promise) as typeof fetch;
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
     const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    messageResponse.resolve(
+      new Response(
+        JSON.stringify({
+          controls: { canSend: false, canStop: true, turnId: 1 },
+          seq: 3,
+        }),
+        { status: 202 },
+      ),
+    );
+    await flushMicrotasks();
+    expect(sendButton.disabled).toBe(true);
+    expect(stopButton.disabled).toBe(false);
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "starting",
+      controls: { canSend: false, canStop: true, turnId: null },
+      seq: 1,
+    });
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 2,
+    });
+    expect(stopButton.disabled).toBe(false);
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 4,
+    });
+    expect(stopButton.disabled).toBe(false);
+    expect(sendButton.disabled).toBe(false);
+
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "The session ended.",
+      fatal: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+      seq: 5,
+    });
+    expect(stopButton.disabled).toBe(true);
+  });
+
+  it("enables Stop from a live controls fact while the message request is still pending", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = (() => messageResponse.promise) as typeof fetch;
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    sendEvent(eventSource, {
+      kind: "controls",
+      controls: { canSend: false, canStop: true, turnId: null },
+      seq: 1,
+    });
+    expect(stopButton.disabled).toBe(false);
+
+    messageResponse.resolve(
+      new Response(
+        JSON.stringify({
+          controls: { canSend: false, canStop: true, turnId: 1 },
+          seq: 2,
+        }),
+        { status: 202 },
+      ),
+    );
+    await flushMicrotasks();
+  });
+
+  it("keeps Stop at the later click's state when an earlier response arrives last", async () => {
+    const { eventSource } = await loadChatModule();
+    const firstResponse = deferred<Response>();
+    const secondResponse = deferred<Response>();
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls += 1;
+      return calls === 1 ? firstResponse.promise : secondResponse.promise;
+    }) as typeof fetch;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 1,
+    });
     stopButton.click();
+    stopButton.click();
+    expect(calls).toBe(2);
+
+    secondResponse.resolve(
+      new Response(
+        JSON.stringify({
+          controls: { canSend: true, canStop: false, turnId: 1 },
+          seq: 10,
+        }),
+        { status: 200 },
+      ),
+    );
+    await flushMicrotasks();
     expect(stopButton.disabled).toBe(true);
 
-    // Stop now cancels the turn rather than ending the session -- if
-    // nothing was running, cancel() is a documented no-op on both
-    // concrete drivers, so no turn-completed event ever arrives to
-    // re-enable this button otherwise.
-    settleFetch(new Response(null, { status: 204 }));
-    await pending;
+    firstResponse.resolve(
+      new Response(
+        JSON.stringify({
+          controls: { canSend: false, canStop: true, turnId: 1 },
+          seq: 5,
+        }),
+        { status: 200 },
+      ),
+    );
+    await flushMicrotasks();
+    expect(stopButton.disabled).toBe(true);
+  });
 
+  it("recovers Send from a live controls fact when the message response body is lost", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = (() => messageResponse.promise) as typeof fetch;
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "ready",
+      controls: { canSend: true, canStop: true, turnId: null },
+      seq: 1,
+    });
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 2,
+    });
+    expect(sendButton.disabled).toBe(true);
+
+    messageResponse.resolve(new Response(null, { status: 202 }));
+    await flushMicrotasks();
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 3,
+    });
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it("re-enables Send from the reconnect snapshot when the turn settled while disconnected", async () => {
+    const { eventSource } = await loadChatModule();
+    const messageResponse = deferred<Response>();
+    globalThis.fetch = (() => messageResponse.promise) as typeof fetch;
+    const messageInput = document.querySelector("#message") as HTMLTextAreaElement;
+    const composer = document.querySelector("#composer") as HTMLFormElement;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+
+    messageInput.value = "Hello";
+    composer.requestSubmit();
+    messageResponse.resolve(
+      new Response(
+        JSON.stringify({
+          controls: { canSend: false, canStop: true, turnId: 1 },
+          seq: 2,
+        }),
+        { status: 202 },
+      ),
+    );
+    await flushMicrotasks();
+    expect(sendButton.disabled).toBe(true);
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "ready",
+      snapshot: true,
+      controls: { canSend: true, canStop: false, turnId: 1 },
+      seq: 3,
+    });
+    expect(sendButton.disabled).toBe(false);
+  });
+
+  it("shows an error card when Stop fails", async () => {
+    const { eventSource } = await loadChatModule();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = (() => stopResponse.promise) as typeof fetch;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "ready",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 1,
+    });
+    stopButton.click();
+    stopResponse.resolve(
+      new Response(
+        JSON.stringify({
+          message: "Stop failed.",
+          controls: { canSend: true, canStop: true, turnId: 1 },
+          seq: 2,
+        }),
+        { status: 500 },
+      ),
+    );
+    await flushMicrotasks();
+
+    expect(textOf(".error-card")).toContain("dohc could not stop this session.");
+    expect(stopButton.disabled).toBe(false);
+  });
+
+  it.each([
+    {
+      settlement: "network rejection",
+      settle(stopResponse: { reject: (reason?: unknown) => void }) {
+        stopResponse.reject(new Error("The old Stop request lost its connection."));
+      },
+    },
+    {
+      settlement: "late non-ok response with a stale sequence",
+      settle(stopResponse: { resolve: (response: Response) => void }) {
+        stopResponse.resolve(
+          new Response(
+            JSON.stringify({
+              message: "Stop failed.",
+              controls: { canSend: true, canStop: true, turnId: 1 },
+              seq: 2,
+            }),
+            { status: 500 },
+          ),
+        );
+      },
+    },
+  ])("ignores Stop 1's $settlement during turn 2", async ({ settle }) => {
+    const { eventSource } = await loadChatModule();
+    const stopResponse = deferred<Response>();
+    globalThis.fetch = (() => stopResponse.promise) as typeof fetch;
+    const sendButton = document.querySelector("#send") as HTMLButtonElement;
+    const stopButton = document.querySelector("#stop") as HTMLButtonElement;
+
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 1,
+    });
+    stopButton.click();
+    sendEvent(eventSource, {
+      kind: "turn-completed",
+      turnId: 1,
+      status: "completed",
+      controls: { canSend: true, canStop: true, turnId: 1 },
+      seq: 2,
+    });
+    sendEvent(eventSource, {
+      kind: "session-state",
+      state: "running",
+      controls: { canSend: false, canStop: true, turnId: 2 },
+      seq: 3,
+    });
+
+    settle(stopResponse);
+    await flushMicrotasks();
+
+    expect(document.querySelectorAll(".error-card")).toHaveLength(0);
+    expect(sendButton.disabled).toBe(true);
     expect(stopButton.disabled).toBe(false);
   });
 });

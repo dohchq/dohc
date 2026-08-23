@@ -14197,6 +14197,38 @@ describe("drawing entry point", () => {
   });
 });
 
+describe("unavailable MCP launcher settings", () => {
+  it("shows the launcher error without a copyable config", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getMcpConfig = vi.fn(
+      async (): Promise<McpConfigResult> => ({
+        unavailable: true,
+        message: "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+      }),
+    );
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.click(
+      await within(await screen.findByTestId("command-palette")).findByText(
+        "Settings: Open Agents & MCP",
+      ),
+    );
+
+    expect((await screen.findByTestId("mcp-unavailable")).textContent).toBe(
+      "dohc could not prepare its MCP launcher. Restart dohc to try again.",
+    );
+    expect(screen.queryByTestId("mcp-config-snippet")).toBeNull();
+    const configSection = screen.getByRole("heading", { name: "MCP config" }).closest("section");
+    if (!configSection) throw new Error("The MCP config section did not render.");
+    expect(
+      (within(configSection).getByRole("button", { name: "Copy" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+});
+
 // #687/#589: the note's precedence and exact copy are pinned at the
 // AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
 // sessionRecorderOn and sharedView straight to DesktopSettings — bypassing
