@@ -486,6 +486,14 @@ export function createChatWebApp(
       publish({ kind: "error", message, fatal: true });
       throw requestError(503, message);
     });
+    // A Stop that arrived while the probe was still in flight has no
+    // sessionStart yet for stop() to abandon on its own -- pendingPrompt
+    // .stopRequested is the only record of it, and this is the first point
+    // after that await where message() can honor it, before this attempt
+    // goes on to start a session nobody wants anymore.
+    if (pendingPrompt?.stopRequested) {
+      throw requestError(503, "The Codex session was stopped while it started.");
+    }
     if (!available.installed) {
       // The provider's own diagnostic (often a raw "spawn codex ENOENT")
       // always exists for a probe that reports not-installed, so it used to
@@ -499,6 +507,13 @@ export function createChatWebApp(
       throw requestError(503, message);
     }
     if (!sessionStart) {
+      // Checked again immediately before committing to a real session-start
+      // attempt: still true from the identical synchronous stretch above (no
+      // await separates them today), named here too so this stays covered
+      // if a future change ever inserts one.
+      if (pendingPrompt?.stopRequested) {
+        throw requestError(503, "The Codex session was stopped while it started.");
+      }
       const attempt = startSession();
       sessionStart = attempt;
       // A separate chain off the same promise, not the one callers await:
@@ -634,6 +649,16 @@ export function createChatWebApp(
       // No live session: if a start is still pending, abort it -- there is
       // no session or context yet to preserve, only an attempt to give up
       // on.
+      // A prompt still awaiting the driver's probe has no sessionStart yet
+      // for the branch below to abandon -- pendingPrompt.stopRequested is
+      // the only record of the stop in that window, honored the moment
+      // liveSession()'s own probe-await resolves (see there). Marking it
+      // here is a no-op for the sessionStart branch just below: that one
+      // still abandons its attempt through the sessionGeneration bump, and
+      // nulls pendingPrompt outright (deliberately, so a fresh /message is
+      // accepted immediately rather than waiting for the doomed handshake to
+      // unwind -- do not change that).
+      if (pendingPrompt) pendingPrompt.stopRequested = true;
       if (sessionStart) {
         // The generation bump dooms the pending attempt -- once
         // driver.startSession resolves it disposes itself instead of

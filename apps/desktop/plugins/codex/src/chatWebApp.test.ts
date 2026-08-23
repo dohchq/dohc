@@ -67,6 +67,11 @@ interface FakeSession extends PluginAgentSession {
 }
 
 interface FakeDriverOptions {
+  /** Runs the instant driver.probe() is entered, before anything else. */
+  onProbeEntered?: () => void;
+  /** Awaited inside driver.probe() before it returns, so a test can hold
+   * the probe open on demand -- mirrors startGate for driver.startSession(). */
+  probeGate?: () => Promise<void>;
   /** Runs the instant driver.startSession is entered, before anything else
    * -- lets a test know the server-side call has actually begun without
    * guessing at timing. */
@@ -126,6 +131,8 @@ function fakeDriver(
   const driver: PluginAgentDriver = {
     async probe() {
       probes += 1;
+      options.onProbeEntered?.();
+      if (options.probeGate) await options.probeGate();
       return probe();
     },
     async startSession(input) {
@@ -1555,6 +1562,31 @@ describe("Codex chat web app", () => {
   });
 
   describe("session lifecycle races", () => {
+    it("stop during the driver probe still cancels the prompt", async () => {
+      const probeEntered = deferred();
+      const probeGate = deferred();
+      const fake = fakeDriver(undefined, {
+        onProbeEntered: () => probeEntered.resolve(),
+        probeGate: () => probeGate.promise,
+      });
+      const { url, token } = await start(fake);
+
+      const messagePromise = post(url, "message", { text: "Hello" }, token);
+      await probeEntered.promise;
+
+      const stopResponse = await post(url, "stop", undefined, token);
+      expect(stopResponse.status).toBe(204);
+
+      probeGate.resolve();
+      const messageResponse = await messagePromise;
+      expect(messageResponse.status).toBe(503);
+      expect(fake.startInputs).toHaveLength(0);
+      expect(fake.sessions).toHaveLength(0);
+
+      const nextResponse = await post(url, "message", { text: "Fresh" }, token);
+      expect(nextResponse.status).toBe(202);
+    });
+
     it("stop during startup disposes the pending session instead of installing it", async () => {
       const entered = deferred();
       const gate = deferred();
