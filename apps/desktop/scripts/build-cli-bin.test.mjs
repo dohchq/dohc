@@ -58,9 +58,36 @@ const cmdPath = process.env.ComSpec ?? "cmd.exe";
 //
 // `majorMinor` (e.g. "22.12") must have the same digit width per segment as
 // this process's own major/minor for the same-length swap to hold; the
-// length assertion below is the actual guard either way.
+// length assertion in fabricatedNodeDir is the actual guard either way.
 function fabricatedVersion(majorMinor) {
   return process.version.replace(/^v\d+\.\d+/, `v${majorMinor}`);
+}
+
+// No length-independent patch was found that keeps the genuine-interpreter
+// property (padding the fabricated string with anything, or growing/
+// shrinking it, changes the compiled binary's byte layout in ways this
+// simple find-and-copy cannot account for -- unlike a plain text file,
+// there is no safe general place to absorb a length change without
+// knowing the PE's internal structure). A host whose major/minor digit
+// widths differ from what a given test fabricates (e.g. this process
+// somehow reporting a single-digit major) cannot use the byte-patch here;
+// skip that one test with a clear, visible reason rather than either
+// failing the whole suite on an environment this approach cannot cover, or
+// silently doing nothing.
+function windowsFabricatedVersionSkipReason(majorMinor) {
+  if (!isWindows) return undefined;
+  const fabricated = fabricatedVersion(majorMinor);
+  if (fabricated.length === process.version.length) return undefined;
+  return (
+    `this host's Node version (${process.version}) has a different byte ` +
+    `length than the fabricated ${fabricated} -- the Windows launcher ` +
+    "test's byte-patch needs an exact-length match to stay a genuine PE binary"
+  );
+}
+
+function skipUnlessWindowsFabricated(majorMinor) {
+  if (!isWindows) return true;
+  return windowsFabricatedVersionSkipReason(majorMinor) ?? false;
 }
 
 function fabricatedNodeDir(version) {
@@ -131,33 +158,41 @@ test("the cmd launcher names the Node.js prerequisite when PATH has no node", { 
   assert.match(result.stderr, /Node\.js/);
 });
 
-test("the cmd launcher refuses Node.js 22.12 and names the found version", { skip: !isWindows }, () => {
-  const dir = launcherDir();
-  const fabricated = fabricatedNodeDir(fabricatedVersion("22.12"));
-  const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd")], {
-    env: { ...process.env, PATH: fabricated.dir, Path: fabricated.dir },
-    encoding: "utf8",
-  });
-  assert.equal(result.status, 127);
-  assert.match(result.stderr, /Node\.js 22\.13 or newer/);
-  assert.ok(result.stderr.includes(fabricated.version.slice(1)));
-});
+test(
+  "the cmd launcher refuses Node.js 22.12 and names the found version",
+  { skip: skipUnlessWindowsFabricated("22.12") },
+  () => {
+    const dir = launcherDir();
+    const fabricated = fabricatedNodeDir(fabricatedVersion("22.12"));
+    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd")], {
+      env: { ...process.env, PATH: fabricated.dir, Path: fabricated.dir },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 127);
+    assert.match(result.stderr, /Node\.js 22\.13 or newer/);
+    assert.ok(result.stderr.includes(fabricated.version.slice(1)));
+  },
+);
 
-test("the cmd launcher runs the bundle beside it on Node.js 22.13 exactly", { skip: !isWindows }, () => {
-  // The byte-patched node.exe stays a genuine, working interpreter -- only
-  // its reported --version changes -- so this actually exercises the
-  // launcher accepting the boundary version and running real code through
-  // it, not just failing to refuse it.
-  const dir = launcherDir();
-  const fabricated = fabricatedNodeDir(fabricatedVersion("22.13"));
-  const path = fabricated.dir + delimiter + dir;
-  const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
-    env: { ...process.env, PATH: path, Path: path },
-    encoding: "utf8",
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /SERVER-RAN --workspace w/);
-});
+test(
+  "the cmd launcher runs the bundle beside it on Node.js 22.13 exactly",
+  { skip: skipUnlessWindowsFabricated("22.13") },
+  () => {
+    // The byte-patched node.exe stays a genuine, working interpreter -- only
+    // its reported --version changes -- so this actually exercises the
+    // launcher accepting the boundary version and running real code through
+    // it, not just failing to refuse it.
+    const dir = launcherDir();
+    const fabricated = fabricatedNodeDir(fabricatedVersion("22.13"));
+    const path = fabricated.dir + delimiter + dir;
+    const result = spawnSync(cmdPath, ["/d", "/c", join(dir, "dohc-mcp.cmd"), "--workspace", "w"], {
+      env: { ...process.env, PATH: path, Path: path },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /SERVER-RAN --workspace w/);
+  },
+);
 
 test("the cmd launcher runs the bundle beside it when node is on PATH", { skip: !isWindows }, () => {
   const dir = launcherDir();

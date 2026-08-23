@@ -107,6 +107,21 @@ describe("hasIntactStableCliBin", () => {
     writeFileSync(join(targetDir, "dohc-mcp.mjs"), "module");
     expect(await hasIntactStableCliBin(targetDir)).toBe(true);
   });
+
+  it("is false when either name is a directory, even a non-empty one", async () => {
+    // Some filesystems (ext4's default block size, for one) report a
+    // directory's own stat size as nonzero -- size alone would misread a
+    // directory sitting where a file should be as an intact publish.
+    const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));
+    scratchDirs.push(root);
+    const targetDir = join(root, "state", "cli-bin");
+    mkdirSync(join(targetDir, "dohc-mcp"), { recursive: true });
+    writeFileSync(join(targetDir, "dohc-mcp", "not-the-launcher"), "x");
+    mkdirSync(join(targetDir, "dohc-mcp.mjs"), { recursive: true });
+    writeFileSync(join(targetDir, "dohc-mcp.mjs", "not-the-module"), "y");
+
+    expect(await hasIntactStableCliBin(targetDir)).toBe(false);
+  });
 });
 
 describe("refreshLinuxStableCliBin", () => {

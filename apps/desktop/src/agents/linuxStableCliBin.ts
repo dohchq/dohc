@@ -36,15 +36,17 @@ export async function syncLinuxStableCliBin(input: {
 
 // publishAtomically's rename-into-place means a file at the real path is
 // always the WHOLE thing from some completed publish, never a partial
-// write -- existence plus a nonzero size is enough to trust it without
-// parsing it.
+// write -- existence, being a regular file (not a directory -- a directory
+// reports a nonzero size on some filesystems, e.g. ext4's default block
+// size, and would otherwise misread as intact), and a nonzero size is
+// enough to trust it without parsing it.
 export async function hasIntactStableCliBin(targetDir: string): Promise<boolean> {
   try {
     const [launcher, module] = await Promise.all([
       stat(join(targetDir, "dohc-mcp")),
       stat(join(targetDir, "dohc-mcp.mjs")),
     ]);
-    return launcher.size > 0 && module.size > 0;
+    return launcher.isFile() && launcher.size > 0 && module.isFile() && module.size > 0;
   } catch {
     return false;
   }
