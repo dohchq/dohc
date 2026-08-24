@@ -4,6 +4,7 @@ import { DOHC_SDK_PROTOCOL, DOHC_THEME_PROTOCOL } from "@dohc/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   InvokePluginPanelSdkResult,
+  PluginPanelInvalidatedEvent,
   PluginPanelSdkEvent,
   StartPluginPanelResult,
 } from "../ipc/bridgeContract";
@@ -12,12 +13,16 @@ import { THEME_ATTRIBUTES } from "./pluginPanelTheme";
 import { palette } from "./tokens";
 
 let panelSdkEventListener: ((event: PluginPanelSdkEvent) => void) | null = null;
+let panelInvalidatedListener: (
+  (event: PluginPanelInvalidatedEvent) => void
+) | null = null;
 
 const bridgeMock = {
   startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
     status: "ok",
     url: "http://127.0.0.1:49160/",
     title: "Hello",
+    surfaceId: 1,
   })),
   stopPluginPanel: vi.fn(async () => undefined),
   invokePluginPanelSdk: vi.fn(
@@ -30,6 +35,16 @@ const bridgeMock = {
       panelSdkEventListener = listener;
       return () => {
         if (panelSdkEventListener === listener) panelSdkEventListener = null;
+      };
+    },
+  ),
+  onPluginPanelInvalidated: vi.fn(
+    (listener: (event: PluginPanelInvalidatedEvent) => void) => {
+      panelInvalidatedListener = listener;
+      return () => {
+        if (panelInvalidatedListener === listener) {
+          panelInvalidatedListener = null;
+        }
       };
     },
   ),
@@ -70,6 +85,7 @@ function uiOpenMessage(source: Window, origin = "http://127.0.0.1:49160") {
 describe("PluginPanelPage", () => {
   beforeEach(() => {
     panelSdkEventListener = null;
+    panelInvalidatedListener = null;
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
@@ -121,6 +137,102 @@ describe("PluginPanelPage", () => {
       pluginId: "hello-plugin",
       panelId: "main",
     });
+  });
+
+  it("restarts only the exact panel surface invalidated by main", async () => {
+    bridgeMock.startPluginPanel
+      .mockResolvedValueOnce({
+        status: "ok",
+        url: "http://127.0.0.1:49160/",
+        title: "Before rebuild",
+        surfaceId: 41,
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        url: "http://127.0.0.1:49161/",
+        title: "After rebuild",
+        surfaceId: 42,
+      });
+    render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        placement="editor"
+        panelId="main"
+      />,
+    );
+    const first = await screen.findByTestId("plugin-panel-frame");
+    expect(new URL(first.getAttribute("src") ?? "").port).toBe("49160");
+
+    act(() => {
+      panelInvalidatedListener?.({
+        workspaceId: "ws-plugins",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        surfaceId: 40,
+      });
+    });
+    expect(bridgeMock.startPluginPanel).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      panelInvalidatedListener?.({
+        workspaceId: "ws-plugins",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        surfaceId: 41,
+      });
+    });
+    const restarted = await screen.findByTestId("plugin-panel-frame");
+    expect(new URL(restarted.getAttribute("src") ?? "").port).toBe("49161");
+    expect(bridgeMock.startPluginPanel).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.stopPluginPanel).not.toHaveBeenCalled();
+  });
+
+  it("restarts when invalidation arrives before the matching start result", async () => {
+    const pending = deferred<StartPluginPanelResult>();
+    bridgeMock.startPluginPanel
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce({
+        status: "ok",
+        url: "http://127.0.0.1:49161/",
+        title: "After rebuild",
+        surfaceId: 42,
+      });
+    render(
+      <PluginPanelPage
+        workspaceId="ws-plugins"
+        pluginId="hello-plugin"
+        placement="editor"
+        panelId="main"
+      />,
+    );
+    await vi.waitFor(() =>
+      expect(bridgeMock.startPluginPanel).toHaveBeenCalledTimes(1),
+    );
+
+    act(() => {
+      panelInvalidatedListener?.({
+        workspaceId: "ws-plugins",
+        pluginId: "hello-plugin",
+        panelId: "main",
+        surfaceId: 41,
+      });
+    });
+    await act(async () => {
+      pending.resolve({
+        status: "ok",
+        url: "http://127.0.0.1:49160/",
+        title: "Before rebuild",
+        surfaceId: 41,
+      });
+      await pending.promise;
+    });
+
+    expect(screen.queryByTitle("Before rebuild")).toBeNull();
+    const restarted = await screen.findByTestId("plugin-panel-frame");
+    expect(new URL(restarted.getAttribute("src") ?? "").port).toBe("49161");
+    expect(bridgeMock.startPluginPanel).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.stopPluginPanel).not.toHaveBeenCalled();
   });
 
   it("forwards SDK events to the exact panel origin", async () => {
@@ -385,6 +497,7 @@ describe("PluginPanelPage", () => {
       status: "ok",
       url: "http://127.0.0.1:49161/",
       title: "Other",
+      surfaceId: 2,
     });
     view.rerender(
       <PluginPanelPage
@@ -432,6 +545,7 @@ describe("PluginPanelPage", () => {
       status: "ok",
       url: "http://127.0.0.1:49161/",
       title: "Other",
+      surfaceId: 2,
     });
     view.rerender(
       <PluginPanelPage
@@ -457,6 +571,7 @@ describe("PluginPanelPage", () => {
         status: "ok",
         url: "http://127.0.0.1:49162/",
         title: "Other",
+        surfaceId: 2,
       });
     const view = render(
       <PluginPanelPage
@@ -484,6 +599,7 @@ describe("PluginPanelPage", () => {
         status: "ok",
         url: "http://127.0.0.1:49163/",
         title: "Stale",
+        surfaceId: 3,
       });
       await pending.promise;
     });
@@ -558,6 +674,7 @@ describe("PluginPanelPage", () => {
       status: "ok",
       url: "https://example.com/",
       title: "Remote",
+      surfaceId: 2,
     });
     render(
       <PluginPanelPage

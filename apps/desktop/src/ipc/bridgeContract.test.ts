@@ -78,6 +78,7 @@ import {
   OpenPluginPanelPayload,
   OpenPluginPanelResult,
   PluginPanelOpenedEvent,
+  PluginPanelInvalidatedEvent,
   StartPluginPanelPayload,
   StartPluginPanelResult,
   StopPluginPanelPayload,
@@ -89,6 +90,7 @@ import {
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   parseInvokePluginPanelSdkPayloadForIpc,
+  parsePluginPanelInvalidatedEventForIpc,
   parsePluginPanelSdkEventForIpc,
   CloudJoinWorkspacePayload,
   ReadShareProposalFileContentPayload,
@@ -1546,15 +1548,25 @@ describe("plugin guest SDK IPC contract", () => {
         status: "ok",
         url: "http://127.0.0.1:43123/",
         title: "Reports",
+        surfaceId: 1,
       }),
     ).toEqual({
       status: "ok",
       url: "http://127.0.0.1:43123/",
       title: "Reports",
+      surfaceId: 1,
     });
     expect(
       StartPluginPanelResult.parse({ status: "not-registered" }),
     ).toEqual({ status: "not-registered" });
+    const invalidated = { ...identity, surfaceId: 1 };
+    expect(PluginPanelInvalidatedEvent.parse(invalidated)).toEqual(invalidated);
+    expect(parsePluginPanelInvalidatedEventForIpc(invalidated)).toEqual(
+      invalidated,
+    );
+    expect(
+      parsePluginPanelInvalidatedEventForIpc({ ...invalidated, extra: true }),
+    ).toBeNull();
 
     expect(
       StartPluginPanelPayload.safeParse({ ...identity, extra: true }).success,
@@ -1593,6 +1605,7 @@ describe("plugin guest SDK IPC contract", () => {
         status: "ok",
         url: "https://127.0.0.1:43123/",
         title: "Reports",
+        surfaceId: 1,
       }).success,
     ).toBe(false);
   });

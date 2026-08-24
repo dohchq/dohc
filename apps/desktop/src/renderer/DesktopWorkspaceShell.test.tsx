@@ -54,6 +54,7 @@ import type {
   RebuildEngineStoreResult,
   RefreshSharedViewResult,
   StartAgentRunResult,
+  StartPluginPanelResult,
   SwitchWorkspaceVersionResult,
   SyncDmsPayload,
   SyncDmsResult,
@@ -623,13 +624,16 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     }),
     searchWorkspace: vi.fn(async (_payload: WorkspaceSearchPayload) => undefined),
     cancelWorkspaceSearch: vi.fn(async () => undefined),
-    startPluginPanel: vi.fn(async () => ({
+    startPluginPanel: vi.fn(async (): Promise<StartPluginPanelResult> => ({
+      status: "ok" as const,
       url: "http://127.0.0.1:49160/" as const,
       title: "Hello panel",
+      surfaceId: 1,
     })),
     stopPluginPanel: vi.fn(async () => undefined),
     invokePluginPanelSdk: vi.fn(async () => ({ result: null })),
     onPluginPanelSdkEvent: vi.fn(() => () => undefined),
+    onPluginPanelInvalidated: vi.fn(() => () => undefined),
   };
 }
 

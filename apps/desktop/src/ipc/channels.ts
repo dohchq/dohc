@@ -670,6 +670,7 @@ export const CHANNELS = {
   startPluginPanel: "desktop:start-plugin-panel",
   invokePluginCommand: "desktop:invoke-plugin-command",
   stopPluginPanel: "desktop:stop-plugin-panel",
+  pluginPanelInvalidated: "desktop:plugin-panel-invalidated",
   invokePluginPanelSdk: "desktop:invoke-plugin-panel-sdk",
   openPluginWebApp: "desktop:open-plugin-web-app",
   startPluginWebApp: "desktop:start-plugin-web-app",

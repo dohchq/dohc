@@ -2,7 +2,7 @@ import type {
   PluginHostRecordToken,
   PluginHostStartEvidence,
 } from "./PluginHost";
-import { COMMAND_CLAIMS_DRAIN_DEADLINE_MS } from "./pluginShared";
+import { PLUGIN_HOST_DRAIN_DEADLINE_MS } from "./pluginShared";
 
 export interface OwnedPluginHost {
   currentRecord(pluginId: string): PluginHostRecordToken | undefined;
@@ -15,6 +15,15 @@ export interface OwnedPluginHost {
 export interface PluginHostOwnershipOptions {
   drainTimeoutMs?: number;
   onCleanupError?: (pluginId: string, error: unknown) => void;
+}
+
+export class PluginHostOwnershipClosedError extends Error {
+  readonly code = "plugin-host-ownership-closed";
+
+  constructor() {
+    super("Plugin host ownership is closed.");
+    this.name = "PluginHostOwnershipClosedError";
+  }
 }
 
 export type PluginHostAdmissionRefusal = {
@@ -39,6 +48,19 @@ export type PluginHostChangeStopOutcome =
   | { kind: "refused"; reason: "self-drain" }
   | { kind: "superseded"; drained: boolean };
 
+export type PluginHostChangeStopCheck =
+  | { kind: "ready" }
+  | { kind: "refused"; reason: "self-drain" }
+  | { kind: "superseded" };
+
+export interface PluginHostChangeStopOptions {
+  /**
+   * Runs after admission and drain checks prove this change still owns the
+   * exact host stop, immediately before that stop starts.
+   */
+  onWillStop?: () => void;
+}
+
 const commandAuthorityBrand: unique symbol = Symbol(
   "PluginHostCommandAuthority",
 );
@@ -56,18 +78,20 @@ const changeCompletionBrand: unique symbol = Symbol(
   "PluginHostChangeCompletion",
 );
 
-export interface PluginHostCommandAuthority {
-  readonly [commandAuthorityBrand]: true;
-
-  start<T>(
-    enqueue: () => Promise<PluginHostStartResult<T>>,
-  ): Promise<PluginHostStartOutcome<T>>;
-
+export interface PluginHostChangeScope {
   runChange<T>(
     operation: (
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T>;
+}
+
+export interface PluginHostCommandAuthority extends PluginHostChangeScope {
+  readonly [commandAuthorityBrand]: true;
+
+  start<T>(
+    enqueue: () => Promise<PluginHostStartResult<T>>,
+  ): Promise<PluginHostStartOutcome<T>>;
 }
 
 export interface PluginHostSurfaceLease {
@@ -82,14 +106,9 @@ export interface PluginHostSurfaceLease {
   release(): Promise<void>;
 }
 
-export interface PluginHostSurfaceStartAuthority {
+export interface PluginHostSurfaceStartAuthority
+  extends PluginHostChangeScope {
   readonly [surfaceStartAuthorityBrand]: true;
-
-  runChange<T>(
-    operation: (
-      change: PluginHostChangeAuthority,
-    ) => Promise<PluginHostChangeCompletion<T>>,
-  ): Promise<T>;
 }
 
 export interface PluginHostChangeReservation {
@@ -106,14 +125,21 @@ export interface PluginHostChangeReservation {
 export interface PluginHostChangeAuthority {
   readonly [changeAuthorityBrand]: true;
 
-  stop(): Promise<PluginHostChangeStopOutcome>;
+  checkStop(): PluginHostChangeStopCheck;
+  stop(options?: PluginHostChangeStopOptions): Promise<PluginHostChangeStopOutcome>;
   adopt<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
-  preserve<T>(value: T): PluginHostChangeCompletion<T>;
+  preserve<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
 }
 
 export interface PluginHostChangeCompletion<T> {
   readonly [changeCompletionBrand]: true;
   readonly value: T;
+}
+
+export function isPluginHostCommandAuthority(
+  scope: PluginHostChangeScope,
+): scope is PluginHostCommandAuthority {
+  return commandAuthorityBrand in scope;
 }
 
 interface PluginOwnershipState {
@@ -203,15 +229,16 @@ const beginAuthorityChange = Symbol("beginAuthorityChange");
 const releaseSurface = Symbol("releaseSurface");
 const runReservedChange = Symbol("runReservedChange");
 const cancelReservedChange = Symbol("cancelReservedChange");
+const checkChangeStop = Symbol("checkChangeStop");
 const stopChange = Symbol("stopChange");
 const completeChange = Symbol("completeChange");
 
-abstract class StartChangeAuthority {
+abstract class StartChangeAuthority implements PluginHostChangeScope {
   active = true;
   readonly changePromises: Promise<unknown>[] = [];
 
   constructor(
-    readonly owner: PluginHostOwnership,
+    readonly owner: PluginHostOwnership<OwnedPluginHost>,
     readonly state: PluginOwnershipState,
     readonly inactiveMessage: string,
   ) {}
@@ -245,7 +272,10 @@ class CommandAuthority
   startUsed = false;
   startPromise: Promise<PluginHostStartOutcome<unknown>> | null = null;
 
-  constructor(owner: PluginHostOwnership, state: PluginOwnershipState) {
+  constructor(
+    owner: PluginHostOwnership<OwnedPluginHost>,
+    state: PluginOwnershipState,
+  ) {
     super(owner, state, "Command authority is no longer active.");
     this.epoch = state.epoch;
   }
@@ -276,7 +306,7 @@ class SurfaceStartAuthority
   readonly [surfaceStartAuthorityBrand] = true;
 
   constructor(
-    owner: PluginHostOwnership,
+    owner: PluginHostOwnership<OwnedPluginHost>,
     readonly lease: SurfaceLease,
   ) {
     super(
@@ -291,10 +321,11 @@ class ChangeReservation implements PluginHostChangeReservation {
   readonly [changeReservationBrand] = true;
   readonly released = signal();
   active = true;
+  closed = false;
   cancelPromise: Promise<void> | null = null;
 
   constructor(
-    readonly owner: PluginHostOwnership,
+    readonly owner: PluginHostOwnership<OwnedPluginHost>,
     readonly state: PluginOwnershipState,
   ) {}
 
@@ -304,6 +335,9 @@ class ChangeReservation implements PluginHostChangeReservation {
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
     if (!this.active) {
+      if (this.closed) {
+        return Promise.reject(new PluginHostOwnershipClosedError());
+      }
       return Promise.reject(
         new Error("Change reservation is no longer active."),
       );
@@ -320,6 +354,11 @@ class ChangeReservation implements PluginHostChangeReservation {
     if (!this.active) return;
     this.active = false;
     this.released.resolve();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.invalidate();
   }
 }
 
@@ -338,7 +377,7 @@ class SurfaceLease implements PluginHostSurfaceLease {
   releasePromise: Promise<void> | null = null;
 
   constructor(
-    readonly owner: PluginHostOwnership,
+    readonly owner: PluginHostOwnership<OwnedPluginHost>,
     readonly state: PluginOwnershipState,
   ) {
     this.epoch = state.epoch;
@@ -400,7 +439,7 @@ class ChangeAuthority implements PluginHostChangeAuthority {
   epoch: number;
 
   constructor(
-    readonly owner: PluginHostOwnership,
+    readonly owner: PluginHostOwnership<OwnedPluginHost>,
     readonly state: PluginOwnershipState,
     epoch: number,
     readonly origin: StartChangeAuthority | undefined,
@@ -409,9 +448,13 @@ class ChangeAuthority implements PluginHostChangeAuthority {
     this.epoch = epoch;
   }
 
-  stop(): Promise<PluginHostChangeStopOutcome> {
-    this.stopPromise ??= this.owner[stopChange](this);
+  stop(options?: PluginHostChangeStopOptions): Promise<PluginHostChangeStopOutcome> {
+    this.stopPromise ??= this.owner[stopChange](this, options);
     return this.stopPromise;
+  }
+
+  checkStop(): PluginHostChangeStopCheck {
+    return this.owner[checkChangeStop](this);
   }
 
   adopt<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T> {
@@ -423,8 +466,13 @@ class ChangeAuthority implements PluginHostChangeAuthority {
     );
   }
 
-  preserve<T>(value: T): PluginHostChangeCompletion<T> {
-    return this.owner[completeChange](this, "preserve", value, null);
+  preserve<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T> {
+    return this.owner[completeChange](
+      this,
+      "preserve",
+      result.value,
+      result.kind === "started" ? result.evidence : null,
+    );
   }
 
   invalidate(): void {
@@ -434,8 +482,7 @@ class ChangeAuthority implements PluginHostChangeAuthority {
   }
 }
 
-export class PluginHostOwnership {
-  readonly #host: OwnedPluginHost;
+export class PluginHostOwnership<H extends OwnedPluginHost> {
   readonly #drainTimeoutMs: number;
   readonly #onCleanupError: (pluginId: string, error: unknown) => void;
   readonly #states = new Map<string, PluginOwnershipState>();
@@ -444,12 +491,11 @@ export class PluginHostOwnership {
   #closePromise: Promise<void> | null = null;
 
   constructor(
-    host: OwnedPluginHost,
+    readonly host: H,
     options: PluginHostOwnershipOptions = {},
   ) {
-    this.#host = host;
     this.#drainTimeoutMs =
-      options.drainTimeoutMs ?? COMMAND_CLAIMS_DRAIN_DEADLINE_MS;
+      options.drainTimeoutMs ?? PLUGIN_HOST_DRAIN_DEADLINE_MS;
     this.#onCleanupError = options.onCleanupError ?? (() => undefined);
     if (
       !Number.isFinite(this.#drainTimeoutMs) ||
@@ -499,7 +545,7 @@ export class PluginHostOwnership {
   }
 
   reserveChange(pluginId: string): PluginHostChangeReservation {
-    if (this.#closed) throw new Error("Plugin host ownership is closed");
+    if (this.#closed) throw new PluginHostOwnershipClosedError();
     const state = this.#state(pluginId);
     const reservation = new ChangeReservation(this, state);
     state.pendingChanges.add(reservation);
@@ -511,7 +557,7 @@ export class PluginHostOwnership {
     this.#closed = true;
     const releases: Promise<void>[] = [];
     for (const state of this.#states.values()) {
-      for (const reservation of state.pendingChanges) reservation.invalidate();
+      for (const reservation of state.pendingChanges) reservation.close();
       state.pendingChanges.clear();
       for (const command of state.commands) {
         if (!command.overranDrain) releases.push(command.released.promise);
@@ -560,6 +606,9 @@ export class PluginHostOwnership {
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
+    if (this.#closed) {
+      return Promise.reject(new PluginHostOwnershipClosedError());
+    }
     return this.#beginChange(authority.state, authority, operation);
   }
 
@@ -621,12 +670,20 @@ export class PluginHostOwnership {
     return this.#finishSurfaceRelease(lease);
   }
 
-  [runReservedChange]<T>(
+  async [runReservedChange]<T>(
     reservation: ChangeReservation,
     operation: (
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
+    const stopping = reservation.state.stopInFlight;
+    if (stopping) await stopping;
+    if (this.#closed || reservation.closed) {
+      throw new PluginHostOwnershipClosedError();
+    }
+    if (!reservation.active) {
+      throw new Error("Change reservation is no longer active.");
+    }
     reservation.invalidate();
     reservation.state.pendingChanges.delete(reservation);
     return this.#beginChange(reservation.state, undefined, operation);
@@ -639,13 +696,23 @@ export class PluginHostOwnership {
     return this.#cleanup(this.#stopOpportunity(reservation.state));
   }
 
+  [checkChangeStop](change: ChangeAuthority): PluginHostChangeStopCheck {
+    if (!change.active || this.#closed) return { kind: "superseded" };
+    if (change.origin instanceof CommandAuthority && change.origin.active) {
+      return { kind: "refused", reason: "self-drain" };
+    }
+    return { kind: "ready" };
+  }
+
   async [stopChange](
     change: ChangeAuthority,
+    options?: PluginHostChangeStopOptions,
   ): Promise<PluginHostChangeStopOutcome> {
-    if (!change.active || this.#closed) {
+    const check = this[checkChangeStop](change);
+    if (check.kind === "superseded") {
       return { kind: "superseded", drained: true };
     }
-    if (change.origin instanceof CommandAuthority && change.origin.active) {
+    if (check.kind === "refused") {
       return { kind: "refused", reason: "self-drain" };
     }
 
@@ -676,6 +743,7 @@ export class PluginHostOwnership {
       }
     }
 
+    options?.onWillStop?.();
     const attempt = await this.#runHostStop(change.state, change.epoch);
     if (attempt.kind === "failed") throw attempt.error;
     // This change owns the stop, so its replacement belongs to the new epoch.
@@ -768,21 +836,7 @@ export class PluginHostOwnership {
       if (!(completion instanceof ChangeCompletion) || completion.change !== change) {
         throw new Error("Change completed with another authority's decision.");
       }
-      if (completion.disposition === "adopt") {
-        await this.#adoptChangeCompletion(change, completion.startEvidence);
-      } else if (
-        completion.disposition === "preserve" &&
-        change.preserveOnDemand &&
-        change.active &&
-        !this.#closed &&
-        change.state.epoch === change.epoch
-      ) {
-        const record = this.#host.currentRecord(change.state.pluginId);
-        change.state.onDemand = record
-          ? { epoch: change.state.epoch, record }
-          : null;
-        change.state.adoptedRecord = null;
-      }
+      await this.#settleChangeCompletion(change, completion);
     } catch (error) {
       failed = true;
       operationError = error;
@@ -868,30 +922,46 @@ export class PluginHostOwnership {
     return refusal;
   }
 
-  async #adoptChangeCompletion(
+  async #settleChangeCompletion(
     change: ChangeAuthority,
-    evidence: PluginHostStartEvidence | null,
+    completion: ChangeCompletion<unknown>,
   ): Promise<void> {
     const superseded =
       this.#closed ||
       !change.active ||
       change.state.epoch !== change.epoch;
-    if (evidence !== null) {
+    if (completion.startEvidence !== null) {
       await this.#settleExactStartEvidence(
         change.state,
-        evidence,
+        completion.startEvidence,
         superseded,
         (record) => {
-          change.state.adoptedRecord = record;
-          change.state.onDemand = null;
+          if (
+            completion.disposition === "preserve" &&
+            change.preserveOnDemand
+          ) {
+            change.state.onDemand = { epoch: change.state.epoch, record };
+            change.state.adoptedRecord = null;
+          } else {
+            change.state.adoptedRecord = record;
+            change.state.onDemand = null;
+          }
         },
       );
       return;
     }
     if (superseded) return;
-    change.state.adoptedRecord =
-      this.#host.currentRecord(change.state.pluginId) ?? null;
-    change.state.onDemand = null;
+    if (completion.disposition === "adopt") {
+      change.state.adoptedRecord =
+        this.host.currentRecord(change.state.pluginId) ?? null;
+      change.state.onDemand = null;
+    } else if (change.preserveOnDemand) {
+      const record = this.host.currentRecord(change.state.pluginId);
+      change.state.onDemand = record
+        ? { epoch: change.state.epoch, record }
+        : null;
+      change.state.adoptedRecord = null;
+    }
   }
 
   async #settleExactStartEvidence(
@@ -905,7 +975,7 @@ export class PluginHostOwnership {
       await this.#discardStartEvidence(state.pluginId, evidence.record);
       return;
     }
-    if (this.#host.currentRecord(state.pluginId) !== evidence.record) {
+    if (this.host.currentRecord(state.pluginId) !== evidence.record) {
       throw new Error(
         `Plugin host start evidence does not name the current "${state.pluginId}" record.`,
       );
@@ -932,14 +1002,14 @@ export class PluginHostOwnership {
     pluginId: string,
     record: PluginHostRecordToken,
   ): Promise<void> {
-    if (this.#host.currentRecord(pluginId) !== record) return;
+    if (this.host.currentRecord(pluginId) !== record) return;
     try {
-      await this.#host.stopRecord(pluginId, record);
+      await this.host.stopRecord(pluginId, record);
     } catch (error) {
       this.#onCleanupError(pluginId, error);
       return;
     }
-    if (this.#host.currentRecord(pluginId) === record) {
+    if (this.host.currentRecord(pluginId) === record) {
       this.#onCleanupError(
         pluginId,
         new Error(
@@ -992,7 +1062,7 @@ export class PluginHostOwnership {
     ) {
       return;
     }
-    const currentRecord = this.#host.currentRecord(opportunity.state.pluginId);
+    const currentRecord = this.host.currentRecord(opportunity.state.pluginId);
     if (currentRecord !== opportunity.record) {
       opportunity.state.epoch += 1;
       opportunity.state.onDemand = null;
@@ -1040,11 +1110,11 @@ export class PluginHostOwnership {
     }
     let stopError: unknown;
     try {
-      await this.#host.stop(state.pluginId);
+      await this.host.stop(state.pluginId);
     } catch (error) {
       stopError = error;
     }
-    if (this.#host.currentRecord(state.pluginId) !== undefined) {
+    if (this.host.currentRecord(state.pluginId) !== undefined) {
       return {
         kind: "failed",
         error:
@@ -1072,8 +1142,8 @@ export class PluginHostOwnership {
         })),
         this.#drainTimeoutMs,
       );
-      this.#host.bumpGeneration();
-      await this.#host.stopAll();
+      this.host.bumpGeneration();
+      await this.host.stopAll();
     } finally {
       this.#reset();
     }

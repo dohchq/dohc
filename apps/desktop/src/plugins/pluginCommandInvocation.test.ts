@@ -1,14 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   invokeRegisteredPluginCommand,
-  PluginClaimsDrainingError,
+  PluginHostBusyError,
 } from "./pluginCommandInvocation";
+import type {
+  PluginHostCommandAuthority,
+  PluginHostCommandRunOutcome,
+} from "./pluginHostOwnership";
 
 const input = {
   workspaceId: "ws-plugins",
   pluginId: "hello-plugin",
   commandId: "hello.write",
 };
+
+const commandAuthority = {} as PluginHostCommandAuthority;
+const runCommand = async <T>(
+  operation: (command: PluginHostCommandAuthority) => Promise<T>,
+): Promise<PluginHostCommandRunOutcome<T>> => ({
+  kind: "completed",
+  value: await operation(commandAuthority),
+});
 
 describe("invokeRegisteredPluginCommand", () => {
   it("invokes a declared, registered plugin command", async () => {
@@ -27,11 +39,12 @@ describe("invokeRegisteredPluginCommand", () => {
             commands: [{ id: "hello.write", title: "Write hello note" }],
           },
         },
+        runCommand,
         ensureStarted,
         ensureCurrent: () => {},
       }),
     ).resolves.toEqual({ status: "ok" });
-    expect(ensureStarted).toHaveBeenCalledWith();
+    expect(ensureStarted).toHaveBeenCalledWith(commandAuthority);
     expect(invokeCommand).toHaveBeenCalledWith("hello-plugin", "hello.write");
   });
 
@@ -50,6 +63,7 @@ describe("invokeRegisteredPluginCommand", () => {
             commands: [{ id: "hello.write", title: "Write hello note" }],
           },
         },
+        runCommand,
         ensureStarted,
         ensureCurrent: () => {},
       }),
@@ -75,6 +89,7 @@ describe("invokeRegisteredPluginCommand", () => {
             commands: [{ id: "hello.write", title: "Write hello note" }],
           },
         },
+        runCommand,
         ensureStarted,
         ensureCurrent: () => {},
       }),
@@ -85,12 +100,57 @@ describe("invokeRegisteredPluginCommand", () => {
     expect(invokeCommand).not.toHaveBeenCalled();
   });
 
+  it("reports a command refused by an active host change as plugin-rebuilding", async () => {
+    const ensureStarted = vi.fn();
+
+    await expect(
+      invokeRegisteredPluginCommand({
+        input,
+        plugin: {
+          manifest: {
+            commands: [{ id: "hello.write", title: "Write hello note" }],
+          },
+        },
+        runCommand: async () => ({
+          kind: "refused",
+          reason: "change-in-progress",
+        }),
+        ensureStarted,
+        ensureCurrent: () => {},
+      }),
+    ).resolves.toEqual({
+      status: "plugin-rebuilding",
+      message:
+        'dohc is still working on plugin "hello-plugin". Try the command again in a moment.',
+    });
+    expect(ensureStarted).not.toHaveBeenCalled();
+  });
+
+  it("reports a command refused by closed ownership as command-failed", async () => {
+    await expect(
+      invokeRegisteredPluginCommand({
+        input,
+        plugin: {
+          manifest: {
+            commands: [{ id: "hello.write", title: "Write hello note" }],
+          },
+        },
+        runCommand: async () => ({ kind: "refused", reason: "closed" }),
+        ensureStarted: vi.fn(),
+        ensureCurrent: () => {},
+      }),
+    ).resolves.toEqual({
+      status: "command-failed",
+      message:
+        'dohc stopped plugin "hello-plugin" before it could run the command. Try again.',
+    });
+  });
+
   it("reports the retryable plugin-rebuilding status, not a generic failure, when ensureStarted rechecks the barrier and finds it raised (round-17 finding 2)", async () => {
     const ensureStarted = vi.fn(async () => {
-      // What ensurePluginStarted throws once it rechecks the barrier right
-      // at its own pipeline-enqueue point and finds a stopping action
-      // raised it in the gap this call's own lifecycle-lock wait opened.
-      throw new PluginClaimsDrainingError("hello-plugin");
+      // Pipeline ensureStarted maps a command's self-drain refusal to this
+      // typed retryable error.
+      throw new PluginHostBusyError("hello-plugin");
     });
 
     await expect(
@@ -101,6 +161,7 @@ describe("invokeRegisteredPluginCommand", () => {
             commands: [{ id: "hello.write", title: "Write hello note" }],
           },
         },
+        runCommand,
         ensureStarted,
         ensureCurrent: () => {},
       }),
@@ -133,6 +194,7 @@ describe("invokeRegisteredPluginCommand", () => {
             commands: [{ id: "hello.write", title: "Write hello note" }],
           },
         },
+        runCommand,
         ensureStarted: async () => host,
         ensureCurrent,
       }),
@@ -160,6 +222,7 @@ describe("invokeRegisteredPluginCommand", () => {
             commands: [{ id: "hello.write", title: "Write hello note" }],
           },
         },
+        runCommand,
         ensureStarted,
         ensureCurrent: () => {},
       }),
@@ -187,6 +250,7 @@ describe("invokeRegisteredPluginCommand", () => {
             commands: [{ id: "hello.write", title: "Write hello note" }],
           },
         },
+        runCommand,
         ensureStarted,
         ensureCurrent: () => {},
       }),

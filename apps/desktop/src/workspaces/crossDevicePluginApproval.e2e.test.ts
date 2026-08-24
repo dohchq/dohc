@@ -20,6 +20,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { PluginHost, type PluginHostOptions } from "../plugins/PluginHost";
+import { PluginHostOwnership } from "../plugins/pluginHostOwnership";
 import { PluginPipeline } from "../plugins/PluginPipeline";
 import { resolvePluginEsbuildBinary } from "../plugins/pluginBuildRunner";
 import {
@@ -315,7 +316,7 @@ async function openDevice(
   pipeline = new PluginPipeline({
     workspaceRoot,
     stateDir,
-    pluginHost: host,
+    hostOwnership: new PluginHostOwnership(host),
     resourcesBasePath,
     pnpmRunnerEntry,
     operations: {

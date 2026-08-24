@@ -49,6 +49,14 @@ export interface PluginHostStartEvidence {
   readonly record: PluginHostRecordToken;
 }
 
+export interface PluginHostPanelDeclaration {
+  readonly id: string;
+  readonly title: string;
+  readonly placement: "editor" | "view";
+  readonly entry: string;
+  readonly icon?: string;
+}
+
 class HostRecordToken implements PluginHostRecordToken {
   readonly [pluginHostRecordBrand] = true;
 }
@@ -259,9 +267,10 @@ export class PluginHost {
     directoryName: string,
     manifest: DohcPluginManifest,
   ): Promise<PluginHostStartEvidence> {
+    const admittedManifest = structuredClone(manifest);
     // The manifest name is the plugin's identity — one identity, so state
     // and attribution can never drift from what the manifest declares.
-    const pluginId = manifest.name;
+    const pluginId = admittedManifest.name;
     if (this.plugins.has(pluginId) || this.pendingStarts.has(pluginId)) {
       throw new Error(`Plugin "${pluginId}" is already running.`);
     }
@@ -293,7 +302,9 @@ export class PluginHost {
         pluginId,
         pluginRoot,
         directoryName,
-        manifest,
+        // The host record owns the declaration it admitted. Discovery and
+        // pipeline state can move on while this exact record keeps running.
+        manifest: admittedManifest,
         status: "starting",
         stderr: [],
       };
@@ -594,6 +605,38 @@ export class PluginHost {
 
   getSpawnId(pluginId: string): string | undefined {
     return this.plugins.get(pluginId)?.current?.spawnId;
+  }
+
+  readyPanelsForSpawn(
+    pluginId: string,
+    expectedSpawnId: string,
+  ): {
+    readonly record: PluginHostRecordToken;
+    readonly panels: readonly PluginHostPanelDeclaration[];
+  } | undefined {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    if (
+      !record ||
+      !spawn ||
+      record.status !== "ready" ||
+      spawn.spawnId !== expectedSpawnId ||
+      !this.isLive(record, spawn)
+    ) {
+      return undefined;
+    }
+    return {
+      record: record.ownershipToken,
+      panels: (record.manifest.panels ?? []).map(
+        ({ id, title, placement, entry, icon }) => ({
+          id,
+          title,
+          placement,
+          entry,
+          ...(icon === undefined ? {} : { icon }),
+        }),
+      ),
+    };
   }
 
   /**

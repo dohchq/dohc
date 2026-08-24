@@ -2,16 +2,9 @@ import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { resolveWorkspaceFile } from "../workspaces/workspaceAssets";
-import {
-  CLAIMS_DRAINING_ERROR_CODE,
-  PluginClaimsDrainingError,
-} from "./pluginCommandInvocation";
 import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
-import type {
-  PluginPipelineEnsureStartedResult,
-  PluginPipelineStatusEvent,
-} from "./PluginPipeline";
+import type { PluginPipelineStatusEvent } from "./PluginPipeline";
 
 export interface PluginPanelRegistration {
   pluginRoot: string;
@@ -90,120 +83,12 @@ export function rememberPluginRegistration(
   return remembered;
 }
 
-/** The key a plugin's host lifetime is tracked under, per workspace. */
-export function pluginLifecycleKey(
-  workspaceId: string,
-  pluginId: string,
-): string {
-  return `${workspaceId}\0${pluginId}`;
-}
-
-/** What `PluginPipeline.ensureStarted` reports back to a panel start. */
-export type PluginPanelHostStartResult =
-  | { ok: true; startedHost: boolean }
-  | {
-    ok: false;
-    error: {
-      message: string;
-      /**
-       * The one pipeline failure a command's own claim can cause (see
-       * PluginPipeline's hasOutstandingCommandClaim, #779 round 25
-       * finding 3). Never reached by a panel or web app, which never
-       * claims. Typed to the one literal it can ever be, not open
-       * `string`, so a producer misspelling of CLAIMS_DRAINING_ERROR_CODE
-       * fails the type system instead of silently degrading this
-       * retryable refusal to a generic error (#779 round 27).
-       */
-      code?: typeof CLAIMS_DRAINING_ERROR_CODE;
-    };
-  };
-
 /**
- * Narrows a PluginPipeline action result's own open-ended error code down
- * to the one literal startPluginForPanel's own ensureStarted result
- * recognizes, dropping anything else — the same as no code at all.
- */
-export function toPluginPanelHostStartResult(
-  result: PluginPipelineEnsureStartedResult,
-): PluginPanelHostStartResult {
-  if (result.ok) return result;
-  return {
-    ok: false,
-    error: {
-      message: result.error.message,
-      code: result.error.code === CLAIMS_DRAINING_ERROR_CODE
-        ? CLAIMS_DRAINING_ERROR_CODE
-        : undefined,
-    },
-  };
-}
-
-/**
- * Starts a plugin because a caller needs it. Panel and web-app callers record
- * a claim on the host's lifetime. Other callers can opt out when the host
- * should live for the workspace instead.
- *
- * Returning on a spawned-but-still-activating host is what made a cold open
- * fail: the surface's next call reached the plugin before `activate()`
- * resolved and was refused as "still starting" (#798). So both paths end on
- * the host's activation — the one for a host something else already started,
- * and the one this call started itself.
- *
- * The claim is made only when this start performed the zero-to-running
- * transition, which the pipeline reports from inside its own per-plugin
- * queue: a plugin the workspace enabled keeps running with no panel open, so
- * a panel that merely rode along must not stop it on close. A start that
- * ran the host owns it even if that host then fails to activate — nothing
- * else is going to stop it.
- */
-export async function startPluginForPanel(input: {
-  panelStartedHosts: Set<string>;
-  workspaceId: string;
-  pluginId: string;
-  claim?: boolean;
-  /**
-   * Called once, only when this exact call performed the zero-to-running
-   * transition under claim: false — the on-demand-command counterpart to
-   * panelStartedHosts gaining an entry, for a caller that opted out of
-   * panel ownership but still needs to know it alone is why the host is
-   * running (round-9 finding 1).
-   */
-  onColdStartWithoutClaim?: () => void;
-  /** The running host's activation, or undefined when no host is running. */
-  hostActivation: () => Promise<void> | undefined;
-  ensureStarted: () => Promise<PluginPanelHostStartResult>;
-}): Promise<void> {
-  const running = input.hostActivation();
-  if (running) return running;
-  const result = await input.ensureStarted();
-  if (!result.ok) {
-    // See PluginPanelHostStartResult's own code field above (#779 round
-    // 25 finding 3).
-    if (result.error.code === CLAIMS_DRAINING_ERROR_CODE) {
-      throw new PluginClaimsDrainingError(input.pluginId);
-    }
-    throw new Error(result.error.message);
-  }
-  if (result.startedHost) {
-    if (input.claim !== false) {
-      input.panelStartedHosts.add(
-        pluginLifecycleKey(input.workspaceId, input.pluginId),
-      );
-    } else {
-      input.onColdStartWithoutClaim?.();
-    }
-  }
-  await input.hostActivation();
-}
-
-/**
- * Forgets what the main process remembers about a plugin that is gone: the
- * manifest its panels are served from, and any panel claim on its host. A
- * refused uninstall changes nothing, so the plugin keeps both.
+ * Forgets the registration the main process remembers for a removed plugin.
+ * A refused uninstall changes nothing, so the plugin keeps its registration.
  */
 export function forgetUninstalledPlugin(input: {
   registrations: Map<string, Map<string, RegisteredPlugin>>;
-  panelStartedHosts: Set<string>;
   workspaceId: string;
   pluginId: string;
   directoryName: string;
@@ -212,19 +97,15 @@ export function forgetUninstalledPlugin(input: {
   if (!input.uninstalled) return;
   const forWorkspace = input.registrations.get(input.workspaceId);
   const registered = forWorkspace?.get(input.pluginId);
-  // The standing trace-to-directory rule: this id's registration and
-  // started-host claim are only ever the departed row's own to forget
-  // when they actually trace to the SAME directory. Two rows can share an
+  // The standing trace-to-directory rule: this registration is only the
+  // departed row's to forget when both name the same directory. Two rows can share an
   // id (a broken manifest's directory-derived fallback colliding with
   // some other, unrelated plugin's real id) — an id-losing loser's own
   // removal must never reach into a still-installed winner's live
-  // registration and host claim under that shared id. Nothing registered
-  // at all is trivially nothing to forget either way.
+  // registration under that shared id. Nothing registered at all is
+  // trivially nothing to forget either way.
   if (!registered || registered.directoryName !== input.directoryName) return;
   forWorkspace?.delete(input.pluginId);
-  input.panelStartedHosts.delete(
-    pluginLifecycleKey(input.workspaceId, input.pluginId),
-  );
 }
 
 /**
@@ -237,14 +118,12 @@ export function forgetUninstalledPlugin(input: {
  */
 export function forgetRemovedPlugin(input: {
   registrations: Map<string, Map<string, RegisteredPlugin>>;
-  panelStartedHosts: Set<string>;
   workspaceId: string;
   event: PluginPipelineStatusEvent;
 }): void {
   if (input.event.kind !== "removed" && input.event.kind !== "renamed") return;
   forgetUninstalledPlugin({
     registrations: input.registrations,
-    panelStartedHosts: input.panelStartedHosts,
     workspaceId: input.workspaceId,
     pluginId: input.event.pluginId,
     directoryName: input.event.kind === "removed"

@@ -36,6 +36,7 @@ import {
   type DoorWrittenDelta,
   overlayDoorWrittenSourceDeltas,
   PluginPipeline,
+  type PluginPipelineRuntimeStopHooks,
   type PluginPipelineStatusEvent,
 } from "./PluginPipeline";
 import {
@@ -51,21 +52,23 @@ import {
   workspaceStateKey,
 } from "./pluginLocalState";
 import {
-  pluginLifecycleKey,
-  startPluginForPanel,
-  toPluginPanelHostStartResult,
-} from "./pluginPanelRegistration";
-import {
   OfferedPluginAddError,
   addOfferedPlugin,
   listOfferedPlugins,
   removeAddedOfferedPlugin,
 } from "./pluginOffers";
 import { readPluginSettingsFile } from "./pluginSettingsFile";
-import { invokeRegisteredPluginCommand } from "./pluginCommandInvocation";
-import { PluginCommandHostClaims } from "./pluginCommandHostClaims";
+import {
+  HOST_CHANGE_REFUSED_ERROR_CODE,
+  invokeRegisteredPluginCommand,
+} from "./pluginCommandInvocation";
+import { PluginHostOwnership } from "./pluginHostOwnership";
 import type { PluginSettingDeclaration } from "./pluginManifestSchema";
-import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
+import {
+  hashPluginSourceFiles,
+  pluginStateRoot,
+  snapshotPluginSource,
+} from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
@@ -76,6 +79,30 @@ interface Deferred {
   resolve(): void;
 }
 
+interface TestUninstallQueueClaim {
+  readonly ready: Promise<void>;
+  decide(decision: "stop" | "cancel"): void;
+  release(): void;
+  readonly stopOutcome: Promise<
+    | { ok: true }
+    | { ok: false; error: unknown }
+  >;
+  readonly outcome: Promise<
+    | { ok: true }
+    | { ok: false; error: unknown }
+  >;
+}
+
+interface PluginPipelineQueueInternals {
+  enqueueActionValue<T>(pluginId: string, run: () => Promise<T>): Promise<T>;
+  claimUninstallCleanupQueues(
+    cleanupIds: ReadonlyArray<string>,
+    primaryPluginId: string,
+    reservations: ReadonlyMap<string, unknown>,
+    hooks: PluginPipelineRuntimeStopHooks,
+  ): TestUninstallQueueClaim[];
+}
+
 type DoorWrittenDeltas = Map<
   string,
   Map<string, DoorWrittenDelta>
@@ -84,6 +111,16 @@ type DoorWrittenDeltas = Map<
 function doorWrittenDeltasOf(pipeline: PluginPipeline): DoorWrittenDeltas {
   return (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
     .doorWrittenDeltas;
+}
+
+function transientStateOf(pipeline: PluginPipeline): {
+  statuses: Map<string, unknown>;
+  lastApprovedAttemptHash: Map<string, string>;
+} {
+  return pipeline as unknown as {
+    statuses: Map<string, unknown>;
+    lastApprovedAttemptHash: Map<string, string>;
+  };
 }
 
 const roots: string[] = [];
@@ -337,6 +374,73 @@ async function waitFor(
   }
 }
 
+async function settleWithin<T>(
+  promise: Promise<T>,
+  message: string,
+  timeoutMs = 10_000,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function ensureFromCommand(
+  pipeline: PluginPipeline,
+  pluginId: string,
+): Promise<{
+  result: Awaited<ReturnType<PluginPipeline["ensureStarted"]>>["value"];
+  exact: Awaited<ReturnType<PluginPipeline["ensureStarted"]>>;
+}> {
+  let exact: Awaited<ReturnType<PluginPipeline["ensureStarted"]>> | undefined;
+  const command = await pipeline.hostOwnership.runCommand(
+    pluginId,
+    async (authority) => authority.start(async () => {
+      exact = await pipeline.ensureStarted(pluginId, authority);
+      return exact;
+    }),
+  );
+  if (command.kind !== "completed" || command.value.kind !== "admitted") {
+    throw new Error(`Plugin "${pluginId}" start was refused.`);
+  }
+  if (!exact) throw new Error(`Plugin "${pluginId}" returned no start result.`);
+  return { result: command.value.value, exact };
+}
+
+async function ensureFromSurface(
+  pipeline: PluginPipeline,
+  pluginId: string,
+): Promise<{
+  result: Awaited<ReturnType<PluginPipeline["ensureStarted"]>>["value"];
+  exact: Awaited<ReturnType<PluginPipeline["ensureStarted"]>>;
+  release: () => Promise<void>;
+}> {
+  const lease = pipeline.hostOwnership.acquireSurface(pluginId);
+  if ("kind" in lease) throw new Error(`Plugin "${pluginId}" surface was refused.`);
+  let exact: Awaited<ReturnType<PluginPipeline["ensureStarted"]>> | undefined;
+  const started = await lease.start(async (authority) => {
+    exact = await pipeline.ensureStarted(pluginId, authority);
+    return exact;
+  });
+  if (started.kind !== "admitted") {
+    await lease.release();
+    throw new Error(`Plugin "${pluginId}" start was refused.`);
+  }
+  if (!exact) {
+    await lease.release();
+    throw new Error(`Plugin "${pluginId}" returned no start result.`);
+  }
+  return { result: started.value, exact, release: () => lease.release() };
+}
+
 /**
  * Writes authored text and reports it door-written, exactly like main.ts's
  * writeAuthoredText -> handleDoorWrittenSourceChange call: the path and the
@@ -396,6 +500,57 @@ function fakeSpawnTransport(
     notify: () => undefined,
     dispose: async () => undefined,
   }));
+}
+
+async function createAliasUninstallFixture(options: {
+  drainTimeoutMs?: number;
+  onRuntimeStopped?: (pluginId: string) => void | Promise<void>;
+} = {}): Promise<{
+  fixture: Awaited<ReturnType<typeof createNamedPluginWorkspace>>;
+  host: PluginHost;
+  hostOwnership: PluginHostOwnership<PluginHost>;
+  pipeline: PluginPipeline;
+}> {
+  const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
+  await mutatePluginRecord(
+    fixture.stateDir,
+    fixture.workspaceRoot,
+    "original-id",
+    () => ({ directoryName: "shared-dir" }),
+  );
+  await mutatePluginRecord(
+    fixture.stateDir,
+    fixture.workspaceRoot,
+    "runtime-id",
+    () => ({ directoryName: "shared-dir" }),
+  );
+  let pipeline!: PluginPipeline;
+  const host = new PluginHost({
+    stateDir: fixture.stateDir,
+    workspaceRoot: fixture.workspaceRoot,
+    spawnTransport: fakeSpawnTransport(),
+    routeSdkRequest: async () => ({}),
+    onStatusChange: (pluginId, status) => {
+      pipeline.noteRuntimeStatus(pluginId, status);
+    },
+  });
+  const hostOwnership = new PluginHostOwnership(host, {
+    drainTimeoutMs: options.drainTimeoutMs,
+  });
+  pipeline = new PluginPipeline({
+    workspaceRoot: fixture.workspaceRoot,
+    stateDir: fixture.stateDir,
+    hostOwnership,
+    resourcesBasePath,
+    pnpmRunnerEntry,
+    onRuntimeStopped: options.onRuntimeStopped,
+    operations: {
+      install: (input) =>
+        installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+    },
+  });
+  await pipeline.start();
+  return { fixture, host, hostOwnership, pipeline };
 }
 
 beforeAll(stagePluginTools);
@@ -543,10 +698,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         pipeline.noteRuntimeStatus(pluginId, status);
       },
     });
+    const hostOwnership = new PluginHostOwnership(host);
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership,
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -611,10 +767,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         pipeline.noteRuntimeStatus(pluginId, status);
       },
     });
+    const hostOwnership = new PluginHostOwnership(host);
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership,
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -694,7 +851,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -830,7 +987,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -931,7 +1088,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -1047,13 +1204,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     );
 
     let pipeline: PluginPipeline;
-    // Round 21 finding 2: uninstall() re-verifies immediately before
-    // stopping the process AND immediately before the actual delete, each
-    // through the same operations.uninstallPreflight() this records here —
-    // every stateRoot it names must apply the same trace-to-directory rule
-    // the initial uninstallPreflight() action already does, not only the
-    // first check.
+    // The dialog gathers the destructive inventory once. Execution then
+    // re-resolves the same identity twice and probes only the source hash.
     const preflightStateRoots: (string | null)[] = [];
+    const revalidatedSourceRoots: string[] = [];
     // #779-offers round 24 finding 4: the "removed" event this uninstall
     // emits must name the row that actually left — never the id alone,
     // which the still-installed survivor shares.
@@ -1072,7 +1226,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot,
         stateDir,
-        pluginHost: newHost(),
+        hostOwnership: new PluginHostOwnership(newHost()),
         resourcesBasePath,
         pnpmRunnerEntry,
         onStatusChange: (event) => events.push(event),
@@ -1082,6 +1236,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           uninstallPreflight: async (input) => {
             preflightStateRoots.push(input.stateRoot);
             return pluginUninstallPreflight(input);
+          },
+          hashSource: async (rootPath) => {
+            revalidatedSourceRoots.push(rootPath);
+            return hashPluginSourceFiles(rootPath);
           },
         },
       });
@@ -1170,14 +1328,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         directoryName: "target-dir",
       });
 
-      // Round 21 finding 2: uninstall()'s own two internal rechecks —
-      // immediately before stopping the process, and immediately before
-      // the actual delete — must apply the same trace-to-directory rule
-      // as the initial preflight above, not fall back to naming the
-      // survivor's real state directory unconditionally. Three total
-      // calls: the uninstallPreflight() action itself, then the two
-      // rechecks inside uninstall().
-      expect(preflightStateRoots).toEqual([null, null, null]);
+      // Inventory and warning traversal belong only to the dialog. The two
+      // execution checks fingerprint the exact source root without walking
+      // the unrelated survivor's state.
+      expect(preflightStateRoots).toEqual([null]);
+      expect(revalidatedSourceRoots).toEqual([invalidRoot, invalidRoot]);
 
       // The invalid directory is gone...
       await expect(lstat(invalidRoot)).rejects.toMatchObject({ code: "ENOENT" });
@@ -1279,7 +1434,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot,
         stateDir,
-        pluginHost: newHost(),
+        hostOwnership: new PluginHostOwnership(newHost()),
         resourcesBasePath,
         pnpmRunnerEntry,
         operations: {
@@ -1392,7 +1547,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -1491,7 +1646,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -1579,16 +1734,6 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   // sit. The cleanupIds Set already dedupes any overlap, so including
   // candidate.id unconditionally is never redundant work, only ever a
   // correctness gap when omitted.
-
-  // Round 14 finding 6: additionalCleanupIds used to exclude candidate.id
-  // from its own scan — meant to avoid double-adding it when it equals
-  // pluginId, but pluginId and candidate.id can genuinely differ (a broken
-  // manifest's fallback id vs. the ORIGINAL id its record is filed under,
-  // #779 round 9 B3), and a SEPARATE, real record filed directly under
-  // candidate.id's own key was silently skipped either way it happened to
-  // sit. The cleanupIds Set already dedupes any overlap, so including
-  // candidate.id unconditionally is never redundant work, only ever a
-  // correctness gap when omitted.
   it("cleans up a record filed under candidate.id's own key, distinct from pluginId", async () => {
     const targetRoot = await mkdtemp(join(tmpdir(), "dohc-plugin-candidate-id-edge-"));
     roots.push(targetRoot);
@@ -1625,6 +1770,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     await writeFile(join(candidateIdStateRoot, "session.json"), "{}");
 
     let pipeline: PluginPipeline;
+    const stoppedRuntimeIds: string[] = [];
     const host = new PluginHost({
       stateDir,
       workspaceRoot,
@@ -1634,12 +1780,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         pipeline.noteRuntimeStatus(pluginId, status);
       },
     });
+    const hostOwnership = new PluginHostOwnership(host);
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership,
       resourcesBasePath,
       pnpmRunnerEntry,
+      onRuntimeStopped: (pluginId) => {
+        stoppedRuntimeIds.push(pluginId);
+      },
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -1648,13 +1798,44 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     try {
       await pipeline.start();
+      const transient = transientStateOf(pipeline);
+      const trackedStatus = pipeline.list().find((row) => row.directoryName === "mixed-dir");
+      expect(trackedStatus).toBeDefined();
+      transient.statuses.set("original-id", trackedStatus!);
+      transient.statuses.set("mixed-dir", trackedStatus!);
+      doorWrittenDeltasOf(pipeline).set("original-id", new Map());
+      doorWrittenDeltasOf(pipeline).set("mixed-dir", new Map());
+      transient.lastApprovedAttemptHash.set("original-id", "a".repeat(64));
+      transient.lastApprovedAttemptHash.set("mixed-dir", "b".repeat(64));
       // "original-id" is a valid pair for "mixed-dir": its own record
       // positively names this directory (#779 round 9 B3's own preserved
       // case, restated in round 14 finding 5's mismatch gate).
       const preflight = await pipeline.uninstallPreflight("original-id", "mixed-dir");
       if (!preflight.ok) throw new Error(preflight.error.message);
-      const removed = await pipeline.uninstall("original-id", "mixed-dir", preflight.confirmationToken);
+      const reserveChange = vi.spyOn(hostOwnership, "reserveChange");
+      const revokedRuntimeIds: string[] = [];
+      const removing = pipeline.uninstall(
+        "original-id",
+        "mixed-dir",
+        preflight.confirmationToken,
+        {
+          onWillStopRuntime: (pluginId) => revokedRuntimeIds.push(pluginId),
+        },
+      );
+      expect(reserveChange.mock.calls.map(([pluginId]) => pluginId)).toEqual([
+        "original-id",
+        "mixed-dir",
+      ]);
+      const removed = await removing;
       expect(removed.ok).toBe(true);
+      expect(revokedRuntimeIds.toSorted()).toEqual([
+        "mixed-dir",
+        "original-id",
+      ]);
+      expect(stoppedRuntimeIds.toSorted()).toEqual([
+        "mixed-dir",
+        "original-id",
+      ]);
 
       await expect(lstat(pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
       // Both identities' state are gone — not only pluginId's own.
@@ -1664,8 +1845,643 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!state.ok) throw new Error(state.warning);
       expect(state.state.plugins["original-id"]).toBeUndefined();
       expect(state.state.plugins["mixed-dir"]).toBeUndefined();
+      expect(transient.statuses.has("original-id")).toBe(false);
+      expect(transient.statuses.has("mixed-dir")).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has("original-id")).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has("mixed-dir")).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has("original-id")).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has("mixed-dir")).toBe(false);
     } finally {
       await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("rejects a removed alias's confirmation after the same plugin is recreated", async () => {
+    const setup = await createAliasUninstallFixture();
+    const sourcePaths = [
+      join(setup.fixture.pluginRoot, "dohc-plugin.json"),
+      join(setup.fixture.pluginRoot, "package.json"),
+      join(setup.fixture.pluginRoot, "pnpm-lock.yaml"),
+      setup.fixture.entryPath,
+    ];
+    const source = await Promise.all(sourcePaths.map((path) => readFile(path)));
+    try {
+      const initialInstall = await setup.pipeline.install("runtime-id");
+      if (!initialInstall.ok) throw new Error(initialInstall.error.message);
+      await waitFor(
+        () => setup.pipeline.list().some(
+          (row) => row.directoryName === "shared-dir" && row.status === "ready",
+        ),
+        "The initial plugin did not reach ready.",
+      );
+      const installedState = await readPluginLocalState(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+      );
+      if (!installedState.ok) throw new Error(installedState.warning);
+      const originalRecord = installedState.state.plugins["original-id"];
+      const aliasRecord = installedState.state.plugins["runtime-id"];
+      if (!originalRecord || !aliasRecord) {
+        throw new Error("The alias uninstall fixture has incomplete records.");
+      }
+      const staleAlias = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!staleAlias.ok) throw new Error(staleAlias.error.message);
+      const primary = await setup.pipeline.uninstallPreflight(
+        "runtime-id",
+        "shared-dir",
+      );
+      if (!primary.ok) throw new Error(primary.error.message);
+
+      const removed = await setup.pipeline.uninstall(
+        "runtime-id",
+        "shared-dir",
+        primary.confirmationToken,
+      );
+      expect(removed.ok).toBe(true);
+
+      await mkdir(dirname(setup.fixture.entryPath), { recursive: true });
+      await Promise.all(
+        sourcePaths.map((path, index) => writeFile(path, source[index]!)),
+      );
+      await setup.pipeline.handleWatcherEvents([
+        { operation: "update", path: "plugins" },
+      ]);
+      const reinstalled = await setup.pipeline.install("runtime-id");
+      if (!reinstalled.ok) throw new Error(reinstalled.error.message);
+      await waitFor(
+        () => setup.pipeline.list().some(
+          (row) => row.directoryName === "shared-dir" && row.status === "ready",
+        ),
+        "The recreated plugin did not reach ready.",
+      );
+      await mutatePluginRecord(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+        "original-id",
+        () => originalRecord,
+      );
+      await mutatePluginRecord(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+        "runtime-id",
+        () => aliasRecord,
+      );
+      await setup.pipeline.handleWatcherEvents([
+        { operation: "update", path: "plugins" },
+      ]);
+
+      const staleRemoval = await setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        staleAlias.confirmationToken,
+      );
+      await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+      expect(staleRemoval).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-required" },
+      });
+      await expect(
+        Promise.all(sourcePaths.map((path) => readFile(path))),
+      ).resolves.toEqual(source);
+      const preservedState = await readPluginLocalState(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+      );
+      if (!preservedState.ok) throw new Error(preservedState.warning);
+      expect(preservedState.state.plugins["original-id"]).toEqual(originalRecord);
+      expect(preservedState.state.plugins["runtime-id"]).toEqual(aliasRecord);
+      expect(setup.pipeline.list()).toContainEqual(
+        expect.objectContaining({
+          id: "runtime-id",
+          directoryName: "shared-dir",
+          status: "ready",
+        }),
+      );
+    } finally {
+      await setup.pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("rejects an uninstall when earlier alias work changes the confirmed target", async () => {
+    const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
+    await mutatePluginRecord(
+      fixture.stateDir,
+      fixture.workspaceRoot,
+      "original-id",
+      () => ({ directoryName: "shared-dir" }),
+    );
+    await mutatePluginRecord(
+      fixture.stateDir,
+      fixture.workspaceRoot,
+      "runtime-id",
+      () => ({ directoryName: "shared-dir" }),
+    );
+    const buildEntered = deferred();
+    const releaseBuild = deferred();
+    const revalidationEntered = deferred();
+    const releaseRevalidation = deferred();
+    let hashSourceCalls = 0;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    const hostOwnership = new PluginHostOwnership(host);
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        hashSource: async (rootPath) => {
+          hashSourceCalls += 1;
+          if (hashSourceCalls === 1) {
+            revalidationEntered.resolve();
+            await releaseRevalidation.promise;
+          }
+          return hashPluginSourceFiles(rootPath);
+        },
+        build: async (input) => {
+          buildEntered.resolve();
+          await releaseBuild.promise;
+          return buildPluginBundle(input);
+        },
+      },
+    });
+
+    let lease: Exclude<
+      ReturnType<PluginHostOwnership<PluginHost>["acquireSurface"]>,
+      { kind: "refused" }
+    > | undefined;
+    let starting: Promise<unknown> | undefined;
+    try {
+      await pipeline.start();
+      const preflight = await pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+
+      const acquired = hostOwnership.acquireSurface("runtime-id");
+      if ("kind" in acquired) throw new Error("The alias surface was refused.");
+      lease = acquired;
+      starting = lease.start(async (authority) =>
+        pipeline.ensureStarted("runtime-id", authority)
+      );
+      await buildEntered.promise;
+
+      const pipelineInternals = pipeline as unknown as {
+        enqueueActionValue: <T>(
+          pluginId: string,
+          run: () => Promise<T>,
+        ) => Promise<T>;
+      };
+      const enqueueActionValue = vi.spyOn(
+        pipelineInternals,
+        "enqueueActionValue",
+      );
+      const removing = pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+      );
+
+      // The claim is synchronous with uninstall admission. It sits behind
+      // the build already in runtime-id's queue and ahead of anything that
+      // can arrive after the irreversible action was accepted. Exact target
+      // validation waits for that earlier build to settle, then rejects its
+      // durable-record drift before stopping either identity.
+      expect(enqueueActionValue.mock.calls.map(([pluginId]) => pluginId))
+        .toContain("runtime-id");
+
+      releaseBuild.resolve();
+      await starting;
+      await revalidationEntered.promise;
+
+      let lateAliasJobEntered = false;
+      const lateAliasJob = pipelineInternals.enqueueActionValue(
+        "runtime-id",
+        async () => {
+          lateAliasJobEntered = true;
+        },
+      );
+      expect(lateAliasJobEntered).toBe(false);
+
+      releaseRevalidation.resolve();
+      const removed = await removing;
+      await lateAliasJob;
+
+      expect(removed).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-stale" },
+      });
+      expect(lateAliasJobEntered).toBe(true);
+      expect(host.currentRecord("runtime-id")).toBeDefined();
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+      await expect(lstat(join(pluginsDataRoot(fixture), "runtime-id")))
+        .resolves.toBeDefined();
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["original-id"]).toBeDefined();
+      expect(state.state.plugins["runtime-id"]).toBeDefined();
+    } finally {
+      releaseBuild.resolve();
+      releaseRevalidation.resolve();
+      await starting?.catch(() => undefined);
+      await lease?.release();
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("enqueues crossed alias uninstall claims and actions in one turn", async () => {
+    const setup = await createAliasUninstallFixture();
+    try {
+      const originalPreflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!originalPreflight.ok) throw new Error(originalPreflight.error.message);
+      const runtimePreflight = await setup.pipeline.uninstallPreflight(
+        "runtime-id",
+        "shared-dir",
+      );
+      if (!runtimePreflight.ok) throw new Error(runtimePreflight.error.message);
+
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      const enqueueActionValue = vi.spyOn(internals, "enqueueActionValue");
+      const removeOriginal = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        originalPreflight.confirmationToken,
+      );
+      const removeRuntime = setup.pipeline.uninstall(
+        "runtime-id",
+        "shared-dir",
+        runtimePreflight.confirmationToken,
+      );
+
+      // Each call must synchronously park its secondary claim and its primary
+      // action. If either call yields between them, these crossed claims can
+      // both run ahead of the actions whose decisions they await.
+      expect(enqueueActionValue.mock.calls.map(([pluginId]) => pluginId)).toEqual([
+        "runtime-id",
+        "original-id",
+        "original-id",
+        "runtime-id",
+      ]);
+
+      const [removedOriginal, removedRuntime] = await settleWithin(
+        Promise.all([removeOriginal, removeRuntime]),
+        "Crossed alias uninstalls did not settle",
+      );
+      expect(removedOriginal.ok).toBe(true);
+      expect(removedRuntime).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-required" },
+      });
+      await expect(lstat(setup.fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await settleWithin(
+        setup.pipeline.dispose(),
+        "Pipeline disposal did not settle after crossed alias uninstalls",
+      );
+    }
+  }, 60_000);
+
+  it("awaits exact post-stop cleanup for a primary-and-live-alias uninstall", async () => {
+    const cleanupAssimilated = deferred();
+    const releaseCleanup = deferred();
+    const observations: Array<{
+      pluginId: string;
+      record: ReturnType<PluginHost["currentRecord"]>;
+    }> = [];
+    const assimilatedPluginIds: string[] = [];
+    let setup!: Awaited<ReturnType<typeof createAliasUninstallFixture>>;
+    setup = await createAliasUninstallFixture({
+      drainTimeoutMs: 0,
+      onRuntimeStopped: (pluginId) => {
+        observations.push({
+          pluginId,
+          record: setup.host.currentRecord(pluginId),
+        });
+        const thenable: PromiseLike<void> = {
+          then: (onFulfilled, onRejected) => {
+            assimilatedPluginIds.push(pluginId);
+            if (assimilatedPluginIds.length === 2) {
+              cleanupAssimilated.resolve();
+            }
+            return releaseCleanup.promise.then(onFulfilled, onRejected);
+          },
+        };
+        return thenable as Promise<void>;
+      },
+    });
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      expect(setup.host.currentRecord("runtime-id")).toBeDefined();
+      const preflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+      );
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      let lateAliasJobEntered = false;
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+
+      const boundary = await Promise.race([
+        cleanupAssimilated.promise.then(() => "cleanup-assimilated" as const),
+        removing.then(() => "uninstall-settled" as const),
+      ]);
+      expect(boundary).toBe("cleanup-assimilated");
+      expect(observations.map(({ pluginId }) => pluginId).toSorted()).toEqual([
+        "original-id",
+        "runtime-id",
+      ]);
+      expect(assimilatedPluginIds.toSorted()).toEqual([
+        "original-id",
+        "runtime-id",
+      ]);
+      expect(observations.every(({ record }) => record === undefined)).toBe(true);
+      expect(lateAliasJobEntered).toBe(false);
+
+      releaseCleanup.resolve();
+      const removed = await removing;
+      await lateAliasJob;
+      expect(removed.ok).toBe(true);
+      expect(lateAliasJobEntered).toBe(true);
+      await expect(lstat(setup.fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      releaseCleanup.resolve();
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("preserves a live alias and releases its queue when pre-stop revocation fails", async () => {
+    const stoppedRuntimeIds: string[] = [];
+    const setup = await createAliasUninstallFixture({
+      drainTimeoutMs: 0,
+      onRuntimeStopped: (pluginId) => {
+        stoppedRuntimeIds.push(pluginId);
+      },
+    });
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      const aliasRecord = setup.host.currentRecord("runtime-id");
+      expect(aliasRecord).toBeDefined();
+      const preflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+
+      const revokedRuntimeIds: string[] = [];
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+        {
+          onWillStopRuntime: (pluginId) => {
+            revokedRuntimeIds.push(pluginId);
+            if (pluginId === "runtime-id") {
+              throw new Error("simulated alias revocation failure");
+            }
+          },
+        },
+      );
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      let lateAliasJobEntered = false;
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+      expect(lateAliasJobEntered).toBe(false);
+
+      const removed = await removing;
+      await lateAliasJob;
+      expect(removed).toMatchObject({
+        ok: false,
+        error: {
+          code: "delete-failed",
+          message: "simulated alias revocation failure",
+        },
+      });
+      expect(revokedRuntimeIds).toContain("runtime-id");
+      expect(stoppedRuntimeIds).not.toContain("runtime-id");
+      expect(setup.host.currentRecord("runtime-id")).toBe(aliasRecord);
+      await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+      expect(lateAliasJobEntered).toBe(true);
+    } finally {
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("cancels alias claims when a newer confirmation replaces the admitted one", async () => {
+    const setup = await createAliasUninstallFixture();
+    const primaryQueueEntered = deferred();
+    const releasePrimaryQueue = deferred();
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let primaryBlocker: Promise<void> | undefined;
+    let replacementPreflight: ReturnType<PluginPipeline["uninstallPreflight"]> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      const firstPreflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
+
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      const aliasRecord = setup.host.currentRecord("runtime-id");
+      expect(aliasRecord).toBeDefined();
+      const stop = vi.spyOn(setup.host, "stop");
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      primaryBlocker = internals.enqueueActionValue("original-id", async () => {
+        primaryQueueEntered.resolve();
+        await releasePrimaryQueue.promise;
+      });
+      await primaryQueueEntered.promise;
+
+      // Admission still sees the first token and claims runtime-id. The
+      // queued preflight replaces it before the primary uninstall executes.
+      replacementPreflight = setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      const reserveChange = vi.spyOn(setup.hostOwnership, "reserveChange");
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        firstPreflight.confirmationToken,
+      );
+      expect(reserveChange.mock.calls.map(([pluginId]) => pluginId)).toEqual([
+        "original-id",
+        "runtime-id",
+      ]);
+
+      let lateAliasJobEntered = false;
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+      expect(lateAliasJobEntered).toBe(false);
+
+      releasePrimaryQueue.resolve();
+      const newer = await replacementPreflight;
+      if (!newer.ok) throw new Error(newer.error.message);
+      const removed = await removing;
+      await lateAliasJob;
+
+      expect(removed).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-required" },
+      });
+      expect(lateAliasJobEntered).toBe(true);
+      expect(setup.host.currentRecord("runtime-id")).toBe(aliasRecord);
+      expect(stop.mock.calls.some(([pluginId]) => pluginId === "runtime-id"))
+        .toBe(false);
+      await expect(
+        setup.hostOwnership.runCommand("runtime-id", async () => "ready"),
+      ).resolves.toEqual({ kind: "completed", value: "ready" });
+    } finally {
+      releasePrimaryQueue.resolve();
+      await primaryBlocker?.catch(() => undefined);
+      await replacementPreflight?.catch(() => undefined);
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("holds alias queues until every uninstall stop attempt settles", async () => {
+    const setup = await createAliasUninstallFixture({ drainTimeoutMs: 0 });
+    const aliasStopEntered = deferred();
+    const primaryStopEntered = deferred();
+    const releasePrimaryStop = deferred();
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      const aliasRecord = setup.host.currentRecord("runtime-id");
+      expect(aliasRecord).toBeDefined();
+      const preflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      const claimCleanupQueues =
+        internals.claimUninstallCleanupQueues.bind(internals);
+      let primaryStopFinished = false;
+      let claimReleasedBeforePrimaryStop = false;
+      let claimReleaseCalls = 0;
+      let lateAliasJobEntered = false;
+      let lateAliasJobEnteredBeforeRelease = false;
+      vi.spyOn(internals, "claimUninstallCleanupQueues").mockImplementation(
+        (cleanupIds, primaryPluginId, reservations, hooks) =>
+          claimCleanupQueues(cleanupIds, primaryPluginId, reservations, hooks).map((claim) => ({
+            ...claim,
+            release: () => {
+              claimReleaseCalls += 1;
+              if (!primaryStopFinished) claimReleasedBeforePrimaryStop = true;
+              if (lateAliasJobEntered) lateAliasJobEnteredBeforeRelease = true;
+              claim.release();
+            },
+          })),
+      );
+
+      const actualStop = setup.host.stop.bind(setup.host);
+      let failedAliasStop = false;
+      vi.spyOn(setup.host, "stop").mockImplementation(async (pluginId) => {
+        if (pluginId === "runtime-id" && !failedAliasStop) {
+          failedAliasStop = true;
+          aliasStopEntered.resolve();
+          throw new Error("simulated alias stop failure");
+        }
+        if (pluginId === "original-id") {
+          primaryStopEntered.resolve();
+          await releasePrimaryStop.promise;
+          await actualStop(pluginId);
+          primaryStopFinished = true;
+          return;
+        }
+        await actualStop(pluginId);
+      });
+
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+      );
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+
+      await Promise.all([aliasStopEntered.promise, primaryStopEntered.promise]);
+      releasePrimaryStop.resolve();
+      const removed = await removing;
+      await lateAliasJob;
+
+      expect(removed).toMatchObject({
+        ok: false,
+        error: { code: "delete-failed" },
+      });
+      expect(primaryStopFinished).toBe(true);
+      expect(claimReleasedBeforePrimaryStop).toBe(false);
+      expect(lateAliasJobEnteredBeforeRelease).toBe(false);
+      expect(claimReleaseCalls).toBe(1);
+      expect(lateAliasJobEntered).toBe(true);
+      expect(setup.host.currentRecord("runtime-id")).toBe(aliasRecord);
+      await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+    } finally {
+      releasePrimaryStop.resolve();
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
     }
   }, 60_000);
 
@@ -1712,7 +2528,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -1830,7 +2646,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -1930,7 +2746,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -2014,7 +2830,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         resourcesBasePath,
         pnpmRunnerEntry,
         operations: {
@@ -2147,7 +2963,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         resourcesBasePath,
         pnpmRunnerEntry,
         operations: {
@@ -2282,7 +3098,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -2402,7 +3218,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -2489,7 +3305,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
@@ -2554,7 +3370,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
@@ -2632,6 +3448,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     let pipeline: PluginPipeline;
     let failCodexDataRemoval = false;
+    const stoppedRuntimeIds: string[] = [];
     const host = new PluginHost({
       stateDir,
       workspaceRoot,
@@ -2644,9 +3461,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
+      onRuntimeStopped: (stoppedPluginId) => {
+        stoppedRuntimeIds.push(stoppedPluginId);
+      },
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -2665,6 +3485,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pluginId).toBe("my-codex-copy");
 
       failCodexDataRemoval = true;
+      const staleAliasPreflight = await pipeline.uninstallPreflight(
+        "codex",
+        pluginId,
+      );
+      if (!staleAliasPreflight.ok) {
+        throw new Error(staleAliasPreflight.error.message);
+      }
       const firstPreflight = await pipeline.uninstallPreflight(pluginId, pluginId);
       if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
       const failed = await pipeline.uninstall(pluginId, pluginId, firstPreflight.confirmationToken);
@@ -2699,15 +3526,44 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // it, not only report on pluginId's own (empty) state.
       expect(retryPreflight.preflight.stateData).toMatchObject({ fileCount: 1 });
       expect(retryPreflight.preflight.stateData?.path).toContain(strandedStateRoot);
-      const finished = await pipeline.uninstall(pluginId, pluginId, retryPreflight.confirmationToken);
+      const transient = transientStateOf(pipeline);
+      const trackedStatus = pipeline.list()[0];
+      expect(trackedStatus).toBeDefined();
+      transient.statuses.set("codex", trackedStatus!);
+      doorWrittenDeltasOf(pipeline).set(pluginId, new Map());
+      doorWrittenDeltasOf(pipeline).set("codex", new Map());
+      transient.lastApprovedAttemptHash.set(pluginId, "a".repeat(64));
+      transient.lastApprovedAttemptHash.set("codex", "b".repeat(64));
+      stoppedRuntimeIds.length = 0;
+      const finished = await pipeline.uninstall(
+        pluginId,
+        pluginId,
+        retryPreflight.confirmationToken,
+      );
       expect(finished.ok).toBe(true);
+      expect(stoppedRuntimeIds.toSorted()).toEqual(["codex", "my-codex-copy"]);
 
       await expect(lstat(strandedStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
       const finalState = await readPluginLocalState(stateDir, workspaceRoot);
       if (!finalState.ok) throw new Error(finalState.warning);
       expect(finalState.state.plugins["codex"]).toBeUndefined();
       expect(finalState.state.plugins["my-codex-copy"]).toBeUndefined();
+      expect(transient.statuses.has(pluginId)).toBe(false);
+      expect(transient.statuses.has("codex")).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has(pluginId)).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has("codex")).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has(pluginId)).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has("codex")).toBe(false);
       expect(pipeline.list()).toEqual([]);
+      const staleAliasRemoval = await pipeline.uninstall(
+        "codex",
+        pluginId,
+        staleAliasPreflight.confirmationToken,
+      );
+      expect(staleAliasRemoval).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-required" },
+      });
     } finally {
       await pipeline.dispose();
     }
@@ -2761,7 +3617,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
     });
@@ -2788,6 +3644,62 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await pipeline.dispose();
     }
   });
+
+  it("keeps a built registration on its exact root when an invalid fallback id collides", async () => {
+    const fixture = await createNamedPluginWorkspace("zzz", "aaa");
+    const invalidRoot = join(fixture.workspaceRoot, "plugins", "aaa");
+    await mkdir(invalidRoot, { recursive: true });
+    await writeFile(
+      join(invalidRoot, "dohc-plugin.json"),
+      "{ this is not valid JSON\n",
+    );
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership: new PluginHostOwnership(host),
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.pluginRegistration("aaa")).toMatchObject({
+        pluginRoot: fixture.pluginRoot,
+        directoryName: "zzz",
+        manifest: { name: "aaa" },
+      });
+
+      const installed = await pipeline.install("aaa");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+
+      expect(pipeline.pluginRegistration("aaa")).toMatchObject({
+        pluginRoot: fixture.pluginRoot,
+        directoryName: "zzz",
+        manifest: { name: "aaa" },
+      });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
 
   // Round 19 finding 3: dohc's own build and state storage (liveRoot,
   // pluginStateRoot) is keyed by pluginId, not directoryName — an id an
@@ -2850,7 +3762,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot,
       stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -2968,7 +3880,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -3018,7 +3930,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       platform: "darwin",
       resourcesBasePath,
       pnpmRunnerEntry,
@@ -3092,7 +4004,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       platform: "darwin",
       resourcesBasePath,
       pnpmRunnerEntry,
@@ -3134,7 +4046,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       platform: "darwin",
       resourcesBasePath,
       pnpmRunnerEntry,
@@ -3197,7 +4109,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       pipeline = new PluginPipelineWithPosixPaths({
         workspaceRoot: "/workspace",
         stateDir: "/state",
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         platform: "darwin",
         pnpmRunnerEntry: "/runner",
       });
@@ -3292,7 +4204,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         pipeline = new PluginPipeline({
           workspaceRoot: fixture.workspaceRoot,
           stateDir: fixture.stateDir,
-          pluginHost: host,
+          hostOwnership: new PluginHostOwnership(host),
           resourcesBasePath,
           pnpmRunnerEntry,
           operations: {
@@ -3380,7 +4292,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       platform: "darwin",
       resourcesBasePath,
       pnpmRunnerEntry,
@@ -3515,7 +4427,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         pipeline = new PluginPipelineWithPosixPaths({
           workspaceRoot: "/workspace",
           stateDir: "/state",
-          pluginHost: host,
+          hostOwnership: new PluginHostOwnership(host),
           platform: "darwin",
           pnpmRunnerEntry: "/runner",
         });
@@ -3627,7 +4539,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       pipeline = new PluginPipelineWithPosixPaths({
         workspaceRoot: "/workspace",
         stateDir: "/state",
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         platform: "darwin",
         pnpmRunnerEntry: "/runner",
       });
@@ -3737,7 +4649,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipelineWithDelayedRecovery({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       platform: "darwin",
       resourcesBasePath,
       pnpmRunnerEntry,
@@ -3819,7 +4731,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       platform: "darwin",
       resourcesBasePath,
       pnpmRunnerEntry,
@@ -3948,7 +4860,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       platform: "darwin",
       resourcesBasePath,
       pnpmRunnerEntry,
@@ -4066,7 +4978,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4268,7 +5180,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4305,7 +5217,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // takes on every app restart for an already-approved plugin whose host
       // isn't running yet.
       await host.stop("example-plugin");
-      const result = await pipeline.ensureStarted("example-plugin");
+      const { result } = await ensureFromCommand(pipeline, "example-plugin");
 
       expect(result.ok).toBe(true);
       // Source was still approved, so the pipeline self-heals with a fresh,
@@ -4336,7 +5248,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4425,7 +5337,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4484,7 +5396,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4556,7 +5468,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4656,7 +5568,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4686,13 +5598,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("refuses to delete when source changed after the last check, immediately before the delete (#779 round 3 finding 3)", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;
-    // Real pluginUninstallPreflight, with liveHash forced to change starting
-    // on its 3rd call — the one this fix adds, running right before the
-    // actual delete, after pluginHost.stop()'s own real await window. Calls
-    // 1 and 2 (the uninstallPreflight() action, then uninstall()'s existing
-    // pre-stop check) see the real, unchanged hash, so the confirmation
-    // token itself is genuinely valid at issuance.
+    // The full preflight runs once for the dialog. Execution hashes the source
+    // before stopping and again immediately before deletion; the second probe
+    // sees drift across the real host-stop await window.
     let preflightCalls = 0;
+    let hashSourceCalls = 0;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
       workspaceRoot: fixture.workspaceRoot,
@@ -4705,7 +5615,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4713,9 +5623,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
         uninstallPreflight: async (input) => {
           preflightCalls += 1;
-          const real = await pluginUninstallPreflight(input);
-          if (preflightCalls <= 2) return real;
-          return { ...real, liveHash: "f".repeat(64) };
+          return pluginUninstallPreflight(input);
+        },
+        hashSource: async (rootPath) => {
+          hashSourceCalls += 1;
+          const real = await hashPluginSourceFiles(rootPath);
+          return hashSourceCalls === 1
+            ? real
+            : { ...real, sourceHash: "f".repeat(64) };
         },
       },
     });
@@ -4749,7 +5664,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
       // Refused, not deleted.
       await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
-      expect(preflightCalls).toBe(3);
+      expect(preflightCalls).toBe(1);
+      expect(hashSourceCalls).toBe(2);
       // And not a stuck "uninstalling" spinner: the status set on the way in
       // is restored to an actionable one the user can retry from (#779 round
       // 7 B6).
@@ -4769,9 +5685,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("refuses to delete when the source could not be fingerprinted (#779 round 11 A2)", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;
-    // Preflight cannot hash the tree (a symlink or an unreadable entry), so
-    // every call records liveHash: null. Comparing null against null says
-    // "unchanged" while proving nothing — and the delete is irreversible.
+    // The dialog can read the source, but execution's fail-closed hash probe
+    // cannot. A present source with an unreadable hash must never compare as
+    // equivalent to an absent source.
+    let preflightCalls = 0;
+    let hashSourceCalls = 0;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
       workspaceRoot: fixture.workspaceRoot,
@@ -4784,16 +5702,20 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-        uninstallPreflight: async (input) => ({
-          ...await pluginUninstallPreflight(input),
-          liveHash: null,
-        }),
+        uninstallPreflight: async (input) => {
+          preflightCalls += 1;
+          return pluginUninstallPreflight(input);
+        },
+        hashSource: async () => {
+          hashSourceCalls += 1;
+          throw new Error("simulated unreadable source");
+        },
       },
     });
 
@@ -4827,6 +5749,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(result.error.message).toContain(
         "could not be read to confirm what uninstall would delete",
       );
+      expect(preflightCalls).toBe(1);
+      expect(hashSourceCalls).toBe(1);
       await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
       await expect(lstat(join(fixture.pluginRoot, "dohc-plugin.json")))
         .resolves.toBeDefined();
@@ -4881,7 +5805,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -4964,7 +5888,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5059,7 +5983,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5178,7 +6102,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5260,7 +6184,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5330,7 +6254,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5405,7 +6329,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         resourcesBasePath,
         pnpmRunnerEntry,
         operations: {
@@ -5494,7 +6418,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5568,7 +6492,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // rebuilds from the still-approved source instead.
       failPublish = false;
       await host.stop("example-plugin");
-      const restarted = await pipeline.ensureStarted("example-plugin");
+      const { result: restarted } = await ensureFromCommand(
+        pipeline,
+        "example-plugin",
+      );
 
       expect(restarted.ok).toBe(true);
       const republished = await readFile(
@@ -5597,7 +6524,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5650,7 +6577,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5726,7 +6653,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5807,7 +6734,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -5885,7 +6812,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         resourcesBasePath,
         pnpmRunnerEntry,
         operations: {
@@ -5972,7 +6899,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         resourcesBasePath,
         pnpmRunnerEntry,
         operations: {
@@ -6080,7 +7007,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership: new PluginHostOwnership(host),
         resourcesBasePath,
         pnpmRunnerEntry,
         operations: {
@@ -6152,7 +7079,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -6221,7 +7148,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -6268,7 +7195,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "",
       ].join("\n"));
       failNextDiscard = true;
-      const started = await pipeline.ensureStarted("example-plugin");
+      const surface = await ensureFromSurface(pipeline, "example-plugin");
+      const started = surface.result;
 
       // Fail-closed, and no staged bytes left beside the live root: the
       // rejected discard is retried by the same job's cleanup (#779 round
@@ -6276,6 +7204,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(started.ok).toBe(false);
       expect(discards).toHaveLength(2);
       expect(await stagingLeftovers(fixture, "example-plugin")).toEqual([]);
+      await surface.release();
       expect(await readFile(
         join(liveSnapshotRoot(fixture, "example-plugin"), "src", "index.ts"),
         "utf8",
@@ -6303,7 +7232,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -6374,6 +7303,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     async function setupEstablishedPlugin(options: {
       commands?: { id: string; title: string }[];
       settings?: PluginSettingDeclaration[];
+      drainTimeoutMs?: number;
+      onRuntimeStopped?: (pluginId: string) => void | Promise<void>;
     } = {}) {
       const fixture = await createPluginWorkspace();
       const manifestPath = join(fixture.pluginRoot, "dohc-plugin.json");
@@ -6399,14 +7330,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let failBuild = false;
       let nextStopGate: { entered: Deferred; release: Deferred } | null = null;
       let nextBuildGate: { entered: Deferred; release: Deferred } | null = null;
-      let nextCommandDrainGate: { entered: Deferred; release: Deferred } | null =
-        null;
       let failNextStop = false;
-      let failNextDisposeAll = false;
-      // A real instance, wired the same way main.ts wires
-      // activeCommandClaims — so isDraining() reflects genuine barrier
-      // state (round-11), not a simulation of it.
-      const commandClaims = new PluginCommandHostClaims();
+      let nextSnapshotGate: { entered: Deferred; release: Deferred } | null = null;
       let buildCalls = 0;
       let registeredCommands = (options.commands ?? [])
         .map((command) => command.id);
@@ -6447,61 +7372,20 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         onStatusChange: (pluginId, status) => {
           pipeline.noteRuntimeStatus(pluginId, status);
         },
-        // stopAll() awaits this directly, outside any catch — the one
-        // seam that reaches PluginPipeline.dispose()'s own stopAll() call
-        // as a genuine rejection, since stopAll() itself only settles
-        // (never rejects on) each plugin's individual stop().
-        onDispose: async () => {
-          if (failNextDisposeAll) {
-            failNextDisposeAll = false;
-            throw new Error("simulated: PluginHost.stopAll() onDispose failed");
-          }
-        },
+      });
+      const hostOwnership = new PluginHostOwnership(host, {
+        drainTimeoutMs: options.drainTimeoutMs,
       });
       pipeline = new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership,
         resourcesBasePath,
         pnpmRunnerEntry,
         onStatusChange: (event) => {
           if (event.kind === "changed") statuses.push(event.plugin.status);
         },
-        // Mirrors main.ts's own wiring: the marker settles at the same
-        // lower every barrier-raising action already shares, not only on
-        // an explicit reset (#779 round 19 finding 3) — but only when
-        // this barrier's own action actually stopped or replaced the
-        // runtime, or a no-op reconcile eats a cold start's own marker
-        // for a runtime it never touched (#779 round 26 note A).
-        raiseCommandClaimsBarrier: (pluginId) => {
-          const lower = commandClaims.raiseDrainBarrier(pluginId);
-          return () => {
-            lower();
-            if (commandClaims.consumeRuntimeStop(pluginId)) {
-              commandClaims.consumeStartedHost(pluginId);
-            }
-          };
-        },
-        onOldRuntimeStopBoundary: (pluginId) => {
-          commandClaims.markRuntimeStopped(pluginId);
-        },
-        awaitCommandClaimsDrained: async (pluginId) => {
-          const gate = nextCommandDrainGate;
-          const drained = commandClaims.drain(pluginId);
-          if (gate) {
-            nextCommandDrainGate = null;
-            gate.entered.resolve();
-            await gate.release.promise;
-          }
-          return drained;
-        },
-        resetCommandClaims: (pluginId) => commandClaims.reset(pluginId),
-        // Mirrors main.ts's own wiring: a command that reached
-        // startFromApprovedSource through its own ensureStarted() call
-        // already holds one of the claims a hold would otherwise drain —
-        // refusing here instead of draining is what avoids waiting on
-        // itself (#779 round 25 finding 3).
-        hasOutstandingCommandClaim: (pluginId: string) => commandClaims.has(pluginId),
+        onRuntimeStopped: options.onRuntimeStopped,
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -6513,6 +7397,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             return mutatePluginRecord(stateDir, workspaceRoot, pluginId, mutate);
           },
           snapshot: async (input) => {
+            const gate = nextSnapshotGate;
+            if (gate) {
+              nextSnapshotGate = null;
+              gate.entered.resolve();
+              await gate.release.promise;
+            }
             const result = await snapshotPluginSource(input);
             if (!result.ok || !mismatchNextSnapshot) return result;
             mismatchNextSnapshot = false;
@@ -6565,6 +7455,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       return {
         pipeline,
+        host,
         fixture,
         entryPath: fixture.entryPath,
         manifestPath,
@@ -6590,18 +7481,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           nextBuildGate = gate;
           return gate;
         },
-        gateNextCommandDrain: () => {
+        gateNextSnapshot: () => {
           const gate = { entered: deferred(), release: deferred() };
-          nextCommandDrainGate = gate;
+          nextSnapshotGate = gate;
           return gate;
         },
         failNextStop: () => {
           failNextStop = true;
         },
-        failNextDisposeAll: () => {
-          failNextDisposeAll = true;
-        },
-        commandClaims,
+        hostOwnership,
         setRegisteredCommands: (commands: string[]) => {
           registeredCommands = [...commands];
         },
@@ -6619,6 +7507,53 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         },
       };
     }
+
+    it("refuses an uninstall token after the durable record retargets to another directory", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const preflight = await setup.pipeline.uninstallPreflight(
+          "example-plugin",
+          "example-plugin",
+        );
+        if (!preflight.ok) throw new Error(preflight.error.message);
+        const runningRecord = setup.host.currentRecord("example-plugin");
+        expect(runningRecord).toBeDefined();
+        const bundleBefore = await readFile(
+          liveBundlePath(setup.fixture, "example-plugin"),
+        );
+
+        await mutatePluginRecord(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+          "example-plugin",
+          (record) => ({ ...record, directoryName: "replacement-directory" }),
+        );
+
+        const result = await setup.pipeline.uninstall(
+          "example-plugin",
+          "example-plugin",
+          preflight.confirmationToken,
+        );
+
+        expect(result).toMatchObject({
+          ok: false,
+          error: { stage: "uninstall", code: "confirmation-stale" },
+        });
+        expect(setup.host.currentRecord("example-plugin")).toBe(runningRecord);
+        await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+        expect(await readFile(liveBundlePath(setup.fixture, "example-plugin")))
+          .toEqual(bundleBefore);
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.directoryName)
+          .toBe("replacement-directory");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
 
     it("retries against the durable approval after a later publish failure", async () => {
       const setup = await setupEstablishedPlugin();
@@ -6823,6 +7758,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             commandId: "old.cmd",
           },
           plugin: recoveredRegistration,
+          runCommand: (operation) =>
+            setup.hostOwnership.runCommand("example-plugin", operation),
+          // This test isolates the recovered registration and old host. The
+          // production start/activation seam has its own behavior tests.
           ensureStarted: async () => setup.pipeline.host,
           ensureCurrent: () => {},
         });
@@ -7399,332 +8338,610 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
-    it("refuses instead of draining when the caller's own ensureStarted() call already holds this plugin's command claim and the approved source changed out of band (#779 round 25 finding 3)", async () => {
-      const setup = await setupEstablishedPlugin();
-      try {
-        // A raw write, not through the door-write path: verifyApprovedSource's
-        // own snapshot reads this file fresh and detects the mismatch
-        // against the approved hash, the same as any genuine out-of-band
-        // edit reaching a cold ensureStarted() call.
-        await writeFile(setup.entryPath, [
-          'export const marker = "edited out of band";',
-          "export default { activate() {} };",
-          "",
-        ].join("\n"));
-
-        // Simulates claimHostForCommand: the caller's own claim taken
-        // before it calls ensureStarted, released only once its own
-        // invocation finishes — the exact claim that could never release
-        // during a drain this same call triggered (#779 round 25 finding
-        // 3). Without the fix, this call hangs until this test harness's
-        // own undeadlined drain never resolves, and the test times out.
-        setup.commandClaims.claim("example-plugin");
-        try {
-          const result = await setup.pipeline.ensureStarted("example-plugin");
-          expect(result.ok).toBe(false);
-          if (result.ok) throw new Error("unreachable: expected a refusal");
-          expect(result.error.code).toBe("claims-draining");
-        } finally {
-          setup.commandClaims.release("example-plugin");
-        }
-      } finally {
-        await setup.pipeline.dispose();
-      }
-    }, 5_000);
-
-    it("falls back to the prior contributions, not the failed candidate's own manifest, when a failed replacement has no readable recovered manifest (round-22 finding 5)", async () => {
+    it("falls back to the prior contributions when a failed replacement has no readable manifest", async () => {
       const oldCommands = [{ id: "old.cmd", title: "Old Command" }];
       const newCommands = [{ id: "new.cmd", title: "New Command" }];
       const setup = await setupEstablishedPlugin({ commands: oldCommands });
       try {
-        // captureRecoveredManifest's own read of this file fails, so
-        // recoveryState's value stays null — the fallback this pin
-        // exercises has nothing but that and the failed candidate's own
-        // (different, never-approved) manifest to choose between.
         const liveRoot = join(pluginsDataRoot(setup.fixture), "example-plugin");
         await writeFile(
           join(liveRoot, "dohc-plugin.generated.json"),
           "not valid json",
         );
-
         await writeFile(setup.manifestPath, setup.manifestText(newCommands));
-        // requireValidCandidate reads a discovery-cached record, not the
-        // source tree directly — an unrelated-plugin event forces the
-        // rescan that actually picks up the edit above, without itself
-        // queuing a reconcile against example-plugin ahead of approve()
-        // (the same trigger this file's other manifest-edit tests use).
         await setup.pipeline.handleWatcherEvents([{
           path: "plugins/unrelated-plugin/dohc-plugin.json",
           operation: "update",
         }]);
-        expect(
-          setup.pipeline.pluginRegistration("example-plugin")?.manifest.commands,
-        ).toEqual(newCommands);
-
         setup.failNextBuild();
-        const approved = await setup.pipeline.approve("example-plugin");
-        expect(approved.ok).toBe(false);
-        expect(setup.pipeline.list()[0]?.status).toBe("failed");
-        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
 
-        // The old build is still what's actually running — its own
-        // commands, not the failed candidate's, since the candidate's own
-        // manifest (confirmed above to now hold newCommands) was never
-        // approved and may not even be compatible with what is still
-        // serving requests.
-        expect(setup.pipeline.list()[0]?.commands).toEqual(oldCommands);
-        // pluginRegistration has no full manifest object left to serve —
-        // the live root's own generated manifest could not be read, and
-        // the candidate's is exactly what must not stand in for it. A
-        // caller reads null here as "nothing new to serve" and falls back
-        // to its own last-known-good registration, never to this failed
-        // candidate.
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(false);
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "failed",
+          hasFailedReplacement: true,
+          commands: oldCommands,
+        });
         expect(setup.pipeline.pluginRegistration("example-plugin")).toBeNull();
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("keeps offering a build retry once the old runtime crash-loops all the way to disabled (round-9 finding 2)", async () => {
+    it("keeps a build retry available after the old runtime reaches crash-loop disable", async () => {
       const setup = await setupEstablishedPlugin();
       try {
         await setup.failEstablishedBuild();
-        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
-
-        // The host's own crash-loop detector gives up and disables the
-        // plugin outright — a terminal transition, unlike the respawn round
-        // 8 covered, with no running host left at all afterward.
         setup.pipeline.noteRuntimeStatus("example-plugin", "disabled");
 
         expect(setup.pipeline.list()[0]).toMatchObject({
           status: "disabled",
           disabledReason: "crash-loop",
+          hasFailedReplacement: true,
         });
-        expect(setup.pipeline.list()[0]?.hasFailedReplacement).toBe(true);
-
-        const rebuilt = await setup.pipeline.rebuild("example-plugin");
-
-        expect(rebuilt.ok).toBe(true);
+        expect((await setup.pipeline.rebuild("example-plugin")).ok).toBe(true);
         await waitFor(
           () =>
             setup.pipeline.list()[0]?.status === "ready" &&
             setup.pipeline.list()[0]?.hasFailedReplacement === false,
-          "Plugin did not recover from a crash-loop disable through Retry build.",
+          "Plugin did not recover from a crash-loop disable.",
         );
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("waits for an in-flight command claim to drain before stopping the old runtime (round-10 finding 2)", async () => {
+    it("reserves a host change before the queued action can run", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const drainGate = setup.gateNextCommandDrain();
-        await writeFile(setup.entryPath, [
-          'export const marker = "replacement";',
-          "export default { activate() {} };",
-          "",
-        ].join("\n"));
-
-        const approving = setup.pipeline.approve("example-plugin");
-
-        await drainGate.entered.promise;
-        // The drain is pending: the old runtime has not been stopped, so
-        // a command claim against it right now would still reach a live
-        // host — this is the fact the drain exists to preserve.
-        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
-
-        drainGate.release.resolve();
-        const approved = await approving;
-
-        expect(approved.ok).toBe(true);
-        await waitFor(
-          () => setup.pipeline.list()[0]?.status === "ready",
-          "Plugin did not reach ready after the drain released.",
-        );
-      } finally {
-        await setup.pipeline.dispose();
-      }
-    }, 60_000);
-
-    it("keeps refusing new command claims through the whole stop, not just the drain wait (round-11)", async () => {
-      const setup = await setupEstablishedPlugin();
-      try {
-        const key = "example-plugin";
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-
-        const stopGate = setup.gateNextStop();
-        await writeFile(setup.entryPath, [
-          'export const marker = "replacement";',
-          "export default { activate() {} };",
-          "",
-        ].join("\n"));
-
-        const approving = setup.pipeline.approve("example-plugin");
-
-        // Nothing ever claimed this key — a "zero-claim rebuild" — and the
-        // barrier still marks: a command racing in has to be refused even
-        // when there was never anything for drain() itself to wait on
-        // (round-11 pin 2).
-        await waitFor(
-          () => setup.commandClaims.isDraining(key),
-          "The drain barrier never marked with zero claims outstanding.",
-        );
-
-        // The drain resolved instantly, so stopOldRuntime has already
-        // moved on to the real stop, which this gate now holds mid-flight.
-        await stopGate.entered.promise;
-        // A command arriving right now — between the last claim releasing
-        // (there was never one) and the stop's own completion — must
-        // still be refused (round-11 pin 1).
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
-
-        stopGate.release.resolve();
-        const approved = await approving;
-
-        expect(approved.ok).toBe(true);
-        // Only once the stop actually finished does the barrier clear —
-        // a new invocation is normal again (round-11 pin 3).
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-      } finally {
-        await setup.pipeline.dispose();
-      }
-    }, 60_000);
-
-    it("marks the drain barrier before a retry's own queued work runs, not only at its eventual stop (round-12 finding 1)", async () => {
-      const setup = await setupEstablishedPlugin();
-      try {
-        const key = "example-plugin";
-        await setup.failEstablishedBuild();
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-
-        const buildGate = setup.gateNextBuild();
-        const rebuilding = setup.pipeline.rebuild("example-plugin");
-
-        // The barrier is up while the retry is still building — long
-        // before it could reach its own eventual stop of the old
-        // runtime, which the earlier failure left running. A command
-        // checking this (as main.ts's invokePluginCommand handler does
-        // before it ever takes a claim) refuses right here instead of
-        // enqueuing its own start behind this same job on the
-        // per-plugin queue — the exact enqueue that would deadlock this
-        // job's later wait for that claim to drain.
-        await buildGate.entered.promise;
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
-
-        buildGate.release.resolve();
-        const rebuilt = await rebuilding;
-
-        expect(rebuilt.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-      } finally {
-        await setup.pipeline.dispose();
-      }
-    }, 60_000);
-
-    it("marks the drain barrier the instant a retry is called, even while it still sits queued behind another job for the same plugin (round-13 finding 1)", async () => {
-      const setup = await setupEstablishedPlugin();
-      let buildGate: ReturnType<typeof setup.gateNextBuild> | undefined;
-      try {
-        const key = "example-plugin";
-        await setup.failEstablishedBuild();
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-
-        // Occupy the plugin's own per-plugin job queue with another
-        // action — approve(), which now raises its own outer hold before
-        // it is enqueued too (round-15 finding 1) — held mid-build.
-        buildGate = setup.gateNextBuild();
-        await writeFile(setup.entryPath, [
-          'export const marker = "queue occupant";',
-          "export default { activate() {} };",
-          "",
-        ].join("\n"));
-        const approving = setup.pipeline.approve("example-plugin");
-        await buildGate.entered.promise;
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
-
-        // Called while the queue is still occupied by approve()'s own
-        // job — this call's own job has not started, let alone reached
-        // a build or snapshot step of its own. Both holds compose: the
-        // mark stays up regardless, so a command racing in right now
-        // still refuses instead of enqueuing its own start behind
-        // either call — deadlocking whichever job eventually reaches
-        // its own stop.
-        const rebuilding = setup.pipeline.rebuild("example-plugin");
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
-
-        buildGate.release.resolve();
-        const approved = await approving;
-        expect(approved.ok).toBe(true);
-        // Retry's own gate check, once it finally runs, finds nothing
-        // left to retry — approve() already published something new.
-        // That's fine: this pins the barrier's timing, not this call's
-        // outcome.
-        const rebuilt = await rebuilding;
-        expect(rebuilt.ok).toBe(false);
-
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-      } finally {
-        // A failed assertion above can leave the build gate held open —
-        // release it defensively so dispose()'s own queue-drain wait
-        // does not hang the whole suite behind a gate nothing else will
-        // ever release.
-        buildGate?.release.resolve();
-        await setup.pipeline.dispose();
-      }
-    }, 60_000);
-
-    it("marks the drain barrier synchronously the instant Disable is called, before its own job has any chance to run (round-15 finding 1)", async () => {
-      const setup = await setupEstablishedPlugin();
-      try {
-        const key = "example-plugin";
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-
-        // No `await` between the call and this assertion: if the raise
-        // lived inside the enqueued job instead of before enqueueAction,
-        // the job has not had a single microtask to run yet, and this
-        // would still read false — exactly the gap that let a command
-        // race in and queue its own start behind Disable on the same
-        // queue, deadlocking Disable's later wait for that exact claim.
         const disabling = setup.pipeline.disable("example-plugin");
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
+        const racingCommand = await setup.hostOwnership.runCommand(
+          "example-plugin",
+          async () => "ran",
+        );
 
-        const disabled = await disabling;
-        expect(disabled.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(racingCommand).toEqual({
+          kind: "refused",
+          reason: "change-in-progress",
+        });
+        expect((await disabling).ok).toBe(true);
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("marks the drain barrier synchronously the instant Uninstall is called, before its own job has any chance to run (round-15 finding 1)", async () => {
-      const setup = await setupEstablishedPlugin();
+    it("revokes, stops, then awaits external runtime cleanup for disable", async () => {
+      const steps: string[] = [];
+      const cleanupEntered = deferred();
+      const releaseCleanup = deferred();
+      const setup = await setupEstablishedPlugin({
+        onRuntimeStopped: async (pluginId) => {
+          steps.push(`stopped:${pluginId}`);
+          cleanupEntered.resolve();
+          await releaseCleanup.promise;
+          steps.push(`cleaned:${pluginId}`);
+        },
+      });
+      const originalStop = setup.pipeline.host.stop.bind(setup.pipeline.host);
+      const stop = vi.spyOn(setup.pipeline.host, "stop").mockImplementation(
+        async (pluginId) => {
+          steps.push("host-stop");
+          await originalStop(pluginId);
+        },
+      );
       try {
-        const key = "example-plugin";
-        const preflight = await setup.pipeline.uninstallPreflight("example-plugin", "example-plugin");
-        if (!preflight.ok) throw new Error(preflight.error.message);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        let settled = false;
+        const disabling = setup.pipeline.disable("example-plugin", {
+          onWillStopRuntime: (pluginId) => steps.push(`revoke:${pluginId}`),
+        });
+        void disabling.then(() => {
+          settled = true;
+        });
 
-        // No `await` between the call and this assertion — see the
-        // Disable test above for why that gap matters.
-        const uninstalling = setup.pipeline.uninstall(
+        await cleanupEntered.promise;
+        expect(steps).toEqual([
+          "revoke:example-plugin",
+          "host-stop",
+          "stopped:example-plugin",
+        ]);
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        releaseCleanup.resolve();
+        const disabled = await disabling;
+
+        expect(disabled.ok).toBe(true);
+        expect(steps).toEqual([
+          "revoke:example-plugin",
+          "host-stop",
+          "stopped:example-plugin",
+          "cleaned:example-plugin",
+        ]);
+      } finally {
+        releaseCleanup.resolve();
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps external authority when disable fails before the stop boundary", async () => {
+      const revoke = vi.fn();
+      const stopped = vi.fn();
+      const setup = await setupEstablishedPlugin({ onRuntimeStopped: stopped });
+      try {
+        setup.failNextRecordWrite();
+        const disabled = await setup.pipeline.disable("example-plugin", {
+          onWillStopRuntime: revoke,
+        });
+
+        expect(disabled.ok).toBe(false);
+        expect(revoke).not.toHaveBeenCalled();
+        expect(stopped).not.toHaveBeenCalled();
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps a completed stop when external runtime cleanup rejects", async () => {
+      const failure = new Error("simulated surface cleanup failure");
+      const setup = await setupEstablishedPlugin({
+        onRuntimeStopped: async () => {
+          throw failure;
+        },
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(
+        () => undefined,
+      );
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        expect(disabled.ok).toBe(true);
+        expect(setup.pipeline.host.currentRecord("example-plugin"))
+          .toBeUndefined();
+        expect(consoleError).toHaveBeenCalledWith(
+          expect.stringContaining("runtime-stopped cleanup failed"),
+          failure,
+        );
+      } finally {
+        consoleError.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the live host when disable cannot revoke its external authority", async () => {
+      const setup = await setupEstablishedPlugin();
+      const runningRecord = setup.pipeline.host.currentRecord("example-plugin");
+      const stop = vi.spyOn(setup.pipeline.host, "stop");
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin", {
+          onWillStopRuntime: () => {
+            throw new Error("simulated authority revocation failure");
+          },
+        });
+
+        expect(disabled).toMatchObject({
+          ok: false,
+          error: {
+            code: "disable-failed",
+            message: "simulated authority revocation failure",
+          },
+        });
+        expect(stop).not.toHaveBeenCalled();
+        expect(setup.pipeline.host.currentRecord("example-plugin"))
+          .toBe(runningRecord);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(false);
+      } finally {
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("preserves a live plugin when uninstall cannot revoke its external authority", async () => {
+      const setup = await setupEstablishedPlugin();
+      const runningRecord = setup.pipeline.host.currentRecord("example-plugin");
+      const stop = vi.spyOn(setup.pipeline.host, "stop");
+      try {
+        const preflight = await setup.pipeline.uninstallPreflight(
+          "example-plugin",
+          "example-plugin",
+        );
+        if (!preflight.ok) throw new Error(preflight.error.message);
+
+        const removed = await setup.pipeline.uninstall(
           "example-plugin",
           "example-plugin",
           preflight.confirmationToken,
+          {
+            onWillStopRuntime: () => {
+              throw new Error("simulated authority revocation failure");
+            },
+          },
         );
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
 
-        const uninstalled = await uninstalling;
-        expect(uninstalled.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(removed).toMatchObject({
+          ok: false,
+          error: {
+            code: "delete-failed",
+            message: "simulated authority revocation failure",
+          },
+        });
+        expect(stop).not.toHaveBeenCalled();
+        expect(setup.pipeline.host.currentRecord("example-plugin"))
+          .toBe(runningRecord);
+        await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+      } finally {
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("restores durable enablement when disable cannot stop the live host", async () => {
+      const stopped = vi.fn();
+      const setup = await setupEstablishedPlugin({ onRuntimeStopped: stopped });
+      const record = setup.pipeline.host.currentRecord("example-plugin");
+      expect(record).toBeDefined();
+      const stop = vi.spyOn(setup.pipeline.host, "stop").mockRejectedValue(
+        new Error("simulated stop failure with a live record"),
+      );
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        expect(disabled).toMatchObject({
+          ok: false,
+          error: {
+            code: "disable-failed",
+            message: "simulated stop failure with a live record",
+          },
+        });
+        expect(stop).toHaveBeenCalledTimes(1);
+        expect(stopped).not.toHaveBeenCalled();
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBe(record);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "ready",
+          runtimeStatus: "ready",
+          error: { code: "disable-failed" },
+        });
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(false);
+
+        await expect(
+          setup.hostOwnership.runCommand(
+            "example-plugin",
+            async (authority) => authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority)),
+          ),
+        ).resolves.toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: {
+              ok: true,
+              plugin: { status: "ready", runtimeStatus: "ready" },
+            },
+          },
+        });
+      } finally {
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the safe durable disable when stop compensation cannot be written", async () => {
+      const setup = await setupEstablishedPlugin();
+      const record = setup.pipeline.host.currentRecord("example-plugin");
+      expect(record).toBeDefined();
+      const consoleError = vi.spyOn(console, "error").mockImplementation(
+        () => undefined,
+      );
+      const stop = vi.spyOn(setup.pipeline.host, "stop").mockImplementation(
+        async () => {
+          setup.failNextRecordWrite();
+          throw new Error("simulated original stop failure");
+        },
+      );
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        expect(disabled).toMatchObject({
+          ok: false,
+          error: {
+            code: "disable-failed",
+            message: "simulated original stop failure",
+          },
+        });
+        expect(stop).toHaveBeenCalledTimes(1);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBe(record);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(true);
+        expect(consoleError).toHaveBeenCalledWith(
+          expect.stringContaining("failed to restore the durable state"),
+          expect.objectContaining({
+            message: "simulated approval record write failure",
+          }),
+        );
+      } finally {
+        stop.mockRestore();
+        consoleError.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the durable disable when disposal supersedes the stop", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const disabling = setup.pipeline.disable("example-plugin");
+        const disposing = setup.pipeline.dispose();
+
+        await expect(disabling).resolves.toMatchObject({ ok: false });
+        await disposing;
+
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(true);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBeUndefined();
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("marks the drain barrier synchronously the instant Install is called, before its own job has any chance to run (round-16 finding 4)", async () => {
+    it("keeps warm command admission open while approved source is verified", async () => {
+      const setup = await setupEstablishedPlugin();
+      const snapshotGate = setup.gateNextSnapshot();
+      const statusEventStart = setup.statuses.length;
+      let runChangeCalls = () => -1;
+      try {
+        const first = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            const runChange = vi.spyOn(authority, "runChange");
+            runChangeCalls = () => runChange.mock.calls.length;
+            return authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+          },
+        );
+        await snapshotGate.entered.promise;
+        expect(runChangeCalls()).toBe(0);
+
+        const secondEntered = deferred();
+        const second = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            secondEntered.resolve();
+            return authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+          },
+        );
+        await expect(Promise.race([
+          secondEntered.promise.then(() => "entered"),
+          second.then(() => "settled"),
+        ])).resolves.toBe("entered");
+
+        snapshotGate.release.resolve();
+        await expect(first).resolves.toMatchObject({
+          kind: "completed",
+          value: { kind: "admitted", value: { ok: true } },
+        });
+        await expect(second).resolves.toMatchObject({
+          kind: "completed",
+          value: { kind: "admitted", value: { ok: true } },
+        });
+        expect(runChangeCalls()).toBe(0);
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "ready",
+          runtimeStatus: "ready",
+        });
+        const warmStatusEvents = setup.statuses.slice(statusEventStart);
+        expect(warmStatusEvents).not.toContain("starting");
+        expect(warmStatusEvents.at(-1)).toBe("ready");
+      } finally {
+        snapshotGate.release.resolve();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("reserves a queued warm surface before a later command can queue behind it", async () => {
+      const setup = await setupEstablishedPlugin({ drainTimeoutMs: 0 });
+      const snapshotGate = setup.gateNextSnapshot();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const surface = setup.hostOwnership.acquireSurface("example-plugin");
+      if ("kind" in surface) throw new Error("Surface lease was refused.");
+      let first: Promise<unknown> | undefined;
+      let surfaceStart: Promise<unknown> | undefined;
+      let second: Promise<unknown> | undefined;
+      try {
+        first = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(() =>
+            setup.pipeline.ensureStarted("example-plugin", authority)),
+        );
+        await snapshotGate.entered.promise;
+        const bundlePath = liveBundlePath(setup.fixture, "example-plugin");
+        await writeFile(
+          bundlePath,
+          `${await readFile(bundlePath, "utf8")}\n// tampered before the queued surface\n`,
+        );
+
+        surfaceStart = surface.start((authority) =>
+          setup.pipeline.ensureStarted("example-plugin", authority));
+        const secondEntered = deferred();
+        second = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            secondEntered.resolve();
+            return authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+          },
+        );
+        const secondObservation = await Promise.race([
+          second.then((result) => ({ kind: "settled" as const, result })),
+          secondEntered.promise.then(() => ({ kind: "entered" as const })),
+        ]);
+        expect(secondObservation).toEqual({
+          kind: "settled",
+          result: { kind: "refused", reason: "change-in-progress" },
+        });
+
+        snapshotGate.release.resolve();
+        await expect(first).resolves.toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: {
+              ok: false,
+              error: { code: HOST_CHANGE_REFUSED_ERROR_CODE },
+            },
+          },
+        });
+        await expect(surfaceStart).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+        await expect(second).resolves.toEqual({
+          kind: "refused",
+          reason: "change-in-progress",
+        });
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        snapshotGate.release.resolve();
+        await Promise.allSettled(
+          [first, surfaceStart, second].filter(
+            (pending): pending is Promise<unknown> => pending !== undefined,
+          ),
+        );
+        await surface.release();
+        await setup.pipeline.dispose();
+        warn.mockRestore();
+      }
+    }, 60_000);
+
+    it("parks a second queued surface outside the first surface change", async () => {
+      const setup = await setupEstablishedPlugin({ drainTimeoutMs: 0 });
+      const snapshotGate = setup.gateNextSnapshot();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const firstSurface = setup.hostOwnership.acquireSurface("example-plugin");
+      const secondSurface = setup.hostOwnership.acquireSurface("example-plugin");
+      if ("kind" in firstSurface || "kind" in secondSurface) {
+        throw new Error("Surface lease was refused.");
+      }
+      let command: Promise<unknown> | undefined;
+      let firstStart: Promise<unknown> | undefined;
+      let secondStart: Promise<unknown> | undefined;
+      let secondEnqueued = false;
+      try {
+        command = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(() =>
+            setup.pipeline.ensureStarted("example-plugin", authority)),
+        );
+        await snapshotGate.entered.promise;
+        const bundlePath = liveBundlePath(setup.fixture, "example-plugin");
+        await writeFile(
+          bundlePath,
+          `${await readFile(bundlePath, "utf8")}\n// tampered before two queued surfaces\n`,
+        );
+
+        firstStart = firstSurface.start((authority) =>
+          setup.pipeline.ensureStarted("example-plugin", authority));
+        secondStart = secondSurface.start((authority) => {
+          secondEnqueued = true;
+          return setup.pipeline.ensureStarted("example-plugin", authority);
+        });
+        expect(secondEnqueued).toBe(false);
+
+        snapshotGate.release.resolve();
+        await expect(command).resolves.toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: {
+              ok: false,
+              error: { code: HOST_CHANGE_REFUSED_ERROR_CODE },
+            },
+          },
+        });
+        await expect(firstStart).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+        await expect(secondStart).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        snapshotGate.release.resolve();
+        await Promise.allSettled(
+          [command, firstStart, secondStart].filter(
+            (pending): pending is Promise<unknown> => pending !== undefined,
+          ),
+        );
+        await firstSurface.release();
+        await secondSurface.release();
+        await setup.pipeline.dispose();
+        warn.mockRestore();
+      }
+    }, 60_000);
+
+    it("keeps surface verification under change admission", async () => {
+      const setup = await setupEstablishedPlugin();
+      const snapshotGate = setup.gateNextSnapshot();
+      const lease = setup.hostOwnership.acquireSurface("example-plugin");
+      if ("kind" in lease) throw new Error("Surface lease was refused.");
+      let runChangeCalls = () => -1;
+      try {
+        const starting = lease.start(async (authority) => {
+          const runChange = vi.spyOn(authority, "runChange");
+          runChangeCalls = () => runChange.mock.calls.length;
+          return setup.pipeline.ensureStarted("example-plugin", authority);
+        });
+        await snapshotGate.entered.promise;
+
+        expect(runChangeCalls()).toBe(1);
+        await expect(
+          setup.hostOwnership.runCommand(
+            "example-plugin",
+            async () => "ran",
+          ),
+        ).resolves.toEqual({
+          kind: "refused",
+          reason: "change-in-progress",
+        });
+
+        snapshotGate.release.resolve();
+        await expect(starting).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+      } finally {
+        snapshotGate.release.resolve();
+        await lease.release();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("returns exact evidence for a cold command start", async () => {
       const fixture = await createPluginWorkspace();
-      const commandClaims = new PluginCommandHostClaims();
       let pipeline: PluginPipeline;
       const host = new PluginHost({
         stateDir: fixture.stateDir,
@@ -7735,14 +8952,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           pipeline.noteRuntimeStatus(pluginId, status);
         },
       });
+      const hostOwnership = new PluginHostOwnership(host);
       pipeline = new PluginPipeline({
         workspaceRoot: fixture.workspaceRoot,
         stateDir: fixture.stateDir,
-        pluginHost: host,
+        hostOwnership,
         resourcesBasePath,
         pnpmRunnerEntry,
-        raiseCommandClaimsBarrier: (pluginId) =>
-          commandClaims.raiseDrainBarrier(pluginId),
         operations: {
           install: (input) =>
             installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
@@ -7751,218 +8967,444 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       try {
         await pipeline.start();
-        const key = "example-plugin";
-        expect(commandClaims.isDraining(key)).toBe(false);
+        let exactResult:
+          | Awaited<ReturnType<PluginPipeline["ensureStarted"]>>
+          | undefined;
+        const command = await hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(async () => {
+            exactResult = await pipeline.ensureStarted("example-plugin", authority);
+            return exactResult;
+          }),
+        );
 
-        // No `await` between the call and this assertion — the same gap
-        // that finding 1 (round 15) closed for disable, uninstall,
-        // approve, and rebuild left install and enable exposed until this
-        // round's uniform rule (round-16 finding 4).
-        const installing = pipeline.install("example-plugin");
-        expect(commandClaims.isDraining(key)).toBe(true);
-
-        const installed = await installing;
-        expect(installed.ok).toBe(true);
-        expect(commandClaims.isDraining(key)).toBe(false);
+        expect(command).toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: {
+              ok: true,
+              plugin: { status: "starting", runtimeStatus: "starting" },
+            },
+          },
+        });
+        expect(exactResult?.kind).toBe("started");
+        expect(host.getStatus("example-plugin")).toBeUndefined();
       } finally {
         await pipeline.dispose();
       }
     }, 60_000);
 
-    it("marks the drain barrier synchronously the instant Enable is called, before its own job has any chance to run (round-16 finding 4)", async () => {
+    it("preserves workspace ownership when a surface rebuilds a running host", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const key = "example-plugin";
-        const disabled = await setup.pipeline.disable("example-plugin");
-        expect(disabled.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        await writeFile(
+          liveBundlePath(setup.fixture, "example-plugin"),
+          "// changed after approval\n",
+        );
+        const surface = await ensureFromSurface(
+          setup.pipeline,
+          "example-plugin",
+        );
 
-        const enabling = setup.pipeline.enable("example-plugin");
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
-
-        const enabled = await enabling;
-        expect(enabled.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(surface.result).toMatchObject({ ok: true });
+        expect(surface.exact.kind).toBe("existing");
+        await surface.release();
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("still lowers a raised drain barrier when the wrapped action throws synchronously instead of rejecting (#779 round 22 findings 11-12)", async () => {
+    it("restores ready status when a command finds a running host without approval", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const key = "example-plugin";
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        await mutatePluginRecord(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+          "example-plugin",
+          (record) => {
+            if (!record) throw new Error("Expected an installed plugin record.");
+            const { approvedHash: _approvedHash, ...withoutApproval } = record;
+            return withoutApproval;
+          },
+        );
+        const statusBefore = setup.pipeline.list()[0];
+        const stateBefore = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!stateBefore.ok) throw new Error(stateBefore.warning);
 
-        // A run() that throws before ever returning a promise: finally()
-        // has nothing to attach to in that case, so only a try/catch
-        // around the call itself can still reach lowerBarrier — the
-        // scenario withCommandClaimsBarrier's own try/catch exists for,
-        // even though every current caller's run closure is an async
-        // wrapper that cannot actually do this today.
-        const withCommandClaimsBarrier = (
-          setup.pipeline as unknown as {
-            withCommandClaimsBarrier: <T>(
-              pluginId: string,
-              run: () => Promise<T>,
-            ) => Promise<T>;
-          }
-        ).withCommandClaimsBarrier.bind(setup.pipeline);
+        const started = await ensureFromCommand(setup.pipeline, "example-plugin");
 
-        expect(() =>
-          withCommandClaimsBarrier(key, () => {
-            throw new Error("synchronous run() failure");
-          }),
-        ).toThrow("synchronous run() failure");
-        // No `await` above and no microtask between the throw and this
-        // read: only a synchronous catch, not a dangling finally(), could
-        // have lowered the barrier already.
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(started).toMatchObject({
+          exact: { kind: "existing" },
+          result: {
+            ok: false,
+            error: { code: HOST_CHANGE_REFUSED_ERROR_CODE },
+          },
+        });
+        expect(setup.pipeline.list()[0]).toEqual(statusBefore);
+        const stateAfter = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        expect(stateAfter).toEqual(stateBefore);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("refuses a racing command instead of stalling forever when Enable's own verify-and-hold branch reaches stopOldRuntime (round-16 finding 4, enable's crash-loop-shaped path)", async () => {
+    it("refuses a command-origin approval hold before it mutates the record", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const key = "example-plugin";
-        const disabled = await setup.pipeline.disable("example-plugin");
-        expect(disabled.ok).toBe(true);
-
-        // Source drifts from the approved hash while disabled — the same
-        // shape a crash-loop repair leaves behind — so enable()'s own
-        // verify step finds "changed" and calls holdForApproval instead of
-        // starting, reaching stopOldRuntime's own wait even though nothing
-        // is currently running (PluginPipeline.ts's holdForApproval always
-        // calls stopOldRuntime, unconditionally).
         await writeFile(setup.entryPath, [
-          'export const marker = "drifted";',
+          'export const marker = "edited out of band";',
           "export default { activate() {} };",
           "",
         ].join("\n"));
 
-        // A claim already outstanding on this key, as if a command were
-        // mid-flight — without this round's barrier, a second racing
-        // command could still claim while enable sits queued, then both
-        // would wait on each other: enable's stopOldRuntime for this
-        // claim to drain, and nothing left to release it.
-        setup.commandClaims.claim(key);
+        let exactResult:
+          | Awaited<ReturnType<PluginPipeline["ensureStarted"]>>
+          | undefined;
+        const command = await setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(async () => {
+            exactResult = await setup.pipeline.ensureStarted(
+              "example-plugin",
+              authority,
+            );
+            return exactResult;
+          }),
+        );
 
-        const enabling = setup.pipeline.enable("example-plugin");
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
-
-        setup.commandClaims.release(key);
-        const enabled = await enabling;
-        expect(enabled.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-      } finally {
-        await setup.pipeline.dispose();
-      }
-    }, 60_000);
-
-    it("holds the drain barrier through the publish window after the old runtime stops, until the whole retry settles (round-13 finding 2)", async () => {
-      const setup = await setupEstablishedPlugin();
-      try {
-        const key = "example-plugin";
-        await setup.failEstablishedBuild();
-
-        // onOldRuntimeStopped fires from inside stopOldRuntime, right
-        // after its own inner hold has already lowered (see
-        // PluginPipeline.stopOldRuntime — the lower runs in a finally
-        // immediately around PluginHost.stop(), strictly before this
-        // callback). Reading isDraining() from inside it is an exact,
-        // race-free snapshot of that instant — unlike polling
-        // getStatus(), which can flip old-stopped -> new-started faster
-        // than a poll interval ever observes it.
-        let isDrainingWhenOldRuntimeStopped: boolean | null = null;
-        const rebuilding = setup.pipeline.rebuild("example-plugin", {
-          onOldRuntimeStopped: () => {
-            isDrainingWhenOldRuntimeStopped = setup.commandClaims.isDraining(key);
+        expect(command).toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: { ok: false, error: { code: HOST_CHANGE_REFUSED_ERROR_CODE } },
           },
         });
-
-        const rebuilt = await rebuilding;
-
-        expect(rebuilt.ok).toBe(true);
-        // The inner hold is down, but the outer hold this retry raised
-        // before it was even enqueued is not — the action itself still
-        // has to publish the new source and build, and start the new
-        // host, before it settles (round-13 finding 2).
-        expect(isDrainingWhenOldRuntimeStopped).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(exactResult?.kind).toBe("existing");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(false);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("clears the drain barrier even when a retry is rejected before it ever reaches a stop (round-12 finding 1 and 3)", async () => {
+    it("refuses a command-origin bundle repair before it mutates durable state", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const key = "example-plugin";
-        // No failed build exists — rebuild()'s own early gate rejects
-        // before buildFromCurrentSource ever runs, so stopOldRuntime is
-        // never reached to clear the barrier the top of rebuild() raised.
-        const rejected = await setup.pipeline.rebuild("example-plugin");
+        const stateBefore = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!stateBefore.ok) throw new Error(stateBefore.warning);
+        await writeFile(
+          liveBundlePath(setup.fixture, "example-plugin"),
+          "globalThis.tampered = true;\n",
+        );
 
-        expect(rejected.ok).toBe(false);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        let exactResult:
+          | Awaited<ReturnType<PluginPipeline["ensureStarted"]>>
+          | undefined;
+        const command = await setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(async () => {
+            exactResult = await setup.pipeline.ensureStarted(
+              "example-plugin",
+              authority,
+            );
+            return exactResult;
+          }),
+        );
+
+        expect(command).toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: { ok: false, error: { code: HOST_CHANGE_REFUSED_ERROR_CODE } },
+          },
+        });
+        expect(exactResult?.kind).toBe("existing");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
+        const stateAfter = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!stateAfter.ok) throw new Error(stateAfter.warning);
+        expect(stateAfter.state.plugins["example-plugin"])
+          .toEqual(stateBefore.state.plugins["example-plugin"]);
+        expect(await stagingLeftovers(setup.fixture, "example-plugin")).toEqual([]);
+        expect(await readFile(
+          liveBundlePath(setup.fixture, "example-plugin"),
+          "utf8",
+        )).toBe("globalThis.tampered = true;\n");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("treats a stop as settled once its record is confirmed gone, even when the transport's own dispose rejects, and still clears the drain barrier (round-12 finding 3, round-19 finding 5)", async () => {
+    it("adopts a runtime that an explicit action started before it failed", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const key = "example-plugin";
-        await setup.failEstablishedBuild();
-        setup.failNextStop();
+        expect((await setup.pipeline.disable("example-plugin")).ok).toBe(true);
+        const originalStart = setup.pipeline.host.start.bind(setup.pipeline.host);
+        let failNextPipelineStatus = false;
+        vi.spyOn(setup.pipeline.host, "start").mockImplementation(async (...args) => {
+          const evidence = await originalStart(...args);
+          failNextPipelineStatus = true;
+          return evidence;
+        });
+        const pipelineInternals = setup.pipeline as unknown as {
+          setStatus: (...args: unknown[]) => unknown;
+        };
+        const originalSetStatus = pipelineInternals.setStatus.bind(setup.pipeline);
+        vi.spyOn(pipelineInternals, "setStatus").mockImplementation((...args) => {
+          if (failNextPipelineStatus) {
+            failNextPipelineStatus = false;
+            throw new Error("simulated post-start status failure");
+          }
+          return originalSetStatus(...args);
+        });
+
+        const enabled = await setup.pipeline.enable("example-plugin");
+
+        expect(enabled).toMatchObject({
+          ok: false,
+          error: { code: "enable-failed" },
+        });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("closes ownership once and prevents a queued action from starting the host", async () => {
+      const setup = await setupEstablishedPlugin();
+      const queueGate = deferred();
+      try {
+        expect((await setup.pipeline.disable("example-plugin")).ok).toBe(true);
+        const enqueue = (
+          setup.pipeline as unknown as {
+            enqueueActionValue: <T>(
+              pluginId: string,
+              run: () => Promise<T>,
+            ) => Promise<T>;
+          }
+        ).enqueueActionValue.bind(setup.pipeline);
+        const blocker = enqueue("example-plugin", async () => {
+          await queueGate.promise;
+        });
+        const enabling = setup.pipeline.enable("example-plugin");
+        const close = vi.spyOn(setup.hostOwnership, "close");
+
+        const firstDispose = setup.pipeline.dispose();
+        const secondDispose = setup.pipeline.dispose();
+        expect(secondDispose).toBe(firstDispose);
+        queueGate.resolve();
+
+        await blocker;
+        await expect(enabling).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
+        await firstDispose;
+        expect(close).toHaveBeenCalledTimes(1);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+        await expect(setup.pipeline.enable("example-plugin")).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
+        await expect(
+          setup.pipeline.uninstallPreflight("example-plugin", "example-plugin"),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
+        await expect(
+          setup.pipeline.uninstall("example-plugin", "example-plugin", "expired"),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
+      } finally {
+        queueGate.resolve();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("does not translate an ordinary stale reservation into pipeline close", async () => {
+      const setup = await setupEstablishedPlugin();
+      const stale = setup.hostOwnership.reserveChange("example-plugin");
+      await stale.cancel();
+      vi.spyOn(setup.hostOwnership, "reserveChange").mockReturnValueOnce(stale);
+
+      const disabling = setup.pipeline.disable("example-plugin");
+      const disposing = setup.pipeline.dispose();
+
+      await expect(disabling).rejects.toThrow(
+        "Change reservation is no longer active.",
+      );
+      await disposing;
+    }, 60_000);
+
+    it("releases reservations after action preconditions fail", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        expect((await setup.pipeline.rebuild("example-plugin")).ok).toBe(false);
+        await expect(
+          setup.hostOwnership.runCommand("example-plugin", async () => "ready"),
+        ).resolves.toEqual({ kind: "completed", value: "ready" });
+
+        expect((await setup.pipeline.disable("missing-plugin")).ok).toBe(false);
+        await expect(
+          setup.hostOwnership.runCommand("missing-plugin", async () => "ready"),
+        ).resolves.toEqual({ kind: "completed", value: "ready" });
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("preserves a command cold start through a precondition-failed action", async () => {
+      const setup = await setupEstablishedPlugin();
+      const commandStarted = deferred();
+      const releaseCommand = deferred();
+      try {
+        expect((await setup.pipeline.disable("example-plugin")).ok).toBe(true);
+        await mutatePluginRecord(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+          "example-plugin",
+          (record) => ({ ...record, disabled: false }),
+        );
+        const command = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            const started = await authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+            commandStarted.resolve();
+            await releaseCommand.promise;
+            return started;
+          },
+        );
+        await commandStarted.promise;
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
 
         const rebuilt = await setup.pipeline.rebuild("example-plugin");
+        expect(rebuilt).toMatchObject({
+          ok: false,
+          error: { code: "no-failed-build" },
+        });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
 
-        // PluginHost's own shutdown() deletes its record in its own
-        // finally regardless of whether transport.dispose() rejected —
-        // the runtime did stop, so this must not fail the whole retry
-        // over a cleanup step that failed after the fact.
-        expect(rebuilt.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-
-        // A later invocation proceeds normally against whatever state is
-        // honest now, instead of refusing forever behind a barrier the
-        // failed stop left standing.
-        setup.commandClaims.claim(key);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-        setup.commandClaims.release(key);
+        releaseCommand.resolve();
+        await command;
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
       } finally {
+        releaseCommand.resolve();
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("clears both disable's own outer hold and stopOldRuntime's own inner hold even when the stop itself rejects (round-12 finding 3, nested)", async () => {
-      // disable()'s own outer hold (round-15 finding 1) and
-      // stopOldRuntime's own inner hold nest on the same key — isDraining
-      // only returns false once both lower. A stop rejection must not
-      // strand either one: disable's own finally lowers its hold
-      // regardless of the outcome, and stopOldRuntime's own finally does
-      // the same for its own, narrower hold.
+    it("propagates owner close failure after stopping the host", async () => {
       const setup = await setupEstablishedPlugin();
+      const stopAll = setup.pipeline.host.stopAll.bind(setup.pipeline.host);
+      vi.spyOn(setup.pipeline.host, "stopAll").mockImplementationOnce(async () => {
+        await stopAll();
+        throw new Error("simulated owner close failure");
+      });
+
+      await expect(setup.pipeline.dispose()).rejects.toThrow(
+        "simulated owner close failure",
+      );
+      expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+      await expect(setup.pipeline.enable("example-plugin")).resolves.toMatchObject({
+        ok: false,
+        error: { code: "pipeline-closed" },
+      });
+    }, 60_000);
+
+    it("waits for a live command before disposal stops the host", async () => {
+      const setup = await setupEstablishedPlugin();
+      const commandEntered = deferred();
+      const commandGate = deferred();
+      const bumpGeneration = vi.spyOn(setup.pipeline.host, "bumpGeneration");
       try {
-        const key = "example-plugin";
-        setup.failNextStop();
+        const command = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async () => {
+            commandEntered.resolve();
+            await commandGate.promise;
+          },
+        );
+        await commandEntered.promise;
 
-        const disabled = await setup.pipeline.disable("example-plugin");
+        const disposing = setup.pipeline.dispose();
 
-        // The record is confirmed gone despite the transport's own dispose
-        // rejecting, so this succeeds too (round-19 finding 5).
-        expect(disabled.ok).toBe(true);
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        await expect(
+          setup.hostOwnership.runCommand("example-plugin", async () => undefined),
+        ).resolves.toEqual({ kind: "refused", reason: "closed" });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(bumpGeneration).not.toHaveBeenCalled();
+
+        commandGate.resolve();
+        await command;
+        await disposing;
+        expect(bumpGeneration).toHaveBeenCalledTimes(1);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
       } finally {
+        commandGate.resolve();
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("runs the stop's own boundary consequences even when the transport's own dispose rejects (round-19 finding 5)", async () => {
+    it("warns when a host change reaches the command drain deadline", async () => {
+      const setup = await setupEstablishedPlugin({ drainTimeoutMs: 0 });
+      const commandEntered = deferred();
+      const commandGate = deferred();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const command = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async () => {
+            commandEntered.resolve();
+            await commandGate.promise;
+          },
+        );
+        await commandEntered.promise;
+        await writeFile(setup.entryPath, [
+          'export const marker = "replacement";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
+
+        const approved = await setup.pipeline.approve("example-plugin");
+
+        expect(approved.ok).toBe(true);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining(
+          'Plugin "example-plugin" still has work in flight',
+        ));
+        commandGate.resolve();
+        await command;
+      } finally {
+        commandGate.resolve();
+        warn.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("runs stop-boundary consequences after transport cleanup rejects", async () => {
       const setup = await setupEstablishedPlugin();
       let oldRuntimeStoppedCalls = 0;
       try {
@@ -7975,172 +9417,59 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
         });
 
-        // The boundary callback (a panel/web-app teardown in main.ts) must
-        // still fire once the record is confirmed gone — a runtime that
-        // died leaves nothing for a stale grant or view to straddle into,
-        // whether or not its own transport cleanup rejected on the way out.
         expect(rebuilt.ok).toBe(true);
         expect(oldRuntimeStoppedCalls).toBe(1);
+        await expect(
+          setup.hostOwnership.runCommand("example-plugin", async () => "ready"),
+        ).resolves.toEqual({ kind: "completed", value: "ready" });
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("clears disable's own outer hold even when the candidate lookup itself throws, before its job ever reaches a try (round-16 finding 3)", async () => {
+    it("takes an ownership stop boundary when no host record exists yet", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const key = "missing-plugin";
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect((await setup.pipeline.disable("example-plugin")).ok).toBe(true);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBeUndefined();
+        const stop = vi.spyOn(setup.pipeline.host, "stop");
 
-        // No plugin named this was ever installed, so requireValidCandidate
-        // throws PipelineFailure the instant the job runs — before any try
-        // this job body's own barrier-lowering could depend on.
-        const disabled = await setup.pipeline.disable("missing-plugin");
+        const disabled = await setup.pipeline.disable("example-plugin");
 
-        expect(disabled.ok).toBe(false);
-        // The barrier must still be down: left up here would refuse every
-        // later command against this key until the workspace closes, not
-        // just the one call that already failed.
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
+        expect(disabled.ok).toBe(true);
+        expect(stop).toHaveBeenCalledTimes(1);
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("waits for an in-flight command claim to drain before workspace disposal stops every host (round-12 finding 2)", async () => {
-      const setup = await setupEstablishedPlugin();
-      const key = "example-plugin";
-      setup.commandClaims.claim(key);
-
-      const disposing = setup.pipeline.dispose();
-
-      // The barrier marks and the wait begins as soon as disposal
-      // starts — a command arriving right now would refuse (isDraining),
-      // and the host is still up while the claim above hasn't released.
-      await waitFor(
-        () => setup.commandClaims.isDraining(key),
-        "Disposal never marked the drain barrier.",
-      );
-      expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
-
-      setup.commandClaims.release(key);
-      await disposing;
-
-      expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
-    }, 60_000);
-
-    it("bumps PluginHost's generation only after the claims drain, not before, so in-flight SDK work is not cut off the instant dispose starts (round-19 finding 4)", async () => {
-      const setup = await setupEstablishedPlugin();
-      const key = "example-plugin";
-      const bumpSpy = vi.spyOn(setup.pipeline.host, "bumpGeneration");
-      setup.commandClaims.claim(key);
-
-      const disposing = setup.pipeline.dispose();
-
-      await waitFor(
-        () => setup.commandClaims.isDraining(key),
-        "Disposal never marked the drain barrier.",
-      );
-      // The claim above is still outstanding, so the drain wait has not
-      // finished — bumpGeneration, which aborts every spawn's in-flight
-      // SDK work synchronously, must not have run yet.
-      expect(bumpSpy).not.toHaveBeenCalled();
-
-      setup.commandClaims.release(key);
-      await disposing;
-
-      expect(bumpSpy).toHaveBeenCalledTimes(1);
-    }, 60_000);
-
-    it("clears every plugin's drain barrier even when workspace disposal's own stop rejects (round-12 finding 3, dispose path)", async () => {
-      const setup = await setupEstablishedPlugin();
-      const key = "example-plugin";
-      setup.failNextDisposeAll();
-
-      await expect(setup.pipeline.dispose()).rejects.toThrow(
-        "simulated: PluginHost.stopAll() onDispose failed",
-      );
-
-      expect(setup.commandClaims.isDraining(key)).toBe(false);
-    }, 60_000);
-
-    it("clears a stale started-host marker at dispose, so a later session reusing the same key is never misattributed to it (round-15 finding 2)", async () => {
-      const setup = await setupEstablishedPlugin();
-      const key = "example-plugin";
-      // A command that finished under dispose's own barrier skips
-      // consumeStartedHost (round-14's !isDraining guard defers it
-      // indefinitely, not just past this dispose) — simulate that
-      // stale marker directly, the state it would have left behind.
-      setup.commandClaims.markStartedHost(key);
-
-      await setup.pipeline.dispose();
-
-      // This workspace is gone for good. Nothing may still attribute a
-      // later session's own host, opened under this same lifecycle
-      // key, to whatever this one never consumed.
-      expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
-    }, 60_000);
-
-    it("clears a cold-start command's on-demand marker once an in-queue rebuild's barrier lowers, so a later release does not stop the replacement (round-19 finding 3)", async () => {
+    it("holds changed source without stopping again when no host record exists", async () => {
       const setup = await setupEstablishedPlugin();
       try {
-        const key = "example-plugin";
-        // A command cold-started this host before the rebuild below — its
-        // own on-demand marker, set the same way main.ts's
-        // invokePluginCommand does on a claimless cold start.
-        setup.commandClaims.markStartedHost(key);
+        expect((await setup.pipeline.disable("example-plugin")).ok).toBe(true);
+        const stop = vi.spyOn(setup.pipeline.host, "stop");
+        await writeFile(setup.entryPath, [
+          'export const marker = "changed while disabled";',
+          "export default { activate() {} };",
+          "",
+        ].join("\n"));
 
-        await setup.failEstablishedBuild();
-        const rebuilt = await setup.pipeline.rebuild("example-plugin");
-        expect(rebuilt.ok).toBe(true);
+        const enabled = await setup.pipeline.enable("example-plugin");
 
-        // The rebuild's own barrier just lowered, replacing the runtime as
-        // the workspace's own enabled process — the pre-rebuild marker no
-        // longer describes what's running, so a later, unrelated release
-        // must not consume it and stop the replacement it never claimed.
-        expect(setup.commandClaims.consumeStartedHost(key)).toBe(false);
+        expect(enabled).toMatchObject({
+          ok: true,
+          plugin: { status: "disabled-pending-approval" },
+        });
+        expect(stop).not.toHaveBeenCalled();
       } finally {
         await setup.pipeline.dispose();
       }
     }, 60_000);
 
-    it("keeps a command's own cold-start marker through a precondition-failed rebuild, so the host still stops once that command releases (#779 round 26 note A)", async () => {
-      const setup = await setupEstablishedPlugin();
-      try {
-        const key = "example-plugin";
-        // A command cold-started this host before the rebuild below — its
-        // own on-demand marker, set the same way main.ts's
-        // invokePluginCommand does on a claimless cold start.
-        setup.commandClaims.markStartedHost(key);
-
-        // Nothing is currently failed, so rebuild()'s own precondition
-        // (hasRecoverableFailure) refuses here — this raise/lower cycle
-        // never reaches stopOldRuntime at all, unlike the twin test above.
-        const rebuilt = await setup.pipeline.rebuild(key);
-        expect(rebuilt.ok).toBe(false);
-
-        // The marker must have survived this no-op cycle: consuming it
-        // here is exactly what the cold-starting command's own eventual
-        // release does to decide whether it, and nothing else, is why the
-        // host is running — eating it here would leak that host ownerless
-        // until workspace close.
-        expect(setup.commandClaims.consumeStartedHost(key)).toBe(true);
-      } finally {
-        await setup.pipeline.dispose();
-      }
-    }, 60_000);
-
-    it("keeps the drain barrier up across a door-write reconcile and the watcher-driven identity removal queued behind it, clearing only once both settle (round-16 finding 2, round-17 finding 4)", async () => {
+    it("keeps ownership closed across queued source refresh and identity removal", async () => {
       const setup = await setupEstablishedPlugin();
       let buildGate: ReturnType<typeof setup.gateNextBuild> | undefined;
       try {
-        const key = "example-plugin";
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-
-        // Occupy the plugin's own per-plugin job queue with a door-write
-        // reconcile — an internal, background refresh (enqueueSourceRefresh)
-        // that now raises its own barrier too (round-17 finding 4) — held
-        // mid-build.
         buildGate = setup.gateNextBuild();
         const driftedText = [
           'export const marker = "door-written drift";',
@@ -8153,193 +9482,103 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           text: driftedText,
         });
         await buildGate.entered.promise;
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
+        await expect(
+          setup.hostOwnership.runCommand("example-plugin", async () => undefined),
+        ).resolves.toEqual({ kind: "refused", reason: "change-in-progress" });
 
-        // The plugin's whole root vanishes — a real departure — while that
-        // reconcile is still gated mid-build. removeOldIdentity's own job
-        // cannot have started yet: it is still queued behind the reconcile
-        // job on the same per-plugin queue. isDraining stays true
-        // regardless — both holds compose — so a command racing in right
-        // now still refuses instead of enqueuing its own start behind
-        // either job.
         await rm(setup.fixture.pluginRoot, { recursive: true, force: true });
-        const watching = setup.pipeline.handleWatcherEvents([
-          { path: "plugins/example-plugin", operation: "delete" },
-        ]);
-        expect(setup.commandClaims.isDraining(key)).toBe(true);
+        const watching = setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin",
+          operation: "delete",
+        }]);
+        await expect(
+          setup.hostOwnership.runCommand("example-plugin", async () => undefined),
+        ).resolves.toEqual({ kind: "refused", reason: "change-in-progress" });
 
         buildGate.release.resolve();
         await watching;
 
-        expect(setup.commandClaims.isDraining(key)).toBe(false);
-        expect(setup.pipeline.list().some((p) => p.id === "example-plugin"))
-          .toBe(false);
+        await expect(
+          setup.hostOwnership.runCommand("example-plugin", async () => "ready"),
+        ).resolves.toEqual({ kind: "completed", value: "ready" });
+        expect(
+          setup.pipeline.list().some((plugin) => plugin.id === "example-plugin"),
+        ).toBe(false);
       } finally {
         buildGate?.release.resolve();
         await setup.pipeline.dispose();
       }
     }, 60_000);
-  });
 
-  it("opens a surface only once the host finished activating (#798)", async () => {
-    const fixture = await createPluginWorkspace();
-    let pipeline: PluginPipeline;
-    let activationGate = deferred();
-    const host = new PluginHost({
-      stateDir: fixture.stateDir,
-      workspaceRoot: fixture.workspaceRoot,
-      spawnTransport: vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
-        request: async <T = unknown>(method: string): Promise<T> => {
-          if (method !== "plugin.activate") return {} as T;
-          await activationGate.promise;
-          return { commands: [], drivers: [] } as T;
+    it("awaits failed surface cleanup before removing a watched identity", async () => {
+      const cleanupEntered = deferred();
+      const cleanupRelease = deferred();
+      const cleanupFailure = new Error("simulated surface cleanup failure");
+      const steps: string[] = [];
+      let watcherSettled = false;
+      const setup = await setupEstablishedPlugin({
+        onRuntimeStopped: async (pluginId) => {
+          steps.push(`cleanup:${pluginId}`);
+          cleanupEntered.resolve();
+          await cleanupRelease.promise;
+          steps.push(`cleanup-failed:${pluginId}`);
+          throw cleanupFailure;
         },
-        notify: () => undefined,
-        dispose: async () => undefined,
-      })),
-      routeSdkRequest: async () => ({}),
-      onStatusChange: (pluginId, status) => {
-        pipeline.noteRuntimeStatus(pluginId, status);
-      },
-    });
-    pipeline = new PluginPipeline({
-      workspaceRoot: fixture.workspaceRoot,
-      stateDir: fixture.stateDir,
-      pluginHost: host,
-      resourcesBasePath,
-      pnpmRunnerEntry,
-      operations: {
-        install: (input) =>
-          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-      },
-    });
-
-    // What main.ts wires behind every panel and web-app open.
-    const panelStartedHosts = new Set<string>();
-    const open = () => {
-      let opened = false;
-      const settled = startPluginForPanel({
-        panelStartedHosts,
-        workspaceId: "workspace-1",
-        pluginId: "example-plugin",
-        hostActivation: () => host.activationOf("example-plugin"),
-        ensureStarted: () =>
-          pipeline.ensureStarted("example-plugin").then(toPluginPanelHostStartResult),
-      }).then(() => {
-        opened = true;
       });
-      return { settled, isOpen: () => opened };
-    };
-    const settleQueuedWork = () =>
-      new Promise((resolve) => setTimeout(resolve, 50));
-
-    try {
-      await pipeline.start();
-      const installed = await pipeline.install("example-plugin");
-      if (!installed.ok) {
-        throw new Error(
-          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
-        );
-      }
-
-      // The workspace's own install spawned the host and returned. The plugin
-      // is still activating, which is the window a cold open lands in.
-      expect(host.getStatus("example-plugin")).toBe("starting");
-
-      const rode = open();
-      await settleQueuedWork();
-      expect(rode.isOpen()).toBe(false);
-      // The call the surface makes next is refused for as long as this lasts.
-      await expect(
-        host.invokeCommand("example-plugin", "example.command"),
-      ).rejects.toThrow('Plugin "example-plugin" is still starting.');
-
-      activationGate.resolve();
-      await rode.settled;
-      expect(host.getStatus("example-plugin")).toBe("ready");
-      await host.invokeCommand("example-plugin", "example.command");
-      // It rode along on a host the install started, so it does not own it.
-      expect(panelStartedHosts.size).toBe(0);
-
-      // The cold path: this open starts the host itself and must wait the
-      // same way.
-      await host.stop("example-plugin");
-      activationGate = deferred();
-      const cold = open();
-      await waitFor(
-        () => host.getStatus("example-plugin") === "starting",
-        "The open did not start the host.",
+      const consoleError = vi.spyOn(console, "error").mockImplementation(
+        () => undefined,
       );
-      await settleQueuedWork();
-      expect(cold.isOpen()).toBe(false);
+      try {
+        await rm(setup.fixture.pluginRoot, { recursive: true, force: true });
+        const watching = setup.pipeline.handleWatcherEvents([{
+          path: "plugins/example-plugin",
+          operation: "delete",
+        }]).then(() => {
+          watcherSettled = true;
+          steps.push("watcher-settled");
+        });
 
-      activationGate.resolve();
-      await cold.settled;
-      expect(host.getStatus("example-plugin")).toBe("ready");
-      await host.invokeCommand("example-plugin", "example.command");
-      expect([...panelStartedHosts]).toEqual([
-        pluginLifecycleKey("workspace-1", "example-plugin"),
-      ]);
-    } finally {
-      activationGate.resolve();
-      await pipeline.dispose();
-    }
-  }, 60_000);
+        await cleanupEntered.promise;
 
-  it("hands panel ownership only to the call that started the host (#779 round 10 B3)", async () => {
-    const fixture = await createPluginWorkspace();
-    let pipeline: PluginPipeline;
-    const host = new PluginHost({
-      stateDir: fixture.stateDir,
-      workspaceRoot: fixture.workspaceRoot,
-      spawnTransport: fakeSpawnTransport(),
-      routeSdkRequest: async () => ({}),
-      onStatusChange: (pluginId, status) => {
-        pipeline.noteRuntimeStatus(pluginId, status);
-      },
-    });
-    pipeline = new PluginPipeline({
-      workspaceRoot: fixture.workspaceRoot,
-      stateDir: fixture.stateDir,
-      pluginHost: host,
-      resourcesBasePath,
-      pnpmRunnerEntry,
-      operations: {
-        install: (input) =>
-          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-      },
-    });
-
-    try {
-      await pipeline.start();
-      // The install is the workspace starting the host, exactly as a queued
-      // reconciliation would during workspace startup.
-      const installed = await pipeline.install("example-plugin");
-      if (!installed.ok) {
-        throw new Error(
-          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        expect(steps).toEqual(["cleanup:example-plugin"]);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBeUndefined();
+        expect(watcherSettled).toBe(false);
+        const whileCleaning = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
         );
+        if (!whileCleaning.ok) throw new Error(whileCleaning.warning);
+        expect(whileCleaning.state.plugins["example-plugin"]).toBeDefined();
+
+        cleanupRelease.resolve();
+        await watching;
+
+        expect(steps).toEqual([
+          "cleanup:example-plugin",
+          "cleanup-failed:example-plugin",
+          "watcher-settled",
+        ]);
+        const removed = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!removed.ok) throw new Error(removed.warning);
+        expect(removed.state.plugins["example-plugin"]).toBeUndefined();
+        expect(
+          setup.pipeline.list().some((plugin) => plugin.id === "example-plugin"),
+        ).toBe(false);
+        expect(consoleError).toHaveBeenCalledWith(
+          expect.stringContaining("runtime-stopped cleanup failed"),
+          cleanupFailure,
+        );
+      } finally {
+        cleanupRelease.resolve();
+        consoleError.mockRestore();
+        await setup.pipeline.dispose();
       }
-      await waitFor(
-        () => pipeline.list()[0]?.status === "ready",
-        "Plugin did not reach ready after install.",
-      );
+    }, 60_000);
 
-      // A panel's own ensureStarted now succeeds on an already-running host.
-      // It did not perform the zero-to-running transition, so closing that
-      // panel must not stop an enabled plugin's background work.
-      const followed = await pipeline.ensureStarted("example-plugin");
-      expect(followed.ok).toBe(true);
-      expect(followed.ok && followed.startedHost).toBe(false);
-
-      await host.stop("example-plugin");
-      const cold = await pipeline.ensureStarted("example-plugin");
-      expect(cold.ok).toBe(true);
-      expect(cold.ok && cold.startedHost).toBe(true);
-    } finally {
-      await pipeline.dispose();
-    }
-  }, 60_000);
+  });
 
   it("keeps an installation whose manifest breaks while it is watched, and recovers it when the manifest returns (#779 round 12 A1)", async () => {
     const fixture = await createPluginWorkspace();
@@ -8356,7 +9595,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -8442,6 +9681,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("finishes an uninstall whose source delete succeeded and whose data delete failed (#779 round 12 A2)", async () => {
     const fixture = await createPluginWorkspace();
     let failDataRemoval = false;
+    let hashSourceCalls = 0;
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -8455,12 +9695,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        hashSource: async (rootPath) => {
+          hashSourceCalls += 1;
+          return hashPluginSourceFiles(rootPath);
+        },
         removePath: async (path, options) => {
           if (
             failDataRemoval &&
@@ -8504,6 +9748,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
         code: "ENOENT",
       });
+      expect(hashSourceCalls).toBe(2);
       expect(await readdir(pluginsDataRoot(fixture))).toEqual([
         "example-plugin",
       ]);
@@ -8550,6 +9795,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         retryPreflight.confirmationToken,
       );
       expect(finished.ok).toBe(true);
+      // A confirmed absent source still re-resolves its identity twice, but
+      // neither check tries to hash a path already proven absent.
+      expect(hashSourceCalls).toBe(2);
 
       expect(await readdir(pluginsDataRoot(fixture))).toEqual([]);
       const state = await readPluginLocalState(
@@ -8559,6 +9807,124 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!state.ok) throw new Error(state.warning);
       expect(state.state.plugins["example-plugin"]).toBeUndefined();
       expect(pipeline.list()).toEqual([]);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("refuses a sourceless token after the same id is restored and restarted", async () => {
+    const fixture = await createPluginWorkspace();
+    const backupRoot = join(fixture.root, "source-backup");
+    await cp(fixture.pluginRoot, backupRoot, { recursive: true });
+    let failDataRemoval = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership: new PluginHostOwnership(host),
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        removePath: async (path, options) => {
+          if (
+            failDataRemoval &&
+            String(path).startsWith(pluginsDataRoot(fixture))
+          ) {
+            throw new Error("plugin data delete failed");
+          }
+          await rm(path, options);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      failDataRemoval = true;
+      const firstPreflight = await pipeline.uninstallPreflight(
+        "example-plugin",
+        "example-plugin",
+      );
+      if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
+      const partial = await pipeline.uninstall(
+        "example-plugin",
+        "example-plugin",
+        firstPreflight.confirmationToken,
+      );
+      expect(partial).toMatchObject({
+        ok: false,
+        error: { stage: "uninstall", code: "delete-failed" },
+      });
+      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+
+      failDataRemoval = false;
+      const sourceless = await pipeline.uninstallPreflight(
+        "example-plugin",
+        "example-plugin",
+      );
+      if (!sourceless.ok) throw new Error(sourceless.error.message);
+      expect(sourceless.preflight.liveHash).toBeNull();
+
+      await cp(backupRoot, fixture.pluginRoot, { recursive: true });
+      await pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin",
+        operation: "update",
+      }]);
+      const enabled = await pipeline.enable("example-plugin");
+      if (!enabled.ok) throw new Error(enabled.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The restored plugin did not restart.",
+      );
+      const runningRecord = host.currentRecord("example-plugin");
+      expect(runningRecord).toBeDefined();
+      const dataBundle = await readFile(liveBundlePath(fixture, "example-plugin"));
+      const stateRoot = pluginStateRoot(
+        pluginDataDir(fixture.stateDir, fixture.workspaceRoot),
+        "example-plugin",
+      );
+      await mkdir(stateRoot, { recursive: true });
+      await writeFile(join(stateRoot, "new-session.json"), "new state\n");
+
+      const stale = await pipeline.uninstall(
+        "example-plugin",
+        "example-plugin",
+        sourceless.confirmationToken,
+      );
+
+      expect(stale).toMatchObject({
+        ok: false,
+        error: { stage: "uninstall", code: "confirmation-stale" },
+      });
+      expect(host.currentRecord("example-plugin")).toBe(runningRecord);
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+      expect(await readFile(liveBundlePath(fixture, "example-plugin")))
+        .toEqual(dataBundle);
+      expect(await readFile(join(stateRoot, "new-session.json"), "utf8"))
+        .toBe("new state\n");
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]).toBeDefined();
     } finally {
       await pipeline.dispose();
     }
@@ -8582,7 +9948,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: newHost(),
+      hostOwnership: new PluginHostOwnership(newHost()),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -8616,7 +9982,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: newHost(),
+      hostOwnership: new PluginHostOwnership(newHost()),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -8672,7 +10038,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -8784,7 +10150,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
@@ -8838,7 +10204,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -8919,7 +10285,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9009,7 +10375,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9082,7 +10448,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9219,7 +10585,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9320,7 +10686,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9382,7 +10748,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9452,7 +10818,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9531,7 +10897,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9641,7 +11007,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -9751,7 +11117,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
     });
@@ -9825,7 +11191,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
@@ -9897,7 +11263,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       onStatusChange: (event) => events.push(event),
@@ -9954,7 +11320,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
       operations: {
@@ -10064,7 +11430,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
     });
@@ -10133,7 +11499,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
     });
@@ -10181,7 +11547,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     pipeline = new PluginPipeline({
       workspaceRoot: fixture.workspaceRoot,
       stateDir: fixture.stateDir,
-      pluginHost: host,
+      hostOwnership: new PluginHostOwnership(host),
       resourcesBasePath,
       pnpmRunnerEntry,
     });
