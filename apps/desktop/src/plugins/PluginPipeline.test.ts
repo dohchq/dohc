@@ -7587,6 +7587,59 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("refuses a command-origin bundle repair before it mutates durable state", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const stateBefore = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!stateBefore.ok) throw new Error(stateBefore.warning);
+        await writeFile(
+          liveBundlePath(setup.fixture, "example-plugin"),
+          "globalThis.tampered = true;\n",
+        );
+
+        let exactResult:
+          | Awaited<ReturnType<PluginPipeline["ensureStarted"]>>
+          | undefined;
+        const command = await setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(async () => {
+            exactResult = await setup.pipeline.ensureStarted(
+              "example-plugin",
+              authority,
+            );
+            return exactResult;
+          }),
+        );
+
+        expect(command).toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: { ok: false, error: { code: HOST_CHANGE_REFUSED_ERROR_CODE } },
+          },
+        });
+        expect(exactResult?.kind).toBe("existing");
+        const stateAfter = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!stateAfter.ok) throw new Error(stateAfter.warning);
+        expect(stateAfter.state.plugins["example-plugin"])
+          .toEqual(stateBefore.state.plugins["example-plugin"]);
+        expect(await stagingLeftovers(setup.fixture, "example-plugin")).toEqual([]);
+        expect(await readFile(
+          liveBundlePath(setup.fixture, "example-plugin"),
+          "utf8",
+        )).toBe("globalThis.tampered = true;\n");
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("adopts a runtime that an explicit action started before it failed", async () => {
       const setup = await setupEstablishedPlugin();
       try {
@@ -7683,6 +7736,47 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           setup.hostOwnership.runCommand("missing-plugin", async () => "ready"),
         ).resolves.toEqual({ kind: "completed", value: "ready" });
       } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("preserves a command cold start through a precondition-failed action", async () => {
+      const setup = await setupEstablishedPlugin();
+      const commandStarted = deferred();
+      const releaseCommand = deferred();
+      try {
+        expect((await setup.pipeline.disable("example-plugin")).ok).toBe(true);
+        await mutatePluginRecord(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+          "example-plugin",
+          (record) => ({ ...record, disabled: false }),
+        );
+        const command = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            const started = await authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+            commandStarted.resolve();
+            await releaseCommand.promise;
+            return started;
+          },
+        );
+        await commandStarted.promise;
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
+
+        const rebuilt = await setup.pipeline.rebuild("example-plugin");
+        expect(rebuilt).toMatchObject({
+          ok: false,
+          error: { code: "no-failed-build" },
+        });
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
+
+        releaseCommand.resolve();
+        await command;
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+      } finally {
+        releaseCommand.resolve();
         await setup.pipeline.dispose();
       }
     }, 60_000);

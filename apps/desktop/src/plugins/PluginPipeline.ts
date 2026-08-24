@@ -3487,6 +3487,15 @@ export class PluginPipeline {
     const pluginId = candidate.id;
     const liveRoot = this.liveRoot(pluginId);
     if (!await this.verifiedLiveBundle(liveRoot, state.approvedBundleHash)) {
+      if (
+        this.host.currentRecord(pluginId) &&
+        (!change || change.checkStop().kind !== "ready")
+      ) {
+        return existingHostResult(this.failure(
+          pluginId,
+          this.hostChangeInProgressError(pluginId),
+        ));
+      }
       return this.runFullBuild({
         candidate,
         startRuntime: true,
@@ -3742,7 +3751,9 @@ export class PluginPipeline {
             : pipelineError("runtime", "action-failed", errorMessage(error));
           result = existingHostResult(this.failure(pluginId, detail));
         }
-        return change.adopt(result);
+        return result.kind === "started"
+          ? change.adopt(result)
+          : change.preserve(result);
       }));
     return action.catch((error: unknown) => {
       if (this.isCloseInvalidation(error)) {

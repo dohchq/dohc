@@ -39,6 +39,11 @@ export type PluginHostChangeStopOutcome =
   | { kind: "refused"; reason: "self-drain" }
   | { kind: "superseded"; drained: boolean };
 
+export type PluginHostChangeStopCheck =
+  | { kind: "ready" }
+  | { kind: "refused"; reason: "self-drain" }
+  | { kind: "superseded" };
+
 const commandAuthorityBrand: unique symbol = Symbol(
   "PluginHostCommandAuthority",
 );
@@ -103,6 +108,7 @@ export interface PluginHostChangeReservation {
 export interface PluginHostChangeAuthority {
   readonly [changeAuthorityBrand]: true;
 
+  checkStop(): PluginHostChangeStopCheck;
   stop(): Promise<PluginHostChangeStopOutcome>;
   adopt<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
   preserve<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
@@ -200,6 +206,7 @@ const beginAuthorityChange = Symbol("beginAuthorityChange");
 const releaseSurface = Symbol("releaseSurface");
 const runReservedChange = Symbol("runReservedChange");
 const cancelReservedChange = Symbol("cancelReservedChange");
+const checkChangeStop = Symbol("checkChangeStop");
 const stopChange = Symbol("stopChange");
 const completeChange = Symbol("completeChange");
 
@@ -412,6 +419,10 @@ class ChangeAuthority implements PluginHostChangeAuthority {
   stop(): Promise<PluginHostChangeStopOutcome> {
     this.stopPromise ??= this.owner[stopChange](this);
     return this.stopPromise;
+  }
+
+  checkStop(): PluginHostChangeStopCheck {
+    return this.owner[checkChangeStop](this);
   }
 
   adopt<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T> {
@@ -642,13 +653,22 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
     return this.#cleanup(this.#stopOpportunity(reservation.state));
   }
 
+  [checkChangeStop](change: ChangeAuthority): PluginHostChangeStopCheck {
+    if (!change.active || this.#closed) return { kind: "superseded" };
+    if (change.origin instanceof CommandAuthority && change.origin.active) {
+      return { kind: "refused", reason: "self-drain" };
+    }
+    return { kind: "ready" };
+  }
+
   async [stopChange](
     change: ChangeAuthority,
   ): Promise<PluginHostChangeStopOutcome> {
-    if (!change.active || this.#closed) {
+    const check = this[checkChangeStop](change);
+    if (check.kind === "superseded") {
       return { kind: "superseded", drained: true };
     }
-    if (change.origin instanceof CommandAuthority && change.origin.active) {
+    if (check.kind === "refused") {
       return { kind: "refused", reason: "self-drain" };
     }
 

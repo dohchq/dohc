@@ -361,9 +361,16 @@ describe("PluginHostOwnership", () => {
     const command = await owner.runCommand(
       "example-plugin",
       (authority: PluginHostCommandAuthority) =>
-        authority.runChange(async (change) =>
-          change.preserve({ kind: "existing", value: await change.stop() }),
-        ),
+        authority.runChange(async (change) => {
+          expect(change.checkStop()).toEqual({
+            kind: "refused",
+            reason: "self-drain",
+          });
+          return change.preserve({
+            kind: "existing",
+            value: await change.stop(),
+          });
+        }),
     );
 
     expect(command).toEqual({
