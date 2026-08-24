@@ -19,6 +19,7 @@ import {
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
+import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
   applyCombinedChange,
@@ -1749,41 +1750,41 @@ export function VersionComparePage(props: {
   // the same cursor again (the renderer async-state invariant).
   const windowGeneration = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    windowGeneration.current += 1;
-    setState({ status: "loading" });
-    // The pending flag belongs to the window too (#602 review): without this
-    // reset, a replaced window inherits an abandoned page's "Loading…" until
-    // the stale request settles — indefinitely, if it never does.
-    setLoadingMore(false);
-    setLoadMoreError(null);
-    void (async () => {
-      const [versions, comparison] = await Promise.all([
+  useAsyncResponseEffect(
+    () => {
+      windowGeneration.current += 1;
+      setState({ status: "loading" });
+      // The pending flag belongs to the window too (#602 review): without this
+      // reset, a replaced window inherits an abandoned page's "Loading…" until
+      // the stale request settles — indefinitely, if it never does.
+      setLoadingMore(false);
+      setLoadMoreError(null);
+      return Promise.all([
         bridge().listWorkspaceVersions({ workspaceId }),
         bridge().compareWorkspaceVersions({ workspaceId, versionId }),
       ]);
-      if (cancelled) return;
-      const name =
-        versions.versions.find((version) => version.id === versionId)?.name ??
-        "This version";
-      setState({
-        status: "ready",
-        versionName: name,
-        files: comparison.files,
-        nextAfterPath: comparison.nextAfterPath,
-      });
-    })().catch((error) => {
-      if (cancelled) return;
-      setState({
-        status: "error",
-        message: ipcErrorMessage(error, "Could not compare with Main."),
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, versionId, refreshNonce]);
+    },
+    {
+      onSuccess: ([versions, comparison]) => {
+        const name =
+          versions.versions.find((version) => version.id === versionId)?.name ??
+          "This version";
+        setState({
+          status: "ready",
+          versionName: name,
+          files: comparison.files,
+          nextAfterPath: comparison.nextAfterPath,
+        });
+      },
+      onError: (error) => {
+        setState({
+          status: "error",
+          message: ipcErrorMessage(error, "Could not compare with Main."),
+        });
+      },
+    },
+    [workspaceId, versionId, refreshNonce],
+  );
 
   const loadMore = useCallback(() => {
     if (state.status !== "ready" || state.nextAfterPath === null) return;

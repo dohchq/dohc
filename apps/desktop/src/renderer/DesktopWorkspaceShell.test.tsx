@@ -130,6 +130,12 @@ const WORKSPACE: Workspace = {
   mode: "local-first",
 };
 
+const OTHER_WORKSPACE: Workspace = {
+  ...WORKSPACE,
+  workspaceId: "ws-shell-other",
+  rootPath: "/home/ice/dohc/other",
+};
+
 const SYNC_STATUS: SyncStatusResult = {
   state: "synced",
   pendingChangeCount: 0,
@@ -3768,6 +3774,35 @@ const SKIPPED_RECORD = {
 };
 
 describe("ui-state merge-on-load", () => {
+  it("drops saved state answered after the shell changes workspaces", async () => {
+    const first = deferred<WorkspaceUiState | null>();
+    const bridge = makeBridge(first.promise);
+    bridge.getWorkspaceUiState
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce(storedStateWithTabs(["b.md"], "b.md"));
+    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
+    const view = renderShell(bridge, WORKSPACE, workspaces);
+
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={OTHER_WORKSPACE}
+        workspaces={workspaces}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
+
+    await act(async () => {
+      first.resolve(storedStateWithTabs(["a.md"], "a.md"));
+      await first.promise;
+    });
+
+    // MUTATION: omit the response guard's cleanup invalidation. The first
+    // workspace's late answer replaces b.md with a.md here.
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.queryByTestId("tab-a.md")).toBeNull();
+  });
+
   it("restores saved state after a no-op focus before the load resolves", async () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
@@ -12560,6 +12595,66 @@ describe("versions surface after a failed capture build", () => {
 
     expect(await screen.findByTestId("version-menu-button")).toBeTruthy();
     await waitFor(() => expect(bridge.listWorkspaceVersions).toHaveBeenCalled());
+  });
+
+  it("does not reuse a late capability read after leaving and returning", async () => {
+    const staleFirstRead = deferred<WorkspaceSettingsResult>();
+    const freshReturnRead = deferred<WorkspaceSettingsResult>();
+    const engineOn: WorkspaceSettingsResult = {
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: {
+          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+          workspaceEngineAlpha: true,
+        },
+      },
+      source: "stored",
+    };
+    const engineOff: WorkspaceSettingsResult = {
+      settings: {
+        ...DEFAULT_WORKSPACE_SETTINGS,
+        experimental: {
+          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
+          workspaceEngineAlpha: false,
+        },
+      },
+      source: "stored",
+    };
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.getWorkspaceSettings = vi
+      .fn()
+      .mockImplementationOnce(() => staleFirstRead.promise)
+      .mockResolvedValueOnce(engineOff)
+      .mockImplementationOnce(() => freshReturnRead.promise);
+    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
+    const view = renderShell(bridge, WORKSPACE, workspaces);
+
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={OTHER_WORKSPACE}
+        workspaces={workspaces}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+
+    await act(async () => {
+      staleFirstRead.resolve(engineOn);
+      await staleFirstRead.promise;
+    });
+    view.rerender(
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={workspaces}
+        onSwitchWorkspace={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(3));
+    // MUTATION: let the first response commit after its dependency changes.
+    // Returning to that workspace exposes the obsolete engine-on answer.
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
   });
 
   // The window the test above cannot see. Its status fake answers in the same

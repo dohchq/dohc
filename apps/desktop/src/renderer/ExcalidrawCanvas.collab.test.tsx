@@ -677,6 +677,8 @@ it("drops asset hydration that resolves after the scene changes", async () => {
     await first;
   });
 
+  // MUTATION: omit the response guard's cleanup invalidation. The retired
+  // scene's asset reaches the current Excalidraw API as a second addFiles.
   expect(excalidraw.addFiles).toHaveBeenCalledTimes(1);
   expect(excalidraw.addFiles).toHaveBeenCalledWith([
     expect.objectContaining({ id: "current" }),

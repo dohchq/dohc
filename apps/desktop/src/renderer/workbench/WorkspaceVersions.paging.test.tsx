@@ -430,6 +430,67 @@ describe("VersionComparePage paging", () => {
     };
   }
 
+  it("drops an initial comparison answered after the version changes", async () => {
+    let resolveFirst!: (page: {
+      files: Array<ReturnType<typeof compareRow>>;
+      nextAfterPath: string | null;
+    }) => void;
+    const first = new Promise<{
+      files: Array<ReturnType<typeof compareRow>>;
+      nextAfterPath: string | null;
+    }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    bridgeMock.listWorkspaceVersions
+      .mockResolvedValueOnce({
+        versions: [
+          {
+            id: "v-1",
+            name: "First",
+            kind: "named",
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: "v-1",
+      })
+      .mockResolvedValueOnce({
+        versions: [
+          {
+            id: "v-2",
+            name: "Second",
+            kind: "named",
+            createdAtMs: 2,
+            canMergeIntoMain: true,
+          },
+        ],
+        activeVersionId: "v-2",
+      });
+    bridgeMock.compareWorkspaceVersions
+      .mockImplementationOnce(() => first)
+      .mockResolvedValueOnce({
+        files: [compareRow("second.md")],
+        nextAfterPath: null,
+      });
+    const view = render(
+      <VersionComparePage workspaceId="ws-1" versionId="v-1" />,
+    );
+
+    view.rerender(<VersionComparePage workspaceId="ws-1" versionId="v-2" />);
+    await settle();
+    screen.getByText("Second compared with Main");
+
+    resolveFirst({ files: [compareRow("first.md")], nextAfterPath: null });
+    await settle();
+
+    // MUTATION: omit the response guard's cleanup invalidation. The first
+    // comparison replaces the second version's heading and file here.
+    screen.getByText("Second compared with Main");
+    expect(
+      screen.getByTestId("version-compare-file").dataset.comparePath,
+    ).toBe("second.md");
+  });
+
   it("appends the next page with the continuation and updates the count copy", async () => {
     bridgeMock.compareWorkspaceVersions.mockImplementation(
       async (payload: { afterPath?: string }) =>

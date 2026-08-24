@@ -68,6 +68,7 @@ import {
   rendererMarks,
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
+import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { useSnapshotLane } from "./snapshotLane";
@@ -2211,12 +2212,10 @@ export function DesktopWorkspaceShell(props: {
     [invalidateDeferredFileOpen, mutateWb, workspaceId],
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    void bridge()
-      .getWorkspaceUiState({ workspaceId })
-      .then((stored) => {
-        if (cancelled) return;
+  useAsyncResponseEffect(
+    () => bridge().getWorkspaceUiState({ workspaceId }),
+    {
+      onSuccess: (stored) => {
         if (stored && !userTouchedWb.current) {
           const parsed = parseUiState(stored);
           // Order matters: wbRef first, THEN setWb, THEN enable flushes — a
@@ -2232,14 +2231,13 @@ export function DesktopWorkspaceShell(props: {
             .setWorkspaceUiState({ workspaceId, state: serializeUiState(wbRef.current) })
             .catch(() => undefined);
         }
-      })
-      .catch(() => {
+      },
+      onError: () => {
         uiStateLoaded.current = true;
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId]);
+      },
+    },
+    [workspaceId],
+  );
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
   useEffect(() => {
@@ -2999,18 +2997,16 @@ export function DesktopWorkspaceShell(props: {
   // open-time read (syncStatus.settingsWarning), the read that decided
   // whether anything is recorded. This read only drives which engine
   // surfaces the shell offers (versions and chats).
-  useEffect(() => {
-    let cancelled = false;
-    void bridge()
-      .getWorkspaceSettings({ workspaceId })
-      .then((result) => {
-        if (cancelled) return;
+  useAsyncResponseEffect(
+    () => bridge().getWorkspaceSettings({ workspaceId }),
+    {
+      onSuccess: (result) => {
         setEngineRead({
           workspaceId,
           enabled: result.settings.experimental.workspaceEngineAlpha,
         });
-      })
-      .catch(() => {
+      },
+      onError: () => {
         // Settings unavailable reads as flag off — never a broken shell.
         // Capability only, fail-closed (#329): the surface hides, but what
         // the placeholder then SAYS comes from main's status. This failure
@@ -3019,13 +3015,11 @@ export function DesktopWorkspaceShell(props: {
         // It is still an ANSWER. Recording it is what releases the surfaces
         // below from their load state; a failure held as "pending" would
         // leave a persisted tab spinning for the rest of the session.
-        if (cancelled) return;
         setEngineRead({ workspaceId, enabled: false });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId]);
+      },
+    },
+    [workspaceId],
+  );
   // Conflict review (0P-C): opened from the notice center's conflict notice.
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.

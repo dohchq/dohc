@@ -34,6 +34,7 @@ import {
   type ExcalidrawPresenceBinding,
   type ExcalidrawPresenceCollaboration,
 } from "./collab/excalidrawPresence";
+import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 
 export type ExcalidrawCanvasProps = {
   document: ExcalidrawDocument;
@@ -144,23 +145,22 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
     return () => doc.off("afterTransaction", onTransaction);
   }, [props.sceneDoc, renderSceneDoc]);
 
-  useEffect(() => {
-    hydratedFileIds.current.clear();
-    const api = readyApi;
-    if (!props.sceneDoc || !props.hydrateAssets || !api) return;
-    let active = true;
-    void props
-      .hydrateAssets()
-      .then((files) => {
-        if (!active || apiRef.current !== api) return;
+  useAsyncResponseEffect(
+    () => {
+      hydratedFileIds.current.clear();
+      if (!props.sceneDoc || !props.hydrateAssets || !readyApi) return null;
+      return props.hydrateAssets();
+    },
+    {
+      onSuccess: (files) => {
+        if (!readyApi || apiRef.current !== readyApi) return;
         for (const file of files) hydratedFileIds.current.add(file.id);
-        api.addFiles([...files]);
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, [props.hydrateAssets, props.sceneDoc, readyApi]);
+        readyApi.addFiles([...files]);
+      },
+      onError: () => undefined,
+    },
+    [props.hydrateAssets, props.sceneDoc, readyApi],
+  );
 
   useEffect(() => {
     setPresenceBound(false);
