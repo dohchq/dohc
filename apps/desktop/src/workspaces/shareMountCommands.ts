@@ -303,8 +303,11 @@ export function createShareMountCommands<WorkspaceSummary>(
               grantedSelector: mount.grantedSelector,
               ended: false,
             };
+            const files = dependencies.files();
+            let mounted = false;
             try {
-              const outcome = await dependencies.files().mount(lease, prepared);
+              const outcome = await files.mount(lease, prepared);
+              mounted = true;
               dependencies.refreshNativeWorkspaceSurfaces();
               dependencies.notifyRenderer();
               return {
@@ -317,17 +320,38 @@ export function createShareMountCommands<WorkspaceSummary>(
                 },
               };
             } catch (error) {
+              let mountError = error;
+              if (mounted) {
+                try {
+                  const rollback = await files.unmount(lease, {
+                    kind: "mount",
+                    workspaceId: workspace.workspaceId,
+                    shareId: mount.shareId,
+                  });
+                  if (rollback.folderLeft) {
+                    mountError = new ShareViewMountRollbackError(
+                      error,
+                      rollback.error,
+                    );
+                  }
+                } catch (rollbackError) {
+                  mountError = new ShareViewMountRollbackError(
+                    error,
+                    rollbackError,
+                  );
+                }
+              }
               dependencies.logError(
                 `mount-share rollback for ${mount.label}:`,
-                error,
+                mountError,
               );
               dependencies.notifyRenderer();
-              if (error instanceof ShareUnavailableError) {
+              if (mountError instanceof ShareUnavailableError) {
                 throw new Error(
                   "This share was ended before it could be added. Nothing was added to this workspace.",
                 );
               }
-              if (error instanceof ShareViewMountRollbackError) {
+              if (mountError instanceof ShareViewMountRollbackError) {
                 throw new Error(
                   "dohc could not add this share, and cleanup did not finish. " +
                     "If the share still appears, remove it from this workspace. " +

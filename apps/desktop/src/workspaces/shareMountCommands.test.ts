@@ -270,6 +270,62 @@ describe("share mount commands", () => {
     ]);
   });
 
+  it("rolls back a durable mount when post-commit presentation fails", async () => {
+    const h = harness();
+    h.dependencies.refreshNativeWorkspaceSurfaces = () => {
+      h.events.push("native");
+      throw new Error("native refresh failed");
+    };
+    const commands = createShareMountCommands(h.dependencies);
+
+    await expect(
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+    ).rejects.toThrow("Nothing was added");
+
+    expect(h.mounts).toEqual([]);
+    expect(h.events).toEqual([
+      "credentials",
+      "preflight",
+      "lease:start",
+      "disk:names",
+      "files:mount",
+      "projection:create",
+      "registry:1",
+      "native",
+      "files:unmount",
+      "relay:close",
+      "projection:remove",
+      "registry:0",
+      "log",
+      "notify",
+    ]);
+  });
+
+  it("preserves incomplete post-commit cleanup evidence", async () => {
+    const h = harness();
+    const cleanupFailure = new Error("folder is busy");
+    const loggedErrors: unknown[] = [];
+    h.dependencies.refreshNativeWorkspaceSurfaces = () => {
+      throw new Error("native refresh failed");
+    };
+    h.dependencies.logError = (_message, error) => {
+      loggedErrors.push(error);
+    };
+    h.removeOutcome = { folderLeft: true, error: cleanupFailure };
+    const commands = createShareMountCommands(h.dependencies);
+
+    await expect(
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+    ).rejects.toThrow("cleanup did not finish");
+
+    const rollbackError = loggedErrors.at(-1);
+    expect(rollbackError).toBeInstanceOf(ShareViewMountRollbackError);
+    expect(
+      (rollbackError as ShareViewMountRollbackError).rollbackError,
+    ).toBe(cleanupFailure);
+    expect(h.mounts).toEqual([]);
+  });
+
   it("serializes mount commands before relay preflight", async () => {
     const h = harness();
     let releaseFirst!: () => void;

@@ -196,7 +196,7 @@ export interface ShareViewFiles {
   unmount(
     lease: WorkspaceOperationLease,
     target: Extract<ShareViewFilesTarget, { kind: "mount" }>,
-  ): Promise<{ folderLeft: boolean }>;
+  ): Promise<{ folderLeft: boolean; error?: unknown }>;
 }
 
 export type ShareViewFilesStore = CaptureVersionedTextStore & {
