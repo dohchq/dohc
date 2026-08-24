@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { Profiler } from "react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -712,6 +713,116 @@ describe("SitePreviewPage", () => {
 
     expect(screen.queryByText(/stale report output/)).toBeNull();
     expect(screen.getByText(/replacement ready/)).toBeTruthy();
+  });
+
+  it("does not re-render every second when the dev-log ring is unchanged", async () => {
+    vi.useFakeTimers();
+    try {
+      const devSite: SitePackageInfo = {
+        ...site,
+        kind: "package",
+        packagePath: "report/package.json",
+        scripts: { dev: "vite" },
+      };
+      bridgeMock.getSitePackage.mockResolvedValueOnce(devSite);
+      bridgeMock.startSitePreview.mockResolvedValueOnce({
+        siteRoot: "report",
+        mode: "dev",
+        url: "http://127.0.0.1:49152/",
+        logs: [{ stream: "stdout", text: "ready", at: 1 }],
+        exited: false,
+      });
+      // Every poll returns a content-equal but reference-DIFFERENT ring: only
+      // the sameLogs bailout keeps the previous state and skips the commit.
+      bridgeMock.getSitePreviewLogs.mockImplementation(
+        async (): Promise<GetSitePreviewLogsResult> => ({
+          logs: [{ stream: "stdout", text: "ready", at: 1 }],
+          exited: false,
+        }),
+      );
+
+      let renders = 0;
+      render(
+        <Profiler id="site-preview" onRender={() => (renders += 1)}>
+          <SitePreviewPage workspaceId="ws-sites" siteRoot="report" />
+        </Profiler>,
+      );
+      // Let load -> auto-start -> first log poll settle, then one more poll so
+      // React's first bailed-out set has flushed and renders are steady.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByTestId("site-preview-frame")).toBeTruthy();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      const settledRenders = renders;
+      const settledPolls = bridgeMock.getSitePreviewLogs.mock.calls.length;
+
+      // Three more unchanged polls: zero renders.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(bridgeMock.getSitePreviewLogs.mock.calls.length).toBe(settledPolls + 3);
+      expect(renders).toBe(settledRenders);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("repaints when the log ring shifts but length and last entry match", async () => {
+    vi.useFakeTimers();
+    try {
+      const devSite: SitePackageInfo = {
+        ...site,
+        kind: "package",
+        packagePath: "report/package.json",
+        scripts: { dev: "vite" },
+      };
+      bridgeMock.getSitePackage.mockResolvedValueOnce(devSite);
+      bridgeMock.startSitePreview.mockResolvedValueOnce({
+        siteRoot: "report",
+        mode: "dev",
+        url: "http://127.0.0.1:49152/",
+        logs: [
+          { stream: "stdout", text: "line one", at: 1 },
+          { stream: "stdout", text: "ready", at: 1 },
+        ],
+        exited: false,
+      });
+      // At the ring cap a new chunk shifts the interior while the length stays
+      // pinned, and multi-line chunks share one `at` — length plus last entry
+      // cannot tell these rings apart. Only a full compare repaints.
+      let ring = [
+        { stream: "stdout" as const, text: "line one", at: 1 },
+        { stream: "stdout" as const, text: "ready", at: 1 },
+      ];
+      bridgeMock.getSitePreviewLogs.mockImplementation(
+        async (): Promise<GetSitePreviewLogsResult> => ({
+          logs: ring.map((entry) => ({ ...entry })),
+          exited: false,
+        }),
+      );
+
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      fireEvent.click(screen.getByText("Logs"));
+      expect(screen.getByText(/line one/)).toBeTruthy();
+
+      ring = [
+        { stream: "stdout" as const, text: "line two", at: 1 },
+        { stream: "stdout" as const, text: "ready", at: 1 },
+      ];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(screen.queryByText(/line one/)).toBeNull();
+      expect(screen.getByText(/line two/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("names the byte budget and observed scan size when sharing is refused", async () => {
