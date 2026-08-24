@@ -11,7 +11,7 @@ The durable object that owns a shared scope of a workspace: its selector, discus
 _Avoid_: export, publish (for grants)
 
 **Grant**:
-One principal's access to a share, with its own level, generation, and revocation. A named user, a pending email invite, and a share link each hold a grant.
+One grantee's authority on a share, with its own level, generation, and revocation. A named user, a pending email invite, and a share link each hold one. A link's browser principals derive from the link grant; they are provenance, not grants.
 _Avoid_: permission, membership
 
 **Share access**:
@@ -39,7 +39,7 @@ The server-minted identity for one browser holding one share link. It carries pr
 _Avoid_: anonymous id, device id
 
 **Received share**:
-The recipient-side materialization of a share: either its own read-only workspace or a mount inside a host workspace under `shared-with-me/`.
+The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access.
 _Avoid_: shared folder, remote workspace
 
 **Pending invite**:

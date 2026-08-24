@@ -8,9 +8,9 @@ The design is recorded in `CONTEXT.md` (vocabulary) and `docs/adr/0001` through 
 
 Build the data and authorization contracts before any route or UI.
 
-- Replace the one-row share model with share, grant, and link credential records (ADR 0005), in `packages/security-contract` and the Rust twin, with contract tests holding them equal.
+- Replace the one-row share model with share, grant, and link credential records (ADR 0005) in `packages/security-contract`. Grant and credential persistence records stay relay-side per ADR 0005; only `GrantBinding` crosses the engine boundary (a device session host checks it), so only it gets a Rust twin held equal by shared vectors.
 - Define grant generations and the `{grant, generation, access}` binding for every derived credential.
-- Define one `authorizeShareAction` seam owned by the relay: server-derived principal, action, resource in; effective capability or generic refusal out. Callers never combine link, selector, approval, and policy rules themselves.
+- Define one `authorizeShareAction` seam owned by the relay: server-derived principal, action, resource in; effective capability or generic refusal out. Callers never combine link, selector, approval, and policy rules themselves. The seam reloads the share's active status and the granter's current standing on every check; deleting a share revokes every grant.
 - Define the link principal (server-minted, per link grant per browser) and the audit record that survives Y.Doc compaction, replication, and settlement.
 - Define host lease, epoch, and append-before-acknowledge journaling shapes (ADR 0003), and the publication record (ADR 0006).
 
@@ -34,7 +34,7 @@ Gate: each prototype has a written pass, or a design revision recorded as an ADR
 
 The first shippable vertical: accountless viewing.
 
-- Desktop: create, rotate, retune, and revoke a share link from the existing share dialog. Rotate and revoke warn before running: rotation permanently kills the old URL, and revoke ends every session and dependent grant derived from the link.
+- Desktop: create, rotate, retune, and revoke a share link from the existing share dialog. Rotate, revoke, and raising a link's level warn before running: rotation and a level raise permanently kill the old URL, and revoke ends every session and dependent grant derived from the link.
 - `share-web`: secret exchange at the relay seam (ADR 0001), folder navigation, sanitized Markdown, safe images, Excalidraw view, forced download for untrusted formats. Secrets travel in the URL fragment and become short-lived cookies. A link secret comes from a CSPRNG with at least 256 bits of entropy, is stored only as a keyed hash, and verifies in constant time, with tests for all three properties.
 - Honest freshness: the viewer shows settled content with a "last settled" indicator; it never calls a stale snapshot live.
 - Refusal discipline: invalid id, bad secret, revoked, and rate-limited responses are indistinguishable before authentication.
@@ -72,6 +72,7 @@ Gate: restart, stale-frame, selector-drift, access-change, and restore tests pas
 - Then owner-approved read capabilities tied to the bundle digest, delivered through the scoped data API.
 - Then, only if a launch app needs it, one typed create-only collection per ADR 0004, after naming the authoritative app-data store and its sync, export, backup, and deletion path.
 - Service workers, persistent storage, raw HTML, inline SVG, and remote embeds stay disabled until a specific use case passes a threat test.
+- Publications and capabilities have visible withdrawal paths: unpublish a publication, and revoke or narrow an approved capability. Active app sessions lose the authority at their next data-API check. The phase gate tests both withdrawals.
 
 Gate: the Phase 1 isolation attacks re-run green against the real origin model; a capability widening attempt fails closed at the approval seam.
 
