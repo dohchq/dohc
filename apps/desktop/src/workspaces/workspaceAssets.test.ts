@@ -851,6 +851,60 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     expect(order).toEqual(["first:start", "first:end", "leased"]);
   });
 
+  it("rejects queued leased target work after its scheduler callback returns", async () => {
+    const rootPath = "C:/workspace";
+    const resolvedTarget = "C:/workspace/notes/a.md";
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (root, relativePath) => join(root, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    let markFirstStarted!: () => void;
+    let releaseFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const escapedRun = vi.fn(async () => "escaped");
+    let escaped!: Promise<string>;
+
+    const first = access.orderedOnResolvedTarget(
+      rootPath,
+      resolvedTarget,
+      async () => {
+        markFirstStarted();
+        await firstHeld;
+      },
+    );
+    await firstStarted;
+    await scheduler.staleSensitiveShared(rootPath, async (lease) => {
+      escaped = access.orderedOnResolvedTargetInLease(
+        rootPath,
+        lease,
+        resolvedTarget,
+        escapedRun,
+      );
+    });
+
+    const rejected = expect(escaped).rejects.toThrow(
+      "Workspace operation lease is inactive or belongs to another root.",
+    );
+    releaseFirst();
+    await Promise.all([first, rejected]);
+    expect(escapedRun).not.toHaveBeenCalled();
+  });
+
   it("holds later direct-text reads and writes behind an exclusive workspace operation", async () => {
     const root = await makeWorkspace();
     let releaseExclusive!: () => void;

@@ -790,7 +790,10 @@ export function createOrderedWorkspaceTextAccess(deps: {
       } catch (error) {
         return Promise.reject(error);
       }
-      return enqueueOrdered(targetTails, pathKey(resolvedTarget), run);
+      return enqueueOrdered(targetTails, pathKey(resolvedTarget), () => {
+        scheduler.assertActiveLease(rootPath, lease);
+        return run();
+      });
     },
   };
 }
