@@ -809,8 +809,12 @@ fn append_local_update(
     actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
-    let base = load_for_replay_gate(conn, key)?;
-    crate::validate_replay_parity(&base, update)?;
+    // Content-addressed dedup BEFORE the replay-parity gate (same argument as
+    // `apply_remote_update_in_transaction`): an in-log sha means byte-identical
+    // bytes were already admitted by the gate against the base they extended,
+    // and a retry's re-application is a CRDT no-op — re-gating against a newer
+    // base could only spuriously refuse. Folded bytes miss this probe and take
+    // the full gate (the DEDUP SPAN, see `replication`'s module doc).
     if let Some(existing) = blob_seq_in_log(conn, key, sha)? {
         return Ok(AppendOutcome {
             seq: existing,
@@ -818,6 +822,8 @@ fn append_local_update(
             emit_outbound: false,
         });
     }
+    let base = load_for_replay_gate(conn, key)?;
+    crate::validate_replay_parity(&base, update)?;
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     Ok(AppendOutcome {
@@ -1821,7 +1827,7 @@ pub fn load_doc_from_connection(conn: &Connection, key: &DocKey) -> Result<Ydoc,
 
 /// Append one locally-produced update inside the caller's transaction — the
 /// transaction-composable core of [`record_local_update`]. Validates the
-/// bytes, runs the replay-parity gate, content-dedupes, and advances the
+/// bytes, content-dedupes, runs the replay-parity gate, and advances the
 /// head.
 pub fn record_update_in_tx(
     tx: &Transaction<'_>,

@@ -198,7 +198,9 @@ fn normalized_ranges_cover(ranges: &[(u32, u32)], clock: u32) -> bool {
 thread_local! {
     /// Test-only seam: forces the gate's wrapped computation to unwind so the
     /// `catch_unwind` fail-closed containment can be exercised deterministically.
-    static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// While armed, any gate invocation fails closed — the dedupe-hoist tests in
+    /// [`crate::replication`] use that to prove a path did NOT reach the gate.
+    pub(crate) static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Reject a valid v1 update whose structural edit boundaries cannot replay
