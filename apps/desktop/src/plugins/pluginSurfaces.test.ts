@@ -4,6 +4,8 @@ import {
   PluginSurfaces,
   type PluginPanelStartAdmission,
   type PluginSurfaceHostLease,
+  type PluginSurfaceStopTarget,
+  type PluginWebAppHostLease,
   type PluginWebAppStartAdmission,
   type PluginWebAppContainer,
   type PluginWebAppViewLike,
@@ -134,6 +136,8 @@ function webAdmission(input: {
   webAppGate?: Promise<void>;
   onWebAppStart?: () => void;
   startHost?: () => Promise<string>;
+  startWebApp?: () => Promise<{ url: string; title?: string }>;
+  unpair?: (expectedSpawnId: string) => Promise<void>;
   assertBudget?: (liveAndReservedOtherInstances: number) => void;
 }): PluginWebAppStartAdmission {
   const spawn = input.spawn ?? (() => "spawn-1");
@@ -141,27 +145,31 @@ function webAdmission(input: {
   return {
     assertInstanceBudget: input.assertBudget ?? (() => undefined),
     assertAllowed: () => undefined,
-    acquireHostLease: async () => ({
+    acquireHostLease: async (): Promise<PluginWebAppHostLease> => ({
       start: async () => {
         await input.startGate;
         input.steps?.push(`host:${attempt}`);
         return input.startHost ? input.startHost() : spawn();
       },
       currentSpawnId: spawn,
+      startWebApp:
+        input.startWebApp ??
+        (async () => {
+          input.onWebAppStart?.();
+          await input.webAppGate;
+          return {
+            url: `http://127.0.0.1:4000/pair#${attempt}`,
+            title: attempt,
+          };
+        }),
+      unpair:
+        input.unpair ??
+        (async () => {
+          input.steps?.push(`unpair:${attempt}`);
+          await input.unpairGate;
+        }),
       release: () => input.ownedLease.release(),
     }),
-    startWebApp: async () => {
-      input.onWebAppStart?.();
-      await input.webAppGate;
-      return {
-        url: `http://127.0.0.1:4000/pair#${attempt}`,
-        title: attempt,
-      };
-    },
-    unpair: async () => {
-      input.steps?.push(`unpair:${attempt}`);
-      await input.unpairGate;
-    },
   };
 }
 
@@ -226,6 +234,76 @@ function panelAdmission(input: {
   };
 }
 
+type TestSurfaceScope = {
+  workspaceId: string;
+  pluginId: string;
+  senderId: number;
+};
+
+async function startSurfacePair(
+  surfaces: PluginSurfaces<FakeView>,
+  scope: TestSurfaceScope,
+  suffix: string,
+) {
+  const panel = {
+    ...scope,
+    generation: 1,
+    panelId: `${suffix}-panel`,
+  };
+  const webApp = {
+    ...scope,
+    generation: 1,
+    workspaceRoot: "C:/workspace",
+    webAppId: `${suffix}-app`,
+    instanceKey: null,
+    container: container(),
+  };
+  await surfaces.startPanel(panel, panelAdmission({ ownedLease: lease() }));
+  await surfaces.startWebApp(webApp, webAdmission({ ownedLease: lease() }));
+  return { panel, webApp };
+}
+
+function panelIsLive(
+  surfaces: PluginSurfaces<FakeView>,
+  panel: TestSurfaceScope & { generation: number; panelId: string },
+): boolean {
+  try {
+    surfaces.authorizePanelSdk({
+      workspaceId: panel.workspaceId,
+      pluginId: panel.pluginId,
+      panelId: panel.panelId,
+      senderId: panel.senderId,
+      currentGeneration: () => panel.generation,
+      activeWorkspaceId: () => panel.workspaceId,
+      liveSpawnId: () => "spawn-1",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function webAppIsLive(
+  surfaces: PluginSurfaces<FakeView>,
+  webApp: TestSurfaceScope & {
+    generation: number;
+    webAppId: string;
+    instanceKey: string | null;
+  },
+): boolean {
+  return surfaces.applyWebAppBounds({
+    workspaceId: webApp.workspaceId,
+    pluginId: webApp.pluginId,
+    webAppId: webApp.webAppId,
+    instanceKey: webApp.instanceKey,
+    senderId: webApp.senderId,
+    generation: webApp.generation,
+    zoomFactor: 1,
+    bounds: { x: 0, y: 0, width: 1, height: 1 },
+    visible: true,
+  });
+}
+
 describe("PluginSurfaces web app attempt ownership", () => {
   it("ignores a rejected load from an attempt closed before the same identity reopened", async () => {
     FakeView.created = [];
@@ -261,15 +339,15 @@ describe("PluginSurfaces web app attempt ownership", () => {
       acquireHostLease: async () => ({
         start: async () => currentSpawn,
         currentSpawnId: () => currentSpawn,
+        startWebApp: async () => ({
+          url: `http://127.0.0.1:4000/pair#${attempt}`,
+          title: attempt,
+        }),
+        unpair: async () => {
+          unpairs.push(attempt);
+        },
         release: () => ownedLease.release(),
       }),
-      startWebApp: async () => ({
-        url: `http://127.0.0.1:4000/pair#${attempt}`,
-        title: attempt,
-      }),
-      unpair: async () => {
-        unpairs.push(attempt);
-      },
     });
 
     await surfaces.startWebApp(target, admission(firstLease, "a"));
@@ -452,8 +530,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
     };
     const surfaces = createSurfaces();
     const request = webRequest(ownedContainer);
-    const admission = webAdmission({ ownedLease, attempt: "pending" });
-    admission.unpair = unpair;
+    const admission = webAdmission({ ownedLease, attempt: "pending", unpair });
 
     await expect(surfaces.startWebApp(request, admission)).rejects.toThrow(
       "window disappeared",
@@ -477,11 +554,14 @@ describe("PluginSurfaces web app attempt ownership", () => {
     const ownedLease = lease();
     const surfaces = createSurfaces({ notifications });
     const request = webRequest();
-    const admission = webAdmission({ ownedLease, attempt: "setup-failure" });
     const unpair = vi.fn(async () => {
       unpaired.resolve();
     });
-    admission.unpair = unpair;
+    const admission = webAdmission({
+      ownedLease,
+      attempt: "setup-failure",
+      unpair,
+    });
 
     await expect(surfaces.startWebApp(request, admission)).rejects.toThrow(
       "session hardening failed",
@@ -624,7 +704,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
     expect(FakeView.created[1]!.closed).toBe(0);
 
     surfaces.hostChanged({
-      kind: "runtime-replaced",
+      kind: "terminal",
       workspaceId: request.workspaceId,
       pluginId: request.pluginId,
     });
@@ -788,6 +868,100 @@ describe("PluginSurfaces web app attempt ownership", () => {
     await surfaces.close();
   });
 
+  it.each([
+    ["panel", "stop", null],
+    ["web app", "stop", new Error("simulated lease release failure")],
+    ["panel", "close", null],
+    ["web app", "close", null],
+  ] as const)(
+    "releases a %s lease before queued %s waits for its start lane",
+    async (kind, cleanup, releaseFailure) => {
+      FakeView.created = [];
+      const startEntered = deferred<void>();
+      const releaseRequested = deferred<void>();
+      const startSettled = deferred<void>();
+      const finishRelease = deferred<void>();
+      const errors: unknown[] = [];
+      let releaseCalls = 0;
+      const release = async () => {
+        releaseCalls += 1;
+        releaseRequested.resolve();
+        await startSettled.promise;
+        await finishRelease.promise;
+        if (releaseFailure) throw releaseFailure;
+      };
+      const start = async () => {
+        startEntered.resolve();
+        await releaseRequested.promise;
+        startSettled.resolve();
+        return "spawn-1";
+      };
+      const surfaces = createSurfaces({ errors });
+      const starting = kind === "panel"
+        ? surfaces.startPanel(panelRequest, {
+            assertAllowed: () => undefined,
+            acquireHostLease: async () => ({
+              start,
+              currentSpawnId: () => "spawn-1",
+              release,
+            }),
+            startPreview: async () => ({
+              url: "http://127.0.0.1:4100/panel.html",
+              stop: async () => undefined,
+            }),
+          })
+        : surfaces.startWebApp(webRequest(), {
+            assertInstanceBudget: () => undefined,
+            assertAllowed: () => undefined,
+            acquireHostLease: async () => ({
+              start,
+              currentSpawnId: () => "spawn-1",
+              startWebApp: async () => ({
+                url: "http://127.0.0.1:4000/pair#attempt",
+              }),
+              unpair: async () => undefined,
+              release,
+            }),
+          });
+      const startOutcome = starting.then(
+        () => ({ ok: true as const, error: null }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await startEntered.promise;
+      const stopping = cleanup === "stop"
+        ? surfaces.stop({
+            kind: "plugin",
+            workspaceId: "ws",
+            pluginId: "plugin",
+          })
+        : surfaces.close();
+      let stopSettled = false;
+      void stopping.then(() => {
+        stopSettled = true;
+      });
+
+      try {
+        expect(releaseCalls).toBe(1);
+        await startSettled.promise;
+        await turns(50);
+        expect(stopSettled).toBe(false);
+        finishRelease.resolve();
+        const [outcome] = await Promise.all([startOutcome, stopping]);
+        expect(outcome.ok).toBe(false);
+        expect(String(outcome.error)).toMatch(/cancelled/);
+        expect(releaseCalls).toBe(1);
+        expect(errors).toEqual(releaseFailure ? [releaseFailure] : []);
+        expect(FakeView.created).toEqual([]);
+      } finally {
+        releaseRequested.resolve();
+        startSettled.resolve();
+        finishRelease.resolve();
+        await Promise.all([startOutcome, stopping.catch(() => undefined)]);
+        await surfaces.close();
+      }
+    },
+  );
+
   it("captures pre-install panel and web-app attempts for a sender stop", async () => {
     FakeView.created = [];
     const panelGate = deferred<void>();
@@ -928,8 +1102,8 @@ describe("PluginSurfaces web app attempt ownership", () => {
       ownedLease: webAppLease,
       webAppGate: credentialGate.promise,
       onWebAppStart: () => credentialEntered.resolve(),
+      unpair,
     });
-    admission.unpair = unpair;
     const webAppStart = surfaces.startWebApp(
       request,
       admission,
@@ -979,15 +1153,15 @@ describe("PluginSurfaces web app attempt ownership", () => {
     const ownedLease = lease();
     const surfaces = createSurfaces({ errors, notifications });
     const request = webRequest();
+    const unpair = vi.fn(async () => {
+      throw failure;
+    });
     const admission = webAdmission({
       ownedLease,
       webAppGate: credentialGate.promise,
       onWebAppStart: () => credentialEntered.resolve(),
+      unpair,
     });
-    const unpair = vi.fn(async () => {
-      throw failure;
-    });
-    admission.unpair = unpair;
     const starting = surfaces.startWebApp(request, admission);
     await credentialEntered.promise;
 
@@ -1021,14 +1195,14 @@ describe("PluginSurfaces web app attempt ownership", () => {
       let spawnId = "spawn-a";
       const surfaces = createSurfaces({ notifications });
       const request = webRequest();
+      const unpair = vi.fn(async () => undefined);
       const admission = webAdmission({
         ownedLease,
         spawn: () => spawnId,
         webAppGate: credentialGate.promise,
         onWebAppStart: () => credentialEntered.resolve(),
+        unpair,
       });
-      const unpair = vi.fn(async () => undefined);
-      admission.unpair = unpair;
       const starting = surfaces.startWebApp(request, admission);
       await credentialEntered.promise;
 
@@ -1092,14 +1266,14 @@ describe("PluginSurfaces web app attempt ownership", () => {
         onPreviewStart: () => previewEntered.resolve(),
       }),
     );
+    const unpair = vi.fn(async () => undefined);
     const secondWebAdmission = webAdmission({
       ownedLease: secondWebAppLease,
       attempt: "second",
       webAppGate: credentialGate.promise,
       onWebAppStart: () => credentialEntered.resolve(),
+      unpair,
     });
-    const unpair = vi.fn(async () => undefined);
-    secondWebAdmission.unpair = unpair;
     const secondWebStart = surfaces.startWebApp(
       secondWebRequest,
       secondWebAdmission,
@@ -1221,8 +1395,8 @@ describe("PluginSurfaces web app attempt ownership", () => {
     const admission = webAdmission({
       ownedLease: failedLease,
       spawn: () => spawnId,
+      unpair,
     });
-    admission.unpair = unpair;
     await surfaces.startWebApp(request, admission);
 
     FakeView.created[0]!.load.reject(new Error("load failed"));
@@ -1256,8 +1430,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
       onError: (error) => reported.push(error),
     });
     const request = webRequest();
-    const admission = webAdmission({ ownedLease: failedLease });
-    admission.unpair = unpair;
+    const admission = webAdmission({ ownedLease: failedLease, unpair });
     await surfaces.startWebApp(request, admission);
     FakeView.created[0]!.load.reject(new Error("load failed"));
     await turns();
@@ -1318,9 +1491,58 @@ describe("PluginSurfaces panel authority", () => {
     });
   }
 
-  it("never revives a stale same-owner grant after replacement or regrant", async () => {
+  it("revokes SDK grants synchronously without destroying surfaces before action success", async () => {
     FakeView.created = [];
     const surfaces = createSurfaces();
+    const panelLease = lease();
+    const webAppLease = lease();
+    const stopPanel = vi.fn(async () => undefined);
+    const request = webRequest();
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: panelLease, previewStop: stopPanel }),
+    );
+    await surfaces.startWebApp(
+      request,
+      webAdmission({ ownedLease: webAppLease, attempt: "pre-stop" }),
+    );
+    const active = authorize(surfaces, {
+      generation: 1,
+      workspaceId: "ws",
+      spawnId: "spawn-1",
+    });
+
+    surfaces.revokePluginSdkGrants({ workspaceId: "ws", pluginId: "plugin" });
+
+    expect(active.authority.signal.aborted).toBe(true);
+    expect(active.isPushLive()).toBe(false);
+    expect(stopPanel).not.toHaveBeenCalled();
+    expect(panelLease.releases).toBe(0);
+    expect(webAppIsLive(surfaces, request)).toBe(true);
+    expect(FakeView.created[0]!.closed).toBe(0);
+    expect(webAppLease.releases).toBe(0);
+
+    await surfaces.stop({
+      kind: "plugin",
+      workspaceId: "ws",
+      pluginId: "plugin",
+    });
+    await surfaces.stop({
+      kind: "plugin",
+      workspaceId: "ws",
+      pluginId: "plugin",
+    });
+
+    expect(stopPanel).toHaveBeenCalledTimes(1);
+    expect(panelLease.releases).toBe(1);
+    expect(FakeView.created[0]!.closed).toBe(1);
+    expect(webAppLease.releases).toBe(1);
+  });
+
+  it("regrants only the retained exact panel after terminal then ready", async () => {
+    FakeView.created = [];
+    const revoked: string[] = [];
+    const surfaces = createSurfaces({ revoked });
     const current = {
       generation: 1,
       workspaceId: "ws" as string | undefined,
@@ -1328,13 +1550,21 @@ describe("PluginSurfaces panel authority", () => {
     };
     await surfaces.startPanel(
       panelRequest,
-      panelAdmission({ ownedLease: lease(), url: "http://127.0.0.1:4100/a" }),
+      panelAdmission({
+        ownedLease: lease(),
+        spawn: () => current.spawnId ?? "missing",
+        url: "http://127.0.0.1:4100/a",
+      }),
     );
     const first = authorize(surfaces, current);
 
     await surfaces.startPanel(
       panelRequest,
-      panelAdmission({ ownedLease: lease(), url: "http://127.0.0.1:4101/b" }),
+      panelAdmission({
+        ownedLease: lease(),
+        spawn: () => current.spawnId ?? "missing",
+        url: "http://127.0.0.1:4101/b",
+      }),
     );
     const second = authorize(surfaces, current);
     expect(first.authority.signal.aborted).toBe(true);
@@ -1347,7 +1577,7 @@ describe("PluginSurfaces panel authority", () => {
 
     current.spawnId = "spawn-2";
     surfaces.hostChanged({
-      kind: "runtime-replaced",
+      kind: "terminal",
       workspaceId: "ws",
       pluginId: "plugin",
     });
@@ -1355,12 +1585,31 @@ describe("PluginSurfaces panel authority", () => {
     expect(second.isPushLive()).toBe(false);
     await turns();
     expect(FakeView.created[0]!.closed).toBe(1);
+    surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "stale-spawn",
+    });
+    await turns();
+    expect(() => authorize(surfaces, current)).toThrow();
+    surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-2",
+    });
+    surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-2",
+    });
+    await turns();
 
     const third = authorize(surfaces, current);
     expect(third.authority.spawnId).toBe("spawn-2");
     expect(third.isPushLive()).toBe(true);
     expect(first.isPushLive()).toBe(false);
     expect(second.isPushLive()).toBe(false);
+    expect(revoked).toEqual(["panel", "panel"]);
   });
 
   it("rejects an installed panel replacement overtaken by a host change", async () => {
@@ -1387,7 +1636,7 @@ describe("PluginSurfaces panel authority", () => {
     expect(revoked).toEqual(["panel"]);
 
     surfaces.hostChanged({
-      kind: "runtime-replaced",
+      kind: "terminal",
       workspaceId: panelRequest.workspaceId,
       pluginId: panelRequest.pluginId,
     });
@@ -1416,11 +1665,12 @@ describe("PluginSurfaces panel authority", () => {
     "revokes %s authority before gated panel cleanup settles",
     async (kind) => {
       const stopPreview = deferred<void>();
+      const ownedLease = lease();
       const surfaces = createSurfaces();
       await surfaces.startPanel(
         panelRequest,
         panelAdmission({
-          ownedLease: lease(),
+          ownedLease,
           previewStop: () => stopPreview.promise,
         }),
       );
@@ -1452,8 +1702,10 @@ describe("PluginSurfaces panel authority", () => {
       });
       await turns();
       expect(settled).toBe(false);
+      expect(ownedLease.releases).toBe(0);
       stopPreview.resolve();
       await stopping;
+      expect(ownedLease.releases).toBe(1);
     },
   );
 
@@ -1503,7 +1755,7 @@ describe("PluginSurfaces panel authority", () => {
     ).resolves.toEqual({ url: "http://127.0.0.1:4100/panel.html" });
   });
 
-  it("does not regrant a runtime replacement queued before permanent close", async () => {
+  it("does not regrant a ready event queued before permanent close", async () => {
     const stopPreview = deferred<void>();
     const ownedLease = lease();
     const revoked: string[] = [];
@@ -1517,6 +1769,7 @@ describe("PluginSurfaces panel authority", () => {
       panelRequest,
       panelAdmission({
         ownedLease,
+        spawn: () => current.spawnId ?? "missing",
         previewStop: () => stopPreview.promise,
       }),
     );
@@ -1524,9 +1777,14 @@ describe("PluginSurfaces panel authority", () => {
     current.spawnId = "spawn-2";
 
     surfaces.hostChanged({
-      kind: "runtime-replaced",
+      kind: "terminal",
       workspaceId: "ws",
       pluginId: "plugin",
+    });
+    surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-2",
     });
     const closing = surfaces.close();
     await Promise.resolve();
@@ -1538,16 +1796,16 @@ describe("PluginSurfaces panel authority", () => {
     expect(ownedLease.releases).toBe(1);
     expect(revoked).toEqual(["panel"]);
 
-    surfaces.hostChanged({
-      kind: "runtime-replaced",
+    surfaces.hostReady({
       workspaceId: "ws",
       pluginId: "plugin",
+      spawnId: "spawn-2",
     });
     await turns();
     expect(() => authorize(surfaces, current)).toThrow();
   });
 
-  it("does not regrant a runtime replacement superseded by a terminal change", async () => {
+  it("does not regrant a ready event superseded by a later terminal change", async () => {
     const revoked: string[] = [];
     const surfaces = createSurfaces({ revoked });
     const current = {
@@ -1557,15 +1815,23 @@ describe("PluginSurfaces panel authority", () => {
     };
     await surfaces.startPanel(
       panelRequest,
-      panelAdmission({ ownedLease: lease() }),
+      panelAdmission({
+        ownedLease: lease(),
+        spawn: () => current.spawnId ?? "missing",
+      }),
     );
     const original = authorize(surfaces, current);
     current.spawnId = "spawn-2";
 
     surfaces.hostChanged({
-      kind: "runtime-replaced",
+      kind: "terminal",
       workspaceId: "ws",
       pluginId: "plugin",
+    });
+    surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-2",
     });
     surfaces.hostChanged({
       kind: "terminal",
@@ -1577,6 +1843,75 @@ describe("PluginSurfaces panel authority", () => {
     expect(original.isPushLive()).toBe(false);
     expect(() => authorize(surfaces, current)).toThrow();
     expect(revoked).toEqual(["panel"]);
+    await surfaces.close();
+  });
+
+  it("leaves successor surfaces live when ready follows their post-terminal start", async () => {
+    FakeView.created = [];
+    const revoked: string[] = [];
+    const surfaces = createSurfaces({ revoked });
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: lease(), url: "http://127.0.0.1:4100/old" }),
+    );
+    const oldGrant = authorize(surfaces, {
+      generation: 1,
+      workspaceId: "ws",
+      spawnId: "spawn-1",
+    });
+    surfaces.hostChanged({
+      kind: "terminal",
+      workspaceId: "ws",
+      pluginId: "plugin",
+    });
+    expect(oldGrant.authority.signal.aborted).toBe(true);
+
+    const successorPanel = {
+      ...panelRequest,
+      generation: 2,
+    };
+    const previewGate = deferred<void>();
+    const previewEntered = deferred<void>();
+    const successorPanelStart = surfaces.startPanel(
+      successorPanel,
+      panelAdmission({
+        ownedLease: lease(),
+        previewGate: previewGate.promise,
+        onPreviewStart: () => previewEntered.resolve(),
+        url: "http://127.0.0.1:4101/new",
+      }),
+    );
+    await previewEntered.promise;
+    const successorWebApp = { ...webRequest(), generation: 2 };
+    await surfaces.startWebApp(
+      successorWebApp,
+      webAdmission({ ownedLease: lease(), attempt: "successor" }),
+    );
+    surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-1",
+    });
+    surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-1",
+    });
+    previewGate.resolve();
+    await expect(successorPanelStart).resolves.toEqual({
+      url: "http://127.0.0.1:4101/new",
+    });
+    const successorGrant = authorize(surfaces, {
+      generation: 2,
+      workspaceId: "ws",
+      spawnId: "spawn-1",
+    });
+    await turns();
+
+    expect(successorGrant.authority.signal.aborted).toBe(false);
+    expect(successorGrant.isPushLive()).toBe(true);
+    expect(revoked).toEqual(["panel"]);
+    expect(webAppIsLive(surfaces, successorWebApp)).toBe(true);
     await surfaces.close();
   });
 });
@@ -1605,19 +1940,25 @@ describe("PluginSurfaces view operations", () => {
       webAdmission({ ownedLease: lease() }),
     );
 
-    expect(
-      surfaces.applyWebAppBounds({
-        workspaceId: "ws",
-        pluginId: "plugin",
-        webAppId: "app",
-        instanceKey: null,
-        senderId: 8,
-        generation: 1,
-        zoomFactor: 2,
-        bounds: { x: 1, y: 2, width: 3, height: 4 },
-        visible: true,
-      }),
-    ).toBe(false);
+    const mismatches = [
+      { workspaceId: "other-workspace" },
+      { pluginId: "other-plugin" },
+      { webAppId: "other-app" },
+      { instanceKey: "other-instance" },
+      { senderId: 8 },
+      { generation: 2 },
+    ];
+    for (const mismatch of mismatches) {
+      expect(
+        surfaces.applyWebAppBounds({
+          ...request,
+          ...mismatch,
+          zoomFactor: 2,
+          bounds: { x: 1, y: 2, width: 3, height: 4 },
+          visible: true,
+        }),
+      ).toBe(false);
+    }
     expect(
       surfaces.applyWebAppBounds({
         workspaceId: "ws",
@@ -1640,6 +1981,162 @@ describe("PluginSurfaces view operations", () => {
     await surfaces.close();
     surfaces.applyWebAppZoom(4);
     expect(FakeView.created[0]!.zoom).toEqual([0, 3]);
+  });
+
+  it.each([
+    ["workspace", { workspaceId: "other-workspace" }],
+    ["plugin", { pluginId: "other-plugin" }],
+    ["web app", { webAppId: "other-app" }],
+  ] as const)(
+    "keeps the instance budget separate across %s identity",
+    async (_dimension, otherGroup) => {
+      FakeView.created = [];
+      const surfaces = createSurfaces();
+      const assertBudget = (count: number) =>
+        assertInstanceBudget("plugin", "app", count);
+      for (let index = 0; index < 20; index += 1) {
+        await surfaces.startWebApp(
+          {
+            ...webRequest(),
+            ...otherGroup,
+            instanceKey: `other-${index}`,
+          },
+          webAdmission({ ownedLease: lease(), assertBudget }),
+        );
+      }
+
+      await expect(
+        surfaces.startWebApp(
+          { ...webRequest(), instanceKey: "target" },
+          webAdmission({ ownedLease: lease(), assertBudget }),
+        ),
+      ).resolves.toMatchObject({ origin: "http://127.0.0.1:4000" });
+      await surfaces.close();
+    },
+  );
+
+  it.each([
+    [
+      "workspace",
+      { kind: "workspace", workspaceId: "target-workspace" },
+      { workspaceId: "target-workspace", pluginId: "plugin", senderId: 7 },
+      { workspaceId: "other-workspace", pluginId: "plugin", senderId: 7 },
+    ],
+    [
+      "plugin",
+      { kind: "plugin", workspaceId: "workspace", pluginId: "target-plugin" },
+      { workspaceId: "workspace", pluginId: "target-plugin", senderId: 7 },
+      { workspaceId: "workspace", pluginId: "other-plugin", senderId: 7 },
+    ],
+    [
+      "sender",
+      { kind: "sender", senderId: 7 },
+      { workspaceId: "workspace", pluginId: "plugin", senderId: 7 },
+      { workspaceId: "workspace", pluginId: "plugin", senderId: 8 },
+    ],
+  ] satisfies Array<
+    [string, PluginSurfaceStopTarget, TestSurfaceScope, TestSurfaceScope]
+  >)(
+    "keeps a %s stop inside its exact scope",
+    async (_kind, target, matchedScope, survivorScope) => {
+      FakeView.created = [];
+      const surfaces = createSurfaces();
+      const matched = await startSurfacePair(surfaces, matchedScope, "matched");
+      const survivor = await startSurfacePair(
+        surfaces,
+        survivorScope,
+        "survivor",
+      );
+
+      await surfaces.stop(target);
+
+      expect(panelIsLive(surfaces, matched.panel)).toBe(false);
+      expect(webAppIsLive(surfaces, matched.webApp)).toBe(false);
+      expect(panelIsLive(surfaces, survivor.panel)).toBe(true);
+      expect(webAppIsLive(surfaces, survivor.webApp)).toBe(true);
+      await surfaces.close();
+    },
+  );
+
+  it("disposes a stopped secondary alias panel and lease without touching the primary", async () => {
+    const surfaces = createSurfaces();
+    const primaryLease = lease();
+    const aliasLease = lease();
+    const stopPrimary = vi.fn(async () => undefined);
+    const stopAlias = vi.fn(async () => undefined);
+    const primary = {
+      ...panelRequest,
+      pluginId: "primary-plugin",
+      panelId: "primary-panel",
+    };
+    const alias = {
+      ...panelRequest,
+      pluginId: "secondary-alias",
+      panelId: "alias-panel",
+    };
+    await surfaces.startPanel(
+      primary,
+      panelAdmission({ ownedLease: primaryLease, previewStop: stopPrimary }),
+    );
+    await surfaces.startPanel(
+      alias,
+      panelAdmission({ ownedLease: aliasLease, previewStop: stopAlias }),
+    );
+
+    await surfaces.stop({
+      kind: "plugin",
+      workspaceId: alias.workspaceId,
+      pluginId: alias.pluginId,
+    });
+
+    expect(stopAlias).toHaveBeenCalledOnce();
+    expect(aliasLease.releases).toBe(1);
+    expect(panelIsLive(surfaces, alias)).toBe(false);
+    expect(stopPrimary).not.toHaveBeenCalled();
+    expect(primaryLease.releases).toBe(0);
+    expect(panelIsLive(surfaces, primary)).toBe(true);
+    await surfaces.close();
+  });
+
+  it("notifies and disposes every stopped web app when one notification throws", async () => {
+    FakeView.created = [];
+    const notifications: Array<string | null> = [];
+    const errors: unknown[] = [];
+    const firstLease = lease();
+    const secondLease = lease();
+    const failure = new Error("first renderer disappeared");
+    const surfaces = new PluginSurfaces<FakeView>({
+      ViewClass: FakeView,
+      bindWebAppZoom: (webContents) => webContents.setZoomLevel(0),
+      allowPanelOrigin: () => () => undefined,
+      clearPanelStorage: () => Promise.resolve(),
+      clearGuestPartition: () => Promise.resolve(),
+      notifyWebAppFailed: ({ instanceKey }) => {
+        notifications.push(instanceKey);
+        if (instanceKey === "first") throw failure;
+      },
+      onError: (error) => errors.push(error),
+    });
+    await surfaces.startWebApp(
+      { ...webRequest(), instanceKey: "first" },
+      webAdmission({ ownedLease: firstLease, attempt: "first" }),
+    );
+    await surfaces.startWebApp(
+      { ...webRequest(), instanceKey: "second" },
+      webAdmission({ ownedLease: secondLease, attempt: "second" }),
+    );
+
+    await surfaces.stop({
+      kind: "plugin",
+      workspaceId: "ws",
+      pluginId: "plugin",
+    });
+
+    expect(notifications).toEqual(["first", "second"]);
+    expect(errors).toEqual([failure]);
+    expect(firstLease.releases).toBe(1);
+    expect(secondLease.releases).toBe(1);
+    expect(FakeView.created.map((view) => view.closed)).toEqual([1, 1]);
   });
 
   it("owns and clears the hardened guest partition", async () => {

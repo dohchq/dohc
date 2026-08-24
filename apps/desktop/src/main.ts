@@ -692,16 +692,12 @@ import {
   withKeyedStartLock,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
-import {
-  startStaticDirectoryPreview,
-  type StaticDirectoryPreview,
-} from "./security/staticDirectoryPreview";
+import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import { invokeRegisteredPluginCommand } from "./plugins/pluginCommandInvocation";
 import {
   PluginHostOwnership,
   type PluginHostCommandAuthority,
-  type PluginHostSurfaceLease,
 } from "./plugins/pluginHostOwnership";
 import {
   PluginPipeline,
@@ -717,11 +713,7 @@ import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkRead
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
-import {
-  createPluginPanelFileWatchEmitter,
-  isPluginPanelPushLive,
-  isPluginPanelRequestLive,
-} from "./plugins/pluginPanelSdkEvent";
+import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent";
 import {
   createPluginAgentDrivers,
   type PluginAgentDrivers,
@@ -735,14 +727,6 @@ import {
 } from "./plugins/pluginOffers";
 import { readPluginManifestFile } from "./plugins/pluginManifest";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
-import { stopPluginPanelPreview } from "./plugins/pluginPanelLifecycle";
-import {
-  assertPluginPanelRequestCurrent,
-  loadPluginPanelRegistrationForCurrentRenderer,
-  revokePluginPanelAuthorities,
-  revokePluginPanelAuthoritiesForStatus,
-} from "./plugins/pluginPanelStartLifecycle";
-import { createPluginPanelSdkAuthorityRegistry } from "./plugins/pluginPanelSdkAuthority";
 import {
   forgetRemovedPlugin,
   forgetUninstalledPlugin,
@@ -758,20 +742,15 @@ import {
   ensureWorkspacePipeline,
 } from "./plugins/pluginPipelineLifecycle";
 import {
-  clearPluginWebAppPartition,
-  createPluginWebAppGuest,
-} from "./plugins/pluginWebAppGuest";
-import { recoverConsumedWebAppCredential } from "./plugins/pluginWebAppRecovery";
-import {
   assertInstanceBudget,
   requireDeclaredWebApp,
 } from "./plugins/pluginWebAppInstances";
 import {
-  PluginWebAppViewRegistry,
-  stopPluginWebAppGuests,
-  webAppInstanceKey,
-  type PluginWebAppViewRecord,
-} from "./plugins/pluginWebAppViews";
+  PluginSurfaces,
+  type PluginSurfaceHostLease,
+  type PluginWebAppContainer,
+  type PluginWebAppHostLease,
+} from "./plugins/pluginSurfaces";
 import type { DohcPluginManifest } from "./plugins/pluginManifestSchema";
 import {
   mediaTypeForExtension,
@@ -1083,6 +1062,7 @@ let linuxStableCliBinDir: string | undefined;
 
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
+  const pluginIdsWithEndedSpawn = new Set<string>();
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
   const childProcessBroker = new PluginChildProcessBroker({
     dohcDir,
@@ -1184,6 +1164,12 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     // One seam ends a spawn: the driver's sessions fail here, and the broker
     // takes the harness's whole process tree down. Neither asks the plugin.
     onSpawnEnd: (pluginId, spawnId) => {
+      pluginIdsWithEndedSpawn.add(pluginId);
+      pluginSurfaces.hostChanged({
+        kind: "terminal",
+        workspaceId: workspace.workspaceId,
+        pluginId,
+      });
       pluginDrivers.endSpawn(pluginId, spawnId);
       workspaceEvents.disposeSpawn(pluginId, spawnId);
       return childProcessBroker.disposeSpawn(pluginId, spawnId);
@@ -1194,25 +1180,20 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     },
     onStatusChange: (pluginId, status) => {
       pipeline?.noteRuntimeStatus(pluginId, status);
-      revokePluginPanelAuthoritiesForStatus({
+      if (status !== "ready") return;
+      const spawnId = pluginHost.getSpawnId(pluginId);
+      if (
+        pluginHost.getStatus(pluginId) !== "ready" ||
+        !spawnId ||
+        !pluginIdsWithEndedSpawn.delete(pluginId)
+      ) {
+        return;
+      }
+      pluginSurfaces.hostReady({
         workspaceId: workspace.workspaceId,
         pluginId,
-        status,
-        panels: runningPluginPanels.values(),
-        revokePanel: pluginPanelSdkAuthorities.revokePanel,
+        spawnId,
       });
-      // A guest view outliving its plugin would keep showing a dead server:
-      // the broker tears the wrapper's process tree down with the spawn.
-      if (status === "crashed" || status === "failed" || status === "disabled") {
-        void stopPluginWebAppsForPlugin(workspace.workspaceId, pluginId).catch(
-          (error: unknown) => {
-            console.warn(
-              `[desktop] failed to stop plugin web apps after host status ${status}`,
-              error,
-            );
-          },
-        );
-      }
     },
   });
   pluginHostRef = pluginHost;
@@ -1759,10 +1740,7 @@ function applyZoomLevelToWindows(zoomLevel: number): void {
   // Embedded plugin content follows the window zoom (#875): the person who
   // zoomed because text was too small is usually working IN the panel. Only
   // embedded guests — the same app opened by URL keeps the browser's zoom.
-  for (const record of pluginWebAppViews.all()) {
-    const guest = record.view.view.webContents;
-    if (!guest.isDestroyed()) guest.setZoomLevel(zoomLevel);
-  }
+  pluginSurfaces.applyWebAppZoom(zoomLevel);
 }
 
 const bindGuestZoom = createGuestZoomApplier(() => knownZoomLevel);
@@ -3290,165 +3268,87 @@ async function startAgentRunWithWorkspaceActivity(
   return run;
 }
 
-interface RunningPluginPanel {
-  handle: StaticDirectoryPreview;
-  releaseOrigin: () => void;
-  hostLease: PluginHostSurfaceLease;
-  workspaceId: string;
-  pluginId: string;
-  panelId: string;
-  senderId: number;
-  generation: number;
-}
-
 const pluginRegistrations = new Map<string, Map<string, RegisteredPlugin>>();
-const pluginPanelSdkAuthorities = createPluginPanelSdkAuthorityRegistry();
-const runningPluginPanels = new Map<string, RunningPluginPanel>();
-const pluginPanelStartLocks = new Map<string, Promise<void>>();
 const lastEngineStoreRebuildResult = new Map<
   string,
   RebuildEngineStoreResult
 >();
 
-/**
- * Registers a fresh SDK grant for one panel and wires its own file-watch
- * subscription cleanup to the grant's own abort — the shape
- * startPluginPanel uses to register a panel the first time, and
- * reregisterPluginPanels below reuses to restore what a revoke removes
- * (#779 round 21 finding 6).
- */
-function registerPluginPanelGrant(input: {
-  senderId: number;
-  generation: number;
-  workspaceId: string;
-  pluginId: string;
-  panelId: string;
-}): ReturnType<typeof pluginPanelSdkAuthorities.register> {
-  const grant = pluginPanelSdkAuthorities.register(input);
-  grant.signal.addEventListener(
-    "abort",
-    () =>
-      pluginWorkspaceEventsByWorkspace
-        .get(input.workspaceId)
-        ?.disposeOwner({
-          kind: "panel",
-          workspaceId: input.workspaceId,
-          pluginId: input.pluginId,
-          panelId: input.panelId,
-        }),
-    { once: true },
+function requireCurrentRenderer(isCurrent: () => boolean): void {
+  if (isCurrent()) return;
+  throw new Error(
+    "The plugin panel request does not target the active workspace. Open the workspace and try again.",
   );
-  return grant;
 }
 
-// Re-establishes a fresh grant for every one of this plugin's still-
-// mounted panels — called only where a stop replaces the runtime instead
-// of ending the plugin (rebuild), since a revoked grant's own
-// AbortController can never signal live again on its own.
-//
-// Each panel's own re-grant runs under that exact panel's start lock —
-// the same one stopPluginPanel holds while it deletes the panel from
-// runningPluginPanels. Without it, a panel closing mid-rebuild could have
-// this function re-register a fresh grant for it between the read here
-// and the locked delete over there, resurrecting a grant for a panel the
-// close already meant to end (#779 round 23 finding 4).
-async function reregisterPluginPanels(
-  workspaceId: string,
+function createPluginSurfaceHostLease(
+  pipeline: PluginPipeline,
   pluginId: string,
-): Promise<void> {
-  const matches = [...runningPluginPanels.entries()].filter(
-    ([, panel]) => panel.workspaceId === workspaceId && panel.pluginId === pluginId,
-  );
-  await Promise.all(matches.map(([key, panel]) =>
-    withPluginPanelStartLock(key, async () => {
-      // Re-read inside the lock and act on this exact record, not the one
-      // captured before it: a close that ran first already deleted this
-      // key (nothing left to re-grant), and a start that raced this
-      // rebuild's own wait for the lock already installed its own fresh
-      // record with its own live grant — re-registering the stale one
-      // captured before the lock would revoke that fresh grant right back
-      // out from under it, since register() always revokes whatever grant
-      // already exists for the same subject (#779 round 25 finding 1).
-      const current = runningPluginPanels.get(key);
-      if (current !== panel) return;
-      registerPluginPanelGrant({
-        senderId: current.senderId,
-        generation: current.generation,
-        workspaceId: current.workspaceId,
-        pluginId: current.pluginId,
-        panelId: current.panelId,
-      });
-    })
-  ));
-}
-function pluginPanelKey(
-  workspaceId: string,
-  pluginId: string,
-  panelId: string,
-): string {
-  return `${workspaceId}\0${pluginId}\0${panelId}`;
+): PluginSurfaceHostLease {
+  const host = pipeline.host;
+  const lease = acquirePluginSurfaceLease(pipeline.hostOwnership, pluginId);
+  return {
+    start: async () => {
+      const startedHost = await ensurePluginStarted(
+        host,
+        pluginId,
+        () =>
+          lease.start((authority) =>
+            pipeline.ensureStarted(pluginId, authority),
+          ),
+      );
+      const spawnId = startedHost.getSpawnId(pluginId);
+      if (!spawnId) {
+        throw new Error(`Plugin "${pluginId}" has no active process.`);
+      }
+      return spawnId;
+    },
+    currentSpawnId: () => host.getSpawnId(pluginId),
+    release: () => lease.release(),
+  };
 }
 
-const withPluginPanelStartLock = <T>(key: string, operation: () => Promise<T>) =>
-  withKeyedStartLock(pluginPanelStartLocks, key, operation);
-
-// Wrapper-plugin web apps (PR3): one main-owned WebContentsView per open web
-// app tab. The registry decides which record a request or teardown touches;
-// the helpers below apply the Electron effects.
-interface AttachedWebAppView {
-  view: WebContentsView;
-  window: BrowserWindow;
-  hostLease: PluginHostSurfaceLease;
-}
-const pluginWebAppViews = new PluginWebAppViewRegistry<AttachedWebAppView>();
-const pluginWebAppStartLocks = new Map<string, Promise<void>>();
-const hardenedGuestPartitions = new Set<string>();
-const withPluginWebAppStartLock = <T>(key: string, operation: () => Promise<T>) =>
-  withKeyedStartLock(pluginWebAppStartLocks, key, operation);
-
-// The start lock serializes one instance's own starts and teardowns. Two
-// instances of one web app are two servers behind two views, so they take two
-// locks and start side by side.
-function pluginWebAppKey(
-  workspaceId: string,
+function createPluginWebAppHostLease(
+  pipeline: PluginPipeline,
   pluginId: string,
   webAppId: string,
   instanceKey: string | null,
-): string {
-  return webAppInstanceKey({ workspaceId, pluginId, webAppId, instanceKey });
+): PluginWebAppHostLease {
+  const host = pipeline.host;
+  return {
+    ...createPluginSurfaceHostLease(pipeline, pluginId),
+    startWebApp: () => host.startWebApp(pluginId, webAppId, instanceKey),
+    unpair: (expectedSpawnId) => {
+      if (host.getSpawnId(pluginId) !== expectedSpawnId) return Promise.resolve();
+      return host.stopWebApp(pluginId, webAppId, instanceKey);
+    },
+  };
 }
 
-function destroyPluginWebAppViews(
-  views: readonly AttachedWebAppView[],
-): void {
-  for (const { view, window } of views) {
-    try {
-      if (!window.isDestroyed()) window.contentView.removeChildView(view);
-    } catch (error) {
-      console.warn("[desktop] failed to detach a plugin web app view", error);
-    }
-    try {
-      if (!view.webContents.isDestroyed()) view.webContents.close();
-    } catch (error) {
-      console.warn("[desktop] failed to close a plugin web app view", error);
-    }
-  }
-}
-
-async function disposePluginWebAppViews(
-  records: readonly PluginWebAppViewRecord<AttachedWebAppView>[],
-): Promise<void> {
-  destroyPluginWebAppViews(records.map((record) => record.view));
-  const releases = await Promise.allSettled(
-    records.map((record) => record.view.hostLease.release()),
-  );
-  for (const [index, release] of releases.entries()) {
-    if (release.status === "fulfilled") continue;
-    console.warn(
-      `[desktop] failed to release a plugin web app host lease for "${records[index]?.pluginId ?? "unknown"}"`,
-      release.reason,
-    );
-  }
+function createPluginWebAppContainer(
+  sender: WebContents,
+): PluginWebAppContainer<WebContentsView> {
+  let attachedWindow: BrowserWindow | null = null;
+  return {
+    isDestroyed: () => {
+      const window = attachedWindow ?? BrowserWindow.fromWebContents(sender);
+      return !window || window.isDestroyed();
+    },
+    attach: (view) => {
+      const window = BrowserWindow.fromWebContents(sender);
+      if (!window || window.isDestroyed()) {
+        throw new Error("The plugin web app request has no open window.");
+      }
+      attachedWindow = window;
+      window.contentView.addChildView(view);
+    },
+    detach: (view) => {
+      const window = attachedWindow;
+      attachedWindow = null;
+      if (!window || window.isDestroyed()) return;
+      window.contentView.removeChildView(view);
+    },
+  };
 }
 
 // Tells one renderer its guest died after the start already answered "ok".
@@ -3470,32 +3370,30 @@ function notifyPluginWebAppFailed(
   sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
 }
 
-async function stopPluginWebAppsForPlugin(
-  workspaceId: string,
-  pluginId: string,
-): Promise<void> {
-  const records = pluginWebAppViews.removeForPlugin(workspaceId, pluginId);
-  stopPluginWebAppGuests(
-    records,
-    (record) => {
-      const sender = webContents.fromId(record.senderId);
-      if (sender) {
-        notifyPluginWebAppFailed(sender, record.generation, {
-          workspaceId: record.workspaceId,
-          pluginId: record.pluginId,
-          webAppId: record.webAppId,
-          instanceKey: record.instanceKey,
-        });
-      }
-    },
-    (_record, error) =>
-      console.warn(
-        `[desktop] failed to notify a plugin web app's owner for "${pluginId}"`,
-        error,
-      ),
-  );
-  await disposePluginWebAppViews(records);
-}
+const pluginSurfaces = new PluginSurfaces<WebContentsView>({
+  ViewClass: WebContentsView,
+  bindWebAppZoom: bindGuestZoom,
+  allowPanelOrigin: allowLoopbackFrameOrigin,
+  clearPanelStorage: (options) =>
+    session.defaultSession.clearStorageData(options),
+  clearGuestPartition: (partition) =>
+    session.fromPartition(partition).clearStorageData(),
+  notifyWebAppFailed: ({ senderId, generation, ...event }) => {
+    const sender = webContents.fromId(senderId);
+    if (sender) notifyPluginWebAppFailed(sender, generation, event);
+  },
+  onPanelAuthorityRevoked: ({ workspaceId, pluginId, panelId }) => {
+    pluginWorkspaceEventsByWorkspace.get(workspaceId)?.disposeOwner({
+      kind: "panel",
+      workspaceId,
+      pluginId,
+      panelId,
+    });
+  },
+  onError: (error, context) => {
+    console.warn(`[desktop] ${context}`, error);
+  },
+});
 
 async function requirePluginEngineCapture(workspaceId: string) {
   const workspace = requireWorkspace(workspaceId);
@@ -3616,180 +3514,8 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
   );
 }
 
-async function stopRunningPluginPanelPreview(input: {
-  handle: StaticDirectoryPreview;
-  releaseOrigin: () => void;
-}): Promise<void> {
-  await stopPluginPanelPreview(
-    {
-      url: input.handle.url,
-      stop: () => input.handle.stop(),
-      releaseOrigin: input.releaseOrigin,
-    },
-    (options) => session.defaultSession.clearStorageData(options),
-    (error) => {
-      console.warn(
-        `[desktop] failed to clear plugin panel storage for ${input.handle.url}`,
-        error,
-      );
-    },
-  );
-}
-
-async function stopPluginPanel(
-  workspaceId: string,
-  pluginId: string,
-  panelId: string,
-  owner?: { senderId: number; generation: number },
-): Promise<void> {
-  const key = pluginPanelKey(workspaceId, pluginId, panelId);
-  await withPluginPanelStartLock(key, async () => {
-    const panel = runningPluginPanels.get(key);
-    if (
-      panel && owner &&
-      (panel.senderId !== owner.senderId || panel.generation !== owner.generation)
-    ) {
-      throw new Error(
-        "The plugin panel stop request does not belong to this renderer.",
-      );
-    }
-    pluginPanelSdkAuthorities.revokePanel(workspaceId, pluginId, panelId);
-    runningPluginPanels.delete(key);
-    if (!panel) return;
-    try {
-      await stopRunningPluginPanelPreview(panel);
-    } finally {
-      await panel.hostLease.release();
-    }
-  });
-}
-
-async function stopPluginWebApp(
-  workspaceId: string,
-  pluginId: string,
-  webAppId: string,
-  instanceKey: string | null,
-  owner?: { senderId: number; generation: number },
-): Promise<void> {
-  await withPluginWebAppStartLock(
-    pluginWebAppKey(workspaceId, pluginId, webAppId, instanceKey),
-    () =>
-      stopPluginWebAppUnderStartLock(
-        workspaceId,
-        pluginId,
-        webAppId,
-        instanceKey,
-        owner,
-      ),
-  );
-}
-
-// The same stop for a caller that already holds this web app's start lock —
-// the failed-start recovery, which unpairs and stops the view in one section.
-// Taking the start lock again from inside that section would wait on itself.
-async function stopPluginWebAppUnderStartLock(
-  workspaceId: string,
-  pluginId: string,
-  webAppId: string,
-  instanceKey: string | null,
-  owner?: { senderId: number; generation: number },
-): Promise<void> {
-  const current = pluginWebAppViews.get({
-    workspaceId,
-    pluginId,
-    webAppId,
-    instanceKey,
-  });
-  if (
-    current && owner &&
-    (current.senderId !== owner.senderId ||
-      current.generation !== owner.generation)
-  ) {
-    throw new Error(
-      "The plugin web app stop request does not belong to this renderer.",
-    );
-  }
-  const removed = pluginWebAppViews.remove({
-    workspaceId,
-    pluginId,
-    webAppId,
-    instanceKey,
-  });
-  if (removed) await disposePluginWebAppViews([removed]);
-}
-
-async function stopPluginPanelsForWorkspace(workspaceId: string): Promise<void> {
-  const stops: Promise<void>[] = [];
-  for (const panel of [...runningPluginPanels.values()]) {
-    if (panel.workspaceId !== workspaceId) continue;
-    stops.push(
-      stopPluginPanel(workspaceId, panel.pluginId, panel.panelId).catch((error) => {
-        console.warn(
-          "[desktop] failed to stop plugin panel during workspace cleanup",
-          error,
-        );
-      }),
-    );
-  }
-  await Promise.all(stops);
-}
-
-async function stopPluginPanelsForPlugin(
-  workspaceId: string,
-  pluginId: string,
-): Promise<void> {
-  const stops: Promise<void>[] = [];
-  for (const panel of [...runningPluginPanels.values()]) {
-    if (panel.workspaceId !== workspaceId || panel.pluginId !== pluginId) continue;
-    stops.push(
-      stopPluginPanel(workspaceId, pluginId, panel.panelId).catch((error) => {
-        console.warn(
-          `[desktop] failed to stop plugin panel during plugin cleanup for "${pluginId}"`,
-          error,
-        );
-      }),
-    );
-  }
-  await Promise.all(stops);
-}
-
-async function stopPluginPanelsForSender(senderId: number): Promise<void> {
-  const stops: Promise<void>[] = [];
-  for (const panel of [...runningPluginPanels.values()]) {
-    if (panel.senderId !== senderId) continue;
-    stops.push(
-      stopPluginPanel(
-        panel.workspaceId,
-        panel.pluginId,
-        panel.panelId,
-        { senderId: panel.senderId, generation: panel.generation },
-      ).catch((error) => {
-        console.warn(
-          "[desktop] failed to stop plugin panel during sender cleanup",
-          error,
-        );
-      }),
-    );
-  }
-  await Promise.all(stops);
-}
-
-// Every main-owned resource this sender's window opened, wherever its
-// workspace is. Each record releases its own host lease during teardown.
-async function stopPluginSurfacesForSender(senderId: number): Promise<void> {
-  const removedWebApps = pluginWebAppViews.removeForSender(senderId);
-  await disposePluginWebAppViews(removedWebApps);
-  await stopPluginPanelsForSender(senderId);
-}
-
-// Stopping the shared host is the pipeline's job (stopPluginPipelineForWorkspace
-// disposes it via PluginPipeline.dispose() -> pluginHost.stopAll()); this only
-// stops the panels layered on top of it.
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
-  await disposePluginWebAppViews(
-    pluginWebAppViews.removeForWorkspace(workspaceId),
-  );
-  await stopPluginPanelsForWorkspace(workspaceId);
+  await pluginSurfaces.stop({ kind: "workspace", workspaceId });
   await stopPluginPipelineForWorkspace(workspaceId);
   forgetWorkspaceRegistrations(pluginRegistrations, workspaceId);
 }
@@ -3800,14 +3526,12 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
   // hard-kill path.
   const sitePreviewStop = sitePreviews.stopAll();
-  pluginPanelSdkAuthorities.revokeAll();
+  const surfaceStop = pluginSurfaces.close();
+  await Promise.allSettled([sitePreviewStop, surfaceStop]);
   await Promise.allSettled([
-    sitePreviewStop,
-    ...[...new Set([
-      ...pluginPipelines.keys(),
-      ...[...runningPluginPanels.values()].map((panel) => panel.workspaceId),
-      ...pluginWebAppViews.all().map((record) => record.workspaceId),
-    ])].map((workspaceId) => stopPluginWorkspace(workspaceId)),
+    ...[...pluginPipelines.keys()].map((workspaceId) =>
+      stopPluginPipelineForWorkspace(workspaceId),
+    ),
   ]);
   pluginRegistrations.clear();
 }
@@ -4200,8 +3924,8 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
+  const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
   sitePreviewStarts.abortForSender(senderId);
-  pluginPanelSdkAuthorities.revokeSender(senderId);
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
@@ -4216,8 +3940,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
       : Promise.resolve(),
     closeEngineYDocSessionsForSender(senderId),
     waitForPendingEngineYDocOpens(senderId),
-    // See stopPluginSurfacesForSender's own doc (#779 round 20 finding 1).
-    stopPluginSurfacesForSender(senderId),
+    pluginSurfaceStop,
     // This sender's own entry has not been cleared yet, so it would
     // otherwise always count as "another window" — excluded here so full
     // teardown still runs when this reload was the last window on the
@@ -4873,7 +4596,6 @@ app.on("will-quit", (event) => {
   // has had its chance to veto and this quit is now certain (#579 review,
   // r19). Fire-and-forget — skip locks and do not await async stops so
   // termination stays quick; child.unref() and the OS finish the cleanup.
-  pluginPanelSdkAuthorities.revokeAll();
   const pluginStop = stopAllPluginWorkspaces();
   const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
   const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
@@ -7935,22 +7657,19 @@ function registerIpcHandlers(
       !sender.isDestroyed() &&
       rendererGeneration(sender.id) === generation &&
       activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    assertPluginPanelRequestCurrent(isCurrent);
+    requireCurrentRenderer(isCurrent);
     assertWritableWorkspace(workspace);
-    const registration = await loadPluginPanelRegistrationForCurrentRenderer(
-      () =>
-        loadPluginPanelRegistration({
-          workspaceRoot: workspace.rootPath,
-          pluginRoot: input.pluginRoot,
-          pluginId: input.pluginId,
-          panelId: input.panelId,
-          pluginRegistration: pluginPipelines.get(workspace.workspaceId),
-        }),
-      isCurrent,
-    );
+    const registration = await loadPluginPanelRegistration({
+      workspaceRoot: workspace.rootPath,
+      pluginRoot: input.pluginRoot,
+      pluginId: input.pluginId,
+      panelId: input.panelId,
+      pluginRegistration: pluginPipelines.get(workspace.workspaceId),
+    });
+    requireCurrentRenderer(isCurrent);
     assertWritableWorkspace(workspace);
     const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-    assertPluginPanelRequestCurrent(isCurrent);
+    requireCurrentRenderer(isCurrent);
     rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,
@@ -7975,11 +7694,7 @@ function registerIpcHandlers(
       !sender.isDestroyed() &&
       rendererGeneration(sender.id) === generation &&
       activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    if (!isCurrent()) {
-      throw new Error(
-        "The plugin panel request does not target the active workspace. Open the workspace and try again.",
-      );
-    }
+    requireCurrentRenderer(isCurrent);
     assertWritableWorkspace(workspace);
     const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
     if (!plugin) {
@@ -8003,122 +7718,41 @@ function registerIpcHandlers(
           `"${input.placement}".`,
       );
     }
-    const key = pluginPanelKey(
-      workspace.workspaceId,
-      input.pluginId,
-      input.panelId,
-    );
-    return withPluginPanelStartLock(key, async () => {
-      assertPluginPanelRequestCurrent(isCurrent);
-      assertWritableWorkspace(workspace);
-      const pipeline = await ensurePluginPipeline(workspace);
-      const hostLease = acquirePluginSurfaceLease(
-        pipeline.hostOwnership,
-        input.pluginId,
-      );
-      let handle: StaticDirectoryPreview | null = null;
-      let installed: RunningPluginPanel | null = null;
-      try {
-        const host = await ensurePluginStarted(
-          pipeline.host,
-          input.pluginId,
-          () =>
-            hostLease.start((authority) =>
-              pipeline.ensureStarted(input.pluginId, authority)
-            ),
-        );
-        const spawnId = host.getSpawnId(input.pluginId);
-        if (!spawnId) {
-          throw new Error(`Plugin "${input.pluginId}" has no active process.`);
-        }
-
-        const snapshotRoot = pluginSnapshotRoot(workspace, input.pluginId);
-        const entryPath = join(snapshotRoot, panel.entry);
-        handle = await startStaticDirectoryPreview(dirname(entryPath), {
-          containmentRoot: snapshotRoot,
-          entry: basename(entryPath),
-          entryLabel: "plugin panel entry",
-        });
-        if (!isCurrent()) {
-          const staleHandle = handle;
-          handle = null;
-          await stopRunningPluginPanelPreview({
-            handle: staleHandle,
-            releaseOrigin: () => undefined,
+    const started = await pluginSurfaces.startPanel(
+      {
+        workspaceId: workspace.workspaceId,
+        pluginId: input.pluginId,
+        panelId: input.panelId,
+        senderId: sender.id,
+        generation,
+      },
+      {
+        assertAllowed: () => {
+          requireCurrentRenderer(isCurrent);
+          assertWritableWorkspace(workspace);
+        },
+        acquireHostLease: async () => {
+          const pipeline = await ensurePluginPipeline(workspace);
+          requireCurrentRenderer(isCurrent);
+          assertWritableWorkspace(workspace);
+          return createPluginSurfaceHostLease(pipeline, input.pluginId);
+        },
+        startPreview: async () => {
+          const snapshotRoot = pluginSnapshotRoot(workspace, input.pluginId);
+          const entryPath = join(snapshotRoot, panel.entry);
+          const handle = await startStaticDirectoryPreview(dirname(entryPath), {
+            containmentRoot: snapshotRoot,
+            entry: basename(entryPath),
+            entryLabel: "plugin panel entry",
           });
-          throw new Error(
-            "Plugin panel start was cancelled because the renderer changed.",
-          );
-        }
-        if (host.getSpawnId(input.pluginId) !== spawnId) {
-          throw new Error(
-            `Plugin "${input.pluginId}" restarted while its panel was starting. Try again.`,
-          );
-        }
-        const releaseOrigin = allowLoopbackFrameOrigin(handle.url);
-        const next: RunningPluginPanel = {
-          handle,
-          releaseOrigin,
-          hostLease,
-          workspaceId: workspace.workspaceId,
-          pluginId: input.pluginId,
-          panelId: input.panelId,
-          senderId: sender.id,
-          generation,
-        };
-        const previous = runningPluginPanels.get(key);
-        runningPluginPanels.set(key, next);
-        installed = next;
-        handle = null;
-        registerPluginPanelGrant({
-          senderId: sender.id,
-          generation,
-          workspaceId: workspace.workspaceId,
-          pluginId: input.pluginId,
-          panelId: input.panelId,
-        });
-        if (previous) {
-          try {
-            await stopRunningPluginPanelPreview(previous);
-          } catch (error) {
-            console.warn(
-              `[desktop] failed to stop a displaced plugin panel for "${input.pluginId}"`,
-              error,
-            );
-          } finally {
-            await previous.hostLease.release();
-          }
-        }
-        return StartPluginPanelResult.parse({
-          status: "ok",
-          url: next.handle.url,
-          title: panel.title,
-        });
-      } catch (error) {
-        try {
-          if (installed && runningPluginPanels.get(key) === installed) {
-            runningPluginPanels.delete(key);
-            pluginPanelSdkAuthorities.revokePanel(
-              workspace.workspaceId,
-              input.pluginId,
-              input.panelId,
-            );
-            await stopRunningPluginPanelPreview(installed);
-          } else if (handle) {
-            await stopRunningPluginPanelPreview({
-              handle,
-              releaseOrigin: () => undefined,
-            });
-          }
-        } catch (cleanupError) {
-          console.warn(
-            `[desktop] failed to clean up a refused plugin panel start for "${input.pluginId}"`,
-            cleanupError,
-          );
-        }
-        await hostLease.release();
-        throw error;
-      }
+          return { url: handle.url, stop: () => handle.stop() };
+        },
+      },
+    );
+    return StartPluginPanelResult.parse({
+      status: "ok",
+      url: started.url,
+      title: panel.title,
     });
   });
 
@@ -8185,46 +7819,32 @@ function registerIpcHandlers(
         "The plugin panel stop request does not target the active workspace.",
       );
     }
-    await stopPluginPanel(
-      workspace.workspaceId,
-      input.pluginId,
-      input.panelId,
-      {
+    await pluginSurfaces.stop({
+      kind: "panel",
+      workspaceId: workspace.workspaceId,
+      pluginId: input.pluginId,
+      panelId: input.panelId,
+      owner: {
         senderId: event.sender.id,
         generation: rendererGeneration(event.sender.id),
       },
-    );
+    });
   });
 
   ipcMain.handle(CHANNELS.invokePluginPanelSdk, async (event, payload) => {
     assertTrustedSender(event);
     const input = InvokePluginPanelSdkPayload.parse(payload);
     const sender = event.sender;
-    const key = pluginPanelKey(
-      input.workspaceId,
-      input.pluginId,
-      input.panelId,
-    );
-    const panel = runningPluginPanels.get(key);
-    const host = pluginPipelines.get(input.workspaceId)?.host;
     const workspaceEvents = pluginWorkspaceEventsByWorkspace.get(input.workspaceId);
-    const liveSpawnId = host?.getSpawnId(input.pluginId);
-    const generation = rendererGeneration(sender.id);
-    const panelRunning = isPluginPanelRequestLive({
-      currentPanel: panel,
-      senderId: sender.id,
-      generation,
-      liveSpawnId,
-    });
-    const authority = pluginPanelSdkAuthorities.authorize({
-      senderId: sender.id,
-      generation,
-      activeWorkspaceId: activeWorkspaceIdBySender.get(sender.id),
+    const { authority, isPushLive } = pluginSurfaces.authorizePanelSdk({
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       panelId: input.panelId,
-      panelRunning,
-      liveSpawnId,
+      senderId: sender.id,
+      currentGeneration: () => rendererGeneration(sender.id),
+      activeWorkspaceId: () => activeWorkspaceIdBySender.get(sender.id),
+      liveSpawnId: () =>
+        pluginPipelines.get(input.workspaceId)?.host.getSpawnId(input.pluginId),
     });
     // Absent when the workspace's registry isn't up (pipeline still starting,
     // or already torn down) — files.watch then degrades to watch:false and
@@ -8240,15 +7860,7 @@ function registerIpcHandlers(
           workspaceId: authority.workspaceId,
           pluginId: authority.pluginId,
           panelId: authority.panelId,
-          isPanelRunning: () =>
-            isPluginPanelPushLive({
-              signal: authority.signal,
-              currentPanel: runningPluginPanels.get(key),
-              grant: {
-                senderId: authority.senderId,
-                generation: authority.generation,
-              },
-            }),
+          isPanelRunning: isPushLive,
           send: notifyPluginPanelSdkEvent,
         })
       : undefined;
@@ -8283,22 +7895,19 @@ function registerIpcHandlers(
       !sender.isDestroyed() &&
       rendererGeneration(sender.id) === generation &&
       activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    assertPluginPanelRequestCurrent(isCurrent);
+    requireCurrentRenderer(isCurrent);
     assertWritableWorkspace(workspace);
-    const registration = await loadPluginPanelRegistrationForCurrentRenderer(
-      () =>
-        loadPluginWebAppRegistration({
-          workspaceRoot: workspace.rootPath,
-          pluginRoot: input.pluginRoot,
-          pluginId: input.pluginId,
-          webAppId: input.webAppId,
-          pluginRegistration: pluginPipelines.get(workspace.workspaceId),
-        }),
-      isCurrent,
-    );
+    const registration = await loadPluginWebAppRegistration({
+      workspaceRoot: workspace.rootPath,
+      pluginRoot: input.pluginRoot,
+      pluginId: input.pluginId,
+      webAppId: input.webAppId,
+      pluginRegistration: pluginPipelines.get(workspace.workspaceId),
+    });
+    requireCurrentRenderer(isCurrent);
     assertWritableWorkspace(workspace);
     const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-    assertPluginPanelRequestCurrent(isCurrent);
+    requireCurrentRenderer(isCurrent);
     const plugin = rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,
@@ -8333,7 +7942,7 @@ function registerIpcHandlers(
       !sender.isDestroyed() &&
       rendererGeneration(sender.id) === generation &&
       activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    assertPluginPanelRequestCurrent(isCurrent);
+    requireCurrentRenderer(isCurrent);
     assertWritableWorkspace(workspace);
     const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
     if (!plugin) {
@@ -8351,197 +7960,46 @@ function registerIpcHandlers(
       webAppId: input.webAppId,
       instanceKey: input.instanceKey,
     };
-    return withPluginWebAppStartLock(
-      pluginWebAppKey(
-        workspace.workspaceId,
-        input.pluginId,
-        input.webAppId,
-        input.instanceKey,
-      ),
-      async () => {
-        // The budget is read inside the lock, against the live views: a
-        // restore that reopens more instances than the budget allows is
-        // refused here, which is the only place that sees them all.
-        assertInstanceBudget(
-          input.pluginId,
-          input.webAppId,
-          pluginWebAppViews.countOtherInstances(identity),
-        );
-        assertPluginPanelRequestCurrent(isCurrent);
-        assertWritableWorkspace(workspace);
-        const pipeline = await ensurePluginPipeline(workspace);
-        const hostLease = acquirePluginSurfaceLease(
-          pipeline.hostOwnership,
-          input.pluginId,
-        );
-        let credentialConsumed = false;
-        let installedRecord: PluginWebAppViewRecord<AttachedWebAppView> | null = null;
-        let displacedRecord: PluginWebAppViewRecord<AttachedWebAppView> | null = null;
-        let pendingView: AttachedWebAppView | null = null;
-        let recoveryStarted = false;
-        let host: PluginHost;
-        try {
-          host = await ensurePluginStarted(
-            pipeline.host,
+    const started = await pluginSurfaces.startWebApp(
+      {
+        ...identity,
+        senderId: sender.id,
+        generation,
+        workspaceRoot: workspace.rootPath,
+        container: createPluginWebAppContainer(sender),
+      },
+      {
+        assertInstanceBudget: (liveAndReservedOtherInstances) =>
+          assertInstanceBudget(
             input.pluginId,
-            () =>
-              hostLease.start((authority) =>
-                pipeline.ensureStarted(input.pluginId, authority)
-              ),
-          );
-        } catch (error) {
-          await hostLease.release();
-          throw error;
-        }
-        const spawnId = host.getSpawnId(input.pluginId);
-        if (!spawnId) {
-          await hostLease.release();
-          throw new Error(`Plugin "${input.pluginId}" has no active process.`);
-        }
-        // The long await: the plugin spawns its server and polls readiness.
-        // The returned URL can carry a one-time credential in its fragment;
-        // it goes into loadURL below and nowhere else — never a log, never
-        // the renderer.
-        let started: Awaited<ReturnType<PluginHost["startWebApp"]>>;
-        try {
-          started = await host.startWebApp(
+            input.webAppId,
+            liveAndReservedOtherInstances,
+          ),
+        assertAllowed: () => {
+          requireCurrentRenderer(isCurrent);
+          assertWritableWorkspace(workspace);
+        },
+        acquireHostLease: async () => {
+          const pipeline = await ensurePluginPipeline(workspace);
+          requireCurrentRenderer(isCurrent);
+          assertWritableWorkspace(workspace);
+          return createPluginWebAppHostLease(
+            pipeline,
             input.pluginId,
             input.webAppId,
             input.instanceKey,
           );
-          credentialConsumed = true;
-        } catch (error) {
-          await hostLease.release();
-          throw error;
-        }
-        const restartedDuringStart = host.getSpawnId(input.pluginId) !== spawnId;
-        // Every path from here to a rendered guest can still fail, and the
-        // start URL's one-time credential is already spent. Whatever fails,
-        // the plugin's server must not stay paired to a guest that never
-        // arrived, so the recovery asks the PLUGIN to unpair. Stopping the
-        // view cannot do that job: it only stops the host when an on-demand
-        // open is the reason the host runs, and the default deployment is a
-        // workspace-started host, which survives — with a paired, cookieless
-        // server behind it.
-        //
-        // The teardown takes this web app's start lock, which is the lock a
-        // reopen queues on: the section is claimed before this handler's own
-        // one releases, so the reopen waits for the unpair instead of reading
-        // the doomed server's state. The recovery runs detached — it must not
-        // hold that section open waiting for the handler it runs inside.
-        const recoverConsumedCredential = (): void => {
-          if (recoveryStarted) return;
-          recoveryStarted = true;
-          void recoverConsumedWebAppCredential({
-            notifyFailed: () => notifyPluginWebAppFailed(sender, generation, identity),
-            withTeardownLock: (teardown) =>
-              withPluginWebAppStartLock(
-                pluginWebAppKey(
-                  workspace.workspaceId,
-                  input.pluginId,
-                  input.webAppId,
-                  input.instanceKey,
-                ),
-                teardown,
-              ),
-            unpair: () =>
-              host.stopWebApp(
-                input.pluginId,
-                input.webAppId,
-                input.instanceKey,
-              ),
-            stopView: async () => {
-              const records: PluginWebAppViewRecord<AttachedWebAppView>[] = [];
-              if (
-                installedRecord &&
-                pluginWebAppViews.get(identity) === installedRecord
-              ) {
-                const removed = pluginWebAppViews.remove(identity);
-                if (removed) records.push(removed);
-              }
-              if (displacedRecord) {
-                records.push(displacedRecord);
-                displacedRecord = null;
-              }
-              if (pendingView) {
-                destroyPluginWebAppViews([pendingView]);
-                pendingView = null;
-              }
-              await disposePluginWebAppViews(records);
-              await hostLease.release();
-            },
-            onError: (stage, error) => {
-              console.warn(
-                `[desktop] failed to ${stage} a plugin web app after a failed start`,
-                error,
-              );
-            },
-          });
-        };
-        if (restartedDuringStart) {
-          await hostLease.release();
-          throw new Error(
-            `Plugin "${input.pluginId}" restarted while its web app was starting. Try again.`,
-          );
-        }
-        try {
-          assertPluginPanelRequestCurrent(isCurrent);
-          const win = BrowserWindow.fromWebContents(sender);
-          if (!win || win.isDestroyed()) {
-            throw new Error("The plugin web app request has no open window.");
-          }
-          const guest = createPluginWebAppGuest({
-            workspaceRoot: workspace.rootPath,
-            pluginId: input.pluginId,
-            url: started.url,
-            hardenedPartitions: hardenedGuestPartitions,
-            ViewClass: WebContentsView,
-            attach: (view, { origin, partition }) => {
-              pendingView = { view, window: win, hostLease };
-              // Embedded plugin content follows the window zoom (#875).
-              bindGuestZoom(view.webContents);
-              win.contentView.addChildView(view);
-              const next: PluginWebAppViewRecord<AttachedWebAppView> = {
-                ...identity,
-                senderId: sender.id,
-                generation,
-                origin,
-                partition,
-                view: pendingView,
-              };
-              displacedRecord = pluginWebAppViews.register(next);
-              installedRecord = next;
-              pendingView = null;
-            },
-            onLoadFailure: () => {
-              // The load error's message can embed the URL, credential
-              // fragment included — report the failure without it.
-              console.warn(
-                `[desktop] plugin "${input.pluginId}" web app "${input.webAppId}" failed to load its start URL.`,
-              );
-              recoverConsumedCredential();
-            },
-          });
-          if (displacedRecord) {
-            const displaced = displacedRecord;
-            displacedRecord = null;
-            await disposePluginWebAppViews([displaced]);
-          }
-          // Every instance of one id shares the manifest title, which would
-          // label twenty preview tabs "Preview". A plugin that knows what its
-          // instance is may name it; the manifest title is the fallback.
-          return StartPluginWebAppResult.parse({
-            status: "ok",
-            title: started.title ?? webApp.title,
-            origin: guest.origin,
-          });
-        } catch (error) {
-          if (credentialConsumed) recoverConsumedCredential();
-          else await hostLease.release();
-          throw error;
-        }
+        },
       },
     );
+    // Every instance of one id shares the manifest title, which would label
+    // twenty preview tabs "Preview". A plugin that knows its instance may name
+    // it; the manifest title is the fallback.
+    return StartPluginWebAppResult.parse({
+      status: "ok",
+      title: started.title ?? webApp.title,
+      origin: started.origin,
+    });
   });
 
   ipcMain.handle(CHANNELS.setPluginWebAppBounds, (event, payload) => {
@@ -8550,28 +8008,20 @@ function registerIpcHandlers(
     // Stale updates are dropped, never applied: a slow bounds report from a
     // previous renderer generation or another workspace's tab must not move
     // the live view (async-guard invariant).
-    const record = pluginWebAppViews.authorizeBounds({
+    pluginSurfaces.applyWebAppBounds({
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
       instanceKey: input.instanceKey,
       senderId: event.sender.id,
       generation: rendererGeneration(event.sender.id),
+      bounds: input.bounds,
+      visible: input.visible,
+      // The renderer reports CSS pixels; page zoom changes the CSS→DIP
+      // mapping, so a zoomed host would otherwise place the guest over
+      // neighboring chrome and take clicks outside its frame.
+      zoomFactor: event.sender.getZoomFactor(),
     });
-    if (!record) return;
-    // The renderer reports CSS pixels; page zoom changes the CSS→DIP mapping,
-    // so a zoomed host would otherwise place the guest at the wrong
-    // rectangle — over neighboring chrome, taking clicks outside its frame.
-    // The renderer re-reports on the resize a zoom change triggers, so a
-    // report in flight across a zoom step corrects itself.
-    const zoomFactor = event.sender.getZoomFactor();
-    record.view.view.setBounds({
-      x: Math.round(input.bounds.x * zoomFactor),
-      y: Math.round(input.bounds.y * zoomFactor),
-      width: Math.round(input.bounds.width * zoomFactor),
-      height: Math.round(input.bounds.height * zoomFactor),
-    });
-    record.view.view.setVisible(input.visible);
   });
 
   ipcMain.handle(CHANNELS.stopPluginWebApp, async (event, payload) => {
@@ -8583,16 +8033,17 @@ function registerIpcHandlers(
         "The plugin web app stop request does not target the active workspace.",
       );
     }
-    await stopPluginWebApp(
-      workspace.workspaceId,
-      input.pluginId,
-      input.webAppId,
-      input.instanceKey,
-      {
+    await pluginSurfaces.stop({
+      kind: "web-app",
+      workspaceId: workspace.workspaceId,
+      pluginId: input.pluginId,
+      webAppId: input.webAppId,
+      instanceKey: input.instanceKey,
+      owner: {
         senderId: event.sender.id,
         generation: rendererGeneration(event.sender.id),
       },
-    );
+    });
   });
 
   async function activePluginPipelineFor(
@@ -8733,18 +8184,6 @@ function registerIpcHandlers(
     }
   });
 
-  // Ends every panel's authority over a plugin before an action that takes
-  // its process away. A panel SDK call already in flight carries its own
-  // abort signal, so stopping the process is not what cancels it.
-  const revokePluginPanels = (workspaceId: string, pluginId: string): void => {
-    revokePluginPanelAuthorities({
-      workspaceId,
-      pluginId,
-      panels: runningPluginPanels.values(),
-      revokePanel: pluginPanelSdkAuthorities.revokePanel,
-    });
-  };
-
   const pluginAction = (
     channel: string,
     run: (
@@ -8776,47 +8215,22 @@ function registerIpcHandlers(
     pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, async (pipeline, pluginId, workspaceId) => {
     const result = await pipeline.disable(pluginId, {
-      onWillStopRuntime: () => revokePluginPanels(workspaceId, pluginId),
+      onWillStopRuntime: () =>
+        pluginSurfaces.revokePluginSdkGrants({ workspaceId, pluginId }),
+      onRuntimeStopped: (stoppedPluginId) =>
+        pluginSurfaces.stop({
+          kind: "plugin",
+          workspaceId,
+          pluginId: stoppedPluginId,
+        }),
     });
-    if (!result.ok) return result;
-    await Promise.all([
-      stopPluginPanelsForPlugin(workspaceId, pluginId),
-      stopPluginWebAppsForPlugin(workspaceId, pluginId),
-    ]);
     return result;
   });
   pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
     pipeline.enable(pluginId));
   pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
     pipeline.approve(pluginId));
-  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId, workspaceId) =>
-    pipeline.rebuild(pluginId, {
-      // The old grant must not survive the runtime it was authorized
-      // against — disable/uninstall already revoke here, rebuild only tore
-      // down web apps (#779 round 18 finding 3). Unlike disable/uninstall,
-      // rebuild leaves the panel mounted with a new runtime still coming —
-      // an aborted grant can never signal live again on its own, so a
-      // still-mounted panel's next SDK call would otherwise fail forever
-      // instead of the round-5 split's own re-grant (#779 round 21
-      // finding 6).
-      onOldRuntimeStopped: () => {
-        revokePluginPanels(workspaceId, pluginId);
-        void reregisterPluginPanels(workspaceId, pluginId).catch((error: unknown) => {
-          console.warn(
-            `[desktop] failed to re-register plugin panels after a rebuild (plugin ${pluginId})`,
-            error,
-          );
-        });
-        void stopPluginWebAppsForPlugin(workspaceId, pluginId).catch(
-          (error: unknown) => {
-            console.warn(
-              `[desktop] failed to stop plugin web apps during rebuild for "${pluginId}"`,
-              error,
-            );
-          },
-        );
-      },
-    }));
+  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId) => pipeline.rebuild(pluginId));
 
   ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
     assertTrustedSender(event);
@@ -8895,18 +8309,18 @@ function registerIpcHandlers(
     }
   });
 
-  // Whether `pluginId` is claimed, right now, by a genuinely INSTALLED row
-  // (approvedHash set) — never merely present. A collision's losing,
-  // never-approved side can sit in pipeline.list() under the exact same id
-  // as the winning, installed side; only the installed side ever registers
-  // a panel, opens a web app, or owns a guest partition, so it is the only
-  // one this id's ID-keyed main-process state can ever legitimately belong
-  // to.
-  const pluginIdHasInstalledClaimant = (
+  // A different installed directory with the same id still protects the
+  // ID-keyed registration, surfaces, and guest partition it may own.
+  const pluginIdHasOtherInstalledClaimant = (
     pipeline: PluginPipeline,
     pluginId: string,
+    directoryName: string,
   ): boolean =>
-    pipeline.list().some((entry) => entry.id === pluginId && entry.approvedHash !== null);
+    pipeline.list().some((entry) =>
+      entry.id === pluginId &&
+      entry.directoryName !== directoryName &&
+      entry.approvedHash !== null
+    );
 
   ipcMain.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
     assertTrustedSender(event);
@@ -8920,44 +8334,36 @@ function registerIpcHandlers(
           input.confirmationToken,
           {
             onWillStopRuntime: (pluginId) =>
-              revokePluginPanels(input.workspaceId, pluginId),
+              pluginSurfaces.revokePluginSdkGrants({
+                workspaceId: input.workspaceId,
+                pluginId,
+              }),
+            onRuntimeStopped: (pluginId) =>
+              pluginSurfaces.stop({
+                kind: "plugin",
+                workspaceId: input.workspaceId,
+                pluginId,
+              }),
           },
         ),
       );
-      // Teardown below must key on THIS id's own claimant having genuinely
-      // stopped — never on result.ok alone, and never eagerly before
-      // uninstall validates the confirmation. A stale dialog or expired
-      // token fails before uninstall ever calls pluginHost.stop(); tearing
-      // surfaces down ahead of that, or on a collision loser's own
-      // trivially-true result.ok, would destroy a still-running claimant's
-      // panel and web app views for an action that never touched it.
-      // claimantStoppedBySettledResult covers a FAILURE that still stopped
-      // the process (delete-failed, or confirmation-stale caught after
-      // stop() ran): both explicitly mark the row disabled or
-      // disabled-pending-repair, merged onto its own pre-existing status —
-      // which is why this also reads correctly for a collision's
-      // SURVIVING claimant, not only the row that actually left.
-      const claimantStoppedBySettledResult =
-        result.plugin !== null &&
-        result.plugin.approvedHash !== null &&
-        (result.plugin.status === "disabled" ||
-          result.plugin.status === "disabled-pending-repair");
-      // input.pluginId can still be claimed by a completely different,
-      // still-installed plugin a collision produced: the losing,
-      // never-installed side removed while the winning side keeps running
-      // under the identical id, with nothing of its own ever having run.
-      const stillInstalledClaimant = pluginIdHasInstalledClaimant(pipeline, input.pluginId);
-      if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {
-        await Promise.all([
-          stopPluginPanelsForPlugin(input.workspaceId, input.pluginId),
-          stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId),
-        ]);
+      // Runtime-surface cleanup already ran for every exact id whose host
+      // stopped. Registration and the guest partition are keyed by id alone,
+      // with no directoryName to disambiguate a surviving collision claimant,
+      // so only the last-claimant decision below may clear either one.
+      const removedLastClaimant = result.ok && !pluginIdHasOtherInstalledClaimant(
+        pipeline,
+        input.pluginId,
+        input.directoryName,
+      );
+      if (removedLastClaimant) {
+        await pluginSurfaces.stop({
+          kind: "plugin",
+          workspaceId: input.workspaceId,
+          pluginId: input.pluginId,
+          clearPartition: { workspaceRoot: workspace.rootPath },
+        });
       }
-      // Registration and the guest partition below are keyed by id alone,
-      // with no directoryName to disambiguate by, so clearing them
-      // unconditionally would reach into a surviving claimant's own live
-      // registration and session rather than the row that actually left.
-      const removedLastClaimant = result.ok && !stillInstalledClaimant;
       // Also gated on directoryName, the standing trace-to-directory rule:
       // forgetUninstalledPlugin only clears a registration that actually
       // traces to THIS directory, so an id-losing loser's own removed
@@ -8970,22 +8376,6 @@ function registerIpcHandlers(
         directoryName: input.directoryName,
         uninstalled: removedLastClaimant,
       });
-      if (removedLastClaimant) {
-        // The guest partition holds the web app's session cookies — plugin
-        // state as much as its data directory. A reinstall starts unpaired.
-        await clearPluginWebAppPartition({
-          workspaceRoot: workspace.rootPath,
-          pluginId: input.pluginId,
-          hardenedPartitions: hardenedGuestPartitions,
-          fromPartition: (partition) => session.fromPartition(partition),
-          onError: (error) => {
-            console.warn(
-              "[desktop] failed to clear a plugin web app partition after uninstall",
-              error,
-            );
-          },
-        });
-      }
       return result;
     } catch (error) {
       return PluginActionResult.parse({
@@ -9025,7 +8415,7 @@ function registerIpcHandlers(
       // previews below, which must not stop a preview another window is
       // still showing.
       sitePreviewStarts.abortForSender(senderId);
-      await stopPluginSurfacesForSender(senderId);
+      await pluginSurfaces.stop({ kind: "sender", senderId });
     }
     // A→B then A→C both read previousWorkspaceId=A above and raced through
     // the await — if B's call resumes after C's already assigned C, B's
@@ -9040,14 +8430,13 @@ function registerIpcHandlers(
       event.sender.once("destroyed", () => {
         const activeWorkspaceId = activeWorkspaceIdBySender.get(senderId);
         sitePreviewStarts.abortForSender(senderId);
-        pluginPanelSdkAuthorities.revokeSender(senderId);
+        const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
         workspaceSwitchTokenBySender.delete(senderId);
-        // See stopPluginSurfacesForSender's own doc (#779 round 20 finding 1).
         void (async () => {
           try {
-            await stopPluginSurfacesForSender(senderId);
+            await pluginSurfaceStop;
           } catch (error) {
             console.warn(
               `[desktop] failed to clean up plugin surfaces for a destroyed window (sender ${senderId})`,

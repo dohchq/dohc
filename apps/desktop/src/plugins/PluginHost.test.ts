@@ -30,10 +30,6 @@ import { readPluginManifestFile } from "./pluginManifest";
 import { invokePluginSdkHost } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 import {
-  revokePluginPanelAuthorities,
-  revokePluginPanelAuthoritiesForStatus,
-} from "./pluginPanelStartLifecycle";
-import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
   PLUGIN_HOST_METHODS,
   type PluginRuntimeStatus,
@@ -1722,20 +1718,11 @@ describe("PluginHost", () => {
         };
       },
       routeSdkRequest: defaultRouter,
-      onStatusChange: (pluginId, status) =>
-        revokePluginPanelAuthoritiesForStatus({
-          workspaceId: "workspace-a",
-          pluginId,
-          status,
-          panels: [
-            {
-              workspaceId: "workspace-a",
-              pluginId: "hello-plugin",
-              panelId: "main",
-            },
-          ],
-          revokePanel: registry.revokePanel,
-        }),
+      onStatusChange: (pluginId, status) => {
+        if (status === "crashed" || status === "failed" || status === "disabled") {
+          registry.revokePanel("workspace-a", pluginId, "main");
+        }
+      },
     });
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
@@ -1887,18 +1874,7 @@ describe("PluginHost", () => {
         const outcome = await change.stop({
           onWillStop: () => {
             steps.push("revoke");
-            revokePluginPanelAuthorities({
-              workspaceId: "workspace-a",
-              pluginId: "hello-plugin",
-              panels: [
-                {
-                  workspaceId: "workspace-a",
-                  pluginId: "hello-plugin",
-                  panelId: "main",
-                },
-              ],
-              revokePanel: registry.revokePanel,
-            });
+            registry.revokePanel("workspace-a", "hello-plugin", "main");
           },
         });
         return change.preserve({ kind: "existing", value: outcome });

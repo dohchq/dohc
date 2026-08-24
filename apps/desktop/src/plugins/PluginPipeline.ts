@@ -216,6 +216,11 @@ export type PluginPipelineUninstallPreflightResult =
 export interface PluginPipelineRuntimeStopHooks {
   /** Revokes authority immediately before this pipeline stops a proven runtime. */
   onWillStopRuntime?: (pluginId: string) => void;
+  /**
+   * Awaits external cleanup after this pipeline proves the host stopped.
+   * A rejection is logged and does not undo the completed stop.
+   */
+  onRuntimeStopped?: (pluginId: string) => void | Promise<void>;
 }
 
 interface PluginPipelineOperations {
@@ -1100,6 +1105,7 @@ export class PluginPipeline {
         try {
           await this.stopOldRuntime(pluginId, change, {
             onWillStop: () => hooks.onWillStopRuntime?.(pluginId),
+            onRuntimeStopped: () => hooks.onRuntimeStopped?.(pluginId),
           });
         } catch (stopError) {
           if (
@@ -2428,6 +2434,7 @@ export class PluginPipeline {
     change: PluginHostChangeAuthority,
     callbacks: {
       onWillStop?: () => void;
+      onRuntimeStopped?: () => void | Promise<void>;
       onStopped?: () => void;
       markStopped?: () => void;
     } = {},
@@ -2457,6 +2464,16 @@ export class PluginPipeline {
     // The stop already happened — mark it before running its consequences,
     // so a throwing notification can never look like the stop never occurred.
     callbacks.markStopped?.();
+    try {
+      await callbacks.onRuntimeStopped?.();
+    } catch (error) {
+      // Best-effort: the host is already gone, so cleanup failure cannot
+      // restore it or turn this completed stop back into a failed stop.
+      console.error(
+        `[PluginPipeline] runtime-stopped cleanup failed for "${pluginId}".`,
+        error,
+      );
+    }
     try {
       callbacks.onStopped?.();
     } catch (error) {
@@ -3576,6 +3593,7 @@ export class PluginPipeline {
     if (cleanupIds.has(primaryPluginId)) {
       stops.push(this.stopOldRuntime(primaryPluginId, primaryChange, {
         onWillStop: () => hooks.onWillStopRuntime?.(primaryPluginId),
+        onRuntimeStopped: () => hooks.onRuntimeStopped?.(primaryPluginId),
       }));
     }
     const outcomes = await Promise.allSettled(stops);
@@ -3635,6 +3653,7 @@ export class PluginPipeline {
           await reservation.run(async (change) => {
             await this.stopOldRuntime(pluginId, change, {
               onWillStop: () => hooks.onWillStopRuntime?.(pluginId),
+              onRuntimeStopped: () => hooks.onRuntimeStopped?.(pluginId),
             });
             return change.preserve(existingHostResult(undefined));
           });

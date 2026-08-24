@@ -1806,12 +1806,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!preflight.ok) throw new Error(preflight.error.message);
       const reserveChange = vi.spyOn(hostOwnership, "reserveChange");
       const revokedRuntimeIds: string[] = [];
+      const stoppedRuntimeIds: string[] = [];
       const removing = pipeline.uninstall(
         "original-id",
         "mixed-dir",
         preflight.confirmationToken,
         {
           onWillStopRuntime: (pluginId) => revokedRuntimeIds.push(pluginId),
+          onRuntimeStopped: (pluginId) => {
+            stoppedRuntimeIds.push(pluginId);
+          },
         },
       );
       expect(reserveChange.mock.calls.map(([pluginId]) => pluginId)).toEqual([
@@ -1821,6 +1825,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const removed = await removing;
       expect(removed.ok).toBe(true);
       expect(revokedRuntimeIds.toSorted()).toEqual([
+        "mixed-dir",
+        "original-id",
+      ]);
+      expect(stoppedRuntimeIds.toSorted()).toEqual([
         "mixed-dir",
         "original-id",
       ]);
@@ -2040,6 +2048,153 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         setup.pipeline.dispose(),
         "Pipeline disposal did not settle after crossed alias uninstalls",
       );
+    }
+  }, 60_000);
+
+  it("awaits exact post-stop cleanup for a primary-and-live-alias uninstall", async () => {
+    const setup = await createAliasUninstallFixture({ drainTimeoutMs: 0 });
+    const cleanupAssimilated = deferred();
+    const releaseCleanup = deferred();
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      expect(setup.host.currentRecord("runtime-id")).toBeDefined();
+      const preflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+
+      const observations: Array<{
+        pluginId: string;
+        record: ReturnType<PluginHost["currentRecord"]>;
+      }> = [];
+      const assimilatedPluginIds: string[] = [];
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+        {
+          onRuntimeStopped: (pluginId) => {
+            observations.push({
+              pluginId,
+              record: setup.host.currentRecord(pluginId),
+            });
+            const thenable: PromiseLike<void> = {
+              then: (onFulfilled, onRejected) => {
+                assimilatedPluginIds.push(pluginId);
+                if (assimilatedPluginIds.length === 2) {
+                  cleanupAssimilated.resolve();
+                }
+                return releaseCleanup.promise.then(onFulfilled, onRejected);
+              },
+            };
+            return thenable as Promise<void>;
+          },
+        },
+      );
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      let lateAliasJobEntered = false;
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+
+      const boundary = await Promise.race([
+        cleanupAssimilated.promise.then(() => "cleanup-assimilated" as const),
+        removing.then(() => "uninstall-settled" as const),
+      ]);
+      expect(boundary).toBe("cleanup-assimilated");
+      expect(observations.map(({ pluginId }) => pluginId).toSorted()).toEqual([
+        "original-id",
+        "runtime-id",
+      ]);
+      expect(assimilatedPluginIds.toSorted()).toEqual([
+        "original-id",
+        "runtime-id",
+      ]);
+      expect(observations.every(({ record }) => record === undefined)).toBe(true);
+      expect(lateAliasJobEntered).toBe(false);
+
+      releaseCleanup.resolve();
+      const removed = await removing;
+      await lateAliasJob;
+      expect(removed.ok).toBe(true);
+      expect(lateAliasJobEntered).toBe(true);
+      await expect(lstat(setup.fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      releaseCleanup.resolve();
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("preserves a live alias and releases its queue when pre-stop revocation fails", async () => {
+    const setup = await createAliasUninstallFixture({ drainTimeoutMs: 0 });
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      const aliasRecord = setup.host.currentRecord("runtime-id");
+      expect(aliasRecord).toBeDefined();
+      const preflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+
+      const revokedRuntimeIds: string[] = [];
+      const stoppedRuntimeIds: string[] = [];
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+        {
+          onWillStopRuntime: (pluginId) => {
+            revokedRuntimeIds.push(pluginId);
+            if (pluginId === "runtime-id") {
+              throw new Error("simulated alias revocation failure");
+            }
+          },
+          onRuntimeStopped: (pluginId) => {
+            stoppedRuntimeIds.push(pluginId);
+          },
+        },
+      );
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      let lateAliasJobEntered = false;
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+      expect(lateAliasJobEntered).toBe(false);
+
+      const removed = await removing;
+      await lateAliasJob;
+      expect(removed).toMatchObject({
+        ok: false,
+        error: {
+          code: "delete-failed",
+          message: "simulated alias revocation failure",
+        },
+      });
+      expect(revokedRuntimeIds).toContain("runtime-id");
+      expect(stoppedRuntimeIds).not.toContain("runtime-id");
+      expect(setup.host.currentRecord("runtime-id")).toBe(aliasRecord);
+      await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+      expect(lateAliasJobEntered).toBe(true);
+    } finally {
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
     }
   }, 60_000);
 
@@ -3252,8 +3407,19 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       doorWrittenDeltasOf(pipeline).set("codex", new Map());
       transient.lastApprovedAttemptHash.set(pluginId, "a".repeat(64));
       transient.lastApprovedAttemptHash.set("codex", "b".repeat(64));
-      const finished = await pipeline.uninstall(pluginId, pluginId, retryPreflight.confirmationToken);
+      const stoppedRuntimeIds: string[] = [];
+      const finished = await pipeline.uninstall(
+        pluginId,
+        pluginId,
+        retryPreflight.confirmationToken,
+        {
+          onRuntimeStopped: (stoppedPluginId) => {
+            stoppedRuntimeIds.push(stoppedPluginId);
+          },
+        },
+      );
       expect(finished.ok).toBe(true);
+      expect(stoppedRuntimeIds.toSorted()).toEqual(["codex", "my-codex-copy"]);
 
       await expect(lstat(strandedStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
       const finalState = await readPluginLocalState(stateDir, workspaceRoot);
@@ -8112,9 +8278,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
-    it("revokes external authority before a committed disable stops the host", async () => {
+    it("revokes, stops, then awaits external runtime cleanup for disable", async () => {
       const setup = await setupEstablishedPlugin();
       const steps: string[] = [];
+      const cleanupEntered = deferred();
+      const releaseCleanup = deferred();
       const originalStop = setup.pipeline.host.stop.bind(setup.pipeline.host);
       const stop = vi.spyOn(setup.pipeline.host, "stop").mockImplementation(
         async (pluginId) => {
@@ -8123,13 +8291,41 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         },
       );
       try {
-        const disabled = await setup.pipeline.disable("example-plugin", {
+        let settled = false;
+        const disabling = setup.pipeline.disable("example-plugin", {
           onWillStopRuntime: (pluginId) => steps.push(`revoke:${pluginId}`),
+          onRuntimeStopped: async (pluginId) => {
+            steps.push(`stopped:${pluginId}`);
+            cleanupEntered.resolve();
+            await releaseCleanup.promise;
+            steps.push(`cleaned:${pluginId}`);
+          },
+        });
+        void disabling.then(() => {
+          settled = true;
         });
 
+        await cleanupEntered.promise;
+        expect(steps).toEqual([
+          "revoke:example-plugin",
+          "host-stop",
+          "stopped:example-plugin",
+        ]);
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        releaseCleanup.resolve();
+        const disabled = await disabling;
+
         expect(disabled.ok).toBe(true);
-        expect(steps).toEqual(["revoke:example-plugin", "host-stop"]);
+        expect(steps).toEqual([
+          "revoke:example-plugin",
+          "host-stop",
+          "stopped:example-plugin",
+          "cleaned:example-plugin",
+        ]);
       } finally {
+        releaseCleanup.resolve();
         stop.mockRestore();
         await setup.pipeline.dispose();
       }
@@ -8138,16 +8334,45 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     it("keeps external authority when disable fails before the stop boundary", async () => {
       const setup = await setupEstablishedPlugin();
       const revoke = vi.fn();
+      const stopped = vi.fn();
       try {
         setup.failNextRecordWrite();
         const disabled = await setup.pipeline.disable("example-plugin", {
           onWillStopRuntime: revoke,
+          onRuntimeStopped: stopped,
         });
 
         expect(disabled.ok).toBe(false);
         expect(revoke).not.toHaveBeenCalled();
+        expect(stopped).not.toHaveBeenCalled();
         expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
       } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps a completed stop when external runtime cleanup rejects", async () => {
+      const setup = await setupEstablishedPlugin();
+      const failure = new Error("simulated surface cleanup failure");
+      const consoleError = vi.spyOn(console, "error").mockImplementation(
+        () => undefined,
+      );
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin", {
+          onRuntimeStopped: async () => {
+            throw failure;
+          },
+        });
+
+        expect(disabled.ok).toBe(true);
+        expect(setup.pipeline.host.currentRecord("example-plugin"))
+          .toBeUndefined();
+        expect(consoleError).toHaveBeenCalledWith(
+          expect.stringContaining("runtime-stopped cleanup failed"),
+          failure,
+        );
+      } finally {
+        consoleError.mockRestore();
         await setup.pipeline.dispose();
       }
     }, 60_000);
@@ -8229,11 +8454,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const setup = await setupEstablishedPlugin();
       const record = setup.pipeline.host.currentRecord("example-plugin");
       expect(record).toBeDefined();
+      const stopped = vi.fn();
       const stop = vi.spyOn(setup.pipeline.host, "stop").mockRejectedValue(
         new Error("simulated stop failure with a live record"),
       );
       try {
-        const disabled = await setup.pipeline.disable("example-plugin");
+        const disabled = await setup.pipeline.disable("example-plugin", {
+          onRuntimeStopped: stopped,
+        });
 
         expect(disabled).toMatchObject({
           ok: false,
@@ -8243,6 +8471,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
         });
         expect(stop).toHaveBeenCalledTimes(1);
+        expect(stopped).not.toHaveBeenCalled();
         expect(setup.pipeline.host.currentRecord("example-plugin")).toBe(record);
         expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
         expect(setup.pipeline.list()[0]).toMatchObject({
