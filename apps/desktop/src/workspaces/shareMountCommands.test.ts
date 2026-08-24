@@ -12,8 +12,8 @@ import {
   ShareViewMountRollbackError,
   type PreparedShareViewFilesMount,
   type ShareViewFiles,
-  type ShareViewFilesOwnerCapability,
 } from "./shareViewFiles";
+import type { ShareViewFilesOwnerCapability } from "./shareViewFilesOwner";
 import type { ShareMountRecord } from "./registryStore";
 import {
   createShareMountCommands,
@@ -118,7 +118,9 @@ function harness() {
     | ReturnType<typeof createShareMountCommands>["filesLifecycle"]
     | undefined;
   let mountFailure: unknown;
-  let removeOutcome: { folderLeft: boolean } = { folderLeft: false };
+  let removeOutcome: { folderLeft: boolean; error?: unknown } = {
+    folderLeft: false,
+  };
 
   const files: ShareViewFiles = {
     mount: vi.fn(async (_lease, target: PreparedShareViewFilesMount) => {
@@ -229,7 +231,7 @@ function harness() {
     set mountFailure(error: unknown) {
       mountFailure = error;
     },
-    set removeOutcome(next: { folderLeft: boolean }) {
+    set removeOutcome(next: { folderLeft: boolean; error?: unknown }) {
       removeOutcome = next;
     },
   };
@@ -393,6 +395,35 @@ describe("share mount commands", () => {
       "relay:close",
       "log",
       "projection:remove",
+      "registry:0",
+    ]);
+  });
+
+  it("returns the projection error when removal leaves the mount folder", async () => {
+    const h = harness();
+    const removalError = new Error("folder is busy");
+    h.mounts = [
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+    ];
+    h.removeOutcome = { folderLeft: true, error: removalError };
+    const target = preparedTarget({ granterEmail: null });
+
+    const result = await withLiveMountOwner(target, (owner) =>
+      h.commands.filesLifecycle.removeMount(owner, target),
+    );
+
+    expect(result).toEqual({ folderLeft: true, error: removalError });
+    expect(h.events).toEqual([
+      "relay:close",
+      "projection:remove",
+      "log",
       "registry:0",
     ]);
   });

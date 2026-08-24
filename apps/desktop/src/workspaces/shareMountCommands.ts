@@ -20,12 +20,12 @@ import {
 } from "./shareMounts";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
-  assertActiveShareViewFilesOwner,
   ShareViewMountRollbackError,
   type PreparedShareViewFilesMount,
   type ShareViewFiles,
   type ShareViewFilesDependencies,
 } from "./shareViewFiles";
+import { assertActiveShareViewFilesOwner } from "./shareViewFilesOwner";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
 import { parseShareCode, relayUrlsMatch } from "./syncCode";
 
@@ -214,7 +214,10 @@ export function createShareMountCommands<WorkspaceSummary>(
         target.workspaceId,
         mounts.filter((mount) => !matches.has(mount)),
       );
-      return { folderLeft: removed.folderLeft };
+      return {
+        folderLeft: removed.folderLeft,
+        ...(removed.error === undefined ? {} : { error: removed.error }),
+      };
     },
   };
 
