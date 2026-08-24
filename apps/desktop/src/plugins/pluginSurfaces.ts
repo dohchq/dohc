@@ -231,6 +231,7 @@ interface WebAppAttempt<V extends PluginWebAppViewLike> {
   pendingView: PendingWebAppView<V> | null;
   displaced: WebAppRecord<V>[];
   credentialConsumed: boolean;
+  navigationSucceeded: boolean;
   recoveryQueued: boolean;
   notified: boolean;
   cancelled: boolean;
@@ -401,6 +402,7 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
       pendingView: null,
       displaced: [],
       credentialConsumed: false,
+      navigationSucceeded: false,
       recoveryQueued: false,
       notified: false,
       cancelled: false,
@@ -418,6 +420,8 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         this.#assertWebAppStartActive(attempt);
         const spawnId = await ownedLease.lease.start();
         attempt.spawnId = spawnId;
+        this.#assertWebAppStartActive(attempt);
+        await this.#retirePendingWebAppPredecessor(request);
         this.#assertWebAppStartActive(attempt);
         const started = await ownedLease.lease.startWebApp();
         attempt.credentialConsumed = true;
@@ -469,6 +473,9 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
             this.#releaseInstanceReservation(reservation);
           },
           onLoadFailure: () => this.#queueRecovery(attempt),
+          onLoadSuccess: () => {
+            attempt.navigationSucceeded = true;
+          },
         });
         for (const displaced of attempt.displaced.splice(0)) {
           await this.#disposeWebApp(displaced);
@@ -480,12 +487,12 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         if (
           attempt.cancelled &&
           attempt.credentialConsumed &&
-          !attempt.record
+          !attempt.navigationSucceeded
         ) {
-          // A stop can overtake the one-time credential request before the
-          // guest exists. Recover here, while this attempt still owns the
-          // identity lane: its already-queued stop would otherwise retire the
-          // attempt before detached recovery could unpair it.
+          // Cancellation can overtake either credential delivery or displaced
+          // record cleanup before navigation succeeds. Recover while this
+          // attempt still owns the identity lane; its queued stop would
+          // otherwise retire the attempt before detached recovery can unpair.
           await this.#recoverCancelledConsumedAttempt(attempt);
         } else if (
           attempt.credentialConsumed &&
@@ -1010,8 +1017,52 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         await this.#disposeAttempt(attempt);
         return;
       }
+      await this.#recoverPendingNavigationBeforeStop(attempt);
       await this.#removeWebAppRecord(record, notify);
     });
+  }
+
+  async #recoverPendingNavigationBeforeStop(
+    attempt: WebAppAttempt<V>,
+  ): Promise<void> {
+    if (!attempt.credentialConsumed || attempt.navigationSucceeded) return;
+    try {
+      await this.#unpairExactAttempt(attempt);
+    } catch (error) {
+      this.#report(
+        error,
+        `unpair stopped plugin web app "${attempt.request.pluginId}"`,
+      );
+    }
+  }
+
+  async #retirePendingWebAppPredecessor(
+    request: PluginWebAppIdentity,
+  ): Promise<void> {
+    const predecessor = this.#webApps.get(webAppKey(request));
+    if (
+      !predecessor ||
+      predecessor.closed ||
+      predecessor.attempt.navigationSucceeded
+    ) {
+      return;
+    }
+    let unpairFailed = false;
+    let unpairError: unknown;
+    try {
+      await this.#unpairExactAttempt(predecessor.attempt);
+    } catch (error) {
+      unpairFailed = true;
+      unpairError = error;
+      this.#report(
+        error,
+        `unpair replaced plugin web app "${predecessor.pluginId}"`,
+      );
+    }
+    if (this.#webApps.get(webAppKey(request)) === predecessor) {
+      await this.#removeWebAppRecord(predecessor, false);
+    }
+    if (unpairFailed) throw unpairError;
   }
 
   async #removePanelRecord(record: PanelRecord): Promise<void> {

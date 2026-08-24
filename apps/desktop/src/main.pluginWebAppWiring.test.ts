@@ -260,23 +260,17 @@ describe("plugin web app main-process wiring", () => {
     expect(squeeze(forget)).toContain("uninstalled:removedLastClaimant,");
   });
 
-  it("tears each stopped runtime down and keeps successful partition cleanup idempotent", () => {
+  it("keeps successful last-claimant partition cleanup idempotent", () => {
     const uninstall = handler("uninstallPlugin");
     const uninstallAt = uninstall.indexOf("pipeline.uninstall(");
-    const stoppedHookAt = uninstall.indexOf(
-      "onRuntimeStopped: (pluginId) =>",
-      uninstallAt,
-    );
-    const exactStopAt = uninstall.indexOf("pluginSurfaces.stop({", stoppedHookAt);
-    const exactPluginAt = uninstall.indexOf("pluginId,", exactStopAt);
-    const guardAt = uninstall.indexOf("if (removedLastClaimant)", exactPluginAt);
+    const guardAt = uninstall.indexOf("if (removedLastClaimant)", uninstallAt);
     const partitionStopAt = uninstall.indexOf("pluginSurfaces.stop({", guardAt);
     expect(uninstallAt).toBeGreaterThan(-1);
-    expect(stoppedHookAt).toBeGreaterThan(uninstallAt);
-    expect(exactStopAt).toBeGreaterThan(stoppedHookAt);
-    expect(exactPluginAt).toBeGreaterThan(exactStopAt);
-    expect(guardAt).toBeGreaterThan(exactPluginAt);
+    expect(guardAt).toBeGreaterThan(uninstallAt);
     expect(partitionStopAt).toBeGreaterThan(guardAt);
+    expect(uninstall.slice(uninstallAt, guardAt)).not.toContain(
+      "pluginSurfaces.stop({",
+    );
     expect(uninstall.indexOf("pluginSurfaces.stop({", partitionStopAt + 1)).toBe(-1);
   });
 

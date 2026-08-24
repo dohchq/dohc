@@ -1218,6 +1218,12 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
     onStatusChange: (event) =>
       notifyPluginStatusChanged(workspace.workspaceId, event),
+    onRuntimeStopped: (pluginId) =>
+      pluginSurfaces.stop({
+        kind: "plugin",
+        workspaceId: workspace.workspaceId,
+        pluginId,
+      }),
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
   });
@@ -8252,12 +8258,6 @@ function registerIpcHandlers(
         onWillStopRuntime: () => {
           suspend({ workspaceId, pluginId });
         },
-        onRuntimeStopped: (stoppedPluginId) =>
-          pluginSurfaces.stop({
-            kind: "plugin",
-            workspaceId,
-            pluginId: stoppedPluginId,
-          }),
       }),
     );
     return result;
@@ -8376,12 +8376,6 @@ function registerIpcHandlers(
                   pluginId,
                 });
               },
-              onRuntimeStopped: (pluginId) =>
-                pluginSurfaces.stop({
-                  kind: "plugin",
-                  workspaceId: input.workspaceId,
-                  pluginId,
-                }),
             },
           ),
         ),

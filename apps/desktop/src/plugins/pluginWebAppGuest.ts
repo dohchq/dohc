@@ -183,6 +183,9 @@ export function createPluginWebAppGuest<V extends GuestViewLike>(input: {
    * and no session cookie replaced it, so the caller stops the web app and
    * lets the next open pair again. */
   onLoadFailure: (error: unknown) => void;
+  /** Marks that the credential-bearing navigation delivered a session before
+   * the owner removes the guest. */
+  onLoadSuccess: () => void;
 }): PluginWebAppGuest<V> {
   const { origin } = parsePluginWebAppUrl(input.url);
   const partition = pluginWebAppPartition(input.workspaceRoot, input.pluginId);
@@ -200,7 +203,10 @@ export function createPluginWebAppGuest<V extends GuestViewLike>(input: {
   // Invisible until the renderer reports its placeholder's bounds.
   view.setVisible(false);
   input.attach(view, { origin, partition });
-  void view.webContents.loadURL(input.url).catch(input.onLoadFailure);
+  void view.webContents.loadURL(input.url).then(
+    () => input.onLoadSuccess(),
+    input.onLoadFailure,
+  );
   return { view, origin, partition };
 }
 

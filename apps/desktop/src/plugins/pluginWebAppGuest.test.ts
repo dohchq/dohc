@@ -265,6 +265,7 @@ function createGuest(
       attached.push(record);
     },
     onLoadFailure: overrides.onLoadFailure ?? (() => undefined),
+    onLoadSuccess: () => undefined,
   });
   return { ...harness, attached, owned, guest };
 }

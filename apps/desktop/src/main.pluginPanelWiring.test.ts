@@ -206,6 +206,21 @@ describe("plugin panel main-process wiring", () => {
     expect(wireAt).toBeGreaterThan(pipelineAt);
   });
 
+  it("awaits surface cleanup when a watched plugin identity departs", () => {
+    const createPipeline = functionSource("function createPluginPipeline(");
+    const pipelineAt = createPipeline.indexOf("pipeline = new PluginPipeline({");
+    const hookAt = createPipeline.indexOf(
+      "onRuntimeStopped: (pluginId) =>",
+      pipelineAt,
+    );
+    const stopAt = createPipeline.indexOf("pluginSurfaces.stop({", hookAt);
+    expect(hookAt).toBeGreaterThan(pipelineAt);
+    expect(stopAt).toBeGreaterThan(hookAt);
+    expect(squeeze(createPipeline.slice(stopAt, stopAt + 180))).toContain(
+      'kind:"plugin",workspaceId:workspace.workspaceId,pluginId,',
+    );
+  });
+
   it("uses the exact pipeline host and ownership lease for surface admission", () => {
     const adapter = functionSource("function createPluginSurfaceHostLease(");
     const captureAt = adapter.indexOf("const host = pipeline.host;");
@@ -368,24 +383,9 @@ describe("plugin panel main-process wiring", () => {
       "suspend({ workspaceId, pluginId })",
       suspendHookAt,
     );
-    const stoppedHookAt = disable.indexOf(
-      "onRuntimeStopped: (stoppedPluginId) =>",
-      suspendAt,
-    );
-    const disableCleanupAt = disable.indexOf(
-      "pluginSurfaces.stop({",
-      stoppedHookAt,
-    );
-    const cleanupKindAt = disable.indexOf('kind: "plugin",', disableCleanupAt);
-    const cleanupWorkspaceAt = disable.indexOf("workspaceId,", cleanupKindAt);
-    const cleanupPluginAt = disable.indexOf(
-      "pluginId: stoppedPluginId,",
-      cleanupWorkspaceAt,
-    );
-    const cleanupEndAt = disable.indexOf("}),", cleanupPluginAt);
     const resultReturnAt = disable.indexOf(
       "return result;",
-      cleanupEndAt,
+      suspendAt,
     );
 
     expect(ownerAt).toBeGreaterThan(-1);
@@ -393,14 +393,9 @@ describe("plugin panel main-process wiring", () => {
     expect(disableCallAt).toBeGreaterThan(callbackAt);
     expect(suspendHookAt).toBeGreaterThan(disableCallAt);
     expect(suspendAt).toBeGreaterThan(suspendHookAt);
-    expect(stoppedHookAt).toBeGreaterThan(suspendAt);
-    expect(disableCleanupAt).toBeGreaterThan(stoppedHookAt);
-    expect(cleanupKindAt).toBeGreaterThan(disableCleanupAt);
-    expect(cleanupWorkspaceAt).toBeGreaterThan(cleanupKindAt);
-    expect(cleanupPluginAt).toBeGreaterThan(cleanupWorkspaceAt);
-    expect(cleanupEndAt).toBeGreaterThan(cleanupPluginAt);
-    expect(resultReturnAt).toBeGreaterThan(cleanupEndAt);
-    expect(disable).not.toContain("void pluginSurfaces.stop");
+    expect(resultReturnAt).toBeGreaterThan(suspendAt);
+    expect(disable).not.toContain("onRuntimeStopped");
+    expect(disable).not.toContain("pluginSurfaces.stop");
   });
 
   it("tracks every uninstall suspension for failed-action restore before successful teardown", () => {
@@ -424,19 +419,9 @@ describe("plugin panel main-process wiring", () => {
     );
     const suspendPluginAt = uninstall.indexOf("pluginId,", suspendWorkspaceAt);
     const suspendEndAt = uninstall.indexOf("});", suspendPluginAt);
-    const stoppedHookAt = uninstall.indexOf(
-      "onRuntimeStopped: (pluginId) =>",
-      suspendEndAt,
-    );
-    const stoppedCleanupAt = uninstall.indexOf(
-      "pluginSurfaces.stop({",
-      stoppedHookAt,
-    );
-    const stoppedPluginAt = uninstall.indexOf("pluginId,", stoppedCleanupAt);
-    const stoppedEndAt = uninstall.indexOf("}),", stoppedPluginAt);
     const removedAt = uninstall.indexOf(
       "const removedLastClaimant =",
-      stoppedEndAt,
+      suspendEndAt,
     );
     const uninstallCleanupAt = uninstall.indexOf(
       "pluginSurfaces.stop({",
@@ -450,12 +435,11 @@ describe("plugin panel main-process wiring", () => {
     expect(suspendWorkspaceAt).toBeGreaterThan(suspendAt);
     expect(suspendPluginAt).toBeGreaterThan(suspendWorkspaceAt);
     expect(suspendEndAt).toBeGreaterThan(suspendPluginAt);
-    expect(stoppedHookAt).toBeGreaterThan(suspendEndAt);
-    expect(stoppedCleanupAt).toBeGreaterThan(stoppedHookAt);
-    expect(stoppedPluginAt).toBeGreaterThan(stoppedCleanupAt);
-    expect(stoppedEndAt).toBeGreaterThan(stoppedPluginAt);
-    expect(removedAt).toBeGreaterThan(stoppedEndAt);
+    expect(removedAt).toBeGreaterThan(suspendEndAt);
     expect(uninstallCleanupAt).toBeGreaterThan(removedAt);
+    expect(uninstall.slice(uninstallCallAt, removedAt)).not.toContain(
+      "onRuntimeStopped",
+    );
     expect(uninstall).not.toContain("void pluginSurfaces.stop");
   });
 

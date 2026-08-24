@@ -216,11 +216,6 @@ export type PluginPipelineUninstallPreflightResult =
 export interface PluginPipelineRuntimeStopHooks {
   /** Revokes authority immediately before this pipeline stops a proven runtime. */
   onWillStopRuntime?: (pluginId: string) => void;
-  /**
-   * Awaits external cleanup after this pipeline proves the host stopped.
-   * A rejection is logged and does not undo the completed stop.
-   */
-  onRuntimeStopped?: (pluginId: string) => void | Promise<void>;
 }
 
 interface PluginPipelineOperations {
@@ -247,6 +242,9 @@ export interface PluginPipelineOptions {
   /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
   pnpmRunnerEntry: string;
   onStatusChange?: (event: PluginPipelineStatusEvent) => void;
+  /** Awaits external cleanup after a terminal runtime stop. A rejection is
+   * logged and does not undo the completed stop. */
+  onRuntimeStopped?: (pluginId: string) => void | Promise<void>;
   /** Whether this workspace's engine capture is running right now — used
    * only to keep uninstall preflight's recovery promises honest (a file
    * under the capture size cap is not actually recoverable if capture
@@ -1103,10 +1101,11 @@ export class PluginPipeline {
           },
         );
         try {
-          await this.stopOldRuntime(pluginId, change, {
-            onWillStop: () => hooks.onWillStopRuntime?.(pluginId),
-            onRuntimeStopped: () => hooks.onRuntimeStopped?.(pluginId),
-          });
+          await this.stopTerminalRuntime(
+            pluginId,
+            change,
+            () => hooks.onWillStopRuntime?.(pluginId),
+          );
         } catch (stopError) {
           if (
             !this.disposed &&
@@ -2382,7 +2381,7 @@ export class PluginPipeline {
     renamedToDirectoryName?: string,
   ): Promise<void> {
     try {
-      await this.stopOldRuntime(candidate.id, change);
+      await this.stopTerminalRuntime(candidate.id, change);
       await this.operations.mutateRecord(
         this.options.stateDir,
         this.workspaceRoot,
@@ -2483,6 +2482,17 @@ export class PluginPipeline {
       // Best-effort: a notification failure must never corrupt build state.
       console.error(`[PluginPipeline] old-runtime-stopped notification failed for "${pluginId}".`, error);
     }
+  }
+
+  private stopTerminalRuntime(
+    pluginId: string,
+    change: PluginHostChangeAuthority,
+    onWillStop?: () => void,
+  ): Promise<void> {
+    return this.stopOldRuntime(pluginId, change, {
+      onWillStop,
+      onRuntimeStopped: () => this.options.onRuntimeStopped?.(pluginId),
+    });
   }
 
   private startHost(
@@ -3600,10 +3610,11 @@ export class PluginPipeline {
       if (!outcome.ok) throw outcome.error;
     });
     if (cleanupIds.has(primaryPluginId)) {
-      stops.push(this.stopOldRuntime(primaryPluginId, primaryChange, {
-        onWillStop: () => hooks.onWillStopRuntime?.(primaryPluginId),
-        onRuntimeStopped: () => hooks.onRuntimeStopped?.(primaryPluginId),
-      }));
+      stops.push(this.stopTerminalRuntime(
+        primaryPluginId,
+        primaryChange,
+        () => hooks.onWillStopRuntime?.(primaryPluginId),
+      ));
     }
     const outcomes = await Promise.allSettled(stops);
     const failure = outcomes.find(
@@ -3660,10 +3671,11 @@ export class PluginPipeline {
         let stopFailure: unknown;
         try {
           await reservation.run(async (change) => {
-            await this.stopOldRuntime(pluginId, change, {
-              onWillStop: () => hooks.onWillStopRuntime?.(pluginId),
-              onRuntimeStopped: () => hooks.onRuntimeStopped?.(pluginId),
-            });
+            await this.stopTerminalRuntime(
+              pluginId,
+              change,
+              () => hooks.onWillStopRuntime?.(pluginId),
+            );
             return change.preserve(existingHostResult(undefined));
           });
           settleStop({ ok: true });

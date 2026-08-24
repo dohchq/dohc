@@ -376,10 +376,14 @@ function webAppIsLive(
 }
 
 describe("PluginSurfaces web app attempt ownership", () => {
-  it("ignores a rejected load from an attempt closed before the same identity reopened", async () => {
+  it("unpairs a stopped pending navigation without touching its successor", async () => {
     FakeView.created = [];
     const notifications: string[] = [];
-    const unpairs: string[] = [];
+    const unpairs: Array<{
+      attempt: string;
+      expectedSpawnId: string;
+      liveSpawnId: string;
+    }> = [];
     let currentSpawn = "spawn-1";
     const surfaces = new PluginSurfaces<FakeView>({
       ViewClass: FakeView,
@@ -415,8 +419,8 @@ describe("PluginSurfaces web app attempt ownership", () => {
           url: `http://127.0.0.1:4000/pair#${attempt}`,
           title: attempt,
         }),
-        unpair: async () => {
-          unpairs.push(attempt);
+        unpair: async (expectedSpawnId: string) => {
+          unpairs.push({ attempt, expectedSpawnId, liveSpawnId: currentSpawn });
         },
         release: () => ownedLease.release(),
       }),
@@ -424,7 +428,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
 
     await surfaces.startWebApp(target, admission(firstLease, "a"));
     const firstView = FakeView.created[0]!;
-    await surfaces.stop({
+    const stopping = surfaces.stop({
       kind: "web-app",
       workspaceId: target.workspaceId,
       pluginId: target.pluginId,
@@ -432,14 +436,19 @@ describe("PluginSurfaces web app attempt ownership", () => {
       instanceKey: target.instanceKey,
       owner: { senderId: 7, generation: 1 },
     });
+    firstView.load.reject(new Error("closed during navigation"));
+    await stopping;
     currentSpawn = "spawn-2";
     await surfaces.startWebApp(target, admission(secondLease, "b"));
 
-    firstView.load.reject(new Error("late load failure"));
     await turns();
 
     expect(notifications).toEqual([]);
-    expect(unpairs).toEqual([]);
+    expect(unpairs).toEqual([{
+      attempt: "a",
+      expectedSpawnId: "spawn-1",
+      liveSpawnId: "spawn-1",
+    }]);
     expect(firstLease.releases).toBe(1);
     expect(secondLease.releases).toBe(0);
     expect(
@@ -458,6 +467,169 @@ describe("PluginSurfaces web app attempt ownership", () => {
     expect(FakeView.created[1]!.bounds).toEqual([
       { x: 1, y: 2, width: 3, height: 4 },
     ]);
+  });
+
+  it("retires a pending predecessor before requesting its successor URL", async () => {
+    FakeView.created = [];
+    const steps: string[] = [];
+    const predecessorUnpaired = deferred<void>();
+    const predecessorUnpairEntered = deferred<void>();
+    const surfaces = createSurfaces();
+    const request = webRequest();
+    const firstLease = lease({ steps, label: "a" });
+    await surfaces.startWebApp(
+      request,
+      webAdmission({
+        ownedLease: firstLease,
+        attempt: "a",
+        steps,
+        unpair: async () => {
+          steps.push("unpair:a");
+          predecessorUnpairEntered.resolve();
+          await predecessorUnpaired.promise;
+        },
+      }),
+    );
+
+    const successor = surfaces.startWebApp(
+      request,
+      webAdmission({
+        ownedLease: lease({ steps, label: "b" }),
+        attempt: "b",
+        steps,
+        onWebAppStart: () => steps.push("credential:b"),
+      }),
+    );
+    await predecessorUnpairEntered.promise;
+
+    expect(steps).toContain("unpair:a");
+    expect(steps).not.toContain("credential:b");
+    predecessorUnpaired.resolve();
+    await successor;
+    expect(steps.indexOf("credential:b")).toBeGreaterThan(
+      steps.indexOf("unpair:a"),
+    );
+    expect(firstLease.releases).toBe(1);
+  });
+
+  it("does not unpair a navigation that fulfilled before its stop", async () => {
+    FakeView.created = [];
+    const unpair = vi.fn(async () => undefined);
+    const ownedLease = lease();
+    const surfaces = createSurfaces();
+    const request = webRequest();
+    await surfaces.startWebApp(
+      request,
+      webAdmission({ ownedLease, unpair }),
+    );
+    FakeView.created[0]!.load.resolve();
+    await turns();
+
+    await surfaces.stop({
+      kind: "web-app",
+      workspaceId: request.workspaceId,
+      pluginId: request.pluginId,
+      webAppId: request.webAppId,
+      instanceKey: request.instanceKey,
+    });
+
+    expect(unpair).not.toHaveBeenCalled();
+    expect(ownedLease.releases).toBe(1);
+  });
+
+  it("still removes a stopped pending navigation when exact unpair fails", async () => {
+    FakeView.created = [];
+    const failure = new Error("unpair failed");
+    const errors: unknown[] = [];
+    const ownedLease = lease();
+    const surfaces = createSurfaces({ errors });
+    const request = webRequest();
+    const unpair = vi.fn(async () => {
+      throw failure;
+    });
+    await surfaces.startWebApp(
+      request,
+      webAdmission({ ownedLease, unpair }),
+    );
+
+    await surfaces.stop({
+      kind: "web-app",
+      workspaceId: request.workspaceId,
+      pluginId: request.pluginId,
+      webAppId: request.webAppId,
+      instanceKey: request.instanceKey,
+    });
+
+    expect(unpair).toHaveBeenCalledOnce();
+    expect(errors).toEqual([failure]);
+    expect(ownedLease.releases).toBe(1);
+    expect(FakeView.created[0]!.closed).toBe(1);
+    expect(webAppIsLive(surfaces, request)).toBe(false);
+  });
+
+  it("retires a pending predecessor and refuses its successor when unpair fails", async () => {
+    FakeView.created = [];
+    const failure = new Error("unpair failed");
+    const errors: unknown[] = [];
+    const firstLease = lease();
+    const secondLease = lease();
+    const surfaces = createSurfaces({ errors });
+    const request = webRequest();
+    const unpair = vi.fn(async () => {
+      throw failure;
+    });
+    await surfaces.startWebApp(
+      request,
+      webAdmission({ ownedLease: firstLease, unpair }),
+    );
+
+    await expect(
+      surfaces.startWebApp(
+        request,
+        webAdmission({ ownedLease: secondLease, attempt: "successor" }),
+      ),
+    ).rejects.toBe(failure);
+
+    expect(unpair).toHaveBeenCalledOnce();
+    expect(errors).toEqual([failure]);
+    expect(firstLease.releases).toBe(1);
+    expect(secondLease.releases).toBe(1);
+    expect(FakeView.created).toHaveLength(1);
+    expect(FakeView.created[0]!.closed).toBe(1);
+    expect(webAppIsLive(surfaces, request)).toBe(false);
+  });
+
+  it("does not unpair a successor spawn when stop observes a host change", async () => {
+    FakeView.created = [];
+    let spawnId = "spawn-a";
+    const unpair = vi.fn(async () => undefined);
+    const firstLease = lease();
+    const secondLease = lease();
+    const surfaces = createSurfaces();
+    const request = webRequest();
+    await surfaces.startWebApp(
+      request,
+      webAdmission({ ownedLease: firstLease, spawn: () => spawnId, unpair }),
+    );
+
+    const stopping = surfaces.stop({
+      kind: "web-app",
+      workspaceId: request.workspaceId,
+      pluginId: request.pluginId,
+      webAppId: request.webAppId,
+      instanceKey: request.instanceKey,
+    });
+    spawnId = "spawn-b";
+    await stopping;
+    await surfaces.startWebApp(
+      request,
+      webAdmission({ ownedLease: secondLease, spawn: () => spawnId }),
+    );
+
+    expect(unpair).not.toHaveBeenCalled();
+    expect(firstLease.releases).toBe(1);
+    expect(secondLease.releases).toBe(0);
+    expect(webAppIsLive(surfaces, request)).toBe(true);
   });
 
   it("settles a consumed start failure, then recovers outside its own lane", async () => {
@@ -706,14 +878,17 @@ describe("PluginSurfaces web app attempt ownership", () => {
       request,
       webAdmission({ ownedLease: firstLease, attempt: "a" }),
     );
+    FakeView.created[0]!.load.resolve();
+    await turns();
 
     let replacementSettled = false;
     const replacementCreated = deferred<void>();
+    const unpair = vi.fn(async () => undefined);
     FakeView.onNextCreate = () => replacementCreated.resolve();
     const replacement = surfaces
       .startWebApp(
         request,
-        webAdmission({ ownedLease: secondLease, attempt: "b" }),
+        webAdmission({ ownedLease: secondLease, attempt: "b", unpair }),
       )
       .then(() => {
         replacementSettled = true;
@@ -739,6 +914,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
 
     releaseDisplaced.resolve();
     await Promise.all([replacementRejected, stopped]);
+    expect(unpair).toHaveBeenCalledOnce();
     expect(FakeView.created[1]!.closed).toBe(1);
     expect(secondLease.releases).toBe(1);
     expect(
@@ -768,6 +944,8 @@ describe("PluginSurfaces web app attempt ownership", () => {
       request,
       webAdmission({ ownedLease: firstLease, attempt: "first" }),
     );
+    FakeView.created[0]!.load.resolve();
+    await turns();
     const replacement = surfaces.startWebApp(
       request,
       webAdmission({ ownedLease: secondLease, attempt: "replacement" }),
@@ -818,6 +996,8 @@ describe("PluginSurfaces web app attempt ownership", () => {
       request,
       webAdmission({ ownedLease: firstLease, attempt: "first" }),
     );
+    FakeView.created[0]!.load.resolve();
+    await turns();
     const replacement = surfaces.startWebApp(
       request,
       webAdmission({
@@ -1333,6 +1513,8 @@ describe("PluginSurfaces web app attempt ownership", () => {
       firstWebRequest,
       webAdmission({ ownedLease: firstWebAppLease, attempt: "first" }),
     );
+    FakeView.created[0]!.load.resolve();
+    await turns();
 
     const previewGate = deferred<void>();
     const previewEntered = deferred<void>();
