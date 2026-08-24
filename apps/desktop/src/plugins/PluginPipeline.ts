@@ -2872,7 +2872,7 @@ export class PluginPipeline {
         ? (await verifyPluginIcon(candidate.rootPath, manifest.icon)).icon
         : null;
       this.discovery = this.discovery.map((entry) =>
-        entry.id === candidate.id
+        candidateKey(entry) === candidateKey(candidate)
           ? { ...entry, manifest, iconPath: builtIcon }
           : entry
       );

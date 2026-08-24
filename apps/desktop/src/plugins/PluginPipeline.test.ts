@@ -3217,6 +3217,62 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   });
 
+  it("keeps a built registration on its exact root when an invalid fallback id collides", async () => {
+    const fixture = await createNamedPluginWorkspace("zzz", "aaa");
+    const invalidRoot = join(fixture.workspaceRoot, "plugins", "aaa");
+    await mkdir(invalidRoot, { recursive: true });
+    await writeFile(
+      join(invalidRoot, "dohc-plugin.json"),
+      "{ this is not valid JSON\n",
+    );
+
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership: new PluginHostOwnership(host),
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      expect(pipeline.pluginRegistration("aaa")).toMatchObject({
+        pluginRoot: fixture.pluginRoot,
+        directoryName: "zzz",
+        manifest: { name: "aaa" },
+      });
+
+      const installed = await pipeline.install("aaa");
+      if (!installed.ok) {
+        throw new Error(
+          `${installed.error.stage}/${installed.error.code}: ${installed.error.message}`,
+        );
+      }
+
+      expect(pipeline.pluginRegistration("aaa")).toMatchObject({
+        pluginRoot: fixture.pluginRoot,
+        directoryName: "zzz",
+        manifest: { name: "aaa" },
+      });
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   // Round 19 finding 3: dohc's own build and state storage (liveRoot,
   // pluginStateRoot) is keyed by pluginId, not directoryName — an id an
   // invalid, never-installed collision loser shares with a genuinely
