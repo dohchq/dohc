@@ -303,7 +303,7 @@ describe("plugin web app main-process wiring", () => {
       disableAt,
     );
     const disableCallAt = mainSource.indexOf(
-      "const result = pipeline.disable(pluginId);",
+      "pipeline.disable(pluginId),",
       disableAt,
     );
     expect(disableCallAt).toBeGreaterThan(disableAt);
