@@ -154,8 +154,8 @@ describe("hardenGuestWebContents", () => {
   });
 });
 
-// The guest main.ts builds, built the way main.ts builds it. Everything the
-// handler used to decide inline is decided in createPluginWebAppGuest, so the
+// The guest lifecycle owner builds. Everything it once had to decide inline is
+// decided in createPluginWebAppGuest, so the
 // mutations that used to survive (a preload on the guest, an origin lock on
 // an origin the guest never uses, session hardening that never runs, a
 // credential-bearing "origin" handed back) are all visible from here.
@@ -249,19 +249,24 @@ function createGuest(
 ) {
   const harness = guestHarness();
   const attached: Array<{ origin: string; partition: string }> = [];
+  const owned: FakeGuestView[] = [];
   const guest = createPluginWebAppGuest({
     workspaceRoot: WORKSPACE_ROOT,
     pluginId: PLUGIN_ID,
     url: overrides.url ?? START_URL,
     hardenedPartitions: overrides.hardenedPartitions ?? new Set<string>(),
     ViewClass: harness.FakeView,
+    onViewCreated: (view) => {
+      harness.steps.push("own");
+      owned.push(view);
+    },
     attach: (_view, record) => {
       harness.steps.push("attach");
       attached.push(record);
     },
     onLoadFailure: overrides.onLoadFailure ?? (() => undefined),
   });
-  return { ...harness, attached, guest };
+  return { ...harness, attached, owned, guest };
 }
 
 describe("createPluginWebAppGuest", () => {
@@ -317,9 +322,11 @@ describe("createPluginWebAppGuest", () => {
   });
 
   it("starts invisible and attaches before it navigates", () => {
-    const { created, steps } = createGuest();
+    const { created, owned, steps } = createGuest();
+    expect(owned).toEqual([created[0]!.view]);
     expect(created[0]!.view.visibility).toEqual([false]);
     expect(steps).toEqual([
+      "own",
       "harden-session",
       "harden-contents",
       "harden-contents",

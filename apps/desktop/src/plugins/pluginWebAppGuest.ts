@@ -3,8 +3,8 @@
 // never a renderer webview tag, never a plain iframe — with a
 // per-workspace-per-plugin storage partition. The guest grants NO workspace
 // authority: no preload, no Node, no IPC; it renders one loopback origin and
-// nothing else. This module holds the decisions; main.ts owns the Electron
-// objects and calls these against them.
+// nothing else. This module holds the security decisions; its lifecycle owner
+// supplies the Electron-shaped objects and retains them before setup begins.
 
 import { createHash } from "node:crypto";
 import { workspaceStateKey } from "./pluginLocalState";
@@ -163,8 +163,8 @@ export interface PluginWebAppGuest<V extends GuestViewLike> {
  * preload in them, the origin lock, the once-per-partition session hardening,
  * and the navigation that carries the credential.
  *
- * main.ts owns the Electron objects and passes them in; every decision above
- * lives here, where a test can watch it.
+ * The caller owns the Electron lifecycle and passes its effects in; every
+ * security decision above lives here, where a test can watch it.
  */
 export function createPluginWebAppGuest<V extends GuestViewLike>(input: {
   workspaceRoot: string;
@@ -175,6 +175,9 @@ export function createPluginWebAppGuest<V extends GuestViewLike>(input: {
   /** Partitions whose session is already hardened, app-wide. */
   hardenedPartitions: Set<string>;
   ViewClass: new (options: { webPreferences: GuestWebPreferences }) => V;
+  /** Takes lifecycle ownership immediately after construction, before any
+   * setup step can throw and strand the view. */
+  onViewCreated: (view: V) => void;
   attach: (view: V, guest: { origin: string; partition: string }) => void;
   /** Runs when the navigation never lands. The credential is spent by then
    * and no session cookie replaced it, so the caller stops the web app and
@@ -186,6 +189,7 @@ export function createPluginWebAppGuest<V extends GuestViewLike>(input: {
   const view = new input.ViewClass({
     webPreferences: guestWebPreferences(partition),
   });
+  input.onViewCreated(view);
   // Sessions are app-global per partition; hardening one twice is harmless
   // but hardening none is not, so the set records what has been done.
   if (!input.hardenedPartitions.has(partition)) {
