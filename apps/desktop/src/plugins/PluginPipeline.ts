@@ -1491,6 +1491,16 @@ export class PluginPipeline {
     pluginId: string,
     directoryName: string,
   ): Promise<PluginPipelineUninstallPreflightResult> {
+    if (this.disposed) {
+      return Promise.resolve({
+        ok: false,
+        error: pipelineError(
+          "uninstall",
+          "pipeline-closed",
+          "Plugin pipeline is closed.",
+        ),
+      });
+    }
     return this.enqueueActionValue(pluginId, async () => {
       try {
         const target = await this.resolveUninstallTarget(pluginId, directoryName);

@@ -9227,6 +9227,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           error: { code: "pipeline-closed" },
         });
         await expect(
+          setup.pipeline.uninstallPreflight("example-plugin", "example-plugin"),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
+        await expect(
           setup.pipeline.uninstall("example-plugin", "example-plugin", "expired"),
         ).resolves.toMatchObject({
           ok: false,

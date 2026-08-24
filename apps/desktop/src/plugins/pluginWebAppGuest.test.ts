@@ -250,6 +250,7 @@ function createGuest(
   const harness = guestHarness();
   const attached: Array<{ origin: string; partition: string }> = [];
   const owned: FakeGuestView[] = [];
+  let loadSuccesses = 0;
   const guest = createPluginWebAppGuest({
     workspaceRoot: WORKSPACE_ROOT,
     pluginId: PLUGIN_ID,
@@ -265,9 +266,17 @@ function createGuest(
       attached.push(record);
     },
     onLoadFailure: overrides.onLoadFailure ?? (() => undefined),
-    onLoadSuccess: () => undefined,
+    onLoadSuccess: () => {
+      loadSuccesses += 1;
+    },
   });
-  return { ...harness, attached, owned, guest };
+  return {
+    ...harness,
+    attached,
+    owned,
+    guest,
+    loadSuccesses: () => loadSuccesses,
+  };
 }
 
 describe("createPluginWebAppGuest", () => {
@@ -346,24 +355,26 @@ describe("createPluginWebAppGuest", () => {
   // to show for it, so the failure must reach the caller that can stop it.
   it("reports a navigation that never lands", async () => {
     const failures: unknown[] = [];
-    const { created } = createGuest({
+    const { created, loadSuccesses } = createGuest({
       onLoadFailure: (error) => failures.push(error),
     });
     created[0]!.view.settleLoad("fail");
     await Promise.resolve();
     await Promise.resolve();
     expect(failures).toHaveLength(1);
+    expect(loadSuccesses()).toBe(0);
   });
 
   it("stays quiet when the navigation lands", async () => {
     const failures: unknown[] = [];
-    const { created } = createGuest({
+    const { created, loadSuccesses } = createGuest({
       onLoadFailure: (error) => failures.push(error),
     });
     created[0]!.view.settleLoad("ok");
     await Promise.resolve();
     await Promise.resolve();
     expect(failures).toEqual([]);
+    expect(loadSuccesses()).toBe(1);
   });
 });
 
