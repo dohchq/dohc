@@ -6,7 +6,7 @@ A share owns one immutable selector. It can hold many grants at the same time, i
 
 Share access has this order: View, Comment, Edit. Every grant starts at generation 1. Every transition that changes authority increments the generation in the same transaction.
 
-Every derived credential and open session carries a `GrantBinding` with `grantId`, `generation`, and `access`. The authoritative mutation transaction loads the current grant and compares the full binding. It also loads the parent link grant for a dependent user grant. A mismatch refuses the mutation. Closing an open connection can reduce delay, but it is not the authorization check.
+Every derived credential and open session carries a `GrantBinding` with `grantId`, `generation`, and `access`. The authoritative mutation transaction loads the current grant and compares the full binding. It also loads the parent link grant for a dependent user grant, the share's active status, and the granter's current standing. A mismatch on any of these refuses the mutation. Closing an open connection can reduce delay, but it is not the authorization check.
 
 ## Record invariants
 
@@ -31,7 +31,8 @@ Every derived credential and open session carries a `GrantBinding` with `grantId
 | Rotate | The link grant is active. | Keep access unchanged and increment the generation. Retire the current credential. Create a current credential with a new secret. Increment every active dependent user grant generation. | The old URL stops working. Old bindings for the link grant and its dependent grants fail their next commit-time check. |
 | Revoke | The grant is active. | Set status to revoked, set `revokedAt`, and increment the generation. If it is a link grant, retire its current credential. Revoke each active dependent user grant and increment each dependent generation. | No credential can derive new authority. Every old binding for the grant or an affected dependent grant fails its next commit-time check. Committed work remains in history. |
 | Convert | The holder has an active link grant and explicitly accepts after signing in. | Create an active user grant at generation 1. Set its access to the link grant's current access. Set `parentGrantId` to the link grant ID and `revokedAt` to null. | The link credential and existing link sessions do not change. New named sessions bind to the new user grant. Parent transitions continue to reach this grant. |
-| Promote | The owner selects an active user grant with `parentGrantId` set. | Keep the current access, clear `parentGrantId`, and increment the user grant generation. | Every old binding for the user grant fails its next commit-time check. Later changes to the former parent link grant do not affect it. |
+| Promote | The owner selects an active user grant with `parentGrantId` set, after a warning that promotion is permanent. | Keep the current access, clear `parentGrantId`, and increment the user grant generation. | Every old binding for the user grant fails its next commit-time check. Later changes to the former parent link grant do not affect it. The reverse path afterward is revoking this grant. |
+| Delete share | The share exists and the owner confirms after a warning. | Revoke every active grant (status, `revokedAt`, and a generation increment each) and retire every current link credential. The share ends. | Every binding fails its next commit-time check. Committed work stays in history. |
 
 ## Refused transitions
 
