@@ -8000,7 +8000,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
-    it("preserves workspace ownership when a command rebuilds a running host", async () => {
+    it("preserves workspace ownership when a surface rebuilds a running host", async () => {
       const setup = await setupEstablishedPlugin();
       try {
         await writeFile(
@@ -8015,6 +8015,47 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         expect(surface.result).toMatchObject({ ok: true });
         expect(surface.exact.kind).toBe("existing");
         await surface.release();
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("restores ready status when a command finds a running host without approval", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        await mutatePluginRecord(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+          "example-plugin",
+          (record) => {
+            if (!record) throw new Error("Expected an installed plugin record.");
+            const { approvedHash: _approvedHash, ...withoutApproval } = record;
+            return withoutApproval;
+          },
+        );
+        const statusBefore = setup.pipeline.list()[0];
+        const stateBefore = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!stateBefore.ok) throw new Error(stateBefore.warning);
+
+        const started = await ensureFromCommand(setup.pipeline, "example-plugin");
+
+        expect(started).toMatchObject({
+          exact: { kind: "existing" },
+          result: {
+            ok: false,
+            error: { code: HOST_CHANGE_REFUSED_ERROR_CODE },
+          },
+        });
+        expect(setup.pipeline.list()[0]).toEqual(statusBefore);
+        const stateAfter = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        expect(stateAfter).toEqual(stateBefore);
         expect(setup.pipeline.host.getStatus("example-plugin")).toBeDefined();
       } finally {
         await setup.pipeline.dispose();

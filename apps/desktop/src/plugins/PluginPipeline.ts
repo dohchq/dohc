@@ -1102,6 +1102,7 @@ export class PluginPipeline {
     change?: PluginHostChangeAuthority,
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const candidate = this.requireValidCandidate(pluginId);
+    const priorStatus = this.statuses.get(pluginId);
     const state = await this.localRecord(pluginId);
     if (state?.disabled === true) {
       return existingHostResult(this.failure(
@@ -1115,10 +1116,14 @@ export class PluginPipeline {
     }
     if (!state?.approvedHash) {
       if (this.host.currentRecord(pluginId) && !change) {
-        return existingHostResult(this.failure(
-          pluginId,
-          this.hostChangeInProgressError(pluginId),
-        ));
+        return this.restoreStatusAfterHostChangeRefusal(
+          candidate,
+          priorStatus,
+          existingHostResult(this.failure(
+            pluginId,
+            this.hostChangeInProgressError(pluginId),
+          )),
+        );
       }
       return this.runFullBuild({
         candidate,
