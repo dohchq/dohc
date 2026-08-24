@@ -3,7 +3,6 @@ import {
   isSharedWithMePath,
   normalizeAbsolutePath,
   preferredBuildOutput,
-  type WatcherEvent,
   validateUserReadPath,
   validateUserWritePath,
   validateWorkspaceRootChoice,
@@ -111,47 +110,16 @@ import {
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
-  InvokePluginCommandPayload,
-  InvokePluginCommandResult,
-  InvokePluginPanelSdkPayload,
-  InvokePluginPanelSdkResult,
-  ListOfferedPluginsPayload,
-  ListOfferedPluginsResult,
-  AddOfferedPluginPayload,
-  AddOfferedPluginResult,
   GetSitePreviewLogsPayload,
   GetSitePreviewLogsResult,
   StartSitePreviewPayload,
   StartSitePreviewResult,
   StopSitePreviewPayload,
-  ListPluginsPayload,
-  PluginSettingsResult,
-  GetPluginSettingsPayload,
-  SetPluginSettingsPayload,
-  ListPluginsResult,
-  PluginActionPayload,
-  PluginActionResult,
-  PluginSizesResult,
-  PluginSizesPayload,
-  PluginUninstallPreflightPayload,
-  PluginUninstallPreflightResult,
-  UninstallPluginPayload,
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
   DesktopMarksResult,
   LaunchMarksResult,
-  OpenPluginPanelPayload,
-  OpenPluginPanelResult,
   PluginPanelInvalidatedEvent,
-  StartPluginPanelPayload,
-  StartPluginPanelResult,
-  StopPluginPanelPayload,
-  OpenPluginWebAppPayload,
-  OpenPluginWebAppResult,
-  StartPluginWebAppPayload,
-  StartPluginWebAppResult,
-  SetPluginWebAppBoundsPayload,
-  StopPluginWebAppPayload,
   PluginWebAppFailedEvent,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
@@ -306,13 +274,13 @@ import {
   UpdateStateEvent,
 } from "./ipc/bridgeContract";
 import {
-  BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   CHANNELS,
   SEARCH_EVENT_MAX_ENTRIES,
   type EngineYDocSaveStateName,
 } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
+import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -683,11 +651,7 @@ import {
 } from "./workspaces/sitePreviewLifecycle";
 import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
-import { invokeRegisteredPluginCommand } from "./plugins/pluginCommandInvocation";
-import {
-  PluginHostOwnership,
-  type PluginHostCommandAuthority,
-} from "./plugins/pluginHostOwnership";
+import { PluginHostOwnership } from "./plugins/pluginHostOwnership";
 import {
   PluginPipeline,
   type PluginPipelineStatusEvent,
@@ -710,20 +674,10 @@ import {
 } from "./plugins/pluginAgentDrivers";
 import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
-import {
-  addOfferedPlugin,
-  listOfferedPlugins,
-  removeAddedOfferedPlugin,
-} from "./plugins/pluginOffers";
-import { readPluginManifestFile } from "./plugins/pluginManifest";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import {
   forgetRemovedPlugin,
-  forgetUninstalledPlugin,
-  loadPluginWebAppRegistration,
   forgetWorkspaceRegistrations,
-  loadPluginPanelRegistration,
-  rememberPluginRegistration,
   resolveRegisteredPlugin,
   type RegisteredPlugin,
 } from "./plugins/pluginPanelRegistration";
@@ -732,12 +686,9 @@ import {
   ensureWorkspacePipeline,
 } from "./plugins/pluginPipelineLifecycle";
 import {
-  assertInstanceBudget,
-  requireDeclaredWebApp,
-} from "./plugins/pluginWebAppInstances";
-import {
   PluginSurfaces,
   type PluginPanelHostLease,
+  type PluginPanelSdkAuthorization,
   type PluginSurfaceHostLease,
   type PluginWebAppContainer,
   type PluginWebAppHostLease,
@@ -979,26 +930,6 @@ function builtinPluginsRoot(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "builtin-plugins")
     : join(desktopPackageRootInDev(), "plugins");
-}
-
-/**
- * The packaged built-in's own manifest name — displayName if it declared
- * one, its manifest name otherwise — read fresh, never a workspace copy's,
- * which can be hand-edited or too broken to read. Null means ONLY "this
- * directoryName is not a built-in dohc ships", never "a built-in with
- * nothing to call itself": every readable built-in manifest has a name,
- * even without a displayName. Still null if the packaged manifest itself
- * cannot be read (a broken dohc install the uninstall dialog's wording is
- * not the place to surface).
- */
-async function packagedBuiltinDisplayName(directoryName: string): Promise<string | null> {
-  if (
-    !(BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES as readonly string[]).includes(directoryName)
-  ) {
-    return null;
-  }
-  const manifest = await readPluginManifestFile(join(builtinPluginsRoot(), directoryName));
-  return manifest.ok ? manifest.manifest.displayName ?? manifest.manifest.name : null;
 }
 
 function notifyPluginStatusChanged(
@@ -3266,13 +3197,6 @@ const lastEngineStoreRebuildResult = new Map<
   RebuildEngineStoreResult
 >();
 
-function requireCurrentRenderer(isCurrent: () => boolean): void {
-  if (isCurrent()) return;
-  throw new Error(
-    "The plugin panel request does not target the active workspace. Open the workspace and try again.",
-  );
-}
-
 function createPluginSurfaceHostLease(
   pipeline: PluginPipeline,
   pluginId: string,
@@ -3499,6 +3423,51 @@ async function invokeWorkspacePluginSdk(input: {
   );
 }
 
+async function routePluginPanelSdk(input: {
+  authorization: PluginPanelSdkAuthorization;
+  method: string;
+  params?: unknown;
+}): Promise<unknown> {
+  const { authority, surfaceId, isPushLive } = input.authorization;
+  const workspaceEvents = pluginWorkspaceEventsByWorkspace.get(
+    authority.workspaceId,
+  );
+  const owner = {
+    kind: "panel" as const,
+    workspaceId: authority.workspaceId,
+    pluginId: authority.pluginId,
+    panelId: authority.panelId,
+    surfaceId,
+  };
+  const emitEvent = workspaceEvents
+    ? createPluginPanelFileWatchEmitter({
+        workspaceId: authority.workspaceId,
+        pluginId: authority.pluginId,
+        panelId: authority.panelId,
+        isPanelRunning: isPushLive,
+        send: notifyPluginPanelSdkEvent,
+      })
+    : undefined;
+  return invokeWorkspacePluginSdk({
+    workspaceId: authority.workspaceId,
+    pluginId: authority.pluginId,
+    spawnId: authority.spawnId,
+    requestPath: "panel",
+    isWritable: () => !sharedViewOf(authority.workspaceId),
+    signal: authority.signal,
+    subscribeFileWatch:
+      workspaceEvents && emitEvent
+        ? (watchParams) =>
+            workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
+        : undefined,
+    unsubscribeFileWatch: workspaceEvents
+      ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
+      : undefined,
+    method: input.method,
+    params: input.params,
+  });
+}
+
 // A plugin this workspace can serve panels for. The pipeline's current
 // discovery owns the manifest. The registration map is only a fallback for a
 // plugin the pipeline does not currently expose. Approval is unaffected:
@@ -3515,23 +3484,6 @@ function registeredPlugin(
   );
 }
 
-// Never re-derived from a path — an in-workspace symlink can resolve
-// pluginRoot to a final segment that differs from the pipeline's own
-// discovered directoryName, silently breaking the trace-to-directory rule
-// every consumer of a registration relies on. The pipeline's own discovery
-// is the one source of truth; nothing here is worth guessing when it
-// disagrees, so a pluginId it does not currently discover rejects outright.
-function requireDiscoveredDirectoryName(
-  pipeline: PluginPipeline,
-  pluginId: string,
-): string {
-  const directoryName = pipeline.pluginRegistration(pluginId)?.directoryName;
-  if (directoryName === undefined) {
-    throw new Error(`Plugin "${pluginId}" is not currently discovered in this workspace.`);
-  }
-  return directoryName;
-}
-
 // Panels serve from the approved, hash-verified snapshot — never from
 // plugin.pluginRoot (live, unverified workspace-folder source) — matching
 // ensurePluginStarted's own hash-verify-before-execute gate: a panel is
@@ -3544,6 +3496,21 @@ function pluginSnapshotRoot(workspace: CreatedWorkspace, pluginId: string): stri
     pluginIdToSafePath(pluginId),
     "snapshot",
   );
+}
+
+async function startPluginPanelPreview(input: {
+  workspace: CreatedWorkspace;
+  pluginId: string;
+  panel: { entry: string };
+}) {
+  const snapshotRoot = pluginSnapshotRoot(input.workspace, input.pluginId);
+  const entryPath = join(snapshotRoot, input.panel.entry);
+  const handle = await startStaticDirectoryPreview(dirname(entryPath), {
+    containmentRoot: snapshotRoot,
+    entry: basename(entryPath),
+    entryLabel: "plugin panel entry",
+  });
+  return { url: handle.url, stop: () => handle.stop() };
 }
 
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
@@ -7359,725 +7326,36 @@ function registerIpcHandlers(
     });
   });
 
-  ipcMain.handle(CHANNELS.openPluginPanel, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OpenPluginPanelPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const isCurrent = () =>
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation &&
-      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    requireCurrentRenderer(isCurrent);
-    assertWritableWorkspace(workspace);
-    const registration = await loadPluginPanelRegistration({
-      workspaceRoot: workspace.rootPath,
-      pluginRoot: input.pluginRoot,
-      pluginId: input.pluginId,
-      panelId: input.panelId,
-      pluginRegistration: pluginPipelines.get(workspace.workspaceId),
-    });
-    requireCurrentRenderer(isCurrent);
-    assertWritableWorkspace(workspace);
-    const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-    requireCurrentRenderer(isCurrent);
-    rememberPluginRegistration(
-      pluginRegistrations,
-      workspace.workspaceId,
-      {
-        ...registration,
-        directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
+  registerPluginIpcHandlers<
+    WebContents,
+    IpcMainInvokeEvent,
+    CreatedWorkspace,
+    WebContentsView
+  >({
+    registrar: {
+      handle: (channel, handler) => {
+        ipcMain.handle(channel, handler);
       },
-    );
-    return OpenPluginPanelResult.parse({
-      pluginId: input.pluginId,
-      panelId: input.panelId,
-    });
-  });
-
-  ipcMain.handle(CHANNELS.startPluginPanel, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StartPluginPanelPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const isCurrent = () =>
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation &&
-      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    requireCurrentRenderer(isCurrent);
-    assertWritableWorkspace(workspace);
-    const currentPipeline = pluginPipelines.get(workspace.workspaceId);
-    if (
-      !currentPipeline?.host.currentRecord(input.pluginId) &&
-      !registeredPlugin(workspace.workspaceId, input.pluginId)
-    ) {
-      return StartPluginPanelResult.parse({ status: "not-registered" });
-    }
-    const started = await pluginSurfaces.startPanel(
-      {
-        workspaceId: workspace.workspaceId,
-        pluginId: input.pluginId,
-        panelId: input.panelId,
-        placement: input.placement,
-        senderId: sender.id,
-        generation,
-      },
-      {
-        assertAllowed: () => {
-          requireCurrentRenderer(isCurrent);
-          assertWritableWorkspace(workspace);
-        },
-        acquireHostLease: async () => {
-          const pipeline = await ensurePluginPipeline(workspace);
-          requireCurrentRenderer(isCurrent);
-          assertWritableWorkspace(workspace);
-          return createPluginPanelSurfaceHostLease(pipeline, input.pluginId);
-        },
-        startPreview: async (panel) => {
-          const snapshotRoot = pluginSnapshotRoot(workspace, input.pluginId);
-          const entryPath = join(snapshotRoot, panel.entry);
-          const handle = await startStaticDirectoryPreview(dirname(entryPath), {
-            containmentRoot: snapshotRoot,
-            entry: basename(entryPath),
-            entryLabel: "plugin panel entry",
-          });
-          return { url: handle.url, stop: () => handle.stop() };
-        },
-      },
-    );
-    return StartPluginPanelResult.parse({
-      status: "ok",
-      url: started.url,
-      title: started.title,
-      surfaceId: started.surfaceId,
-    });
-  });
-
-  ipcMain.handle(CHANNELS.invokePluginCommand, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = InvokePluginCommandPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const isCurrent = () =>
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation &&
-      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    if (!isCurrent()) {
-      throw new Error(
-        "The plugin command request does not target the active workspace. Open the workspace and try again.",
-      );
-    }
-    const pipeline = await ensurePluginPipeline(workspace);
-    assertWritableWorkspace(workspace);
-    const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
-    if (!plugin) {
-      return InvokePluginCommandResult.parse({
-        status: "plugin-not-found",
-        message: `This workspace has no plugin "${input.pluginId}".`,
-      });
-    }
-    const assertCurrent = () => {
-      if (!isCurrent()) {
-        throw new Error(
-          "The plugin command request was cancelled because the renderer changed.",
-        );
-      }
-    };
-    return InvokePluginCommandResult.parse(
-      await invokeRegisteredPluginCommand({
-        input,
-        plugin,
-        runCommand: (operation) =>
-          pipeline.hostOwnership.runCommand(input.pluginId, operation),
-        ensureStarted: async (command: PluginHostCommandAuthority) => {
-          assertCurrent();
-          assertWritableWorkspace(workspace);
-          return ensurePluginStarted(
-            pipeline.host,
-            input.pluginId,
-            () =>
-              command.start(() =>
-                pipeline.ensureStarted(input.pluginId, command)
-              ),
-          );
-        },
-        ensureCurrent: assertCurrent,
-      }),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.stopPluginPanel, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StopPluginPanelPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
-      throw new Error(
-        "The plugin panel stop request does not target the active workspace.",
-      );
-    }
-    await pluginSurfaces.stop({
-      kind: "panel",
-      workspaceId: workspace.workspaceId,
-      pluginId: input.pluginId,
-      panelId: input.panelId,
-      owner: {
-        senderId: event.sender.id,
-        generation: rendererGeneration(event.sender.id),
-      },
-    });
-  });
-
-  ipcMain.handle(CHANNELS.invokePluginPanelSdk, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = InvokePluginPanelSdkPayload.parse(payload);
-    const sender = event.sender;
-    const workspaceEvents = pluginWorkspaceEventsByWorkspace.get(input.workspaceId);
-    const { authority, surfaceId, isPushLive } = pluginSurfaces.authorizePanelSdk({
-      workspaceId: input.workspaceId,
-      pluginId: input.pluginId,
-      panelId: input.panelId,
-      senderId: sender.id,
-      currentGeneration: () => rendererGeneration(sender.id),
-      activeWorkspaceId: () => activeWorkspaceIdBySender.get(sender.id),
-      liveSpawnId: () =>
-        pluginPipelines.get(input.workspaceId)?.host.getSpawnId(input.pluginId),
-    });
-    // Absent when the workspace's registry isn't up (pipeline still starting,
-    // or already torn down) — files.watch then degrades to watch:false and
-    // its own named refusal, callback-driven like every other SDK capability.
-    const owner = {
-      kind: "panel" as const,
-      workspaceId: authority.workspaceId,
-      pluginId: authority.pluginId,
-      panelId: authority.panelId,
-      surfaceId,
-    };
-    const emitEvent = workspaceEvents
-      ? createPluginPanelFileWatchEmitter({
-          workspaceId: authority.workspaceId,
-          pluginId: authority.pluginId,
-          panelId: authority.panelId,
-          isPanelRunning: isPushLive,
-          send: notifyPluginPanelSdkEvent,
-        })
-      : undefined;
-    const result = await invokeWorkspacePluginSdk({
-      workspaceId: authority.workspaceId,
-      pluginId: authority.pluginId,
-      spawnId: authority.spawnId,
-      requestPath: "panel",
-      isWritable: () => !sharedViewOf(authority.workspaceId),
-      signal: authority.signal,
-      subscribeFileWatch:
-        workspaceEvents && emitEvent
-          ? (watchParams) =>
-              workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
-          : undefined,
-      unsubscribeFileWatch: workspaceEvents
-        ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
-        : undefined,
-      method: input.method,
-      params: input.params,
-    });
-    return InvokePluginPanelSdkResult.parse({ result });
-  });
-
-  ipcMain.handle(CHANNELS.openPluginWebApp, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OpenPluginWebAppPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const isCurrent = () =>
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation &&
-      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    requireCurrentRenderer(isCurrent);
-    assertWritableWorkspace(workspace);
-    const registration = await loadPluginWebAppRegistration({
-      workspaceRoot: workspace.rootPath,
-      pluginRoot: input.pluginRoot,
-      pluginId: input.pluginId,
-      webAppId: input.webAppId,
-      pluginRegistration: pluginPipelines.get(workspace.workspaceId),
-    });
-    requireCurrentRenderer(isCurrent);
-    assertWritableWorkspace(workspace);
-    const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-    requireCurrentRenderer(isCurrent);
-    const plugin = rememberPluginRegistration(
-      pluginRegistrations,
-      workspace.workspaceId,
-      {
-        ...registration,
-        directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
-      },
-    );
-    // The open's shape must match the id it names before a tab appears for
-    // it: a keyless open of a per-instance app would otherwise reach start
-    // and fail there, after the user already has an empty tab.
-    requireDeclaredWebApp(
-      input.pluginId,
-      plugin.manifest.webApps,
-      input.webAppId,
-      input.instanceKey,
-    );
-    return OpenPluginWebAppResult.parse({
-      pluginId: input.pluginId,
-      webAppId: input.webAppId,
-      instanceKey: input.instanceKey,
-    });
-  });
-
-  ipcMain.handle(CHANNELS.startPluginWebApp, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StartPluginWebAppPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const isCurrent = () =>
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation &&
-      activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
-    requireCurrentRenderer(isCurrent);
-    assertWritableWorkspace(workspace);
-    const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
-    if (!plugin) {
-      return StartPluginWebAppResult.parse({ status: "not-registered" });
-    }
-    const webApp = requireDeclaredWebApp(
-      input.pluginId,
-      plugin.manifest.webApps,
-      input.webAppId,
-      input.instanceKey,
-    );
-    const identity = {
-      workspaceId: workspace.workspaceId,
-      pluginId: input.pluginId,
-      webAppId: input.webAppId,
-      instanceKey: input.instanceKey,
-    };
-    const started = await pluginSurfaces.startWebApp(
-      {
-        ...identity,
-        senderId: sender.id,
-        generation,
-        workspaceRoot: workspace.rootPath,
-        container: createPluginWebAppContainer(sender),
-      },
-      {
-        assertInstanceBudget: (liveAndReservedOtherInstances) =>
-          assertInstanceBudget(
-            input.pluginId,
-            input.webAppId,
-            liveAndReservedOtherInstances,
-          ),
-        assertAllowed: () => {
-          requireCurrentRenderer(isCurrent);
-          assertWritableWorkspace(workspace);
-        },
-        acquireHostLease: async () => {
-          const pipeline = await ensurePluginPipeline(workspace);
-          requireCurrentRenderer(isCurrent);
-          assertWritableWorkspace(workspace);
-          return createPluginWebAppHostLease(
-            pipeline,
-            input.pluginId,
-            input.webAppId,
-            input.instanceKey,
-          );
-        },
-      },
-    );
-    // Every instance of one id shares the manifest title, which would label
-    // twenty preview tabs "Preview". A plugin that knows its instance may name
-    // it; the manifest title is the fallback.
-    return StartPluginWebAppResult.parse({
-      status: "ok",
-      title: started.title ?? webApp.title,
-      origin: started.origin,
-    });
-  });
-
-  ipcMain.handle(CHANNELS.setPluginWebAppBounds, (event, payload) => {
-    assertTrustedSender(event);
-    const input = SetPluginWebAppBoundsPayload.parse(payload);
-    // Stale updates are dropped, never applied: a slow bounds report from a
-    // previous renderer generation or another workspace's tab must not move
-    // the live view (async-guard invariant).
-    pluginSurfaces.applyWebAppBounds({
-      workspaceId: input.workspaceId,
-      pluginId: input.pluginId,
-      webAppId: input.webAppId,
-      instanceKey: input.instanceKey,
-      senderId: event.sender.id,
-      generation: rendererGeneration(event.sender.id),
-      bounds: input.bounds,
-      visible: input.visible,
-      // The renderer reports CSS pixels; page zoom changes the CSS→DIP
-      // mapping, so a zoomed host would otherwise place the guest over
-      // neighboring chrome and take clicks outside its frame.
-      zoomFactor: event.sender.getZoomFactor(),
-    });
-  });
-
-  ipcMain.handle(CHANNELS.stopPluginWebApp, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StopPluginWebAppPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
-      throw new Error(
-        "The plugin web app stop request does not target the active workspace.",
-      );
-    }
-    await pluginSurfaces.stop({
-      kind: "web-app",
-      workspaceId: workspace.workspaceId,
-      pluginId: input.pluginId,
-      webAppId: input.webAppId,
-      instanceKey: input.instanceKey,
-      owner: {
-        senderId: event.sender.id,
-        generation: rendererGeneration(event.sender.id),
-      },
-    });
-  });
-
-  async function activePluginPipelineFor(
-    event: IpcMainInvokeEvent,
-    workspaceId: string,
-  ) {
-    const workspace = requireWorkspace(workspaceId);
-    if (activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId) {
-      throw new Error(
-        "The plugin request does not target the active workspace. Open the workspace and try again.",
-      );
-    }
-    const pipeline = await ensurePluginPipeline(workspace);
-    return { pipeline, workspace };
-  }
-
-  function pluginIpcError(error: unknown) {
-    return {
-      stage: "state" as const,
-      code: "pipeline-unavailable",
-      message: error instanceof Error ? error.message : String(error),
-    };
-  }
-
-  ipcMain.handle(CHANNELS.listPlugins, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListPluginsPayload.parse(payload);
-    try {
-      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-      return ListPluginsResult.parse({ ok: true, plugins: pipeline.list() });
-    } catch (error) {
-      return ListPluginsResult.parse({ ok: false, error: pluginIpcError(error) });
-    }
-  });
-
-  ipcMain.handle(CHANNELS.listOfferedPlugins, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListOfferedPluginsPayload.parse(payload);
-    try {
-      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
-      // Redundant with ensurePluginPipeline's own check (activePluginPipelineFor
-      // already refuses a shared view before a pipeline exists to list from),
-      // but stated directly here too: the boundary a shared view's Plugins
-      // panel depends on must stay visible at the call site itself, not only
-      // three functions deep in pipeline lifecycle plumbing.
-      assertWritableWorkspace(workspace);
-      const existingPluginIds = new Set(pipeline.list().map((plugin) => plugin.id));
-      const offers = await listOfferedPlugins(
-        builtinPluginsRoot(),
-        workspace.rootPath,
-        existingPluginIds,
-      );
-      return ListOfferedPluginsResult.parse({ ok: true, offers });
-    } catch (error) {
-      return ListOfferedPluginsResult.parse({
-        ok: false,
-        error: pluginIpcError(error),
-      });
-    }
-  });
-
-  ipcMain.handle(CHANNELS.addOfferedPlugin, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AddOfferedPluginPayload.parse(payload);
-    try {
-      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
-      // See listOfferedPlugins above: redundant with ensurePluginPipeline's
-      // own check, stated directly here because this handler copies files
-      // into the workspace and that write boundary must be legible on its
-      // own, not inferred from a pipeline-lifecycle helper three calls away.
-      assertWritableWorkspace(workspace);
-      // pipeline.list() only reflects discovery's LAST scan, which can be
-      // stale: a plugin created on disk by anything other than this handler
-      // (an agent, a second client) may not have reached it yet if the
-      // workspace's own file watcher hasn't settled its batch. Sampling IDs
-      // from a stale list let a not-yet-discovered directory's id through,
-      // so this forces the same rescan handleWatcherEvents already uses
-      // after the copy — but here, before existingPluginIds is sampled and
-      // before anything is copied.
-      await pipeline.handleWatcherEvents([
-        { operation: "update", path: "plugins" },
-      ]);
-      // Sampled fresh, not reused from any earlier listOfferedPlugins call —
-      // a plugin can be discovered under a different directory between an
-      // offer showing and this request landing.
-      const existingPluginIds = new Set(pipeline.list().map((entry) => entry.id));
-      const added = await addOfferedPlugin({
-        builtinPluginsRoot: builtinPluginsRoot(),
-        workspaceRoot: workspace.rootPath,
-        directoryName: input.directoryName,
-        existingPluginIds,
-      });
-      const rediscoveryEvent: WatcherEvent = {
-        operation: "create",
-        path: `plugins/${input.directoryName}`,
-      };
-      await pipeline.handleWatcherEvents([rediscoveryEvent]);
-      const plugin = pipeline.list().find(
-        (entry) => entry.directoryName === input.directoryName,
-      );
-      // A directory claiming the same manifest id can appear WHILE this
-      // request is copying — discovery's own duplicate-id handling then
-      // degrades ONE side of that collision, and it must not read as a
-      // successful add on EITHER side: !plugin.valid catches this add
-      // having lost, and findDirectorySupersededBy catches it having WON
-      // (its own record stays valid, but some other directory's discovery
-      // entry now carries a structured marker naming this one as the id it
-      // lost) — read from discovery directly, never from list()'s
-      // wire-shaped status or a scan over diagnostic prose.
-      const displaced = pipeline.findDirectorySupersededBy(input.directoryName);
-      if (!plugin || !plugin.valid || displaced) {
-        // handleWatcherEvents logs and swallows a rescan failure rather than
-        // throwing, so a transient fs error that left `plugin` missing must
-        // not silently strand the copy while this handler still reports a
-        // refusal — a retry would then find "already exists" for a plugin
-        // the user was just told never appeared. Same cleanup either way:
-        // remove what this request wrote and let the rescan hand the id
-        // back to whichever side (if any) was already there first.
-        await removeAddedOfferedPlugin({
-          workspaceRoot: workspace.rootPath,
-          directoryName: input.directoryName,
-          identity: added.identity,
-          contentHash: added.contentHash,
-        });
-        await pipeline.handleWatcherEvents([rediscoveryEvent]);
-        throw new Error(
-          plugin
-            ? `Another plugin already claims the id "${input.directoryName}" in this workspace.`
-            : `plugins/${input.directoryName} did not appear after it was added.`,
-        );
-      }
-      return AddOfferedPluginResult.parse({ ok: true, plugin });
-    } catch (error) {
-      return AddOfferedPluginResult.parse({
-        ok: false,
-        error: pluginIpcError(error),
-      });
-    }
-  });
-
-  const pluginAction = (
-    channel: string,
-    run: (
-      pipeline: PluginPipeline,
-      pluginId: string,
-      workspaceId: string,
-    ) => Promise<unknown>,
-  ): void => {
-    ipcMain.handle(channel, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = PluginActionPayload.parse(payload);
-      try {
-        const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-        const result = PluginActionResult.parse(
-          await run(pipeline, input.pluginId, input.workspaceId),
-        );
-        return result;
-      } catch (error) {
-        return PluginActionResult.parse({
-          ok: false,
-          error: pluginIpcError(error),
-          plugin: null,
-        });
-      }
-    });
-  };
-
-  pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
-    pipeline.install(pluginId));
-  pluginAction(CHANNELS.disablePlugin, async (pipeline, pluginId, workspaceId) => {
-    const result = await pluginSurfaces.withPluginSdkGrantSuspensions(
-      (suspend) => pipeline.disable(pluginId, {
-        onWillStopRuntime: () => {
-          suspend({ workspaceId, pluginId });
-        },
-      }),
-    );
-    return result;
-  });
-  pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
-    pipeline.enable(pluginId));
-  pluginAction(CHANNELS.approvePlugin, (pipeline, pluginId) =>
-    pipeline.approve(pluginId));
-  pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId) => pipeline.rebuild(pluginId));
-
-  ipcMain.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = PluginUninstallPreflightPayload.parse(payload);
-    try {
-      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-      const result = await pipeline.uninstallPreflight(input.pluginId, input.directoryName);
-      if (!result.ok) return PluginUninstallPreflightResult.parse(result);
-      return PluginUninstallPreflightResult.parse({
-        ...result,
-        preflight: {
-          ...result.preflight,
-          packagedDisplayName: await packagedBuiltinDisplayName(input.directoryName),
-        },
-      });
-    } catch (error) {
-      return PluginUninstallPreflightResult.parse({
-        ok: false,
-        error: pluginIpcError(error),
-      });
-    }
-  });
-
-  ipcMain.handle(CHANNELS.pluginSizes, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = PluginSizesPayload.parse(payload);
-    try {
-      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-      return PluginSizesResult.parse({
-        ok: true,
-        sizes: await pipeline.sizes(input.directoryName, input.pluginId),
-      });
-    } catch (error) {
-      return PluginSizesResult.parse({
-        ok: false,
-        error: pluginIpcError(error),
-      });
-    }
-  });
-
-  ipcMain.handle(CHANNELS.getPluginSettings, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = GetPluginSettingsPayload.parse(payload);
-    try {
-      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-      return PluginSettingsResult.parse({
-        ok: true,
-        values: await pipeline.getPluginSettings(input.directoryName),
-      });
-    } catch (error) {
-      return PluginSettingsResult.parse({
-        ok: false,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
-  ipcMain.handle(CHANNELS.setPluginSettings, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SetPluginSettingsPayload.parse(payload);
-    try {
-      const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
-      return PluginSettingsResult.parse({
-        ok: true,
-        values: await pipeline.setPluginSettings(
-          input.directoryName,
-          input.pluginId,
-          input.values,
-        ),
-      });
-    } catch (error) {
-      return PluginSettingsResult.parse({
-        ok: false,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
-  // A different installed directory with the same id still protects the
-  // ID-keyed registration, surfaces, and guest partition it may own.
-  const pluginIdHasOtherInstalledClaimant = (
-    pipeline: PluginPipeline,
-    pluginId: string,
-    directoryName: string,
-  ): boolean =>
-    pipeline.list().some((entry) =>
-      entry.id === pluginId &&
-      entry.directoryName !== directoryName &&
-      entry.approvedHash !== null
-    );
-
-  ipcMain.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = UninstallPluginPayload.parse(payload);
-    try {
-      const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
-      const result = PluginActionResult.parse(
-        await pluginSurfaces.withPluginSdkGrantSuspensions(
-          (suspend) => pipeline.uninstall(
-            input.pluginId,
-            input.directoryName,
-            input.confirmationToken,
-            {
-              onWillStopRuntime: (pluginId) => {
-                suspend({
-                  workspaceId: input.workspaceId,
-                  pluginId,
-                });
-              },
-            },
-          ),
-        ),
-      );
-      // Runtime-surface cleanup already ran for every exact id whose host
-      // stopped. Registration and the guest partition are keyed by id alone,
-      // with no directoryName to disambiguate a surviving collision claimant,
-      // so only the last-claimant decision below may clear either one.
-      const removedLastClaimant = result.ok && !pluginIdHasOtherInstalledClaimant(
-        pipeline,
-        input.pluginId,
-        input.directoryName,
-      );
-      if (removedLastClaimant) {
-        await pluginSurfaces.stop({
-          kind: "plugin",
-          workspaceId: input.workspaceId,
-          pluginId: input.pluginId,
-          clearPartition: { workspaceRoot: workspace.rootPath },
-        });
-      }
-      // Also gated on directoryName, the standing trace-to-directory rule:
-      // forgetUninstalledPlugin only clears a registration that actually
-      // traces to THIS directory, so an id-losing loser's own removed
-      // event can never delete a still-installed winner's own
-      // registration under the same shared id.
-      forgetUninstalledPlugin({
-        registrations: pluginRegistrations,
-        workspaceId: input.workspaceId,
-        pluginId: input.pluginId,
-        directoryName: input.directoryName,
-        uninstalled: removedLastClaimant,
-      });
-      return result;
-    } catch (error) {
-      return PluginActionResult.parse({
-        ok: false,
-        error: pluginIpcError(error),
-        plugin: null,
-      });
-    }
+    },
+    assertTrustedSender,
+    workspaces: {
+      activeWorkspaceIdBySender,
+      assertWritable: assertWritableWorkspace,
+      require: requireWorkspace,
+    },
+    rendererGeneration,
+    pipelines: pluginPipelines,
+    ensurePipeline: ensurePluginPipeline,
+    registrations: pluginRegistrations,
+    surfaces: pluginSurfaces,
+    platform: {
+      builtinPluginsRoot,
+      createPanelHostLease: createPluginPanelSurfaceHostLease,
+      createWebAppContainer: createPluginWebAppContainer,
+      createWebAppHostLease: createPluginWebAppHostLease,
+      routePanelSdk: routePluginPanelSdk,
+      startPanelPreview: startPluginPanelPreview,
+    },
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
