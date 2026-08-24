@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -142,8 +142,10 @@ export interface EngineDaemonLifecycleOptions {
   maxPingExpiries?: number;
   maxConsecutiveWedges?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
-  // Fires once per launched-and-healthy daemon generation (the first launch
-  // AND every restart). A capture event committed by a previous generation
+  // Fires once per launched daemon generation (the first launch AND every
+  // restart). The first generation is only handshaked when this fires — its
+  // startup smoke still runs behind it; restart generations have passed the
+  // blocking smoke. A capture event committed by a previous generation
   // can die with its transport before delivery, and the replacement's
   // baseline finds disk and manifest already agreeing — so no retry event is
   // ever generated. Consumers use this to invalidate state that daemon
@@ -162,6 +164,13 @@ interface InFlightLaunch {
   readonly abortController: AbortController;
   readonly promise: Promise<void>;
 }
+
+// Whether a launch proves workspace work before it counts as live. The first
+// launch runs its smoke in the background so start() can resolve on the
+// handshake; every restart keeps the blocking smoke, because restartAfterExit
+// counts a failed smoke as a failed attempt — which is what bounds a daemon
+// that relaunches but cannot do workspace work.
+type SmokeMode = "background" | "blocking";
 
 export class EngineDaemonUnavailableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -210,6 +219,18 @@ function isFile(path: string): boolean {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+// Kill a daemon whose replacement is already on the way: the kill becomes a
+// process exit, and the exit feeds the ordinary restart machinery.
+// `closeUnresponsive` rejects everything in flight as a transport failure,
+// which retry-enabled callers retry through; a plain `close` reports a
+// deliberate shutdown, which they must not — they would stay failed across
+// the very restart this kill is starting. A client that cannot tell the two
+// apart falls back to `close`.
+function killForReplacement(client: EngineDaemonClient): void {
+  if (client.closeUnresponsive) client.closeUnresponsive();
+  else client.close();
 }
 
 // The restart window reaches the user through a dialog, so it is spoken in
@@ -310,10 +331,8 @@ export class EngineDaemonLifecycle {
     // alive and speaking the protocol, and the desktop blocks window creation
     // on this resolution, so every boot paid for the workspace smoke's disk
     // work. The smoke still runs — in the background, with a real failure
-    // path. Restarts keep the blocking smoke instead: restartAfterExit's
-    // retry loop counts a failed smoke as a failed attempt, which is what
-    // bounds a daemon that relaunches but cannot do workspace work.
-    await this.launchTracked(true);
+    // path. SmokeMode explains why restarts keep the blocking smoke.
+    await this.launchTracked("background");
   }
 
   async smokeWorkspace(
@@ -543,7 +562,7 @@ export class EngineDaemonLifecycle {
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
         void client.cancelRequest?.(request.id).catch(() => undefined);
-        if (method === "workspace.open") client.close();
+        if (method === "workspace.open") killForReplacement(client);
         reject(
           new EngineDaemonUnavailableError(
             `Rust engine ${method} timed out after ${timeoutMs}ms.`,
@@ -567,9 +586,9 @@ export class EngineDaemonLifecycle {
     }
   }
 
-  private launchTracked(deferSmoke = false): Promise<void> {
+  private launchTracked(smokeMode: SmokeMode): Promise<void> {
     const abortController = new AbortController();
-    const promise = this.launchOnce(abortController.signal, deferSmoke);
+    const promise = this.launchOnce(abortController.signal, smokeMode);
     const launch: InFlightLaunch = { abortController, promise };
     this.inFlightLaunches.add(launch);
     void promise.then(
@@ -581,7 +600,7 @@ export class EngineDaemonLifecycle {
 
   private async launchOnce(
     signal: AbortSignal,
-    deferSmoke = false,
+    smokeMode: SmokeMode,
   ): Promise<void> {
     this.assertBinaryPresent();
     if (this.stopping) return;
@@ -623,10 +642,8 @@ export class EngineDaemonLifecycle {
           "Rust engine exited during its startup handshake.",
         );
       }
-      if (!deferSmoke) {
-        await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
-          await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
-        );
+      if (smokeMode === "blocking") {
+        await this.runSmoke(client);
         if (this.stopping || this.exitedGenerations.has(generation)) {
           await this.closeClient(client);
           if (this.stopping) return;
@@ -639,7 +656,7 @@ export class EngineDaemonLifecycle {
       this.running = true;
       this.scheduleHealthyReset(generation);
       this.startWedgeWatch(generation, client);
-      if (deferSmoke) {
+      if (smokeMode === "background") {
         this.backgroundSmoke = this.runDeferredSmoke(generation, client);
       }
       try {
@@ -661,28 +678,30 @@ export class EngineDaemonLifecycle {
     await client.waitForExit?.();
   }
 
+  private async runSmoke(client: EngineDaemonClient): Promise<JsonValue> {
+    return await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
+      await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
+    );
+  }
+
   // The first launch's startup smoke, run after start() resolved. The daemon
   // already proved it is alive and speaking the protocol; this checks that it
   // can do real workspace work. A failure is handled the way a wedge is:
   // kill, then report. The kill becomes a process exit, and the exit carries
   // the failure into the same restart machinery a crash uses — whose
   // relaunches run the blocking smoke and bound a daemon that keeps failing
-  // it. `closeUnresponsive` for the same reason reportWedge uses it: this
-  // kill is a replacement, and retry-enabled callers must retry through it.
+  // it.
   private async runDeferredSmoke(
     generation: number,
     client: EngineDaemonClient,
   ): Promise<void> {
     try {
-      await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
-        await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
-      );
+      await this.runSmoke(client);
     } catch (error) {
       // A generation that already exited, was replaced, or is stopping has
       // its own failure path; a stale smoke must not condemn its successor.
       if (!this.probedGenerationIsLive(generation, client)) return;
-      if (client.closeUnresponsive) client.closeUnresponsive();
-      else client.close();
+      killForReplacement(client);
       this.reportFailure(asError(error), false);
     }
   }
@@ -737,7 +756,7 @@ export class EngineDaemonLifecycle {
       if (delay > 0) await this.sleep(delay);
       if (this.stopping) return;
       try {
-        await this.launchTracked();
+        await this.launchTracked("blocking");
         return;
       } catch (error) {
         if (this.stopping) return;
@@ -949,13 +968,7 @@ export class EngineDaemonLifecycle {
     // a modal that does not return until the user dismisses it. Killing after
     // that call would leave the wedged child alive for as long as the dialog
     // stands, while this lifecycle already called the engine gone.
-    //
-    // `closeUnresponsive` rejects everything in flight as a transport failure.
-    // A plain `close` reports a deliberate shutdown, and retry-enabled callers
-    // do not retry through one — they would stay failed across the very
-    // restart this kill is starting.
-    if (client.closeUnresponsive) client.closeUnresponsive();
-    else client.close();
+    killForReplacement(client);
     this.reportFailure(
       new EngineDaemonUnavailableError(
         terminal
@@ -991,10 +1004,7 @@ async function runEngineDaemonSmoke(
     // Unique per invocation: the background startup smoke can overlap an
     // explicit smoke (tests, restarts) in the same process, and two live
     // opens must never share one workspaceId.
-    return await smokeWorkspace(
-      rootDir,
-      `desktop-startup-smoke-${process.pid}-${randomBytes(4).toString("hex")}`,
-    );
+    return await smokeWorkspace(rootDir, `desktop-startup-smoke-${randomUUID()}`);
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

@@ -1406,7 +1406,6 @@ describe("Rust engine daemon lifecycle", () => {
     });
     await lifecycle.start();
     await startupSmokeDone(client);
-    client.requests.length = 0;
 
     const desktopOpen = await client.sendRequest({
       id: 10_000,
@@ -1548,22 +1547,27 @@ describe("Rust engine daemon lifecycle", () => {
         client.requests.filter((request) => request.method === "workspace.close"),
       ).toEqual([]);
       expect(lifecycle.currentClient()).toBe(client);
-      // The smoke still runs to completion in the background.
       await vi.waitFor(() => expect(openRequest).toBeDefined(), WAIT);
       if (!openRequest) throw new Error("smoke open was not sent");
+      // stop() joins the held smoke: shutdown must wait out its
+      // temp-directory work rather than pulling the directory from under it.
+      let stopped = false;
+      const stop = lifecycle.stop().then(() => {
+        stopped = true;
+      });
+      await vi.waitFor(() => expect(client.closed).toBe(true), WAIT);
+      expect(stopped).toBe(false);
+      // Released, the smoke still runs to completion in the background.
       releaseOpen({
         id: openRequest.id,
         result: { workspace: "health-handle" },
       });
-      await vi.waitFor(
-        () =>
-          expect(client.requests.map((request) => request.method)).toEqual([
-            "workspace.open",
-            "versions.active",
-            "workspace.close",
-          ]),
-        WAIT,
-      );
+      await stop;
+      expect(client.requests.map((request) => request.method)).toEqual([
+        "workspace.open",
+        "versions.active",
+        "workspace.close",
+      ]);
     } finally {
       await lifecycle.stop();
     }
@@ -1581,9 +1585,7 @@ describe("Rust engine daemon lifecycle", () => {
     const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
-      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
       initialBackoffMs: 0,
-      healthyResetMs: HEALTHY_RESET_MS,
       launch: async (options) => {
         // Only the first generation fails its smoke; the replacement passes.
         const failing = clients.length === 0;
@@ -1606,7 +1608,6 @@ describe("Rust engine daemon lifecycle", () => {
       // Resolves despite the doomed smoke: the handshake is the gate.
       await lifecycle.start();
       await vi.waitFor(() => expect(clients).toHaveLength(2), WAIT);
-      expect(clients[0]?.closed).toBe(true);
       expect(clients[0]?.closeCause).toBe("transport-error");
       expect(
         failures.map(({ error, terminal }) => [error.message, terminal]),
@@ -1614,6 +1615,22 @@ describe("Rust engine daemon lifecycle", () => {
         ["smoke integrity check failed", false],
         ["Rust engine daemon exited unexpectedly with signal SIGTERM.", false],
       ]);
+      // Each generation's smoke opened its OWN workspace id: a background
+      // smoke and a restart's blocking smoke can overlap in one process, and
+      // two live opens must never share one.
+      const smokeOpenId = (client: FakeClient | undefined) =>
+        (
+          client?.requests.find(
+            (request) => request.method === "workspace.open",
+          )?.params as Record<string, unknown> | undefined
+        )?.workspaceId;
+      await vi.waitFor(
+        () => expect(smokeOpenId(clients[1])).toBeDefined(),
+        WAIT,
+      );
+      expect(smokeOpenId(clients[0])).toMatch(/^desktop-startup-smoke-/);
+      expect(smokeOpenId(clients[1])).toMatch(/^desktop-startup-smoke-/);
+      expect(smokeOpenId(clients[1])).not.toBe(smokeOpenId(clients[0]));
     } finally {
       await lifecycle.stop();
     }
@@ -1651,7 +1668,11 @@ describe("Rust engine daemon lifecycle", () => {
     // bound this one never broke — widening it would let a regression that
     // delays the startup timeout to just under the ceiling pass unseen.
     expect(Date.now() - startedAt).toBeLessThan(500);
-    expect(client.closed).toBe(true);
+    // The kill must read as a replacement. The timeout path closes the client
+    // BEFORE the deferred smoke's handler runs, and a real client keeps its
+    // first cause — a plain close here would classify this kill as deliberate
+    // and strand retry-enabled callers across the restart it starts.
+    expect(client.closeCause).toBe("transport-error");
     await lifecycle.stop();
   });
 
@@ -1677,7 +1698,6 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.start();
     await startupSmokeDone(client);
     client.requests.length = 0;
-    client.cancelledRequestIds.length = 0;
     hangOpen = true;
     await expect(
       lifecycle.requestWorkspace(
