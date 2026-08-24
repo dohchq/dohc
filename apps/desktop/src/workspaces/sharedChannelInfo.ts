@@ -1,4 +1,8 @@
 import {
+  isChatShareAccessValue,
+  type ChatShareAccess,
+} from "@dohc/security-contract/share-grant";
+import {
   RelayUnauthorizedError,
   ShareUnavailableError,
   type SyncRelayConnection,
@@ -9,7 +13,7 @@ export interface SharedChannelInfo {
   granterUserId: string;
   granterEmail: string | null;
   channelWireId: string;
-  access: "read-write" | "read-only";
+  access: ChatShareAccess;
   createdAtMs: number;
 }
 
@@ -50,7 +54,8 @@ export async function fetchSharedChannelInfo(input: {
   if (
     selector.kind !== "chat-channel" ||
     typeof selector.channelWireId !== "string" ||
-    selector.channelWireId.length === 0
+    selector.channelWireId.length === 0 ||
+    !isChatShareAccessValue(body.access)
   ) {
     throw new ShareUnavailableError();
   }
@@ -59,7 +64,7 @@ export async function fetchSharedChannelInfo(input: {
     granterUserId: String(body.granterUserId ?? ""),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     channelWireId: selector.channelWireId,
-    access: selector.access === "read-only" ? "read-only" : "read-write",
+    access: body.access,
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
 }

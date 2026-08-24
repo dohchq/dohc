@@ -188,7 +188,15 @@ async function createChannelShare(
     ),
   );
   expect(response.status).toBe(200);
-  return (await json(response)).shareId as string;
+  const created = await json(response);
+  expect(created).toMatchObject({
+    selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+    access: access ?? "read-write",
+    grantId: expect.any(String),
+    generation: 1,
+  });
+  expect(created.selector).not.toHaveProperty("access");
+  return created.shareId as string;
 }
 
 async function fetchSharePage(
@@ -250,6 +258,84 @@ describe("shared channels (MU-C4)", () => {
     ).toBe("chat-channel");
   });
 
+  it("marks a chat selector with file access as damaged and keeps the share revocable", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    storage.createShare({
+      share: {
+        shareId: "share-damaged-chat-access",
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({
+          kind: "chat-channel",
+          channelWireId: SHARED_WIRE,
+        }),
+        createdAtMs: 1000,
+      },
+      grant: {
+        grantId: "grant-damaged-chat-access",
+        shareId: "share-damaged-chat-access",
+        principalKind: "user",
+        principalUserId: MEMBER_A,
+        principalEmail: null,
+        access: "edit",
+        generation: 1,
+        status: "active",
+        createdAtMs: 1000,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+
+    const granted = (await json(await h(request(OWNER, "/sync/shares")))).granted as Array<
+      Record<string, unknown>
+    >;
+    expect(granted).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-chat-access",
+        selector: null,
+        selectorKind: "chat-channel",
+        access: "edit",
+        damaged: true,
+        revokedAtMs: null,
+      }),
+    );
+
+    const received = (await json(await h(request(MEMBER_A, "/sync/shares")))).received as Array<
+      Record<string, unknown>
+    >;
+    expect(received).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-chat-access",
+        selector: null,
+        selectorKind: "chat-channel",
+        access: "edit",
+        damaged: true,
+      }),
+    );
+    expect(received[0]).not.toHaveProperty("workspaceId");
+
+    const revoke = await h(
+      request(OWNER, "/sync/shares/share-damaged-chat-access/revoke", { method: "POST" }),
+    );
+    expect(revoke.status).toBe(200);
+    expect((await json(await h(request(MEMBER_A, "/sync/shares")))).received).toEqual([]);
+    expect(
+      ((await json(await h(request(OWNER, "/sync/shares")))).granted as Array<
+        Record<string, unknown>
+      >)[0],
+    ).toMatchObject({
+      shareId: "share-damaged-chat-access",
+      selector: null,
+      selectorKind: "chat-channel",
+      access: "edit",
+      damaged: true,
+      generation: 2,
+      revokedAtMs: 5555,
+    });
+  });
+
   it("creates a chat-channel grant (read-write default) and echoes the selector on both sides", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -261,7 +347,10 @@ describe("shared channels (MU-C4)", () => {
     >;
     expect(granted[0]).toMatchObject({
       shareId,
-      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE, access: "read-write" },
+      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+      access: "read-write",
+      grantId: expect.any(String),
+      generation: 1,
     });
 
     const received = (await json(await h(request(MEMBER_A, "/sync/shares")))).received as Array<
@@ -270,7 +359,10 @@ describe("shared channels (MU-C4)", () => {
     expect(received[0]).toMatchObject({
       shareId,
       granterUserId: OWNER,
-      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE, access: "read-write" },
+      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+      access: "read-write",
+      grantId: expect.any(String),
+      generation: 1,
     });
     // The member never learns the owner's workspace id.
     expect(received[0]).not.toHaveProperty("workspaceId");

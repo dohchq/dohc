@@ -3301,11 +3301,24 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
   versionId: z.string().min(1).max(128).nullable(),
-  access: SHARE_ACCESS,
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
-export const RelayShareGrantedRow = z.object({
+const RelayShareReadableState = z.object({
+  selector: RelayShareSelector,
+  access: SHARE_ACCESS,
+  damaged: z.never().optional(),
+});
+
+const RelayShareDamagedState = z.object({
+  selector: z.null(),
+  // Damage reports carry the raw stored value so Settings can keep the
+  // reverse path available without treating that value as authority.
+  access: z.string().max(64),
+  damaged: z.literal(true),
+});
+
+const RelayShareGrantedRowBase = z.object({
   shareId: SHARE_ID,
   // The relay-side workspace id (the remote identity, not necessarily a
   // local registry id).
@@ -3314,29 +3327,35 @@ export const RelayShareGrantedRow = z.object({
   // account yet); the recipientEmail carries who it was shared with (PR 18).
   recipientUserId: z.string().min(1).max(256).nullable(),
   recipientEmail: EMAIL_STRING.nullable(),
-  // null when the relay could not read this row's stored selector. The row
-  // stays listed so ending the share remains possible; it states the damage
-  // rather than a level nobody granted (#646).
-  selector: RelayShareSelector.nullable(),
-  damaged: z.literal(true).optional(),
+  grantId: z.string().min(1).max(200),
+  generation: z.number().int().min(1),
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
   shareCode: z.string().min(1).max(4096),
 });
+
+export const RelayShareGrantedRow = z.union([
+  RelayShareGrantedRowBase.extend(RelayShareReadableState.shape),
+  RelayShareGrantedRowBase.extend(RelayShareDamagedState.shape),
+]);
 export type RelayShareGrantedRow = z.infer<typeof RelayShareGrantedRow>;
 
 // A path/version share granted TO this account (the receive side). The
 // relay deliberately omits the granter's workspace id; the selector and
 // granter identity are all a recipient ever sees.
-export const RelayShareReceivedRow = z.object({
+const RelayShareReceivedRowBase = z.object({
   shareId: SHARE_ID,
   granterEmail: EMAIL_STRING.nullable(),
-  // null when the relay could not read this row's stored selector (#646).
-  selector: RelayShareSelector.nullable(),
-  damaged: z.literal(true).optional(),
+  grantId: z.string().min(1).max(200),
+  generation: z.number().int().min(1),
   createdAtMs: z.number().int().nonnegative(),
   shareCode: z.string().min(1).max(4096),
 });
+
+export const RelayShareReceivedRow = z.union([
+  RelayShareReceivedRowBase.extend(RelayShareReadableState.shape),
+  RelayShareReceivedRowBase.extend(RelayShareDamagedState.shape),
+]);
 export type RelayShareReceivedRow = z.infer<typeof RelayShareReceivedRow>;
 
 export const ListRelaySharesResult = z.object({

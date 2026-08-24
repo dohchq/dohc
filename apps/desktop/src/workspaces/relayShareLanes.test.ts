@@ -11,21 +11,37 @@ import {
 
 const pathRow = (shareId: string) => ({
   shareId,
-  selector: { paths: ["docs"], versionId: null, access: "view" },
+  selector: { paths: ["docs"], versionId: null },
+  access: "view",
+  grantId: `grant-${shareId}`,
+  generation: 1,
 });
 const chatRow = (shareId: string) => ({
   shareId,
-  selector: { kind: "chat-channel", channelWireId: "wire-1", access: "read-write" },
+  selector: { kind: "chat-channel", channelWireId: "wire-1" },
+  access: "read-write",
+  grantId: `grant-${shareId}`,
+  generation: 1,
 });
 // What the relay sends for a row it could not read: no selector, and the
 // kind only when it survived.
 const damagedChatRow = (shareId: string) => ({
   shareId,
   selector: null,
+  access: "read-write",
+  grantId: `grant-${shareId}`,
+  generation: 1,
   damaged: true,
   selectorKind: "chat-channel",
 });
-const damagedPathRow = (shareId: string) => ({ shareId, selector: null, damaged: true });
+const damagedPathRow = (shareId: string) => ({
+  shareId,
+  selector: null,
+  access: "view",
+  grantId: `grant-${shareId}`,
+  generation: 1,
+  damaged: true,
+});
 
 describe("relay share lanes", () => {
   it("sends a healthy chat-channel grant to the chat manager, not this one", () => {
