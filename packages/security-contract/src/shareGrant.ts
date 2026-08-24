@@ -9,17 +9,26 @@ export const GRANT_STATUS_VALUES = ["active", "revoked"] as const;
 
 export type GrantStatus = (typeof GRANT_STATUS_VALUES)[number];
 
-export type ShareGrantRecord = {
+export const CHAT_SHARE_ACCESS_VALUES = ["read-write", "read-only"] as const;
+
+export type ChatShareAccess = (typeof CHAT_SHARE_ACCESS_VALUES)[number];
+
+type ShareGrantRecordBase = {
   grantId: string;
   shareId: string;
   principal: SharePrincipal;
-  access: ShareAccess;
   generation: number;
   status: GrantStatus;
   createdAt: string;
   revokedAt: string | null;
   parentGrantId: string | null;
 };
+
+export type ShareGrantRecord = ShareGrantRecordBase &
+  (
+    | { kind: "file"; access: ShareAccess }
+    | { kind: "chat-channel"; access: ChatShareAccess }
+  );
 
 export type LinkCredentialRecord = {
   credentialId: string;
@@ -69,13 +78,19 @@ export function isGrantStatusValue(value: unknown): value is GrantStatus {
   );
 }
 
+export function isChatShareAccessValue(value: unknown): value is ChatShareAccess {
+  return (
+    typeof value === "string" &&
+    (CHAT_SHARE_ACCESS_VALUES as readonly string[]).includes(value)
+  );
+}
+
 export function isShareGrantRecord(value: unknown): value is ShareGrantRecord {
   if (!isRecord(value)) return false;
   if (
     typeof value.grantId !== "string" ||
     typeof value.shareId !== "string" ||
     !isSharePrincipal(value.principal) ||
-    !isShareAccessValue(value.access) ||
     !isGrantGeneration(value.generation) ||
     !isGrantStatusValue(value.status) ||
     typeof value.createdAt !== "string" ||
@@ -86,7 +101,15 @@ export function isShareGrantRecord(value: unknown): value is ShareGrantRecord {
   }
   if (value.status === "active" && value.revokedAt !== null) return false;
   if (value.status === "revoked" && value.revokedAt === null) return false;
-  return value.parentGrantId === null || value.principal.kind === "user";
+  if (value.parentGrantId !== null && value.principal.kind !== "user") return false;
+  switch (value.kind) {
+    case "file":
+      return isShareAccessValue(value.access);
+    case "chat-channel":
+      return isChatShareAccessValue(value.access);
+    default:
+      return false;
+  }
 }
 
 export function isLinkCredentialRecord(

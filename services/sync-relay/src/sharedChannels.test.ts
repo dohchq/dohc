@@ -92,12 +92,12 @@ function chatOp(
   return { originSeq, opKind, payload, recordedAtMs: 1000 + originSeq };
 }
 
-function channelCreate(wireId: string, name: string) {
+function channelCreate(wireId: string, name: string, kind: "channel" | "agent" = "channel") {
   return chatOp("chat.channel.create", {
     channelId: `chan-${wireId}`,
     name,
     slug: name.toLowerCase(),
-    kind: "channel",
+    kind,
     createdAtMs: 1,
     wireId,
   });
@@ -214,17 +214,29 @@ describe("shared channels (MU-C4)", () => {
     // A stored row damaged in every dimension EXCEPT its kind, written
     // through the same API the create route uses.
     storage.createShare({
-      shareId: "share-damaged-channel",
-      workspaceId: WORKSPACE,
-      granterUserId: OWNER,
-      recipientUserId: MEMBER_A,
-      recipientEmail: null,
-      selectorJson: JSON.stringify({
-        kind: "chat-channel",
-        channelWireId: "",
+      share: {
+        shareId: "share-damaged-channel",
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({
+          kind: "chat-channel",
+          channelWireId: "",
+        }),
+        createdAtMs: 1000,
+      },
+      grant: {
+        grantId: "grant-damaged-channel",
+        shareId: "share-damaged-channel",
+        principalKind: "user",
+        principalUserId: MEMBER_A,
+        principalEmail: null,
         access: "nonsense",
-      }),
-      createdAtMs: 1000,
+        generation: 1,
+        status: "active",
+        createdAtMs: 1000,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
     });
 
     const listing = await json(await h(request(OWNER, "/sync/shares")));
@@ -282,6 +294,24 @@ describe("shared channels (MU-C4)", () => {
     );
     expect(badAccess.status).toBe(400);
     expect((await json(badAccess)).code).toBe("invalid_access");
+    const agentWire = "wire-agent";
+    const seedAgent = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({ originId: "origin-owner", ops: [channelCreate(agentWire, "agent", "agent")] }),
+      ),
+    );
+    expect(seedAgent.status).toBe(200);
+    const crossedInvalid = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: agentWire, access: "admin" }),
+      ),
+    );
+    expect(crossedInvalid.status).toBe(400);
+    expect((await json(crossedInvalid)).code).toBe("invalid_access");
   });
 
   it("serves a member ONLY the granted channel's ops — private channels, files, and secrets never leak", async () => {

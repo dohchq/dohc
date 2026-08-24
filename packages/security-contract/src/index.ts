@@ -10,7 +10,9 @@ export {
 } from "./shareSelector";
 export { MAX_SHARE_PROPOSAL_OPS } from "./shareProposalBound";
 export {
+  CHAT_SHARE_ACCESS_VALUES,
   GRANT_STATUS_VALUES,
+  isChatShareAccessValue,
   isGrantBinding,
   isGrantStatusValue,
   isLinkCredentialRecord,
@@ -18,6 +20,7 @@ export {
   isSharePrincipal,
   type GrantBinding,
   type GrantStatus,
+  type ChatShareAccess,
   type LinkCredentialRecord,
   type ShareGrantRecord,
   type SharePrincipal,

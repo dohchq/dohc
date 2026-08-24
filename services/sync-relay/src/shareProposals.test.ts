@@ -1548,19 +1548,18 @@ describe("who may do what", () => {
   });
 });
 
-// A downgrade the way one would leave the stored row. There is no downgrade
-// route yet, so the selector is narrowed directly and the gates must read the
-// CURRENT level rather than the one the request started with.
+// There is no downgrade route yet, so the grant is narrowed directly. The
+// gates must read the current access rather than the request's starting value.
 function narrowToComment(storage: SyncRelayStorage, shareId: string): void {
-  const row = storage.getShare(shareId);
-  if (!row) throw new Error(`no share ${shareId}`);
-  const selector = JSON.parse(row.selectorJson) as Record<string, unknown>;
-  selector.access = "comment";
   (
     storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }
   ).db
-    .prepare("UPDATE sync_relay_shares SET selector_json = ? WHERE share_id = ?")
-    .run(JSON.stringify(selector), shareId);
+    .prepare(
+      `UPDATE sync_relay_share_grants
+       SET access = 'comment', generation = generation + 1
+       WHERE share_id = ?`,
+    )
+    .run(shareId);
 }
 
 describe("the recipient's blob route", () => {

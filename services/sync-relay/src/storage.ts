@@ -61,16 +61,30 @@ export interface SyncRelayShareRow {
   shareId: string;
   workspaceId: string;
   granterUserId: string;
-  // null for a PENDING email invite: the granter addressed an email that has
-  // no dohc account yet. It is claimed (recipient_user_id filled in) the first
-  // time that account touches the relay (see claimPendingSharesForEmail).
-  recipientUserId: string | null;
-  // Set only for a pending email invite; cleared once claimed.
-  recipientEmail: string | null;
-  // Validated ShareSelector JSON (shareFilter.ts owns the shape).
+  // Validated selector JSON without access. The grant owns access.
   selectorJson: string;
   createdAtMs: number;
+}
+
+export type SyncRelayShareGrantStatus = "active" | "revoked";
+
+export interface SyncRelayShareGrantRow {
+  grantId: string;
+  shareId: string;
+  principalKind: "user" | "email";
+  principalUserId: string | null;
+  principalEmail: string | null;
+  access: string;
+  generation: number;
+  status: SyncRelayShareGrantStatus;
+  createdAtMs: number;
   revokedAtMs: number | null;
+  parentGrantId: string | null;
+}
+
+export interface SyncRelayShareWithGrantRow {
+  share: SyncRelayShareRow;
+  grant: SyncRelayShareGrantRow;
 }
 
 // #646 PR3a. A recipient's submitted changes, held at the relay until the
@@ -239,22 +253,26 @@ export interface SyncRelayStorage {
     originId: string;
     originSeq: number;
   }): SyncRelayLogRow | null;
-  // PR 18 share grants. Shares are append-only rows; revocation stamps
-  // revoked_at_ms instead of deleting, so a grant leaves an audit trail.
-  createShare(input: Omit<SyncRelayShareRow, "revokedAtMs">): void;
+  createShare(input: {
+    share: SyncRelayShareRow;
+    grant: SyncRelayShareGrantRow;
+  }): void;
   // Claims any pending email invites addressed to `email` for `userId`,
-  // filling recipient_user_id and clearing recipient_email. Idempotent; the
-  // email match is exact on the normalized (lowercased) address. Returns the
-  // number of rows claimed. This is the lazy claim path: an invited account
-  // becomes a real recipient the first time it authenticates to the relay.
+  // changing the grant principal from email to user. Idempotent; the email
+  // match is exact on the normalized (lowercased) address. Returns the number
+  // of grants claimed.
   claimPendingSharesForEmail(email: string, userId: string): number;
   getShare(shareId: string): SyncRelayShareRow | null;
-  listSharesGrantedBy(granterUserId: string): SyncRelayShareRow[];
+  getShareGrantForRecipient(
+    shareId: string,
+    recipientUserId: string,
+  ): SyncRelayShareGrantRow | null;
+  listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[];
   // Received listings exclude revoked shares entirely: after revocation the
   // recipient must not be able to read even the share's metadata (paths,
   // version names) — a revoked share is indistinguishable from one that
   // never existed.
-  listSharesReceivedBy(recipientUserId: string): SyncRelayShareRow[];
+  listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
   // Candidate rows for the shared-blob allowlist: every log row whose payload
@@ -427,6 +445,55 @@ export interface OpenSyncRelayStorageOptions {
   blobGraceMs?: number;
 }
 
+const NORMALIZED_SHARE_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS sync_relay_shares (
+    share_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    granter_user_id TEXT NOT NULL,
+    selector_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (workspace_id)
+      REFERENCES sync_relay_workspaces(workspace_id)
+      ON DELETE CASCADE
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_granter
+    ON sync_relay_shares(granter_user_id, created_at_ms);
+
+  CREATE TABLE IF NOT EXISTS sync_relay_share_grants (
+    grant_id TEXT PRIMARY KEY,
+    share_id TEXT NOT NULL,
+    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('user', 'email')),
+    principal_user_id TEXT,
+    principal_email TEXT,
+    access TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at_ms INTEGER NOT NULL,
+    revoked_at_ms INTEGER,
+    parent_grant_id TEXT,
+    CHECK (
+      (principal_kind = 'user' AND principal_user_id IS NOT NULL AND principal_email IS NULL)
+      OR
+      (principal_kind = 'email' AND principal_user_id IS NULL AND principal_email IS NOT NULL)
+    ),
+    CHECK (
+      (status = 'active' AND revoked_at_ms IS NULL)
+      OR
+      (status = 'revoked' AND revoked_at_ms IS NOT NULL)
+    ),
+    FOREIGN KEY (share_id)
+      REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_grant_id)
+      REFERENCES sync_relay_share_grants(grant_id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_share
+    ON sync_relay_share_grants(share_id, created_at_ms);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_user
+    ON sync_relay_share_grants(principal_user_id, created_at_ms);
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_email
+    ON sync_relay_share_grants(principal_email, created_at_ms);
+`;
+
 export function initializeSyncRelaySchema(db: SqliteDb): void {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -523,31 +590,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_key_envelope_history
         ON sync_relay_key_envelope_history(workspace_id, history_seq);
 
-      -- PR 18 share grants: one row per grant. Revocation stamps
-      -- revoked_at_ms (rows are never deleted while the workspace lives).
-      -- recipient_user_id is NULL for a pending email invite (an email with
-      -- no dohc account yet); recipient_email holds the addressed email until
-      -- the invite is claimed. Exactly one of the two identifies the
-      -- recipient at any time.
-      CREATE TABLE IF NOT EXISTS sync_relay_shares (
-        share_id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL,
-        granter_user_id TEXT NOT NULL,
-        recipient_user_id TEXT,
-        recipient_email TEXT,
-        selector_json TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL,
-        revoked_at_ms INTEGER,
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id)
-          ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_granter
-        ON sync_relay_shares(granter_user_id, created_at_ms);
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient
-        ON sync_relay_shares(recipient_user_id, created_at_ms);
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_recipient_email
-        ON sync_relay_shares(recipient_email, created_at_ms);
+      ${NORMALIZED_SHARE_SCHEMA_SQL}
 
       -- #646 PR2: where every object the relay has ever seen sits RIGHT NOW,
       -- maintained at insert time by appendLogBatch. The file-chat share
@@ -681,6 +724,20 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         completed_at_ms INTEGER NOT NULL
       ) STRICT;
     `);
+    const shareColumns = db
+      .prepare("PRAGMA table_info(sync_relay_shares)")
+      .all()
+      .map((row) => String(row.name));
+    if (shareColumns.includes("recipient_user_id")) {
+      // Pre-launch replacement. Dropping the old parent also clears its
+      // proposal rows through the existing cascade. No legacy grant data is
+      // carried into the new authority model.
+      db.exec(`
+        DROP TABLE sync_relay_share_grants;
+        DROP TABLE sync_relay_shares;
+        ${NORMALIZED_SHARE_SCHEMA_SQL}
+      `);
+    }
     // Lazy additive migration (0P sync-hardening item 4): dbs created before the
     // blob retention window gain created_at_ms on open. Existing rows default to
     // 0, so a legacy unreferenced blob is immediately past any grace window and
@@ -1864,23 +1921,48 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
-  createShare(input: Omit<SyncRelayShareRow, "revokedAtMs">): void {
-    this.db
-      .prepare(
-        `INSERT INTO sync_relay_shares (
-          share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
-          selector_json, created_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        input.shareId,
-        input.workspaceId,
-        input.granterUserId,
-        input.recipientUserId,
-        input.recipientEmail,
-        input.selectorJson,
-        Math.trunc(input.createdAtMs),
-      );
+  createShare(input: {
+    share: SyncRelayShareRow;
+    grant: SyncRelayShareGrantRow;
+  }): void {
+    if (input.grant.shareId !== input.share.shareId) {
+      throw new Error("share and grant ids do not match");
+    }
+    this.tx(() => {
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_shares (
+            share_id, workspace_id, granter_user_id, selector_json, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.share.shareId,
+          input.share.workspaceId,
+          input.share.granterUserId,
+          input.share.selectorJson,
+          Math.trunc(input.share.createdAtMs),
+        );
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_share_grants (
+            grant_id, share_id, principal_kind, principal_user_id, principal_email,
+            access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.grant.grantId,
+          input.grant.shareId,
+          input.grant.principalKind,
+          input.grant.principalUserId,
+          input.grant.principalEmail,
+          input.grant.access,
+          input.grant.generation,
+          input.grant.status,
+          Math.trunc(input.grant.createdAtMs),
+          input.grant.revokedAtMs,
+          input.grant.parentGrantId,
+        );
+    });
   }
 
   claimPendingSharesForEmail(email: string, userId: string): number {
@@ -1888,9 +1970,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (!normalized) return 0;
     const result = this.db
       .prepare(
-        `UPDATE sync_relay_shares
-         SET recipient_user_id = ?, recipient_email = NULL
-         WHERE recipient_user_id IS NULL AND recipient_email = ?`,
+        `UPDATE sync_relay_share_grants
+         SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
+         WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'`,
       )
       .run(userId, normalized);
     return Number(result.changes ?? 0);
@@ -1899,50 +1981,79 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   getShare(shareId: string): SyncRelayShareRow | null {
     const row = this.db
       .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
-                selector_json, created_at_ms, revoked_at_ms
+        `SELECT share_id, workspace_id, granter_user_id, selector_json, created_at_ms
          FROM sync_relay_shares WHERE share_id = ?`,
       )
       .get(shareId);
     return row ? rowToShareRow(row) : null;
   }
 
-  listSharesGrantedBy(granterUserId: string): SyncRelayShareRow[] {
-    return this.db
+  getShareGrantForRecipient(
+    shareId: string,
+    recipientUserId: string,
+  ): SyncRelayShareGrantRow | null {
+    const row = this.db
       .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
-                selector_json, created_at_ms, revoked_at_ms
-         FROM sync_relay_shares
-         WHERE granter_user_id = ?
-         ORDER BY created_at_ms DESC, share_id`,
+        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
+                access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         FROM sync_relay_share_grants
+         WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?
+         ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
+                  created_at_ms DESC, grant_id
+         LIMIT 1`,
       )
-      .all(granterUserId)
-      .map(rowToShareRow);
+      .get(shareId, recipientUserId);
+    return row ? rowToShareGrantRow(row) : null;
   }
 
-  listSharesReceivedBy(recipientUserId: string): SyncRelayShareRow[] {
+  listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[] {
     return this.db
       .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, recipient_user_id, recipient_email,
-                selector_json, created_at_ms, revoked_at_ms
-         FROM sync_relay_shares
-         WHERE recipient_user_id = ? AND revoked_at_ms IS NULL
-         ORDER BY created_at_ms DESC, share_id`,
+        `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+                s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
+                g.principal_kind, g.principal_user_id, g.principal_email, g.access,
+                g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
+                g.revoked_at_ms, g.parent_grant_id
+         FROM sync_relay_shares s
+         JOIN sync_relay_share_grants g ON g.share_id = s.share_id
+         WHERE s.granter_user_id = ?
+         ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
+      )
+      .all(granterUserId)
+      .map(rowToShareWithGrantRow);
+  }
+
+  listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[] {
+    return this.db
+      .prepare(
+        `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+                s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
+                g.principal_kind, g.principal_user_id, g.principal_email, g.access,
+                g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
+                g.revoked_at_ms, g.parent_grant_id
+         FROM sync_relay_shares s
+         JOIN sync_relay_share_grants g ON g.share_id = s.share_id
+         WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status = 'active'
+         ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
       )
       .all(recipientUserId)
-      .map(rowToShareRow);
+      .map(rowToShareWithGrantRow);
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
     return this.tx(() => {
       const existing = this.db
-        .prepare("SELECT revoked_at_ms FROM sync_relay_shares WHERE share_id = ?")
+        .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
       if (existing === undefined) return false;
-      if (existing.revoked_at_ms === null || existing.revoked_at_ms === undefined) {
-        this.db
-          .prepare("UPDATE sync_relay_shares SET revoked_at_ms = ? WHERE share_id = ?")
-          .run(Math.trunc(revokedAtMs), shareId);
+      const revoked = this.db
+        .prepare(
+          `UPDATE sync_relay_share_grants
+           SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
+           WHERE share_id = ? AND status = 'active'`,
+        )
+        .run(Math.trunc(revokedAtMs), shareId);
+      if (Number(revoked.changes ?? 0) > 0) {
         // #646 PR3a: ending a share settles what it was still carrying. An
         // open proposal outlives the grant it came through — the recipient
         // can no longer withdraw it, and its content stays pinned out of the
@@ -2555,20 +2666,45 @@ function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
     shareId: String(row.share_id),
     workspaceId: String(row.workspace_id),
     granterUserId: String(row.granter_user_id),
-    recipientUserId:
-      row.recipient_user_id === null || row.recipient_user_id === undefined
-        ? null
-        : String(row.recipient_user_id),
-    recipientEmail:
-      row.recipient_email === null || row.recipient_email === undefined
-        ? null
-        : String(row.recipient_email),
     selectorJson: String(row.selector_json),
     createdAtMs: Number(row.created_at_ms),
-    revokedAtMs:
-      row.revoked_at_ms === null || row.revoked_at_ms === undefined
-        ? null
-        : Number(row.revoked_at_ms),
+  };
+}
+
+function rowToShareGrantRow(row: Record<string, unknown>): SyncRelayShareGrantRow {
+  const principalKind = String(row.principal_kind);
+  const status = String(row.status);
+  if (principalKind !== "user" && principalKind !== "email") {
+    throw new Error("stored share grant has an invalid principal kind");
+  }
+  if (status !== "active" && status !== "revoked") {
+    throw new Error("stored share grant has an invalid status");
+  }
+  return {
+    grantId: String(row.grant_id),
+    shareId: String(row.share_id),
+    principalKind,
+    principalUserId: nullableText(row.principal_user_id),
+    principalEmail: nullableText(row.principal_email),
+    access: String(row.access),
+    generation: Number(row.generation),
+    status,
+    createdAtMs: Number(row.created_at_ms),
+    revokedAtMs: nullableInt(row.revoked_at_ms),
+    parentGrantId: nullableText(row.parent_grant_id),
+  };
+}
+
+function rowToShareWithGrantRow(
+  row: Record<string, unknown>,
+): SyncRelayShareWithGrantRow {
+  return {
+    share: rowToShareRow(row),
+    grant: rowToShareGrantRow({
+      ...row,
+      share_id: row.grant_share_id,
+      created_at_ms: row.grant_created_at_ms,
+    }),
   };
 }
 

@@ -10,19 +10,22 @@ import {
 } from "./presence";
 import {
   MAIN_VERSION_ID,
+  effectiveShareSelector,
   filterOpForShare,
   filterOpForShareAppend,
   filterProposedChangeForShare,
   isChatChannelSelector,
-  parseAnyShareSelectorJson,
+  parseStoredAnyShareSelectorJson,
   presenceTopicAllowedForShare,
   targetVersionId,
   validateChatChannelShareSelector,
+  validateChatShareAccess,
+  validateFileShareAccess,
   validateShareSelector,
-  type AnyShareSelector,
-  type ShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
+  type ShareSelector,
+  type StoredAnyShareSelector,
   type ThreadFileBinding,
 } from "./shareFilter";
 import {
@@ -33,9 +36,15 @@ import {
   type ObjectMomentRow,
   type ShareProposalOpRow,
   type SyncRelayLogInput,
-  type SyncRelayShareRow,
+  type SyncRelayShareWithGrantRow,
   type SyncRelayStorage,
 } from "./storage";
+import {
+  authorizeShareAction,
+  selectorTargetsBlockedChannel,
+  type AuthorizedShareAction,
+  type ShareAction,
+} from "./shareAuthorization";
 import { destinationPath, proposalMomentPayload } from "./shareProposals";
 import { RELAY_ERRORS, type RelayErrorCode, type RelayErrorDefinition } from "./errorCodes";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
@@ -55,6 +64,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   newShareId?: () => string;
+  newGrantId?: () => string;
   // #646 PR3a: ids the relay MINTS — proposal ids, and the moment and object
   // ids a proposal's accept stamps on the granter's own log. Minted, never
   // taken from the recipient: a recipient-supplied moment id could name a
@@ -188,6 +198,7 @@ export function createSyncRelayHandler({
   resolveUserIdByEmail,
   lookupUserEmail,
   newShareId = () => randomUUID(),
+  newGrantId = () => randomUUID(),
   newId = () => randomUUID(),
   presence = new PresenceHub(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
@@ -240,30 +251,6 @@ export function createSyncRelayHandler({
     }
     throw methodNotAllowed();
   };
-
-  const selectorTargetsBlockedChannel = (
-    workspaceId: string,
-    selector: AnyShareSelector,
-  ): boolean => {
-    if (!isChatChannelSelector(selector)) return false;
-    const channelKind = storage.findChannelCreateKind(workspaceId, selector.channelWireId);
-    return channelKind === "agent" || channelKind === null;
-  };
-
-  // Whether a recipient may append through this selector at all. A read-write
-  // chat-channel grant may. A path/version selector may at comment and edit
-  // (#646 PR2, chat ops only — `filterOpForShareAppend` decides which); a view share
-  // may not, and its refusal is the SAME shareNotAppendable() code and body
-  // every other refusal uses, because a level-specific one would tell a
-  // probing recipient the selector's level.
-  const selectorAcceptsAppends = (selector: AnyShareSelector): boolean =>
-    isChatChannelSelector(selector)
-      ? selector.access === "read-write"
-      : // Chat is the only thing a file share accepts in PR2, and chat follows
-        // PATHS only (#646). A version share — no paths — carries no chat, so
-        // it accepts no append either, at any level.
-        selector.paths.length > 0 &&
-        (selector.access === "comment" || selector.access === "edit");
 
   // #646 PR3a: whether a recipient may PROPOSE changes to the files this
   // selector shares. Edit and nothing else — and the refusal is the same
@@ -338,32 +325,6 @@ export function createSyncRelayHandler({
     };
   };
 
-  const selectorAcceptsProposals = (selector: AnyShareSelector): selector is ShareSelector =>
-    !isChatChannelSelector(selector) &&
-    selector.paths.length > 0 &&
-    selector.access === "edit";
-
-  // Loads a share for RECIPIENT access. Every failure mode — no such share,
-  // revoked share, caller is not the recipient, granter lost the workspace —
-  // is the same generic 404 the relay uses for absent workspaces, so probing
-  // recipients cannot distinguish "never existed" from "exists but not
-  // yours" from "was revoked".
-  const shareForRecipient = (shareId: string, userId: string): SyncRelayShareRow & { selector: AnyShareSelector } => {
-    const share = storage.getShare(shareId);
-    if (!share) throw notFound();
-    if (share.recipientUserId !== userId) throw notFound();
-    if (share.revokedAtMs !== null) throw notFound();
-    // Defensive: the grant is only as good as the granter's own standing.
-    if (!storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) throw notFound();
-    const selector = parseAnyShareSelectorJson(share.selectorJson);
-    if (!selector) throw notFound();
-    // Agent channels are owner-only and never use the per-recipient grant
-    // lane. Reject historical/corrupt rows centrally so metadata, log reads,
-    // append, blobs, and presence all remain byte-identical to an absent share.
-    if (selectorTargetsBlockedChannel(share.workspaceId, selector)) throw notFound();
-    return { ...share, selector };
-  };
-
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's OWN log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
@@ -425,11 +386,38 @@ export function createSyncRelayHandler({
     if (email) storage.claimPendingSharesForEmail(email, userId);
   };
 
+  function requireShareAction(
+    shareId: string,
+    actorUserId: string,
+    action: "propose",
+  ): AuthorizedShareAction<ShareSelector>;
+  function requireShareAction(
+    shareId: string,
+    actorUserId: string,
+    action: ShareAction,
+  ): AuthorizedShareAction;
+  function requireShareAction(
+    shareId: string,
+    actorUserId: string,
+    action: ShareAction,
+  ): AuthorizedShareAction {
+    const result = authorizeShareAction({ storage, actorUserId, shareId, action });
+    if (result.ok) return result;
+    if (result.reason === "denied" && (action === "append" || action === "propose")) {
+      throw shareNotAppendable();
+    }
+    throw notFound();
+  }
+
   const shareSummary = async (
-    share: SyncRelayShareRow,
+    row: SyncRelayShareWithGrantRow,
     side: "granted" | "received",
   ): Promise<Record<string, unknown>> => {
-    const selector = parseAnyShareSelectorJson(share.selectorJson);
+    const { share, grant } = row;
+    const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    const selector = storedSelector
+      ? effectiveShareSelector(storedSelector, grant.access)
+      : null;
     const base = {
       shareId: share.shareId,
       // An unreadable row says so. It does NOT get a stand-in selector: a
@@ -452,17 +440,17 @@ export function createSyncRelayHandler({
       // A pending invite has no recipient user id yet; surface the addressed
       // email the granter typed. A claimed/real share resolves the email from
       // its recipient id for display.
-      const recipientEmail = share.recipientUserId
+      const recipientEmail = grant.principalUserId
         ? lookupUserEmail
-          ? await lookupUserEmail(share.recipientUserId)
+          ? await lookupUserEmail(grant.principalUserId)
           : null
-        : share.recipientEmail;
+        : grant.principalEmail;
       return {
         ...base,
         workspaceId: share.workspaceId,
-        recipientUserId: share.recipientUserId,
+        recipientUserId: grant.principalUserId,
         recipientEmail,
-        revokedAtMs: share.revokedAtMs,
+        revokedAtMs: grant.revokedAtMs,
       };
     }
     // Received summaries deliberately omit the workspace id: the recipient's
@@ -505,20 +493,20 @@ export function createSyncRelayHandler({
       if (route.route === "shares-list" && request.method === "GET") {
         await claimPendingShares(actor.userId);
         const granted = await Promise.all(
-          storage.listSharesGrantedBy(actor.userId).map((share) => shareSummary(share, "granted")),
+          storage.listSharesGrantedBy(actor.userId).map((row) => shareSummary(row, "granted")),
         );
         const receivedRows = await Promise.all(
-          storage.listSharesReceivedBy(actor.userId).map(async (share) => ({
-            share,
-            summary: await shareSummary(share, "received"),
+          storage.listSharesReceivedBy(actor.userId).map(async (row) => ({
+            row,
+            summary: await shareSummary(row, "received"),
           })),
         );
         // Re-evaluate AFTER the async display-name lookups, immediately before
         // serialization. A pre-provisioned wire that became an agent channel
         // during those awaits must not get one final recipient-list exposure.
-        const received = receivedRows.flatMap(({ share, summary }) => {
-          const selector = parseAnyShareSelectorJson(share.selectorJson);
-          return selector && selectorTargetsBlockedChannel(share.workspaceId, selector)
+        const received = receivedRows.flatMap(({ row, summary }) => {
+          const selector = parseStoredAnyShareSelectorJson(row.share.selectorJson);
+          return selector && selectorTargetsBlockedChannel(storage, row.share.workspaceId, selector)
             ? []
             : [summary];
         });
@@ -528,9 +516,12 @@ export function createSyncRelayHandler({
 
       if (route.route === "share" && request.method === "GET") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
-        const summary = await shareSummary(share, "received");
-        shareForRecipient(route.shareId, actor.userId);
+        const authorized = requireShareAction(route.shareId, actor.userId, "read");
+        const summary = await shareSummary(
+          { share: authorized.share, grant: authorized.grant },
+          "received",
+        );
+        requireShareAction(route.shareId, actor.userId, "read");
         return jsonResponse({ ok: true, ...summary });
       }
       if (route.route === "share") throw methodNotAllowed();
@@ -547,7 +538,8 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-log" && request.method === "GET") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
+        const authorized = requireShareAction(route.shareId, actor.userId, "read");
+        const share = { ...authorized.share, selector: authorized.effectiveSelector };
         const url = new URL(request.url);
         const channelWireId = url.searchParams.get("channelWireId");
         if (
@@ -586,7 +578,7 @@ export function createSyncRelayHandler({
         // that raced with this in-flight read (after the entry check, while
         // the page was assembled) must abort the response, not leak a final
         // filtered page. Re-loading the share throws the same generic 404.
-        shareForRecipient(route.shareId, actor.userId);
+        requireShareAction(route.shareId, actor.userId, "read");
         return jsonResponse({
           ok: true,
           ops,
@@ -598,7 +590,7 @@ export function createSyncRelayHandler({
       // MU-C4 member append — the bidirectional extension of the PR-18
       // recipient model, and the first place a non-owner writes into an
       // owner's bucket. Fail-closed gauntlet, in order:
-      //   1. shareForRecipient: membership, revocation, granter standing —
+      //   1. authorizeShareAction: membership, grant status, granter standing —
       //      every denial is the same byte-identical generic 404.
       //   2. The selector must accept appends: a read-write chat-channel
       //      grant, or (#646 PR2) a file share at comment or edit. A
@@ -622,8 +614,8 @@ export function createSyncRelayHandler({
       // filter, so workspace epoch enforcement does not apply on this route.
       if (route.route === "share-log" && request.method === "POST") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
-        if (!selectorAcceptsAppends(share.selector)) throw shareNotAppendable();
+        const authorized = requireShareAction(route.shareId, actor.userId, "append");
+        const share = { ...authorized.share, selector: authorized.effectiveSelector };
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
         // #646 PR3a: a share's origin space is shared between the recipient's
@@ -744,9 +736,8 @@ export function createSyncRelayHandler({
           // current level (#646) on the same workspace bucket — a level
           // narrowed mid-flight loses the race the same way a revoke does.
           guard: () => {
-            const fresh = shareForRecipient(route.shareId, actor.userId);
-            if (fresh.workspaceId !== share.workspaceId) throw notFound();
-            if (!selectorAcceptsAppends(fresh.selector)) throw shareNotAppendable();
+            const fresh = requireShareAction(route.shareId, actor.userId, "append");
+            if (fresh.share.workspaceId !== share.workspaceId) throw notFound();
           },
         });
         return jsonResponse({
@@ -761,7 +752,8 @@ export function createSyncRelayHandler({
 
       if (route.route === "share-blob" && request.method === "GET") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
+        const authorized = requireShareAction(route.shareId, actor.userId, "read");
+        const share = { ...authorized.share, selector: authorized.effectiveSelector };
         assertSha256(route.sha256);
         // A blob is served to a recipient ONLY when at least one op that
         // passes the share filter legitimately references it. Everything
@@ -782,7 +774,7 @@ export function createSyncRelayHandler({
         // Re-check revocation immediately before returning the blob body: a
         // revoke that raced with this in-flight read must abort rather than
         // serve a final shared blob. The re-load throws the same generic 404.
-        shareForRecipient(route.shareId, actor.userId);
+        requireShareAction(route.shareId, actor.userId, "read");
         return new Response(arrayBufferForBytes(blob), {
           status: 200,
           headers: { "content-type": "application/octet-stream" },
@@ -800,8 +792,8 @@ export function createSyncRelayHandler({
       // them.
       if (route.route === "share-blob" && request.method === "PUT") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
-        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        const authorized = requireShareAction(route.shareId, actor.userId, "propose");
+        const share = { ...authorized.share, selector: authorized.effectiveSelector };
         assertSha256(route.sha256);
         const bytes = await readBytes(request, MAX_BLOB_BYTES);
         const actual = sha256Hex(bytes);
@@ -817,7 +809,7 @@ export function createSyncRelayHandler({
         // Re-check the grant immediately before answering, mirroring the read
         // routes: a revoke that raced this upload aborts rather than
         // confirming a write into the granter's workspace.
-        shareForRecipient(route.shareId, actor.userId);
+        requireShareAction(route.shareId, actor.userId, "propose");
         return jsonResponse({
           ok: true,
           shareId: route.shareId,
@@ -835,8 +827,8 @@ export function createSyncRelayHandler({
       // nothing on the append route can propose.
       if (route.route === "share-proposals" && request.method === "POST") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
-        if (!selectorAcceptsProposals(share.selector)) throw shareNotAppendable();
+        const authorized = requireShareAction(route.shareId, actor.userId, "propose");
+        const share = { ...authorized.share, selector: authorized.effectiveSelector };
         const input = await readJsonObject(request);
         const submitId = parseString(input.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
@@ -936,9 +928,8 @@ export function createSyncRelayHandler({
           // full gauntlet re-runs inside the write's own BEGIN IMMEDIATE, so a
           // revoke or a level narrowed mid-flight loses.
           guard: () => {
-            const fresh = shareForRecipient(route.shareId, actor.userId);
-            if (fresh.workspaceId !== share.workspaceId) throw notFound();
-            if (!selectorAcceptsProposals(fresh.selector)) throw shareNotAppendable();
+            const fresh = requireShareAction(route.shareId, actor.userId, "propose");
+            if (fresh.share.workspaceId !== share.workspaceId) throw notFound();
           },
         });
         return jsonResponse({
@@ -956,7 +947,12 @@ export function createSyncRelayHandler({
       // same answer every level with nothing open gives.
       if (route.route === "share-proposals" && request.method === "GET") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
+        const authorized = requireShareAction(
+          route.shareId,
+          actor.userId,
+          "list-own-proposals",
+        );
+        const share = authorized.share;
         return jsonResponse({
           ok: true,
           proposals: storage.listShareProposalsForShare(share.shareId).map((proposal) => ({
@@ -977,15 +973,20 @@ export function createSyncRelayHandler({
       // stops new submits, and a reverse path that a downgrade removes is not
       // a reverse path — it would strand the recipient's already-sent changes
       // in front of a granter who may never answer them. Membership is still
-      // proven (`shareForRecipient`), and the proposal must be this share's
+      // proven (`authorizeShareAction`), and the proposal must be this share's
       // and this person's.
       if (route.route === "share-proposal-withdraw" && request.method === "POST") {
         await claimPendingShares(actor.userId);
-        const share = shareForRecipient(route.shareId, actor.userId);
+        const authorized = requireShareAction(
+          route.shareId,
+          actor.userId,
+          "withdraw-proposal",
+        );
+        const share = authorized.share;
         const proposal = storage.getShareProposal(route.proposalId);
         // A proposal of another share is the same generic 404 as one that
         // never existed — and that is also what makes it this person's:
-        // `shareForRecipient` proved the caller is THIS share's recipient, and
+        // `authorizeShareAction` proved the caller is THIS share's recipient, and
         // a path share has exactly one.
         if (!proposal || proposal.shareId !== share.shareId) throw notFound();
         if (!storage.settleShareProposal(route.proposalId, "withdrawn", nowMs())) {
@@ -1015,10 +1016,18 @@ export function createSyncRelayHandler({
         // the durable chat filter uses; bare wire presence also resolves kind
         // so an owner-only agent channel can never enter a share scope.
         const authorizeShare = () => {
-          const share = shareForRecipient(route.shareId, actor.userId);
-          const chatResolver = chatResolverFor(share.workspaceId);
-          if (!presenceTopicAllowedForShare(share.selector, topic, chatResolver)) throw notFound();
-          return share;
+          const authorized = requireShareAction(route.shareId, actor.userId, "presence");
+          const chatResolver = chatResolverFor(authorized.share.workspaceId);
+          if (
+            !presenceTopicAllowedForShare(
+              authorized.effectiveSelector,
+              topic,
+              chatResolver,
+            )
+          ) {
+            throw notFound();
+          }
+          return { ...authorized.share, selector: authorized.effectiveSelector };
         };
         const share = authorizeShare();
         // `await` is load-bearing: respondPresence can reject long after this
@@ -1268,43 +1277,63 @@ export function createSyncRelayHandler({
         // (MU-C4, addressed by channelWireId + optional access) or the PR-18
         // path/version grant. The recipient addressing, pending-invite, and
         // anti-enumeration behavior below is identical for both.
-        let selector: AnyShareSelector;
-        if (input.channelWireId !== undefined) {
-          // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
-          // also carry a path/version selector. Silently preferring
-          // channelWireId (and dropping the paths) would turn a stale/leftover
-          // `paths` field into a full chat-channel grant — a silent intent
-          // mismatch. Reject it instead (hardens regular shared-channel grants
-          // too).
-          if (input.paths !== undefined || input.versionId !== undefined) {
+        const { selector, access, wireSelector } = (() => {
+          if (input.channelWireId !== undefined) {
+            // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
+            // also carry a path/version selector. Silently preferring
+            // channelWireId (and dropping the paths) would turn a stale/leftover
+            // `paths` field into a full chat-channel grant — a silent intent
+            // mismatch. Reject it instead (hardens regular shared-channel grants
+            // too).
+            if (input.paths !== undefined || input.versionId !== undefined) {
+              throw relayHttpError(
+                RELAY_ERRORS.ambiguous_selector,
+                "a chat-channel share must not also carry paths or versionId",
+              );
+            }
+            const chatValidation = validateChatChannelShareSelector({
+              channelWireId: input.channelWireId,
+            });
+            if (!chatValidation.ok) {
+              throw relayHttpError(RELAY_ERRORS[chatValidation.code], chatValidation.message);
+            }
+            const accessValidation = validateChatShareAccess(input.access);
+            if (!accessValidation.ok) {
+              throw relayHttpError(
+                RELAY_ERRORS[accessValidation.code],
+                accessValidation.message,
+              );
+            }
+            const selector = chatValidation.selector;
+            if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
+              throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
+            }
+            const access = accessValidation.access;
+            const wireSelector = { ...selector, access };
+            return { selector, access, wireSelector };
+          }
+
+          const accessValidation = validateFileShareAccess(input.access);
+          if (!accessValidation.ok) {
             throw relayHttpError(
-              RELAY_ERRORS.ambiguous_selector,
-              "a chat-channel share must not also carry paths or versionId",
+              RELAY_ERRORS[accessValidation.code],
+              accessValidation.message,
             );
           }
-          const chatValidation = validateChatChannelShareSelector(
-            {
-              channelWireId: input.channelWireId,
-              access: input.access,
-            },
-            chatResolverFor(route.workspaceId),
-          );
-          if (!chatValidation.ok) {
-            throw relayHttpError(RELAY_ERRORS[chatValidation.code], chatValidation.message);
-          }
-          selector = chatValidation.selector;
-        } else {
           const validation = validateShareSelector({
             paths: input.paths,
             versionId: input.versionId,
-            access: input.access,
           });
           if (!validation.ok) {
             throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
           }
-          selector = validation.selector;
-        }
+          const selector = validation.selector;
+          const access = accessValidation.access;
+          const wireSelector = { ...selector, access };
+          return { selector, access, wireSelector };
+        })();
         const shareId = newShareId();
+        const grantId = newGrantId();
         const createdAtMs = nowMs();
 
         // Sharing by explicit user id: the granter already knows the id, so
@@ -1316,24 +1345,37 @@ export function createSyncRelayHandler({
             MAX_ORIGIN_ID_CHARS,
           );
           if (recipientUserId === actor.userId) throw selfShare();
-          if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
+          if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
             throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
           }
           storage.createShare({
-            shareId,
-            workspaceId: route.workspaceId,
-            granterUserId: actor.userId,
-            recipientUserId,
-            recipientEmail: null,
-            selectorJson: JSON.stringify(selector),
-            createdAtMs,
+            share: {
+              shareId,
+              workspaceId: route.workspaceId,
+              granterUserId: actor.userId,
+              selectorJson: JSON.stringify(selector),
+              createdAtMs,
+            },
+            grant: {
+              grantId,
+              shareId,
+              principalKind: "user",
+              principalUserId: recipientUserId,
+              principalEmail: null,
+              access,
+              generation: 1,
+              status: "active",
+              createdAtMs,
+              revokedAtMs: null,
+              parentGrantId: null,
+            },
           });
           return jsonResponse({
             ok: true,
             shareId,
             workspaceId: route.workspaceId,
             recipientUserId,
-            selector: selector,
+            selector: wireSelector,
             createdAtMs,
           });
         }
@@ -1353,23 +1395,36 @@ export function createSyncRelayHandler({
         if (resolved === actor.userId) throw selfShare();
         // Re-check after the asynchronous account lookup: a pre-provisioned
         // wire may have become an agent channel while this request was waiting.
-        if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
+        if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
           throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
         }
         storage.createShare({
-          shareId,
-          workspaceId: route.workspaceId,
-          granterUserId: actor.userId,
-          recipientUserId: resolved ?? null,
-          recipientEmail: resolved ? null : email.trim().toLowerCase(),
-          selectorJson: JSON.stringify(selector),
-          createdAtMs,
+          share: {
+            shareId,
+            workspaceId: route.workspaceId,
+            granterUserId: actor.userId,
+            selectorJson: JSON.stringify(selector),
+            createdAtMs,
+          },
+          grant: {
+            grantId,
+            shareId,
+            principalKind: resolved ? "user" : "email",
+            principalUserId: resolved ?? null,
+            principalEmail: resolved ? null : email.trim().toLowerCase(),
+            access,
+            generation: 1,
+            status: "active",
+            createdAtMs,
+            revokedAtMs: null,
+            parentGrantId: null,
+          },
         });
         return jsonResponse({
           ok: true,
           shareId,
           workspaceId: route.workspaceId,
-          selector: selector,
+          selector: wireSelector,
           createdAtMs,
         });
       }

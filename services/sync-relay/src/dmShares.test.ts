@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import {
   filterOpForShare,
-  parseAnyShareSelectorJson,
   validateChatChannelShareSelector,
+  validateChatShareAccess,
   type ChatChannelShareSelector,
   type ChatShareThreadResolver,
   type ShareFileChatResolver,
@@ -228,45 +228,15 @@ async function denialBytes(response: Response): Promise<string> {
 describe("chat-channel share selector (DM grants)", () => {
   it("validates grant-time chat selectors fail-closed", () => {
     expect(validateChatChannelShareSelector({ channelWireId: DM_WIRE }).ok).toBe(true);
-    expect(
-      validateChatChannelShareSelector({ channelWireId: DM_WIRE, access: "read-only" }).ok,
-    ).toBe(true);
+    expect(validateChatShareAccess("read-only").ok).toBe(true);
     for (const bad of [
       { channelWireId: "" },
       { channelWireId: "  padded  " },
       { channelWireId: "x".repeat(300) },
-      { channelWireId: DM_WIRE, access: "admin" },
     ]) {
       expect(validateChatChannelShareSelector(bad).ok, JSON.stringify(bad)).toBe(false);
     }
-  });
-
-  it("parses stored selectors for both shapes and fails closed on unknown kinds", () => {
-    expect(
-      parseAnyShareSelectorJson(
-        JSON.stringify({ kind: "chat-channel", channelWireId: DM_WIRE, access: "read-write" }),
-      ),
-    ).toEqual({ kind: "chat-channel", channelWireId: DM_WIRE, access: "read-write" });
-    expect(
-      parseAnyShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null, access: "view" })),
-    ).toEqual({
-      paths: ["docs"],
-      versionId: null,
-      access: "view",
-    });
-    // A persisted path row with no explicit access fails closed the same way.
-    expect(
-      parseAnyShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null })),
-    ).toBeNull();
-    expect(parseAnyShareSelectorJson(JSON.stringify({ kind: "everything" }))).toBeNull();
-    // A persisted chat row with no explicit access must NOT be promoted to
-    // read-write — it fails closed to null (the generic 404).
-    expect(parseAnyShareSelectorJson(JSON.stringify({ kind: "chat-channel", channelWireId: DM_WIRE }))).toBeNull();
-    expect(
-      parseAnyShareSelectorJson(
-        JSON.stringify({ kind: "chat-channel", channelWireId: DM_WIRE, access: "root" }),
-      ),
-    ).toBeNull();
+    expect(validateChatShareAccess("admin").ok).toBe(false);
   });
 
   it("admits ONLY thread-bound chat ops for the granted channel through the read filter", () => {

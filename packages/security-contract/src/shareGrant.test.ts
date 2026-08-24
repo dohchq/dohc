@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import vectors from "../vectors/share-grant-vectors.json";
 import {
+  isChatShareAccessValue,
   isGrantBinding,
   isGrantStatusValue,
   isLinkCredentialRecord,
@@ -11,6 +12,7 @@ import {
 const contracts = [
   ["share principals", vectors.sharePrincipals, isSharePrincipal],
   ["grant statuses", vectors.grantStatuses, isGrantStatusValue],
+  ["chat share accesses", vectors.chatShareAccesses, isChatShareAccessValue],
   ["share grant records", vectors.shareGrantRecords, isShareGrantRecord],
   [
     "link credential records",

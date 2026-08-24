@@ -1,5 +1,9 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
+  isChatShareAccessValue,
+  type ChatShareAccess,
+} from "@dohc/security-contract/share-grant";
+import {
   MAX_SHARE_PATHS,
   MAX_SHARE_PATH_CHARS,
   isShareablePathList,
@@ -35,17 +39,16 @@ export const MAX_CHANNEL_WIRE_ID_CHARS = 256;
 
 export const MAIN_VERSION_ID = "main";
 
-export interface ShareSelector {
+export interface StoredShareSelector {
   // Normalized workspace-relative paths. A path selects itself and, as a
   // prefix, everything beneath it ("docs" selects "docs/a.md"). Empty means
   // "every tracked path" and is only valid for version shares.
   paths: string[];
   // null = live-follow of the main version; otherwise the shared version id.
   versionId: string | null;
-  // The level the recipient holds on this selector (#646). Required: a
-  // selector without one is not a legacy grant, it is unreadable. All three
-  // levels grant the same reads today; PR2 opens comment and edit to chat,
-  // PR3 opens edit to document writes.
+}
+
+export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
 }
 
@@ -55,19 +58,30 @@ export interface ShareSelector {
 // access is "read-write" — lets the member APPEND channel-scoped chat ops via
 // the member append route. "read-only" is the broadcast/announcements opt-in:
 // the member replays the channel but every inbound append is refused.
-export const CHAT_SHARE_ACCESS_VALUES = ["read-write", "read-only"] as const;
-export type ChatShareAccess = (typeof CHAT_SHARE_ACCESS_VALUES)[number];
-
-export interface ChatChannelShareSelector {
+export interface StoredChatChannelShareSelector {
   kind: "chat-channel";
   // The channel's cross-machine wire identity (chat_channel_wire_ids in the
   // engine; `wireId` on chat.channel.create). NEVER a local channel id or
   // slug — those differ per machine.
   channelWireId: string;
+}
+
+export interface ChatChannelShareSelector extends StoredChatChannelShareSelector {
   access: ChatShareAccess;
 }
 
 export type AnyShareSelector = ShareSelector | ChatChannelShareSelector;
+export type StoredAnyShareSelector = StoredShareSelector | StoredChatChannelShareSelector;
+
+export function effectiveShareSelector(
+  selector: StoredAnyShareSelector,
+  access: unknown,
+): AnyShareSelector | null {
+  if ("kind" in selector) {
+    return isChatShareAccessValue(access) ? { ...selector, access } : null;
+  }
+  return isShareAccessValue(access) ? { ...selector, access } : null;
+}
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
 
@@ -117,19 +131,35 @@ export function isChatChannelSelector(
 }
 
 export type ChatChannelSelectorValidation =
-  | { ok: true; selector: ChatChannelShareSelector }
+  | { ok: true; selector: StoredChatChannelShareSelector }
   | {
       ok: false;
-      code:
-        | typeof RELAY_ERRORS.invalid_channel.code
-        | typeof RELAY_ERRORS.invalid_access.code;
+      code: typeof RELAY_ERRORS.invalid_channel.code;
       message: string;
     };
+
+export type ChatShareAccessValidation =
+  | { ok: true; access: ChatShareAccess }
+  | {
+      ok: false;
+      code: typeof RELAY_ERRORS.invalid_access.code;
+      message: string;
+    };
+
+export function validateChatShareAccess(value: unknown): ChatShareAccessValidation {
+  const access = value ?? "read-write";
+  return isChatShareAccessValue(access)
+    ? { ok: true, access }
+    : {
+        ok: false,
+        code: RELAY_ERRORS.invalid_access.code,
+        message: 'access must be "read-write" or "read-only"',
+      };
+}
 
 export function validateChatChannelShareSelector(
   input: {
     channelWireId?: unknown;
-    access?: unknown;
   },
   chat?: Pick<ChatShareThreadResolver, "channelKind">,
 ): ChatChannelSelectorValidation {
@@ -144,17 +174,6 @@ export function validateChatChannelShareSelector(
       ok: false,
       code: RELAY_ERRORS.invalid_channel.code,
       message: "channelWireId must be a non-empty trimmed string",
-    };
-  }
-  // Default read-write (the design's accepted recommendation): a shared
-  // channel is collaborative by nature; read-only is the explicit broadcast
-  // opt-in.
-  const access = input.access ?? "read-write";
-  if (access !== "read-write" && access !== "read-only") {
-    return {
-      ok: false,
-      code: RELAY_ERRORS.invalid_access.code,
-      message: 'access must be "read-write" or "read-only"',
     };
   }
   // The request carries only a wire id; channel kind is trusted exclusively
@@ -176,11 +195,11 @@ export function validateChatChannelShareSelector(
       message: "channel is not shareable",
     };
   }
-  return { ok: true, selector: { kind: "chat-channel", channelWireId: wireId, access } };
+  return { ok: true, selector: { kind: "chat-channel", channelWireId: wireId } };
 }
 
 export type ShareSelectorValidation =
-  | { ok: true; selector: ShareSelector }
+  | { ok: true; selector: StoredShareSelector }
   | {
       ok: false;
       code:
@@ -188,10 +207,27 @@ export type ShareSelectorValidation =
         | typeof RELAY_ERRORS.too_many_paths.code
         | typeof RELAY_ERRORS.invalid_path.code
         | typeof RELAY_ERRORS.secret_path.code
-        | typeof RELAY_ERRORS.invalid_version.code
-        | typeof RELAY_ERRORS.invalid_access.code;
+        | typeof RELAY_ERRORS.invalid_version.code;
       message: string;
     };
+
+export type FileShareAccessValidation =
+  | { ok: true; access: ShareAccess }
+  | {
+      ok: false;
+      code: typeof RELAY_ERRORS.invalid_access.code;
+      message: string;
+    };
+
+export function validateFileShareAccess(value: unknown): FileShareAccessValidation {
+  return isShareAccessValue(value)
+    ? { ok: true, access: value }
+    : {
+        ok: false,
+        code: RELAY_ERRORS.invalid_access.code,
+        message: 'access must be "view", "comment", or "edit"',
+      };
+}
 
 // Grant-time gate #1 for secrets: selector paths must classify as engine
 // "tracked" — secret-classified paths (the .env family, however encoded) are
@@ -201,21 +237,7 @@ export type ShareSelectorValidation =
 export function validateShareSelector(input: {
   paths?: unknown;
   versionId?: unknown;
-  access?: unknown;
 }): ShareSelectorValidation {
-  const access = input.access;
-  if (!isShareAccessValue(access)) {
-    return {
-      ok: false,
-      code: RELAY_ERRORS.invalid_access.code,
-      message: 'access must be "view", "comment", or "edit"',
-    };
-  }
-  // FIRST, before paths or version. A share is minted here and the level is
-  // required (#646, decision G at the minting boundary): a caller that names
-  // no level has not chosen `view`, it has failed to say what it grants. It
-  // is checked first so that answer is the SAME whatever else is wrong —
-  // otherwise a bad path decided which of two refusals a caller saw.
   const rawPaths = input.paths ?? [];
   if (!Array.isArray(rawPaths)) {
     return {
@@ -296,19 +318,21 @@ export function validateShareSelector(input: {
     };
   }
   const deduped = [...new Set(paths)].sort();
-  return { ok: true, selector: { paths: deduped, versionId, access } };
+  return { ok: true, selector: { paths: deduped, versionId } };
 }
 
-// A persisted row must carry an EXPLICIT, valid access, the same rule create
-// applies. A row missing the field, or carrying a value the relay never
-// issues, fails closed to null and the routes answer that with the generic
-// 404 — decision G, stated plainly: no migration shim, no implicit upgrade,
-// and no level invented for a row that never named one.
-export function parseShareSelectorJson(selectorJson: string): ShareSelector | null {
+export function parseStoredShareSelectorJson(selectorJson: string): StoredShareSelector | null {
   try {
     const parsed = JSON.parse(selectorJson) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const candidate = parsed as { paths?: unknown; versionId?: unknown; access?: unknown };
+    const candidate = parsed as {
+      kind?: unknown;
+      paths?: unknown;
+      versionId?: unknown;
+      access?: unknown;
+    };
+    if (candidate.kind !== undefined) return null;
+    if (candidate.access !== undefined) return null;
     if (!Array.isArray(candidate.paths)) return null;
     // The SAME rule every other selector reader applies. This was the last
     // reader on its own check, and a laxer reader than the writer accepts
@@ -324,40 +348,32 @@ export function parseShareSelectorJson(selectorJson: string): ShareSelector | nu
     if (candidate.versionId !== null && !isValidShareVersionId(candidate.versionId)) {
       return null;
     }
-    if (!isShareAccessValue(candidate.access)) return null;
     return {
       paths: candidate.paths as string[],
       versionId: candidate.versionId as string | null,
-      access: candidate.access,
     };
   } catch {
     return null;
   }
 }
 
-// Union parser for stored selector rows. A `kind: "chat-channel"` row is
-// re-validated on every load (a hand-edited/corrupt row fails closed to null,
-// which the routes answer with the generic 404); everything else parses as
-// the legacy path/version selector.
-export function parseAnyShareSelectorJson(selectorJson: string): AnyShareSelector | null {
+export function parseStoredAnyShareSelectorJson(
+  selectorJson: string,
+): StoredAnyShareSelector | null {
   try {
     const parsed = JSON.parse(selectorJson) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     if ((parsed as { kind?: unknown }).kind === "chat-channel") {
-      // A persisted row must carry an EXPLICIT access: the create-time default
-      // in validateChatChannelShareSelector must not silently promote a
-      // tampered/legacy row with no access into a read-write grant. Fail closed
-      // to null (the routes answer that with the generic 404).
-      if (typeof (parsed as { access?: unknown }).access !== "string") return null;
+      if ((parsed as { access?: unknown }).access !== undefined) return null;
       const validation = validateChatChannelShareSelector(
-        parsed as { channelWireId?: unknown; access?: unknown },
+        parsed as { channelWireId?: unknown },
       );
       return validation.ok ? validation.selector : null;
     }
   } catch {
     return null;
   }
-  return parseShareSelectorJson(selectorJson);
+  return parseStoredShareSelectorJson(selectorJson);
 }
 
 // Gate #2 for secrets (and gate #1 for everything else): a path is visible
