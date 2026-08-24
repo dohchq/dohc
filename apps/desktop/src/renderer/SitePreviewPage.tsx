@@ -70,6 +70,21 @@ function availableModes(
   return modes;
 }
 
+// Reference-stable no-op for the 1s dev-log poll: an unchanged log ring MUST
+// keep the previous array so setState bails out instead of re-rendering the
+// page every second. Logs only append (truncating from the front at the cap),
+// so equal length + equal last entry means nothing changed.
+function sameLogs(
+  prev: StartSitePreviewResult["logs"],
+  next: StartSitePreviewResult["logs"],
+): boolean {
+  if (prev.length !== next.length) return false;
+  const a = prev[prev.length - 1];
+  const b = next[next.length - 1];
+  if (!a || !b) return true; // both empty
+  return a.at === b.at && a.stream === b.stream && a.text === b.text;
+}
+
 const SITE_PREVIEW_MODE_STORAGE_PREFIX = "dohc.site-preview-mode.v1";
 
 function storedModeKey(workspaceId: string, siteRoot: string): string {
@@ -418,7 +433,7 @@ export function SitePreviewPage(props: {
         requestContext !== siteContextRef.current ||
         previewRequest !== previewStartRequestRef.current
       ) return;
-      setPreviewLogs(result.logs);
+      setPreviewLogs((prev) => (sameLogs(prev, result.logs) ? prev : result.logs));
       if (result.exited) {
         setPreview(null);
         setIdleReason("exited");

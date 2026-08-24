@@ -40,6 +40,11 @@ const getAgentSessionState = vi.fn(async ({ workspaceId }: { workspaceId: string
 
 beforeEach(() => {
   getAgentSessionState.mockClear();
+  // A test may swap the implementation (e.g. to start a session mid-test);
+  // restore the workspace-keyed default so tests stay independent.
+  getAgentSessionState.mockImplementation(
+    async ({ workspaceId }: { workspaceId: string }) => panelFor(workspaceId),
+  );
   vi.stubGlobal("dohcDesktop", { getAgentSessionState });
 });
 
@@ -111,5 +116,80 @@ describe("useAgentNotifications workspace isolation", () => {
       await Promise.resolve();
     });
     expect(result.current.notifications).toEqual([]);
+  });
+});
+
+// The poller runs for the app's life in every window. These tests pin the two
+// idle-cost guarantees: an unchanged poll never re-renders the host, and a
+// sessionless workspace polls at the slow cadence.
+describe("useAgentNotifications idle polling", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("keeps pendingAsks reference-stable across a no-change poll (no re-render)", async () => {
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders += 1;
+      return useAgentNotifications({
+        workspaceId: "ws-a",
+        ...baseProps,
+        pollIntervalMs: 1_500,
+      });
+    });
+    // First poll lands: asks + notice paint once.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const asks = result.current.pendingPermissions;
+    expect(asks).toEqual([WS_A_PERMISSION]);
+
+    // React renders once more on the first bailed-out set before it trusts
+    // the queue is a no-op; let that tick pass, then pin the steady state.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    const settledRenders = renders;
+
+    // Further polls of the same snapshot: same references, zero renders.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(getAgentSessionState.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(result.current.pendingPermissions).toBe(asks);
+    expect(renders).toBe(settledRenders);
+  });
+
+  it("backs off to a slow cadence with no session and speeds up when one appears", async () => {
+    renderHook(() =>
+      useAgentNotifications({
+        workspaceId: "ws-b",
+        ...baseProps,
+        pollIntervalMs: 1_500,
+      }),
+    );
+    // Immediate poll sees no session (ws-b), so the next one waits 10s, not 1.5s.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_000);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(2);
+
+    // A session starts: the idle tick that sees it restores the 1.5s cadence.
+    getAgentSessionState.mockImplementation(async () => panelFor("ws-a"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(4);
   });
 });
