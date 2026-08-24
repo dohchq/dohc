@@ -23,7 +23,7 @@ Gate: contract tests pass in both languages; a written state machine for grant t
 
 Prove the failure cases before committing to implementation shape. Each prototype is throwaway code with a written result.
 
-1. **Credential lifecycle.** Exchange a fragment secret for a session, open HTTP and websocket sessions, then rotate, revoke, narrow, and widen. No old generation commits after the transition; no secret appears in logs, history, referrers, or cache keys.
+1. **Credential lifecycle.** Exchange a fragment secret for a session, open HTTP and websocket sessions, then rotate, revoke, narrow, and widen. No old generation commits or reads after the transition — subsequent reads refuse and open sockets close, tested alongside commits; no secret appears in logs, history, referrers, or cache keys.
 2. **Stop-and-restore.** Run a vandal and two legitimate Yjs editors, execute the owner stop-and-restore action (ADR 0002), and record what good work is lost, what audit remains, and how clients recover from the successor lineage. This is the go/no-go for anonymous Edit: if a whole-document forward restore is not acceptable under interleaved edits, the Edit decision changes before Phase 4.
 3. **Selector drift.** Move, delete, and recreate a document while a session edits it; narrow the selector mid-append; fetch `../` assets. Every stale action must fail at commit.
 4. **Browser isolation.** Attack the viewer and app origins: raw HTML, SVG, MIME confusion, service workers, CORS, CSRF, navigation, remote fetches, cross-app storage, reaching viewer credentials.
@@ -45,7 +45,7 @@ The first shippable vertical: accountless viewing.
 
 Settle first: which metadata a viewer receives (no owner email, workspace ids, private ancestor paths, or participant identities by default); remote-media policy (blocked in v1); cache and unfurl-bot policy. Chat-channel selectors are excluded from links in this program.
 
-Gate: hostile-content, refusal-oracle, and revocation tests pass; a leaked-URL walkthrough of what an attacker gets matches the owner-facing warning text.
+Gate: hostile-content, refusal-oracle, and revocation tests pass; selector-drift integration tests prove the shipped read path drops object and blob access on move, deletion, and recreation under an open session, and refuses stale cached reads; granter ownership loss goes dark generically; a leaked-URL walkthrough of what an attacker gets matches the owner-facing warning text.
 
 ## Phase 3: Comment
 
