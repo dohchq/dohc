@@ -1,10 +1,5 @@
 import type { PluginRuntimeStatus } from "./pluginHostProtocol";
 
-export type PluginPanelLifecycleLock = <T>(
-  key: string,
-  operation: () => Promise<T>,
-) => Promise<T>;
-
 const PLUGIN_PANEL_WORKSPACE_ERROR =
   "The plugin panel request does not target the active workspace. Open the workspace and try again.";
 
@@ -21,33 +16,6 @@ export async function loadPluginPanelRegistrationForCurrentRenderer<T>(
   const registration = await load();
   assertPluginPanelRequestCurrent(isCurrent);
   return registration;
-}
-
-export function startPluginPanelWithLock<TContext, TResult>(
-  panelKey: string,
-  pluginKey: string,
-  withPanelLock: PluginPanelLifecycleLock,
-  withPluginLock: PluginPanelLifecycleLock,
-  ensurePluginStarted: () => Promise<TContext>,
-  startPanel: (context: TContext) => Promise<TResult>,
-): Promise<TResult> {
-  return withPanelLock(panelKey, () =>
-    withPluginLock(pluginKey, async () =>
-      startPanel(await ensurePluginStarted()),
-    ),
-  );
-}
-
-export function stopPluginPanelWithLock(
-  panelKey: string,
-  pluginKey: string,
-  withPanelLock: PluginPanelLifecycleLock,
-  withPluginLock: PluginPanelLifecycleLock,
-  stopPanelAndUnusedPlugin: () => Promise<void>,
-): Promise<void> {
-  return withPanelLock(panelKey, () =>
-    withPluginLock(pluginKey, stopPanelAndUnusedPlugin),
-  );
 }
 
 /**

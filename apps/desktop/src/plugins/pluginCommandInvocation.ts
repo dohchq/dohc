@@ -2,6 +2,10 @@ import type {
   InvokePluginCommandPayload,
   InvokePluginCommandResult,
 } from "../ipc/bridgeContract";
+import type {
+  PluginHostCommandAuthority,
+  PluginHostCommandRunOutcome,
+} from "./pluginHostOwnership";
 
 interface PluginCommandRegistration {
   manifest: {
@@ -18,24 +22,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * The one PluginPipeline error code a panel or web-app start recognizes
- * (see PluginPanelHostStartResult in pluginPanelRegistration.ts) — a
- * shared literal, not a raw string at each site, so a typo at either end
- * fails the type system instead of silently degrading the retryable
- * refusal to a generic error (#779 round 27).
- */
+/** The pipeline code for a retryable host-ownership drain. */
 export const CLAIMS_DRAINING_ERROR_CODE = "claims-draining";
 
-/**
- * Thrown by an `ensureStarted` implementation that rechecked the command
- * claims barrier right at its own pipeline-enqueue point and found it
- * raised — a stopping action started queuing after this command's own
- * earlier check passed, before it claimed. Mapped to the same retryable
- * "plugin-rebuilding" status that check already returns, not a generic
- * command failure: this call never reached anything, so retrying it costs
- * nothing (round-17 finding 2).
- */
+/** Maps a command's self-drain refusal to the retryable IPC result. */
 export class PluginClaimsDrainingError extends Error {
   constructor(pluginId: string) {
     super(`dohc is still working on plugin "${pluginId}". Try the command again in a moment.`);
@@ -46,7 +36,14 @@ export class PluginClaimsDrainingError extends Error {
 export async function invokeRegisteredPluginCommand(options: {
   input: InvokePluginCommandPayload;
   plugin: PluginCommandRegistration;
-  ensureStarted: () => Promise<PluginCommandHost>;
+  runCommand: (
+    operation: (
+      command: PluginHostCommandAuthority,
+    ) => Promise<InvokePluginCommandResult>,
+  ) => Promise<PluginHostCommandRunOutcome<InvokePluginCommandResult>>;
+  ensureStarted: (
+    command: PluginHostCommandAuthority,
+  ) => Promise<PluginCommandHost>;
   ensureCurrent: () => void;
 }): Promise<InvokePluginCommandResult> {
   const { input, plugin } = options;
@@ -61,30 +58,47 @@ export async function invokeRegisteredPluginCommand(options: {
     };
   }
 
-  let host: PluginCommandHost;
   try {
-    host = await options.ensureStarted();
-  } catch (error) {
-    if (error instanceof PluginClaimsDrainingError) {
-      return { status: "plugin-rebuilding", message: error.message };
-    }
-    return { status: "command-failed", message: errorMessage(error) };
-  }
-  try {
-    options.ensureCurrent();
-  } catch (error) {
-    return { status: "command-failed", message: errorMessage(error) };
-  }
-  if (!host.getSpawnId(input.pluginId)) {
-    return {
-      status: "plugin-not-running",
-      message: `Plugin "${input.pluginId}" has no active process.`,
-    };
-  }
+    const outcome = await options.runCommand(async (commandAuthority) => {
+      let host: PluginCommandHost;
+      try {
+        host = await options.ensureStarted(commandAuthority);
+      } catch (error) {
+        if (error instanceof PluginClaimsDrainingError) {
+          return { status: "plugin-rebuilding", message: error.message };
+        }
+        return { status: "command-failed", message: errorMessage(error) };
+      }
+      try {
+        options.ensureCurrent();
+      } catch (error) {
+        return { status: "command-failed", message: errorMessage(error) };
+      }
+      if (!host.getSpawnId(input.pluginId)) {
+        return {
+          status: "plugin-not-running",
+          message: `Plugin "${input.pluginId}" has no active process.`,
+        };
+      }
 
-  try {
-    await host.invokeCommand(input.pluginId, input.commandId);
-    return { status: "ok" };
+      try {
+        await host.invokeCommand(input.pluginId, input.commandId);
+        return { status: "ok" };
+      } catch (error) {
+        return { status: "command-failed", message: errorMessage(error) };
+      }
+    });
+    if (outcome.kind === "completed") return outcome.value;
+    return outcome.reason === "change-in-progress"
+      ? {
+        status: "plugin-rebuilding",
+        message: new PluginClaimsDrainingError(input.pluginId).message,
+      }
+      : {
+        status: "command-failed",
+        message:
+          `dohc stopped plugin "${input.pluginId}" before it could run the command. Try again.`,
+      };
   } catch (error) {
     return { status: "command-failed", message: errorMessage(error) };
   }

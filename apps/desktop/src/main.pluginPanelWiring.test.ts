@@ -22,10 +22,6 @@ function functionSource(signature: string): string {
 
 const stopPluginPanelSource = () =>
   functionSource("async function stopPluginPanel(");
-// The claim accounting both close paths share (panel close and web app tab
-// close). Its callers are pinned here and in main.pluginWebAppWiring.test.ts.
-const stopPluginHostIfUnclaimedSource = () =>
-  functionSource("async function stopPluginHostIfUnclaimed(");
 
 describe("plugin panel main-process wiring", () => {
   it("forwards watcher batches to the matching plugin pipeline and workspace events", () => {
@@ -84,26 +80,21 @@ describe("plugin panel main-process wiring", () => {
     expect(notify).toContain("console.error(");
   });
 
-  it("validates a contained plugin registration before starting its host", () => {
+  it("validates and remembers a contained panel without starting its host", () => {
     const open = handler("openPluginPanel");
     const loadAt = open.indexOf(
       "loadPluginPanelRegistrationForCurrentRenderer(",
     );
     const currentAt = open.indexOf("isCurrent,", loadAt);
     const rememberAt = open.indexOf("rememberPluginRegistration(");
-    const lockAt = open.indexOf("await withPluginPanelStartLock(");
-    const startAt = open.indexOf(
-      "return ensurePluginStarted(workspace, plugin)",
-    );
 
     expect(loadAt).toBeGreaterThan(-1);
     expect(currentAt).toBeGreaterThan(loadAt);
     expect(currentAt).toBeLessThan(rememberAt);
     expect(rememberAt).toBeGreaterThan(loadAt);
-    expect(lockAt).toBeGreaterThan(rememberAt);
-    expect(open).toContain("withPluginHostLifecycleLock(");
     expect(open).toContain("assertPluginPanelRequestCurrent(isCurrent);");
-    expect(startAt).toBeGreaterThan(lockAt);
+    expect(open).not.toContain("ensurePluginStarted(");
+    expect(open).not.toContain("acquirePluginSurfaceLease(");
     expect(open).toContain(
       "pluginRegistration: pluginPipelines.get(workspace.workspaceId),",
     );
@@ -127,27 +118,21 @@ describe("plugin panel main-process wiring", () => {
     expect(registerAt).toBeGreaterThan(-1);
     expect(disposeAt).toBeGreaterThan(registerAt);
     expect(grantFn).toContain("grant.signal.addEventListener(");
-    expect(start).toContain("startPluginPanelWithLock(");
-    expect(start).toContain("withPluginHostLifecycleLock,");
-    expect(start).toContain("() => ensurePluginStarted(workspace, plugin)");
+    expect(start).toContain("withPluginPanelStartLock(key");
+    expect(start).toContain("hostLease.start((authority)");
     expect(start).toContain("await stopRunningPluginPanelPreview(previous);");
 
     const stop = stopPluginPanelSource();
-    expect(stop).toContain("stopPluginPanelWithLock(");
-    expect(stop).toContain("withPluginHostLifecycleLock,");
+    expect(stop).toContain("withPluginPanelStartLock(key");
     expect(stop).toContain("await stopRunningPluginPanelPreview(panel);");
-    // The host itself is released through the shared claim accounting, whose
-    // body this file pins below.
-    expect(stop).toContain(
-      "await stopPluginHostIfUnclaimed(workspaceId, pluginId);",
-    );
+    expect(stop).toContain("await panel.hostLease.release();");
   });
 
   it("starts a panel only where its manifest places it, and serves a view with no tab (B1)", () => {
     const start = handler("startPluginPanel");
     const panelAt = start.indexOf("plugin.manifest.panels?.find(");
     const placementAt = start.indexOf("panel.placement !== input.placement");
-    const lockAt = start.indexOf("startPluginPanelWithLock(");
+    const lockAt = start.indexOf("withPluginPanelStartLock(key");
 
     // MUTATION (stale tab): without this check a tab restored from before an
     // update mounts a panel the plugin has since moved to the view rail, and
@@ -212,47 +197,20 @@ describe("plugin panel main-process wiring", () => {
   it("routes plugin commands through the declared-command guard", () => {
     const invoke = handler("invokePluginCommand");
     const currentAt = invoke.indexOf("activeWorkspaceIdBySender.get(");
-    const pipelineAt = invoke.indexOf("await ensurePluginPipeline(workspace);");
+    const pipelineAt = invoke.indexOf("const pipeline = await ensurePluginPipeline(workspace);");
     const lookupAt = invoke.indexOf("registeredPlugin(");
     const routeAt = invoke.indexOf("invokeRegisteredPluginCommand({");
-    const lockAt = invoke.indexOf("return withPluginHostLifecycleLock(", routeAt);
-    const startAt = invoke.indexOf("ensurePluginStarted(", lockAt);
+    const ownerAt = invoke.indexOf("pipeline.hostOwnership.runCommand(", routeAt);
+    const startAt = invoke.indexOf("command.start(() =>", ownerAt);
 
     expect(currentAt).toBeGreaterThan(-1);
     expect(pipelineAt).toBeGreaterThan(currentAt);
     expect(lookupAt).toBeGreaterThan(pipelineAt);
     expect(routeAt).toBeGreaterThan(lookupAt);
-    expect(lockAt).toBeGreaterThan(routeAt);
-    expect(startAt).toBeGreaterThan(lockAt);
+    expect(ownerAt).toBeGreaterThan(routeAt);
+    expect(startAt).toBeGreaterThan(ownerAt);
     expect(invoke).toContain("assertWritableWorkspace(workspace);");
-    expect(invoke).toContain(
-      "pluginLifecycleKey(workspace.workspaceId, input.pluginId)",
-    );
-    expect(invoke).toContain("claim: false");
-    expect(invoke).toContain("activeCommandClaims.claim(claimKey);");
-    expect(invoke).toContain("finally {");
-    expect(invoke).toContain("activeCommandClaims.release(claimKey);");
-    expect(invoke).toContain(
-      "() => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId)",
-    );
-    // A `finally` that itself throws replaces whatever the `try` returned
-    // or threw — so this cleanup must be contained, or a host-stop
-    // rejection would reach the renderer in place of a command result the
-    // invocation already earned (round-8 finding 4). The isolation and
-    // always-run guarantees of that shape are behavioral, not
-    // grep-provable; pinned by finding-4's own containment test below,
-    // this only pins that the containment is actually wired here.
-    const finallyAt = invoke.indexOf("} finally {");
-    const stopCallAt = invoke.indexOf(
-      "() => stopPluginHostIfUnclaimed(workspace.workspaceId, input.pluginId)",
-      finallyAt,
-    );
-    const catchAt = invoke.indexOf("} catch (error) {", stopCallAt);
-    const warnAt = invoke.indexOf("console.warn(", catchAt);
-    expect(finallyAt).toBeGreaterThan(-1);
-    expect(stopCallAt).toBeGreaterThan(finallyAt);
-    expect(catchAt).toBeGreaterThan(stopCallAt);
-    expect(warnAt).toBeGreaterThan(catchAt);
+    expect(invoke).not.toContain("activeCommandClaims");
   });
 
   it("wires the production authored-text writer with this invocation's own signal and pipeline (CERT779L D1)", () => {
@@ -287,8 +245,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("releases a removed identity's registration from the status-event path (#779 round 14 A5)", () => {
-    // What forgetRemovedPlugin does — clearing the registration and the
-    // panel host claim only for a removed event — is pinned by behavior in
+    // What forgetRemovedPlugin does is pinned by behavior in
     // pluginPanelRegistration.test.ts. This asserts only that main.ts's
     // status-event handler calls it before the schema guard that protects
     // the renderer send, so a departed identity (a rename, not an
@@ -303,7 +260,6 @@ describe("plugin panel main-process wiring", () => {
     expect(forgetAt).toBeGreaterThan(-1);
     expect(guardAt).toBeGreaterThan(forgetAt);
     expect(notify).toContain("registrations: pluginRegistrations,");
-    expect(notify).toContain("panelStartedHosts,");
   });
 
   it("uses utilityProcess and tears plugin hosts down with their owners", () => {
@@ -382,342 +338,121 @@ describe("plugin panel main-process wiring", () => {
     expect(open).toContain("stillActive && !sharedViewOf(workspace.workspaceId)");
   });
 
-  it("stops a host on last-panel-close only when a panel is the reason it's running (#779 round 4 finding 3)", () => {
-    // Claiming the host is startPluginForPanel's job and is pinned by
-    // behavior in pluginPanelRegistration.test.ts. Source-text assertions
-    // about it survived a mutation that claimed the host unconditionally
-    // (CERT779J S1), so they are gone.
-    // The panel close reaches the host only through the shared claim
-    // accounting, so the guard lives in that helper's body.
-    expect(stopPluginPanelSource()).toContain(
-      "await stopPluginHostIfUnclaimed(workspaceId, pluginId);",
-    );
-    const unclaimed = stopPluginHostIfUnclaimedSource();
-    const hasAnotherAt = unclaimed.indexOf("hasAnotherPanel");
-    const deleteAt = unclaimed.indexOf("panelStartedHosts.delete(key)");
-    const stopHostAt = unclaimed.indexOf(
-      "await pluginPipelines.get(workspaceId)?.host.stop(pluginId);",
-    );
-    // MUTATION (ownership): dropping the panelStartedHosts.delete() guard
-    // (leaving only !hasAnotherPanel) stops every plugin's host on its last
-    // panel close, including one the workspace itself enabled and expects
-    // to keep running with no panel open at all.
-    expect(hasAnotherAt).toBeGreaterThan(-1);
-    expect(deleteAt).toBeGreaterThan(hasAnotherAt);
-    expect(stopHostAt).toBeGreaterThan(deleteAt);
+  it("gives each running panel record its own host lease", () => {
+    const stop = stopPluginPanelSource();
+    const removeAt = stop.indexOf("runningPluginPanels.delete(key);");
+    const previewAt = stop.indexOf("await stopRunningPluginPanelPreview(panel);");
+    const releaseAt = stop.indexOf("await panel.hostLease.release();");
 
-    const pluginActionStart = mainSource.indexOf("const pluginAction = (");
-    const pluginActionEnd = mainSource.indexOf("\n  };\n\n  pluginAction(", pluginActionStart);
-    expect(pluginActionEnd).toBeGreaterThan(-1);
-    const pluginAction = mainSource.slice(pluginActionStart, pluginActionEnd);
-    expect(pluginAction).toContain("if (result.ok) {");
-    expect(pluginAction).toContain("panelStartedHosts.delete(key);");
-    expect(pluginAction).toContain("activeCommandClaims.consumeStartedHost(key);");
+    expect(stop).toContain("withPluginPanelStartLock(key");
+    expect(removeAt).toBeGreaterThan(-1);
+    expect(previewAt).toBeGreaterThan(removeAt);
+    expect(releaseAt).toBeGreaterThan(previewAt);
+    expect(stop).not.toContain(".host.stop(");
+
+    const start = handler("startPluginPanel");
+    const acquireAt = start.indexOf("acquirePluginSurfaceLease(");
+    const ownerAt = start.indexOf("pipeline.hostOwnership", acquireAt);
+    const startAt = start.indexOf("hostLease.start((authority)");
+    const installAt = start.indexOf("runningPluginPanels.set(key, next)");
+    const displacedReleaseAt = start.indexOf("await previous.hostLease.release();");
+
+    expect(acquireAt).toBeGreaterThan(-1);
+    expect(ownerAt).toBeGreaterThan(acquireAt);
+    expect(startAt).toBeGreaterThan(acquireAt);
+    expect(installAt).toBeGreaterThan(startAt);
+    expect(displacedReleaseAt).toBeGreaterThan(installAt);
   });
 
-  it("stops a surface-less host a command cold-started once its own claim is the last to release (round-9 finding 1)", () => {
-    // The refcount and the on-demand marker's actual claim/release/mark/
-    // consume behavior are pinned in pluginCommandHostClaims.test.ts, and
-    // the callback that reports a cold start under claim: false is pinned
-    // behaviorally in pluginPanelRegistration.test.ts. This only pins that
-    // main.ts wires those two pieces together correctly.
+  it("releases a panel start's lease when no record survives", () => {
+    const start = handler("startPluginPanel");
+    const catchAt = start.indexOf("} catch (error) {");
+    const exactRecordAt = start.indexOf(
+      "runningPluginPanels.get(key) === installed",
+      catchAt,
+    );
+    const releaseAt = start.indexOf("await hostLease.release();", exactRecordAt);
+    const throwAt = start.indexOf("throw error;", releaseAt);
+
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(exactRecordAt).toBeGreaterThan(catchAt);
+    expect(releaseAt).toBeGreaterThan(exactRecordAt);
+    expect(throwAt).toBeGreaterThan(releaseAt);
+  });
+
+  it("runs plugin commands through the owner and the command's start authority", () => {
     const invoke = handler("invokePluginCommand");
-    const ensureStartedAt = invoke.indexOf("ensureStarted: async () => {");
-    const startAt = invoke.indexOf(
-      "ensurePluginStarted(workspace, plugin, {",
-      ensureStartedAt,
+    const runAt = invoke.indexOf("pipeline.hostOwnership.runCommand(");
+    const startAt = invoke.indexOf("command.start(() =>", runAt);
+    const ensureAt = invoke.indexOf(
+      "pipeline.ensureStarted(input.pluginId, command)",
+      startAt,
     );
-    const claimFalseAt = invoke.indexOf("claim: false,", startAt);
-    const onColdStartAt = invoke.indexOf("onColdStartWithoutClaim: () =>", claimFalseAt);
-    const markAt = invoke.indexOf(
-      "activeCommandClaims.markStartedHost(claimKey)",
-      onColdStartAt,
-    );
-    expect(ensureStartedAt).toBeGreaterThan(-1);
-    expect(startAt).toBeGreaterThan(ensureStartedAt);
-    expect(claimFalseAt).toBeGreaterThan(startAt);
-    expect(onColdStartAt).toBeGreaterThan(claimFalseAt);
-    expect(markAt).toBeGreaterThan(onColdStartAt);
 
-    const unclaimed = stopPluginHostIfUnclaimedSource();
-    const activeClaimAt = unclaimed.indexOf("!activeCommandClaims.has(key)");
-    const orAt = unclaimed.indexOf(
-      "(panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))",
-      activeClaimAt,
-    );
-    // MUTATION (leak): dropping the "|| activeCommandClaims.consumeStartedHost(key)"
-    // half leaves panelStartedHosts.delete(key) as the sole trigger, which a
-    // command's cold start (claim: false) never populates — the exact way a
-    // surface-less command-started host used to never stop.
-    expect(activeClaimAt).toBeGreaterThan(-1);
-    expect(orAt).toBeGreaterThan(activeClaimAt);
+    expect(runAt).toBeGreaterThan(-1);
+    expect(startAt).toBeGreaterThan(runAt);
+    expect(ensureAt).toBeGreaterThan(startAt);
+    expect(invoke).not.toContain("activeCommandClaims");
+    expect(invoke).not.toContain("finally {");
   });
 
-  it("defers to a plugin's own drain barrier instead of stopping its host out of band (round-14 finding 1)", () => {
-    const unclaimed = stopPluginHostIfUnclaimedSource();
-    const activeClaimAt = unclaimed.indexOf("!activeCommandClaims.has(key)");
-    const isDrainingAt = unclaimed.indexOf(
-      "!activeCommandClaims.isDraining(key)",
-      activeClaimAt,
+  it("constructs one owner for the pipeline and its exact host", () => {
+    const createPipeline = functionSource("function createPluginPipeline(");
+    const ownerAt = createPipeline.indexOf(
+      "const hostOwnership = new PluginHostOwnership(pluginHost",
     );
-    const consumeAt = unclaimed.indexOf(
-      "(panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))",
-      isDrainingAt,
-    );
-    // MUTATION (out-of-band stop): without this check, a command that
-    // finishes mid-rebuild consumes the on-demand marker and stops the
-    // host directly here — outside the pipeline's own rebuild — while
-    // the rebuild still believes that runtime is retained.
-    expect(activeClaimAt).toBeGreaterThan(-1);
-    expect(isDrainingAt).toBeGreaterThan(activeClaimAt);
-    expect(consumeAt).toBeGreaterThan(isDrainingAt);
+    const pipelineAt = createPipeline.indexOf("pipeline = new PluginPipeline({");
+    const wireAt = createPipeline.indexOf("hostOwnership,", pipelineAt);
+
+    expect(ownerAt).toBeGreaterThan(-1);
+    expect(pipelineAt).toBeGreaterThan(ownerAt);
+    expect(wireAt).toBeGreaterThan(pipelineAt);
+    expect(createPipeline).not.toContain("raiseCommandClaimsBarrier:");
+    expect(createPipeline).not.toContain("awaitCommandClaimsDrained:");
   });
 
-  it("refuses a new command claim while a plugin is draining, and wires both barrier hooks to the same claims object", () => {
-    // raiseDrainBarrier()/drain()/isDraining()'s own semantics are pinned
-    // in pluginCommandHostClaims.test.ts. rebuild(), stopOldRuntime, and
-    // dispose()'s own use of the returned lower handles are pinned
-    // behaviorally in PluginPipeline.test.ts. This only pins that main.ts
-    // wires both hooks to the same claims object.
-    const invoke = handler("invokePluginCommand");
-    const claimKeyAt = invoke.indexOf(
-      "const claimKey = pluginLifecycleKey(workspace.workspaceId, input.pluginId);",
-    );
-    const isDrainingAt = invoke.indexOf(
-      "activeCommandClaims.isDraining(claimKey)",
-      claimKeyAt,
-    );
-    const refusalAt = invoke.indexOf('"plugin-rebuilding"', isDrainingAt);
-    const refusalMessageAt = invoke.indexOf(
-      'dohc is still working on plugin "${input.pluginId}". Try the command again in a moment.',
-      refusalAt,
-    );
-    const claimAt = invoke.indexOf("activeCommandClaims.claim(claimKey);", refusalAt);
-    // MUTATION (unbounded wait): dropping this refusal lets a new command
-    // join a plugin whose rebuild or workspace close is already draining
-    // it, so drain()'s own wait would never end.
-    expect(claimKeyAt).toBeGreaterThan(-1);
-    expect(isDrainingAt).toBeGreaterThan(claimKeyAt);
-    expect(refusalAt).toBeGreaterThan(isDrainingAt);
-    // MUTATION (passive voice hides the actor): dohc-interface requires a
-    // named actor for a failing action, not a passive "isn't available"
-    // that never says who is busy (#779 round 22 finding 6).
-    expect(refusalMessageAt).toBeGreaterThan(refusalAt);
-    expect(claimAt).toBeGreaterThan(refusalMessageAt);
+  it("passes the pipeline's exact host to the activation-tested start seam", () => {
+    const start = handler("startPluginPanel");
+    const ensureAt = start.indexOf("ensurePluginStarted(");
+    const hostAt = start.indexOf("pipeline.host,", ensureAt);
+    const leaseStartAt = start.indexOf("hostLease.start((authority)", hostAt);
 
-    const createPipeline = functionSource(
-      "function createPluginPipeline(",
-    );
-    const optionsAt = createPipeline.indexOf("pipeline = new PluginPipeline({");
-    const raiseAt = createPipeline.indexOf(
-      "raiseCommandClaimsBarrier: (pluginId) =>",
-      optionsAt,
-    );
-    const raiseCallAt = createPipeline.indexOf(
-      "activeCommandClaims.raiseDrainBarrier(",
-      raiseAt,
-    );
-    const lowerCallAt = createPipeline.indexOf("lower();", raiseCallAt);
-    const stopGateAt = createPipeline.indexOf(
-      "if (activeCommandClaims.consumeRuntimeStop(key)) {",
-      lowerCallAt,
-    );
-    const consumeAt = createPipeline.indexOf(
-      "activeCommandClaims.consumeStartedHost(key);",
-      stopGateAt,
-    );
-    // MUTATION (stale marker survives a rebuild): a marker not settled at
-    // this same lower survives a successful in-queue rebuild that replaced
-    // the runtime — a later, unrelated release then finds it and stops the
-    // replacement it never claimed (#779 round 19 finding 3).
-    expect(lowerCallAt).toBeGreaterThan(raiseCallAt);
-    // MUTATION (no-op reconcile eats a live marker): consuming unconditionally
-    // here, not only when consumeRuntimeStop reports this exact barrier's own
-    // action actually stopped or replaced the runtime, eats a command's own
-    // cold-start marker for a no-op reconcile or a precondition-failed action
-    // that never touched the runtime — nothing is then left to stop the host
-    // it started until workspace close (#779 round 26 note A).
-    expect(stopGateAt).toBeGreaterThan(lowerCallAt);
-    expect(consumeAt).toBeGreaterThan(stopGateAt);
+    expect(ensureAt).toBeGreaterThan(-1);
+    expect(hostAt).toBeGreaterThan(ensureAt);
+    expect(leaseStartAt).toBeGreaterThan(hostAt);
+  });
 
-    const boundaryAt = createPipeline.indexOf(
-      "onOldRuntimeStopBoundary: (pluginId) => {",
-      optionsAt,
-    );
-    const boundaryMarkAt = createPipeline.indexOf(
-      "activeCommandClaims.markRuntimeStopped(",
-      boundaryAt,
-    );
-    // MUTATION (nothing ever flags the stop): without this wire-up,
-    // consumeRuntimeStop above can never report true for any action, so the
-    // gate it guards permanently withholds the started-host marker instead
-    // of only withholding it from no-op reconciles (#779 round 26 note A).
-    expect(boundaryAt).toBeGreaterThan(optionsAt);
-    expect(boundaryMarkAt).toBeGreaterThan(boundaryAt);
-
-    const drainedAt = createPipeline.indexOf(
-      "awaitCommandClaimsDrained: (pluginId) =>",
-      raiseCallAt,
-    );
-    const deadlineWrapAt = createPipeline.indexOf(
-      "awaitCommandClaimsDrainedWithDeadline(",
-      drainedAt,
-    );
-    const drainCallAt = createPipeline.indexOf(
-      "activeCommandClaims.drain(",
-      deadlineWrapAt,
-    );
-    const resetAt = createPipeline.indexOf(
-      "resetCommandClaims: (pluginId) =>",
-      drainCallAt,
-    );
-    const resetCallAt = createPipeline.indexOf(
-      "activeCommandClaims.reset(",
-      resetAt,
-    );
-    // MUTATION (no raise/no wait): missing either wire-up makes the
-    // corresponding PluginPipeline hook a no-op (each is optional exactly
-    // so a caller without one keeps working) — silently letting a command
-    // claim a plugin its own rebuild believes it has exclusive control of.
-    expect(optionsAt).toBeGreaterThan(-1);
-    expect(raiseAt).toBeGreaterThan(optionsAt);
-    expect(raiseCallAt).toBeGreaterThan(raiseAt);
-    expect(drainedAt).toBeGreaterThan(raiseCallAt);
-    // MUTATION (unbounded teardown): a raw drain() with no deadline wrap
-    // lets a hung command's handler block disable/uninstall/rebuild and
-    // workspace disposal forever (round-15 finding 3).
-    expect(deadlineWrapAt).toBeGreaterThan(drainedAt);
-    expect(drainCallAt).toBeGreaterThan(deadlineWrapAt);
-    // MUTATION (stale marker survives disposal): a missing reset wire-up
-    // leaves a disposed workspace's started-host marker in place, so the
-    // next command against a later session reusing the same lifecycle
-    // key stops the wrong host (round-15 finding 2).
-    expect(resetAt).toBeGreaterThan(drainCallAt);
-    expect(resetCallAt).toBeGreaterThan(resetAt);
-
-    // A command's own isDraining check above only runs once, before it
-    // claims and before its lifecycle-lock wait — a stopping action can
-    // still raise its own barrier and enqueue in that gap. ensurePluginStarted
-    // calls the command's own recheck immediately before the pipeline's own
-    // enqueue call, with no `await` between the two, so nothing can
-    // interleave between them (round-17 finding 2, round-18 finding 1).
-    const ensureStartedFn = functionSource("async function ensurePluginStarted(");
-    const recheckParamAt = ensureStartedFn.indexOf("recheckCommandClaims?: CommandClaimsRecheck;");
-    // The recheck and the enqueue call both live inside this one callback,
-    // not the outer async function — declared with a plain `() => {`, not
-    // `async () => {`. That declaration is what actually makes an `await`
-    // between the two impossible: TypeScript refuses to compile one inside
-    // a non-async arrow. A mutation that turns this callback async is the
-    // one way "no await between them" could stop being true (#779 round 22
-    // finding 7 — the position checks below only proved ordering, not the
-    // absence of a gap; this line proves there is structurally no room for
-    // one).
-    const ensureStartedCallbackAt = ensureStartedFn.indexOf(
-      "ensureStarted: () => {",
-      recheckParamAt,
-    );
-    const recheckCallAt = ensureStartedFn.indexOf(
-      "options.recheckCommandClaims?.();",
-      ensureStartedCallbackAt,
-    );
-    const pipelineEnsureStartedAt = ensureStartedFn.indexOf(
-      "return pipeline.ensureStarted(plugin.manifest.name)",
-      recheckCallAt,
-    );
-    // MUTATION (TOCTOU stall): a recheck that runs anywhere but immediately
-    // before this exact call leaves a window where a racing action's own
-    // enqueue still lands ahead of this one on the same per-plugin queue —
-    // this call's own claim is then the exact thing that action's later
-    // stopOldRuntime wait stalls on.
-    expect(recheckParamAt).toBeGreaterThan(-1);
-    expect(ensureStartedCallbackAt).toBeGreaterThan(recheckParamAt);
-    expect(recheckCallAt).toBeGreaterThan(ensureStartedCallbackAt);
-    expect(pipelineEnsureStartedAt).toBeGreaterThan(recheckCallAt);
-    // MUTATION (async callback reopens the gap): nothing between the two
-    // calls but whitespace — an inserted `await` (which the callback's own
-    // sync signature above already forbids, so this also catches making
-    // the callback async first) or any other statement would push this
-    // slice past a bare closing brace.
-    const betweenRecheckAndEnsure = ensureStartedFn
-      .slice(recheckCallAt + "options.recheckCommandClaims?.();".length, pipelineEnsureStartedAt)
-      .trim();
-    expect(betweenRecheckAndEnsure).toBe("");
-    // MUTATION (raw pipeline error code reaches the panel/web-app catch):
-    // narrows PluginPipeline's own open-ended error code down to the one
-    // literal the catch above recognizes before it ever reaches
-    // startPluginForPanel (#779 round 27).
-    const narrowedAt = ensureStartedFn.indexOf(
-      ".then(toPluginPanelHostStartResult);",
-      pipelineEnsureStartedAt,
-    );
-    expect(narrowedAt).toBeGreaterThan(pipelineEnsureStartedAt);
-
-    const wireAt = invoke.indexOf(
-      "recheckCommandClaims: () =>",
-      claimAt,
-    );
-    const wireCheckAt = invoke.indexOf(
-      "activeCommandClaims.isDraining(claimKey)",
-      wireAt,
-    );
-    const wireThrowAt = invoke.indexOf(
-      "throw new PluginClaimsDrainingError(",
-      wireCheckAt,
-    );
-    // MUTATION (no recheck): a command path that never supplies this hook
-    // leaves ensurePluginStarted's own recheck permanently a no-op — the
-    // exact TOCTOU this round closes never gets checked at all.
-    expect(wireAt).toBeGreaterThan(-1);
-    expect(wireCheckAt).toBeGreaterThan(wireAt);
-    expect(wireThrowAt).toBeGreaterThan(wireCheckAt);
-
-    // A stale command's own recheck above can pass once disposal's drain
-    // deadline resets the barrier (round-18 finding 2) — the pipeline
-    // creation it then reaches must independently refuse a workspace no
-    // window has open any more, so ensurePluginPipeline shares one gate
-    // with every other caller instead of trusting each one's own point
-    // check.
-    const ensurePipelineFn = functionSource("async function ensurePluginPipeline(");
-    const createOnlyWhileAt = ensurePipelineFn.indexOf("createOnlyWhile: () =>");
-    const createOnlyWhileCallAt = ensurePipelineFn.indexOf(
+  it("refuses to create a plugin pipeline after the last workspace window closes", () => {
+    const ensurePipeline = functionSource("async function ensurePluginPipeline(");
+    const gateAt = ensurePipeline.indexOf("createOnlyWhile: () =>");
+    const checkAt = ensurePipeline.indexOf(
       "isWorkspaceOpenInAnyWindow(workspace.workspaceId)",
-      createOnlyWhileAt,
+      gateAt,
     );
-    // MUTATION (zombie pipeline): no createOnlyWhile wire-up leaves
-    // ensureWorkspacePipeline's own gate a no-op — a stale caller that
-    // waited out a workspace's disposal creates a fresh pipeline for it
-    // anyway, even though no window has that workspace open any more.
-    expect(createOnlyWhileAt).toBeGreaterThan(-1);
-    expect(createOnlyWhileCallAt).toBeGreaterThan(createOnlyWhileAt);
+
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(checkAt).toBeGreaterThan(gateAt);
   });
 
-  it("revokes a plugin's panel authorities before disable takes its process (#779 round 12 A4)", () => {
+  it("reserves disable before it disposes the plugin's panel records", () => {
     const disableAt = mainSource.indexOf(
       "pluginAction(CHANNELS.disablePlugin,",
     );
-    const disableRevokeAt = mainSource.indexOf(
-      "revokePluginPanels(workspaceId, pluginId);",
+    const disableCleanupAt = mainSource.indexOf(
+      "stopPluginPanelsForPlugin(workspaceId, pluginId)",
       disableAt,
     );
     const disableCallAt = mainSource.indexOf(
-      "return pipeline.disable(pluginId);",
+      "const result = pipeline.disable(pluginId);",
       disableAt,
     );
 
-    // MUTATION (ordering): revoking after the pipeline call leaves an
-    // already-queued panel write holding a live authority for the whole time
-    // the pipeline spends stopping the process and deleting the source, which
-    // is exactly the window the write completes in. What revocation does to
-    // an in-flight write is pinned by behavior in PluginHost.test.ts. disable
-    // takes no confirmation to validate first, so revoking ahead of its own
-    // call is safe — unlike uninstall, whose own ordering is pinned in
-    // main.pluginWebAppWiring.test.ts.
     expect(disableAt).toBeGreaterThan(-1);
-    expect(disableRevokeAt).toBeGreaterThan(-1);
-    expect(disableCallAt).toBeGreaterThan(disableRevokeAt);
+    expect(disableCallAt).toBeGreaterThan(disableAt);
+    expect(disableCleanupAt).toBeGreaterThan(disableCallAt);
   });
 
-  it("revokes a plugin's panel authorities only once no installed claimant survives its own uninstall", () => {
+  it("disposes a plugin's panel records only once no installed claimant survives uninstall", () => {
     const uninstall = handler("uninstallPlugin");
     const uninstallCallAt = uninstall.indexOf(
       "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
@@ -726,13 +461,12 @@ describe("plugin panel main-process wiring", () => {
       "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
       uninstallCallAt,
     );
-    const uninstallRevokeAt = uninstall.indexOf(
-      "revokePluginPanels(input.workspaceId, input.pluginId);",
+    const uninstallCleanupAt = uninstall.indexOf(
+      "stopPluginPanelsForPlugin(input.workspaceId, input.pluginId)",
       stillInstalledClaimantAt,
     );
 
-    // MUTATION (revoke before the result, or unconditionally): a collision
-    // loser's own uninstall must never tear down panel authorities a
+    // A collision loser's uninstall must never tear down panel records a
     // still-installed winner sharing this id genuinely owns — revoking has
     // to wait for both the pipeline's own result AND proof no installed
     // claimant of this id survives. The gate's own predicate is pinned by
@@ -740,7 +474,7 @@ describe("plugin panel main-process wiring", () => {
     // sibling is pinned end to end there too.
     expect(uninstallCallAt).toBeGreaterThan(-1);
     expect(stillInstalledClaimantAt).toBeGreaterThan(uninstallCallAt);
-    expect(uninstallRevokeAt).toBeGreaterThan(stillInstalledClaimantAt);
+    expect(uninstallCleanupAt).toBeGreaterThan(stillInstalledClaimantAt);
   });
 
   it("revokes a plugin's panel authorities before rebuild replaces its process", () => {
@@ -769,7 +503,7 @@ describe("plugin panel main-process wiring", () => {
       rebuildRevokeAt,
     );
     const rebuildStopWebAppsAt = rebuildBody.indexOf(
-      "stopPluginWebAppsForPlugin(workspaceId, pluginId);",
+      "void stopPluginWebAppsForPlugin(workspaceId, pluginId).catch(",
       rebuildReregisterAt,
     );
     // MUTATION (grant straddles the replacement): rebuild without this
@@ -877,8 +611,7 @@ describe("plugin panel main-process wiring", () => {
     // MUTATION (guest records outlive their window): a destroyed window
     // whose workspace survives must still lose its own panels and web
     // apps — revoking its SDK grants alone leaves those records alive
-    // indefinitely and starves stopPluginHostIfUnclaimed (#779 round 20
-    // finding 1).
+    // indefinitely and keeps their host leases live.
     expect(destroyedTryAt).toBeGreaterThan(destroyedAt);
     expect(destroyedSurfacesAt).toBeGreaterThan(destroyedTryAt);
     // MUTATION (unhandled rejection): a stop that rejects with no catch
@@ -904,8 +637,12 @@ describe("plugin panel main-process wiring", () => {
       "if (panel.senderId !== senderId) continue;",
     );
     const stopCallAt = panelsForSender.indexOf(
-      "stopPluginPanel(panel.workspaceId, panel.pluginId, panel.panelId)",
+      "stopPluginPanel(",
       filterAt,
+    );
+    const exactOwnerAt = panelsForSender.indexOf(
+      "{ senderId: panel.senderId, generation: panel.generation },",
+      stopCallAt,
     );
     // MUTATION (wrong window's panels stopped, or none at all): a filter
     // on any field but senderId either tears down a surviving window's
@@ -914,6 +651,7 @@ describe("plugin panel main-process wiring", () => {
     // opened it.
     expect(filterAt).toBeGreaterThan(-1);
     expect(stopCallAt).toBeGreaterThan(filterAt);
+    expect(exactOwnerAt).toBeGreaterThan(stopCallAt);
 
     const surfacesForSender = functionSource(
       "async function stopPluginSurfacesForSender(",
@@ -921,29 +659,17 @@ describe("plugin panel main-process wiring", () => {
     const webAppsAt = surfacesForSender.indexOf(
       "const removedWebApps = pluginWebAppViews.removeForSender(senderId);",
     );
-    const destroyAt = surfacesForSender.indexOf(
-      "destroyPluginWebAppViews(removedWebApps);",
+    const disposeAt = surfacesForSender.indexOf(
+      "await disposePluginWebAppViews(removedWebApps);",
       webAppsAt,
-    );
-    const unclaimedAt = surfacesForSender.indexOf(
-      "stopPluginHostIfUnclaimed(workspaceId, pluginId)",
-      destroyAt,
     );
     const panelsAt = surfacesForSender.indexOf(
       "await stopPluginPanelsForSender(senderId);",
-      unclaimedAt,
+      disposeAt,
     );
-    // MUTATION (host claim leak): destroying a sender's own web app view
-    // without also checking whether anything else still claims that host
-    // leaves a cold-started process running forever once the window that
-    // started it is gone (#779 round 21 finding 2).
-    expect(destroyAt).toBeGreaterThan(webAppsAt);
-    expect(unclaimedAt).toBeGreaterThan(destroyAt);
-    // MUTATION (one surface type left behind): a caller reaching only one
-    // of these still starves stopPluginHostIfUnclaimed of the other kind
-    // of claim this sender's own window left behind.
+    expect(disposeAt).toBeGreaterThan(webAppsAt);
     expect(webAppsAt).toBeGreaterThan(-1);
-    expect(panelsAt).toBeGreaterThan(webAppsAt);
+    expect(panelsAt).toBeGreaterThan(disposeAt);
   });
 
   it("excludes the reloading sender's own now-stale entry from the any-window check, so a reload of the last window still tears down its workspace (#779 round 20 finding 2)", () => {

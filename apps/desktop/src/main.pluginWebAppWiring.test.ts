@@ -31,19 +31,16 @@ function functionSource(signature: string): string {
 }
 
 describe("plugin web app main-process wiring", () => {
-  it("validates the web app registration before starting its host", () => {
+  it("validates and remembers a web app without starting its host", () => {
     const open = handler("openPluginWebApp");
     const loadAt = open.indexOf("loadPluginWebAppRegistration({");
     const rememberAt = open.indexOf("rememberPluginRegistration(");
-    const lockAt = open.indexOf("await withPluginWebAppStartLock(");
-    const startAt = open.indexOf("return ensurePluginStarted(workspace, plugin)");
 
     expect(loadAt).toBeGreaterThan(-1);
     expect(rememberAt).toBeGreaterThan(loadAt);
-    expect(lockAt).toBeGreaterThan(rememberAt);
-    expect(startAt).toBeGreaterThan(lockAt);
-    expect(open).toContain("withPluginHostLifecycleLock(");
     expect(open).toContain("assertPluginPanelRequestCurrent(isCurrent);");
+    expect(open).not.toContain("ensurePluginStarted(");
+    expect(open).not.toContain("acquirePluginSurfaceLease(");
     expect(open).toContain(
       "pluginRegistration: pluginPipelines.get(workspace.workspaceId),",
     );
@@ -80,7 +77,7 @@ describe("plugin web app main-process wiring", () => {
     // credential-free is pinned in pluginWebAppGuest.test.ts, where it is
     // derived; the start URL reaches this handler only to be passed on.
     expect(start).toContain("origin: guest.origin,");
-    expect(start).toContain("if (displaced) destroyPluginWebAppViews([displaced]);");
+    expect(start).toContain("await disposePluginWebAppViews([displaced]);");
   });
 
   it("recovers a consumed credential by unpairing the plugin itself", () => {
@@ -98,22 +95,17 @@ describe("plugin web app main-process wiring", () => {
     expect(start).toContain("notifyFailed: () =>");
     expect(start).toContain("onLoadFailure: () => {");
     expect(start).toContain("recoverConsumedCredential();");
-    // The teardown runs in a section on the lock a reopen queues on, and its
-    // view stop must be the variant that does NOT take that lock again.
-    // MUTATION (stopPluginWebApp here): the section waits on itself and the
-    // web app can never be opened again in this app run.
+    // The teardown runs in a section on the lock a reopen queues on.
     expect(start).toContain("withTeardownLock: (teardown) =>");
     expect(start).toContain("withPluginWebAppStartLock(");
-    expect(start).toContain("stopPluginWebAppUnderStartLock(");
-    expect(start).not.toContain("stopPluginWebApp(");
+    expect(start).toContain("pluginWebAppViews.get(identity) === installedRecord");
+    expect(start).toContain("await disposePluginWebAppViews(records);");
   });
 
   it("leaves a normal tab close paired", () => {
-    // Both halves of the close: this path and the host release it delegates
-    // to. An unpair added to either one would unpair every tab close.
-    const closePath =
-      functionSource("async function stopPluginWebAppUnderStartLock(") +
-      functionSource("async function stopPluginHostIfUnclaimed(");
+    const closePath = functionSource(
+      "async function stopPluginWebAppUnderStartLock(",
+    );
     // MUTATION (unpair on every close): an enabled plugin's server would then
     // be torn down and respawned on every tab close, and the guest's session
     // cookie — which already landed, and which the next open reuses — would
@@ -131,10 +123,11 @@ describe("plugin web app main-process wiring", () => {
     // the attach callback binds the REAL guest's WebContents to the applier
     // fed by knownZoomLevel.
     const start = handler("startPluginWebApp");
-    const registerAt = start.indexOf("pluginWebAppViews.register({");
-    const bindAt = start.indexOf("bindGuestZoom(view.webContents);", registerAt);
+    const bindAt = start.indexOf("bindGuestZoom(view.webContents);");
+    const registerAt = start.indexOf("pluginWebAppViews.register(next)", bindAt);
+    expect(bindAt).toBeGreaterThan(-1);
     expect(registerAt).toBeGreaterThan(-1);
-    expect(bindAt).toBeGreaterThan(registerAt);
+    expect(registerAt).toBeGreaterThan(bindAt);
     expect(squeeze(mainSource)).toContain(
       "constbindGuestZoom=createGuestZoomApplier(()=>knownZoomLevel);",
     );
@@ -179,9 +172,7 @@ describe("plugin web app main-process wiring", () => {
   // preview's resize, stop, or failure would land on another preview.
   it("keys every web app path by the instance the request named", () => {
     const start = squeeze(handler("startPluginWebApp"));
-    expect(start).toContain(
-      "stopView:()=>stopPluginWebAppUnderStartLock(workspace.workspaceId,input.pluginId,input.webAppId,input.instanceKey,)",
-    );
+    expect(start).toContain("constidentity={workspaceId:workspace.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,}");
     expect(start).toContain(
       "assertInstanceBudget(input.pluginId,input.webAppId,pluginWebAppViews.countOtherInstances(identity),)",
     );
@@ -193,39 +184,58 @@ describe("plugin web app main-process wiring", () => {
     );
     const stop = squeeze(handler("stopPluginWebApp"));
     expect(stop).toContain(
-      "pluginWebAppViews.get({workspaceId:workspace.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,})",
+      "awaitstopPluginWebApp(workspace.workspaceId,input.pluginId,input.webAppId,input.instanceKey,{senderId:event.sender.id,generation:rendererGeneration(event.sender.id),},)",
     );
-    expect(stop).toContain(
-      "awaitstopPluginWebApp(workspace.workspaceId,input.pluginId,input.webAppId,input.instanceKey,)",
+    const stopUnderLock = squeeze(
+      functionSource("async function stopPluginWebAppUnderStartLock("),
+    );
+    expect(stopUnderLock).toContain(
+      "pluginWebAppViews.get({workspaceId,pluginId,webAppId,instanceKey,})",
     );
   });
 
-  it("shares the host claim accounting between panels and web apps", () => {
-    // One helper, both close paths: neither can grow a claim rule the other
-    // does not have.
-    const call = "await stopPluginHostIfUnclaimed(workspaceId, pluginId);";
-    expect(functionSource("async function stopPluginWebAppUnderStartLock(")).toContain(
-      call,
+  it("releases a failed web app start's exact lease", () => {
+    const start = handler("startPluginWebApp");
+    const stopViewAt = start.indexOf("stopView: async () => {");
+    const exactRecordAt = start.indexOf(
+      "pluginWebAppViews.get(identity) === installedRecord",
+      stopViewAt,
     );
-    expect(functionSource("async function stopPluginPanel(")).toContain(call);
+    const recordReleaseAt = start.indexOf(
+      "await disposePluginWebAppViews(records);",
+      exactRecordAt,
+    );
+    const pendingReleaseAt = start.indexOf(
+      "await hostLease.release();",
+      recordReleaseAt,
+    );
 
-    const unclaimed = functionSource("async function stopPluginHostIfUnclaimed(");
-    expect(unclaimed).toContain("hasAnotherPanel");
-    // MUTATION (shared claim): without this, closing the last panel stops a
-    // host whose web app tab is still open on the same plugin — and closing
-    // the last tab stops a host a panel still needs.
-    expect(unclaimed).toContain(
-      "!pluginWebAppViews.hasForPlugin(workspaceId, pluginId) &&",
+    expect(stopViewAt).toBeGreaterThan(-1);
+    expect(exactRecordAt).toBeGreaterThan(stopViewAt);
+    expect(recordReleaseAt).toBeGreaterThan(exactRecordAt);
+    expect(pendingReleaseAt).toBeGreaterThan(recordReleaseAt);
+  });
+
+  it("stores and releases the lease owned by each web app record", () => {
+    const start = handler("startPluginWebApp");
+    const acquireAt = start.indexOf("acquirePluginSurfaceLease(");
+    const ownerAt = start.indexOf("pipeline.hostOwnership", acquireAt);
+    const startAt = start.indexOf("hostLease.start((authority)", acquireAt);
+    const installAt = start.indexOf("pluginWebAppViews.register(next)", startAt);
+    const displacementAt = start.indexOf(
+      "await disposePluginWebAppViews([displaced]);",
+      installAt,
     );
-    expect(unclaimed).toContain("!activeCommandClaims.has(key) &&");
-    // A command's cold start (claim: false) never touches panelStartedHosts,
-    // so a surface-less command-started host relies on this fallback the
-    // same way a panel's own claim relies on panelStartedHosts.delete()
-    // (round-9 finding 1) — pinned behaviorally in
-    // pluginCommandHostClaims.test.ts and pluginPanelRegistration.test.ts.
-    expect(unclaimed).toContain(
-      "(panelStartedHosts.delete(key) || activeCommandClaims.consumeStartedHost(key))",
-    );
+
+    expect(acquireAt).toBeGreaterThan(-1);
+    expect(ownerAt).toBeGreaterThan(acquireAt);
+    expect(startAt).toBeGreaterThan(acquireAt);
+    expect(installAt).toBeGreaterThan(startAt);
+    expect(displacementAt).toBeGreaterThan(installAt);
+
+    const dispose = functionSource("async function disposePluginWebAppViews(");
+    expect(dispose).toContain("destroyPluginWebAppViews(records);");
+    expect(dispose).toContain("record.view.hostLease.release()");
   });
 
   it("destroys guest views on every teardown path a view could outlive", () => {
@@ -242,53 +252,43 @@ describe("plugin web app main-process wiring", () => {
       "const removedWebApps = pluginWebAppViews.removeForSender(senderId);",
     );
     expect(surfacesForSender).toContain(
-      "destroyPluginWebAppViews(removedWebApps);",
+      "await disposePluginWebAppViews(removedWebApps);",
     );
-    // MUTATION (a rejecting host stop skips panel cleanup): an uncaught
-    // rejection from any one host's own stopPluginHostIfUnclaimed call
-    // would reject the whole Promise.all and skip everything queued after
-    // it in this function, including stopPluginPanelsForSender below — a
-    // single web-app host that fails to stop must not leave every panel
-    // this sender opened uncleaned too (#779 round 25 finding 4).
-    const stopHostAt = surfacesForSender.indexOf(
-      "() => stopPluginHostIfUnclaimed(workspaceId, pluginId),",
-    );
-    const stopHostCatchAt = surfacesForSender.indexOf(
-      ".catch((error: unknown) => {",
-      stopHostAt,
+    const disposeAt = surfacesForSender.indexOf(
+      "await disposePluginWebAppViews(removedWebApps);",
     );
     const panelsForSenderAt = surfacesForSender.indexOf(
       "await stopPluginPanelsForSender(senderId);",
-      stopHostCatchAt,
+      disposeAt,
     );
-    expect(stopHostAt).toBeGreaterThan(-1);
-    expect(stopHostCatchAt).toBeGreaterThan(stopHostAt);
-    expect(panelsForSenderAt).toBeGreaterThan(stopHostCatchAt);
+    expect(panelsForSenderAt).toBeGreaterThan(disposeAt);
 
     const stopWorkspace = functionSource("async function stopPluginWorkspace(");
     expect(stopWorkspace).toContain(
-      "destroyPluginWebAppViews(pluginWebAppViews.removeForWorkspace(workspaceId));",
+      "pluginWebAppViews.removeForWorkspace(workspaceId)",
     );
+    expect(stopWorkspace).toContain("await disposePluginWebAppViews(");
 
     const stopAll = functionSource("async function stopAllPluginWorkspaces(");
-    expect(stopAll).toContain("destroyPluginWebAppViews(pluginWebAppViews.removeAll());");
+    expect(stopAll).toContain("pluginWebAppViews.all().map((record) => record.workspaceId)");
 
     const pipeline = functionSource("function createPluginPipeline");
     expect(pipeline).toContain(
-      "stopPluginWebAppsForPlugin(workspace.workspaceId, pluginId);",
+      "void stopPluginWebAppsForPlugin(workspace.workspaceId, pluginId).catch(",
     );
 
     const disableAt = mainSource.indexOf("pluginAction(CHANNELS.disablePlugin,");
     const disableStopAt = mainSource.indexOf(
-      "stopPluginWebAppsForPlugin(workspaceId, pluginId);",
+      "stopPluginWebAppsForPlugin(workspaceId, pluginId)",
       disableAt,
     );
     const disableCallAt = mainSource.indexOf(
-      "return pipeline.disable(pluginId);",
+      "const result = pipeline.disable(pluginId);",
       disableAt,
     );
+    expect(disableCallAt).toBeGreaterThan(disableAt);
     expect(disableStopAt).toBeGreaterThan(disableAt);
-    expect(disableCallAt).toBeGreaterThan(disableStopAt);
+    expect(disableStopAt).toBeGreaterThan(disableCallAt);
   });
 
   // The predicate itself, pinned once by name so every gate that reuses it
@@ -335,13 +335,13 @@ describe("plugin web app main-process wiring", () => {
       guestsAt,
     );
     const notifyAt = stop.indexOf("notifyPluginWebAppFailed(sender,", resolveSenderAt);
-    const destroyAt = stop.indexOf("destroyPluginWebAppViews,", notifyAt);
+    const disposeAt = stop.indexOf("await disposePluginWebAppViews(records);", notifyAt);
 
     expect(removeAt).toBeGreaterThan(-1);
     expect(guestsAt).toBeGreaterThan(removeAt);
     expect(resolveSenderAt).toBeGreaterThan(guestsAt);
     expect(notifyAt).toBeGreaterThan(resolveSenderAt);
-    expect(destroyAt).toBeGreaterThan(notifyAt);
+    expect(disposeAt).toBeGreaterThan(notifyAt);
     expect(squeeze(stop)).toContain(
       "notifyPluginWebAppFailed(sender,record.generation,{workspaceId:record.workspaceId,pluginId:record.pluginId,webAppId:record.webAppId,instanceKey:record.instanceKey,})",
     );
@@ -439,13 +439,13 @@ describe("plugin web app main-process wiring", () => {
       "if (!stillInstalledClaimant && (result.ok || claimantStoppedBySettledResult)) {",
       uninstallCallAt,
     );
-    const revokeAt = uninstall.indexOf(
-      "revokePluginPanels(input.workspaceId, input.pluginId);",
+    const panelStopAt = uninstall.indexOf(
+      "stopPluginPanelsForPlugin(input.workspaceId, input.pluginId)",
       settledGuardAt,
     );
     const stopAt = uninstall.indexOf(
-      "stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);",
-      revokeAt,
+      "stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId)",
+      panelStopAt,
     );
 
     // MUTATION (revoke/stop before the settled guard, or before
@@ -454,13 +454,11 @@ describe("plugin web app main-process wiring", () => {
     // this attempt actually reached pluginHost.stop().
     expect(uninstallCallAt).toBeGreaterThan(-1);
     expect(settledGuardAt).toBeGreaterThan(uninstallCallAt);
-    expect(revokeAt).toBeGreaterThan(settledGuardAt);
-    expect(stopAt).toBeGreaterThan(revokeAt);
-    // No earlier, unconditional revoke/stop pair exists before the call at
-    // all — the only occurrences are the ones just found, after settling.
-    expect(uninstall.indexOf("revokePluginPanels(input.workspaceId, input.pluginId);"))
-      .toBe(revokeAt);
-    expect(uninstall.indexOf("stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId);"))
+    expect(panelStopAt).toBeGreaterThan(settledGuardAt);
+    expect(stopAt).toBeGreaterThan(panelStopAt);
+    expect(uninstall.indexOf("stopPluginPanelsForPlugin(input.workspaceId, input.pluginId)"))
+      .toBe(panelStopAt);
+    expect(uninstall.indexOf("stopPluginWebAppsForPlugin(input.workspaceId, input.pluginId)"))
       .toBe(stopAt);
   });
 

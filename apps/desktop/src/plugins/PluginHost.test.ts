@@ -31,8 +31,6 @@ import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority
 import {
   revokePluginPanelAuthorities,
   revokePluginPanelAuthoritiesForStatus,
-  startPluginPanelWithLock,
-  stopPluginPanelWithLock,
 } from "./pluginPanelStartLifecycle";
 import {
   PLUGIN_ACTIVATION_TIMEOUT_MS,
@@ -1960,103 +1958,6 @@ describe("PluginHost", () => {
       liveSpawnId: restartedSpawnId,
     })).toMatchObject({ spawnId: restartedSpawnId });
     expect(grant.signal.aborted).toBe(false);
-  });
-
-  it("sequences different panels against one plugin host", async () => {
-    const root = await workspaceRoot();
-    const stopEntered = deferredVoid();
-    const releaseStop = deferredVoid();
-    let spawnCount = 0;
-    const host = trackHost({
-      stateDir: await stateDir(),
-      workspaceRoot: root,
-      spawnTransport: () => {
-        spawnCount += 1;
-        const thisSpawn = spawnCount;
-        return {
-          request: async <T,>(method: string) => {
-            if (
-              thisSpawn === 1 &&
-              method === PLUGIN_HOST_METHODS.deactivate
-            ) {
-              stopEntered.resolve();
-              await releaseStop.promise;
-            }
-            return (method === PLUGIN_HOST_METHODS.activate
-              ? { commands: ["hello.write"], drivers: [] }
-              : {}) as T;
-          },
-          notify: () => undefined,
-          dispose: async () => undefined,
-        };
-      },
-      routeSdkRequest: defaultRouter,
-    });
-    const manifest = await fixtureManifest();
-    await host.start(helloPluginRoot, "hello-plugin", manifest);
-    await waitFor(
-      () => host.getStatus("hello-plugin") === "ready",
-      "Plugin did not become ready.",
-    );
-
-    const panelLocks = new Map<string, Promise<void>>();
-    const pluginLocks = new Map<string, Promise<void>>();
-    const lock = (locks: Map<string, Promise<void>>) =>
-      async <T>(key: string, operation: () => Promise<T>) => {
-        const previous = locks.get(key) ?? Promise.resolve();
-        let release!: () => void;
-        const current = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        const queued = previous.catch(() => undefined).then(() => current);
-        locks.set(key, queued);
-        await previous.catch(() => undefined);
-        try {
-          return await operation();
-        } finally {
-          release();
-          if (locks.get(key) === queued) locks.delete(key);
-        }
-      };
-    const withPanelLock = lock(panelLocks);
-    const withPluginLock = lock(pluginLocks);
-    const panels = new Set(["panel-a"]);
-
-    const stop = stopPluginPanelWithLock(
-      "workspace-a\0hello-plugin\0panel-a",
-      "workspace-a\0hello-plugin",
-      withPanelLock,
-      withPluginLock,
-      async () => {
-        panels.delete("panel-a");
-        await host.stop("hello-plugin");
-      },
-    );
-    await stopEntered.promise;
-    const start = startPluginPanelWithLock(
-      "workspace-a\0hello-plugin\0panel-b",
-      "workspace-a\0hello-plugin",
-      withPanelLock,
-      withPluginLock,
-      async () => {
-        if (!host.getSpawnId("hello-plugin")) {
-          await host.start(helloPluginRoot, "hello-plugin", manifest);
-        }
-        return host;
-      },
-      async () => {
-        panels.add("panel-b");
-      },
-    );
-    expect(spawnCount).toBe(1);
-    expect(panels).toEqual(new Set());
-
-    releaseStop.resolve();
-    await Promise.all([stop, start]);
-
-    expect(spawnCount).toBe(2);
-    expect(host.getSpawnId("hello-plugin")).toBeTruthy();
-    expect(panels).toEqual(new Set(["panel-b"]));
   });
 
   it("cleanly stops the respawned plugin when a status listener reacts to a crash", async () => {
