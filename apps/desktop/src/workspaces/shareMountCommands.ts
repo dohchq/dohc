@@ -221,6 +221,25 @@ export function createShareMountCommands<WorkspaceSummary>(
     },
   };
 
+  function presentUnmount(shareId: string): void {
+    try {
+      dependencies.refreshNativeWorkspaceSurfaces();
+    } catch (surfaceError) {
+      dependencies.logError(
+        `could not refresh native surfaces after unmount for ${shareId}:`,
+        surfaceError,
+      );
+    }
+    try {
+      dependencies.notifyRenderer();
+    } catch (notifyError) {
+      dependencies.logError(
+        `could not notify renderer after unmount for ${shareId}:`,
+        notifyError,
+      );
+    }
+  }
+
   return {
     filesLifecycle,
 
@@ -328,7 +347,10 @@ export function createShareMountCommands<WorkspaceSummary>(
                     workspaceId: workspace.workspaceId,
                     shareId: mount.shareId,
                   });
-                  if (rollback.folderLeft) {
+                  if (
+                    rollback.folderLeft ||
+                    rollback.error !== undefined
+                  ) {
                     mountError = new ShareViewMountRollbackError(
                       error,
                       rollback.error,
@@ -486,8 +508,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                 workspace.workspaceId,
                 removal.remaining,
               );
-              dependencies.refreshNativeWorkspaceSurfaces();
-              dependencies.notifyRenderer();
+              presentUnmount(shareId);
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 folderLeft: true as const,
@@ -498,8 +519,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               workspaceId: workspace.workspaceId,
               shareId: removal.mount.shareId,
             });
-            dependencies.refreshNativeWorkspaceSurfaces();
-            dependencies.notifyRenderer();
+            presentUnmount(shareId);
             return {
               workspace: dependencies.workspaceSummary(workspace.workspaceId),
               ...(removed.folderLeft ? { folderLeft: true as const } : {}),

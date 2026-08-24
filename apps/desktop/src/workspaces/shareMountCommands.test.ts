@@ -339,6 +339,33 @@ describe("share mount commands", () => {
     expect(h.mounts).toEqual([]);
   });
 
+  it("preserves a cleanup error when rollback removed the folder", async () => {
+    const h = harness();
+    const cleanupFailure = new Error("metadata cleanup failed");
+    const loggedErrors: unknown[] = [];
+    h.dependencies.refreshNativeWorkspaceSurfaces = () => {
+      throw new Error("native refresh failed");
+    };
+    h.dependencies.logError = (_message, error) => {
+      loggedErrors.push(error);
+    };
+    h.removeOutcome = { folderLeft: false, error: cleanupFailure };
+    const commands = createShareMountCommands(h.dependencies);
+
+    await expect(
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+    ).rejects.toThrow("cleanup did not finish");
+
+    const rollbackError = loggedErrors.find(
+      (error) => error instanceof ShareViewMountRollbackError,
+    );
+    expect(rollbackError).toBeInstanceOf(ShareViewMountRollbackError);
+    expect(
+      (rollbackError as ShareViewMountRollbackError).rollbackError,
+    ).toBe(cleanupFailure);
+    expect(h.mounts).toEqual([]);
+  });
+
   it("serializes mount commands before relay preflight", async () => {
     const h = harness();
     let releaseFirst!: () => void;
@@ -672,6 +699,58 @@ describe("share mount commands", () => {
     ]);
     expect(h.mounts).toEqual([]);
   });
+
+  it.each([
+    {
+      caseName: "damaged registry ownership",
+      mounts: [
+        { shareId: SHARE_ID, label: "../../escape" },
+        { shareId: SHARE_ID, label: "duplicate" },
+      ],
+      folderLeft: true,
+    },
+    {
+      caseName: "a usable mount",
+      mounts: [
+        {
+          shareId: SHARE_ID,
+          label: "alex",
+          granterEmail: null,
+          relayUrl: "https://relay.example",
+          recipientEmail: null,
+          grantedSelector: SELECTOR,
+        },
+      ],
+      folderLeft: false,
+    },
+  ] as const)(
+    "returns committed unmount success when presenting $caseName fails",
+    async ({ mounts, folderLeft }) => {
+      const h = harness();
+      const nativeFailure = new Error("native refresh failed");
+      const notifyFailure = new Error("notify failed");
+      const loggedErrors: unknown[] = [];
+      h.mounts = [...mounts];
+      h.dependencies.refreshNativeWorkspaceSurfaces = () => {
+        throw nativeFailure;
+      };
+      h.dependencies.notifyRenderer = () => {
+        throw notifyFailure;
+      };
+      h.dependencies.logError = (_message, error) => {
+        loggedErrors.push(error);
+      };
+
+      await expect(
+        h.commands.unmount({ workspace: WORKSPACE, shareId: SHARE_ID }),
+      ).resolves.toEqual({
+        workspace: { id: WORKSPACE.workspaceId },
+        ...(folderLeft ? { folderLeft: true } : {}),
+      });
+      expect(loggedErrors).toEqual([nativeFailure, notifyFailure]);
+      expect(h.mounts).toEqual([]);
+    },
+  );
 
   it("maps an ended share during mount without leaving success notifications", async () => {
     const h = harness();
