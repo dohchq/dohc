@@ -39,7 +39,6 @@ const getAgentSessionState = vi.fn(async ({ workspaceId }: { workspaceId: string
 );
 
 beforeEach(() => {
-  getAgentSessionState.mockClear();
   // A test may swap the implementation (e.g. to start a session mid-test);
   // restore the workspace-keyed default so tests stay independent.
   getAgentSessionState.mockImplementation(
@@ -154,7 +153,7 @@ describe("useAgentNotifications idle polling", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3_000);
     });
-    expect(getAgentSessionState.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(getAgentSessionState).toHaveBeenCalledTimes(4);
     expect(result.current.pendingPermissions).toBe(asks);
     expect(renders).toBe(settledRenders);
   });

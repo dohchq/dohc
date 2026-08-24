@@ -87,60 +87,56 @@ export function useAgentNotifications(params: {
     let cancelled = false;
     let timer: number | undefined;
 
-    // Returns whether a session exists, so the scheduler below can back off.
-    const poll = async (): Promise<boolean> => {
-      let panel: Awaited<ReturnType<ReturnType<typeof bridge>["getAgentSessionState"]>>;
+    // Idle backoff: no session means no asks and nothing to notify about, so
+    // the next look can wait. The poll that first sees a session — and every
+    // poll while one exists — schedules at the fast cadence again.
+    const idleIntervalMs = Math.max(pollIntervalMs, IDLE_POLL_INTERVAL_MS);
+    const poll = async () => {
+      // Fast cadence unless this poll proves there is no session; a transient
+      // IPC failure (no panel) also retries fast.
+      let nextDelayMs = pollIntervalMs;
+      let panel: AgentPanelSnapshotResult | undefined;
       try {
         panel = await bridge().getAgentSessionState({ workspaceId });
       } catch {
-        return true; // transient IPC failure — retry at the fast cadence
+        // transient IPC failure — retry at the fast cadence
       }
-      if (cancelled) return true;
-      const runId = panel.session?.runId ?? null;
-      const requests = panel.session?.pendingPermissions ?? [];
-      // Reference-stable no-op (same rule as reduceAgentNotifications): a poll
-      // that changes nothing MUST keep `prev` so setState bails out instead of
-      // re-rendering the host shell every tick. requestId is the request's
-      // identity — a new ask always gets a fresh one.
-      setPendingAsks((prev) =>
-        prev.workspaceId === workspaceId &&
-        prev.runId === runId &&
-        prev.requests.length === requests.length &&
-        prev.requests.every((req, i) => req.requestId === requests[i]!.requestId)
-          ? prev
-          : { workspaceId, runId, requests },
-      );
-      const activity = deriveAgentActivity({
-        workspaceId,
-        workspaceName: metaRef.current.workspaceName,
-        agentName: metaRef.current.agentName,
-        session: panel.session,
-        userCandidates: candidatesRef.current,
-      });
-      if (activity) {
-        setNotifications((prev) =>
-          reduceAgentNotifications(prev, activity, {
-            nowMs: Date.now(),
-            dismissed: dismissedFor(workspaceId),
-          }),
-        );
-      }
-      return panel.session !== null;
-    };
-
-    // Idle backoff: no session means no asks and nothing to notify about, so
-    // the next look can wait. The tick that first sees a session — and every
-    // tick while one exists — schedules at the fast cadence again.
-    const idleIntervalMs = Math.max(pollIntervalMs, IDLE_POLL_INTERVAL_MS);
-    const tick = async () => {
-      const hasSession = await poll();
       if (cancelled) return;
-      timer = window.setTimeout(
-        () => void tick(),
-        hasSession ? pollIntervalMs : idleIntervalMs,
-      );
+      if (panel) {
+        if (panel.session === null) nextDelayMs = idleIntervalMs;
+        const runId = panel.session?.runId ?? null;
+        const requests = panel.session?.pendingPermissions ?? [];
+        // Reference-stable no-op (same rule as reduceAgentNotifications): a poll
+        // that changes nothing MUST keep `prev` so setState bails out instead of
+        // re-rendering the host shell every tick. requestId is the request's
+        // identity — a new ask always gets a fresh one.
+        setPendingAsks((prev) =>
+          prev.workspaceId === workspaceId &&
+          prev.runId === runId &&
+          prev.requests.length === requests.length &&
+          prev.requests.every((req, i) => req.requestId === requests[i]!.requestId)
+            ? prev
+            : { workspaceId, runId, requests },
+        );
+        const activity = deriveAgentActivity({
+          workspaceId,
+          workspaceName: metaRef.current.workspaceName,
+          agentName: metaRef.current.agentName,
+          session: panel.session,
+          userCandidates: candidatesRef.current,
+        });
+        if (activity) {
+          setNotifications((prev) =>
+            reduceAgentNotifications(prev, activity, {
+              nowMs: Date.now(),
+              dismissed: dismissedFor(workspaceId),
+            }),
+          );
+        }
+      }
+      timer = window.setTimeout(() => void poll(), nextDelayMs);
     };
-    void tick();
+    void poll();
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
