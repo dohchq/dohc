@@ -296,7 +296,10 @@ class EngineYDocSessionIpc {
         ? unavailableOpen({ engineMayHoldDocument: true })
         : unavailableOpen();
     }
-    if (opened.reason === "session-unreleased") {
+    if (
+      opened.reason === "session-in-use" ||
+      opened.reason === "session-unreleased"
+    ) {
       return unavailableOpen({ engineMayHoldDocument: true });
     }
     if (opened.reason !== "open-refused") return unavailableOpen();
