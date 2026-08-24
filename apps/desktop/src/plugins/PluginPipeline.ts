@@ -276,6 +276,11 @@ type UninstallCleanupDecision = "stop" | "cancel";
 
 interface UninstallQueueClaim {
   decide(decision: UninstallCleanupDecision): void;
+  release(): void;
+  readonly stopOutcome: Promise<
+    | { ok: true }
+    | { ok: false; error: unknown }
+  >;
   readonly outcome: Promise<
     | { ok: true }
     | { ok: false; error: unknown }
@@ -1733,7 +1738,10 @@ export class PluginPipeline {
       }
     }, primaryReservation);
     return action.finally(async () => {
-      for (const claim of cleanupQueueClaims) claim.decide("cancel");
+      for (const claim of cleanupQueueClaims) {
+        claim.decide("cancel");
+        claim.release();
+      }
       await Promise.all(cleanupQueueClaims.map((claim) => claim.outcome));
     });
   }
@@ -3367,7 +3375,7 @@ export class PluginPipeline {
   ): Promise<void> {
     const stops = cleanupQueueClaims.map(async (claim) => {
       claim.decide("stop");
-      const outcome = await claim.outcome;
+      const outcome = await claim.stopOutcome;
       if (!outcome.ok) throw outcome.error;
     });
     if (cleanupIds.has(primaryPluginId)) {
@@ -3408,24 +3416,67 @@ export class PluginPipeline {
           resolveDecision(next);
         };
       });
+      let release!: () => void;
+      const released = new Promise<void>((resolveReleased) => {
+        release = resolveReleased;
+      });
+      let settleStop!: (
+        outcome: { ok: true } | { ok: false; error: unknown },
+      ) => void;
+      let stopSettled = false;
+      const stopOutcome = new Promise<
+        { ok: true } | { ok: false; error: unknown }
+      >((resolveStop) => {
+        settleStop = (outcome) => {
+          if (stopSettled) return;
+          stopSettled = true;
+          resolveStop(outcome);
+        };
+      });
       const action = this.enqueueActionValue(pluginId, async () => {
         if (await decision === "cancel") {
-          await reservation.cancel();
+          try {
+            await reservation.cancel();
+            settleStop({ ok: true });
+          } catch (error) {
+            settleStop({ ok: false, error });
+            throw error;
+          }
           return;
         }
-        const failure = await reservation.run(async (change) => {
-          let stopFailure: unknown;
-          try {
-            await this.stopOldRuntime(pluginId, change);
-          } catch (error) {
-            stopFailure = error;
-          }
-          return change.preserve(existingHostResult(stopFailure));
-        });
-        if (failure !== undefined) throw failure;
+        let stopFailure: unknown;
+        try {
+          stopFailure = await reservation.run(async (change) => {
+            let failure: unknown;
+            try {
+              await this.stopOldRuntime(pluginId, change);
+            } catch (error) {
+              failure = error;
+            }
+            return change.preserve(existingHostResult(failure));
+          });
+          settleStop(
+            stopFailure === undefined
+              ? { ok: true }
+              : { ok: false, error: stopFailure },
+          );
+        } catch (error) {
+          stopFailure = error;
+          settleStop({ ok: false, error });
+        }
+        // The stop boundary and the queue boundary are separate: the primary
+        // uninstall may delete only after stopOutcome settles, while work
+        // admitted behind this claim stays parked until primary cleanup ends.
+        await released;
+        if (stopFailure !== undefined) throw stopFailure;
+      });
+      void action.catch((error: unknown) => {
+        settleStop({ ok: false, error });
       });
       claims.push({
         decide,
+        release,
+        stopOutcome,
         outcome: action.then(
           () => ({ ok: true as const }),
           (error: unknown) => ({ ok: false as const, error }),

@@ -1734,6 +1734,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     );
     const buildEntered = deferred();
     const releaseBuild = deferred();
+    const preDeleteEntered = deferred();
+    const releasePreDelete = deferred();
+    let uninstallPreflightCalls = 0;
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -1754,6 +1757,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        uninstallPreflight: async (input) => {
+          uninstallPreflightCalls += 1;
+          if (uninstallPreflightCalls === 3) {
+            preDeleteEntered.resolve();
+            await releasePreDelete.promise;
+          }
+          return pluginUninstallPreflight(input);
+        },
         build: async (input) => {
           buildEntered.resolve();
           await releaseBuild.promise;
@@ -1807,9 +1818,23 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       releaseBuild.resolve();
       await starting;
+      await preDeleteEntered.promise;
+
+      let lateAliasJobEntered = false;
+      const lateAliasJob = pipelineInternals.enqueueActionValue(
+        "runtime-id",
+        async () => {
+          lateAliasJobEntered = true;
+        },
+      );
+      expect(lateAliasJobEntered).toBe(false);
+
+      releasePreDelete.resolve();
       const removed = await removing;
+      await lateAliasJob;
 
       expect(removed.ok).toBe(true);
+      expect(lateAliasJobEntered).toBe(true);
       expect(host.currentRecord("runtime-id")).toBeUndefined();
       await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
         code: "ENOENT",
@@ -1825,6 +1850,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(state.state.plugins["runtime-id"]).toBeUndefined();
     } finally {
       releaseBuild.resolve();
+      releasePreDelete.resolve();
       await starting?.catch(() => undefined);
       await lease?.release();
       await pipeline.dispose();
