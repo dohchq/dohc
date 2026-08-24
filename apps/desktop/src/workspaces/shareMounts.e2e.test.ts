@@ -7,12 +7,12 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { mountRootFor } from "./shareMounts";
 import {
-  createMountDirectory,
-  mountRootFor,
-  removeMountFolder,
-} from "./shareMounts";
-import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
+  createShareMountDirectoryThroughOwnerForTest as createMountDirectory,
+  refreshShareMountThroughOwnerForTest,
+  removeShareMountFolderThroughOwnerForTest as removeMountFolder,
+} from "../testing/shareViewFilesMountHarness";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 

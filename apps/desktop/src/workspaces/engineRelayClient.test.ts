@@ -30,13 +30,17 @@ import {
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import {
-  createMountDirectory,
   mountRootFor,
   mountStoreWorkspaceIdFor,
 } from "./shareMounts";
-import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
+import {
+  createShareMountDirectoryThroughOwnerForTest as createMountDirectory,
+  refreshShareMountThroughOwnerForTest,
+  refreshStandaloneShareThroughOwnerForTest,
+} from "../testing/shareViewFilesMountHarness";
 import { syncJoinedSharedChannels } from "./sharedChannels";
-import { refreshSharedViewOnce } from "./sharedView";
+
+const refreshSharedViewOnce = refreshStandaloneShareThroughOwnerForTest;
 
 // Every test in this file pulls with the selector its share record pins. The
 // damaged-record path has its own tests in sharedView.test.ts. This is a REAL
@@ -394,9 +398,11 @@ describe("EngineRelayClient", () => {
         };
       }
       if (request.method === "sync.commitCursor") {
-        const cursor = (request.params as unknown as {
+        const cursor = (
+          request.params as unknown as {
           pendingCursor: { token?: string };
-        }).pendingCursor;
+          }
+        ).pendingCursor;
         expect(cursor.token).toBe(`cursor-${committedPages + 1}`);
         expect(materializedPaths.at(-1)).toBe(
           `notes/page-${committedPages + 1}.md`,
@@ -419,7 +425,9 @@ describe("EngineRelayClient", () => {
       },
     );
 
-    await expect(client.pull(materializePage)).rejects.toThrow("disk unavailable");
+    await expect(client.pull(materializePage)).rejects.toThrow(
+      "disk unavailable",
+    );
     expect(committedPages).toBe(1);
     expect(materializedPaths).toEqual(["notes/page-1.md"]);
 
@@ -663,7 +671,12 @@ describe("EngineRelayClient", () => {
   it("reports an empty share proposal submit as offering nothing, not as a failure", async () => {
     const daemon = new MockDaemon((request) =>
       request.method === "share.proposal.submit"
-        ? { submitted: 0, proposalId: null, skippedOutsideShare: 3, morePending: false }
+        ? {
+            submitted: 0,
+            proposalId: null,
+            skippedOutsideShare: 3,
+            morePending: false,
+          }
         : undefined,
     );
     const { client, sessions } = await harness(daemon);
@@ -689,11 +702,19 @@ describe("EngineRelayClient", () => {
   // would tell the recipient everything went when some of it did not.
   it("refuses a share proposal submit that does not say what it left behind", async () => {
     for (const [label, reply] of [
-      ["no skipped count", { submitted: 1, proposalId: "p", morePending: false }],
-      ["no pending flag", { submitted: 1, proposalId: "p", skippedOutsideShare: 0 }],
+      [
+        "no skipped count",
+        { submitted: 1, proposalId: "p", morePending: false },
+      ],
+      [
+        "no pending flag",
+        { submitted: 1, proposalId: "p", skippedOutsideShare: 0 },
+      ],
     ] as const) {
       const daemon = new MockDaemon((request) =>
-        request.method === "share.proposal.submit" ? (reply as JsonValue) : undefined,
+        request.method === "share.proposal.submit"
+          ? (reply as JsonValue)
+          : undefined,
       );
       const { client, sessions } = await harness(daemon);
       await expect(
@@ -727,9 +748,7 @@ describe("EngineRelayClient", () => {
       });
 
     // Changes offered, but no proposal to show the sender or to withdraw.
-    await expect(submit("submit-a")).rejects.toThrow(
-      /disagreed with itself/u,
-    );
+    await expect(submit("submit-a")).rejects.toThrow(/disagreed with itself/u);
     // A proposal opened over nothing.
     reply = {
       submitted: 0,
@@ -737,9 +756,7 @@ describe("EngineRelayClient", () => {
       skippedOutsideShare: 0,
       morePending: false,
     };
-    await expect(submit("submit-b")).rejects.toThrow(
-      /disagreed with itself/u,
-    );
+    await expect(submit("submit-b")).rejects.toThrow(/disagreed with itself/u);
     // Neither field may be coerced: a number is not an id, and "" is not a
     // proposal that exists.
     reply = { submitted: 1, proposalId: 7 };
@@ -875,10 +892,11 @@ describe("EngineRelayClient", () => {
   });
 
   it("orders join identity bootstrap before registration and activity capture", async () => {
-    const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
-    const bootstrap = source.indexOf(
-      "await bootstrapJoinedWorkspace({",
+    const source = await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
     );
+    const bootstrap = source.indexOf("await bootstrapJoinedWorkspace({");
     const registration = source.indexOf(
       "registerWorkspace({ ...created, joinBootstrapPending: true });",
       bootstrap,
@@ -918,26 +936,31 @@ describe("EngineRelayClient", () => {
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],
+      collisionRecordQuarantined: false,
       refusedOps: 0,
       refusedDetail: null,
     });
     expect(daemon.requests.map((request) => request.method)).toEqual([
       "workspace.open",
+      "versions.ensureMain",
+      "versionedText.list",
+      "versions.ensureMain",
+      "versionedText.list",
+      "workspace.close",
+      "workspace.open",
       "share.view.pull",
       "sync.commitCursor",
     ]);
     expect(
-      daemon.requests.find(
-        (request) => request.method === "sync.commitCursor",
-      )?.params,
+      daemon.requests.find((request) => request.method === "sync.commitCursor")
+        ?.params,
     ).toMatchObject({
       pendingCursor: { kind: "shareView", token: "share-cursor-13" },
     });
     expectStatefulRequestsScoped(daemon.requests);
     expect(
-      daemon.requests.find(
-        (request) => request.method === "share.view.pull",
-      )?.params,
+      daemon.requests.find((request) => request.method === "share.view.pull")
+        ?.params,
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
@@ -971,9 +994,8 @@ describe("EngineRelayClient", () => {
     });
 
     expect(
-      daemon.requests.find(
-        (request) => request.method === "share.view.pull",
-      )?.params,
+      daemon.requests.find((request) => request.method === "share.view.pull")
+        ?.params,
       "MUTATION: dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
     ).toEqual({
       workspaceId: "workspace-a",
@@ -1101,7 +1123,8 @@ describe("EngineRelayClient", () => {
             originSeq: 4,
             opKind: "moment.append",
             code: "share-boundary-violation",
-            detail: "the share granted version main, the relay offered version version-other",
+            detail:
+              "the share granted version main, the relay offered version version-other",
           },
         ],
         hasMore: true,
@@ -1233,7 +1256,11 @@ describe("EngineRelayClient", () => {
           hasMore: false,
           nextCursor: 14,
           changedPaths: [
-            { path: "notes/daemon.md", operation: "write", contentKind: "text" },
+            {
+              path: "notes/daemon.md",
+              operation: "write",
+              contentKind: "text",
+            },
           ],
           pendingCursor: { kind: "shareView", token: "share-cursor-14" },
         };
@@ -1293,11 +1320,14 @@ describe("EngineRelayClient", () => {
       changedPaths: 1,
       excludedPaths: [],
       unjournalablePaths: [],
+      collisionRecordQuarantined: false,
       refusedOps: 0,
       refusedDetail: null,
     });
 
-    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(body);
+    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(
+      body,
+    );
     expect(daemon.requests.map((request) => request.method)).toContain(
       "versionedText.read",
     );
@@ -1354,17 +1384,14 @@ describe("EngineRelayClient", () => {
     );
     expect(ownerOpenIndex).toBeGreaterThanOrEqual(0);
     expect(ownerOpenIndex).toBeLessThan(pullIndex);
-    expect(
-      daemon.requests[ownerOpenIndex]?.params,
-    ).toMatchObject({
+    expect(daemon.requests[ownerOpenIndex]?.params).toMatchObject({
       rootDir: target.rootPath,
       workspaceId: target.workspaceId,
       captureMode: "none",
     });
     expect(
-      daemon.requests.find(
-        (request) => request.method === "share.view.pull",
-      )?.params,
+      daemon.requests.find((request) => request.method === "share.view.pull")
+        ?.params,
     ).toMatchObject({
       workspaceId: target.workspaceId,
       shareId: mount.shareId,
@@ -1418,6 +1445,7 @@ describe("EngineRelayClient", () => {
       changedPaths: 0,
       excludedPaths: [],
       unjournalablePaths: [],
+      collisionRecordQuarantined: false,
       refusedOps: 0,
       refusedDetail: null,
     });
@@ -1884,7 +1912,10 @@ describe("allowInsecureLoopbackRelayForTests", () => {
       allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", enabled),
     ).toBe(true);
     expect(
-      allowInsecureLoopbackRelayForTests("http://localhost:8787/relay", enabled),
+      allowInsecureLoopbackRelayForTests(
+        "http://localhost:8787/relay",
+        enabled,
+      ),
     ).toBe(true);
     expect(
       allowInsecureLoopbackRelayForTests("http://[::1]:8787", enabled),
@@ -1907,9 +1938,9 @@ describe("allowInsecureLoopbackRelayForTests", () => {
   });
 
   it("stays off without the exact flag, for https, and for junk URLs", () => {
-    expect(allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {})).toBe(
-      false,
-    );
+    expect(
+      allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {}),
+    ).toBe(false);
     expect(
       allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {
         [INSECURE_LOOPBACK_RELAY_TEST_ENV]: "true",
@@ -1918,7 +1949,9 @@ describe("allowInsecureLoopbackRelayForTests", () => {
     expect(
       allowInsecureLoopbackRelayForTests("https://relay.test", enabled),
     ).toBe(false);
-    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(
+      false,
+    );
   });
 
   it("flows from the env flag into the daemon workspace.open relay config", async () => {

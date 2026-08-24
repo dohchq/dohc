@@ -518,8 +518,11 @@ export function createRegistryStore(registryFile: string) {
       // can leave its projection folder behind when safe removal is refused;
       // deleting the field would immediately promote those known share bytes
       // to ordinary local authority on the next read.
-      entry.shareMounts = shareMounts;
-      write(registry);
+      const updated: RegistryEntry = { ...entry, shareMounts };
+      write({
+        ...registry,
+        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      });
     },
 
     // Failed-join rollback (0P-C gate fix): removes a registration this

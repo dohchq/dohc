@@ -21,6 +21,11 @@ import {
   resolveWorkspaceFileRead,
   type PreparedWorkspaceFileRead,
 } from "./workspaceAssets";
+import {
+  assertActiveShareViewFilesOwner,
+  type ShareViewFilesOwnerCapability,
+  withActiveShareViewFilesOwnerOperation,
+} from "./shareViewFiles";
 
 // Share mounts: the receive side of a relay share materialized INSIDE a host
 // workspace as shared-with-me/<label>/ — ordinary read-only files the user's
@@ -463,14 +468,17 @@ export async function assertRealMountRoot(
 // only ever owns a directory it created — a leftover or hand-made folder
 // must never be adopted (pulls would overwrite it; rollback/unmount would
 // delete it).
-export async function createMountDirectory(
+async function createMountDirectory(
   hostRoot: string,
   label: string,
+  assertActive: () => void,
 ): Promise<void> {
   const rootDir = mountRootFor(hostRoot, label);
   await assertRealMountRoot(hostRoot, label);
   const container = join(await realpath(hostRoot), SHARED_WITH_ME_FOLDER);
+  assertActive();
   await mkdir(container, { recursive: true });
+  assertActive();
   await mkdir(rootDir); // NOT recursive: EEXIST refuses adoption
 }
 
@@ -580,9 +588,10 @@ export function classifyShareMountRefreshError(
 // mount is a projection of the granter's data — removing it destroys no
 // source of truth, so a plain recursive remove is honest. Callers remove the
 // registry record; this only owns the disk side.
-export async function removeMountFolder(
+async function removeMountFolder(
   hostRoot: string,
   label: string,
+  assertActive: () => void,
 ): Promise<void> {
   mountRootFor(hostRoot, label); // label validation + lexical containment
   const realHost = await realpath(hostRoot);
@@ -601,21 +610,63 @@ export async function removeMountFolder(
     // A tampered symlinked mount root is removed AS A LINK — rm without
     // `recursive` unlinks the entry itself, never following it — so unmount
     // always succeeds instead of wedging the share in Settings/Explorer.
+    assertActive();
     await rm(leaf, { force: true });
     return;
   }
+  assertActive();
   await rm(leaf, { recursive: true, force: true });
 }
 
-export async function removeShareMountProjection(
-  hostRoot: string,
-  label: unknown,
-): Promise<{ folderLeft: boolean; error?: unknown }> {
-  if (!validMountLabel(label)) return { folderLeft: true };
-  try {
-    await removeMountFolder(hostRoot, label);
-    return { folderLeft: false };
-  } catch (error) {
-    return { folderLeft: true, error };
+function activeMountResource(owner: ShareViewFilesOwnerCapability) {
+  const resource = assertActiveShareViewFilesOwner(owner, { kind: "mount" });
+  if (resource.mountLabel === undefined) {
+    throw new Error("Share-view mount ownership has no label.");
   }
+  const rootPath = mountRootFor(
+    resource.schedulingRootPath,
+    resource.mountLabel,
+  );
+  if (resolve(rootPath) !== resolve(resource.rootPath)) {
+    throw new Error(
+      "Share-view file ownership admission belongs to another target.",
+    );
+  }
+  return {
+    hostRoot: resource.schedulingRootPath,
+    label: resource.mountLabel,
+  };
+}
+
+export function shareViewFilesMountProjection(
+  owner: ShareViewFilesOwnerCapability,
+) {
+  const active = () => activeMountResource(owner);
+  return {
+    create: async (): Promise<void> => {
+      await withActiveShareViewFilesOwnerOperation(
+        owner,
+        { kind: "mount" },
+        async () => {
+          const resource = active();
+          await createMountDirectory(resource.hostRoot, resource.label, active);
+        },
+      );
+    },
+    remove: async (): Promise<{ folderLeft: boolean; error?: unknown }> => {
+      return withActiveShareViewFilesOwnerOperation(
+        owner,
+        { kind: "mount" },
+        async () => {
+          const resource = active();
+          try {
+            await removeMountFolder(resource.hostRoot, resource.label, active);
+            return { folderLeft: false };
+          } catch (error) {
+            return { folderLeft: true, error };
+          }
+        },
+      );
+    },
+  };
 }

@@ -8,6 +8,7 @@ import {
 } from "@dohc/workspace-core";
 import {
   SharedFileReadOnlyError,
+  ShareUnavailableError,
   type PullShareViewResult,
   type ShareViewRefusal,
   type SyncRelayConnection,
@@ -31,12 +32,9 @@ import {
   type ImportCopyOutcome,
 } from "./workspaceFiles";
 import {
-  captureStandaloneShareViewDivergence,
-  captureSharedViewLocalDivergence,
+  createShareViewLifecycle,
   readSharedViewProjectionDebt,
-  reconcileStandaloneShareView,
-  refreshCapturedShareView,
-  refreshSharedViewOnce,
+  type CaptureSharedViewLocalDivergenceOutcome,
   type RefreshSharedViewOutcome,
   type StandaloneShareViewRefreshOutcome,
   withShareViewRefreshLifecycleLock,
@@ -48,18 +46,90 @@ import {
 } from "./shareViewRecords";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
-import {
-  applyShareViewFileCreate,
-  applyShareViewFileImport,
-  applyShareViewPathDelete,
-  applyShareViewPathMove,
-  applyShareViewTextWrite,
-} from "./shareViewFileChanges";
+import { createShareViewFileChanges } from "./shareViewFileChanges";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 export type ShareViewFilesTarget =
   | { kind: "standalone"; workspaceId: string }
   | { kind: "mount"; workspaceId: string; shareId: string };
+
+const shareViewFilesOwnerCapabilityBrand = Symbol(
+  "ShareViewFilesOwnerCapability",
+);
+
+export interface ShareViewFilesOwnerCapability {
+  readonly [shareViewFilesOwnerCapabilityBrand]: true;
+}
+
+export interface ShareViewFilesOwnerResource {
+  kind: ShareViewFilesTarget["kind"];
+  workspaceId: string;
+  storeWorkspaceId: string;
+  schedulingRootPath: string;
+  rootPath: string;
+  shareId: string;
+  mountLabel?: string;
+}
+
+export type ShareViewFilesOwnerResourceExpectation = Partial<
+  ShareViewFilesOwnerResource
+>;
+
+const activeShareViewFilesOwners = new WeakMap<
+  ShareViewFilesOwnerCapability,
+  {
+    assertActive: () => void;
+    pending: Set<Promise<unknown>>;
+    resource: Readonly<ShareViewFilesOwnerResource>;
+  }
+>();
+
+export function assertActiveShareViewFilesOwner(
+  owner: ShareViewFilesOwnerCapability,
+  expected: ShareViewFilesOwnerResourceExpectation = {},
+): Readonly<ShareViewFilesOwnerResource> {
+  const active = activeShareViewFilesOwners.get(owner);
+  if (active === undefined) {
+    throw new Error("Share-view file ownership admission is inactive.");
+  }
+  active.assertActive();
+  const actual = active.resource;
+  const matches =
+    (expected.kind === undefined || expected.kind === actual.kind) &&
+    (expected.workspaceId === undefined ||
+      expected.workspaceId === actual.workspaceId) &&
+    (expected.storeWorkspaceId === undefined ||
+      expected.storeWorkspaceId === actual.storeWorkspaceId) &&
+    (expected.shareId === undefined || expected.shareId === actual.shareId) &&
+    (expected.mountLabel === undefined ||
+      expected.mountLabel === actual.mountLabel) &&
+    (expected.schedulingRootPath === undefined ||
+      samePath(expected.schedulingRootPath, actual.schedulingRootPath)) &&
+    (expected.rootPath === undefined ||
+      samePath(expected.rootPath, actual.rootPath));
+  if (!matches) {
+    throw new Error(
+      "Share-view file ownership admission belongs to another target.",
+    );
+  }
+  return actual;
+}
+
+export function withActiveShareViewFilesOwnerOperation<T>(
+  owner: ShareViewFilesOwnerCapability,
+  expected: ShareViewFilesOwnerResourceExpectation,
+  operation: () => Promise<T>,
+): Promise<T> {
+  assertActiveShareViewFilesOwner(owner, expected);
+  const admission = activeShareViewFilesOwners.get(owner)!;
+  const pending = Promise.resolve().then(operation);
+  admission.pending.add(pending);
+  void pending.then(
+    () => admission.pending.delete(pending),
+    () => admission.pending.delete(pending),
+  );
+  return pending;
+}
 
 export interface ResolvedShareViewFilesTarget {
   kind: ShareViewFilesTarget["kind"];
@@ -160,17 +230,13 @@ export type ShareViewReconcileOutcome =
       kind: "settle";
       capturedPaths: number;
       repairedPaths: number;
-      unjournalablePaths: Awaited<
-        ReturnType<typeof captureStandaloneShareViewDivergence>
-      >["unjournalablePaths"];
+      unjournalablePaths: CaptureSharedViewLocalDivergenceOutcome["unjournalablePaths"];
       collisionRecordQuarantined: boolean;
     }
   | {
       kind: "repair";
       repairedPaths: number;
-      unjournalablePaths: Awaited<
-        ReturnType<typeof captureStandaloneShareViewDivergence>
-      >["unjournalablePaths"];
+      unjournalablePaths: CaptureSharedViewLocalDivergenceOutcome["unjournalablePaths"];
       collisionRecordQuarantined: boolean;
     }
   | {
@@ -179,6 +245,10 @@ export type ShareViewReconcileOutcome =
     };
 
 export interface ShareViewFiles {
+  mount(
+    lease: WorkspaceOperationLease,
+    target: PreparedShareViewFilesMount,
+  ): Promise<RefreshSharedViewOutcome>;
   change(
     lease: WorkspaceOperationLease,
     target: ShareViewFilesTarget,
@@ -226,9 +296,7 @@ export interface ShareViewFilesDependencies {
   resolveTarget(
     target: ShareViewFilesTarget,
   ): ResolvedShareViewFilesTarget | null;
-  openStore(
-    target: ResolvedShareViewFilesTarget,
-  ): ShareViewFilesStore;
+  openStore(target: ResolvedShareViewFilesTarget): ShareViewFilesStore;
   resolveRelay(
     target: ActiveShareViewFilesTarget,
   ): Promise<SyncRelayConnection | null>;
@@ -249,19 +317,43 @@ export interface ShareViewFilesDependencies {
   markEnded(target: ActiveShareViewFilesTarget): Promise<void>;
   retireTarget(target: ActiveShareViewFilesTarget): Promise<void>;
   assertProjectionRoot(target: ResolvedShareViewFilesTarget): Promise<void>;
+  createMount(
+    owner: ShareViewFilesOwnerCapability,
+    target: PreparedShareViewFilesMount,
+  ): Promise<void>;
   removeMount(
+    owner: ShareViewFilesOwnerCapability,
     target: ActiveShareViewFilesTarget,
-  ): Promise<{ folderLeft: boolean }>;
+  ): Promise<{ folderLeft: boolean; error?: unknown }>;
 }
 
 type ActiveShareViewFilesTarget = ResolvedShareViewFilesTarget & {
   shareId: string;
 };
 
+export type PreparedShareViewFilesMount = ActiveShareViewFilesTarget & {
+  kind: "mount";
+  mountLabel: string;
+  relayUrl: string;
+  grantedSelector: NonNullable<ReturnType<typeof recordedShareSelector>>;
+};
+
 export class ShareViewFilesTargetMissingError extends Error {
   constructor() {
     super("This received share is no longer registered in this workspace.");
     this.name = "ShareViewFilesTargetMissingError";
+  }
+}
+
+export class ShareViewMountRollbackError extends Error {
+  constructor(
+    readonly mountError: unknown,
+    readonly rollbackError: unknown,
+  ) {
+    super("The share mount failed and could not be fully rolled back.", {
+      cause: rollbackError,
+    });
+    this.name = "ShareViewMountRollbackError";
   }
 }
 
@@ -672,7 +764,9 @@ export function createShareViewFiles(
     target: ActiveShareViewFilesTarget,
     change: ShareViewFileChange,
     selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
+    owner: ShareViewFilesOwnerCapability,
   ): Promise<ShareViewFileChangeOutcome> {
+    const lifecycle = createShareViewLifecycle(owner);
     if (change.kind === "save" || change.kind === "create") {
       assertPathWithinGrant(selector, change.path);
     } else if (change.kind === "move") {
@@ -684,7 +778,7 @@ export function createShareViewFiles(
     const store = dependencies.openStore(target);
     const divergenceScopes = localDivergenceScopes(change);
     if (target.kind === "standalone" && divergenceScopes.length > 0) {
-      const captured = await captureStandaloneShareViewDivergence({
+      const captured = await lifecycle.captureStandalone({
         rootDir: target.rootPath,
         workspaceId: target.storeWorkspaceId,
         store,
@@ -707,13 +801,12 @@ export function createShareViewFiles(
       change,
     );
     const storeResolver = () => store;
+    const fileChanges = createShareViewFileChanges(owner);
     try {
       let value: ShareViewFileChangeValue;
       switch (change.kind) {
         case "save":
-          value = await applyShareViewTextWrite({
-            workspaceId: target.storeWorkspaceId,
-            rootPath: target.rootPath,
+          value = await fileChanges.writeText({
             relativePath: change.path,
             text: change.text,
             expectedContentHash: change.expectedContentHash,
@@ -721,41 +814,32 @@ export function createShareViewFiles(
           });
           break;
         case "create":
-          value = await applyShareViewFileCreate({
-            workspaceId: target.storeWorkspaceId,
-            rootPath: target.rootPath,
+          value = await fileChanges.createFile({
             relativePath: change.path,
             initialText: change.initialText,
             shareViewStore: storeResolver,
           });
           break;
         case "move":
-          value = await applyShareViewPathMove({
-            workspaceId: target.storeWorkspaceId,
-            rootPath: target.rootPath,
+          value = await fileChanges.movePath({
             fromPath: change.fromPath,
             toPath: change.toPath,
             shareViewStore: storeResolver,
           });
           break;
         case "delete":
-          value = await applyShareViewPathDelete({
-            workspaceId: target.storeWorkspaceId,
-            rootPath: target.rootPath,
+          value = await fileChanges.deletePath({
             relativePath: change.path,
             shareViewStore: storeResolver,
           });
           break;
         case "import":
-          value = await applyShareViewFileImport({
-            workspaceId: target.storeWorkspaceId,
-            rootPath: target.rootPath,
+          value = await fileChanges.importFiles({
             absolutePaths: change.absolutePaths,
             screenAgainstRoots: change.screenAgainstRoots,
             targetDir: change.targetDir,
             shareViewStore: storeResolver,
-            assertPathAllowed: (path) =>
-              assertPathWithinGrant(selector, path),
+            assertPathAllowed: (path) => assertPathWithinGrant(selector, path),
           });
           break;
       }
@@ -811,14 +895,245 @@ export function createShareViewFiles(
     }
   }
 
+  async function withOwnerCapability<T>(
+    lease: WorkspaceOperationLease,
+    target: ActiveShareViewFilesTarget,
+    run: (owner: ShareViewFilesOwnerCapability) => Promise<T>,
+  ): Promise<T> {
+    let active = true;
+    const owner: ShareViewFilesOwnerCapability = {
+      [shareViewFilesOwnerCapabilityBrand]: true,
+    };
+    const resource = Object.freeze({
+      kind: target.kind,
+      workspaceId: target.workspaceId,
+      storeWorkspaceId: target.storeWorkspaceId,
+      schedulingRootPath: target.schedulingRootPath,
+      rootPath: target.rootPath,
+      shareId: target.shareId,
+      ...(target.mountLabel === undefined
+        ? {}
+        : { mountLabel: target.mountLabel }),
+    });
+    activeShareViewFilesOwners.set(owner, {
+      resource,
+      pending: new Set(),
+      assertActive: () => {
+        if (!active) {
+          throw new Error("Share-view file ownership admission has ended.");
+        }
+        assertLease(lease, target);
+      },
+    });
+    try {
+      assertActiveShareViewFilesOwner(owner);
+      return await run(owner);
+    } finally {
+      const admission = activeShareViewFilesOwners.get(owner);
+      while (admission !== undefined && admission.pending.size > 0) {
+        await Promise.allSettled([...admission.pending]);
+      }
+      active = false;
+      activeShareViewFilesOwners.delete(owner);
+    }
+  }
+
+  async function reconcileWithOwner(
+    lease: WorkspaceOperationLease,
+    target: ActiveShareViewFilesTarget,
+    request: ShareViewReconcileRequest,
+    owner: ShareViewFilesOwnerCapability,
+  ): Promise<ShareViewReconcileOutcome> {
+    const lifecycle = createShareViewLifecycle(owner);
+    if (target.kind === "mount") {
+      await dependencies.assertProjectionRoot(target);
+    }
+    const store = dependencies.openStore(target);
+    const capture = () =>
+      target.kind === "standalone"
+        ? lifecycle.captureStandalone({
+            rootDir: target.rootPath,
+            workspaceId: target.storeWorkspaceId,
+            store,
+            pinnedSelector: target.grantedSelector,
+            shareId: target.shareId,
+            ended: target.ended,
+            workspaceLease: lease,
+          })
+        : lifecycle.captureShared(
+            target.rootPath,
+            target.storeWorkspaceId,
+            store,
+            false,
+            target.shareId,
+          );
+
+    if (request === "settle") {
+      if (target.kind !== "standalone") {
+        throw new SharedFileReadOnlyError(
+          "Mounted shares are read-only projections and have no local changes to settle.",
+        );
+      }
+      return { kind: "settle", ...(await capture()) };
+    }
+
+    const recovered = await capture();
+    const localChanges = recovered.capturedPaths + recovered.repairedPaths;
+
+    if (request === "repair") {
+      return {
+        kind: "repair",
+        repairedPaths: localChanges,
+        unjournalablePaths: recovered.unjournalablePaths,
+        collisionRecordQuarantined: recovered.collisionRecordQuarantined,
+      };
+    }
+
+    const localOutcome = (
+      status: RefreshSharedViewOutcome["status"],
+    ): StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome => {
+      const outcome: RefreshSharedViewOutcome = {
+        status,
+        changedPaths: localChanges,
+        excludedPaths: [],
+        unjournalablePaths: recovered.unjournalablePaths,
+        collisionRecordQuarantined: recovered.collisionRecordQuarantined,
+        refusedOps: 0,
+        refusedDetail: null,
+      };
+      return target.kind === "standalone"
+        ? { ok: true, ...outcome }
+        : outcome;
+    };
+
+    let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
+    if (target.ended) {
+      outcome = localOutcome("ended");
+    } else {
+      const relay = await dependencies.resolveRelay(target);
+      if (relay === null) {
+        outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
+      } else {
+        const pull: Parameters<
+          ReturnType<typeof createShareViewLifecycle>["refreshOnce"]
+        >[0]["pull"] = async (input) =>
+          dependencies.pull(target, relay, {
+            grantedSelector: input.grantedSelector,
+            recordRefusals: input.recordRefusals,
+            recordCollisions: input.recordCollisions,
+            recordChangedPaths: input.recordChangedPaths,
+          });
+        const recordRefusals = async (refusals: ShareViewRefusal[]) =>
+          dependencies.recordRefusals(target, refusals);
+
+        outcome =
+          target.kind === "standalone"
+            ? await lifecycle.reconcileStandalone({
+                rootDir: target.rootPath,
+                workspaceId: target.storeWorkspaceId,
+                relay,
+                shareId: target.shareId,
+                pull,
+                store,
+                pinnedSelector: target.grantedSelector,
+                recordRefusals,
+                captured: recovered,
+              })
+            : await lifecycle.refreshCaptured({
+                rootDir: target.rootPath,
+                workspaceId: target.storeWorkspaceId,
+                relay,
+                shareId: target.shareId,
+                pull,
+                store,
+                pinnedSelector: target.grantedSelector,
+                recordRefusals,
+                captured: recovered,
+              });
+      }
+    }
+    if (
+      "ok" in outcome
+        ? outcome.ok && outcome.status === "ended"
+        : outcome.status === "ended"
+    ) {
+      await dependencies.markEnded(target);
+      await dependencies.retireTarget(target);
+    }
+    return { kind: "refresh", outcome };
+  }
+
   return {
+    async mount(lease, prepared) {
+      assertLease(lease, prepared);
+      const requested: Extract<ShareViewFilesTarget, { kind: "mount" }> = {
+        kind: "mount",
+        workspaceId: prepared.workspaceId,
+        shareId: prepared.shareId,
+      };
+      if (dependencies.resolveTarget(requested) !== null) {
+        throw new Error("This share is already added to this workspace.");
+      }
+      return withShareViewRefreshLifecycleLock(prepared.rootPath, async () => {
+        assertLease(lease, prepared);
+        if (dependencies.resolveTarget(requested) !== null) {
+          throw new Error("This share is already added to this workspace.");
+        }
+        return withOwnerCapability(lease, prepared, async (owner) => {
+          let mounted = false;
+          try {
+            await dependencies.createMount(owner, prepared);
+            mounted = true;
+            const registered = dependencies.resolveTarget(requested);
+            if (registered === null) {
+              throw new Error("The share mount was not registered.");
+            }
+            assertSameTarget(prepared, registered);
+            assertActiveTarget(registered);
+            const reconciled = await reconcileWithOwner(
+              lease,
+              registered,
+              "refresh",
+              owner,
+            );
+            if (reconciled.kind !== "refresh" || "ok" in reconciled.outcome) {
+              throw new Error("Share mount refresh returned an invalid result.");
+            }
+            if (reconciled.outcome.status === "ended") {
+              throw new ShareUnavailableError();
+            }
+            return reconciled.outcome;
+          } catch (error) {
+            if (!mounted) throw error;
+            try {
+              const rollback = await dependencies.removeMount(owner, prepared);
+              if (rollback.folderLeft) {
+                throw new ShareViewMountRollbackError(
+                  error,
+                  rollback.error,
+                );
+              }
+            } catch (rollbackError) {
+              if (rollbackError instanceof ShareViewMountRollbackError) {
+                throw rollbackError;
+              }
+              throw new ShareViewMountRollbackError(error, rollbackError);
+            }
+            throw error;
+          }
+        });
+      });
+    },
+
     async change(lease, requested, change) {
       assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
         const selector = writableSelector(target);
-        return applyChange(lease, target, change, selector);
+        return withOwnerCapability(lease, target, (owner) =>
+          applyChange(lease, target, change, selector, owner),
+        );
       });
     },
 
@@ -897,7 +1212,9 @@ export function createShareViewFiles(
                       path: entry.path,
                     });
                     if (snapshot && snapshot.contentKind !== "binary") {
-                      icon = extractFrontmatterIcon(snapshot.text.slice(0, 1024));
+                      icon = extractFrontmatterIcon(
+                        snapshot.text.slice(0, 1024),
+                      );
                     }
                   } catch {
                     // Listing stays available if one optional icon cannot be read.
@@ -977,129 +1294,9 @@ export function createShareViewFiles(
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
-        if (target.kind === "mount") {
-          await dependencies.assertProjectionRoot(target);
-        }
-        const store = dependencies.openStore(target);
-        const capture = () =>
-          target.kind === "standalone"
-            ? captureStandaloneShareViewDivergence({
-                rootDir: target.rootPath,
-                workspaceId: target.storeWorkspaceId,
-                store,
-                pinnedSelector: target.grantedSelector,
-                shareId: target.shareId,
-                ended: target.ended,
-                workspaceLease: lease,
-              })
-            : captureSharedViewLocalDivergence(
-                target.rootPath,
-                target.storeWorkspaceId,
-                store,
-                false,
-                target.shareId,
-              );
-
-        if (request === "settle") {
-          if (target.kind !== "standalone") {
-            throw new SharedFileReadOnlyError(
-              "Mounted shares are read-only projections and have no local changes to settle.",
-            );
-          }
-          return { kind: "settle", ...(await capture()) };
-        }
-
-        const recovered = await capture();
-        const localChanges =
-          recovered.capturedPaths + recovered.repairedPaths;
-
-        if (request === "repair") {
-          return {
-            kind: "repair",
-            repairedPaths: localChanges,
-            unjournalablePaths: recovered.unjournalablePaths,
-            collisionRecordQuarantined:
-              recovered.collisionRecordQuarantined,
-          };
-        }
-
-        const localOutcome = (
-          status: RefreshSharedViewOutcome["status"],
-        ): StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome => {
-          const outcome: RefreshSharedViewOutcome = {
-            status,
-            changedPaths: localChanges,
-            excludedPaths: [],
-            unjournalablePaths: recovered.unjournalablePaths,
-            collisionRecordQuarantined:
-              recovered.collisionRecordQuarantined,
-            refusedOps: 0,
-            refusedDetail: null,
-          };
-          return target.kind === "standalone"
-            ? {
-                ok: true,
-                ...outcome,
-              }
-            : outcome;
-        };
-
-        let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
-        if (target.ended) {
-          outcome = localOutcome("ended");
-        } else {
-          const relay = await dependencies.resolveRelay(target);
-          if (relay === null) {
-            outcome = localOutcome(localChanges > 0 ? "updated" : "unchanged");
-          } else {
-            const pull: Parameters<
-              typeof refreshSharedViewOnce
-            >[0]["pull"] = async (input) =>
-              dependencies.pull(target, relay, {
-                grantedSelector: input.grantedSelector,
-                recordRefusals: input.recordRefusals,
-                recordCollisions: input.recordCollisions,
-                recordChangedPaths: input.recordChangedPaths,
-              });
-            const recordRefusals = async (refusals: ShareViewRefusal[]) =>
-              dependencies.recordRefusals(target, refusals);
-
-            if (target.kind === "standalone") {
-              outcome = await reconcileStandaloneShareView({
-                rootDir: target.rootPath,
-                workspaceId: target.storeWorkspaceId,
-                relay,
-                shareId: target.shareId,
-                pull,
-                store,
-                pinnedSelector: target.grantedSelector,
-                recordRefusals,
-                captured: recovered,
-              });
-            } else {
-              outcome = await refreshCapturedShareView({
-                rootDir: target.rootPath,
-                workspaceId: target.storeWorkspaceId,
-                relay,
-                shareId: target.shareId,
-                pull,
-                store,
-                pinnedSelector: target.grantedSelector,
-                recordRefusals,
-                captured: recovered,
-              });
-            }
-          }
-        }
-        if (
-          "ok" in outcome
-            ? outcome.ok && outcome.status === "ended"
-            : outcome.status === "ended"
-        ) {
-          await dependencies.markEnded(target);
-          await dependencies.retireTarget(target);
-        }
-        return { kind: "refresh", outcome };
+        return withOwnerCapability(lease, target, (owner) =>
+          reconcileWithOwner(lease, target, request, owner),
+        );
       });
     },
 
@@ -1113,7 +1310,9 @@ export function createShareViewFiles(
             "Only a mounted share can be removed from a workspace.",
           );
         }
-        return dependencies.removeMount(target);
+        return withOwnerCapability(lease, target, (owner) =>
+          dependencies.removeMount(owner, target),
+        );
       });
     },
   };

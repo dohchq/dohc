@@ -18,11 +18,8 @@ import {
   allocateShareMountLabel,
   classifyShareMountRefreshError,
   shareMountResultRow,
-  createMountDirectory,
   mountRootFor,
   mountStoreWorkspaceIdFor,
-  removeMountFolder,
-  removeShareMountProjection,
   refuseImportIntoShareProjection,
   refuseMoveAcrossShareMount,
   resolveShareMountPath,
@@ -32,7 +29,11 @@ import {
   usableShareMountRecord,
   validMountLabel,
 } from "./shareMounts";
-import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
+import {
+  createShareMountDirectoryThroughOwnerForTest as createMountDirectory,
+  refreshShareMountThroughOwnerForTest,
+  removeShareMountFolderThroughOwnerForTest as removeMountFolder,
+} from "../testing/shareViewFilesMountHarness";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // These tests drive the pull with the selector a mount record pins. No paths
@@ -1143,7 +1144,7 @@ describe("removeMountFolder", () => {
     await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
 
     await expect(
-      removeShareMountProjection(host, "alex"),
+      removeMountFolder(host, "alex"),
     ).resolves.toMatchObject({ folderLeft: true, error: expect.any(Error) });
     expect(await readFile(join(elsewhere, "alex", "victim.md"), "utf8")).toBe(
       "untouched",

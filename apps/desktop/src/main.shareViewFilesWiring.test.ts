@@ -20,25 +20,57 @@ function handlerSource(channel: string): string {
 }
 
 describe("ShareViewFiles main-process wiring", () => {
-  it("falls back to registry and folder cleanup when registered unmount fails", () => {
+  it("routes mount creation and rollback through ShareViewFiles", () => {
     const handler = handlerSource("mountShare");
-    const registeredAt = handler.indexOf("if (registered) {");
-    const rollback = handler.slice(
-      registeredAt,
-      handler.indexOf("notifyRenderer();", registeredAt),
-    );
-    const unmountAt = rollback.indexOf(".unmount(lease,");
-    const fallbackAt = rollback.indexOf("catch (unmountError)");
-    const registryAt = rollback.indexOf("setWorkspaceShareMounts(", fallbackAt);
-    const registryCatchAt = rollback.indexOf("catch (registryError)", registryAt);
-    const folderAt = rollback.indexOf("removeMountFolder(", fallbackAt);
+    expect(handler).toContain("await shareViewFiles.mount(");
+    expect(handler).toContain("error instanceof ShareViewMountRollbackError");
+    expect(handler).toContain("cleanup did not finish");
+    expect(handler).toContain("remove any leftover folder from shared-with-me");
+    expect(handler).not.toContain("createMountDirectory(");
+    expect(handler).not.toContain("removeMountFolder(");
+    expect(handler).not.toContain("removeShareMountProjection(");
 
-    expect(registeredAt).toBeGreaterThan(-1);
-    expect(unmountAt).toBeGreaterThan(-1);
-    expect(fallbackAt).toBeGreaterThan(unmountAt);
-    expect(registryAt).toBeGreaterThan(fallbackAt);
-    expect(registryCatchAt).toBeGreaterThan(registryAt);
-    expect(folderAt).toBeGreaterThan(registryCatchAt);
+    expect(handlerSource("openShare")).not.toContain(
+      "ShareViewMountRollbackError",
+    );
+  });
+
+  it("does not let relay shutdown skip owner-gated mount cleanup", () => {
+    const removeMount = sourceBlock(
+      "  removeMount: async (owner, target) => {",
+      "\n  },\n});",
+    );
+    const relayCloseAt = removeMount.indexOf(
+      "await closeRelayTransportWorkspace(target.storeWorkspaceId)",
+    );
+    const ownerRemoveAt = removeMount.indexOf(
+      "await shareViewFilesMountProjection(owner).remove()",
+    );
+    const registryWriteAt = removeMount.indexOf("setWorkspaceShareMounts(");
+
+    expect(relayCloseAt).toBeGreaterThan(-1);
+    expect(removeMount.slice(relayCloseAt, ownerRemoveAt)).toContain(
+      ".catch((error) =>",
+    );
+    expect(ownerRemoveAt).toBeGreaterThan(relayCloseAt);
+    expect(registryWriteAt).toBeGreaterThan(ownerRemoveAt);
+
+    const unmount = handlerSource("unmountShare");
+    const registryOnlyAt = unmount.indexOf(
+      'if (removal.kind === "registry-only")',
+    );
+    const registryOnlyCloseAt = unmount.indexOf(
+      "await closeRelayTransportWorkspace(",
+      registryOnlyAt,
+    );
+    const registryOnlyWriteAt = unmount.indexOf(
+      "setWorkspaceShareMounts(",
+      registryOnlyCloseAt,
+    );
+    expect(registryOnlyAt).toBeGreaterThan(-1);
+    expect(unmount.slice(registryOnlyCloseAt, registryOnlyWriteAt)).toContain(
+      ").catch((error) =>",
+    );
   });
 
   it("holds the mount lock across preflight but leases the workspace only for local mount work", () => {
@@ -46,14 +78,12 @@ describe("ShareViewFiles main-process wiring", () => {
     const mountLockAt = mount.indexOf("return withShareMountLock(");
     const infoAt = mount.indexOf("await fetchShareViewInfo(");
     const exclusiveAt = mount.indexOf("return withExclusiveWorkspaceOperation(");
-    const createAt = mount.indexOf("await createMountDirectory(");
-    const reconcileAt = mount.indexOf("await shareViewFiles.reconcile(");
+    const ownerMountAt = mount.indexOf("await shareViewFiles.mount(");
 
     expect(mountLockAt).toBeGreaterThan(-1);
     expect(infoAt).toBeGreaterThan(mountLockAt);
     expect(exclusiveAt).toBeGreaterThan(infoAt);
-    expect(createAt).toBeGreaterThan(exclusiveAt);
-    expect(reconcileAt).toBeGreaterThan(createAt);
+    expect(ownerMountAt).toBeGreaterThan(exclusiveAt);
 
     const refresh = handlerSource("refreshShareMounts");
     const refreshLockAt = refresh.indexOf("return withShareMountLock(");
