@@ -268,6 +268,9 @@ export class EngineDaemonLifecycle {
   // A terminal verdict was reported. The kill it ordered still has an exit
   // coming, and that exit must not start another generation.
   private terminal = false;
+  // The first launch's deferred startup smoke, so stop() can wait out its
+  // temp-directory work. It never rejects: runDeferredSmoke handles failure.
+  private backgroundSmoke: Promise<void> | null = null;
   private readonly exitedGenerations = new Set<number>();
   private readonly inFlightLaunches = new Set<InFlightLaunch>();
   private readonly launchingClients = new Set<EngineDaemonClient>();
@@ -303,7 +306,14 @@ export class EngineDaemonLifecycle {
         "Rust engine lifecycle is already stopping.",
       );
     }
-    await this.launchTracked();
+    // Resolve on the handshake: hello/helloAck already proves the daemon is
+    // alive and speaking the protocol, and the desktop blocks window creation
+    // on this resolution, so every boot paid for the workspace smoke's disk
+    // work. The smoke still runs — in the background, with a real failure
+    // path. Restarts keep the blocking smoke instead: restartAfterExit's
+    // retry loop counts a failed smoke as a failed attempt, which is what
+    // bounds a daemon that relaunches but cannot do workspace work.
+    await this.launchTracked(true);
   }
 
   async smokeWorkspace(
@@ -450,6 +460,7 @@ export class EngineDaemonLifecycle {
     await Promise.allSettled(
       [...this.inFlightLaunches].map(async ({ promise }) => await promise),
     );
+    await this.backgroundSmoke;
     await this.restartPromise?.catch(() => undefined);
   }
 
@@ -556,9 +567,9 @@ export class EngineDaemonLifecycle {
     }
   }
 
-  private launchTracked(): Promise<void> {
+  private launchTracked(deferSmoke = false): Promise<void> {
     const abortController = new AbortController();
-    const promise = this.launchOnce(abortController.signal);
+    const promise = this.launchOnce(abortController.signal, deferSmoke);
     const launch: InFlightLaunch = { abortController, promise };
     this.inFlightLaunches.add(launch);
     void promise.then(
@@ -568,7 +579,10 @@ export class EngineDaemonLifecycle {
     return promise;
   }
 
-  private async launchOnce(signal: AbortSignal): Promise<void> {
+  private async launchOnce(
+    signal: AbortSignal,
+    deferSmoke = false,
+  ): Promise<void> {
     this.assertBinaryPresent();
     if (this.stopping) return;
     const generation = ++this.launchGeneration;
@@ -609,20 +623,25 @@ export class EngineDaemonLifecycle {
           "Rust engine exited during its startup handshake.",
         );
       }
-      await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
-        await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
-      );
-      if (this.stopping || this.exitedGenerations.has(generation)) {
-        await this.closeClient(client);
-        if (this.stopping) return;
-        throw new EngineDaemonUnavailableError(
-          "Rust engine exited during its startup health check.",
+      if (!deferSmoke) {
+        await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
+          await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
         );
+        if (this.stopping || this.exitedGenerations.has(generation)) {
+          await this.closeClient(client);
+          if (this.stopping) return;
+          throw new EngineDaemonUnavailableError(
+            "Rust engine exited during its startup health check.",
+          );
+        }
       }
       this.client = client;
       this.running = true;
       this.scheduleHealthyReset(generation);
       this.startWedgeWatch(generation, client);
+      if (deferSmoke) {
+        this.backgroundSmoke = this.runDeferredSmoke(generation, client);
+      }
       try {
         this.options.onLaunch?.();
       } catch {
@@ -640,6 +659,32 @@ export class EngineDaemonLifecycle {
   private async closeClient(client: EngineDaemonClient): Promise<void> {
     client.close();
     await client.waitForExit?.();
+  }
+
+  // The first launch's startup smoke, run after start() resolved. The daemon
+  // already proved it is alive and speaking the protocol; this checks that it
+  // can do real workspace work. A failure is handled the way a wedge is:
+  // kill, then report. The kill becomes a process exit, and the exit carries
+  // the failure into the same restart machinery a crash uses — whose
+  // relaunches run the blocking smoke and bound a daemon that keeps failing
+  // it. `closeUnresponsive` for the same reason reportWedge uses it: this
+  // kill is a replacement, and retry-enabled callers must retry through it.
+  private async runDeferredSmoke(
+    generation: number,
+    client: EngineDaemonClient,
+  ): Promise<void> {
+    try {
+      await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
+        await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
+      );
+    } catch (error) {
+      // A generation that already exited, was replaced, or is stopping has
+      // its own failure path; a stale smoke must not condemn its successor.
+      if (!this.probedGenerationIsLive(generation, client)) return;
+      if (client.closeUnresponsive) client.closeUnresponsive();
+      else client.close();
+      this.reportFailure(asError(error), false);
+    }
   }
 
   private handleUnexpectedExit(

@@ -148,6 +148,24 @@ afterEach(() => {
   }
 });
 
+// The first launch's startup smoke runs BEHIND start() now, so a test that
+// resets `client.requests` after start() must let the smoke finish first or
+// its tail requests bleed into the assertion window. workspace.close is the
+// smoke's last request, and this fake answers synchronously on push — once
+// the close is recorded, its response (and any fake state it mutates) has
+// already settled.
+async function startupSmokeDone(client: FakeClient): Promise<void> {
+  await vi.waitFor(
+    () =>
+      expect(
+        client.requests.some(
+          (request) => request.method === "workspace.close",
+        ),
+      ).toBe(true),
+    WAIT,
+  );
+}
+
 describe("Rust engine daemon lifecycle", () => {
   it("generates a distinct auth token for every launch", async () => {
     const tokens: string[] = [];
@@ -1255,6 +1273,7 @@ describe("Rust engine daemon lifecycle", () => {
       launch: async () => client,
     });
     await lifecycle.start();
+    await startupSmokeDone(client);
     client.requests.length = 0;
 
     await expect(
@@ -1294,6 +1313,7 @@ describe("Rust engine daemon lifecycle", () => {
       launch: async () => client,
     });
     await lifecycle.start();
+    await startupSmokeDone(client);
     client.requests.length = 0;
 
     await expect(
@@ -1385,6 +1405,7 @@ describe("Rust engine daemon lifecycle", () => {
       launch: async () => client,
     });
     await lifecycle.start();
+    await startupSmokeDone(client);
     client.requests.length = 0;
 
     const desktopOpen = await client.sendRequest({
@@ -1456,6 +1477,7 @@ describe("Rust engine daemon lifecycle", () => {
       launch: async () => client,
     });
     await lifecycle.start();
+    await startupSmokeDone(client);
     client.requests.length = 0;
 
     const first = lifecycle.requestWorkspace(
@@ -1495,7 +1517,109 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.stop();
   });
 
-  it("fails initial generation health within the request bound after helloAck", async () => {
+  it("resolves start() on the handshake, before the startup smoke completes", async () => {
+    // The hello/helloAck handshake already proves the daemon is alive and
+    // speaking the protocol; the desktop blocks window creation on start(),
+    // so the disk-heavy workspace smoke must not gate it.
+    // MUTATION: await the smoke inside the first launch again and start()
+    // cannot resolve while the smoke's workspace.open is still unanswered —
+    // this test times out inside lifecycle.start().
+    let openRequest: Request | undefined;
+    let releaseOpen!: (response: Response) => void;
+    const client = new FakeClient((request) => {
+      if (request.method === "workspace.open") {
+        openRequest = request;
+        return new Promise<Response>((resolve) => {
+          releaseOpen = resolve;
+        });
+      }
+      return healthyPing(request);
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+    });
+
+    try {
+      await lifecycle.start();
+      // The smoke has not completed — its workspace.open is unsent or held —
+      // yet the lifecycle is already running and serving its client.
+      expect(
+        client.requests.filter((request) => request.method === "workspace.close"),
+      ).toEqual([]);
+      expect(lifecycle.currentClient()).toBe(client);
+      // The smoke still runs to completion in the background.
+      await vi.waitFor(() => expect(openRequest).toBeDefined(), WAIT);
+      if (!openRequest) throw new Error("smoke open was not sent");
+      releaseOpen({
+        id: openRequest.id,
+        result: { workspace: "health-handle" },
+      });
+      await vi.waitFor(
+        () =>
+          expect(client.requests.map((request) => request.method)).toEqual([
+            "workspace.open",
+            "versions.active",
+            "workspace.close",
+          ]),
+        WAIT,
+      );
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("routes a background smoke failure through onFailure and the restart path", async () => {
+    // The smoke's own rejection reaches onFailure unwrapped and non-terminal
+    // — the same error the blocking smoke used to throw out of start(). The
+    // kill is a replacement (transport-error, like a wedge kill), and its
+    // exit carries the failure into the ordinary restart machinery, whose
+    // relaunch runs the BLOCKING smoke and takes over.
+    // MUTATION: swallow the deferred smoke's rejection, or drop its kill,
+    // and no failure is ever reported and no replacement is launched.
+    const clients: SelfExitingClient[] = [];
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: WINDOW_TEST_MAX_RESTARTS,
+      initialBackoffMs: 0,
+      healthyResetMs: HEALTHY_RESET_MS,
+      launch: async (options) => {
+        // Only the first generation fails its smoke; the replacement passes.
+        const failing = clients.length === 0;
+        const client = new SelfExitingClient((request) => {
+          if (failing && request.method === "versions.active") {
+            throw new Error("smoke integrity check failed");
+          }
+          return healthyPing(request);
+        });
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => {
+        failures.push({ error, terminal });
+      },
+    });
+
+    try {
+      // Resolves despite the doomed smoke: the handshake is the gate.
+      await lifecycle.start();
+      await vi.waitFor(() => expect(clients).toHaveLength(2), WAIT);
+      expect(clients[0]?.closed).toBe(true);
+      expect(clients[0]?.closeCause).toBe("transport-error");
+      expect(
+        failures.map(({ error, terminal }) => [error.message, terminal]),
+      ).toEqual([
+        ["smoke integrity check failed", false],
+        ["Rust engine daemon exited unexpectedly with signal SIGTERM.", false],
+      ]);
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("reports a hung startup smoke within the request bound after start() resolves", async () => {
     const client = new FakeClient(
       () =>
         new Promise<Response>(() => {
@@ -1503,17 +1627,24 @@ describe("Rust engine daemon lifecycle", () => {
           // stopped processing requests.
         }),
     );
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
       requestTimeoutMs: 20,
       launch: async () => client,
+      onFailure: (error, terminal) => {
+        failures.push({ error, terminal });
+      },
     });
 
     const startedAt = Date.now();
-    await expect(lifecycle.start()).rejects.toThrow(
+    await lifecycle.start();
+    await vi.waitFor(() => expect(failures).toHaveLength(1), WAIT);
+    expect(failures[0]?.error.message).toMatch(
       /workspace\.open timed out after 20ms/,
     );
-    // Proves the 20ms request timer drove the rejection rather than a hang
+    expect(failures[0]?.terminal).toBe(false);
+    // Proves the 20ms request timer drove the failure rather than a hang
     // or a mis-armed slower timer. This bound stays at its original 500ms:
     // this exact path never failed under load in 12 measured runs (#568),
     // and evidence borrowed from another path cannot widen a discrimination
@@ -1544,6 +1675,7 @@ describe("Rust engine daemon lifecycle", () => {
     });
 
     await lifecycle.start();
+    await startupSmokeDone(client);
     client.requests.length = 0;
     client.cancelledRequestIds.length = 0;
     hangOpen = true;
