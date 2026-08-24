@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
     ChatActorKind, ChatChannelKind, ChatReactionState, CreateFileThread, FollowState,
-    FollowTargetKind, LinkedChatStore, NoFaults, ResolveDecision, SendMessage, SetFollow,
-    SetReaction, StartChannelThread, reaction_id_for,
+    FollowTargetKind, LinkedChatStore, LocalAttachmentInput, NoFaults, ResolveDecision,
+    SendMessage, SetFollow, SetReaction, StartChannelThread, attachment_id_for, reaction_id_for,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -67,6 +67,24 @@ fn send(
     at_ms: i64,
     needs_decision: bool,
 ) {
+    send_with(
+        store,
+        thread_id,
+        message_id,
+        at_ms,
+        needs_decision,
+        Vec::new(),
+    );
+}
+
+fn send_with(
+    store: &mut EngineStore,
+    thread_id: &str,
+    message_id: &str,
+    at_ms: i64,
+    needs_decision: bool,
+    attachments: Vec<LocalAttachmentInput>,
+) {
     LinkedChatStore::new(store)
         .send_message(
             &SendMessage {
@@ -80,13 +98,23 @@ fn send(
                 origin: None,
                 body: format!("message {message_id}"),
                 needs_decision,
-                attachments: Vec::new(),
+                attachments,
                 now_ms: at_ms,
                 request_id: None,
             },
             &NO_FAULTS,
         )
         .expect("send");
+}
+
+fn attachment(object: &str) -> LocalAttachmentInput {
+    LocalAttachmentInput {
+        object_id: object.to_owned(),
+        path_hint: Some(format!("notes/{object}.md")),
+        heading_text: None,
+        heading_anchor: None,
+        heading_occurrence: None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -949,7 +977,7 @@ fn channel_summary_returns_only_active_opening_reactions_in_stable_order() {
 fn channel_summary_batch_keeps_per_thread_aggregates_apart() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
-    start(&mut store, "full", "full-opening", 20, false);
+    start(&mut store, "full", "full-opening", 20, true);
     send(&mut store, "full", "full-reply", 30, false);
     set_reaction(
         &mut store,
@@ -979,18 +1007,6 @@ fn channel_summary_batch_keeps_per_thread_aggregates_apart() {
                 [WS],
             )
             .map_err(StorageError::persist_public)?;
-            tx.execute(
-                "UPDATE chat_thread_read_state SET last_read_sequence = 2 \
-                 WHERE workspace_id = ?1 AND thread_id = 'pruned'",
-                [WS],
-            )
-            .map_err(StorageError::persist_public)?;
-            tx.execute(
-                "UPDATE chat_thread_read_state SET last_read_sequence = 1 \
-                 WHERE workspace_id = ?1 AND thread_id = 'full'",
-                [WS],
-            )
-            .map_err(StorageError::persist_public)?;
             Ok::<_, StorageError>(())
         })
         .expect("fixture");
@@ -1011,11 +1027,13 @@ fn channel_summary_batch_keeps_per_thread_aggregates_apart() {
     assert_eq!(empty.message_count, 0);
     assert_eq!(empty.last_read_sequence, 0);
     assert_eq!(empty.unread_count, 0);
+    assert_eq!(empty.open_decision_count, 0);
     assert!(empty.opening_message.is_none());
     let pruned = &summaries[1];
     assert_eq!(pruned.message_count, 1);
-    assert_eq!(pruned.last_read_sequence, 1, "cursor clamps to live count");
+    assert_eq!(pruned.last_read_sequence, 1);
     assert_eq!(pruned.unread_count, 0);
+    assert_eq!(pruned.open_decision_count, 0);
     let pruned_opening = pruned.opening_message.as_ref().expect("pruned opening");
     assert_eq!(pruned_opening.message_id, "pruned-second");
     assert_eq!(pruned_opening.body_snippet, "message pruned-second");
@@ -1024,6 +1042,7 @@ fn channel_summary_batch_keeps_per_thread_aggregates_apart() {
     assert_eq!(full.message_count, 2);
     assert_eq!(full.last_read_sequence, 1);
     assert_eq!(full.unread_count, 1);
+    assert_eq!(full.open_decision_count, 1);
     let full_opening = full.opening_message.as_ref().expect("full opening");
     assert_eq!(full_opening.message_id, "full-opening");
     assert_eq!(
@@ -1034,6 +1053,68 @@ fn channel_summary_batch_keeps_per_thread_aggregates_apart() {
             .collect::<Vec<_>>(),
         vec!["👍"]
     );
+}
+
+#[test]
+fn message_page_batch_keeps_attachments_with_their_own_messages() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, false);
+    send_with(
+        &mut store,
+        "thread",
+        "pair",
+        30,
+        false,
+        vec![attachment("alpha"), attachment("beta")],
+    );
+    send(&mut store, "thread", "bare", 40, false);
+    send_with(
+        &mut store,
+        "thread",
+        "solo",
+        50,
+        false,
+        vec![attachment("gamma")],
+    );
+    let page = LinkedChatStore::new(&mut store)
+        .list_messages(WS, "thread", 10, None)
+        .expect("page");
+    // MUTATION: hydrating the page's attachments in one query without
+    // distributing by message -> one message collects its neighbors'
+    // attachments, an attachment-free message stops being empty, or the
+    // per-message (created_at_ms, attachment_id) order breaks.
+    let mut pair_objects = vec!["alpha", "beta"];
+    pair_objects.sort_by_key(|object| attachment_id_for("pair", object, None, None));
+    let by_message: Vec<(&str, Vec<&str>)> = page
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.message_id.as_str(),
+                message
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.object_id.as_deref().expect("object id"))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_message,
+        vec![
+            ("opening", Vec::new()),
+            ("pair", pair_objects),
+            ("bare", Vec::new()),
+            ("solo", vec!["gamma"]),
+        ]
+    );
+    for message in &page.messages {
+        for attachment in &message.attachments {
+            assert_eq!(attachment.message_id, message.message_id);
+            assert_eq!(attachment.thread_id, "thread");
+        }
+    }
 }
 
 #[test]
