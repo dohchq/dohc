@@ -1,10 +1,10 @@
-import type { ChatShareAccess } from "@dohc/security-contract/share-grant";
-import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   effectiveShareSelector,
   isChatChannelSelector,
   parseStoredAnyShareSelectorJson,
   type AnyShareSelector,
+  type ShareSelector,
+  type StoredAnyShareSelector,
 } from "./shareFilter";
 import type {
   SyncRelayShareGrantRow,
@@ -28,21 +28,41 @@ type ShareAuthorizationStorage = Pick<
   | "workspaceIsOwnedBy"
 >;
 
-export interface AuthorizedShareAction {
+export interface AuthorizedShareAction<Selector extends AnyShareSelector = AnyShareSelector> {
+  ok: true;
   share: SyncRelayShareRow;
   grant: SyncRelayShareGrantRow;
-  effectiveSelector: AnyShareSelector;
-  access: ShareAccess | ChatShareAccess;
+  effectiveSelector: Selector;
 }
 
-export function authorizeShareAction(input: {
+export type ShareAuthorizationResult<Selector extends AnyShareSelector = AnyShareSelector> =
+  | AuthorizedShareAction<Selector>
+  | { ok: false; reason: "gauntlet" | "denied" };
+
+type ShareAuthorizationInput = {
   storage: ShareAuthorizationStorage;
   actorUserId: string;
   shareId: string;
   action: ShareAction;
-}): AuthorizedShareAction | null {
+};
+
+export function selectorTargetsBlockedChannel(
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
+  workspaceId: string,
+  selector: StoredAnyShareSelector,
+): boolean {
+  if (!("kind" in selector) || selector.kind !== "chat-channel") return false;
+  const channelKind = storage.findChannelCreateKind(workspaceId, selector.channelWireId);
+  return channelKind === "agent" || channelKind === null;
+}
+
+export function authorizeShareAction(
+  input: ShareAuthorizationInput & { action: "propose" },
+): ShareAuthorizationResult<ShareSelector>;
+export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult;
+export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult {
   const share = input.storage.getShare(input.shareId);
-  if (!share) return null;
+  if (!share) return { ok: false, reason: "gauntlet" };
   const grant = input.storage.getShareGrantForRecipient(input.shareId, input.actorUserId);
   if (
     !grant ||
@@ -55,46 +75,45 @@ export function authorizeShareAction(input: {
     !Number.isInteger(grant.generation) ||
     grant.generation < 1
   ) {
-    return null;
+    return { ok: false, reason: "gauntlet" };
   }
   if (!input.storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) {
-    return null;
+    return { ok: false, reason: "gauntlet" };
   }
 
   const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
-  if (!storedSelector) return null;
+  if (!storedSelector) return { ok: false, reason: "gauntlet" };
 
-  if ("kind" in storedSelector) {
-    const channelKind = input.storage.findChannelCreateKind(
-      share.workspaceId,
-      storedSelector.channelWireId,
-    );
-    if (channelKind === "agent" || channelKind === null) return null;
+  if (selectorTargetsBlockedChannel(input.storage, share.workspaceId, storedSelector)) {
+    return { ok: false, reason: "gauntlet" };
   }
   const effectiveSelector = effectiveShareSelector(storedSelector, grant.access);
-  if (!effectiveSelector) return null;
-  const access: ShareAccess | ChatShareAccess = effectiveSelector.access;
+  if (!effectiveSelector) return { ok: false, reason: "gauntlet" };
 
-  const allowed = (() => {
-    switch (input.action) {
-      case "read":
-      case "presence":
-      case "list-own-proposals":
-      case "withdraw-proposal":
-        return true;
-      case "append":
-        return isChatChannelSelector(effectiveSelector)
+  switch (input.action) {
+    case "read":
+    case "presence":
+    case "list-own-proposals":
+    case "withdraw-proposal":
+      return { ok: true, share, grant, effectiveSelector };
+    case "append":
+      if (
+        isChatChannelSelector(effectiveSelector)
           ? effectiveSelector.access === "read-write"
           : effectiveSelector.paths.length > 0 &&
-              (effectiveSelector.access === "comment" || effectiveSelector.access === "edit");
-      case "propose":
-        return (
-          !isChatChannelSelector(effectiveSelector) &&
-          effectiveSelector.paths.length > 0 &&
-          effectiveSelector.access === "edit"
-        );
-    }
-  })();
-
-  return allowed ? { share, grant, effectiveSelector, access } : null;
+            (effectiveSelector.access === "comment" || effectiveSelector.access === "edit")
+      ) {
+        return { ok: true, share, grant, effectiveSelector };
+      }
+      return { ok: false, reason: "denied" };
+    case "propose":
+      if (
+        !isChatChannelSelector(effectiveSelector) &&
+        effectiveSelector.paths.length > 0 &&
+        effectiveSelector.access === "edit"
+      ) {
+        return { ok: true, share, grant, effectiveSelector };
+      }
+      return { ok: false, reason: "denied" };
+  }
 }

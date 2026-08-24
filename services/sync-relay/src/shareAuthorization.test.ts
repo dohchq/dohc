@@ -84,9 +84,10 @@ describe("share authorization", () => {
         storageFixture({ grant: { ...grant, access: testCase.access } }),
       );
       expect(
-        result !== null,
+        result.ok,
         `${testCase.access} ${testCase.action}`,
       ).toBe(testCase.allowed);
+      if (!testCase.allowed) expect(result).toEqual({ ok: false, reason: "denied" });
     }
   });
 
@@ -114,7 +115,8 @@ describe("share authorization", () => {
           grant: { ...grant, access },
         }),
       );
-      expect(result !== null, `${access} ${action}`).toBe(allowed);
+      expect(result.ok, `${access} ${action}`).toBe(allowed);
+      if (!allowed) expect(result).toEqual({ ok: false, reason: "denied" });
     }
   });
 
@@ -124,9 +126,9 @@ describe("share authorization", () => {
       selectorJson: JSON.stringify({ paths: [], versionId: "version-1" }),
     };
     const storage = storageFixture({ share: versionShare });
-    expect(authorize("read", storage)).not.toBeNull();
-    expect(authorize("append", storage)).toBeNull();
-    expect(authorize("propose", storage)).toBeNull();
+    expect(authorize("read", storage).ok).toBe(true);
+    expect(authorize("append", storage)).toEqual({ ok: false, reason: "denied" });
+    expect(authorize("propose", storage)).toEqual({ ok: false, reason: "denied" });
   });
 
   it("refuses revoked grants, wrong actors, and lost granter ownership", () => {
@@ -137,9 +139,15 @@ describe("share authorization", () => {
           grant: { ...grant, status: "revoked", generation: 2, revokedAtMs: 2000 },
         }),
       ),
-    ).toBeNull();
-    expect(authorize("read", storageFixture(), "stranger")).toBeNull();
-    expect(authorize("read", storageFixture({ ownerStanding: false }))).toBeNull();
+    ).toEqual({ ok: false, reason: "gauntlet" });
+    expect(authorize("read", storageFixture(), "stranger")).toEqual({
+      ok: false,
+      reason: "gauntlet",
+    });
+    expect(authorize("read", storageFixture({ ownerStanding: false }))).toEqual({
+      ok: false,
+      reason: "gauntlet",
+    });
   });
 
   it("refuses blocked channels and crossed selector/access values", () => {
@@ -155,18 +163,18 @@ describe("share authorization", () => {
         "read",
         storageFixture({ share: chatShare, channelKind: "agent" }),
       ),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: "gauntlet" });
     expect(
       authorize(
         "read",
         storageFixture({ share: chatShare, grant: { ...grant, access: "edit" } }),
       ),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: "gauntlet" });
     expect(
       authorize(
         "read",
         storageFixture({ grant: { ...grant, access: "read-write" } }),
       ),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: "gauntlet" });
   });
 });

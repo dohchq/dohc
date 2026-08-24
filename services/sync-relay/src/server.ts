@@ -24,6 +24,7 @@ import {
   validateShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
+  type ShareSelector,
   type StoredAnyShareSelector,
   type ThreadFileBinding,
 } from "./shareFilter";
@@ -40,6 +41,7 @@ import {
 } from "./storage";
 import {
   authorizeShareAction,
+  selectorTargetsBlockedChannel,
   type AuthorizedShareAction,
   type ShareAction,
 } from "./shareAuthorization";
@@ -250,15 +252,6 @@ export function createSyncRelayHandler({
     throw methodNotAllowed();
   };
 
-  const selectorTargetsBlockedChannel = (
-    workspaceId: string,
-    selector: StoredAnyShareSelector,
-  ): boolean => {
-    if (!("kind" in selector) || selector.kind !== "chat-channel") return false;
-    const channelKind = storage.findChannelCreateKind(workspaceId, selector.channelWireId);
-    return channelKind === "agent" || channelKind === null;
-  };
-
   // #646 PR3a: whether a recipient may PROPOSE changes to the files this
   // selector shares. Edit and nothing else — and the refusal is the same
   // `shareNotAppendable()` code and body a comment or a view share gets on the
@@ -393,24 +386,28 @@ export function createSyncRelayHandler({
     if (email) storage.claimPendingSharesForEmail(email, userId);
   };
 
-  const requireShareAction = (
+  function requireShareAction(
+    shareId: string,
+    actorUserId: string,
+    action: "propose",
+  ): AuthorizedShareAction<ShareSelector>;
+  function requireShareAction(
     shareId: string,
     actorUserId: string,
     action: ShareAction,
-  ): AuthorizedShareAction => {
-    const authorized = authorizeShareAction({ storage, actorUserId, shareId, action });
-    if (authorized) return authorized;
-    if (action === "append" || action === "propose") {
-      const readable = authorizeShareAction({
-        storage,
-        actorUserId,
-        shareId,
-        action: "read",
-      });
-      if (readable) throw shareNotAppendable();
+  ): AuthorizedShareAction;
+  function requireShareAction(
+    shareId: string,
+    actorUserId: string,
+    action: ShareAction,
+  ): AuthorizedShareAction {
+    const result = authorizeShareAction({ storage, actorUserId, shareId, action });
+    if (result.ok) return result;
+    if (result.reason === "denied" && (action === "append" || action === "propose")) {
+      throw shareNotAppendable();
     }
     throw notFound();
-  };
+  }
 
   const shareSummary = async (
     row: SyncRelayShareWithGrantRow,
@@ -509,7 +506,7 @@ export function createSyncRelayHandler({
         // during those awaits must not get one final recipient-list exposure.
         const received = receivedRows.flatMap(({ row, summary }) => {
           const selector = parseStoredAnyShareSelectorJson(row.share.selectorJson);
-          return selector && selectorTargetsBlockedChannel(row.share.workspaceId, selector)
+          return selector && selectorTargetsBlockedChannel(storage, row.share.workspaceId, selector)
             ? []
             : [summary];
         });
@@ -796,7 +793,6 @@ export function createSyncRelayHandler({
       if (route.route === "share-blob" && request.method === "PUT") {
         await claimPendingShares(actor.userId);
         const authorized = requireShareAction(route.shareId, actor.userId, "propose");
-        if (isChatChannelSelector(authorized.effectiveSelector)) throw notFound();
         const share = { ...authorized.share, selector: authorized.effectiveSelector };
         assertSha256(route.sha256);
         const bytes = await readBytes(request, MAX_BLOB_BYTES);
@@ -832,7 +828,6 @@ export function createSyncRelayHandler({
       if (route.route === "share-proposals" && request.method === "POST") {
         await claimPendingShares(actor.userId);
         const authorized = requireShareAction(route.shareId, actor.userId, "propose");
-        if (isChatChannelSelector(authorized.effectiveSelector)) throw notFound();
         const share = { ...authorized.share, selector: authorized.effectiveSelector };
         const input = await readJsonObject(request);
         const submitId = parseString(input.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
@@ -1282,40 +1277,42 @@ export function createSyncRelayHandler({
         // (MU-C4, addressed by channelWireId + optional access) or the PR-18
         // path/version grant. The recipient addressing, pending-invite, and
         // anti-enumeration behavior below is identical for both.
-        let selector: StoredAnyShareSelector;
-        let access: string;
-        if (input.channelWireId !== undefined) {
-          // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
-          // also carry a path/version selector. Silently preferring
-          // channelWireId (and dropping the paths) would turn a stale/leftover
-          // `paths` field into a full chat-channel grant — a silent intent
-          // mismatch. Reject it instead (hardens regular shared-channel grants
-          // too).
-          if (input.paths !== undefined || input.versionId !== undefined) {
-            throw relayHttpError(
-              RELAY_ERRORS.ambiguous_selector,
-              "a chat-channel share must not also carry paths or versionId",
-            );
-          }
-          const chatValidation = validateChatChannelShareSelector(
-            {
+        const { selector, access, wireSelector } = (() => {
+          if (input.channelWireId !== undefined) {
+            // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
+            // also carry a path/version selector. Silently preferring
+            // channelWireId (and dropping the paths) would turn a stale/leftover
+            // `paths` field into a full chat-channel grant — a silent intent
+            // mismatch. Reject it instead (hardens regular shared-channel grants
+            // too).
+            if (input.paths !== undefined || input.versionId !== undefined) {
+              throw relayHttpError(
+                RELAY_ERRORS.ambiguous_selector,
+                "a chat-channel share must not also carry paths or versionId",
+              );
+            }
+            const chatValidation = validateChatChannelShareSelector({
               channelWireId: input.channelWireId,
-            },
-            chatResolverFor(route.workspaceId),
-          );
-          if (!chatValidation.ok) {
-            throw relayHttpError(RELAY_ERRORS[chatValidation.code], chatValidation.message);
+            });
+            if (!chatValidation.ok) {
+              throw relayHttpError(RELAY_ERRORS[chatValidation.code], chatValidation.message);
+            }
+            const accessValidation = validateChatShareAccess(input.access);
+            if (!accessValidation.ok) {
+              throw relayHttpError(
+                RELAY_ERRORS[accessValidation.code],
+                accessValidation.message,
+              );
+            }
+            const selector = chatValidation.selector;
+            if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
+              throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
+            }
+            const access = accessValidation.access;
+            const wireSelector = { ...selector, access };
+            return { selector, access, wireSelector };
           }
-          const accessValidation = validateChatShareAccess(input.access);
-          if (!accessValidation.ok) {
-            throw relayHttpError(
-              RELAY_ERRORS[accessValidation.code],
-              accessValidation.message,
-            );
-          }
-          selector = chatValidation.selector;
-          access = accessValidation.access;
-        } else {
+
           const accessValidation = validateFileShareAccess(input.access);
           if (!accessValidation.ok) {
             throw relayHttpError(
@@ -1330,14 +1327,14 @@ export function createSyncRelayHandler({
           if (!validation.ok) {
             throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
           }
-          selector = validation.selector;
-          access = accessValidation.access;
-        }
+          const selector = validation.selector;
+          const access = accessValidation.access;
+          const wireSelector = { ...selector, access };
+          return { selector, access, wireSelector };
+        })();
         const shareId = newShareId();
         const grantId = newGrantId();
         const createdAtMs = nowMs();
-        const wireSelector = effectiveShareSelector(selector, access);
-        if (!wireSelector) throw notFound();
 
         // Sharing by explicit user id: the granter already knows the id, so
         // there is no account existence to leak — echo it back.
@@ -1348,7 +1345,7 @@ export function createSyncRelayHandler({
             MAX_ORIGIN_ID_CHARS,
           );
           if (recipientUserId === actor.userId) throw selfShare();
-          if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
+          if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
             throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
           }
           storage.createShare({
@@ -1398,7 +1395,7 @@ export function createSyncRelayHandler({
         if (resolved === actor.userId) throw selfShare();
         // Re-check after the asynchronous account lookup: a pre-provisioned
         // wire may have become an agent channel while this request was waiting.
-        if (selectorTargetsBlockedChannel(route.workspaceId, selector)) {
+        if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
           throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
         }
         storage.createShare({

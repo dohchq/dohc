@@ -92,12 +92,12 @@ function chatOp(
   return { originSeq, opKind, payload, recordedAtMs: 1000 + originSeq };
 }
 
-function channelCreate(wireId: string, name: string) {
+function channelCreate(wireId: string, name: string, kind: "channel" | "agent" = "channel") {
   return chatOp("chat.channel.create", {
     channelId: `chan-${wireId}`,
     name,
     slug: name.toLowerCase(),
-    kind: "channel",
+    kind,
     createdAtMs: 1,
     wireId,
   });
@@ -294,15 +294,24 @@ describe("shared channels (MU-C4)", () => {
     );
     expect(badAccess.status).toBe(400);
     expect((await json(badAccess)).code).toBe("invalid_access");
-    const bothInvalid = await h(
+    const agentWire = "wire-agent";
+    const seedAgent = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({ originId: "origin-owner", ops: [channelCreate(agentWire, "agent", "agent")] }),
+      ),
+    );
+    expect(seedAgent.status).toBe(200);
+    const crossedInvalid = await h(
       request(
         OWNER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientUserId: MEMBER_A, channelWireId: "", access: "admin" }),
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: agentWire, access: "admin" }),
       ),
     );
-    expect(bothInvalid.status).toBe(400);
-    expect((await json(bothInvalid)).code).toBe("invalid_channel");
+    expect(crossedInvalid.status).toBe(400);
+    expect((await json(crossedInvalid)).code).toBe("invalid_access");
   });
 
   it("serves a member ONLY the granted channel's ops — private channels, files, and secrets never leak", async () => {

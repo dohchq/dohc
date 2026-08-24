@@ -1,6 +1,5 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
-  CHAT_SHARE_ACCESS_VALUES,
   isChatShareAccessValue,
   type ChatShareAccess,
 } from "@dohc/security-contract/share-grant";
@@ -35,8 +34,6 @@ import { RELAY_ERRORS } from "./errorCodes";
 // payload shape it does not positively recognize is EXCLUDED.
 
 export { MAX_SHARE_PATHS, MAX_SHARE_PATH_CHARS };
-export { CHAT_SHARE_ACCESS_VALUES, isChatShareAccessValue };
-export type { ChatShareAccess };
 
 export const MAX_CHANNEL_WIRE_ID_CHARS = 256;
 
@@ -360,28 +357,6 @@ export function parseStoredShareSelectorJson(selectorJson: string): StoredShareS
   }
 }
 
-export function parseShareSelectorJson(selectorJson: string): ShareSelector | null {
-  try {
-    const parsed = JSON.parse(selectorJson) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const candidate = parsed as {
-      kind?: unknown;
-      paths?: unknown;
-      versionId?: unknown;
-      access?: unknown;
-    };
-    if (candidate.kind !== undefined) return null;
-    const access = validateFileShareAccess(candidate.access);
-    if (!access.ok) return null;
-    const stored = parseStoredShareSelectorJson(
-      JSON.stringify({ paths: candidate.paths, versionId: candidate.versionId }),
-    );
-    return stored ? { ...stored, access: access.access } : null;
-  } catch {
-    return null;
-  }
-}
-
 export function parseStoredAnyShareSelectorJson(
   selectorJson: string,
 ): StoredAnyShareSelector | null {
@@ -399,26 +374,6 @@ export function parseStoredAnyShareSelectorJson(
     return null;
   }
   return parseStoredShareSelectorJson(selectorJson);
-}
-
-// Parser for the access-bearing selector that the relay still exposes on its
-// wire. Stored selectors use parseStoredAnyShareSelectorJson instead.
-export function parseAnyShareSelectorJson(selectorJson: string): AnyShareSelector | null {
-  try {
-    const parsed = JSON.parse(selectorJson) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    if ((parsed as { kind?: unknown }).kind === "chat-channel") {
-      // The wire selector must carry explicit access. A missing value is not
-      // read-write by default.
-      if (typeof (parsed as { access?: unknown }).access !== "string") return null;
-      const selector = validateChatChannelShareSelector(parsed as { channelWireId?: unknown });
-      const access = validateChatShareAccess((parsed as { access?: unknown }).access);
-      return selector.ok && access.ok ? { ...selector.selector, access: access.access } : null;
-    }
-  } catch {
-    return null;
-  }
-  return parseShareSelectorJson(selectorJson);
 }
 
 // Gate #2 for secrets (and gate #1 for everything else): a path is visible

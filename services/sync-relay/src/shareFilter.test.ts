@@ -8,9 +8,7 @@ import {
   MAX_SHARE_PATHS,
   MAX_SHARE_PATH_CHARS,
   filterOpForShare,
-  parseAnyShareSelectorJson,
   parseChatThreadTopic,
-  parseShareSelectorJson,
   parseStoredShareSelectorJson,
   presenceTopicAllowedForShare,
   validateChatChannelShareSelector,
@@ -166,131 +164,21 @@ describe("share selector validation", () => {
     expect(barelyOver.message).toContain("UTF-16 code units");
   });
 
-  it("round-trips through selector JSON and rejects malformed persisted selectors", () => {
+  it("parses stored selector JSON and rejects malformed persisted selectors", () => {
     const validated = validateShareSelector({ paths: ["docs"], versionId: "v-1" });
     expect(validated.ok).toBe(true);
     if (!validated.ok) return;
-    const json = JSON.stringify({ ...validated.selector, access: "comment" });
-    expect(parseShareSelectorJson(json)).toEqual({ ...validated.selector, access: "comment" });
     expect(parseStoredShareSelectorJson(JSON.stringify(validated.selector))).toEqual(
       validated.selector,
     );
-    expect(parseShareSelectorJson("not json")).toBeNull();
-    expect(parseShareSelectorJson('{"paths":"docs","versionId":null,"access":"view"}')).toBeNull();
-    expect(parseShareSelectorJson('{"paths":[1],"versionId":null,"access":"view"}')).toBeNull();
+    expect(parseStoredShareSelectorJson("not json")).toBeNull();
+    expect(parseStoredShareSelectorJson('{"paths":"docs","versionId":null}')).toBeNull();
+    expect(parseStoredShareSelectorJson('{"paths":[1],"versionId":null}')).toBeNull();
     expect(
       parseStoredShareSelectorJson(
         '{"kind":"file-ish","paths":["docs"],"versionId":null}',
       ),
     ).toBeNull();
-    expect(
-      parseShareSelectorJson(
-        '{"kind":"file-ish","paths":["docs"],"versionId":null,"access":"view"}',
-      ),
-    ).toBeNull();
-  });
-
-  // A stored row missing `access` (pre-#646) or naming a level the relay
-  // never issues must fail closed to null, never resurrect into "view" — the
-  // create-time default in validateShareSelector is a create-time-only
-  // convenience (decision G), and this is the row-reload rule mirroring the
-  // chat-channel selector's identical posture at line 277-287.
-  // Every selector reader applies ONE path rule. This one was the last on its
-  // own check, so a stored row the desktop refuses used to load here — the
-  // two ends disagreeing about what a share grants. A row can only carry
-  // paths this relay could have issued, because it is the relay that wrote
-  // them: normalized, tracked, non-secret, within both caps.
-  // A stored version id the relay could not have issued is not cosmetic. A
-  // no-paths selector treats ANY non-null version as "the whole tracked
-  // workspace", so `""` in a stored row authorizes every tracked path — and
-  // presence on every topic with it.
-  it("fails a stored row closed to null when the version id is not one the relay could have issued", () => {
-    for (const versionId of ["", "   ", " v1", "v1 ", "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1)]) {
-      const row = JSON.stringify({ paths: [], versionId, access: "view" });
-      expect(
-        parseShareSelectorJson(row),
-        `MUTATION: ${JSON.stringify(versionId)} grants the whole tracked workspace`,
-      ).toBeNull();
-    }
-    // The version share the relay really does issue still loads.
-    expect(
-      parseShareSelectorJson(JSON.stringify({ paths: [], versionId: "v1", access: "view" })),
-    ).toEqual({ paths: [], versionId: "v1", access: "view" });
-  });
-
-  // The concrete authorization failure the rule above prevents: a no-paths
-  // selector admits presence on every tracked path as soon as its version is
-  // non-null, and `""` is non-null.
-  it("does not let a damaged stored version authorize presence on every path", () => {
-    const resolver: ChatShareThreadResolver = {
-      channelKind: () => undefined,
-      threadChannelWireId: () => undefined,
-      ...NO_FILE_CHAT,
-    };
-    const asItWouldHaveBeen = {
-      paths: [],
-      versionId: "",
-      access: "view",
-    } as unknown as ShareSelector;
-    expect(
-      presenceTopicAllowedForShare(asItWouldHaveBeen, "docs/unrelated.md", resolver),
-      "the damaged selector really does authorize an unrelated path — which is why it must never parse",
-    ).toBe(true);
-    // So it never parses.
-    expect(
-      parseShareSelectorJson(JSON.stringify({ paths: [], versionId: "", access: "view" })),
-    ).toBeNull();
-  });
-
-  it("fails a stored row closed to null when a path is not one the relay could have issued", () => {
-    const row = (paths: unknown) =>
-      JSON.stringify({ paths, versionId: null, access: "view" });
-    for (const paths of [
-      [""],
-      ["../escape.md"],
-      ["/absolute.md"],
-      [".env"],
-      ["config/.env"],
-      ["docs/"],
-      ["docs//notes.md"],
-      ["d".repeat(MAX_SHARE_PATH_CHARS + 1)],
-      Array.from({ length: MAX_SHARE_PATHS + 1 }, (_, i) => `docs/f${i}.md`),
-      ["docs", 7],
-    ]) {
-      expect(
-        parseShareSelectorJson(row(paths)),
-        `MUTATION: ${JSON.stringify(paths).slice(0, 40)} loads here but the desktop refuses it`,
-      ).toBeNull();
-    }
-    // A row the relay really did mint still loads, at both caps.
-    expect(parseShareSelectorJson(row(["docs/notes.md"]))).toEqual({
-      paths: ["docs/notes.md"],
-      versionId: null,
-      access: "view",
-    });
-    expect(
-      parseShareSelectorJson(
-        row(Array.from({ length: MAX_SHARE_PATHS }, (_, i) => `docs/f${i}.md`)),
-      ),
-    ).not.toBeNull();
-  });
-
-  it("fails a stored row closed to null when access is missing or unrecognized, even though create-time defaults it", () => {
-    expect(
-      parseShareSelectorJson('{"paths":["docs"],"versionId":null}'),
-      "MUTATION: a stored row with no access must not silently become view",
-    ).toBeNull();
-    for (const access of ["View", "COMMENT", " view", "viewer", "read-write", ""]) {
-      expect(
-        parseShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null, access })),
-        access,
-      ).toBeNull();
-    }
-    for (const access of ["view", "comment", "edit"] as const) {
-      expect(
-        parseShareSelectorJson(JSON.stringify({ paths: ["docs"], versionId: null, access })),
-      ).toEqual({ paths: ["docs"], versionId: null, access });
-    }
   });
 });
 
@@ -611,46 +499,6 @@ describe("chat-channel share selector", () => {
     expect(
       validateChatShareAccess("write"),
     ).toMatchObject({ ok: false, code: "invalid_access" });
-  });
-
-  it("round-trips through selector JSON and fails closed on tampered rows", () => {
-    const validated = validateChatChannelShareSelector({ channelWireId: "wire-1" });
-    expect(validated.ok).toBe(true);
-    if (!validated.ok) return;
-    const json = JSON.stringify({ ...validated.selector, access: "read-write" });
-    expect(parseAnyShareSelectorJson(json)).toEqual({
-      ...validated.selector,
-      access: "read-write",
-    });
-    // A hand-edited row with a bad access or wire id parses to null (the
-    // routes answer null with the generic 404).
-    expect(parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":""}')).toBeNull();
-    expect(
-      parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w","access":"all"}'),
-    ).toBeNull();
-    // A stored row MISSING an explicit access fails closed on reload — the
-    // create-time default must not resurrect a tampered/legacy row into a
-    // read-write grant.
-    expect(
-      parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w"}'),
-    ).toBeNull();
-    // …but an explicit access still round-trips.
-    expect(
-      parseAnyShareSelectorJson('{"kind":"chat-channel","channelWireId":"w","access":"read-write"}'),
-    ).toEqual({ kind: "chat-channel", channelWireId: "w", access: "read-write" });
-    // Path selectors still parse through the union parser, and the same
-    // fail-closed-on-missing-access rule applies to them (decision G).
-    expect(
-      parseAnyShareSelectorJson('{"paths":["docs"],"versionId":null}'),
-      "MUTATION: a path row with no access must not silently become view",
-    ).toBeNull();
-    expect(
-      parseAnyShareSelectorJson('{"paths":["docs"],"versionId":null,"access":"view"}'),
-    ).toEqual({
-      paths: ["docs"],
-      versionId: null,
-      access: "view",
-    });
   });
 
   it("rejects an agent wire id when trusted owner-log kind resolution is available", () => {
