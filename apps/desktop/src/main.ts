@@ -3432,7 +3432,7 @@ const pluginSurfaces = new PluginSurfaces<WebContentsView>({
     const sender = webContents.fromId(senderId);
     if (sender) notifyPluginPanelInvalidated(sender, generation, event);
   },
-  onPanelAuthorityRevoked: ({ workspaceId, pluginId, panelId, surfaceId }) => {
+  onPanelDisposed: ({ workspaceId, pluginId, panelId, surfaceId }) => {
     pluginWorkspaceEventsByWorkspace.get(workspaceId)?.disposeOwner({
       kind: "panel",
       workspaceId,
