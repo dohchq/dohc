@@ -1074,7 +1074,6 @@ export function createShareViewFiles(
                 store,
                 pinnedSelector: target.grantedSelector,
                 recordRefusals,
-                ended: false,
                 captured: recovered,
               });
             } else {

@@ -120,11 +120,23 @@ const SHARE_ID = "share-1";
 const TOKEN = "test:recipient";
 
 function reconcileStandaloneForTest(
-  input: Parameters<typeof reconcileStandaloneShareView>[0],
+  input: Omit<
+    Parameters<typeof reconcileStandaloneShareView>[0],
+    "captured"
+  > & { ended: boolean },
 ) {
-  return withShareViewRefreshLifecycleLock(input.rootDir, () =>
-    reconcileStandaloneShareView(input),
-  );
+  return withShareViewRefreshLifecycleLock(input.rootDir, async () => {
+    const { ended, ...refreshInput } = input;
+    const captured = await captureStandaloneShareViewDivergence({
+      rootDir: input.rootDir,
+      workspaceId: input.workspaceId,
+      store: input.store,
+      pinnedSelector: input.pinnedSelector,
+      shareId: input.shareId,
+      ended,
+    });
+    return reconcileStandaloneShareView({ ...refreshInput, captured });
+  });
 }
 
 // chmod-based fixtures cannot make a path unreadable for root. Windows uses
@@ -4736,7 +4748,13 @@ describe("shared view refresh", () => {
               recordRefusals: async () => undefined,
               ended: false,
             }),
-          ).resolves.toMatchObject({ ok: false, changedPaths: 1 });
+          ).rejects.toMatchObject({
+            name: "CapturePartialFailureError",
+            capturedPaths: 0,
+            repairedPaths: 1,
+            path: deniedPath,
+            reason: "unreadable",
+          });
         } finally {
           await restoreRead(parent, 0o755);
         }
@@ -4779,7 +4797,13 @@ describe("shared view refresh", () => {
           recordRefusals: async () => undefined,
           ended: false,
         }),
-      ).resolves.toMatchObject({ ok: false, changedPaths: 1 });
+      ).rejects.toMatchObject({
+        name: "CapturePartialFailureError",
+        capturedPaths: 0,
+        repairedPaths: 1,
+        path,
+        reason: "other",
+      });
     } finally {
       failRenameToPathOnce = null;
       await store.close();
@@ -4833,10 +4857,13 @@ describe("shared view refresh", () => {
           recordRefusals: async () => undefined,
           ended: false,
         }),
-      ).resolves.toEqual({
-        ok: false,
-        changedPaths: 0,
-        errorMessage: "engine store unavailable",
+      ).rejects.toMatchObject({
+        name: "CapturePartialFailureError",
+        capturedPaths: 0,
+        repairedPaths: 0,
+        path,
+        reason: "other",
+        message: "engine store unavailable",
       });
     } finally {
       await store.close();
@@ -4888,10 +4915,12 @@ describe("shared view refresh", () => {
               recordRefusals: async () => undefined,
               ended: false,
             }),
-          ).resolves.toEqual({
-            ok: false,
-            changedPaths: 1,
-            errorMessage: `dohc could not read ${deniedPath}. Close anything using this file, or wait.`,
+          ).rejects.toMatchObject({
+            name: "CapturePartialFailureError",
+            capturedPaths: 0,
+            repairedPaths: 1,
+            path: deniedPath,
+            reason: "unreadable",
           });
         } finally {
           await restoreRead(parent, 0o755);
@@ -4968,16 +4997,15 @@ describe("shared view refresh", () => {
           await denyRead(parent, "dir");
           parentDenied = true;
           releaseDeniedPathLock();
-          const failed = await refreshing;
+          await expect(refreshing).rejects.toMatchObject({
+            name: "CapturePartialFailureError",
+            capturedPaths: 0,
+            repairedPaths: 1,
+            path: deniedPath,
+            reason: "unreadable",
+          });
           await expect(readPendingMaterializationPaths(rootDir)).resolves.toEqual(
             new Set([deniedPath]),
-          );
-          if (failed.ok) throw new Error("expected the unreadable refresh to fail");
-          expect(failed).toMatchObject({
-            changedPaths: 1,
-          });
-          expect(failed.errorMessage).toBe(
-            `dohc could not read ${deniedPath}. Close anything using this file, or wait.`,
           );
         } finally {
           observeRealpath = null;

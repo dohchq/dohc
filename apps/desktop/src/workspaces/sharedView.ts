@@ -36,7 +36,6 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 import {
   recordedShareSelector,
   SharePinInvalidError,
-  unjournalablePathMessages,
   type UnjournalablePath,
 } from "./shareViewRecords";
 
@@ -76,9 +75,9 @@ export interface CaptureSharedViewLocalDivergenceOutcome {
 // the pending marker for the ONE unreadable path survives (capture's
 // pending branch fails closed rather than guessing, per #867), but the
 // repairs or edits capture already applied to every entry visited before it
-// are real and already durable. This carries those counts past the throw so
-// a caller wrapping capture in a failure outcome doesn't report zero changes
-// and skip the repaint those repairs earned.
+// are real and already durable. This carries those counts on the error so a
+// caller can account for the work completed before capture failed instead of
+// treating the whole pass as though it changed nothing.
 class CapturePartialFailureError extends Error {
   constructor(
     readonly capturedPaths: number,
@@ -1893,15 +1892,12 @@ export async function refreshCapturedShareView(
 // deadlocking the operation that already owns it.
 export async function reconcileStandaloneShareView(
   input: ShareViewRefreshCompositionInput & {
-    ended: boolean;
-    captured?: CaptureSharedViewLocalDivergenceOutcome;
+    captured: CaptureSharedViewLocalDivergenceOutcome;
   },
 ): Promise<StandaloneShareViewRefreshOutcome> {
   let totalLocalChanges = 0;
   try {
-    const { captured: suppliedCapture, ...refreshInput } = input;
-    const captured =
-      suppliedCapture ?? (await captureStandaloneShareViewDivergence(input));
+    const { captured, ...refreshInput } = input;
     totalLocalChanges = captured.capturedPaths + captured.repairedPaths;
     const outcome = await refreshCapturedShareView({
       ...refreshInput,
@@ -1917,18 +1913,6 @@ export async function reconcileStandaloneShareView(
     // "record is damaged" message and depends on it escaping as a
     // rejection, not becoming a generic outcome.
     if (error instanceof SharePinInvalidError) throw error;
-    if (error instanceof CapturePartialFailureError) {
-      return {
-        ok: false,
-        changedPaths: error.capturedPaths + error.repairedPaths,
-        errorMessage:
-          error.reason === "unreadable"
-            ? (unjournalablePathMessages([
-                { path: error.path, reason: "unreadable" },
-              ])[0] ?? error.message)
-            : error.message,
-      };
-    }
     return {
       ok: false,
       changedPaths: totalLocalChanges,
