@@ -988,9 +988,12 @@ async function runEngineDaemonSmoke(
       randomBytes(32).toString("hex"),
       { encoding: "utf8", flag: "wx", mode: 0o600 },
     );
+    // Unique per invocation: the background startup smoke can overlap an
+    // explicit smoke (tests, restarts) in the same process, and two live
+    // opens must never share one workspaceId.
     return await smokeWorkspace(
       rootDir,
-      `desktop-startup-smoke-${process.pid}`,
+      `desktop-startup-smoke-${process.pid}-${randomBytes(4).toString("hex")}`,
     );
   } finally {
     await rm(rootDir, { recursive: true, force: true });
