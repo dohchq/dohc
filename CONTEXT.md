@@ -19,7 +19,7 @@ The level a file-share grant carries: View, Comment, or Edit. Comment adds the s
 _Avoid_: permission level, role
 
 **Change proposal**:
-A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access, and owner-approved app data takes link-holder writes live. Everything else changes at the source only through a proposal.
+A set of bulk or file-tree changes a named recipient submits for the granter to accept or decline. Live documents co-edit directly under Edit access, and owner-approved app data takes link-holder writes live at any share level, because the approval, not the document level, is that lane's authority. Everything else changes at the source only through a proposal.
 _Avoid_: pull request, patch, suggestion
 
 **Share code**:
