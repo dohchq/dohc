@@ -288,8 +288,6 @@ interface UninstallTargetSnapshot {
 
 interface ResolvedUninstallTarget {
   snapshot: UninstallTargetSnapshot;
-  candidate: InstalledPluginRecord | null;
-  state: PluginLocalState;
   record: PluginRecordShape | undefined;
   preflight: Awaited<ReturnType<typeof pluginUninstallPreflight>>;
 }
@@ -3300,8 +3298,6 @@ export class PluginPipeline {
       engineCaptureAvailable: this.engineCaptureAvailable(),
     });
     return {
-      candidate,
-      state,
       record,
       preflight,
       snapshot: {
