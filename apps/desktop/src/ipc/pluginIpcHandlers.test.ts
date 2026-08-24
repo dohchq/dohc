@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
-import { registerPluginIpcHandlers } from "./pluginIpcHandlers";
+import {
+  createTrustedPluginIpcRegistrar,
+  registerPluginIpcHandlers,
+} from "./pluginIpcHandlers";
 
 const directOperations = vi.hoisted(() => ({
   addOffer: vi.fn(),
@@ -402,22 +405,24 @@ function createHarness() {
   });
 
   registerPluginIpcHandlers({
-    registrar: {
-      handle: (
-        channel: string,
-        handler: (
-          capturedEvent: typeof event,
-          payload: unknown,
-        ) => unknown | Promise<unknown>,
-      ) => {
-        if (handlers.has(channel)) throw new Error(`Duplicate handler: ${channel}`);
-        handlers.set(channel, handler);
+    registrar: createTrustedPluginIpcRegistrar(
+      {
+        handle: (
+          channel: string,
+          handler: (
+            capturedEvent: typeof event,
+            payload: unknown,
+          ) => unknown | Promise<unknown>,
+        ) => {
+          if (handlers.has(channel)) throw new Error(`Duplicate handler: ${channel}`);
+          handlers.set(channel, handler);
+        },
       },
-    },
-    assertTrustedSender: () => {
-      log.push("trust");
-      if (!state.trusted) throw new Error("Untrusted sender");
-    },
+      () => {
+        log.push("trust");
+        if (!state.trusted) throw new Error("Untrusted sender");
+      },
+    ),
     workspaces: {
       activeWorkspaceIdBySender,
       assertWritable,
@@ -535,6 +540,42 @@ describe("plugin IPC handlers", () => {
       "assert-writable",
     ]);
     expect(directOperations.listOffers).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [CHANNELS.listOfferedPlugins, directOperations.listOffers],
+    [CHANNELS.addOfferedPlugin, directOperations.addOffer],
+  ] as const)(
+    "revalidates write authority after pipeline startup for %s",
+    async (channel, effect) => {
+      const harness = createHarness();
+      const pipelineReady = deferred<typeof harness.pipeline>();
+      harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+
+      const request = harness.invoke(channel);
+      await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
+      harness.state.writable = false;
+      pipelineReady.resolve(harness.pipeline);
+
+      await expect(request).resolves.toMatchObject({ ok: false });
+      expect(harness.assertWritable).toHaveBeenCalledTimes(2);
+      expect(effect).not.toHaveBeenCalled();
+    },
+  );
+
+  it("revalidates write authority after command pipeline startup", async () => {
+    const harness = createHarness();
+    const pipelineReady = deferred<typeof harness.pipeline>();
+    harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+
+    const request = harness.invoke(CHANNELS.invokePluginCommand);
+    await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
+    harness.state.writable = false;
+    pipelineReady.resolve(harness.pipeline);
+
+    await expect(request).rejects.toThrow("read-only");
+    expect(harness.assertWritable).toHaveBeenCalledTimes(2);
+    expect(harness.pipeline.hostOwnership.runCommand).not.toHaveBeenCalled();
   });
 
   it("uses readable active-workspace policy and exact owner identity for stops", async () => {

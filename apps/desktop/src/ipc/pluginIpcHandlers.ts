@@ -97,6 +97,30 @@ export interface PluginIpcRegistrar<TEvent> {
   handle(channel: string, handler: PluginIpcHandler<TEvent>): void;
 }
 
+const trustedPluginIpcRegistrarBrand: unique symbol = Symbol(
+  "trustedPluginIpcRegistrar",
+);
+
+export interface TrustedPluginIpcRegistrar<TEvent>
+  extends PluginIpcRegistrar<TEvent> {
+  readonly [trustedPluginIpcRegistrarBrand]: true;
+}
+
+export function createTrustedPluginIpcRegistrar<TEvent>(
+  registrar: PluginIpcRegistrar<TEvent>,
+  assertTrustedSender: (event: TEvent) => void,
+): TrustedPluginIpcRegistrar<TEvent> {
+  return {
+    [trustedPluginIpcRegistrarBrand]: true,
+    handle(channel, handler) {
+      registrar.handle(channel, (event, payload) => {
+        assertTrustedSender(event);
+        return handler(event, payload);
+      });
+    },
+  };
+}
+
 type PluginIpcSurfaces<TView extends PluginWebAppViewLike> = Pick<
   PluginSurfaces<TView>,
   | "applyWebAppBounds"
@@ -142,8 +166,7 @@ interface RegisterPluginIpcHandlersOptions<
   TWorkspace extends PluginIpcWorkspace,
   TView extends PluginWebAppViewLike,
 > {
-  registrar: PluginIpcRegistrar<TEvent>;
-  assertTrustedSender(event: TEvent): void;
+  registrar: TrustedPluginIpcRegistrar<TEvent>;
   workspaces: {
     activeWorkspaceIdBySender: ReadonlyMap<number, string>;
     assertWritable(workspace: TWorkspace): void;
@@ -188,7 +211,6 @@ export function registerPluginIpcHandlers<
 >(options: RegisterPluginIpcHandlersOptions<TEvent, TSender, TWorkspace, TView>): void {
   const {
     registrar,
-    assertTrustedSender,
     workspaces,
     rendererGeneration,
     pipelines,
@@ -312,7 +334,6 @@ export function registerPluginIpcHandlers<
   };
 
   registrar.handle(CHANNELS.openPluginPanel, async (event, payload) => {
-    assertTrustedSender(event);
     const input = OpenPluginPanelPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
@@ -343,7 +364,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.startPluginPanel, async (event, payload) => {
-    assertTrustedSender(event);
     const input = StartPluginPanelPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
@@ -390,7 +410,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.invokePluginCommand, async (event, payload) => {
-    assertTrustedSender(event);
     const input = InvokePluginCommandPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage:
@@ -398,6 +417,7 @@ export function registerPluginIpcHandlers<
       trackRenderer: true,
     });
     const pipeline = await ensurePipeline(policy.workspace);
+    workspaces.assertWritable(policy.workspace);
     const plugin = registeredPlugin(policy.workspace.workspaceId, input.pluginId);
     if (!plugin) {
       return InvokePluginCommandResult.parse({
@@ -430,7 +450,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.stopPluginPanel, async (event, payload) => {
-    assertTrustedSender(event);
     const input = StopPluginPanelPayload.parse(payload);
     const policy = createExactSurfaceOwnershipPolicy(
       event,
@@ -447,7 +466,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.invokePluginPanelSdk, async (event, payload) => {
-    assertTrustedSender(event);
     const input = InvokePluginPanelSdkPayload.parse(payload);
     const authorization = surfaces.authorizePanelSdk({
       workspaceId: input.workspaceId,
@@ -469,7 +487,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.openPluginWebApp, async (event, payload) => {
-    assertTrustedSender(event);
     const input = OpenPluginWebAppPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
@@ -507,7 +524,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.startPluginWebApp, async (event, payload) => {
-    assertTrustedSender(event);
     const input = StartPluginWebAppPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
@@ -563,7 +579,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.setPluginWebAppBounds, (event, payload) => {
-    assertTrustedSender(event);
     const input = SetPluginWebAppBoundsPayload.parse(payload);
     surfaces.applyWebAppBounds({
       workspaceId: input.workspaceId,
@@ -579,7 +594,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.stopPluginWebApp, async (event, payload) => {
-    assertTrustedSender(event);
     const input = StopPluginWebAppPayload.parse(payload);
     const policy = createExactSurfaceOwnershipPolicy(
       event,
@@ -597,7 +611,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.listPlugins, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListPluginsPayload.parse(payload);
     try {
       const { pipeline } = await activePipeline(event, input.workspaceId);
@@ -608,10 +621,10 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.listOfferedPlugins, async (event, payload) => {
-    assertTrustedSender(event);
     const input = ListOfferedPluginsPayload.parse(payload);
     try {
       const { pipeline, workspace } = await activePipeline(event, input.workspaceId);
+      workspaces.assertWritable(workspace);
       const existingPluginIds = new Set(
         pipeline.list().map((plugin) => plugin.id),
       );
@@ -630,10 +643,10 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.addOfferedPlugin, async (event, payload) => {
-    assertTrustedSender(event);
     const input = AddOfferedPluginPayload.parse(payload);
     try {
       const { pipeline, workspace } = await activePipeline(event, input.workspaceId);
+      workspaces.assertWritable(workspace);
       await pipeline.handleWatcherEvents([
         { operation: "update", path: "plugins" },
       ]);
@@ -687,7 +700,6 @@ export function registerPluginIpcHandlers<
     ) => Promise<unknown>,
   ): void => {
     registrar.handle(channel, async (event, payload) => {
-      assertTrustedSender(event);
       const input = PluginActionPayload.parse(payload);
       try {
         const { pipeline } = await activePipeline(event, input.workspaceId);
@@ -720,7 +732,6 @@ export function registerPluginIpcHandlers<
     pipeline.rebuild(pluginId));
 
   registrar.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
-    assertTrustedSender(event);
     const input = PluginUninstallPreflightPayload.parse(payload);
     try {
       const { pipeline } = await activePipeline(event, input.workspaceId);
@@ -747,7 +758,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.pluginSizes, async (event, payload) => {
-    assertTrustedSender(event);
     const input = PluginSizesPayload.parse(payload);
     try {
       const { pipeline } = await activePipeline(event, input.workspaceId);
@@ -764,7 +774,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.getPluginSettings, async (event, payload) => {
-    assertTrustedSender(event);
     const input = GetPluginSettingsPayload.parse(payload);
     try {
       const { pipeline } = await activePipeline(event, input.workspaceId);
@@ -781,7 +790,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.setPluginSettings, async (event, payload) => {
-    assertTrustedSender(event);
     const input = SetPluginSettingsPayload.parse(payload);
     try {
       const { pipeline } = await activePipeline(event, input.workspaceId);
@@ -802,7 +810,6 @@ export function registerPluginIpcHandlers<
   });
 
   registrar.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
-    assertTrustedSender(event);
     const input = UninstallPluginPayload.parse(payload);
     try {
       const { pipeline, workspace } = await activePipeline(
