@@ -117,8 +117,4 @@ This shape has three constraints:
 
 The successor shape is cleaner only if the product chooses isolation over local continuity and resets every old-lineage client. Direct Yjs merge from an old lineage is not a safe recovery path.
 
-Run the prototype from the repository root:
-
-```powershell
-node prototypes/stop-and-restore/run.mjs
-```
+The prototype code was throwaway and is not retained; this result and the lane brief (share-links campaign ledger) are sufficient to re-create the drill for the Phase 4 gate.
