@@ -192,6 +192,7 @@ describe("share grants", () => {
         selector: { paths: ["docs", "notes.md"], versionId: null },
         access: "view",
         grantId: expect.any(String),
+        principalKind: "user",
         generation: 1,
         createdAtMs: 5555,
         revokedAtMs: null,
@@ -210,6 +211,7 @@ describe("share grants", () => {
       selector: { paths: ["docs", "notes.md"], versionId: null },
       access: "view",
       grantId: expect.any(String),
+      principalKind: "user",
       generation: 1,
     });
     // The recipient never learns the granter's workspace id.
@@ -223,6 +225,7 @@ describe("share grants", () => {
       selector: { paths: ["docs", "notes.md"], versionId: null },
       access: "view",
       grantId: expect.any(String),
+      principalKind: "user",
       generation: 1,
     });
   });

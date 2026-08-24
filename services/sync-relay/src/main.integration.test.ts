@@ -432,4 +432,20 @@ describe("sync relay startup guards", () => {
     expect(code).toBe(1);
     expect(stderr).toContain("POSTGRES_URL must be set");
   });
+
+  it("refuses to start in production when DOHC_RELAY_LINK_KEY is unset", async () => {
+    const dbPath = join(await tempRoot("no-link-key"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "production",
+      SYNC_RELAY_TEST_AUTH: undefined,
+      POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
+      DOHC_RELAY_LINK_KEY: undefined,
+      SYNC_RELAY_PORT: "0",
+      BETTER_AUTH_SECRET: "x".repeat(32),
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("DOHC_RELAY_LINK_KEY must be set");
+  });
 });

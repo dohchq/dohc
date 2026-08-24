@@ -23,6 +23,7 @@ export {
   type GrantStatus,
   type ChatShareAccess,
   type LinkCredentialRecord,
+  type LinkExchangeResult,
   type ShareGrantRecord,
   type SharePrincipal,
 } from "./shareGrant";

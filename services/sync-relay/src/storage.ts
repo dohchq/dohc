@@ -71,7 +71,7 @@ export type SyncRelayShareGrantStatus = "active" | "revoked";
 export interface SyncRelayShareGrantRow {
   grantId: string;
   shareId: string;
-  principalKind: "user" | "email";
+  principalKind: "user" | "email" | "link";
   principalUserId: string | null;
   principalEmail: string | null;
   access: string;
@@ -81,6 +81,33 @@ export interface SyncRelayShareGrantRow {
   revokedAtMs: number | null;
   parentGrantId: string | null;
 }
+
+export interface SyncRelayLinkCredentialRow {
+  credentialId: string;
+  grantId: string;
+  secretHash: string;
+  generation: number;
+  mintedAtMs: number;
+  retiredAtMs: number | null;
+}
+
+export interface SyncRelayLinkCredentialGrantRow {
+  credential: SyncRelayLinkCredentialRow;
+  grant: SyncRelayShareGrantRow;
+}
+
+export interface SyncRelayLinkSessionRow {
+  sessionId: string;
+  capabilityHash: string;
+  grantId: string;
+  generation: number;
+  mintedAtMs: number;
+  expiresAtMs: number;
+}
+
+export type ShareGrantTransitionResult =
+  | { ok: true; grant: SyncRelayShareGrantRow }
+  | { ok: false };
 
 export interface SyncRelayShareWithGrantRow {
   share: SyncRelayShareRow;
@@ -257,6 +284,55 @@ export interface SyncRelayStorage {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
   }): void;
+  createLinkGrant(input: {
+    grant: SyncRelayShareGrantRow;
+    credential: SyncRelayLinkCredentialRow;
+  }): boolean;
+  getShareGrant(grantId: string): SyncRelayShareGrantRow | null;
+  getCurrentLinkCredential(grantId: string): SyncRelayLinkCredentialRow | null;
+  mintLinkCredential(credential: SyncRelayLinkCredentialRow): boolean;
+  findLinkGrantByCredentialHash(
+    secretHash: string,
+  ): SyncRelayLinkCredentialGrantRow | null;
+  retireLinkCredential(grantId: string, retiredAtMs: number): boolean;
+  rotateLinkGrant(input: {
+    shareId: string;
+    grantId: string;
+    credentialId: string;
+    secretHash: string;
+    rotatedAtMs: number;
+  }): ShareGrantTransitionResult;
+  retuneShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    credentialId?: string;
+    secretHash?: string;
+  }): ShareGrantTransitionResult;
+  revokeShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    revokedAtMs: number;
+  }): ShareGrantTransitionResult;
+  convertLinkGrant(input: {
+    shareId: string;
+    parentGrantId: string;
+    grantId: string;
+    principalUserId: string;
+    createdAtMs: number;
+  }): ShareGrantTransitionResult;
+  promoteShareGrant(input: {
+    shareId: string;
+    grantId: string;
+  }): ShareGrantTransitionResult;
+  mintLinkSession(input: {
+    session: SyncRelayLinkSessionRow;
+    guard?: () => void;
+  }): boolean;
+  findLinkSessionByCapabilityHash(
+    capabilityHash: string,
+  ): SyncRelayLinkSessionRow | null;
   // Claims any pending email invites addressed to `email` for `userId`,
   // changing the grant principal from email to user. Idempotent; the email
   // match is exact on the normalized (lowercased) address. Returns the number
@@ -462,7 +538,7 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sync_relay_share_grants (
     grant_id TEXT PRIMARY KEY,
     share_id TEXT NOT NULL,
-    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('user', 'email')),
+    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('user', 'email', 'link')),
     principal_user_id TEXT,
     principal_email TEXT,
     access TEXT NOT NULL,
@@ -475,12 +551,15 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
       (principal_kind = 'user' AND principal_user_id IS NOT NULL AND principal_email IS NULL)
       OR
       (principal_kind = 'email' AND principal_user_id IS NULL AND principal_email IS NOT NULL)
+      OR
+      (principal_kind = 'link' AND principal_user_id IS NULL AND principal_email IS NULL)
     ),
     CHECK (
       (status = 'active' AND revoked_at_ms IS NULL)
       OR
       (status = 'revoked' AND revoked_at_ms IS NOT NULL)
     ),
+    CHECK (parent_grant_id IS NULL OR principal_kind = 'user'),
     FOREIGN KEY (share_id)
       REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
     FOREIGN KEY (parent_grant_id)
@@ -492,6 +571,36 @@ const NORMALIZED_SHARE_SCHEMA_SQL = `
     ON sync_relay_share_grants(principal_user_id, created_at_ms);
   CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_email
     ON sync_relay_share_grants(principal_email, created_at_ms);
+
+  CREATE TABLE IF NOT EXISTS sync_relay_link_credentials (
+    credential_id TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL,
+    secret_hash TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    minted_at_ms INTEGER NOT NULL,
+    retired_at_ms INTEGER,
+    FOREIGN KEY (grant_id)
+      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
+  ) STRICT;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_link_credentials_current
+    ON sync_relay_link_credentials(grant_id)
+    WHERE retired_at_ms IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_credentials_hash
+    ON sync_relay_link_credentials(secret_hash);
+
+  CREATE TABLE IF NOT EXISTS sync_relay_link_sessions (
+    session_id TEXT PRIMARY KEY,
+    capability_hash TEXT NOT NULL UNIQUE,
+    grant_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    minted_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    CHECK (expires_at_ms > minted_at_ms),
+    FOREIGN KEY (grant_id)
+      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_sessions_grant
+    ON sync_relay_link_sessions(grant_id, generation, expires_at_ms);
 `;
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
@@ -737,6 +846,22 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         DROP TABLE sync_relay_shares;
         ${NORMALIZED_SHARE_SCHEMA_SQL}
       `);
+    } else {
+      const grantSchema = db
+        .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_grants'")
+        .get();
+      if (!String(grantSchema?.sql ?? "").includes("'link'")) {
+        // Pre-launch replacement of the first normalized grant table. SQLite
+        // cannot alter a CHECK constraint in place, and there is no shipped
+        // data contract to migrate. Recreate the authority model as one unit.
+        db.exec(`
+          DROP TABLE sync_relay_link_sessions;
+          DROP TABLE sync_relay_link_credentials;
+          DROP TABLE sync_relay_share_grants;
+          DROP TABLE sync_relay_shares;
+          ${NORMALIZED_SHARE_SCHEMA_SQL}
+        `);
+      }
     }
     // Lazy additive migration (0P sync-hardening item 4): dbs created before the
     // blob retention window gain created_at_ms on open. Existing rows default to
@@ -1928,6 +2053,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (input.grant.shareId !== input.share.shareId) {
       throw new Error("share and grant ids do not match");
     }
+    if (input.grant.principalKind === "link") {
+      throw new Error("a link grant requires an existing share and a credential");
+    }
     this.tx(() => {
       this.db
         .prepare(
@@ -1961,8 +2089,492 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           Math.trunc(input.grant.createdAtMs),
           input.grant.revokedAtMs,
           input.grant.parentGrantId,
-        );
+      );
     });
+  }
+
+  createLinkGrant(input: {
+    grant: SyncRelayShareGrantRow;
+    credential: SyncRelayLinkCredentialRow;
+  }): boolean {
+    const { grant, credential } = input;
+    if (
+      grant.principalKind !== "link" ||
+      grant.principalUserId !== null ||
+      grant.principalEmail !== null ||
+      grant.parentGrantId !== null ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null ||
+      grant.generation !== 1 ||
+      credential.grantId !== grant.grantId ||
+      credential.generation !== grant.generation ||
+      credential.retiredAtMs !== null ||
+      !credential.secretHash
+    ) {
+      return false;
+    }
+    return this.tx(() => {
+      const activeShare = this.db
+        .prepare(
+          `SELECT 1 AS active
+           FROM sync_relay_share_grants
+           WHERE share_id = ? AND status = 'active'
+           LIMIT 1`,
+        )
+        .get(grant.shareId);
+      if (!this.getShare(grant.shareId) || !activeShare) return false;
+      this.insertShareGrant(grant);
+      this.insertLinkCredential(credential);
+      return true;
+    });
+  }
+
+  getShareGrant(grantId: string): SyncRelayShareGrantRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
+                access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         FROM sync_relay_share_grants WHERE grant_id = ?`,
+      )
+      .get(grantId);
+    return row ? rowToShareGrantRow(row) : null;
+  }
+
+  getCurrentLinkCredential(grantId: string): SyncRelayLinkCredentialRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms
+         FROM sync_relay_link_credentials
+         WHERE grant_id = ? AND retired_at_ms IS NULL
+         LIMIT 1`,
+      )
+      .get(grantId);
+    return row ? rowToLinkCredentialRow(row) : null;
+  }
+
+  mintLinkCredential(credential: SyncRelayLinkCredentialRow): boolean {
+    if (credential.retiredAtMs !== null || !credential.secretHash) return false;
+    return this.tx(() => {
+      const grant = this.getShareGrant(credential.grantId);
+      if (
+        !grant ||
+        grant.principalKind !== "link" ||
+        grant.status !== "active" ||
+        grant.generation !== credential.generation
+      ) {
+        return false;
+      }
+      this.retireCurrentLinkCredential(credential.grantId, credential.mintedAtMs);
+      this.insertLinkCredential(credential);
+      return true;
+    });
+  }
+
+  findLinkGrantByCredentialHash(
+    secretHash: string,
+  ): SyncRelayLinkCredentialGrantRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT c.credential_id, c.grant_id AS credential_grant_id, c.secret_hash,
+                c.generation AS credential_generation, c.minted_at_ms, c.retired_at_ms,
+                g.grant_id, g.share_id, g.principal_kind, g.principal_user_id,
+                g.principal_email, g.access, g.generation, g.status, g.created_at_ms,
+                g.revoked_at_ms, g.parent_grant_id
+         FROM sync_relay_link_credentials c
+         JOIN sync_relay_share_grants g ON g.grant_id = c.grant_id
+         WHERE c.secret_hash = ? AND c.retired_at_ms IS NULL
+         LIMIT 1`,
+      )
+      .get(secretHash);
+    if (!row) return null;
+    return {
+      credential: rowToLinkCredentialRow({
+        ...row,
+        grant_id: row.credential_grant_id,
+        generation: row.credential_generation,
+      }),
+      grant: rowToShareGrantRow(row),
+    };
+  }
+
+  retireLinkCredential(grantId: string, retiredAtMs: number): boolean {
+    return this.tx(() => this.retireCurrentLinkCredential(grantId, retiredAtMs));
+  }
+
+  rotateLinkGrant(input: {
+    shareId: string;
+    grantId: string;
+    credentialId: string;
+    secretHash: string;
+    rotatedAtMs: number;
+  }): ShareGrantTransitionResult {
+    if (!input.credentialId || !input.secretHash) return { ok: false };
+    return this.tx(() => {
+      const grant = this.getShareGrant(input.grantId);
+      const current = this.getCurrentLinkCredential(input.grantId);
+      if (
+        !grant ||
+        grant.shareId !== input.shareId ||
+        grant.principalKind !== "link" ||
+        grant.status !== "active" ||
+        grant.revokedAtMs !== null ||
+        !current ||
+        current.generation !== grant.generation
+      ) {
+        return { ok: false };
+      }
+      const generation = grant.generation + 1;
+      this.db
+        .prepare("UPDATE sync_relay_share_grants SET generation = ? WHERE grant_id = ?")
+        .run(generation, grant.grantId);
+      this.retireCurrentLinkCredential(grant.grantId, input.rotatedAtMs);
+      this.insertLinkCredential({
+        credentialId: input.credentialId,
+        grantId: grant.grantId,
+        secretHash: input.secretHash,
+        generation,
+        mintedAtMs: input.rotatedAtMs,
+        retiredAtMs: null,
+      });
+      this.incrementActiveDependentGenerations(grant.grantId);
+      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
+    });
+  }
+
+  retuneShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    access: string;
+    changedAtMs: number;
+    credentialId?: string;
+    secretHash?: string;
+  }): ShareGrantTransitionResult {
+    return this.tx(() => {
+      const grant = this.getShareGrant(input.grantId);
+      const from = grant ? fileAccessRank(grant.access) : null;
+      const to = fileAccessRank(input.access);
+      if (
+        !grant ||
+        grant.shareId !== input.shareId ||
+        grant.status !== "active" ||
+        grant.revokedAtMs !== null ||
+        from === null ||
+        to === null ||
+        from === to
+      ) {
+        return { ok: false };
+      }
+
+      const widening = to > from;
+      const suppliedCredential =
+        input.credentialId !== undefined || input.secretHash !== undefined;
+      const current =
+        grant.principalKind === "link"
+          ? this.getCurrentLinkCredential(grant.grantId)
+          : null;
+      if (grant.principalKind === "link" && (!current || current.generation !== grant.generation)) {
+        return { ok: false };
+      }
+      if (widening && grant.parentGrantId !== null) {
+        const parent = this.getShareGrant(grant.parentGrantId);
+        const parentRank = parent ? fileAccessRank(parent.access) : null;
+        if (
+          !parent ||
+          parent.principalKind !== "link" ||
+          parent.status !== "active" ||
+          parent.shareId !== grant.shareId ||
+          parentRank === null ||
+          to > parentRank
+        ) {
+          return { ok: false };
+        }
+      }
+      if (
+        grant.principalKind === "link" &&
+        widening &&
+        (!input.credentialId || !input.secretHash)
+      ) {
+        return { ok: false };
+      }
+      if ((!widening || grant.principalKind !== "link") && suppliedCredential) {
+        return { ok: false };
+      }
+
+      const generation = grant.generation + 1;
+      this.db
+        .prepare(
+          "UPDATE sync_relay_share_grants SET access = ?, generation = ? WHERE grant_id = ?",
+        )
+        .run(input.access, generation, grant.grantId);
+
+      if (grant.principalKind === "link") {
+        if (widening) {
+          this.retireCurrentLinkCredential(grant.grantId, input.changedAtMs);
+          this.insertLinkCredential({
+            credentialId: input.credentialId!,
+            grantId: grant.grantId,
+            secretHash: input.secretHash!,
+            generation,
+            mintedAtMs: input.changedAtMs,
+            retiredAtMs: null,
+          });
+          this.incrementActiveDependentGenerations(grant.grantId);
+        } else {
+          this.db
+            .prepare(
+              `UPDATE sync_relay_link_credentials
+               SET generation = ?
+               WHERE grant_id = ? AND retired_at_ms IS NULL`,
+            )
+            .run(generation, grant.grantId);
+          const dependents = this.activeDependentGrants(grant.grantId);
+          for (const dependent of dependents) {
+            const dependentRank = fileAccessRank(dependent.access);
+            if (dependentRank !== null && dependentRank > to) {
+              this.db
+                .prepare(
+                  `UPDATE sync_relay_share_grants
+                   SET access = ?, generation = generation + 1
+                   WHERE grant_id = ? AND status = 'active'`,
+                )
+                .run(input.access, dependent.grantId);
+            }
+          }
+        }
+      }
+      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
+    });
+  }
+
+  revokeShareGrant(input: {
+    shareId: string;
+    grantId: string;
+    revokedAtMs: number;
+  }): ShareGrantTransitionResult {
+    return this.tx(() => {
+      const grant = this.getShareGrant(input.grantId);
+      if (
+        !grant ||
+        grant.shareId !== input.shareId ||
+        grant.status !== "active" ||
+        grant.revokedAtMs !== null
+      ) {
+        return { ok: false };
+      }
+      const revokedAtMs = Math.trunc(input.revokedAtMs);
+      this.db
+        .prepare(
+          `UPDATE sync_relay_share_grants
+           SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
+           WHERE grant_id = ?`,
+        )
+        .run(revokedAtMs, grant.grantId);
+      if (grant.principalKind === "link") {
+        this.retireCurrentLinkCredential(grant.grantId, revokedAtMs);
+        this.db
+          .prepare(
+            `UPDATE sync_relay_share_grants
+             SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
+             WHERE parent_grant_id = ? AND status = 'active'`,
+          )
+          .run(revokedAtMs, grant.grantId);
+      }
+      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
+    });
+  }
+
+  convertLinkGrant(input: {
+    shareId: string;
+    parentGrantId: string;
+    grantId: string;
+    principalUserId: string;
+    createdAtMs: number;
+  }): ShareGrantTransitionResult {
+    return this.tx(() => {
+      const parent = this.getShareGrant(input.parentGrantId);
+      if (
+        !parent ||
+        parent.shareId !== input.shareId ||
+        parent.principalKind !== "link" ||
+        parent.status !== "active" ||
+        parent.revokedAtMs !== null ||
+        !input.principalUserId
+      ) {
+        return { ok: false };
+      }
+      const grant: SyncRelayShareGrantRow = {
+        grantId: input.grantId,
+        shareId: input.shareId,
+        principalKind: "user",
+        principalUserId: input.principalUserId,
+        principalEmail: null,
+        access: parent.access,
+        generation: 1,
+        status: "active",
+        createdAtMs: Math.trunc(input.createdAtMs),
+        revokedAtMs: null,
+        parentGrantId: parent.grantId,
+      };
+      this.insertShareGrant(grant);
+      return { ok: true, grant };
+    });
+  }
+
+  promoteShareGrant(input: {
+    shareId: string;
+    grantId: string;
+  }): ShareGrantTransitionResult {
+    return this.tx(() => {
+      const grant = this.getShareGrant(input.grantId);
+      if (
+        !grant ||
+        grant.shareId !== input.shareId ||
+        grant.principalKind !== "user" ||
+        grant.status !== "active" ||
+        grant.revokedAtMs !== null ||
+        grant.parentGrantId === null
+      ) {
+        return { ok: false };
+      }
+      this.db
+        .prepare(
+          `UPDATE sync_relay_share_grants
+           SET parent_grant_id = NULL, generation = generation + 1
+           WHERE grant_id = ?`,
+        )
+        .run(grant.grantId);
+      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
+    });
+  }
+
+  mintLinkSession(input: {
+    session: SyncRelayLinkSessionRow;
+    guard?: () => void;
+  }): boolean {
+    const { session } = input;
+    if (
+      !session.capabilityHash ||
+      session.expiresAtMs <= session.mintedAtMs ||
+      session.generation < 1
+    ) {
+      return false;
+    }
+    return this.tx(() => {
+      input.guard?.();
+      const grant = this.getShareGrant(session.grantId);
+      if (
+        !grant ||
+        grant.principalKind !== "link" ||
+        grant.status !== "active" ||
+        grant.generation !== session.generation
+      ) {
+        return false;
+      }
+      this.db
+        .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms <= ?")
+        .run(Math.trunc(session.mintedAtMs));
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_link_sessions (
+             session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          session.sessionId,
+          session.capabilityHash,
+          session.grantId,
+          session.generation,
+          Math.trunc(session.mintedAtMs),
+          Math.trunc(session.expiresAtMs),
+        );
+      return true;
+    });
+  }
+
+  findLinkSessionByCapabilityHash(
+    capabilityHash: string,
+  ): SyncRelayLinkSessionRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
+         FROM sync_relay_link_sessions WHERE capability_hash = ? LIMIT 1`,
+      )
+      .get(capabilityHash);
+    return row ? rowToLinkSessionRow(row) : null;
+  }
+
+  private insertShareGrant(grant: SyncRelayShareGrantRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO sync_relay_share_grants (
+           grant_id, share_id, principal_kind, principal_user_id, principal_email,
+           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        grant.grantId,
+        grant.shareId,
+        grant.principalKind,
+        grant.principalUserId,
+        grant.principalEmail,
+        grant.access,
+        grant.generation,
+        grant.status,
+        Math.trunc(grant.createdAtMs),
+        grant.revokedAtMs,
+        grant.parentGrantId,
+      );
+  }
+
+  private insertLinkCredential(credential: SyncRelayLinkCredentialRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO sync_relay_link_credentials (
+           credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        credential.credentialId,
+        credential.grantId,
+        credential.secretHash,
+        credential.generation,
+        Math.trunc(credential.mintedAtMs),
+        credential.retiredAtMs,
+      );
+  }
+
+  private retireCurrentLinkCredential(grantId: string, retiredAtMs: number): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE sync_relay_link_credentials
+         SET retired_at_ms = ?
+         WHERE grant_id = ? AND retired_at_ms IS NULL`,
+      )
+      .run(Math.trunc(retiredAtMs), grantId);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  private activeDependentGrants(parentGrantId: string): SyncRelayShareGrantRow[] {
+    return this.db
+      .prepare(
+        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
+                access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         FROM sync_relay_share_grants
+         WHERE parent_grant_id = ? AND status = 'active'
+         ORDER BY grant_id`,
+      )
+      .all(parentGrantId)
+      .map(rowToShareGrantRow);
+  }
+
+  private incrementActiveDependentGenerations(parentGrantId: string): void {
+    this.db
+      .prepare(
+        `UPDATE sync_relay_share_grants
+         SET generation = generation + 1
+         WHERE parent_grant_id = ? AND status = 'active'`,
+      )
+      .run(parentGrantId);
   }
 
   claimPendingSharesForEmail(email: string, userId: string): number {
@@ -2051,6 +2663,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           `UPDATE sync_relay_share_grants
            SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
            WHERE share_id = ? AND status = 'active'`,
+        )
+        .run(Math.trunc(revokedAtMs), shareId);
+      this.db
+        .prepare(
+          `UPDATE sync_relay_link_credentials
+           SET retired_at_ms = ?
+           WHERE retired_at_ms IS NULL
+             AND grant_id IN (
+               SELECT grant_id FROM sync_relay_share_grants WHERE share_id = ?
+             )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
       if (Number(revoked.changes ?? 0) > 0) {
@@ -2616,6 +3238,19 @@ function nullableInt(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value);
 }
 
+function fileAccessRank(access: string): number | null {
+  switch (access) {
+    case "view":
+      return 0;
+    case "comment":
+      return 1;
+    case "edit":
+      return 2;
+    default:
+      return null;
+  }
+}
+
 function rowToObjectMomentRow(row: Record<string, unknown>): ObjectMomentRow {
   return {
     momentId: String(row.moment_id),
@@ -2674,7 +3309,7 @@ function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
 function rowToShareGrantRow(row: Record<string, unknown>): SyncRelayShareGrantRow {
   const principalKind = String(row.principal_kind);
   const status = String(row.status);
-  if (principalKind !== "user" && principalKind !== "email") {
+  if (principalKind !== "user" && principalKind !== "email" && principalKind !== "link") {
     throw new Error("stored share grant has an invalid principal kind");
   }
   if (status !== "active" && status !== "revoked") {
@@ -2692,6 +3327,30 @@ function rowToShareGrantRow(row: Record<string, unknown>): SyncRelayShareGrantRo
     createdAtMs: Number(row.created_at_ms),
     revokedAtMs: nullableInt(row.revoked_at_ms),
     parentGrantId: nullableText(row.parent_grant_id),
+  };
+}
+
+function rowToLinkCredentialRow(
+  row: Record<string, unknown>,
+): SyncRelayLinkCredentialRow {
+  return {
+    credentialId: String(row.credential_id),
+    grantId: String(row.grant_id),
+    secretHash: String(row.secret_hash),
+    generation: Number(row.generation),
+    mintedAtMs: Number(row.minted_at_ms),
+    retiredAtMs: nullableInt(row.retired_at_ms),
+  };
+}
+
+function rowToLinkSessionRow(row: Record<string, unknown>): SyncRelayLinkSessionRow {
+  return {
+    sessionId: String(row.session_id),
+    capabilityHash: String(row.capability_hash),
+    grantId: String(row.grant_id),
+    generation: Number(row.generation),
+    mintedAtMs: Number(row.minted_at_ms),
+    expiresAtMs: Number(row.expires_at_ms),
   };
 }
 

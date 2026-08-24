@@ -20,6 +20,7 @@ const secret = process.env.BETTER_AUTH_SECRET ?? "";
 const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
+const linkKey = process.env.DOHC_RELAY_LINK_KEY;
 
 function fatal(message: string): never {
   writeSync(2, `${message}\n`);
@@ -55,6 +56,10 @@ if (!isDevOrTest && !testAuthSeam && process.env.POSTGRES_URL === undefined) {
   fatal(
     "FATAL: POSTGRES_URL must be set outside development/test (it must match workspace-api's database).",
   );
+}
+
+if (!isDevOrTest && !linkKey) {
+  fatal("FATAL: DOHC_RELAY_LINK_KEY must be set outside development/test.");
 }
 
 if (process.env.SYNC_RELAY_TEST_AUTH === "1" && !isDevOrTest) {
@@ -150,6 +155,7 @@ const relayHandler = createSyncRelayHandler({
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   presence,
+  linkKey,
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
@@ -225,9 +231,13 @@ const server = createServer((request, response) => {
   request.on("end", () => {
     if (rejected) return;
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    const headers = new Headers(request.headers as Record<string, string>);
+    // Overwrite any caller-supplied value. The pre-auth token bucket keys on
+    // the socket peer, not on a spoofable forwarding header.
+    headers.set("x-dohc-relay-client-ip", request.socket.remoteAddress ?? "unknown");
     const webRequest = new Request(url, {
       method: request.method,
-      headers: request.headers as Record<string, string>,
+      headers,
       body: chunks.length === 0 ? undefined : Buffer.concat(chunks),
       signal: disconnect.signal,
     });
