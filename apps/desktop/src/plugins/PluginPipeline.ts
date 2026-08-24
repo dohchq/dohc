@@ -3864,6 +3864,40 @@ export class PluginPipeline {
       }, change);
     }
 
+    // Crash-loop disable keeps an inert record for inspection. Retire it
+    // through this change before PluginHost admits the replacement record.
+    if (
+      options.clearDisabled &&
+      this.host.getStatus(pluginId) === "disabled"
+    ) {
+      if (!change) {
+        return this.restoreStatusAfterHostChangeRefusal(
+          candidate,
+          priorStatus,
+          existingHostResult(this.failure(
+            pluginId,
+            this.hostChangeInProgressError(pluginId),
+          )),
+        );
+      }
+      try {
+        await this.stopTerminalRuntime(pluginId, change);
+      } catch (error) {
+        const detail = error instanceof PipelineFailure
+          ? error.detail
+          : pipelineError(
+            "runtime",
+            options.runtimeErrorCode,
+            errorMessage(error),
+          );
+        return this.restoreStatusAfterHostChangeRefusal(
+          candidate,
+          priorStatus,
+          existingHostResult(this.failure(pluginId, detail)),
+        );
+      }
+    }
+
     let startEvidence: PluginHostStartEvidence | null = null;
     try {
       if (options.clearDisabled) {
