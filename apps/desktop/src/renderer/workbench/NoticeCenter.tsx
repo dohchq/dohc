@@ -21,7 +21,7 @@ import {
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
-import { bridge } from "../bridge";
+import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import type {
   AgentNotification,
   AgentNotificationKind,
@@ -125,46 +125,21 @@ export function NoticeCenter(props: {
     const interval = setInterval(() => forceTick((n) => n + 1), 30_000);
     return () => clearInterval(interval);
   }, [open]);
-  const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
   const [dismissedUpdateToastKey, setDismissedUpdateToastKey] = useState<
     string | null
   >(null);
   const [updateActionError, setUpdateActionError] = useState<string | null>(null);
   const [installPending, setInstallPending] = useState(false);
+  const clearReadyUpdateError = useCallback((update: UpdateStateEvent) => {
+    if (update.status === "ready") setUpdateActionError(null);
+  }, []);
+  const { updateState: desktopUpdateState } =
+    useDesktopUpdateStateFeed(clearReadyUpdateError);
+  const updateState =
+    desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
-  const updateSubscriptionFiredRef = useRef(false);
-
-  const applyUpdateState = useCallback((update: UpdateStateEvent) => {
-    if (update.status === "ready") {
-      setUpdateState(update);
-      setUpdateActionError(null);
-      return;
-    }
-    setUpdateState(null);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    updateSubscriptionFiredRef.current = false;
-    void bridge()
-      .getUpdateState()
-      .then((update) => {
-        if (!cancelled && !updateSubscriptionFiredRef.current) {
-          applyUpdateState(update);
-        }
-      })
-      .catch(() => undefined);
-    const unsubscribe = bridge().onUpdateState((update) => {
-      updateSubscriptionFiredRef.current = true;
-      applyUpdateState(update);
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [applyUpdateState]);
 
   const readyUpdateKey =
     updateState?.status === "ready"

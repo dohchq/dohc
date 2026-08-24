@@ -16,7 +16,6 @@ import {
   useRef,
   useState,
 } from "react";
-import type { UpdateStateEvent } from "../../ipc/bridgeContract";
 import {
   DEFAULT_USER_SETTINGS,
   DesktopUserSettingsResult,
@@ -36,6 +35,7 @@ import {
 import { bridge } from "../bridge";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyAppearanceSettings } from "../theme";
+import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
@@ -127,10 +127,9 @@ export function SettingsDialog(props: {
   // (or, via the next full-settings save, overwrite) workspace B. Mirrors the
   // token guard DesktopWorkspaceShell uses for engine history.
   const workspaceTokenRef = useRef(0);
-  const updateSubscriptionFiredRef = useRef(false);
-  // Same shape as updateSubscriptionFiredRef: a zoom broadcast arriving while
-  // the initial Promise.all load is in flight is NEWER than the user-settings
-  // snapshot that load retained, and must not be painted over.
+  // A zoom broadcast arriving while the initial Promise.all load is in flight
+  // is NEWER than the user-settings snapshot that load retained, and must not
+  // be painted over.
   const settingsEventFiredRef = useRef(false);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
     props.initialSection ?? DEFAULT_SETTINGS_SECTION,
@@ -141,9 +140,11 @@ export function SettingsDialog(props: {
     useState<WorkspaceSettingsResult | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [updateState, setUpdateState] = useState<UpdateStateEvent | null>(null);
   const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const clearUpdateError = useCallback(() => setUpdateError(null), []);
+  const { updateState, acceptUpdateResult } =
+    useDesktopUpdateStateFeed(clearUpdateError);
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearSaveStateTimer = useCallback(() => {
@@ -232,29 +233,6 @@ export function SettingsDialog(props: {
       }),
     [markSaved],
   );
-
-  useEffect(() => {
-    let cancelled = false;
-    updateSubscriptionFiredRef.current = false;
-    void bridge()
-      .getUpdateState()
-      .then((next) => {
-        if (!cancelled && !updateSubscriptionFiredRef.current) {
-          setUpdateError(null);
-          setUpdateState(next);
-        }
-      })
-      .catch(() => undefined);
-    const unsubscribe = bridge().onUpdateState((next) => {
-      updateSubscriptionFiredRef.current = true;
-      setUpdateError(null);
-      setUpdateState(next);
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, []);
 
   useEffect(() => {
     if (props.initialSection) setActiveSection(props.initialSection);
@@ -474,7 +452,7 @@ export function SettingsDialog(props: {
     setUpdateError(null);
     try {
       const result = await bridge().checkForUpdates();
-      setUpdateState(result.state);
+      acceptUpdateResult(result.state);
       if (!result.checked) {
         setUpdateError(
           result.state.status === "error"
@@ -489,7 +467,7 @@ export function SettingsDialog(props: {
     } finally {
       setUpdateBusy(null);
     }
-  }, []);
+  }, [acceptUpdateResult]);
 
   const installUpdate = useCallback(async () => {
     setUpdateBusy("install");
@@ -499,7 +477,7 @@ export function SettingsDialog(props: {
       // present the recovery dialog opens INSTEAD of the one-shot install.
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
-      setUpdateState(result.state);
+      acceptUpdateResult(result.state);
       if (!result.accepted) {
         setUpdateError(
           result.state.status === "error"
@@ -514,7 +492,7 @@ export function SettingsDialog(props: {
     } finally {
       setUpdateBusy(null);
     }
-  }, []);
+  }, [acceptUpdateResult]);
 
   const userSettings = userResult?.settings ?? DEFAULT_USER_SETTINGS;
   const workspaceSettings = workspaceResult?.settings ?? DEFAULT_WORKSPACE_SETTINGS;
