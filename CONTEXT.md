@@ -15,7 +15,7 @@ One grantee's authority on a share, with its own level, generation, and revocati
 _Avoid_: permission, membership
 
 **Share access**:
-The level a grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals.
+The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history. Named recipients with Edit can also send change proposals. A chat-channel grant carries read-only or read-write instead, typed by its selector kind.
 _Avoid_: permission level, role
 
 **Change proposal**:
@@ -27,7 +27,7 @@ The paste-into-dohc handle that names a share and its relay. Carries no authorit
 _Avoid_: share link (that is the URL grant), invite code
 
 **Share link**:
-A URL whose secret is a grant on a share: anyone holding it gets the link's access level in a browser, no account needed. The owner can revoke it, change its level, or rotate its secret. Raising its level mints a new URL.
+A URL carrying the credential that authenticates a link grant: anyone holding it gets the grant's access level in a browser, no account needed. The owner can revoke the grant, change its level, or rotate the credential. Raising the level mints a new URL.
 _Avoid_: public link, web share, share URL
 
 **Link holder**:

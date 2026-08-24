@@ -15,7 +15,7 @@ Build the data and authorization contracts before any route or UI.
 - Define the link principal (server-minted, per link grant per browser) and the audit record that survives Y.Doc compaction, replication, and settlement.
 - Define host lease, epoch, and append-before-acknowledge journaling shapes (ADR 0003), and the publication record (ADR 0006).
 
-Settle first: whether one share can hold several links and mixed levels; whether selector scope is immutable after creation; link expiry vs revoke; what derived named grants survive; what the owner can inspect, block, and delete from the audit record.
+Settle first: whether one share can hold several links and mixed levels; whether selector scope is immutable after creation; what derived named grants survive; what the owner can inspect, block, and delete from the audit record. Already settled: no expiry in v1 — the state machine refuses it, and owners revoke instead.
 
 Gate: contract tests pass in both languages; a written state machine for grant transitions (create, narrow, widen, rotate, revoke, expire, convert, promote) with no undefined transition.
 
@@ -40,7 +40,8 @@ The first shippable vertical: accountless viewing.
 - Sessions are per-link: cookie naming or a server-side session map keyed by link id keeps two links open in one browser fully distinct. The gate includes a two-tab test covering reads, rotation, and revocation across different shares.
 - Honest freshness: the viewer shows settled content with a "last settled" indicator; it never calls a stale snapshot live.
 - Refusal discipline: invalid id, bad secret, revoked, and rate-limited responses are indistinguishable before authentication.
-- Owner visibility: per-link usage, and a warning that a link exposes everything under the selector, including files added later.
+- Owner visibility: per-link usage, and a warning that a link exposes everything under the selector — including files added later for live-follow path shares; a version share is a snapshot, so its warning omits the future-files clause.
+- Promoting a derived named grant warns that it is permanent: the former parent link's rotation and revocation no longer reach that grantee, and the reverse path afterward is revoking the named grant itself.
 
 Settle first: which metadata a viewer receives (no owner email, workspace ids, private ancestor paths, or participant identities by default); remote-media policy (blocked in v1); cache and unfurl-bot policy. Chat-channel selectors are excluded from links in this program.
 
