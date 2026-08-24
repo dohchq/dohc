@@ -96,6 +96,10 @@ export interface PluginPanelSdkAuthorization {
   isPushLive(): boolean;
 }
 
+interface PluginPanelSdkGrantSuspension {
+  restore(): Promise<void>;
+}
+
 export interface PluginWebAppBoundsRequest
   extends PluginWebAppIdentity,
     PluginSurfaceOwner {
@@ -158,6 +162,13 @@ interface PanelAttempt {
   cancelled: boolean;
   active: boolean;
   record: PanelRecord | null;
+}
+
+interface SuspendedPanelGrant {
+  readonly record: PanelRecord;
+  readonly grant: PanelGrant;
+  readonly hostEpoch: number;
+  readonly spawnId: string | undefined;
 }
 
 interface WebAppRecord<V extends PluginWebAppViewLike>
@@ -509,6 +520,93 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         record.panelId,
       );
     }
+  }
+
+  async withPluginSdkGrantSuspensions<
+    Result extends { readonly ok: boolean },
+  >(
+    run: (
+      suspend: (identity: PluginSurfaceIdentity) => void,
+    ) => Promise<Result>,
+  ): Promise<Result> {
+    const suspensions: PluginPanelSdkGrantSuspension[] = [];
+    const restore = () =>
+      Promise.all(suspensions.map((suspension) => suspension.restore()));
+    try {
+      const result = await run((identity) => {
+        suspensions.push(this.#suspendPluginSdkGrants(identity));
+      });
+      if (!result.ok) await restore();
+      return result;
+    } catch (error) {
+      await restore();
+      throw error;
+    }
+  }
+
+  #suspendPluginSdkGrants(
+    identity: PluginSurfaceIdentity,
+  ): PluginPanelSdkGrantSuspension {
+    if (this.#closed) return { restore: () => Promise.resolve() };
+    // Capture the whole rollback set before revoking anything. If one lease
+    // cannot report its spawn, the caller receives no suspension handle, so a
+    // partial revocation here would have no reverse path.
+    const suspended = [...this.#panels.values()]
+      .filter(
+        (record) =>
+          record.workspaceId === identity.workspaceId &&
+          record.pluginId === identity.pluginId &&
+          !record.closed &&
+          record.attempt.active &&
+          !record.grant.signal.aborted,
+      )
+      .map((record): SuspendedPanelGrant => ({
+        record,
+        grant: record.grant,
+        hostEpoch: this.#hostEpoch(record),
+        spawnId: record.ownedLease.lease.currentSpawnId(),
+      }));
+    for (const { record } of suspended) {
+      this.#panelAuthorities.revokePanel(
+        record.workspaceId,
+        record.pluginId,
+        record.panelId,
+      );
+    }
+
+    let restorePromise: Promise<void> | null = null;
+    return {
+      restore: () => {
+        if (restorePromise) return restorePromise;
+        restorePromise = Promise.all(
+          suspended.map(({ record, grant, hostEpoch, spawnId }) =>
+            this.#inPanelLane(record, async () => {
+              if (
+                this.#closed ||
+                record.closed ||
+                !record.attempt.active ||
+                record.attempt.cancelled ||
+                this.#panels.get(panelKey(record)) !== record ||
+                record.grant !== grant ||
+                !grant.signal.aborted ||
+                this.#hostEpoch(record) !== hostEpoch ||
+                spawnId === undefined ||
+                record.ownedLease.lease.currentSpawnId() !== spawnId
+              ) {
+                return;
+              }
+              record.grant = this.#registerPanelGrant(record);
+            }).catch((error) => {
+              this.#report(
+                error,
+                `restore suspended plugin panel authority for "${record.pluginId}"`,
+              );
+            }),
+          ),
+        ).then(() => undefined);
+        return restorePromise;
+      },
+    };
   }
 
   hostChanged(change: PluginSurfaceHostChange): void {

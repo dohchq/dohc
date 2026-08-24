@@ -225,7 +225,7 @@ describe("plugin web app main-process wiring", () => {
 
   it("passes partition clearing to the owner only after the last claimant is removed", () => {
     const uninstall = handler("uninstallPlugin");
-    const uninstallAt = uninstall.indexOf("await pipeline.uninstall(");
+    const uninstallAt = uninstall.indexOf("pipeline.uninstall(");
     const claimantAt = uninstall.indexOf(
       "pluginIdHasOtherInstalledClaimant(",
       uninstallAt,
@@ -262,7 +262,7 @@ describe("plugin web app main-process wiring", () => {
 
   it("tears each stopped runtime down and keeps successful partition cleanup idempotent", () => {
     const uninstall = handler("uninstallPlugin");
-    const uninstallAt = uninstall.indexOf("await pipeline.uninstall(");
+    const uninstallAt = uninstall.indexOf("pipeline.uninstall(");
     const stoppedHookAt = uninstall.indexOf(
       "onRuntimeStopped: (pluginId) =>",
       uninstallAt,

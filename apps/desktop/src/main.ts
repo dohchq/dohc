@@ -8214,16 +8214,19 @@ function registerIpcHandlers(
   pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
     pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, async (pipeline, pluginId, workspaceId) => {
-    const result = await pipeline.disable(pluginId, {
-      onWillStopRuntime: () =>
-        pluginSurfaces.revokePluginSdkGrants({ workspaceId, pluginId }),
-      onRuntimeStopped: (stoppedPluginId) =>
-        pluginSurfaces.stop({
-          kind: "plugin",
-          workspaceId,
-          pluginId: stoppedPluginId,
-        }),
-    });
+    const result = await pluginSurfaces.withPluginSdkGrantSuspensions(
+      (suspend) => pipeline.disable(pluginId, {
+        onWillStopRuntime: () => {
+          suspend({ workspaceId, pluginId });
+        },
+        onRuntimeStopped: (stoppedPluginId) =>
+          pluginSurfaces.stop({
+            kind: "plugin",
+            workspaceId,
+            pluginId: stoppedPluginId,
+          }),
+      }),
+    );
     return result;
   });
   pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
@@ -8328,23 +8331,26 @@ function registerIpcHandlers(
     try {
       const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
       const result = PluginActionResult.parse(
-        await pipeline.uninstall(
-          input.pluginId,
-          input.directoryName,
-          input.confirmationToken,
-          {
-            onWillStopRuntime: (pluginId) =>
-              pluginSurfaces.revokePluginSdkGrants({
-                workspaceId: input.workspaceId,
-                pluginId,
-              }),
-            onRuntimeStopped: (pluginId) =>
-              pluginSurfaces.stop({
-                kind: "plugin",
-                workspaceId: input.workspaceId,
-                pluginId,
-              }),
-          },
+        await pluginSurfaces.withPluginSdkGrantSuspensions(
+          (suspend) => pipeline.uninstall(
+            input.pluginId,
+            input.directoryName,
+            input.confirmationToken,
+            {
+              onWillStopRuntime: (pluginId) => {
+                suspend({
+                  workspaceId: input.workspaceId,
+                  pluginId,
+                });
+              },
+              onRuntimeStopped: (pluginId) =>
+                pluginSurfaces.stop({
+                  kind: "plugin",
+                  workspaceId: input.workspaceId,
+                  pluginId,
+                }),
+            },
+          ),
         ),
       );
       // Runtime-surface cleanup already ran for every exact id whose host

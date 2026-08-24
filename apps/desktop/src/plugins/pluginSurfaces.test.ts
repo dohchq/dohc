@@ -1480,6 +1480,26 @@ describe("PluginSurfaces web app attempt ownership", () => {
 });
 
 describe("PluginSurfaces panel authority", () => {
+  function authorizeExact(
+    surfaces: PluginSurfaces<FakeView>,
+    request: typeof panelRequest,
+    current: {
+      generation: number;
+      workspaceId: string | undefined;
+      spawnId: string | undefined;
+    },
+  ) {
+    return surfaces.authorizePanelSdk({
+      workspaceId: request.workspaceId,
+      pluginId: request.pluginId,
+      panelId: request.panelId,
+      senderId: request.senderId,
+      currentGeneration: () => current.generation,
+      activeWorkspaceId: () => current.workspaceId,
+      liveSpawnId: () => current.spawnId,
+    });
+  }
+
   function authorize(
     surfaces: PluginSurfaces<FakeView>,
     current: {
@@ -1488,15 +1508,7 @@ describe("PluginSurfaces panel authority", () => {
       spawnId: string | undefined;
     },
   ) {
-    return surfaces.authorizePanelSdk({
-      workspaceId: "ws",
-      pluginId: "plugin",
-      panelId: "panel",
-      senderId: 7,
-      currentGeneration: () => current.generation,
-      activeWorkspaceId: () => current.workspaceId,
-      liveSpawnId: () => current.spawnId,
-    });
+    return authorizeExact(surfaces, panelRequest, current);
   }
 
   it("revokes SDK grants synchronously without destroying surfaces before action success", async () => {
@@ -1545,6 +1557,234 @@ describe("PluginSurfaces panel authority", () => {
     expect(panelLease.releases).toBe(1);
     expect(FakeView.created[0]!.closed).toBe(1);
     expect(webAppLease.releases).toBe(1);
+  });
+
+  it("restores same-spawn panel SDK authority after a failed disable", async () => {
+    const surfaces = createSurfaces();
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    const beforeDisable = authorize(surfaces, current);
+
+    await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+      await Promise.resolve();
+      suspend({ workspaceId: "ws", pluginId: "plugin" });
+      expect(beforeDisable.authority.signal.aborted).toBe(true);
+      return { ok: false };
+    });
+
+    const restored = authorize(surfaces, current);
+    expect(restored.authority.signal).not.toBe(beforeDisable.authority.signal);
+    expect(restored.isPushLive()).toBe(true);
+  });
+
+  it("restores every still-live alias and primary suspension after a failed uninstall", async () => {
+    const surfaces = createSurfaces();
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    const primary = { ...panelRequest, panelId: "primary-panel" };
+    const alias = {
+      ...panelRequest,
+      pluginId: "plugin-alias",
+      panelId: "alias-panel",
+    };
+    await surfaces.startPanel(
+      primary,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    await surfaces.startPanel(
+      alias,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    const primaryBefore = authorizeExact(surfaces, primary, current);
+    const aliasBefore = authorizeExact(surfaces, alias, current);
+    await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+      for (const request of [primary, alias]) {
+        suspend({
+          workspaceId: request.workspaceId,
+          pluginId: request.pluginId,
+        });
+      }
+      expect(primaryBefore.authority.signal.aborted).toBe(true);
+      expect(aliasBefore.authority.signal.aborted).toBe(true);
+      return { ok: false };
+    });
+
+    expect(authorizeExact(surfaces, primary, current).isPushLive()).toBe(true);
+    expect(authorizeExact(surfaces, alias, current).isPushLive()).toBe(true);
+  });
+
+  it.each(["changed", "absent"] as const)(
+    "does not restore a tentative grant when the captured spawn is %s",
+    async (change) => {
+      let currentSpawnId: string | undefined = "spawn-1";
+      const surfaces = createSurfaces();
+      await surfaces.startPanel(
+        panelRequest,
+        panelAdmission({
+          ownedLease: lease(),
+          spawn: () => currentSpawnId ?? "missing",
+        }),
+      );
+      await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+        suspend({ workspaceId: "ws", pluginId: "plugin" });
+        currentSpawnId = change === "changed" ? "spawn-2" : undefined;
+        return { ok: false };
+      });
+
+      expect(() =>
+        authorize(surfaces, {
+          generation: 1,
+          workspaceId: "ws",
+          spawnId: currentSpawnId,
+        })
+      ).toThrow();
+    },
+  );
+
+  it("does not restore a tentative grant after a successful stop", async () => {
+    const surfaces = createSurfaces();
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+      suspend({ workspaceId: "ws", pluginId: "plugin" });
+      await surfaces.stop({
+        kind: "plugin",
+        workspaceId: "ws",
+        pluginId: "plugin",
+      });
+      return { ok: true };
+    });
+
+    expect(() =>
+      authorize(surfaces, {
+        generation: 1,
+        workspaceId: "ws",
+        spawnId: "spawn-1",
+      })
+    ).toThrow();
+  });
+
+  it("restores tentative grants before rethrowing an action failure", async () => {
+    const failure = new Error("disable failed");
+    const surfaces = createSurfaces();
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    await expect(
+      surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+        suspend({ workspaceId: "ws", pluginId: "plugin" });
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+
+    expect(authorize(surfaces, current).isPushLive()).toBe(true);
+  });
+
+  it("does not revoke any grant when the suspension snapshot cannot be captured", async () => {
+    const failure = new Error("spawn snapshot failed");
+    let throwOnSecondSpawnRead = false;
+    const surfaces = createSurfaces();
+    const first = { ...panelRequest, panelId: "first-panel" };
+    const second = { ...panelRequest, panelId: "second-panel" };
+    await surfaces.startPanel(
+      first,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    await surfaces.startPanel(
+      second,
+      panelAdmission({
+        ownedLease: lease(),
+        spawn: () => {
+          if (throwOnSecondSpawnRead) throw failure;
+          return "spawn-1";
+        },
+      }),
+    );
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    const firstBefore = authorizeExact(surfaces, first, current);
+    const secondBefore = authorizeExact(surfaces, second, current);
+    throwOnSecondSpawnRead = true;
+
+    await expect(
+      surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+        suspend({ workspaceId: "ws", pluginId: "plugin" });
+        return { ok: false };
+      }),
+    ).rejects.toBe(failure);
+
+    expect(firstBefore.authority.signal.aborted).toBe(false);
+    expect(secondBefore.authority.signal.aborted).toBe(false);
+  });
+
+  it("reports tentative restore errors without rejecting restoration", async () => {
+    const failure = new Error("spawn read failed");
+    const errors: unknown[] = [];
+    let throwOnSpawnRead = false;
+    const surfaces = createSurfaces({ errors });
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({
+        ownedLease: lease(),
+        spawn: () => {
+          if (throwOnSpawnRead) throw failure;
+          return "spawn-1";
+        },
+      }),
+    );
+    const result = await surfaces.withPluginSdkGrantSuspensions(
+      async (suspend) => {
+        suspend({ workspaceId: "ws", pluginId: "plugin" });
+        throwOnSpawnRead = true;
+        return { ok: false };
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(errors).toEqual([failure]);
+  });
+
+  it("does not restore a grant that was already aborted", async () => {
+    const surfaces = createSurfaces();
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    surfaces.revokePluginSdkGrants({ workspaceId: "ws", pluginId: "plugin" });
+
+    await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+      suspend({ workspaceId: "ws", pluginId: "plugin" });
+      return { ok: false };
+    });
+
+    expect(() =>
+      authorize(surfaces, {
+        generation: 1,
+        workspaceId: "ws",
+        spawnId: "spawn-1",
+      })
+    ).toThrow();
   });
 
   it("regrants only the retained exact panel after terminal then ready", async () => {

@@ -275,25 +275,30 @@ describe("plugin panel main-process wiring", () => {
     expect(checkAt).toBeGreaterThan(gateAt);
   });
 
-  it("revokes SDK grants before disable and returns owner cleanup from the stopped boundary", () => {
+  it("tentatively suspends SDK grants for disable and restores failed actions", () => {
     const disable = sourceBlock(
       "pluginAction(CHANNELS.disablePlugin,",
       "\n  });",
     );
-    const disableCallAt = disable.indexOf(
-      "const result = await pipeline.disable(pluginId, {",
+    const ownerAt = disable.indexOf(
+      "pluginSurfaces.withPluginSdkGrantSuspensions(",
     );
-    const revokeHookAt = disable.indexOf(
+    const callbackAt = disable.indexOf("(suspend) =>", ownerAt);
+    const disableCallAt = disable.indexOf(
+      "pipeline.disable(pluginId, {",
+      callbackAt,
+    );
+    const suspendHookAt = disable.indexOf(
       "onWillStopRuntime: () =>",
       disableCallAt,
     );
-    const revokeAt = disable.indexOf(
-      "pluginSurfaces.revokePluginSdkGrants({ workspaceId, pluginId })",
-      revokeHookAt,
+    const suspendAt = disable.indexOf(
+      "suspend({ workspaceId, pluginId })",
+      suspendHookAt,
     );
     const stoppedHookAt = disable.indexOf(
       "onRuntimeStopped: (stoppedPluginId) =>",
-      revokeAt,
+      suspendAt,
     );
     const disableCleanupAt = disable.indexOf(
       "pluginSurfaces.stop({",
@@ -306,12 +311,17 @@ describe("plugin panel main-process wiring", () => {
       cleanupWorkspaceAt,
     );
     const cleanupEndAt = disable.indexOf("}),", cleanupPluginAt);
-    const resultReturnAt = disable.indexOf("return result;", cleanupEndAt);
+    const resultReturnAt = disable.indexOf(
+      "return result;",
+      cleanupEndAt,
+    );
 
-    expect(disableCallAt).toBeGreaterThan(-1);
-    expect(revokeHookAt).toBeGreaterThan(disableCallAt);
-    expect(revokeAt).toBeGreaterThan(revokeHookAt);
-    expect(stoppedHookAt).toBeGreaterThan(revokeAt);
+    expect(ownerAt).toBeGreaterThan(-1);
+    expect(callbackAt).toBeGreaterThan(ownerAt);
+    expect(disableCallAt).toBeGreaterThan(callbackAt);
+    expect(suspendHookAt).toBeGreaterThan(disableCallAt);
+    expect(suspendAt).toBeGreaterThan(suspendHookAt);
+    expect(stoppedHookAt).toBeGreaterThan(suspendAt);
     expect(disableCleanupAt).toBeGreaterThan(stoppedHookAt);
     expect(cleanupKindAt).toBeGreaterThan(disableCleanupAt);
     expect(cleanupWorkspaceAt).toBeGreaterThan(cleanupKindAt);
@@ -321,26 +331,30 @@ describe("plugin panel main-process wiring", () => {
     expect(disable).not.toContain("void pluginSurfaces.stop");
   });
 
-  it("routes every uninstall runtime revocation through the owner before successful physical teardown", () => {
+  it("tracks every uninstall suspension for failed-action restore before successful teardown", () => {
     const uninstall = handler("uninstallPlugin");
-    const uninstallCallAt = uninstall.indexOf("await pipeline.uninstall(");
-    const revokeHookAt = uninstall.indexOf(
+    const ownerAt = uninstall.indexOf(
+      "pluginSurfaces.withPluginSdkGrantSuspensions(",
+    );
+    const callbackAt = uninstall.indexOf("(suspend) =>", ownerAt);
+    const uninstallCallAt = uninstall.indexOf("pipeline.uninstall(", callbackAt);
+    const suspendHookAt = uninstall.indexOf(
       "onWillStopRuntime: (pluginId) =>",
       uninstallCallAt,
     );
-    const revokeAt = uninstall.indexOf(
-      "pluginSurfaces.revokePluginSdkGrants({",
-      revokeHookAt,
+    const suspendAt = uninstall.indexOf(
+      "suspend({",
+      suspendHookAt,
     );
-    const revokeWorkspaceAt = uninstall.indexOf(
+    const suspendWorkspaceAt = uninstall.indexOf(
       "workspaceId: input.workspaceId,",
-      revokeAt,
+      suspendAt,
     );
-    const revokePluginAt = uninstall.indexOf("pluginId,", revokeWorkspaceAt);
-    const revokeEndAt = uninstall.indexOf("}),", revokePluginAt);
+    const suspendPluginAt = uninstall.indexOf("pluginId,", suspendWorkspaceAt);
+    const suspendEndAt = uninstall.indexOf("});", suspendPluginAt);
     const stoppedHookAt = uninstall.indexOf(
       "onRuntimeStopped: (pluginId) =>",
-      revokeEndAt,
+      suspendEndAt,
     );
     const stoppedCleanupAt = uninstall.indexOf(
       "pluginSurfaces.stop({",
@@ -356,13 +370,15 @@ describe("plugin panel main-process wiring", () => {
       "pluginSurfaces.stop({",
       removedAt,
     );
-    expect(uninstallCallAt).toBeGreaterThan(-1);
-    expect(revokeHookAt).toBeGreaterThan(uninstallCallAt);
-    expect(revokeAt).toBeGreaterThan(revokeHookAt);
-    expect(revokeWorkspaceAt).toBeGreaterThan(revokeAt);
-    expect(revokePluginAt).toBeGreaterThan(revokeWorkspaceAt);
-    expect(revokeEndAt).toBeGreaterThan(revokePluginAt);
-    expect(stoppedHookAt).toBeGreaterThan(revokeEndAt);
+    expect(ownerAt).toBeGreaterThan(-1);
+    expect(callbackAt).toBeGreaterThan(ownerAt);
+    expect(uninstallCallAt).toBeGreaterThan(callbackAt);
+    expect(suspendHookAt).toBeGreaterThan(uninstallCallAt);
+    expect(suspendAt).toBeGreaterThan(suspendHookAt);
+    expect(suspendWorkspaceAt).toBeGreaterThan(suspendAt);
+    expect(suspendPluginAt).toBeGreaterThan(suspendWorkspaceAt);
+    expect(suspendEndAt).toBeGreaterThan(suspendPluginAt);
+    expect(stoppedHookAt).toBeGreaterThan(suspendEndAt);
     expect(stoppedCleanupAt).toBeGreaterThan(stoppedHookAt);
     expect(stoppedPluginAt).toBeGreaterThan(stoppedCleanupAt);
     expect(stoppedEndAt).toBeGreaterThan(stoppedPluginAt);
