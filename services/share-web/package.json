@@ -1,0 +1,40 @@
+{
+  "name": "@dohc/share-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0",
+    "pnpm": "11.20.0"
+  },
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "scripts": {
+    "build": "vite build --config viewer/vite.config.ts && node scripts/build.mjs",
+    "dev": "tsx watch src/main.ts",
+    "dev:viewer": "vite --config viewer/vite.config.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dompurify": "3.4.13",
+    "marked": "17.0.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@dohc/sync-relay": "workspace:*",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "esbuild": "0.28.1",
+    "jsdom": "^30.0.1",
+    "tsx": "^4.23.11",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}

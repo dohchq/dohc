@@ -12,8 +12,10 @@ import {
   constantTimeHashEqual,
   hashLinkBearer,
   LinkExchangeRateLimiter,
+  LinkReadRateLimiter,
   LINK_SESSION_TTL_MS,
   mintLinkBearer,
+  validateLinkCapability,
 } from "./linkSecurity";
 import {
   PresenceCapacityError,
@@ -34,6 +36,7 @@ import {
   validateChatShareAccess,
   validateFileShareAccess,
   validateShareSelector,
+  type AnyShareSelector,
   type ChatShareChannelKind,
   type ChatShareThreadResolver,
   type ShareSelector,
@@ -93,11 +96,15 @@ export interface CreateSyncRelayHandlerOptions {
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
   linkExchangeRateLimiter?: LinkExchangeRateLimiter;
+  linkReadRateLimiter?: LinkReadRateLimiter;
   newLinkBearer?: () => string;
 }
 
 type SyncRelayRoute =
   | { route: "link-exchange" }
+  | { route: "link-share" }
+  | { route: "link-log" }
+  | { route: "link-blob"; sha256: string }
   | { route: "workspaces" }
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
@@ -226,6 +233,7 @@ export function createSyncRelayHandler({
   presence = new PresenceHub(),
   linkKey,
   linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
+  linkReadRateLimiter = new LinkReadRateLimiter(),
   newLinkBearer = () => mintLinkBearer(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
@@ -556,6 +564,113 @@ export function createSyncRelayHandler({
     parentGrantId: grant.parentGrantId,
   });
 
+  const filteredLogPage = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    since: number,
+    limit: number,
+  ): {
+    ops: Array<Record<string, unknown>>;
+    nextCursor: number;
+    hasMore: boolean;
+  } => {
+    const page = storage.fetchLogPage({
+      workspaceId,
+      sinceRelaySeq: since,
+      limit,
+    });
+    const chatResolver = chatResolverFor(workspaceId);
+    const ops: Array<Record<string, unknown>> = [];
+    for (const row of page.rows) {
+      const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
+      if (!decision.allowed) continue;
+      ops.push({
+        relaySeq: row.relaySeq,
+        originId: row.originId,
+        originSeq: row.originSeq,
+        opKind: row.opKind,
+        payload: decision.payload,
+        recordedAtMs: row.recordedAtMs,
+      });
+    }
+    return { ops, nextCursor: page.nextCursor, hasMore: page.hasMore };
+  };
+
+  const newestFilteredOpTimestamp = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+  ): number | null => {
+    let cursor = 0;
+    let newest: number | null = null;
+    while (true) {
+      const page = filteredLogPage(workspaceId, selector, cursor, MAX_LOG_PAGE_SIZE);
+      for (const op of page.ops) {
+        const recordedAtMs = op.recordedAtMs;
+        if (typeof recordedAtMs === "number") {
+          newest = newest === null ? recordedAtMs : Math.max(newest, recordedAtMs);
+        }
+      }
+      if (!page.hasMore || page.nextCursor === cursor) return newest;
+      cursor = page.nextCursor;
+    }
+  };
+
+  const sharedBlob = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    sha256: string,
+  ): Uint8Array | null => {
+    const candidates = storage.listLogRowsReferencing(workspaceId, sha256);
+    const chatResolver = chatResolverFor(workspaceId);
+    const reachable = candidates.some((row) => {
+      const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
+      return decision.allowed && decision.blobSha256s.includes(sha256);
+    });
+    return reachable ? storage.getBlob(workspaceId, sha256) : null;
+  };
+
+  const requireLinkRead = (request: Request) => {
+    if (!linkKey) throw notFound();
+    const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
+      request.headers.get("authorization") ?? "",
+    );
+    if (!match) throw notFound();
+    const capabilityToken = match[1]!;
+    const capability = validateLinkCapability({
+      storage,
+      capabilityToken,
+      linkKey,
+      nowMs: nowMs(),
+    });
+    if (!capability) throw notFound();
+    if (!linkReadRateLimiter.allow(capability.session.capabilityHash, nowMs())) {
+      throw linkReadRateLimited();
+    }
+    return { capabilityToken, capability };
+  };
+
+  const requireFreshLinkRead = (
+    capabilityToken: string,
+    expected: { shareId: string; grantId: string; generation: number },
+  ) => {
+    if (!linkKey) throw notFound();
+    const fresh = validateLinkCapability({
+      storage,
+      capabilityToken,
+      linkKey,
+      nowMs: nowMs(),
+    });
+    if (
+      !fresh ||
+      fresh.shareId !== expected.shareId ||
+      fresh.grantId !== expected.grantId ||
+      fresh.generation !== expected.generation
+    ) {
+      throw notFound();
+    }
+    return fresh;
+  };
+
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
     const refused = (): Response => errorResponse(notFound());
     if (!linkKey) return refused();
@@ -663,6 +778,61 @@ export function createSyncRelayHandler({
       if (route.route === "link-exchange") {
         if (request.method !== "POST") throw methodNotAllowed();
         return await respondToLinkExchange(request);
+      }
+      if (
+        route.route === "link-share" ||
+        route.route === "link-log" ||
+        route.route === "link-blob"
+      ) {
+        const { capabilityToken, capability } = requireLinkRead(request);
+        if (request.method !== "GET") throw methodNotAllowed();
+        const share = storage.getShare(capability.shareId);
+        if (!share) throw notFound();
+
+        if (route.route === "link-share") {
+          const granterEmail = lookupUserEmail
+            ? await lookupUserEmail(share.granterUserId)
+            : null;
+          const lastSettledAtMs = newestFilteredOpTimestamp(
+            share.workspaceId,
+            capability.effectiveSelector,
+          );
+          requireFreshLinkRead(capabilityToken, capability);
+          return jsonResponse({
+            ok: true,
+            effectiveSelector: capability.effectiveSelector,
+            access: capability.access,
+            lastSettledAtMs,
+            granterEmail,
+          });
+        }
+
+        if (route.route === "link-log") {
+          const url = new URL(request.url);
+          const since = parseCursor(url.searchParams.get("since"));
+          const limit = parseLimit(url.searchParams.get("limit"));
+          const page = filteredLogPage(
+            share.workspaceId,
+            capability.effectiveSelector,
+            since,
+            limit,
+          );
+          requireFreshLinkRead(capabilityToken, capability);
+          return jsonResponse({ ok: true, ...page });
+        }
+
+        assertSha256(route.sha256);
+        const blob = sharedBlob(
+          share.workspaceId,
+          capability.effectiveSelector,
+          route.sha256,
+        );
+        if (!blob) throw notFound();
+        requireFreshLinkRead(capabilityToken, capability);
+        return new Response(arrayBufferForBytes(blob), {
+          status: 200,
+          headers: { "content-type": "application/octet-stream" },
+        });
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
 
@@ -853,29 +1023,9 @@ export function createSyncRelayHandler({
         }
         const since = parseCursor(url.searchParams.get("since"));
         const limit = parseLimit(url.searchParams.get("limit"));
-        const page = storage.fetchLogPage({
-          workspaceId: share.workspaceId,
-          sinceRelaySeq: since,
-          limit,
-        });
-        // THE share security boundary: each op passes the fail-closed filter
-        // or is dropped from the response. The cursor still advances over
-        // dropped rows (the recipient sees a sparser page, never a stalled
-        // one), and payloads are the filter's (possibly redacted) copy.
-        const chatResolver = chatResolverFor(share.workspaceId);
-        const ops: Array<Record<string, unknown>> = [];
-        for (const row of page.rows) {
-          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson, chatResolver);
-          if (!decision.allowed) continue;
-          ops.push({
-            relaySeq: row.relaySeq,
-            originId: row.originId,
-            originSeq: row.originSeq,
-            opKind: row.opKind,
-            payload: decision.payload,
-            recordedAtMs: row.recordedAtMs,
-          });
-        }
+        // THE share security boundary is shared with capability reads. Both
+        // callers get the same cursor behavior, allowlist, and redacted copy.
+        const page = filteredLogPage(share.workspaceId, share.selector, since, limit);
         // Re-check revocation immediately before returning the body: a revoke
         // that raced with this in-flight read (after the entry check, while
         // the page was assembled) must abort the response, not leak a final
@@ -883,9 +1033,7 @@ export function createSyncRelayHandler({
         requireShareAction(route.shareId, actor.userId, "read");
         return jsonResponse({
           ok: true,
-          ops,
-          nextCursor: page.nextCursor,
-          hasMore: page.hasMore,
+          ...page,
         });
       }
 
@@ -1063,17 +1211,9 @@ export function createSyncRelayHandler({
         // passes the share filter legitimately references it. Everything
         // else — a blob of an unshared file, a secret ciphertext blob, a
         // random hash — is the same generic 404 as a nonexistent share.
-        const candidates = storage.listLogRowsReferencing(share.workspaceId, route.sha256);
-        const chatResolver = chatResolverFor(share.workspaceId);
-        // Chat ops are blob-free (their decisions carry no blobSha256s), so a
-        // chat-channel share can never make ANY blob reachable — every blob
-        // probe on one is the same generic 404.
-        const reachable = candidates.some((row) => {
-          const decision = filterOpForShare(share.selector, row.opKind, row.payloadJson, chatResolver);
-          return decision.allowed && decision.blobSha256s.includes(route.sha256);
-        });
-        if (!reachable) throw notFound();
-        const blob = storage.getBlob(share.workspaceId, route.sha256);
+        // The capability route calls this same filter-backed blob boundary.
+        // Chat shares expose no blob because their filter decisions name none.
+        const blob = sharedBlob(share.workspaceId, share.selector, route.sha256);
         if (!blob) throw notFound();
         // Re-check revocation immediately before returning the blob body: a
         // revoke that raced with this in-flight read must abort rather than
@@ -2012,6 +2152,18 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-exchange") {
     return { route: "link-exchange" };
   }
+  if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {
+    if (parts[2] === "share") return { route: "link-share" };
+    if (parts[2] === "log") return { route: "link-log" };
+  }
+  if (
+    parts.length === 4 &&
+    parts[0] === "sync" &&
+    parts[1] === "link" &&
+    parts[2] === "blobs"
+  ) {
+    return { route: "link-blob", sha256: parts[3]! };
+  }
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "workspaces") {
     return { route: "workspaces" };
   }
@@ -2666,6 +2818,10 @@ function proposalNotOpen(): HttpError {
 
 function notFound(): HttpError {
   return relayHttpError(RELAY_ERRORS.not_found, "not found");
+}
+
+function linkReadRateLimited(): HttpError {
+  return relayHttpError(RELAY_ERRORS.link_read_rate_limited, "too many link reads");
 }
 
 function blobNotFound(): HttpError {

@@ -17,6 +17,9 @@ export const LINK_SESSIONS_PER_GRANT_LIMIT = 10_000;
 export const LINK_EXCHANGE_BUCKET_CAPACITY = 12;
 export const LINK_EXCHANGE_REFILL_PER_SECOND = 0.2;
 export const LINK_EXCHANGE_MAX_IPS = 10_000;
+export const LINK_READ_BUCKET_CAPACITY = 240;
+export const LINK_READ_REFILL_PER_SECOND = 4;
+export const LINK_READ_MAX_CAPABILITIES = 10_000;
 
 type TimingSafeComparator = (left: Uint8Array, right: Uint8Array) => boolean;
 
@@ -91,6 +94,16 @@ export class LinkExchangeRateLimiter {
       }
     }
     if (oldestKey !== null) this.buckets.delete(oldestKey);
+  }
+}
+
+export class LinkReadRateLimiter extends LinkExchangeRateLimiter {
+  constructor(
+    capacity = LINK_READ_BUCKET_CAPACITY,
+    refillPerSecond = LINK_READ_REFILL_PER_SECOND,
+    maxCapabilities = LINK_READ_MAX_CAPABILITIES,
+  ) {
+    super(capacity, refillPerSecond, maxCapabilities);
   }
 }
 
