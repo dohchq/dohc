@@ -80,12 +80,8 @@ import {
   JoinSharedChannelPayload,
   JoinSharedChannelResult,
   LeaveSharedChannelPayload,
-  MountSharePayload,
-  MountShareResult,
   OpenSharedViewPayload,
   OpenSharedViewResult,
-  RefreshShareMountsPayload,
-  RefreshShareMountsResult,
   RefreshSharedViewPayload,
   DismissShareSkipsPayload,
   ListShareProposalsPayload,
@@ -103,8 +99,6 @@ import {
   WithdrawShareChangesPayload,
   WithdrawShareChangesResult,
   RefreshSharedViewResult,
-  UnmountSharePayload,
-  UnmountShareResult,
   CloudJoinWorkspaceResult,
   CloudLoginPollResult,
   CloudLoginStartPayload,
@@ -318,6 +312,7 @@ import {
   type EngineYDocSaveStateName,
 } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
+import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -7198,40 +7193,12 @@ function registerIpcHandlers(
   // the effective-policy floor — mounted content cannot leak into the
   // host's history or its synced copy.
 
-  ipcMain.handle(CHANNELS.mountShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = MountSharePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // A mount changes the host tree — shared views cannot host mounts.
-    assertWritableWorkspace(workspace);
-    return MountShareResult.parse(
-      await shareMountCommands.mount({
-        workspace,
-        shareCode: input.shareCode,
-      }),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.refreshShareMounts, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RefreshShareMountsPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return RefreshShareMountsResult.parse(
-      await shareMountCommands.refresh({ workspace }),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.unmountShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = UnmountSharePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
-    return UnmountShareResult.parse(
-      await shareMountCommands.unmount({
-        workspace,
-        shareId: input.shareId,
-      }),
-    );
+  registerShareMountIpcHandlers({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    requireWorkspace,
+    assertWritableWorkspace,
+    commands: shareMountCommands,
   });
 
   ipcMain.handle(CHANNELS.readWorkspaceDatabase, async (event, payload) => {

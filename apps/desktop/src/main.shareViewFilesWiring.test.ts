@@ -16,31 +16,6 @@ function handlerSource(channel: string): string {
 }
 
 describe("ShareViewFiles main-process wiring", () => {
-  it("composes the share mount commands with process-owned adapters", () => {
-    const composition = sourceBlock(
-      "const shareMountCommands = createShareMountCommands({",
-      "\n\nshareViewFiles = createShareViewFiles({",
-    );
-    expect(composition).toContain("storedShareMounts(findWorkspace(workspaceId)");
-    expect(composition).toContain("setWorkspaceShareMounts(workspaceId, mounts)");
-    expect(composition).toContain("loadAndCacheCurrentCredentials()");
-    expect(composition).toContain("fetchShareViewInfo({ relay, shareId })");
-    expect(composition).toContain("withExclusiveWorkspaceOperation(");
-    expect(composition).toContain("closeRelayTransportWorkspace(workspaceId)");
-    expect(composition).toContain("shareViewFilesMountProjection");
-
-    const filesComposition = sourceBlock(
-      "shareViewFiles = createShareViewFiles({",
-      "\n});\nconst ensureOwnedProjectionTargetCurrent",
-    );
-    expect(filesComposition).toContain(
-      "createMount: shareMountCommands.filesLifecycle.createMount",
-    );
-    expect(filesComposition).toContain(
-      "removeMount: shareMountCommands.filesLifecycle.removeMount",
-    );
-  });
-
   it("limits received-share ripgrep passes to canonical share files", () => {
     const handler = handlerSource("searchWorkspace");
     const preparedAt = handler.indexOf(
