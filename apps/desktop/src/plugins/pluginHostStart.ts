@@ -5,8 +5,8 @@ import {
   type PluginHostSurfaceLease,
 } from "./pluginHostOwnership";
 import {
-  CLAIMS_DRAINING_ERROR_CODE,
-  PluginClaimsDrainingError,
+  HOST_CHANGE_REFUSED_ERROR_CODE,
+  PluginHostBusyError,
 } from "./pluginCommandInvocation";
 
 interface ActivatingPluginHost {
@@ -22,7 +22,7 @@ function admissionError(
   refusal: { reason: "change-in-progress" | "closed" },
 ): Error {
   return refusal.reason === "change-in-progress"
-    ? new PluginClaimsDrainingError(pluginId)
+    ? new PluginHostBusyError(pluginId)
     : new Error(
       `dohc stopped plugin "${pluginId}" before it could start. Try again.`,
     );
@@ -49,8 +49,8 @@ export async function ensurePluginStarted<H extends ActivatingPluginHost>(
     throw admissionError(pluginId, outcome);
   }
   if (!outcome.value.ok) {
-    if (outcome.value.error.code === CLAIMS_DRAINING_ERROR_CODE) {
-      throw new PluginClaimsDrainingError(pluginId);
+    if (outcome.value.error.code === HOST_CHANGE_REFUSED_ERROR_CODE) {
+      throw new PluginHostBusyError(pluginId);
     }
     throw new Error(outcome.value.error.message);
   }

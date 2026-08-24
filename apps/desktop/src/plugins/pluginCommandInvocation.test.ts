@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   invokeRegisteredPluginCommand,
-  PluginClaimsDrainingError,
+  PluginHostBusyError,
 } from "./pluginCommandInvocation";
 import type {
   PluginHostCommandAuthority,
@@ -150,7 +150,7 @@ describe("invokeRegisteredPluginCommand", () => {
     const ensureStarted = vi.fn(async () => {
       // Pipeline ensureStarted maps a command's self-drain refusal to this
       // typed retryable error.
-      throw new PluginClaimsDrainingError("hello-plugin");
+      throw new PluginHostBusyError("hello-plugin");
     });
 
     await expect(

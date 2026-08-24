@@ -16,7 +16,7 @@ import {
   foldForCompare,
   recoverOnDiskSegments,
 } from "./pluginCaseRecovery";
-import { CLAIMS_DRAINING_ERROR_CODE } from "./pluginCommandInvocation";
+import { HOST_CHANGE_REFUSED_ERROR_CODE } from "./pluginCommandInvocation";
 import type {
   PluginHostChangeAuthority,
   PluginHostChangeReservation,
@@ -69,7 +69,7 @@ import {
 } from "./pluginUninstallPreflight";
 import { isInside } from "../security/pathContainment";
 import {
-  COMMAND_CLAIMS_DRAIN_DEADLINE_MS,
+  PLUGIN_HOST_DRAIN_DEADLINE_MS,
   errorMessage,
 } from "./pluginShared";
 
@@ -1591,7 +1591,7 @@ export class PluginPipeline {
         // to identities that trace to this exact directory, so stopping
         // every one of them can never reach a process an unrelated
         // installation owns. stopOldRuntime, not a bare pluginHost.stop:
-        // it also drains this id's own in-flight command claims and clears
+        // it also drains this id's own in-flight work and clears
         // its recovery state, for every identity being torn down here, not
         // only the primary one.
         await this.stopCleanupRuntimes(
@@ -2396,8 +2396,8 @@ export class PluginPipeline {
     }
     if (!stopped.drained) {
       console.warn(
-        `[desktop] Plugin "${pluginId}" still has command claims outstanding ` +
-          `after ${COMMAND_CLAIMS_DRAIN_DEADLINE_MS} ms. Stopping its host anyway.`,
+        `[desktop] Plugin "${pluginId}" still has work in flight ` +
+          `after ${PLUGIN_HOST_DRAIN_DEADLINE_MS} ms. Stopping its host anyway.`,
       );
     }
     if (stopped.stopError !== undefined) {
@@ -2437,7 +2437,7 @@ export class PluginPipeline {
   private hostChangeInProgressError(pluginId: string): PluginPipelineError {
     return pipelineError(
       "runtime",
-      CLAIMS_DRAINING_ERROR_CODE,
+      HOST_CHANGE_REFUSED_ERROR_CODE,
       `dohc is still working on plugin "${pluginId}". Try the command again in a moment.`,
     );
   }

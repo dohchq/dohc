@@ -22,14 +22,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The pipeline code for a retryable host-ownership drain. */
-export const CLAIMS_DRAINING_ERROR_CODE = "claims-draining";
+/** The pipeline code for a retryable host-ownership refusal. */
+export const HOST_CHANGE_REFUSED_ERROR_CODE = "host-change-refused";
 
 /** Maps a command's self-drain refusal to the retryable IPC result. */
-export class PluginClaimsDrainingError extends Error {
+export class PluginHostBusyError extends Error {
   constructor(pluginId: string) {
     super(`dohc is still working on plugin "${pluginId}". Try the command again in a moment.`);
-    this.name = "PluginClaimsDrainingError";
+    this.name = "PluginHostBusyError";
   }
 }
 
@@ -64,7 +64,7 @@ export async function invokeRegisteredPluginCommand(options: {
       try {
         host = await options.ensureStarted(commandAuthority);
       } catch (error) {
-        if (error instanceof PluginClaimsDrainingError) {
+        if (error instanceof PluginHostBusyError) {
           return { status: "plugin-rebuilding", message: error.message };
         }
         return { status: "command-failed", message: errorMessage(error) };
@@ -92,7 +92,7 @@ export async function invokeRegisteredPluginCommand(options: {
     return outcome.reason === "change-in-progress"
       ? {
         status: "plugin-rebuilding",
-        message: new PluginClaimsDrainingError(input.pluginId).message,
+        message: new PluginHostBusyError(input.pluginId).message,
       }
       : {
         status: "command-failed",

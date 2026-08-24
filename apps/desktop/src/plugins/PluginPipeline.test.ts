@@ -58,7 +58,7 @@ import {
 } from "./pluginOffers";
 import { readPluginSettingsFile } from "./pluginSettingsFile";
 import {
-  CLAIMS_DRAINING_ERROR_CODE,
+  HOST_CHANGE_REFUSED_ERROR_CODE,
   invokeRegisteredPluginCommand,
 } from "./pluginCommandInvocation";
 import { PluginHostOwnership } from "./pluginHostOwnership";
@@ -7571,7 +7571,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           kind: "completed",
           value: {
             kind: "admitted",
-            value: { ok: false, error: { code: CLAIMS_DRAINING_ERROR_CODE } },
+            value: { ok: false, error: { code: HOST_CHANGE_REFUSED_ERROR_CODE } },
           },
         });
         expect(exactResult?.kind).toBe("existing");
@@ -7763,7 +7763,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
         expect(approved.ok).toBe(true);
         expect(warn).toHaveBeenCalledWith(expect.stringContaining(
-          'Plugin "example-plugin" still has command claims outstanding',
+          'Plugin "example-plugin" still has work in flight',
         ));
         commandGate.resolve();
         await command;

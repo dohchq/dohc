@@ -43,7 +43,7 @@ export function raceWithTimeout<T>(
 // the grace a user-initiated stop grants in-flight work before it proceeds
 // anyway. Set to PluginHost's own PLUGIN_ACTIVATION_TIMEOUT_MS — the same
 // order this host already uses for "still working" vs. "never will".
-export const COMMAND_CLAIMS_DRAIN_DEADLINE_MS = 30_000;
+export const PLUGIN_HOST_DRAIN_DEADLINE_MS = 30_000;
 
 export const WINDOWS_RENAME_RETRY_DELAYS_MS = [100, 150, 200, 250, 300] as const;
 

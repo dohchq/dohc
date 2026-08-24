@@ -2,7 +2,7 @@ import type {
   PluginHostRecordToken,
   PluginHostStartEvidence,
 } from "./PluginHost";
-import { COMMAND_CLAIMS_DRAIN_DEADLINE_MS } from "./pluginShared";
+import { PLUGIN_HOST_DRAIN_DEADLINE_MS } from "./pluginShared";
 
 export interface OwnedPluginHost {
   currentRecord(pluginId: string): PluginHostRecordToken | undefined;
@@ -452,7 +452,7 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
     options: PluginHostOwnershipOptions = {},
   ) {
     this.#drainTimeoutMs =
-      options.drainTimeoutMs ?? COMMAND_CLAIMS_DRAIN_DEADLINE_MS;
+      options.drainTimeoutMs ?? PLUGIN_HOST_DRAIN_DEADLINE_MS;
     this.#onCleanupError = options.onCleanupError ?? (() => undefined);
     if (
       !Number.isFinite(this.#drainTimeoutMs) ||

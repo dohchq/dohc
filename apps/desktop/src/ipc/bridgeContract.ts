@@ -2521,7 +2521,7 @@ export const InvokePluginCommandResult = z.discriminatedUnion("status", [
     message: z.string(),
   }).strict(),
   // A rebuild's old-runtime stop is already draining this plugin's
-  // in-flight command claims — refused outright rather than queued, so
+  // in-flight plugin work — refused outright rather than queued, so
   // that wait stays bounded by the claims it began with (round-10
   // finding 2).
   z.object({

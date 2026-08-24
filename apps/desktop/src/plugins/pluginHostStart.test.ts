@@ -4,7 +4,10 @@ import {
   ensurePluginStarted,
 } from "./pluginHostStart";
 import { PluginHostOwnership } from "./pluginHostOwnership";
-import { PluginClaimsDrainingError } from "./pluginCommandInvocation";
+import {
+  HOST_CHANGE_REFUSED_ERROR_CODE,
+  PluginHostBusyError,
+} from "./pluginCommandInvocation";
 import type { PluginHostRecordToken } from "./PluginHost";
 
 function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
@@ -76,7 +79,7 @@ describe("plugin host start", () => {
         "hello-plugin",
         async () => ({ kind: "refused", reason: "change-in-progress" }),
       ),
-    ).rejects.toBeInstanceOf(PluginClaimsDrainingError);
+    ).rejects.toBeInstanceOf(PluginHostBusyError);
 
     await expect(
       ensurePluginStarted(
@@ -86,11 +89,11 @@ describe("plugin host start", () => {
           kind: "admitted",
           value: {
             ok: false,
-            error: { code: "claims-draining", message: "retry" },
+            error: { code: HOST_CHANGE_REFUSED_ERROR_CODE, message: "retry" },
           },
         }),
       ),
-    ).rejects.toBeInstanceOf(PluginClaimsDrainingError);
+    ).rejects.toBeInstanceOf(PluginHostBusyError);
     expect(host.activationOf).not.toHaveBeenCalled();
   });
 
