@@ -1316,6 +1316,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       events.length = 0;
       const removed = await pipeline.uninstall("target-dir", "target-dir", preflight.confirmationToken);
       expect(removed.ok).toBe(true);
+      if (!removed.ok) throw new Error(removed.error.message);
+      expect(removed.identity).toBe("retained");
 
       // Round 24 finding 4: the emitted event names the invalid row's OWN
       // directory — never "other-dir", the survivor this id also names.
@@ -2913,6 +2915,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         preflight.confirmationToken,
       );
       expect(uninstalled.ok).toBe(true);
+      if (!uninstalled.ok) throw new Error(uninstalled.error.message);
+      expect(uninstalled.identity).toBe("released");
       await expect(lstat(renamedRoot)).rejects.toMatchObject({ code: "ENOENT" });
       await expect(lstat(ownStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
@@ -3541,6 +3545,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         retryPreflight.confirmationToken,
       );
       expect(finished.ok).toBe(true);
+      if (!finished.ok) throw new Error(finished.error.message);
+      expect(finished.identity).toBe("released");
       expect(stoppedRuntimeIds.toSorted()).toEqual(["codex", "my-codex-copy"]);
 
       await expect(lstat(strandedStateRoot)).rejects.toMatchObject({ code: "ENOENT" });
