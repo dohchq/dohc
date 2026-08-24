@@ -4189,9 +4189,11 @@ const relayTransportRoutes = new RelayTransportRouteGuard();
 
 // Narrowing for the capture gate, matching what `linkedChatStoreFor` and
 // `sharedViewStoreFor` already do (same error text). The invariant is real:
-// startRustEngineDaemon quits the app on failure before any window exists, and
-// this handle is nulled only on that failure path. A throw here would mean that
-// invariant broke, which must be loud, not a silent drop to the legacy engine.
+// startRustEngineDaemon quits the app when the daemon handshake fails, before
+// any window exists, and this handle is nulled only on that failure path. A
+// later startup-smoke failure restarts the daemon without nulling it. A throw
+// here would mean that invariant broke, which must be loud, not a silent drop
+// to the legacy engine.
 function requireEngineSessions(): EngineWorkspaceSessions {
   if (!rustEngineWorkspaceSessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
@@ -12090,7 +12092,9 @@ async function startRustEngineDaemon(): Promise<boolean> {
       sessions: rustEngineWorkspaceSessions,
       routes: relayTransportRoutes,
     });
-    console.info("[desktop] Rust engine daemon startup smoke passed.");
+    console.info(
+      "[desktop] Rust engine daemon handshake complete; startup smoke running.",
+    );
     return true;
   } catch (error) {
     const message =
