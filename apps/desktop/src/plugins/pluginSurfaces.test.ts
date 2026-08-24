@@ -1,9 +1,16 @@
+import { mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createTestScratch } from "../workspaces/testTemp";
 import { assertInstanceBudget } from "./pluginWebAppInstances";
-import type {
+import {
+  PluginHost,
   PluginHostPanelDeclaration,
   PluginHostRecordToken,
+  type PluginHostOptions,
 } from "./PluginHost";
+import { PluginSurfaceHostLifecycle } from "./pluginSurfaceHostLifecycle";
+import { PLUGIN_HOST_METHODS, type PluginRuntimeStatus } from "./pluginHostProtocol";
 import {
   PluginSurfaces,
   type PluginPanelStartRequest,
@@ -2369,6 +2376,189 @@ describe("PluginSurfaces panel authority", () => {
     expect(disposedSurfaceIds).toEqual([watch.surfaceId]);
     expect(received).toHaveLength(1);
     expect(events.unsubscribe({ owner }, subscription)).toBe(false);
+  });
+
+  it("retires a retained panel only when the real host crash loop becomes disabled", async () => {
+    const scratch = await createTestScratch("dohc-plugin-surface-crash-loop-");
+    const workspaceRoot = join(scratch, "workspace");
+    const stateDir = join(scratch, "state");
+    await mkdir(workspaceRoot);
+    await mkdir(stateDir);
+
+    const events = new PluginWorkspaceEvents();
+    const disposedSurfaceIds: number[] = [];
+    const surfaces = createSurfaces({
+      workspaceEvents: events,
+      disposedSurfaceIds,
+    });
+    const spawnCallbacks: Array<Parameters<PluginHostOptions["spawnTransport"]>[0]> = [];
+    const statuses: PluginRuntimeStatus[] = [];
+    let lifecycle!: PluginSurfaceHostLifecycle;
+    const host = new PluginHost({
+      stateDir,
+      workspaceRoot,
+      spawnTransport: (callbacks) => {
+        spawnCallbacks.push(callbacks);
+        return {
+          request: async <T,>(method: string) =>
+            (method === PLUGIN_HOST_METHODS.activate
+              ? { commands: [], drivers: [] }
+              : {}) as T,
+          notify: () => undefined,
+          dispose: () => Promise.resolve(),
+        };
+      },
+      routeSdkRequest: async () => ({}),
+      onSpawnEnd: (pluginId) => {
+        lifecycle.spawnEnded(pluginId);
+        return Promise.resolve();
+      },
+      onStatusChange: (pluginId, status) => {
+        lifecycle.statusChanged(pluginId, status);
+      },
+    });
+    lifecycle = new PluginSurfaceHostLifecycle({
+      workspaceId: "ws",
+      host,
+      surfaces,
+      onRuntimeStatus: (_pluginId, status) => statuses.push(status),
+      onError: (error) => {
+        throw error;
+      },
+    });
+
+    const ownedLease = lease({
+      record: () => host.currentRecord("plugin"),
+    });
+    let previewStops = 0;
+    try {
+      await host.start("C:/plugin", "plugin", {
+        version: 1,
+        name: "plugin",
+        entry: "index.js",
+        panels: declaredPanels,
+      });
+      await vi.waitFor(() => expect(host.getStatus("plugin")).toBe("ready"));
+      await surfaces.startPanel(
+        panelRequest,
+        panelAdmission({
+          ownedLease,
+          spawn: () => host.getSpawnId("plugin") ?? "missing",
+          previewStop: async () => {
+            previewStops += 1;
+          },
+        }),
+      );
+      const watch = surfaces.authorizePanelSdk({
+        workspaceId: "ws",
+        pluginId: "plugin",
+        panelId: "panel",
+        senderId: 7,
+        currentGeneration: () => 1,
+        activeWorkspaceId: () => "ws",
+        liveSpawnId: () => host.getSpawnId("plugin"),
+      });
+      const owner = {
+        kind: "panel" as const,
+        workspaceId: "ws",
+        pluginId: "plugin",
+        panelId: "panel",
+        surfaceId: watch.surfaceId,
+      };
+      const initialHostRecord = host.currentRecord("plugin");
+      expect(initialHostRecord).toBeDefined();
+      const received: Array<{ subscriptionId: string; path: string }> = [];
+      const subscription = events.subscribe(
+        {
+          owner,
+          emitEvent: (subscriptionId, _event, data) => {
+            if (!watch.isPushLive()) return;
+            received.push({
+              subscriptionId,
+              path: (data as { path: string }).path,
+            });
+          },
+        },
+        { path: "docs" },
+      );
+
+      for (let crash = 0; crash < 2; crash += 1) {
+        spawnCallbacks[crash]!.onExit({ code: 1, signal: null });
+        expect(watch.isPushLive()).toBe(false);
+        events.handleWatcherEvents([{
+          path: `docs/down-${crash}.md`,
+          operation: "update",
+          sha256: `down-${crash}`,
+        }]);
+        await vi.waitFor(() => expect(spawnCallbacks).toHaveLength(crash + 2));
+        await vi.waitFor(() => expect(host.getStatus("plugin")).toBe("ready"));
+        await vi.waitFor(() => expect(watch.isPushLive()).toBe(true));
+        expect(host.currentRecord("plugin")).toBe(initialHostRecord);
+        events.handleWatcherEvents([{
+          path: `docs/ready-${crash}.md`,
+          operation: "update",
+          sha256: `ready-${crash}`,
+        }]);
+      }
+
+      expect(received).toEqual([
+        {
+          subscriptionId: subscription.subscriptionId,
+          path: "docs/ready-0.md",
+        },
+        {
+          subscriptionId: subscription.subscriptionId,
+          path: "docs/ready-1.md",
+        },
+      ]);
+      expect(disposedSurfaceIds).toEqual([]);
+      expect(ownedLease.releases).toBe(0);
+      expect(previewStops).toBe(0);
+
+      spawnCallbacks[2]!.onExit({ code: 1, signal: null });
+      expect(watch.isPushLive()).toBe(false);
+      await vi.waitFor(() => expect(host.getStatus("plugin")).toBe("disabled"));
+      await vi.waitFor(() => expect(disposedSurfaceIds).toEqual([watch.surfaceId]));
+
+      expect(ownedLease.releases).toBe(1);
+      expect(previewStops).toBe(1);
+      expect(events.unsubscribe({ owner }, subscription)).toBe(false);
+      expect(spawnCallbacks).toHaveLength(3);
+      expect(statuses.at(-1)).toBe("disabled");
+      expect(statuses.filter((status) => status === "ready")).toHaveLength(3);
+    } finally {
+      await host.stopAll();
+      await surfaces.close();
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a rejected disabled-surface stop", async () => {
+    const failure = new Error("surface cleanup failed");
+    const onError = vi.fn();
+    const lifecycle = new PluginSurfaceHostLifecycle({
+      workspaceId: "ws",
+      host: {
+        getStatus: () => "disabled",
+        getSpawnId: () => undefined,
+        readyPanelsForSpawn: () => undefined,
+      },
+      surfaces: {
+        hostChanged: () => undefined,
+        hostReady: () => Promise.resolve(),
+        stop: () => Promise.reject(failure),
+      },
+      onRuntimeStatus: () => undefined,
+      onError,
+    });
+
+    lifecycle.statusChanged("plugin", "disabled");
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
+
+    expect(onError).toHaveBeenCalledWith(
+      failure,
+      'stop retained surfaces for disabled plugin "plugin"',
+    );
   });
 
   it.each([
