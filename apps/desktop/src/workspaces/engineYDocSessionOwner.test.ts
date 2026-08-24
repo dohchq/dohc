@@ -184,6 +184,103 @@ describe("EngineYDocSessionOwner", () => {
     });
   });
 
+  it("retires an older generation across different renderer session ids", async () => {
+    const outbound: TestOutbound[] = [];
+    const owner = createOwner(outbound);
+    const sender = { id: 7, label: "reused-web-contents" };
+    const staleEngineOpen = deferred<{
+      session: TestSession;
+      value: string;
+    }>();
+    const staleOpenStarted = deferred<void>();
+    const staleClose = vi.fn(async () => undefined);
+    let staleSignals!: EngineYDocSessionSignals<string, string, string>;
+    let currentSignals!: EngineYDocSessionSignals<string, string, string>;
+
+    const stale = owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "stale-session",
+        path: "notes/stale.md",
+        openSession: (signals) => {
+          staleSignals = signals;
+          staleOpenStarted.resolve();
+          return staleEngineOpen.promise;
+        },
+      }),
+    );
+    await staleOpenStarted.promise;
+
+    await expect(
+      owner.open(
+        openInput({
+          sender,
+          generation: 2,
+          sessionId: "current-session",
+          path: "notes/current.md",
+          openSession: async (signals) => {
+            currentSignals = signals;
+            return {
+              session: { close: async () => undefined },
+              value: "current",
+            };
+          },
+        }),
+      ),
+    ).resolves.toEqual({
+      kind: "opened",
+      value: "current",
+      lineageGeneration: 1,
+    });
+
+    staleSignals.emit("stale while its engine open is pending");
+    expect(outbound).toEqual([]);
+
+    staleEngineOpen.resolve({
+      session: { close: staleClose },
+      value: "stale",
+    });
+    await expect(stale).resolves.toEqual({
+      kind: "cancelled",
+      reason: "superseded",
+      release: { kind: "released" },
+    });
+    expect(staleClose).toHaveBeenCalledOnce();
+    expect(
+      owner.applyUpdate(
+        {
+          sender,
+          generation: 1,
+          sessionId: "stale-session",
+          lineageGeneration: 1,
+        },
+        () => "stale update",
+      ),
+    ).toEqual({ kind: "refused", reason: "session-unavailable" });
+    staleSignals.emit("stale after its engine open settled");
+    expect(outbound).toEqual([]);
+
+    currentSignals.emit("current event");
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0]).toMatchObject({
+      generation: 2,
+      sessionId: "current-session",
+      message: { kind: "session-event", event: "current event" },
+    });
+    expect(
+      owner.applyUpdate(
+        {
+          sender,
+          generation: 2,
+          sessionId: "current-session",
+          lineageGeneration: 1,
+        },
+        () => "current update",
+      ),
+    ).toEqual({ kind: "applied", value: "current update" });
+  });
+
   it("registers a pending open so exact sender retirement waits for and releases it", async () => {
     const owner = createOwner();
     const sender = { id: 7, label: "window-a" };

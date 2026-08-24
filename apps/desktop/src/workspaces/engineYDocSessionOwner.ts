@@ -505,6 +505,7 @@ export class EngineYDocSessionOwner<
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
   ): boolean {
     return (
+      this.#ownsActiveGeneration(record) &&
       this.#slots.get(record.key) === record &&
       (record.state === "opening" || record.state === "open")
     );
@@ -514,7 +515,13 @@ export class EngineYDocSessionOwner<
     input: EngineYDocSessionCaller<TSender>,
   ): SessionRecord<TSender, TSession, TUpdate, TReplacement> | null {
     const record = this.#slots.get(sessionKey(input.sender.id, input.sessionId));
-    if (!record || !this.#sameIdentity(record, input)) return null;
+    if (
+      !record ||
+      !this.#sameIdentity(record, input) ||
+      !this.#ownsActiveGeneration(record)
+    ) {
+      return null;
+    }
     return record;
   }
 
@@ -539,6 +546,7 @@ export class EngineYDocSessionOwner<
         generation: input.generation,
         retired: false,
       });
+      this.#retireOlderGenerations(input.sender.id, input.generation);
       return null;
     }
     if (
@@ -550,6 +558,27 @@ export class EngineYDocSessionOwner<
     return current.retired ? "sender-retired" : null;
   }
 
+  #ownsActiveGeneration(
+    record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
+  ): boolean {
+    const current = this.#senderGenerations.get(record.senderId);
+    return (
+      current !== undefined &&
+      !current.retired &&
+      current.sender === record.sender &&
+      current.generation === record.generation
+    );
+  }
+
+  #retireOlderGenerations(senderId: number, generation: number): void {
+    for (const record of [...this.#records]) {
+      if (record.senderId !== senderId || record.generation >= generation) {
+        continue;
+      }
+      void this.#retire(record, "superseded", true);
+    }
+  }
+
   #retireGeneration(input: EngineYDocSessionIdentity<TSender>): void {
     const current = this.#senderGenerations.get(input.sender.id);
     if (!current || input.generation > current.generation) {
@@ -558,6 +587,7 @@ export class EngineYDocSessionOwner<
         generation: input.generation,
         retired: true,
       });
+      this.#retireOlderGenerations(input.sender.id, input.generation);
       return;
     }
     if (
@@ -565,6 +595,7 @@ export class EngineYDocSessionOwner<
       input.sender === current.sender
     ) {
       current.retired = true;
+      this.#retireOlderGenerations(input.sender.id, input.generation);
     }
   }
 
