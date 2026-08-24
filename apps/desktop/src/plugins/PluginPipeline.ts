@@ -1033,13 +1033,7 @@ export class PluginPipeline {
                 this.options.stateDir,
                 this.workspaceRoot,
                 pluginId,
-                (record) => {
-                  if (!record) return record;
-                  const restored = { ...record };
-                  if (priorDisabled === undefined) delete restored.disabled;
-                  else restored.disabled = priorDisabled;
-                  return restored;
-                },
+                (record) => record && { ...record, disabled: priorDisabled },
               );
             } catch (compensationError) {
               console.error(

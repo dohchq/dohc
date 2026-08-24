@@ -2030,6 +2030,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let primaryStopFinished = false;
       let claimReleasedBeforePrimaryStop = false;
       let claimReleaseCalls = 0;
+      let lateAliasJobEntered = false;
+      let lateAliasJobEnteredBeforeRelease = false;
       vi.spyOn(internals, "claimUninstallCleanupQueues").mockImplementation(
         (cleanupIds, primaryPluginId, reservations) =>
           claimCleanupQueues(cleanupIds, primaryPluginId, reservations).map((claim) => ({
@@ -2037,6 +2039,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             release: () => {
               claimReleaseCalls += 1;
               if (!primaryStopFinished) claimReleasedBeforePrimaryStop = true;
+              if (lateAliasJobEntered) lateAliasJobEnteredBeforeRelease = true;
               claim.release();
             },
           })),
@@ -2065,7 +2068,6 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         "shared-dir",
         preflight.confirmationToken,
       );
-      let lateAliasJobEntered = false;
       lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
         lateAliasJobEntered = true;
       });
@@ -2081,6 +2083,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
       expect(primaryStopFinished).toBe(true);
       expect(claimReleasedBeforePrimaryStop).toBe(false);
+      expect(lateAliasJobEnteredBeforeRelease).toBe(false);
       expect(claimReleaseCalls).toBe(1);
       expect(lateAliasJobEntered).toBe(true);
       expect(setup.host.currentRecord("runtime-id")).toBe(aliasRecord);
