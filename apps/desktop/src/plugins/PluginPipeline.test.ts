@@ -7870,6 +7870,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     it("keeps warm command admission open while approved source is verified", async () => {
       const setup = await setupEstablishedPlugin();
       const snapshotGate = setup.gateNextSnapshot();
+      const statusEventStart = setup.statuses.length;
       let runChangeCalls = () => -1;
       try {
         const first = setup.hostOwnership.runCommand(
@@ -7908,9 +7909,159 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           value: { kind: "admitted", value: { ok: true } },
         });
         expect(runChangeCalls()).toBe(0);
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "ready",
+          runtimeStatus: "ready",
+        });
+        const warmStatusEvents = setup.statuses.slice(statusEventStart);
+        expect(warmStatusEvents).not.toContain("starting");
+        expect(warmStatusEvents.at(-1)).toBe("ready");
       } finally {
         snapshotGate.release.resolve();
         await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("reserves a queued warm surface before a later command can queue behind it", async () => {
+      const setup = await setupEstablishedPlugin({ drainTimeoutMs: 0 });
+      const snapshotGate = setup.gateNextSnapshot();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const surface = setup.hostOwnership.acquireSurface("example-plugin");
+      if ("kind" in surface) throw new Error("Surface lease was refused.");
+      let first: Promise<unknown> | undefined;
+      let surfaceStart: Promise<unknown> | undefined;
+      let second: Promise<unknown> | undefined;
+      try {
+        first = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(() =>
+            setup.pipeline.ensureStarted("example-plugin", authority)),
+        );
+        await snapshotGate.entered.promise;
+        const bundlePath = liveBundlePath(setup.fixture, "example-plugin");
+        await writeFile(
+          bundlePath,
+          `${await readFile(bundlePath, "utf8")}\n// tampered before the queued surface\n`,
+        );
+
+        surfaceStart = surface.start((authority) =>
+          setup.pipeline.ensureStarted("example-plugin", authority));
+        const secondEntered = deferred();
+        second = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            secondEntered.resolve();
+            return authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+          },
+        );
+        const secondObservation = await Promise.race([
+          second.then((result) => ({ kind: "settled" as const, result })),
+          secondEntered.promise.then(() => ({ kind: "entered" as const })),
+        ]);
+        expect(secondObservation).toEqual({
+          kind: "settled",
+          result: { kind: "refused", reason: "change-in-progress" },
+        });
+
+        snapshotGate.release.resolve();
+        await expect(first).resolves.toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: {
+              ok: false,
+              error: { code: HOST_CHANGE_REFUSED_ERROR_CODE },
+            },
+          },
+        });
+        await expect(surfaceStart).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+        await expect(second).resolves.toEqual({
+          kind: "refused",
+          reason: "change-in-progress",
+        });
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        snapshotGate.release.resolve();
+        await Promise.allSettled(
+          [first, surfaceStart, second].filter(
+            (pending): pending is Promise<unknown> => pending !== undefined,
+          ),
+        );
+        await surface.release();
+        await setup.pipeline.dispose();
+        warn.mockRestore();
+      }
+    }, 60_000);
+
+    it("parks a second queued surface outside the first surface change", async () => {
+      const setup = await setupEstablishedPlugin({ drainTimeoutMs: 0 });
+      const snapshotGate = setup.gateNextSnapshot();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const firstSurface = setup.hostOwnership.acquireSurface("example-plugin");
+      const secondSurface = setup.hostOwnership.acquireSurface("example-plugin");
+      if ("kind" in firstSurface || "kind" in secondSurface) {
+        throw new Error("Surface lease was refused.");
+      }
+      let command: Promise<unknown> | undefined;
+      let firstStart: Promise<unknown> | undefined;
+      let secondStart: Promise<unknown> | undefined;
+      let secondEnqueued = false;
+      try {
+        command = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => authority.start(() =>
+            setup.pipeline.ensureStarted("example-plugin", authority)),
+        );
+        await snapshotGate.entered.promise;
+        const bundlePath = liveBundlePath(setup.fixture, "example-plugin");
+        await writeFile(
+          bundlePath,
+          `${await readFile(bundlePath, "utf8")}\n// tampered before two queued surfaces\n`,
+        );
+
+        firstStart = firstSurface.start((authority) =>
+          setup.pipeline.ensureStarted("example-plugin", authority));
+        secondStart = secondSurface.start((authority) => {
+          secondEnqueued = true;
+          return setup.pipeline.ensureStarted("example-plugin", authority);
+        });
+        expect(secondEnqueued).toBe(false);
+
+        snapshotGate.release.resolve();
+        await expect(command).resolves.toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: {
+              ok: false,
+              error: { code: HOST_CHANGE_REFUSED_ERROR_CODE },
+            },
+          },
+        });
+        await expect(firstStart).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+        await expect(secondStart).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        snapshotGate.release.resolve();
+        await Promise.allSettled(
+          [command, firstStart, secondStart].filter(
+            (pending): pending is Promise<unknown> => pending !== undefined,
+          ),
+        );
+        await firstSurface.release();
+        await secondSurface.release();
+        await setup.pipeline.dispose();
+        warn.mockRestore();
       }
     }, 60_000);
 
@@ -7991,7 +8142,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
         expect(command).toMatchObject({
           kind: "completed",
-          value: { kind: "admitted", value: { ok: true } },
+          value: {
+            kind: "admitted",
+            value: {
+              ok: true,
+              plugin: { status: "starting", runtimeStatus: "starting" },
+            },
+          },
         });
         expect(exactResult?.kind).toBe("started");
         expect(host.getStatus("example-plugin")).toBeUndefined();

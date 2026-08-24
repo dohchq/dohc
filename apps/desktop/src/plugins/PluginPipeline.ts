@@ -1084,17 +1084,21 @@ export class PluginPipeline {
     pluginId: string,
     scope: PluginHostChangeScope,
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
-    return this.enqueueStartedValue(pluginId, async () => {
-      if (
-        !this.host.currentRecord(pluginId) ||
-        isPluginHostCommandAuthority(scope)
-      ) {
-        return this.runEnsureStarted(pluginId);
-      }
-      const value = await scope.runChange(async (change) =>
-        change.preserve(await this.runEnsureStarted(pluginId, change)));
-      return existingHostResult(value);
-    });
+    if (
+      this.host.currentRecord(pluginId) &&
+      !isPluginHostCommandAuthority(scope)
+    ) {
+      return scope.runChange(async (change) =>
+        change.preserve(await this.enqueueStartedValue(
+          pluginId,
+          () => this.runEnsureStarted(pluginId, change),
+        )))
+        .then((value) => existingHostResult(value));
+    }
+    return this.enqueueStartedValue(
+      pluginId,
+      () => this.runEnsureStarted(pluginId),
+    );
   }
 
   private async runEnsureStarted(
@@ -3688,10 +3692,13 @@ export class PluginPipeline {
           generatedManifest(candidate.manifest),
         );
       }
+      const runtimeStatus = this.host.getStatus(pluginId) === "ready"
+        ? "ready"
+        : "starting";
       const result = this.success(this.setStatus(candidate, {
-        status: "starting",
+        status: runtimeStatus,
         disabledReason: null,
-        runtimeStatus: "starting",
+        runtimeStatus,
         error: null,
       }));
       return startEvidence
