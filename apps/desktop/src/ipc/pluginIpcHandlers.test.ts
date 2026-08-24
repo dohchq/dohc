@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
 import { registerPluginIpcHandlers } from "./pluginIpcHandlers";
-import type { PluginPipeline } from "../plugins/PluginPipeline";
-import type { RegisteredPlugin } from "../plugins/pluginPanelRegistration";
 
 const directOperations = vi.hoisted(() => ({
   addOffer: vi.fn(),
@@ -474,6 +472,7 @@ function createHarness() {
     platform,
     registrations,
     requireWorkspace,
+    runtime,
     sender,
     state,
     surfaces,
@@ -570,13 +569,13 @@ describe("plugin IPC handlers", () => {
     "revalidates write authority after pipeline startup for %s",
     async (channel, effect) => {
       const harness = createHarness();
-      const pipelineReady = deferred<PluginPipeline>();
-      harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+      const runtimeReady = deferred<typeof harness.runtime>();
+      harness.ensurePipeline.mockReturnValueOnce(runtimeReady.promise);
 
       const request = harness.invoke(channel);
       await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
       harness.state.writable = false;
-      pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
+      runtimeReady.resolve(harness.runtime);
 
       await expect(request).resolves.toMatchObject({ ok: false });
       expect(harness.assertWritable).toHaveBeenCalledTimes(2);
@@ -586,13 +585,13 @@ describe("plugin IPC handlers", () => {
 
   it("revalidates write authority after command pipeline startup", async () => {
     const harness = createHarness();
-    const pipelineReady = deferred<PluginPipeline>();
-    harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+    const runtimeReady = deferred<typeof harness.runtime>();
+    harness.ensurePipeline.mockReturnValueOnce(runtimeReady.promise);
 
     const request = harness.invoke(CHANNELS.invokePluginCommand);
     await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
     harness.state.writable = false;
-    pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
+    runtimeReady.resolve(harness.runtime);
 
     await expect(request).rejects.toThrow("read-only");
     expect(harness.assertWritable).toHaveBeenCalledTimes(2);
