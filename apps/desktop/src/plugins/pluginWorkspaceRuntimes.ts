@@ -25,8 +25,6 @@ export interface PluginWorkspaceRuntimeParts {
 }
 
 export interface PluginWorkspaceRuntime {
-  readonly workspaceId: string;
-  readonly workspaceRoot: string;
   readonly pipeline: PluginPipeline;
   readonly agentDrivers: PluginAgentDrivers;
   readonly workspaceEvents: PluginWorkspaceEvents;
@@ -61,17 +59,18 @@ export interface PluginWorkspaceRuntimesDependencies<
 }
 
 class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
-  readonly workspaceId: string;
-  readonly workspaceRoot: string;
   readonly pipeline: PluginPipeline;
   readonly agentDrivers: PluginAgentDrivers;
   readonly workspaceEvents: PluginWorkspaceEvents;
-  readonly registrations = new Map<string, RegisteredPlugin>();
+  private readonly workspaceId: string;
+  private readonly workspaceRoot: string;
+  private readonly registrations = new Map<string, RegisteredPlugin>();
   private startPromise: Promise<void> | undefined;
 
   constructor(
     workspace: PluginWorkspaceIdentity,
     parts: PluginWorkspaceRuntimeParts,
+    private readonly onCleanupError: (error: unknown) => void,
   ) {
     this.workspaceId = workspace.workspaceId;
     this.workspaceRoot = normalizeAbsolutePath(workspace.rootPath);
@@ -83,6 +82,40 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
   start(): Promise<void> {
     this.startPromise ??= this.pipeline.start();
     return this.startPromise;
+  }
+
+  assertSameRoot(workspaceRoot: string): void {
+    if (this.workspaceRoot === workspaceRoot) return;
+    throw new Error(
+      `Workspace "${this.workspaceId}" is already open from another folder. Close it and try again.`,
+    );
+  }
+
+  async dispose(): Promise<void> {
+    let failure: unknown;
+    let pipelineDisposal: Promise<void>;
+    try {
+      pipelineDisposal = this.pipeline.dispose().catch((error: unknown) => {
+        failure = error;
+      });
+    } catch (error) {
+      failure = error;
+      pipelineDisposal = Promise.resolve();
+    }
+
+    const startPromise = this.startPromise;
+    if (startPromise) await startPromise.catch(() => undefined);
+    await pipelineDisposal;
+
+    try {
+      this.workspaceEvents.dispose();
+    } catch (error) {
+      if (failure === undefined) failure = error;
+      else this.onCleanupError(error);
+    } finally {
+      this.registrations.clear();
+    }
+    if (failure !== undefined) throw failure;
   }
 
   registeredPlugin(pluginId: string): RegisteredPlugin | undefined {
@@ -111,13 +144,18 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
   }
 }
 
-type RuntimeSlot =
-  | { readonly kind: "live"; readonly record: OwnedPluginWorkspaceRuntime }
-  | {
-      readonly kind: "stopping";
-      readonly record: OwnedPluginWorkspaceRuntime;
-      readonly stop: Promise<void>;
-    };
+interface LiveRuntimeSlot {
+  readonly kind: "live";
+  readonly record: OwnedPluginWorkspaceRuntime;
+}
+
+interface StoppingRuntimeSlot {
+  readonly kind: "stopping";
+  readonly record: OwnedPluginWorkspaceRuntime;
+  readonly stop: Promise<void>;
+}
+
+type RuntimeSlot = LiveRuntimeSlot | StoppingRuntimeSlot;
 
 export class PluginWorkspaceRuntimes<
   TWorkspace extends PluginWorkspaceIdentity,
@@ -144,7 +182,7 @@ export class PluginWorkspaceRuntimes<
       this.assertOpen();
       const slot = this.slots.get(workspace.workspaceId);
       if (slot) {
-        this.assertSameRoot(slot.record, workspaceRoot);
+        slot.record.assertSameRoot(workspaceRoot);
         if (slot.kind === "stopping") {
           await slot.stop.catch(() => undefined);
           continue;
@@ -153,10 +191,10 @@ export class PluginWorkspaceRuntimes<
         try {
           await record.start();
         } catch (error) {
-          await this.retireFailedStart(record);
+          await this.retireFailedStart(workspace.workspaceId, record);
           throw error;
         }
-        this.assertStillLive(record);
+        this.assertStillLive(workspace.workspaceId, record);
         return record;
       }
 
@@ -172,22 +210,30 @@ export class PluginWorkspaceRuntimes<
       const pendingStatus: PluginPipelineStatusEvent[] = [];
       const parts = this.dependencies.create(workspace, {
         onPipelineStatus: (event) => {
-          if (record) this.handlePipelineStatus(record, event);
-          else pendingStatus.push(event);
+          if (record) {
+            this.handlePipelineStatus(workspace.workspaceId, record, event);
+          } else {
+            pendingStatus.push(event);
+          }
         },
       });
-      record = new OwnedPluginWorkspaceRuntime(workspace, parts);
+      record = new OwnedPluginWorkspaceRuntime(
+        workspace,
+        parts,
+        (error) =>
+          this.dependencies.onCleanupError?.(workspace.workspaceId, error),
+      );
       this.slots.set(workspace.workspaceId, { kind: "live", record });
       for (const event of pendingStatus) {
-        this.handlePipelineStatus(record, event);
+        this.handlePipelineStatus(workspace.workspaceId, record, event);
       }
       try {
         await record.start();
       } catch (error) {
-        await this.retireFailedStart(record);
+        await this.retireFailedStart(workspace.workspaceId, record);
         throw error;
       }
-      this.assertStillLive(record);
+      this.assertStillLive(workspace.workspaceId, record);
       return record;
     }
   }
@@ -196,14 +242,16 @@ export class PluginWorkspaceRuntimes<
     const slot = this.slots.get(workspaceId);
     if (!slot) return Promise.resolve();
     if (slot.kind === "stopping") return slot.stop;
-    return this.beginStop(slot.record);
+    return this.beginStop(workspaceId, slot.record);
   }
 
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
-    const stops = [...this.slots.values()].map((slot) =>
-      slot.kind === "stopping" ? slot.stop : this.beginStop(slot.record),
+    const stops = [...this.slots.entries()].map(([workspaceId, slot]) =>
+      slot.kind === "stopping"
+        ? slot.stop
+        : this.beginStop(workspaceId, slot.record),
     );
     this.closePromise = Promise.allSettled(stops).then((outcomes) => {
       const failures = outcomes.flatMap((outcome) =>
@@ -223,76 +271,65 @@ export class PluginWorkspaceRuntimes<
     }
   }
 
-  private assertSameRoot(
+  private assertStillLive(
+    workspaceId: string,
     record: OwnedPluginWorkspaceRuntime,
-    workspaceRoot: string,
   ): void {
-    if (record.workspaceRoot === workspaceRoot) return;
-    throw new Error(
-      `Workspace "${record.workspaceId}" is already open from another folder. Close it and try again.`,
-    );
-  }
-
-  private assertStillLive(record: OwnedPluginWorkspaceRuntime): void {
-    const slot = this.slots.get(record.workspaceId);
+    const slot = this.slots.get(workspaceId);
     if (slot?.kind === "live" && slot.record === record) return;
     throw new Error("Plugin pipeline closed while the workspace was opening.");
   }
 
-  private beginStop(record: OwnedPluginWorkspaceRuntime): Promise<void> {
-    const stop = Promise.resolve().then(() => this.disposeRecord(record));
-    this.slots.set(record.workspaceId, { kind: "stopping", record, stop });
+  private beginStop(
+    workspaceId: string,
+    record: OwnedPluginWorkspaceRuntime,
+  ): Promise<void> {
+    const { promise: stop, resolve, reject } = Promise.withResolvers<void>();
+    const slot: StoppingRuntimeSlot = { kind: "stopping", record, stop };
+    this.slots.set(workspaceId, slot);
+    void this.disposeRecord(workspaceId, slot).then(resolve, reject);
     return stop;
   }
 
   private async retireFailedStart(
+    workspaceId: string,
     record: OwnedPluginWorkspaceRuntime,
   ): Promise<void> {
-    const slot = this.slots.get(record.workspaceId);
+    const slot = this.slots.get(workspaceId);
     const stop = slot?.record === record && slot.kind === "stopping"
       ? slot.stop
       : slot?.record === record
-      ? this.beginStop(record)
+      ? this.beginStop(workspaceId, record)
       : undefined;
     if (!stop) return;
     try {
       await stop;
     } catch (error) {
-      this.dependencies.onCleanupError?.(record.workspaceId, error);
+      this.dependencies.onCleanupError?.(workspaceId, error);
     }
   }
 
   private async disposeRecord(
-    record: OwnedPluginWorkspaceRuntime,
+    workspaceId: string,
+    slot: StoppingRuntimeSlot,
   ): Promise<void> {
-    let failure: unknown;
     try {
-      await record.pipeline.dispose();
-    } catch (error) {
-      failure = error;
-    }
-    try {
-      record.workspaceEvents.dispose();
-    } catch (error) {
-      if (failure === undefined) failure = error;
-      else this.dependencies.onCleanupError?.(record.workspaceId, error);
+      await slot.record.dispose();
     } finally {
-      record.registrations.clear();
-      const slot = this.slots.get(record.workspaceId);
-      if (slot?.kind === "stopping" && slot.record === record) {
-        this.slots.delete(record.workspaceId);
+      if (this.slots.get(workspaceId) === slot) {
+        this.slots.delete(workspaceId);
       }
     }
-    if (failure !== undefined) throw failure;
   }
 
   private handlePipelineStatus(
+    workspaceId: string,
     record: OwnedPluginWorkspaceRuntime,
     event: PluginPipelineStatusEvent,
   ): void {
-    const slot = this.slots.get(record.workspaceId);
+    const slot = this.slots.get(workspaceId);
     if (!slot || slot.record !== record) return;
     record.forgetRemovedPlugin(event);
-    this.dependencies.onPipelineStatus(record.workspaceId, event);
+    this.dependencies.onPipelineStatus(workspaceId, event);
   }
 }

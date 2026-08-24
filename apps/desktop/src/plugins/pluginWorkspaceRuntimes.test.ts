@@ -177,29 +177,72 @@ describe("plugin workspace runtimes", () => {
     expect(harness.created).toHaveLength(2);
   });
 
-  it("never returns a runtime that stop retired while start was pending", async () => {
+  it("keeps a stopped pending start until it settles before reopening", async () => {
     const opening = deferred();
     const harness = createHarness({
-      create: () => makeParts({ start: () => opening.promise }),
+      create: () => harness.created.length === 0
+        ? makeParts({ start: () => opening.promise })
+        : makeParts(),
     });
 
     const first = harness.owner.ensure(workspace());
     const second = harness.owner.ensure(workspace());
     first.catch(() => undefined);
     second.catch(() => undefined);
-    expect(harness.owner.current("workspace-1")).toBeDefined();
+    const retired = harness.owner.current("workspace-1");
+    if (!retired) throw new Error("The first runtime was not published.");
+    const remembered = retired.rememberPlugin(registration());
 
-    await harness.owner.stop("workspace-1");
-    opening.resolve();
-
-    await expect(first).rejects.toThrow(
-      "Plugin pipeline closed while the workspace was opening.",
+    const stopping = harness.owner.stop("workspace-1");
+    const reopening = harness.owner.ensure(workspace());
+    let reopeningSettled = false;
+    void reopening.then(
+      () => {
+        reopeningSettled = true;
+      },
+      () => {
+        reopeningSettled = true;
+      },
     );
-    await expect(second).rejects.toThrow(
-      "Plugin pipeline closed while the workspace was opening.",
-    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(harness.created).toHaveLength(1);
+    expect(reopeningSettled).toBe(false);
     expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
-    expect(harness.owner.current("workspace-1")).toBeUndefined();
+    expect(harness.created[0]?.events.dispose).not.toHaveBeenCalled();
+    expect(retired.registeredPlugin("example-plugin")).toBe(remembered);
+
+    opening.reject(new Error("start aborted"));
+
+    await expect(first).rejects.toThrow("start aborted");
+    await expect(second).rejects.toThrow("start aborted");
+    await expect(stopping).resolves.toBeUndefined();
+    await expect(reopening).resolves.not.toBe(retired);
+    expect(harness.created).toHaveLength(2);
+    expect(harness.created[0]?.events.dispose).toHaveBeenCalledOnce();
+    expect(retired.registeredPlugin("example-plugin")).toBeUndefined();
+    expect(harness.owner.current("workspace-1")).toBeDefined();
+  });
+
+  it("publishes the stopping slot and starts disposal before stop returns", async () => {
+    let callbackStop: Promise<void> | undefined;
+    let currentDuringDispose: unknown;
+    const harness = createHarness({
+      create: () => makeParts({
+        dispose: () => {
+          currentDuringDispose = harness.owner.current("workspace-1");
+          callbackStop = harness.owner.stop("workspace-1");
+          return Promise.resolve();
+        },
+      }),
+    });
+    await harness.owner.ensure(workspace());
+
+    const stopping = harness.owner.stop("workspace-1");
+
+    expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
+    expect(currentDuringDispose).toBeUndefined();
+    expect(callbackStop).toBe(stopping);
+    await stopping;
   });
 
   it("makes repeated stops await the exact same teardown", async () => {
