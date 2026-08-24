@@ -143,7 +143,6 @@ interface SessionRecord<
   TReplacement,
 > {
   readonly key: string;
-  readonly openToken: symbol;
   readonly sender: TSender;
   readonly senderId: number;
   readonly generation: number;
@@ -247,7 +246,6 @@ export class EngineYDocSessionOwner<
 
     const record: SessionRecord<TSender, TSession, TUpdate, TReplacement> = {
       key,
-      openToken: Symbol("engine-ydoc-open"),
       sender: input.sender,
       senderId: input.sender.id,
       generation: input.generation,
@@ -420,26 +418,25 @@ export class EngineYDocSessionOwner<
   #signals(
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
   ): EngineYDocSessionSignals<TEvent, TUpdate, TReplacement> {
-    const token = record.openToken;
     return {
       emit: (event) => {
-        this.#send(record, token, { kind: "session-event", event });
+        this.#send(record, { kind: "session-event", event });
       },
       remoteUpdate: (update) => {
-        if (!this.#maySend(record, token)) return;
+        if (!this.#maySend(record)) return;
         const handoff = record.handoff;
         if (handoff) {
           (record.queuedHandoff ?? handoff).updates.push(update);
           return;
         }
-        this.#send(record, token, {
+        this.#send(record, {
           kind: "remote-update",
           update,
           lineageGeneration: record.lineageGeneration,
         });
       },
       replaceLineage: (replacement) => {
-        if (!this.#maySend(record, token)) return;
+        if (!this.#maySend(record)) return;
         if (record.handoff) {
           record.queuedHandoff = {
             replacement,
@@ -463,7 +460,7 @@ export class EngineYDocSessionOwner<
     };
     record.handoff = handoff;
     if (
-      !this.#send(record, record.openToken, {
+      !this.#send(record, {
         kind: "lineage-replacement",
         replacement,
         lineageGeneration: handoff.lineageGeneration,
@@ -475,10 +472,9 @@ export class EngineYDocSessionOwner<
 
   #send(
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
-    token: symbol,
     message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>,
   ): boolean {
-    if (!this.#maySend(record, token)) return false;
+    if (!this.#maySend(record)) return false;
     try {
       this.#onOutbound({
         sender: record.sender,
@@ -496,9 +492,8 @@ export class EngineYDocSessionOwner<
 
   #maySend(
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
-    token: symbol,
   ): boolean {
-    return record.openToken === token && this.#isCurrentAndActive(record);
+    return this.#isCurrentAndActive(record);
   }
 
   #isCurrentAndActive(
