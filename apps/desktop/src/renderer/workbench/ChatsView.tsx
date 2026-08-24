@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import {
   memo,
-  type MutableRefObject,
   type ReactNode,
   type RefObject,
   useCallback,
@@ -1460,7 +1459,7 @@ const ThreadMessages = memo(function ThreadMessages(props: {
   scrollToMessage: (messageId: string) => void;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   onNavCommand?: (nav: ChatsNav) => void;
-  messageNodes: MutableRefObject<Map<string, HTMLElement>>;
+  setMessageNode: (messageId: string, element: HTMLElement | null) => void;
   messagesEndRef: RefObject<HTMLDivElement | null>;
 }) {
   const {
@@ -1481,14 +1480,27 @@ const ThreadMessages = memo(function ThreadMessages(props: {
     beginReply,
     beginResolve,
     scrollToMessage,
-    messageNodes,
+    setMessageNode,
     messagesEndRef,
   } = props;
+  if (messagesLoading) {
+    return (
+      <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
+    );
+  }
   const openingMessage = messages[0] ?? null;
-  const comments = messages.slice(1);
-  const commentTree = openingMessage
-    ? buildThreadCommentTree(openingMessage.id, comments)
-    : [];
+  if (openingMessage === null) {
+    return (
+      <p className="m-0 pt-4 text-center text-[11px] text-subtle">
+        No messages yet.
+      </p>
+    );
+  }
+  const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));
+  const openingTime = formatChatTime(openingMessage.createdAtMs);
+  const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? [];
+  const openingDecision = decisionsByMessage.get(openingMessage.id);
+  const openingBookmark = bookmarkFor("message", openingMessage.id);
   const renderThreadComment = (
     node: ThreadCommentNode,
     depth: number,
@@ -1505,10 +1517,7 @@ const ThreadMessages = memo(function ThreadMessages(props: {
     return (
       <li
         key={comment.id}
-        ref={(element) => {
-          if (element) messageNodes.current.set(comment.id, element);
-          else messageNodes.current.delete(comment.id);
-        }}
+        ref={(element) => setMessageNode(comment.id, element)}
         data-testid="chats-message"
         data-message-id={comment.id}
         data-parent-message-id={comment.parentMessageId}
@@ -1673,19 +1682,10 @@ const ThreadMessages = memo(function ThreadMessages(props: {
       </li>
     );
   };
-  return messagesLoading ? (
-    <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
-  ) : openingMessage === null ? (
-    <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-      No messages yet.
-    </p>
-  ) : (
+  return (
     <>
       <article
-        ref={(node) => {
-          if (node) messageNodes.current.set(openingMessage.id, node);
-          else messageNodes.current.delete(openingMessage.id);
-        }}
+        ref={(node) => setMessageNode(openingMessage.id, node)}
         data-testid="chats-message"
         data-message-id={openingMessage.id}
         data-author-kind={openingMessage.authorKind}
@@ -1724,11 +1724,11 @@ const ThreadMessages = memo(function ThreadMessages(props: {
           ) : null}
           <time
             data-testid="chats-message-time"
-            dateTime={formatChatTime(openingMessage.createdAtMs).iso}
-            title={formatChatTime(openingMessage.createdAtMs).iso}
+            dateTime={openingTime.iso}
+            title={openingTime.iso}
             className="font-mono text-[10px] text-subtle"
           >
-            {formatChatTime(openingMessage.createdAtMs).label}
+            {openingTime.label}
           </time>
         </div>
         <p
@@ -1738,25 +1738,23 @@ const ThreadMessages = memo(function ThreadMessages(props: {
           <MentionText
             body={openingMessage.body}
             candidates={mentionCandidates}
-            attachments={attachmentsByMessage.get(openingMessage.id) ?? []}
+            attachments={openingAttachments}
             testId="chats-message-body"
             onOpenPath={props.onOpenPath}
           />
         </p>
-        {(attachmentsByMessage.get(openingMessage.id) ?? []).length > 0 ? (
+        {openingAttachments.length > 0 ? (
           <div
             data-testid="chats-message-attachments"
             className="mt-3 flex flex-wrap items-center gap-1.5"
           >
-            {(attachmentsByMessage.get(openingMessage.id) ?? []).map(
-              (attachment) => (
-                <AttachmentChip
-                  key={attachment.attachmentId}
-                  attachment={attachment}
-                  onOpenPath={props.onOpenPath}
-                />
-              ),
-            )}
+            {openingAttachments.map((attachment) => (
+              <AttachmentChip
+                key={attachment.attachmentId}
+                attachment={attachment}
+                onOpenPath={props.onOpenPath}
+              />
+            ))}
           </div>
         ) : null}
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -1767,12 +1765,11 @@ const ThreadMessages = memo(function ThreadMessages(props: {
             controls={reactionControls}
             flush
           />
-          {decisionsByMessage.get(openingMessage.id) ? (
+          {openingDecision ? (
             <DecisionStatus
-              decision={decisionsByMessage.get(openingMessage.id)!}
+              decision={openingDecision}
               onResolve={
-                !threadLocked &&
-                decisionsByMessage.get(openingMessage.id)?.state === "open"
+                !threadLocked && openingDecision.state === "open"
                   ? () => beginResolve(openingMessage)
                   : undefined
               }
@@ -1783,11 +1780,9 @@ const ThreadMessages = memo(function ThreadMessages(props: {
             <RunChip run={runRecords[openingMessage.id]} />
           ) : null}
           <BookmarkAction
-            active={Boolean(bookmarkFor("message", openingMessage.id))}
+            active={Boolean(openingBookmark)}
             busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-            destinationPath={
-              bookmarkFor("message", openingMessage.id)?.destinationPath
-            }
+            destinationPath={openingBookmark?.destinationPath}
             onToggle={
               threadLocked
                 ? undefined
@@ -1802,11 +1797,8 @@ const ThreadMessages = memo(function ThreadMessages(props: {
                     })
             }
             onOpen={
-              bookmarkFor("message", openingMessage.id) && props.onOpenPath
-                ? () =>
-                    props.onOpenPath?.(
-                      bookmarkFor("message", openingMessage.id)!.destinationPath,
-                    )
+              openingBookmark && props.onOpenPath
+                ? () => props.onOpenPath?.(openingBookmark.destinationPath)
                 : undefined
             }
             testId="chats-message-bookmark"
@@ -2027,9 +2019,10 @@ export function ChatsView(props: {
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
-  // Stable so ChatMessageList's memo boundary holds across draft keystrokes.
+  // Stable so the ChatMessageList and ThreadMessages memo boundaries hold
+  // across draft keystrokes.
   const setMessageNode = useCallback(
-    (messageId: string, element: HTMLLIElement | null) => {
+    (messageId: string, element: HTMLElement | null) => {
       if (element) messageNodes.current.set(messageId, element);
       else messageNodes.current.delete(messageId);
     },
@@ -2973,20 +2966,9 @@ export function ChatsView(props: {
           if (current.level !== "dm" || current.dm.channelId !== dm.channelId) {
             return current;
           }
-          const currentDm = current.dm;
-          if (
-            currentDm.channelWireId === syncedDm.channelWireId &&
-            currentDm.name === syncedDm.name &&
-            currentDm.peerLabel === syncedDm.peerLabel &&
-            currentDm.role === syncedDm.role &&
-            currentDm.shareId === syncedDm.shareId &&
-            currentDm.threadId === syncedDm.threadId &&
-            currentDm.unreadCount === syncedDm.unreadCount &&
-            currentDm.connected === syncedDm.connected
-          ) {
-            return current;
-          }
-          return { ...current, dm: syncedDm };
+          return samePollData(current.dm, syncedDm)
+            ? current
+            : { ...current, dm: syncedDm };
         });
         await loadDmConversation(syncedDm, token, request);
       } catch {
@@ -4464,27 +4446,22 @@ export function ChatsView(props: {
     return result;
   }, [reactions]);
 
-  // Memoized reaction controls (per surface, since readOnly differs): an
-  // inline object literal would change identity on every keystroke and defeat
-  // the message-list memo boundaries.
+  // Memoized reaction controls: an inline object literal would change
+  // identity on every keystroke and defeat the message-list memo boundaries.
+  // The DM and thread surfaces render mutually exclusively, so one object
+  // serves both; readOnly is derived first so the memo keys on a boolean,
+  // not the whole nav object.
   const threadLocked = nav.level === "thread" && channelIsLocked(nav.channel);
-  const threadReactionControls = useMemo<ChatReactionControls>(
+  const reactionReadOnly =
+    nav.level === "dm" ? !nav.dm.connected : threadLocked;
+  const reactionControls = useMemo<ChatReactionControls>(
     () => ({
       reactions,
       viewerAuthorId,
       onToggle: toggleReaction,
-      readOnly: threadLocked,
+      readOnly: reactionReadOnly,
     }),
-    [reactions, threadLocked, toggleReaction, viewerAuthorId],
-  );
-  const dmReactionControls = useMemo<ChatReactionControls>(
-    () => ({
-      reactions,
-      viewerAuthorId,
-      onToggle: toggleReaction,
-      readOnly: nav.level !== "dm" || !nav.dm.connected,
-    }),
-    [nav, reactions, toggleReaction, viewerAuthorId],
+    [reactions, reactionReadOnly, toggleReaction, viewerAuthorId],
   );
 
   const decisionsByMessage = useMemo(
@@ -4983,7 +4960,7 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               flashMessageId={flashMessageId}
               onMessageElement={setMessageNode}
-              reactionControls={dmReactionControls}
+              reactionControls={reactionControls}
             />
           ) : (
             <div
@@ -5161,7 +5138,7 @@ export function ChatsView(props: {
               reactionsByMessage={reactionsByMessage}
               decisionsByMessage={decisionsByMessage}
               attachmentsByMessage={attachmentsByMessage}
-              reactionControls={threadReactionControls}
+              reactionControls={reactionControls}
               mentionCandidates={mentionCandidates}
               bookmarkFor={bookmarkFor}
               bookmarkBusy={bookmarkBusy}
@@ -5171,7 +5148,7 @@ export function ChatsView(props: {
               scrollToMessage={scrollToMessage}
               onOpenPath={props.onOpenPath}
               onNavCommand={props.onNavCommand}
-              messageNodes={messageNodes}
+              setMessageNode={setMessageNode}
               messagesEndRef={messagesEndRef}
             />
           </div>
