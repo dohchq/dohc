@@ -13,7 +13,7 @@ import {
   assertActiveShareViewFilesOwner,
   type ShareViewFilesOwnerCapability,
   withActiveShareViewFilesOwnerOperation,
-} from "./shareViewFiles";
+} from "./shareViewFilesOwner";
 import {
   type UnjournalablePath,
   unjournalablePathMessages,

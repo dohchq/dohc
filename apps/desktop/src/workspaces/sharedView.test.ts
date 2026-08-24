@@ -40,8 +40,8 @@ import {
   type ResolvedShareViewFilesTarget,
   type ShareViewFileChange,
   type ShareViewFileChangeValue,
-  type ShareViewFilesOwnerCapability,
 } from "./shareViewFiles";
+import type { ShareViewFilesOwnerCapability } from "./shareViewFilesOwner";
 import {
   withOrderedWorkspaceTextPath,
   withStaleSensitiveWorkspaceOperation,
@@ -60,16 +60,35 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 
 // This suite isolates shared-view primitives. Owner admission itself is kept
 // real in shareViewFiles.test.ts and every file-operation/mount e2e suite.
-vi.mock("./shareViewFiles", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./shareViewFiles")>();
+vi.mock("./shareViewFilesOwner", () => {
+  const resources = new WeakMap<object, Record<string, unknown>>();
   return {
-    ...actual,
-    assertActiveShareViewFilesOwner: () => undefined,
+    assertActiveShareViewFilesOwner: (owner: object) =>
+      resources.get(owner) ?? {
+        kind: "standalone",
+        workspaceId: "test-workspace",
+        storeWorkspaceId: "test-workspace",
+        schedulingRootPath: "unused",
+        rootPath: "unused",
+        shareId: "test-share",
+      },
     withActiveShareViewFilesOwnerOperation: (
       _owner: unknown,
       _expected: unknown,
       operation: () => Promise<unknown>,
     ) => operation(),
+    withShareViewFilesOwner: async (
+      input: { resource: Record<string, unknown> },
+      run: (owner: ShareViewFilesOwnerCapability) => Promise<unknown>,
+    ) => {
+      const owner = {} as ShareViewFilesOwnerCapability;
+      resources.set(owner, input.resource);
+      try {
+        return await run(owner);
+      } finally {
+        resources.delete(owner);
+      }
+    },
   };
 });
 
@@ -81,7 +100,26 @@ const testProjection = shareViewFilesProjection(
 );
 const clearPullInFlightMarker = testProjection.clearPullInFlight;
 const recordCollisionPaths = testProjection.recordCollisions;
-const captureSharedViewLocalDivergence = testLifecycle.captureShared;
+const captureSharedViewLocalDivergence = (
+  rootDir: string,
+  workspaceId: string,
+  store: CaptureVersionedTextStore,
+  allowLocalJournaling: boolean,
+  shareId: string,
+  options?: {
+    beforeCaptureWrite?: (path: string) => Promise<void>;
+    paths?: readonly string[];
+    workspaceLease?: Parameters<typeof testLifecycle.captureShared>[0]["workspaceLease"];
+  },
+) =>
+  testLifecycle.captureShared({
+    rootDir,
+    workspaceId,
+    store,
+    allowLocalJournaling,
+    shareId,
+    ...options,
+  });
 const captureStandaloneShareViewDivergence = testLifecycle.captureStandalone;
 const reconcileStandaloneShareView = testLifecycle.reconcileStandalone;
 const refreshSharedViewOnceWithPull = testLifecycle.refreshOnce;

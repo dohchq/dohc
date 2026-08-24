@@ -25,7 +25,7 @@ import {
   assertActiveShareViewFilesOwner,
   type ShareViewFilesOwnerCapability,
   withActiveShareViewFilesOwnerOperation,
-} from "./shareViewFiles";
+} from "./shareViewFilesOwner";
 
 // Share mounts: the receive side of a relay share materialized INSIDE a host
 // workspace as shared-with-me/<label>/ — ordinary read-only files the user's

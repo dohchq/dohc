@@ -37,7 +37,7 @@ import {
   assertActiveShareViewFilesOwner,
   type ShareViewFilesOwnerCapability,
   withActiveShareViewFilesOwnerOperation,
-} from "./shareViewFiles";
+} from "./shareViewFilesOwner";
 import {
   recordedShareSelector,
   SharePinInvalidError,
@@ -995,17 +995,27 @@ async function clearCapturePendingMarker(
 // outside the journal. Comparing disk with the engine head avoids echoing
 // in-app writes and prior materialization.
 async function captureSharedViewLocalDivergence(
-  rootDir: string,
-  workspaceId: string,
-  store: CaptureVersionedTextStore,
-  allowLocalJournaling: boolean,
-  shareId: string,
-  options?: {
+  input: {
+    rootDir: string;
+    workspaceId: string;
+    store: CaptureVersionedTextStore;
+    allowLocalJournaling: boolean;
+    shareId: string;
     beforeCaptureWrite?: (path: string) => Promise<void>;
     paths?: readonly string[];
     workspaceLease?: WorkspaceOperationLease;
   },
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
+  const {
+    rootDir,
+    workspaceId,
+    store,
+    allowLocalJournaling,
+    shareId,
+    beforeCaptureWrite,
+    paths,
+    workspaceLease,
+  } = input;
   const realRoot = await realpath(rootDir).catch(() => null);
   if (realRoot === null) {
     return {
@@ -1020,7 +1030,7 @@ async function captureSharedViewLocalDivergence(
     path: string,
     operation: (resolvedTarget: string) => Promise<T>,
   ) =>
-    withCaptureMutationLock(rootDir, path, options?.workspaceLease, operation);
+    withCaptureMutationLock(rootDir, path, workspaceLease, operation);
 
   const main = await store.ensureMainVersion({ workspaceId });
   if (!store.listTextFileMetadata) {
@@ -1029,8 +1039,8 @@ async function captureSharedViewLocalDivergence(
     );
   }
   const pathIsInScope = (path: string) =>
-    options?.paths === undefined ||
-    options.paths.some(
+    paths === undefined ||
+    paths.some(
       (scope) => path === scope || path.startsWith(`${scope}/`),
     );
   const tracked = (
@@ -1512,7 +1522,7 @@ async function captureSharedViewLocalDivergence(
           );
           return "repaired" as const;
         }
-        await options?.beforeCaptureWrite?.(entry.path);
+        await beforeCaptureWrite?.(entry.path);
         await writeDiskContentToStore({
           store,
           workspaceId,
@@ -1673,7 +1683,7 @@ async function captureSharedViewLocalDivergence(
   }
 
   if (
-    options?.paths === undefined &&
+    paths === undefined &&
     pendingState.pullInFlight &&
     unjournalablePaths.length === 0
   ) {
@@ -1707,17 +1717,15 @@ async function captureStandaloneShareViewDivergence(input: {
     access: grantedSelector.access,
     ended: input.ended,
   });
-  return captureSharedViewLocalDivergence(
-    input.rootDir,
-    input.workspaceId,
-    input.store,
+  return captureSharedViewLocalDivergence({
+    rootDir: input.rootDir,
+    workspaceId: input.workspaceId,
+    store: input.store,
     allowLocalJournaling,
-    input.shareId,
-    {
-      paths: input.paths,
-      workspaceLease: input.workspaceLease,
-    },
-  );
+    shareId: input.shareId,
+    paths: input.paths,
+    workspaceLease: input.workspaceLease,
+  });
 }
 
 // One refresh pass: pull the share's filtered ops into the local store,
@@ -2052,12 +2060,9 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
     );
   return {
     captureShared: (
-      ...args: Parameters<typeof captureSharedViewLocalDivergence>
+      input: Parameters<typeof captureSharedViewLocalDivergence>[0],
     ) => {
-      return active(
-        { rootDir: args[0], workspaceId: args[1], shareId: args[4] },
-        () => captureSharedViewLocalDivergence(...args),
-      );
+      return active(input, () => captureSharedViewLocalDivergence(input));
     },
     captureStandalone: (
       input: Parameters<typeof captureStandaloneShareViewDivergence>[0],

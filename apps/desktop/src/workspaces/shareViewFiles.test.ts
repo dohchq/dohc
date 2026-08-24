@@ -17,10 +17,10 @@ import {
   type ResolvedShareViewFilesTarget,
   type PreparedShareViewFilesMount,
   type ShareViewFilesDependencies,
-  type ShareViewFilesOwnerCapability,
   type ShareViewFilesStore,
   type ShareViewFilesTarget,
 } from "./shareViewFiles";
+import type { ShareViewFilesOwnerCapability } from "./shareViewFilesOwner";
 import {
   readSharedViewProjectionDebt,
   shareViewFilesProjection,
@@ -350,13 +350,13 @@ describe("ShareViewFiles", () => {
     expect(() =>
       sharedView
         .createShareViewLifecycle(forged)
-        .captureShared(
-          "unused",
-          "unused",
-          readStore({ text: "" }),
-          true,
-          "unused",
-        ),
+        .captureShared({
+          rootDir: "unused",
+          workspaceId: "unused",
+          store: readStore({ text: "" }),
+          allowLocalJournaling: true,
+          shareId: "unused",
+        }),
     ).toThrow("ownership admission is inactive");
 
     const forgedChanges = fileChanges.createShareViewFileChanges(forged);
@@ -571,6 +571,7 @@ describe("ShareViewFiles", () => {
       recipientEmail: null,
     };
     let registered = false;
+    const rollbackError = new Error("folder busy");
     const files = createShareViewFiles({
       ...unusedReconcilePorts,
       resolveTarget: () => (registered ? prepared : null),
@@ -588,7 +589,7 @@ describe("ShareViewFiles", () => {
       },
       removeMount: async () => ({
         folderLeft: true,
-        error: new Error("folder busy"),
+        error: rollbackError,
       }),
     });
 
@@ -596,7 +597,11 @@ describe("ShareViewFiles", () => {
       withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
         files.mount(lease, prepared),
       ),
-    ).rejects.toBeInstanceOf(ShareViewMountRollbackError);
+    ).rejects.toMatchObject({
+      name: "ShareViewMountRollbackError",
+      rollbackError,
+      cause: rollbackError,
+    });
     await expect(lstat(prepared.rootPath)).resolves.toBeTruthy();
     expect(registered).toBe(true);
   });

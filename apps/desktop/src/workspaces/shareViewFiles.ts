@@ -47,89 +47,15 @@ import {
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
 import { createShareViewFileChanges } from "./shareViewFileChanges";
+import {
+  type ShareViewFilesOwnerCapability,
+  withShareViewFilesOwner,
+} from "./shareViewFilesOwner";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 export type ShareViewFilesTarget =
   | { kind: "standalone"; workspaceId: string }
   | { kind: "mount"; workspaceId: string; shareId: string };
-
-const shareViewFilesOwnerCapabilityBrand = Symbol(
-  "ShareViewFilesOwnerCapability",
-);
-
-export interface ShareViewFilesOwnerCapability {
-  readonly [shareViewFilesOwnerCapabilityBrand]: true;
-}
-
-export interface ShareViewFilesOwnerResource {
-  kind: ShareViewFilesTarget["kind"];
-  workspaceId: string;
-  storeWorkspaceId: string;
-  schedulingRootPath: string;
-  rootPath: string;
-  shareId: string;
-  mountLabel?: string;
-}
-
-export type ShareViewFilesOwnerResourceExpectation = Partial<
-  ShareViewFilesOwnerResource
->;
-
-const activeShareViewFilesOwners = new WeakMap<
-  ShareViewFilesOwnerCapability,
-  {
-    assertActive: () => void;
-    pending: Set<Promise<unknown>>;
-    resource: Readonly<ShareViewFilesOwnerResource>;
-  }
->();
-
-export function assertActiveShareViewFilesOwner(
-  owner: ShareViewFilesOwnerCapability,
-  expected: ShareViewFilesOwnerResourceExpectation = {},
-): Readonly<ShareViewFilesOwnerResource> {
-  const active = activeShareViewFilesOwners.get(owner);
-  if (active === undefined) {
-    throw new Error("Share-view file ownership admission is inactive.");
-  }
-  active.assertActive();
-  const actual = active.resource;
-  const matches =
-    (expected.kind === undefined || expected.kind === actual.kind) &&
-    (expected.workspaceId === undefined ||
-      expected.workspaceId === actual.workspaceId) &&
-    (expected.storeWorkspaceId === undefined ||
-      expected.storeWorkspaceId === actual.storeWorkspaceId) &&
-    (expected.shareId === undefined || expected.shareId === actual.shareId) &&
-    (expected.mountLabel === undefined ||
-      expected.mountLabel === actual.mountLabel) &&
-    (expected.schedulingRootPath === undefined ||
-      samePath(expected.schedulingRootPath, actual.schedulingRootPath)) &&
-    (expected.rootPath === undefined ||
-      samePath(expected.rootPath, actual.rootPath));
-  if (!matches) {
-    throw new Error(
-      "Share-view file ownership admission belongs to another target.",
-    );
-  }
-  return actual;
-}
-
-export function withActiveShareViewFilesOwnerOperation<T>(
-  owner: ShareViewFilesOwnerCapability,
-  expected: ShareViewFilesOwnerResourceExpectation,
-  operation: () => Promise<T>,
-): Promise<T> {
-  assertActiveShareViewFilesOwner(owner, expected);
-  const admission = activeShareViewFilesOwners.get(owner)!;
-  const pending = Promise.resolve().then(operation);
-  admission.pending.add(pending);
-  void pending.then(
-    () => admission.pending.delete(pending),
-    () => admission.pending.delete(pending),
-  );
-  return pending;
-}
 
 export interface ResolvedShareViewFilesTarget {
   kind: ShareViewFilesTarget["kind"];
@@ -900,42 +826,23 @@ export function createShareViewFiles(
     target: ActiveShareViewFilesTarget,
     run: (owner: ShareViewFilesOwnerCapability) => Promise<T>,
   ): Promise<T> {
-    let active = true;
-    const owner: ShareViewFilesOwnerCapability = {
-      [shareViewFilesOwnerCapabilityBrand]: true,
-    };
-    const resource = Object.freeze({
-      kind: target.kind,
-      workspaceId: target.workspaceId,
-      storeWorkspaceId: target.storeWorkspaceId,
-      schedulingRootPath: target.schedulingRootPath,
-      rootPath: target.rootPath,
-      shareId: target.shareId,
-      ...(target.mountLabel === undefined
-        ? {}
-        : { mountLabel: target.mountLabel }),
-    });
-    activeShareViewFilesOwners.set(owner, {
-      resource,
-      pending: new Set(),
-      assertActive: () => {
-        if (!active) {
-          throw new Error("Share-view file ownership admission has ended.");
-        }
-        assertLease(lease, target);
+    return withShareViewFilesOwner(
+      {
+        resource: {
+          kind: target.kind,
+          workspaceId: target.workspaceId,
+          storeWorkspaceId: target.storeWorkspaceId,
+          schedulingRootPath: target.schedulingRootPath,
+          rootPath: target.rootPath,
+          shareId: target.shareId,
+          ...(target.mountLabel === undefined
+            ? {}
+            : { mountLabel: target.mountLabel }),
+        },
+        workspaceLease: lease,
       },
-    });
-    try {
-      assertActiveShareViewFilesOwner(owner);
-      return await run(owner);
-    } finally {
-      const admission = activeShareViewFilesOwners.get(owner);
-      while (admission !== undefined && admission.pending.size > 0) {
-        await Promise.allSettled([...admission.pending]);
-      }
-      active = false;
-      activeShareViewFilesOwners.delete(owner);
-    }
+      run,
+    );
   }
 
   async function reconcileWithOwner(
@@ -960,13 +867,13 @@ export function createShareViewFiles(
             ended: target.ended,
             workspaceLease: lease,
           })
-        : lifecycle.captureShared(
-            target.rootPath,
-            target.storeWorkspaceId,
+        : lifecycle.captureShared({
+            rootDir: target.rootPath,
+            workspaceId: target.storeWorkspaceId,
             store,
-            false,
-            target.shareId,
-          );
+            allowLocalJournaling: false,
+            shareId: target.shareId,
+          });
 
     if (request === "settle") {
       if (target.kind !== "standalone") {
