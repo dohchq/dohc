@@ -561,6 +561,7 @@ class WorkspaceOperationSupersededError extends Error {
 
 export function createWorkspaceOperationScheduler() {
   const states = new Map<string, WorkspaceOperationState>();
+  const activeLeases = new WeakMap<WorkspaceOperationLease, string>();
   const pathKey = (value: string) =>
     process.platform === "win32" ? value.toLowerCase() : value;
 
@@ -632,8 +633,9 @@ export function createWorkspaceOperationScheduler() {
             return { changed: false };
           }
           let changed = false;
+          const lease = Object.freeze({ rootPath }) as WorkspaceOperationLease;
+          activeLeases.set(lease, key);
           try {
-            const lease = { rootPath } as WorkspaceOperationLease;
             const value = await operation(
               () => {
                 changed = true;
@@ -644,6 +646,8 @@ export function createWorkspaceOperationScheduler() {
             resolve(value);
           } catch (error) {
             reject(error);
+          } finally {
+            activeLeases.delete(lease);
           }
           return { changed };
         },
@@ -673,6 +677,16 @@ export function createWorkspaceOperationScheduler() {
         lease: WorkspaceOperationLease,
       ) => Promise<T>,
     ) => enqueue(rootPath, "exclusive", operation),
+    assertActiveLease: (
+      rootPath: string,
+      lease: WorkspaceOperationLease,
+    ): void => {
+      if (activeLeases.get(lease) !== pathKey(rootPath)) {
+        throw new Error(
+          "Workspace operation lease is inactive or belongs to another root.",
+        );
+      }
+    },
   };
 }
 
@@ -763,6 +777,24 @@ export function createOrderedWorkspaceTextAccess(deps: {
       scheduler.shared(rootPath, () =>
         enqueueOrdered(targetTails, pathKey(resolvedTarget), run),
       ),
+    // The caller already owns scheduler admission for this exact root. Taking
+    // another shared admission can deadlock behind a queued exclusive request.
+    orderedOnResolvedTargetInLease: <T>(
+      rootPath: string,
+      lease: WorkspaceOperationLease,
+      resolvedTarget: string,
+      run: () => Promise<T>,
+    ): Promise<T> => {
+      try {
+        scheduler.assertActiveLease(rootPath, lease);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return enqueueOrdered(targetTails, pathKey(resolvedTarget), () => {
+        scheduler.assertActiveLease(rootPath, lease);
+        return run();
+      });
+    },
   };
 }
 
@@ -808,6 +840,13 @@ const atomicTextWriter = createAtomicTextWriter({
 });
 
 const workspaceOperationScheduler = createWorkspaceOperationScheduler();
+
+export function assertActiveWorkspaceOperationLease(
+  rootPath: string,
+  lease: WorkspaceOperationLease,
+): void {
+  workspaceOperationScheduler.assertActiveLease(rootPath, lease);
+}
 
 const orderedWorkspaceTextAccess = createOrderedWorkspaceTextAccess({
   resolveTarget: async (rootPath, relativePath, access) => {
@@ -860,6 +899,20 @@ export function withOrderedWorkspaceTargetPath<T>(
 ): Promise<T> {
   return orderedWorkspaceTextAccess.orderedOnResolvedTarget(
     rootPath,
+    resolvedTarget,
+    run,
+  );
+}
+
+export function withOrderedWorkspaceTargetPathInLease<T>(
+  rootPath: string,
+  lease: WorkspaceOperationLease,
+  resolvedTarget: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return orderedWorkspaceTextAccess.orderedOnResolvedTargetInLease(
+    rootPath,
+    lease,
     resolvedTarget,
     run,
   );

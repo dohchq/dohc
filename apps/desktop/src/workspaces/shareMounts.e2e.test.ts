@@ -7,12 +7,12 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { mountRootFor } from "./shareMounts";
 import {
-  createMountDirectory,
-  mountRootFor,
-  removeMountFolder,
-} from "./shareMounts";
-import { refreshShareMountThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
+  createShareMountDirectoryThroughOwnerForTest,
+  refreshShareMountThroughOwnerForTest,
+  removeShareMountFolderThroughOwnerForTest,
+} from "../testing/shareViewFilesMountHarness";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 
@@ -36,7 +36,7 @@ describe("share mounts real daemon", () => {
       let lifecycleStopped = false;
 
       try {
-        await createMountDirectory(host, mount.label);
+        await createShareMountDirectoryThroughOwnerForTest(host, mount.label);
         await mkdir(siblingRoot);
         await writeFile(hostSentinel, "host", "utf8");
         await writeFile(siblingSentinel, "sibling", "utf8");
@@ -94,7 +94,7 @@ describe("share mounts real daemon", () => {
         await lifecycle.stop();
         lifecycleStopped = true;
 
-        await removeMountFolder(host, mount.label);
+        await removeShareMountFolderThroughOwnerForTest(host, mount.label);
         expect(existsSync(mountRoot)).toBe(false);
         await expect(readFile(hostSentinel, "utf8")).resolves.toBe("host");
         await expect(readFile(siblingSentinel, "utf8")).resolves.toBe(

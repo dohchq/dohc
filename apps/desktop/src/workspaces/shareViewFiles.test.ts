@@ -1,23 +1,106 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import {
   createShareViewFiles,
+  ShareViewMountRollbackError,
   type ResolvedShareViewFilesTarget,
+  type PreparedShareViewFilesMount,
   type ShareViewFilesDependencies,
   type ShareViewFilesStore,
+  type ShareViewFilesTarget,
 } from "./shareViewFiles";
+import type { ShareViewFilesOwnerCapability } from "./shareViewFilesOwner";
 import {
-  captureSharedViewLocalDivergence,
+  readSharedViewProjectionDebt,
+  shareViewFilesProjection,
   withShareViewRefreshLifecycleLock,
-  writePendingMaterializationPaths,
 } from "./sharedView";
 import { SharePinInvalidError } from "./shareViewRecords";
-import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
+import {
+  mountRootFor,
+  shareViewFilesMountProjection,
+} from "./shareMounts";
+import {
+  type WorkspaceOperationLease,
+  withExclusiveWorkspaceOperation,
+  withStaleSensitiveWorkspaceOperation,
+} from "./workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { createTestScratch } from "./testTemp";
+
+let materializationWriteSchedule: {
+  path: string;
+  attempts: number;
+  firstWriteFinished: () => void;
+  releaseFirstWrite: Promise<void>;
+  secondWriteError: Error;
+} | null = null;
+let sidecarRenameFailure: { path: string; error: Error } | null = null;
+let sidecarRemoveFailure: { path: string; error: Error } | null = null;
+let afterMaterializationWrite: { path: string; run: () => void } | null = null;
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    writeFile: (async (
+      path: Parameters<typeof writeFile>[0],
+      data: Parameters<typeof writeFile>[1],
+      options?: Parameters<typeof writeFile>[2],
+    ) => {
+      const schedule = materializationWriteSchedule;
+      const scheduled = schedule !== null && String(path) === schedule.path;
+      if (scheduled) {
+        schedule.attempts += 1;
+        if (schedule.attempts === 2) throw schedule.secondWriteError;
+      }
+      const result = await actual.writeFile(path, data, options);
+      const afterWrite = afterMaterializationWrite;
+      if (afterWrite !== null && String(path) === afterWrite.path) {
+        afterMaterializationWrite = null;
+        afterWrite.run();
+      }
+      if (scheduled && schedule.attempts === 1) {
+        schedule.firstWriteFinished();
+        await schedule.releaseFirstWrite;
+      }
+      return result;
+    }) as typeof writeFile,
+    rename: (async (
+      oldPath: Parameters<typeof rename>[0],
+      newPath: Parameters<typeof rename>[1],
+    ) => {
+      const failure = sidecarRenameFailure;
+      if (failure !== null && String(newPath) === failure.path) {
+        sidecarRenameFailure = null;
+        throw failure.error;
+      }
+      return actual.rename(oldPath, newPath);
+    }) as typeof rename,
+    rm: (async (
+      path: Parameters<typeof rm>[0],
+      options?: Parameters<typeof rm>[1],
+    ) => {
+      const failure = sidecarRemoveFailure;
+      if (failure !== null && String(path) === failure.path) {
+        sidecarRemoveFailure = null;
+        throw failure.error;
+      }
+      return actual.rm(path, options);
+    }) as typeof rm,
+  };
+});
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -31,6 +114,21 @@ async function workspaceRoot(): Promise<string> {
   const root = join(await createTestScratch("share-view-files-"), "workspace");
   await mkdir(root, { recursive: true });
   return root;
+}
+
+async function seedPendingMaterializationPaths(
+  rootPath: string,
+  paths: readonly string[],
+): Promise<void> {
+  const metadataPath = join(rootPath, ".dohc");
+  await mkdir(metadataPath, { recursive: true });
+  await writeFile(
+    join(metadataPath, "pending-materialization.json"),
+    JSON.stringify({
+      counts: Object.fromEntries([...new Set(paths)].map((path) => [path, 1])),
+    }),
+    "utf8",
+  );
 }
 
 function target(
@@ -184,6 +282,7 @@ const unusedReconcilePorts: Pick<
   | "markEnded"
   | "retireTarget"
   | "assertProjectionRoot"
+  | "createMount"
   | "removeMount"
 > = {
   resolveRelay: async () => null,
@@ -194,10 +293,782 @@ const unusedReconcilePorts: Pick<
   markEnded: async () => undefined,
   retireTarget: async () => undefined,
   assertProjectionRoot: async () => undefined,
+  createMount: async () => undefined,
   removeMount: async () => ({ folderLeft: false }),
 };
 
 describe("ShareViewFiles", () => {
+  it("does not expose raw share-view mutations and rejects forged ownership", async () => {
+    const [sharedView, fileChanges, shareMounts] = await Promise.all([
+      import("./sharedView"),
+      import("./shareViewFileChanges"),
+      import("./shareMounts"),
+    ]);
+    for (const name of [
+      "materializeSharedViewPaths",
+      "writeDiskContentToStore",
+      "writePendingMaterializationPaths",
+      "clearPendingMaterializationPaths",
+      "clearPullInFlightMarker",
+      "recordCollisionPaths",
+      "clearCollisionRecordPaths",
+      "captureSharedViewLocalDivergence",
+      "captureStandaloneShareViewDivergence",
+      "refreshSharedViewOnce",
+      "refreshCapturedShareView",
+      "reconcileStandaloneShareView",
+      "readCollisionRecordPaths",
+    ]) {
+      expect(sharedView).not.toHaveProperty(name);
+    }
+    for (const name of [
+      "applyShareViewTextWrite",
+      "applyShareViewFileCreate",
+      "applyShareViewPathMove",
+      "applyShareViewPathDelete",
+      "applyShareViewFileImport",
+    ]) {
+      expect(fileChanges).not.toHaveProperty(name);
+    }
+    for (const name of [
+      "createMountDirectory",
+      "removeMountFolder",
+      "removeShareMountProjection",
+    ]) {
+      expect(shareMounts).not.toHaveProperty(name);
+    }
+
+    const forged = {} as ShareViewFilesOwnerCapability;
+    await expect(
+      shareMounts.shareViewFilesMountProjection(forged).create(),
+    ).rejects.toThrow("ownership admission is inactive");
+    const projection = sharedView.shareViewFilesProjection(forged);
+    const rootPath = await workspaceRoot();
+    expect(() => projection.markPending(rootPath, ["notes/forged.md"])).toThrow(
+      "ownership admission is inactive",
+    );
+    const forgedStore = readStore({ text: "" });
+    const lifecycle = sharedView.createShareViewLifecycle(forged);
+    expect(() =>
+      lifecycle.captureShared({
+        rootDir: "unused",
+        workspaceId: "unused",
+        store: forgedStore,
+        allowLocalJournaling: true,
+        shareId: "unused",
+      }),
+    ).toThrow("ownership admission is inactive");
+    expect(() =>
+      lifecycle.captureStandaloneRefresh({
+        rootDir: "unused",
+        workspaceId: "unused",
+        store: forgedStore,
+        pinnedSelector: { paths: [], versionId: "main", access: "edit" },
+        shareId: "unused",
+        ended: false,
+      }),
+    ).toThrow("ownership admission is inactive");
+    expect(forgedStore.ensureMainVersion).not.toHaveBeenCalled();
+
+    const forgedChanges = fileChanges.createShareViewFileChanges(forged);
+    const store = mutableTextStore({
+      initial: [{ path: "notes/existing.md", text: "canonical\n" }],
+    });
+    await expect(
+      forgedChanges.writeText({
+        relativePath: "notes/existing.md",
+        text: "forged\n",
+        expectedContentHash: "not-the-current-hash",
+        shareViewStore: () => store,
+      }),
+    ).rejects.toThrow("ownership admission is inactive");
+    expect(store.ensureMainVersion).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["edit", "pending"],
+    ["view", "pending"],
+    ["edit", "collision"],
+    ["view", "collision"],
+  ] as const)(
+    "fails closed for a %s share when %s debt persistence fails after pull",
+    async (access, failedRecord) => {
+      const rootPath = await workspaceRoot();
+      const path = "docs/pull-window.md";
+      const store = mutableTextStore();
+      const resolved = target(rootPath, access);
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => resolved,
+        openStore: () => store,
+        resolveRelay: async () => ({
+          baseUrl: "https://relay.example",
+          token: "test-token",
+        }),
+        pull: async (_target, _relay, input) => {
+          await mkdir(join(rootPath, "docs"), { recursive: true });
+          await writeFile(join(rootPath, path), "recipient bytes\n", "utf8");
+          await store.writeTextFile!({
+            workspaceId: "workspace-a",
+            versionId: "main",
+            path,
+            text: "new canonical\n",
+            metadata: { origin: "sync" },
+          });
+          if (failedRecord === "pending") {
+            sidecarRenameFailure = {
+              path: join(
+                rootPath,
+                ".dohc",
+                "pending-materialization.json",
+              ),
+              error: new Error("pending marker persistence failed"),
+            };
+          }
+          await input.recordChangedPaths?.([path]);
+          if (failedRecord === "collision") {
+            sidecarRenameFailure = {
+              path: join(
+                rootPath,
+                ".dohc",
+                "share-collision-record.json",
+              ),
+              error: new Error("collision persistence failed"),
+            };
+          }
+          await input.recordCollisions?.([path]);
+          return {
+            fetched: 1,
+            applied: 1,
+            skipped: 0,
+            refusals: [],
+            refusalCount: 0,
+            changedPaths: [
+              { path, operation: "write" as const, contentKind: "text" as const },
+            ],
+            nextCursor: 1,
+            commitCursor: async () => undefined,
+          };
+        },
+      });
+      const requested = {
+        kind: "standalone" as const,
+        workspaceId: "workspace-a",
+      };
+
+      try {
+        const failed = await withStaleSensitiveWorkspaceOperation(
+          rootPath,
+          (lease) => files.reconcile(lease, requested, "refresh"),
+        );
+        expect(failed).toMatchObject({
+          kind: "refresh",
+          outcome: { ok: false },
+        });
+
+        const repaired = await withStaleSensitiveWorkspaceOperation(
+          rootPath,
+          (lease) => files.reconcile(lease, requested, "repair"),
+        );
+        expect(repaired).toMatchObject({
+          kind: "repair",
+          repairedPaths: 0,
+          unjournalablePaths: [{ path, reason: "local-collision" }],
+        });
+        await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
+          "recipient bytes\n",
+        );
+        await expect(
+          readSharedViewProjectionDebt(rootPath, "share-a"),
+        ).resolves.toMatchObject({ pullInFlight: true });
+        await expect(
+          store.readTextFile!({
+            workspaceId: "workspace-a",
+            versionId: "main",
+            path,
+          }),
+        ).resolves.toMatchObject({ text: "new canonical\n" });
+      } finally {
+        sidecarRenameFailure = null;
+      }
+    },
+  );
+
+  it("owns mount creation and rollback with one target-bound live capability", async () => {
+    const hostRoot = await workspaceRoot();
+    const mountLabel = "granter";
+    const prepared: PreparedShareViewFilesMount = {
+      kind: "mount",
+      workspaceId: "host-a",
+      storeWorkspaceId: "host-a:share-a",
+      schedulingRootPath: hostRoot,
+      rootPath: mountRootFor(hostRoot, mountLabel),
+      shareId: "share-a",
+      mountLabel,
+      granterEmail: "granter@example.com",
+      grantedSelector: { paths: [], versionId: "main", access: "view" },
+      ended: false,
+      relayUrl: "https://relay.example",
+      recipientEmail: "recipient@example.com",
+    };
+    let registered = false;
+    let leakedOwner: ShareViewFilesOwnerCapability | null = null;
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => (registered ? prepared : null),
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull: async () => {
+        throw new Error("first pull failed");
+      },
+      createMount: async (owner) => {
+        leakedOwner = owner;
+        await shareViewFilesMountProjection(owner).create();
+        registered = true;
+      },
+      removeMount: async (owner) => {
+        const removed = await shareViewFilesMountProjection(owner).remove();
+        registered = false;
+        return removed;
+      },
+    });
+
+    await expect(
+      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
+        files.mount(lease, prepared),
+      ),
+    ).rejects.toThrow("first pull failed");
+    expect(registered).toBe(false);
+    await expect(lstat(prepared.rootPath)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      shareViewFilesMountProjection(leakedOwner!).create(),
+    ).rejects.toThrow("ownership admission is inactive");
+    const staleStore = mutableTextStore({
+      initial: [{ path: "notes/stale.md", text: "canonical\n" }],
+    });
+    const staleChanges = (await import("./shareViewFileChanges"))
+      .createShareViewFileChanges(leakedOwner!);
+    await expect(
+      staleChanges.writeText({
+        relativePath: "notes/stale.md",
+        text: "stale write\n",
+        expectedContentHash: "not-current",
+        shareViewStore: () => staleStore,
+      }),
+    ).rejects.toThrow("ownership admission is inactive");
+    expect(staleStore.ensureMainVersion).not.toHaveBeenCalled();
+    expect(registered).toBe(false);
+  });
+
+  it("does not claim rollback succeeded when a failed mount folder remains", async () => {
+    const hostRoot = await workspaceRoot();
+    const prepared: PreparedShareViewFilesMount = {
+      kind: "mount",
+      workspaceId: "host-a",
+      storeWorkspaceId: "host-a:share-a",
+      schedulingRootPath: hostRoot,
+      rootPath: mountRootFor(hostRoot, "granter"),
+      shareId: "share-a",
+      mountLabel: "granter",
+      granterEmail: null,
+      grantedSelector: { paths: [], versionId: "main", access: "view" },
+      ended: false,
+      relayUrl: "https://relay.example",
+      recipientEmail: null,
+    };
+    let registered = false;
+    const rollbackError = new Error("folder busy");
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => (registered ? prepared : null),
+      openStore: () => mutableTextStore(),
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull: async () => {
+        throw new Error("pull failed");
+      },
+      createMount: async (owner) => {
+        await shareViewFilesMountProjection(owner).create();
+        registered = true;
+      },
+      removeMount: async () => ({
+        folderLeft: true,
+        error: rollbackError,
+      }),
+    });
+
+    await expect(
+      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
+        files.mount(lease, prepared),
+      ),
+    ).rejects.toMatchObject({
+      name: "ShareViewMountRollbackError",
+      rollbackError,
+      cause: rollbackError,
+    });
+    await expect(lstat(prepared.rootPath)).resolves.toBeTruthy();
+    expect(registered).toBe(true);
+  });
+
+  it("rejects cross-target projection claims before touching the other root", async () => {
+    const hostRoot = await workspaceRoot();
+    const otherRoot = await workspaceRoot();
+    const mountLabel = "granter";
+    const prepared: PreparedShareViewFilesMount = {
+      kind: "mount",
+      workspaceId: "host-a",
+      storeWorkspaceId: "host-a:share-a",
+      schedulingRootPath: hostRoot,
+      rootPath: mountRootFor(hostRoot, mountLabel),
+      shareId: "share-a",
+      mountLabel,
+      granterEmail: null,
+      grantedSelector: { paths: [], versionId: "main", access: "view" },
+      ended: false,
+      relayUrl: "https://relay.example",
+      recipientEmail: null,
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => null,
+      openStore: () => mutableTextStore(),
+      createMount: async (owner) => {
+        await import("./sharedView").then((sharedView) =>
+          sharedView
+            .shareViewFilesProjection(owner)
+            .markPending(otherRoot, ["notes/forged.md"]),
+        );
+      },
+    });
+
+    await expect(
+      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
+        files.mount(lease, prepared),
+      ),
+    ).rejects.toThrow("belongs to another target");
+    await expect(lstat(join(otherRoot, ".dohc"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("rejects a mount lease admitted for another workspace root", async () => {
+    const hostRoot = await workspaceRoot();
+    const otherRoot = await workspaceRoot();
+    const prepared: PreparedShareViewFilesMount = {
+      kind: "mount",
+      workspaceId: "host-a",
+      storeWorkspaceId: "host-a:share-a",
+      schedulingRootPath: hostRoot,
+      rootPath: mountRootFor(hostRoot, "granter"),
+      shareId: "share-a",
+      mountLabel: "granter",
+      granterEmail: null,
+      grantedSelector: { paths: [], versionId: "main", access: "view" },
+      ended: false,
+      relayUrl: "https://relay.example",
+      recipientEmail: null,
+    };
+    const createMount = vi.fn(async () => undefined);
+    const resolveTarget = vi.fn(() => null);
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget,
+      openStore: () => mutableTextStore(),
+      createMount,
+    });
+
+    await expect(
+      withExclusiveWorkspaceOperation(otherRoot, (_changed, lease) =>
+        files.mount(lease, prepared),
+      ),
+    ).rejects.toThrow(
+      "Workspace operation lease is inactive or belongs to another root.",
+    );
+    expect(resolveTarget).not.toHaveBeenCalled();
+    expect(createMount).not.toHaveBeenCalled();
+  });
+
+  it("keeps detached facade work inside the live admission and lifecycle lock", async () => {
+    const hostRoot = await workspaceRoot();
+    const prepared: PreparedShareViewFilesMount = {
+      kind: "mount",
+      workspaceId: "host-a",
+      storeWorkspaceId: "host-a:share-a",
+      schedulingRootPath: hostRoot,
+      rootPath: mountRootFor(hostRoot, "granter"),
+      shareId: "share-a",
+      mountLabel: "granter",
+      granterEmail: null,
+      grantedSelector: { paths: [], versionId: "main", access: "view" },
+      ended: false,
+      relayUrl: "https://relay.example",
+      recipientEmail: null,
+    };
+    await mkdir(prepared.rootPath, { recursive: true });
+    const readStarted = deferred();
+    const releaseRead = deferred();
+    const baseStore = mutableTextStore({
+      initial: [{ path: "notes/detached.md", text: "canonical\n" }],
+    });
+    const store: ShareViewFilesStore = {
+      ...baseStore,
+      readTextFile: async (input) => {
+        readStarted.resolve();
+        await releaseRead.promise;
+        return baseStore.readTextFile!(input);
+      },
+    } as ShareViewFilesStore;
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => null,
+      openStore: () => store,
+      createMount: async (owner) => {
+        void shareViewFilesProjection(owner).materialize(
+          prepared.rootPath,
+          prepared.storeWorkspaceId,
+          [
+            {
+              path: "notes/detached.md",
+              operation: "write",
+              contentKind: "text",
+            },
+          ],
+          store,
+        );
+      },
+    });
+
+    const mounting = withExclusiveWorkspaceOperation(
+      hostRoot,
+      (_changed, lease) => files.mount(lease, prepared),
+    );
+    let settled = false;
+    void mounting.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await readStarted.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    releaseRead.resolve();
+    await expect(mounting).rejects.toThrow("not registered");
+    await expect(
+      readFile(join(prepared.rootPath, "notes", "detached.md"), "utf8"),
+    ).resolves.toBe("canonical\n");
+  });
+
+  it("does not mutate canonical state when the real pending mark fails", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/mark-failure.md";
+    const before = "before\n";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), before, "utf8");
+    const store = mutableTextStore({ initial: [{ path, text: before }] });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+    sidecarRenameFailure = {
+      path: join(rootPath, ".dohc", "pending-materialization.json"),
+      error: new Error("real pending mark failed"),
+    };
+
+    try {
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "save",
+              path,
+              text: "after\n",
+              expectedContentHash: createHash("sha256")
+                .update(before)
+                .digest("hex"),
+            },
+          ),
+        ),
+      ).rejects.toThrow("real pending mark failed");
+      expect(store.writeTextFile).not.toHaveBeenCalled();
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(before);
+    } finally {
+      sidecarRenameFailure = null;
+    }
+  });
+
+  it("keeps real pending debt when clear fails and repairs it on retry", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/clear-failure.md";
+    const before = "before\n";
+    const after = "after\n";
+    const pendingPath = join(
+      rootPath,
+      ".dohc",
+      "pending-materialization.json",
+    );
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), before, "utf8");
+    const store = mutableTextStore({ initial: [{ path, text: before }] });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+    afterMaterializationWrite = {
+      path: join(rootPath, path),
+      run: () => {
+        sidecarRemoveFailure = {
+          path: pendingPath,
+          error: new Error("real pending clear failed"),
+        };
+      },
+    };
+
+    try {
+      const changed = await withStaleSensitiveWorkspaceOperation(
+        rootPath,
+        (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "save",
+              path,
+              text: after,
+              expectedContentHash: createHash("sha256")
+                .update(before)
+                .digest("hex"),
+            },
+          ),
+      );
+      expect(changed).toMatchObject({
+        status: "committed",
+        projection: "pending",
+      });
+      await expect(
+        readSharedViewProjectionDebt(rootPath, "share-a"),
+      ).resolves.toMatchObject({ pendingPaths: new Set([path]) });
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(after);
+
+      const repaired = await withStaleSensitiveWorkspaceOperation(
+        rootPath,
+        (lease) =>
+          files.reconcile(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            "repair",
+          ),
+      );
+      expect(repaired).toMatchObject({ kind: "repair", repairedPaths: 1 });
+      await expect(
+        readSharedViewProjectionDebt(rootPath, "share-a"),
+      ).resolves.toMatchObject({ pendingPaths: new Set() });
+    } finally {
+      afterMaterializationWrite = null;
+      sidecarRemoveFailure = null;
+    }
+  });
+
+  it("reports a partial standalone refresh when capture fails after a commit", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/partial-capture.md";
+    const before = "before\n";
+    const after = "agent edit\n";
+    const pendingPath = join(
+      rootPath,
+      ".dohc",
+      "pending-materialization.json",
+    );
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await mkdir(join(rootPath, ".dohc"), { recursive: true });
+    await writeFile(join(rootPath, path), after, "utf8");
+    await writeFile(
+      pendingPath,
+      JSON.stringify({ counts: { [path]: 2 } }),
+      "utf8",
+    );
+    const store = mutableTextStore({ initial: [{ path, text: before }] });
+    const pull = vi.fn(async () => {
+      throw new Error("capture failure must stop the pull");
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull,
+    });
+    sidecarRenameFailure = {
+      path: pendingPath,
+      error: new Error("pending marker unavailable"),
+    };
+
+    try {
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.reconcile(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            "refresh",
+          ),
+        ),
+      ).resolves.toEqual({
+        kind: "refresh",
+        outcome: {
+          ok: false,
+          changedPaths: 1,
+          errorMessage: "pending marker unavailable",
+        },
+      });
+      expect(pull).not.toHaveBeenCalled();
+      await expect(
+        files.read(
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "text", path },
+        ),
+      ).resolves.toMatchObject({ text: after });
+    } finally {
+      sidecarRenameFailure = null;
+    }
+  });
+
+  it("keeps newer projection debt behind a refresh that has not cleared", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "docs/late-clear.md";
+    const v1 = "version one\n";
+    const v2 = "version two\n";
+    const firstWriteFinished = deferred();
+    const releaseFirstWrite = deferred();
+    const secondAdmitted = deferred();
+    const projectionFailure = new Error("second projection write failed");
+    let resolves = 0;
+    const store = mutableTextStore();
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => {
+        resolves += 1;
+        if (resolves === 3) secondAdmitted.resolve();
+        return target(rootPath);
+      },
+      openStore: () => store,
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull: async () => {
+        await store.writeTextFile({
+          workspaceId: "workspace-a",
+          versionId: "main",
+          path,
+          text: v1,
+          metadata: { origin: "sync" },
+        });
+        return {
+          fetched: 1,
+          applied: 1,
+          skipped: 0,
+          refusals: [],
+          refusalCount: 0,
+          changedPaths: [
+            { path, operation: "write" as const, contentKind: "text" as const },
+          ],
+          nextCursor: 1,
+          commitCursor: async () => undefined,
+        };
+      },
+    });
+    materializationWriteSchedule = {
+      path: join(rootPath, path),
+      attempts: 0,
+      firstWriteFinished: firstWriteFinished.resolve,
+      releaseFirstWrite: releaseFirstWrite.promise,
+      secondWriteError: projectionFailure,
+    };
+
+    const refreshing = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        "refresh",
+      ),
+    );
+    let changing: ReturnType<typeof files.change> | null = null;
+    try {
+      await firstWriteFinished.promise;
+      changing = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "save",
+            path,
+            text: v2,
+            expectedContentHash: createHash("sha256").update(v1).digest("hex"),
+          },
+        ),
+      );
+      await secondAdmitted.promise;
+
+      expect(store.writeTextFile).toHaveBeenCalledTimes(1);
+      releaseFirstWrite.resolve();
+      await expect(refreshing).resolves.toMatchObject({
+        kind: "refresh",
+        outcome: { status: "updated" },
+      });
+      await expect(changing).resolves.toMatchObject({
+        status: "committed",
+        kind: "save",
+        projection: "pending",
+        value: { status: "written" },
+      });
+      await expect(lstat(join(rootPath, path))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        files.projectionStatus({
+          kind: "standalone",
+          workspaceId: "workspace-a",
+        }),
+      ).resolves.toEqual({
+        state: "pending",
+        pendingPathCount: 1,
+        pendingPaths: [path],
+        collisionPathCount: 0,
+        collisionPaths: [],
+        pullInFlight: false,
+      });
+      await expect(
+        store.readTextFile({
+          workspaceId: "workspace-a",
+          versionId: "main",
+          path,
+        }),
+      ).resolves.toMatchObject({ text: v2 });
+    } finally {
+      releaseFirstWrite.resolve();
+      materializationWriteSchedule = null;
+      await Promise.allSettled(
+        changing === null ? [refreshing] : [refreshing, changing],
+      );
+    }
+  });
+
   it("rereads authority after waiting for the share lifecycle", async () => {
     const rootPath = await workspaceRoot();
     let current = target(rootPath, "edit");
@@ -286,6 +1157,279 @@ describe("ShareViewFiles", () => {
     expect(openStore).not.toHaveBeenCalled();
   });
 
+  it("rejects an expired lease before resolving any mutation target", async () => {
+    const rootPath = await workspaceRoot();
+    const mountRoot = join(rootPath, "mount");
+    await mkdir(mountRoot, { recursive: true });
+    let expiredLease!: WorkspaceOperationLease;
+    await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+      expiredLease = lease;
+    });
+    const exclusiveStarted = deferred();
+    const releaseExclusive = deferred();
+    const exclusive = withExclusiveWorkspaceOperation(rootPath, async () => {
+      exclusiveStarted.resolve();
+      await releaseExclusive.promise;
+    });
+    await exclusiveStarted.promise;
+
+    const mounted = {
+      ...mountTarget(mountRoot),
+      schedulingRootPath: rootPath,
+    };
+    const resolveTarget = vi.fn((requested: ShareViewFilesTarget) =>
+      requested.kind === "mount" ? mounted : target(rootPath),
+    );
+    const store = mutableTextStore();
+    const removeMount = vi.fn(async () => ({ folderLeft: false }));
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget,
+      openStore: () => store,
+      removeMount,
+    });
+    const standalone = {
+      kind: "standalone" as const,
+      workspaceId: "workspace-a",
+    };
+    const mount = {
+      kind: "mount" as const,
+      workspaceId: "host-a",
+      shareId: "share-a",
+    };
+
+    try {
+      const outcomes = await Promise.all(
+        [
+          files.change(expiredLease, standalone, {
+            kind: "create",
+            path: "notes/new.md",
+            initialText: "new\n",
+          }),
+          files.change(expiredLease, standalone, {
+            kind: "move",
+            fromPath: "notes/same.md",
+            toPath: "notes/same.md",
+          }),
+          files.change(expiredLease, standalone, {
+            kind: "import",
+            absolutePaths: [],
+            screenAgainstRoots: null,
+            targetDir: undefined,
+          }),
+          files.reconcile(expiredLease, mount, "repair"),
+          files.unmount(expiredLease, mount),
+        ].map(async (attempt) => {
+          try {
+            await attempt;
+            return "resolved";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }),
+      );
+
+      expect(outcomes).toEqual(
+        Array(5).fill(
+          "Workspace operation lease is inactive or belongs to another root.",
+        ),
+      );
+      expect(resolveTarget).not.toHaveBeenCalled();
+      expect(removeMount).not.toHaveBeenCalled();
+    } finally {
+      releaseExclusive.resolve();
+      await exclusive;
+    }
+  });
+
+  it("reuses its workspace lease when capture orders a path", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/a.md";
+    const canonical = "canonical before\n";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), canonical, "utf8");
+    const baseStore = mutableTextStore({
+      initial: [{ path, text: canonical }],
+    });
+    const metadataRead = deferred();
+    const releaseMetadata = deferred();
+    const pathOrdered = deferred();
+    let metadataReads = 0;
+    const store: ShareViewFilesStore = {
+      ...baseStore,
+      listTextFileMetadata: vi.fn(async (input) => {
+        const rows = await baseStore.listTextFileMetadata!(input);
+        metadataReads += 1;
+        if (metadataReads === 1) {
+          metadataRead.resolve();
+          await releaseMetadata.promise;
+        }
+        return rows;
+      }),
+      readTextFile: vi.fn(async (input) => {
+        pathOrdered.resolve();
+        return baseStore.readTextFile(input);
+      }),
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+    const order: string[] = [];
+
+    const changing = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "save",
+            path,
+            text: "recipient edit\n",
+            expectedContentHash: createHash("sha256")
+              .update(canonical)
+              .digest("hex"),
+          },
+        ),
+    ).then((outcome) => {
+      order.push("change");
+      return outcome;
+    });
+    await metadataRead.promise;
+    const exclusive = withExclusiveWorkspaceOperation(rootPath, async () => {
+      order.push("exclusive");
+    });
+    releaseMetadata.resolve();
+
+    // Capture must order the target through the workspace lease already held
+    // by ShareViewFiles. Reacquiring the root scheduler here queues this read
+    // behind `exclusive`, while `exclusive` waits for `changing`: a deadlock.
+    await pathOrdered.promise;
+    await expect(changing).resolves.toMatchObject({
+      status: "committed",
+      kind: "save",
+    });
+    await exclusive;
+    expect(order).toEqual(["change", "exclusive"]);
+  }, 2_000);
+
+  it("keeps reconcile behind a save's projection gap", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/a.md";
+    const canonical = "canonical before\n";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), canonical, "utf8");
+    const baseStore = mutableTextStore({
+      initial: [{ path, text: canonical }],
+    });
+    const saveStored = deferred();
+    const releaseSave = deferred();
+    const reconcileWaiting = deferred();
+    const store: ShareViewFilesStore = {
+      ...baseStore,
+      writeTextFile: vi.fn(async (input) => {
+        const outcome = await baseStore.writeTextFile(input);
+        saveStored.resolve();
+        await releaseSave.promise;
+        return outcome;
+      }),
+    };
+    let resolves = 0;
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => {
+        resolves += 1;
+        if (resolves === 3) reconcileWaiting.resolve();
+        return target(rootPath);
+      },
+      openStore: () => store,
+    });
+    const pending: Promise<unknown>[] = [];
+
+    try {
+      const changing = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "save",
+              path,
+              text: "saved in app\n",
+              expectedContentHash: createHash("sha256")
+                .update(canonical)
+                .digest("hex"),
+            },
+          ),
+      );
+      pending.push(changing);
+      await saveStored.promise;
+      await rm(join(rootPath, path));
+
+      const reconciling = withStaleSensitiveWorkspaceOperation(
+        rootPath,
+        (lease) =>
+          files.reconcile(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            "settle",
+          ),
+      );
+      pending.push(reconciling);
+      await reconcileWaiting.promise;
+
+      expect(store.listTextFileMetadata).toHaveBeenCalledTimes(1);
+      expect(store.deleteTextFile).not.toHaveBeenCalled();
+      releaseSave.resolve();
+
+      await expect(changing).resolves.toMatchObject({
+        status: "committed",
+        kind: "save",
+      });
+      await expect(reconciling).resolves.toMatchObject({
+        kind: "settle",
+        capturedPaths: 0,
+        repairedPaths: 0,
+      });
+      expect(await readFile(join(rootPath, path), "utf8")).toBe(
+        "saved in app\n",
+      );
+      expect(store.deleteTextFile).not.toHaveBeenCalled();
+    } finally {
+      releaseSave.resolve();
+      await Promise.allSettled(pending);
+    }
+  });
+
+  it("reuses an exclusive workspace lease while capturing a delete", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/a.md";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), "canonical\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path, text: "canonical\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    const outcome = await withExclusiveWorkspaceOperation(
+      rootPath,
+      (_markChanged, lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "delete", path },
+        ),
+    );
+
+    expect(outcome).toMatchObject({ status: "committed", kind: "delete" });
+    await expect(readFile(join(rootPath, path), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  }, 2_000);
+
   it("repairs tracked files without replacing recipient-owned directories", async () => {
     const rootPath = await workspaceRoot();
     const trackedPath = join(rootPath, "docs", "note.md");
@@ -318,9 +1462,9 @@ describe("ShareViewFiles", () => {
         { path: "docs/note.md", reason: "non-file-replacement" },
       ],
     });
-    await expect(
-      readFile(join(trackedPath, "mine.md"), "utf8"),
-    ).resolves.toBe("recipient\n");
+    await expect(readFile(join(trackedPath, "mine.md"), "utf8")).resolves.toBe(
+      "recipient\n",
+    );
   });
 
   it("repairs an ended view locally without resolving a relay", async () => {
@@ -361,9 +1505,9 @@ describe("ShareViewFiles", () => {
       },
     });
     expect(resolveRelay).not.toHaveBeenCalled();
-    await expect(readFile(join(rootPath, "docs", "note.md"), "utf8")).resolves.toBe(
-      "canonical\n",
-    );
+    await expect(
+      readFile(join(rootPath, "docs", "note.md"), "utf8"),
+    ).resolves.toBe("canonical\n");
   });
 
   it("repairs an ended mount locally without resolving or pulling a relay", async () => {
@@ -705,7 +1849,9 @@ describe("ShareViewFiles", () => {
 
     await expect(
       files.read(requested, { kind: "text", path: "notes/a.md" }),
-    ).resolves.toMatchObject({ text: "canonical local copy\n" });
+    ).resolves.toMatchObject({
+      text: "canonical local copy\n",
+    });
     await expect(files.list(requested)).resolves.toMatchObject({
       files: [{ path: "notes/a.md", kind: "file" }],
     });
@@ -801,7 +1947,10 @@ describe("ShareViewFiles", () => {
         run: () => files.read(requested, { kind: "text", path: "notes/a.md" }),
       },
       { name: "list", run: () => files.list(requested) },
-      { name: "projection status", run: () => files.projectionStatus(requested) },
+      {
+        name: "projection status",
+        run: () => files.projectionStatus(requested),
+      },
       {
         name: "reconcile",
         run: () =>
@@ -852,7 +2001,7 @@ describe("ShareViewFiles", () => {
 
   it("reports bounded durable projection debt", async () => {
     const rootPath = await workspaceRoot();
-    await writePendingMaterializationPaths(
+    await seedPendingMaterializationPaths(
       rootPath,
       Array.from({ length: 25 }, (_, index) => `notes/${index}.md`),
     );
@@ -920,14 +2069,17 @@ describe("ShareViewFiles", () => {
         expect(errorLog).not.toHaveBeenCalled();
 
         await expect(
-          captureSharedViewLocalDivergence(
-            rootPath,
-            "workspace-a",
-            store,
-            true,
-            "share-a",
+          withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+            files.reconcile(
+              lease,
+              { kind: "standalone", workspaceId: "workspace-a" },
+              "settle",
+            ),
           ),
-        ).resolves.toMatchObject({ collisionRecordQuarantined: true });
+        ).resolves.toMatchObject({
+          kind: "settle",
+          collisionRecordQuarantined: true,
+        });
         expect(errorLog).toHaveBeenCalledOnce();
       } finally {
         errorLog.mockRestore();
@@ -1067,7 +2219,7 @@ describe("ShareViewFiles", () => {
   it("checks a save against canonical content while its folder is stale", async () => {
     const rootPath = await workspaceRoot();
     await mkdir(join(rootPath, "notes"), { recursive: true });
-    await writePendingMaterializationPaths(rootPath, ["notes/a.md"]);
+    await seedPendingMaterializationPaths(rootPath, ["notes/a.md"]);
     const canonical = "canonical before\n";
     const store = mutableTextStore({
       initial: [{ path: "notes/a.md", text: canonical }],
@@ -1117,11 +2269,7 @@ describe("ShareViewFiles", () => {
       resolveTarget: () => target(rootPath),
       openStore: () => store,
     });
-    await writeFile(
-      join(rootPath, "notes", "a.md"),
-      "agent edit\n",
-      "utf8",
-    );
+    await writeFile(join(rootPath, "notes", "a.md"), "agent edit\n", "utf8");
 
     const outcome = await withStaleSensitiveWorkspaceOperation(
       rootPath,

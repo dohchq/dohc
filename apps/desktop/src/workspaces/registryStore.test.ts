@@ -655,6 +655,32 @@ describe("registry store", () => {
     );
   });
 
+  it("keeps the cached mount set unchanged when persistence fails", async () => {
+    store.register(personal);
+    const mount = {
+      shareId: "share-9",
+      label: "alex",
+      granterEmail: "alex@example.com",
+      relayUrl: "http://relay.test",
+      grantedSelector: {
+        paths: ["docs"],
+        versionId: null,
+        access: "view" as const,
+      },
+    };
+    store.setShareMounts("ws-1", [mount]);
+
+    // Model a rename failure while leaving the already-read cache available.
+    await rm(registryPath);
+    await mkdir(registryPath);
+
+    expect(() => store.setShareMounts("ws-1", [])).toThrow();
+    expect(
+      store.find("ws-1")?.shareMounts,
+      "MUTATION: a failed unmount write must not remove the mount from memory while disk still owns it",
+    ).toEqual([mount]);
+  });
+
   it("remove unregisters a workspace and tolerates unknown ids (failed-join rollback)", () => {
     store.register(personal);
     store.remove("ws-1");

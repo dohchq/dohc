@@ -2,7 +2,13 @@ import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { collectZipEntries, createFile, createFolder, deletePath, movePath } from "./workspaceFiles";
+import {
+  collectZipEntries,
+  createFile,
+  createFolder,
+  deletePath,
+  movePath,
+} from "./workspaceFiles";
 import {
   createWorkspaceTextExclusive,
   resolveWorkspaceFile,
@@ -10,7 +16,6 @@ import {
 } from "./workspaceAssets";
 import { importToDatabase } from "./workspaceDatabase";
 import { createDefaultDiskWriter } from "./workspaceEngineCapture";
-import { materializeSharedViewPaths } from "./sharedView";
 import { startStaticDirectoryPreview } from "../security/staticDirectoryPreview";
 import { createTestScratch } from "./testTemp";
 
@@ -54,15 +59,17 @@ describe("workspaceFiles through an in-workspace alias", () => {
   });
 
   it("createFolder refuses a mkdir that lands in .dohc", async () => {
-    await expect(createFolder(root, "meta/evil")).rejects.toThrow(/reserved area/);
+    await expect(createFolder(root, "meta/evil")).rejects.toThrow(
+      /reserved area/,
+    );
     expect(existsSync(join(root, ".dohc", "evil"))).toBe(false);
   });
 
   it("movePath refuses a move INTO .dohc", async () => {
     await writeFile(join(root, "notes", "plan.md"), "plan");
-    await expect(movePath(root, "notes/plan.md", "meta/plan.md")).rejects.toThrow(
-      /Move destination leads to a reserved area/,
-    );
+    await expect(
+      movePath(root, "notes/plan.md", "meta/plan.md"),
+    ).rejects.toThrow(/Move destination leads to a reserved area/);
     expect(existsSync(join(root, ".dohc", "plan.md"))).toBe(false);
     expect(existsSync(join(root, "notes", "plan.md"))).toBe(true);
   });
@@ -70,18 +77,22 @@ describe("workspaceFiles through an in-workspace alias", () => {
   it("movePath refuses a move OUT of .dohc into the visible tree", async () => {
     // The leak the containment check can never see: both ends are inside the
     // root, and the destination is an ordinary, syncable, exportable path.
-    await expect(movePath(root, "meta/settings.json", "leak.json")).rejects.toThrow(
-      /Move source leads to a reserved area/,
-    );
+    await expect(
+      movePath(root, "meta/settings.json", "leak.json"),
+    ).rejects.toThrow(/Move source leads to a reserved area/);
     expect(existsSync(join(root, "leak.json"))).toBe(false);
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
+      SETTINGS,
+    );
   });
 
   it("deletePath refuses to trash workspace state", async () => {
-    await expect(deletePath(root, "meta/settings.json", rejectingTrash)).rejects.toThrow(
-      /Delete path leads to a reserved area/,
+    await expect(
+      deletePath(root, "meta/settings.json", rejectingTrash),
+    ).rejects.toThrow(/Delete path leads to a reserved area/);
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
+      SETTINGS,
     );
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
 
   it("collectZipEntries refuses to export .dohc through the alias", async () => {
@@ -107,7 +118,9 @@ describe("workspaceFiles through an in-workspace alias", () => {
   it("renames through a benign alias without losing the destination spelling", async () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     await writeFile(join(root, "notes", "readme.md"), "body");
-    expect(await movePath(root, "inbox/readme.md", "inbox/plan.md")).toBe("inbox/plan.md");
+    expect(await movePath(root, "inbox/readme.md", "inbox/plan.md")).toBe(
+      "inbox/plan.md",
+    );
     expect(await readFile(join(root, "notes", "plan.md"), "utf8")).toBe("body");
     expect(existsSync(join(root, "notes", "readme.md"))).toBe(false);
   });
@@ -124,22 +137,26 @@ describe("workspaceFiles through an in-workspace alias", () => {
     await expect(createFile(root, "mine/alex/note.md", "")).rejects.toThrow(
       /File path leads to a reserved area/,
     );
-    expect(existsSync(join(root, "shared-with-me", "alex", "note.md"))).toBe(false);
+    expect(existsSync(join(root, "shared-with-me", "alex", "note.md"))).toBe(
+      false,
+    );
   });
 });
 
 describe("workspaceAssets through an in-workspace alias", () => {
   it("resolveWorkspaceFile refuses a read that lands in .dohc", async () => {
-    await expect(resolveWorkspaceFile(root, "meta/settings.json", "read")).rejects.toThrow(
-      /Asset path leads to a reserved area/,
-    );
+    await expect(
+      resolveWorkspaceFile(root, "meta/settings.json", "read"),
+    ).rejects.toThrow(/Asset path leads to a reserved area/);
   });
 
   it("restoreWorkspaceText refuses a write that lands in .dohc", async () => {
-    await expect(restoreWorkspaceText(root, "meta/settings.json", "clobbered")).rejects.toThrow(
-      /Restore path leads to a reserved area/,
+    await expect(
+      restoreWorkspaceText(root, "meta/settings.json", "clobbered"),
+    ).rejects.toThrow(/Restore path leads to a reserved area/);
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
+      SETTINGS,
     );
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
 
   // A restore commits with rename over the entry, so it never writes THROUGH
@@ -149,7 +166,9 @@ describe("workspaceAssets through an in-workspace alias", () => {
   it("heals a file someone replaced with a link into .dohc", async () => {
     await symlink(join(root, ".dohc", "settings.json"), join(root, "note.md"));
     await restoreWorkspaceText(root, "note.md", "# Restored\n");
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
+      SETTINGS,
+    );
     expect((await lstat(join(root, "note.md"))).isSymbolicLink()).toBe(false);
     expect(await readFile(join(root, "note.md"), "utf8")).toBe("# Restored\n");
   });
@@ -159,7 +178,9 @@ describe("workspaceAssets through an in-workspace alias", () => {
     await writeFile(join(outside, "victim.md"), "untouched");
     await symlink(join(outside, "victim.md"), join(root, "note.md"));
     await restoreWorkspaceText(root, "note.md", "# Restored\n");
-    expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("untouched");
+    expect(await readFile(join(outside, "victim.md"), "utf8")).toBe(
+      "untouched",
+    );
     expect(await readFile(join(root, "note.md"), "utf8")).toBe("# Restored\n");
   });
 
@@ -171,9 +192,9 @@ describe("workspaceAssets through an in-workspace alias", () => {
   // into .dohc.
   it("refuses an exclusive create through a dangling link into .dohc", async () => {
     await symlink(join(root, ".dohc", "planted.json"), join(root, "note.md"));
-    await expect(createWorkspaceTextExclusive(root, "note.md", "# New\n")).rejects.toThrow(
-      /Restore path has a symlink with no target/,
-    );
+    await expect(
+      createWorkspaceTextExclusive(root, "note.md", "# New\n"),
+    ).rejects.toThrow(/Restore path has a symlink with no target/);
     expect(existsSync(join(root, ".dohc", "planted.json"))).toBe(false);
   });
 });
@@ -222,7 +243,9 @@ describe("the static directory preview through an in-workspace alias", () => {
       expect(denied.status).toBe(403);
       expect(await denied.text()).not.toContain("engine");
       // The ordinary page still serves.
-      await expect(fetch(preview.url).then((res) => res.text())).resolves.toContain("page");
+      await expect(
+        fetch(preview.url).then((res) => res.text()),
+      ).resolves.toContain("page");
     } finally {
       await preview.stop();
     }
@@ -256,14 +279,16 @@ describe("the static directory preview through an in-workspace alias", () => {
 describe("engine disk writer through an in-workspace alias", () => {
   it("refuses engine text and deletes that land in .dohc", async () => {
     const writer = createDefaultDiskWriter(root);
-    await expect(writer.writeTextFile(join(root, "meta", "owned.md"), "engine")).rejects.toThrow(
-      /Engine write path leads to a reserved area/,
-    );
+    await expect(
+      writer.writeTextFile(join(root, "meta", "owned.md"), "engine"),
+    ).rejects.toThrow(/Engine write path leads to a reserved area/);
     expect(existsSync(join(root, ".dohc", "owned.md"))).toBe(false);
-    await expect(writer.deletePath(join(root, "meta", "settings.json"))).rejects.toThrow(
-      /Engine delete path leads to a reserved area/,
+    await expect(
+      writer.deletePath(join(root, "meta", "settings.json")),
+    ).rejects.toThrow(/Engine delete path leads to a reserved area/);
+    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(
+      SETTINGS,
     );
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
   });
 
   // The writer now mkdirs, checks, and writes on the resolution the guard
@@ -279,14 +304,21 @@ describe("engine disk writer through an in-workspace alias", () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "inbox", "owned.md"), "engine text");
-    expect(await readFile(join(root, "notes", "owned.md"), "utf8")).toBe("engine text");
+    expect(await readFile(join(root, "notes", "owned.md"), "utf8")).toBe(
+      "engine text",
+    );
   });
 
   it("creates a still-absent parent chain under the resolved parent", async () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     const writer = createDefaultDiskWriter(root);
-    await writer.writeTextFile(join(root, "inbox", "a", "b", "deep.md"), "nested");
-    expect(await readFile(join(root, "notes", "a", "b", "deep.md"), "utf8")).toBe("nested");
+    await writer.writeTextFile(
+      join(root, "inbox", "a", "b", "deep.md"),
+      "nested",
+    );
+    expect(
+      await readFile(join(root, "notes", "a", "b", "deep.md"), "utf8"),
+    ).toBe("nested");
   });
 
   it("deletes at the resolved location, leaving the alias itself alone", async () => {
@@ -296,59 +328,5 @@ describe("engine disk writer through an in-workspace alias", () => {
     await writer.deletePath(join(root, "inbox", "doomed.md"));
     expect(existsSync(join(root, "notes", "doomed.md"))).toBe(false);
     expect((await lstat(join(root, "inbox"))).isSymbolicLink()).toBe(true);
-  });
-});
-
-describe("shared view materialization through an in-mount alias", () => {
-  const store = {
-    ensureMainVersion: async () => ({ id: "main" }),
-    readTextFile: async () => ({ text: "relay bytes" }),
-    readBinaryFile: async () => {
-      throw new Error("not part of this test");
-    },
-    close: async () => undefined,
-  } as unknown as Parameters<typeof materializeSharedViewPaths>[3];
-
-  const write = (path: string) =>
-    materializeSharedViewPaths(root, "ws", [
-      { path, operation: "write", contentKind: "text" },
-    ], store);
-
-  it("refuses relay-controlled bytes that land in the mount's own .dohc", async () => {
-    await expect(write("meta/owned.md")).rejects.toThrow(
-      /Shared view path leads to a reserved area/,
-    );
-    expect(existsSync(join(root, ".dohc", "owned.md"))).toBe(false);
-  });
-
-  // The LEAF is a different question from its parent chain. A materialize
-  // removes the target and recreates it (`rm` then `wx`), so it never writes
-  // THROUGH a leaf link -- a tampered one is the thing being repaired. A guard
-  // that followed it would refuse, the refresh would throw before it commits
-  // its cursor, and every later replay would wedge on the same path.
-  //
-  // MUTATION NOTE: give write deltas "write" access and these three fail.
-  it("heals a projected file someone replaced with a dangling link", async () => {
-    await symlink(join(root, "gone.md"), join(root, "note.md"));
-    await write("note.md");
-    expect((await lstat(join(root, "note.md"))).isSymbolicLink()).toBe(false);
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe("relay bytes");
-  });
-
-  it("heals a leaf link into .dohc without writing through it", async () => {
-    await symlink(join(root, ".dohc", "settings.json"), join(root, "note.md"));
-    await write("note.md");
-    expect(await readFile(join(root, ".dohc", "settings.json"), "utf8")).toBe(SETTINGS);
-    expect((await lstat(join(root, "note.md"))).isSymbolicLink()).toBe(false);
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe("relay bytes");
-  });
-
-  it("heals a leaf link that escapes the mount without writing outside it", async () => {
-    const outside = await createTestScratch("dohc-real-path-outside-");
-    await writeFile(join(outside, "victim.md"), "untouched");
-    await symlink(join(outside, "victim.md"), join(root, "note.md"));
-    await write("note.md");
-    expect(await readFile(join(outside, "victim.md"), "utf8")).toBe("untouched");
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe("relay bytes");
   });
 });
