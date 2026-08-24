@@ -15,7 +15,7 @@ Build the data and authorization contracts before any route or UI.
 - Define the link principal (server-minted, per link grant per browser) and the audit record that survives Y.Doc compaction, replication, and settlement.
 - Define host lease, epoch, and append-before-acknowledge journaling shapes (ADR 0003), and the publication record (ADR 0006).
 
-Settle first: whether one share can hold several links and mixed levels; whether selector scope is immutable after creation; what derived named grants survive; what the owner can inspect, block, and delete from the audit record. Already settled: no expiry in v1 — the state machine refuses it, and owners revoke instead.
+Settle first: whether one share can hold several links and mixed levels; what derived named grants survive; what the owner can inspect, block, and delete from the audit record. Already settled: no expiry in v1 (the state machine refuses it; owners revoke instead), and selector scope is immutable after share creation — a different scope is a new share, so no transition can silently widen what a leaked URL reaches.
 
 Gate: contract tests pass in both languages; a written state machine for grant transitions (create, narrow, widen, rotate, revoke, expire, convert, promote) with no undefined transition.
 
@@ -59,7 +59,7 @@ Gate: quota, moderation, and revoke-during-append tests pass; provenance shows l
 ## Phase 4: Edit
 
 - One configured session host per deployment (ADR 0003): the service host module for dohc Cloud and willing self-hosters; device-only mode otherwise. No automatic movement.
-- Journal before acknowledgement; grant generation and host epoch on the session ticket and on every accepted update; commit-time recheck of grant, selector containment, and epoch.
+- Journal before acknowledgement; the session ticket is single-use, short-lived, and bound to principal, audience, workspace, version, object, lineage, grant generation, and host epoch, with replay and cross-document tests; commit-time recheck of grant, selector containment, and epoch on every accepted update.
 - Durable authorship records outside the prunable Y.Doc update cache; settlement references its audit interval.
 - Build the owner stop-and-restore action before exposing Edit to anyone. Grant invalidation is inside the action, atomic with it — revoke or downgrade first, then fence, then restore — and the gate proves the old URL cannot open a session against the successor lineage.
 - Ship named-recipient browser Edit first; enable anonymous Edit only after the same path passes adversarial load with link principals.
@@ -75,10 +75,10 @@ Gate: restart, stale-frame, selector-drift, access-change, and restore tests pas
 ## Phase 5: apps
 
 - Publications first (ADR 0006): immutable, capability-free bundles on isolated per-publication origins, served static. Choose the build trust model here, including whether Vite's plugin surface is admissible.
-- Then owner-approved read capabilities tied to the bundle digest, delivered through the scoped data API. Settle first: the app-session credential exchange — a one-time launch handoff mints an app-scoped session bound to grant, generation, and publication, because the viewer's host-only cookie cannot cross to the app origin and the link secret must never enter JavaScript-visible app state. App sessions stay distinct per link exactly as viewer sessions do — the same publication launched from two links keeps two bindings, gated with a concurrent-links test. An approved capability never reaches outside the share's selector in v1: an out-of-selector dataset fails closed at approval, visibly.
+- Then owner-approved read capabilities tied to the bundle digest, delivered through the scoped data API. Settle first: the app-session credential exchange — a one-time launch handoff mints an app-scoped session bound to grant, generation, and publication, because the viewer's host-only cookie cannot cross to the app origin and the link secret must never enter JavaScript-visible app state. App sessions stay distinct per link exactly as viewer sessions do — the same publication launched from two links keeps two bindings, gated with a concurrent-links test — and each app session carries its server-minted link principal, so provenance, budgets, and principal blocks distinguish two browsers on one grant (tested with two principals writing through one link). An approved capability never reaches outside the share's selector in v1: an out-of-selector dataset fails closed at approval, visibly.
 - Then, only if a launch app needs it, one typed create-only collection per ADR 0004, after naming the authoritative app-data store and its sync, export, backup, and deletion path.
 - Service workers, persistent storage, raw HTML, inline SVG, and remote embeds stay disabled until a specific use case passes a threat test.
-- Publications and capabilities have visible withdrawal paths: unpublish a publication, and revoke or narrow an approved capability. Active app sessions lose data authority at their next data-API check; withdrawing external-network access additionally terminates active app sessions, because an already-loaded page keeps its network policy without ever calling the data API again. The phase gate tests both withdrawals, including the network one against a running session.
+- Publications and capabilities have visible withdrawal paths: unpublish a publication, and revoke or narrow an approved capability. Active app sessions lose data authority at their next data-API check; withdrawing external-network access additionally makes the viewer destroy the app's browsing context — invalidating server-side credentials alone cannot stop a loaded page from fetching, so the enforcement is teardown of the frame itself. The phase gate tests both withdrawals, including that a running page stops sending traffic after the network withdrawal.
 
 Gate: the Phase 1 isolation attacks re-run green against the real origin model; a capability widening attempt fails closed at the approval seam.
 
