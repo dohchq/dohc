@@ -23,6 +23,7 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 import { createTestScratch } from "./testTemp";
 import {
   createShareViewFiles,
+  ShareViewFilesTargetMissingError,
   shareViewFilesStore,
   type ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
@@ -168,7 +169,11 @@ function shareViewFilesOwner(input: {
     ended: false,
   };
   const files = createShareViewFiles({
-    resolveTarget: () => resolved,
+    resolveTarget: (candidate) =>
+      candidate.kind === requested.kind &&
+      candidate.workspaceId === requested.workspaceId
+        ? resolved
+        : null,
     openStore: () => shareViewFilesStore(input.shareViewStore()),
     resolveRelay: async () => null,
     pull: async () => {
@@ -265,6 +270,35 @@ function replicationLogRows(rootPath: string): number {
 }
 
 describe("share-view text writes through the real store", () => {
+  it("rejects a text change for another share-view identity before opening the store", async () => {
+    const rootPath = join(process.cwd(), "share-view-text-write-identity-test");
+    const openStore = vi.fn((): CaptureVersionedTextStore => {
+      throw new Error("A mismatched target must not open the store.");
+    });
+    const { files } = shareViewFilesOwner({
+      workspaceId: "workspace-a",
+      rootPath,
+      shareViewStore: openStore,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-b" },
+          {
+            kind: "save",
+            path: "docs/note.md",
+            text: "recipient\n",
+            expectedContentHash:
+              "0000000000000000000000000000000000000000000000000000000000000000",
+          },
+        ),
+      ),
+    ).rejects.toBeInstanceOf(ShareViewFilesTargetMissingError);
+    expect(openStore).not.toHaveBeenCalled();
+  });
+
   it.skipIf(engine.missing)(
     "makes an edit recipient's save a proposable moment, not just a file",
     async () => {

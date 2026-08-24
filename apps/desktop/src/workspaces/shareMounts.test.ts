@@ -30,9 +30,9 @@ import {
   validMountLabel,
 } from "./shareMounts";
 import {
-  createShareMountDirectoryThroughOwnerForTest as createMountDirectory,
+  createShareMountDirectoryThroughOwnerForTest,
   refreshShareMountThroughOwnerForTest,
-  removeShareMountFolderThroughOwnerForTest as removeMountFolder,
+  removeShareMountFolderThroughOwnerForTest,
 } from "../testing/shareViewFilesMountHarness";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
@@ -82,7 +82,7 @@ function daemonHarness(relay: FakeShareRelay): ShareViewDaemonHarness {
 // already be a real one.
 async function ensureMountFolder(hostRoot: string, label: string): Promise<void> {
   if (existsSync(mountRootFor(hostRoot, label))) return;
-  await createMountDirectory(hostRoot, label);
+  await createShareMountDirectoryThroughOwnerForTest(hostRoot, label);
 }
 
 // One mount refresh over the production daemon path: EngineRelayClient's
@@ -321,7 +321,7 @@ describe("mount labels", () => {
 
   it("routes a symlinked spelling to the mount that owns its real path", async () => {
     const host = await tempHostRoot();
-    await createMountDirectory(host, "alex");
+    await createShareMountDirectoryThroughOwnerForTest(host, "alex");
     await mkdir(join(mountRootFor(host, "alex"), "docs"), { recursive: true });
     await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
     const mount = { shareId: SHARE_ID, label: "alex" };
@@ -396,7 +396,7 @@ describe("mount labels", () => {
 
   it("refuses a disk path claimed by more than one registry record", async () => {
     const host = await tempHostRoot();
-    await createMountDirectory(host, "alex");
+    await createShareMountDirectoryThroughOwnerForTest(host, "alex");
     const labels = ["alex", "Alex"];
 
     await expect(
@@ -446,7 +446,7 @@ describe("mount labels", () => {
 
   it("refuses a move when either resolved endpoint belongs to a mount", async () => {
     const host = await tempHostRoot();
-    await createMountDirectory(host, "alex");
+    await createShareMountDirectoryThroughOwnerForTest(host, "alex");
     await mkdir(join(mountRootFor(host, "alex"), "docs"), { recursive: true });
     await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
     const mounts = [{ shareId: SHARE_ID, label: "alex" }];
@@ -499,7 +499,7 @@ describe("mount labels", () => {
 
   it("refuses imports into a mount through its projection path or an alias", async () => {
     const host = await tempHostRoot();
-    await createMountDirectory(host, "alex");
+    await createShareMountDirectoryThroughOwnerForTest(host, "alex");
     await symlink(mountRootFor(host, "alex"), join(host, "inbox"), "dir");
     const mounts = [{ shareId: SHARE_ID, label: "alex" }];
 
@@ -1007,7 +1007,7 @@ describe("refreshShareMount", () => {
     await mkdir(join(host, SHARED_WITH_ME_FOLDER), { recursive: true });
     await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER, "alex"), "dir");
 
-    await removeMountFolder(host, "alex");
+    await removeShareMountFolderThroughOwnerForTest(host, "alex");
 
     expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "alex"))).toBe(false);
     expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
@@ -1064,22 +1064,26 @@ describe("refreshShareMount", () => {
     expect(await readFile(join(elsewhere, "brief.md"), "utf8")).toBe("victim");
   });
 
-  it("createMountDirectory refuses a symlinked container BEFORE any write", async () => {
+  it("owner-mediated mount creation refuses a symlinked container before any write", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
     await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
-    await expect(createMountDirectory(host, "alex")).rejects.toThrow(
+    await expect(
+      createShareMountDirectoryThroughOwnerForTest(host, "alex"),
+    ).rejects.toThrow(
       /not a real directory/,
     );
     // The guard ran before mkdir: nothing was created through the link.
     expect(existsSync(join(elsewhere, "alex"))).toBe(false);
   });
 
-  it("createMountDirectory never adopts an existing folder (exclusive create)", async () => {
+  it("owner-mediated mount creation never adopts an existing folder", async () => {
     const host = await tempHostRoot();
     await mkdir(join(host, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
-    await expect(createMountDirectory(host, "alex")).rejects.toThrow();
-    await createMountDirectory(host, "sam");
+    await expect(
+      createShareMountDirectoryThroughOwnerForTest(host, "alex"),
+    ).rejects.toThrow();
+    await createShareMountDirectoryThroughOwnerForTest(host, "sam");
     expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "sam"))).toBe(true);
   });
 
@@ -1115,7 +1119,7 @@ describe("refreshShareMount", () => {
   });
 });
 
-describe("removeMountFolder", () => {
+describe("owner-mediated mount removal", () => {
   it("removes exactly the mount folder", async () => {
     const host = await tempHostRoot();
     await mkdir(join(host, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
@@ -1123,7 +1127,7 @@ describe("removeMountFolder", () => {
     await writeFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "a.md"), "x");
     await writeFile(join(host, SHARED_WITH_ME_FOLDER, "sam", "s.md"), "y");
 
-    await removeMountFolder(host, "alex");
+    await removeShareMountFolderThroughOwnerForTest(host, "alex");
 
     expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "alex"))).toBe(false);
     expect(existsSync(join(host, SHARED_WITH_ME_FOLDER, "sam", "s.md"))).toBe(true);
@@ -1131,7 +1135,9 @@ describe("removeMountFolder", () => {
 
   it("refuses tampered labels", async () => {
     const host = await tempHostRoot();
-    await expect(removeMountFolder(host, "..")).rejects.toThrow(
+    await expect(
+      removeShareMountFolderThroughOwnerForTest(host, ".."),
+    ).rejects.toThrow(
       /Invalid share mount label/,
     );
   });
@@ -1144,7 +1150,7 @@ describe("removeMountFolder", () => {
     await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
 
     await expect(
-      removeMountFolder(host, "alex"),
+      removeShareMountFolderThroughOwnerForTest(host, "alex"),
     ).resolves.toMatchObject({ folderLeft: true, error: expect.any(Error) });
     expect(await readFile(join(elsewhere, "alex", "victim.md"), "utf8")).toBe(
       "untouched",

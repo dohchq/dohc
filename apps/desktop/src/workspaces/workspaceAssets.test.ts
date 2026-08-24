@@ -851,6 +851,115 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     expect(order).toEqual(["first:start", "first:end", "leased"]);
   });
 
+  it("does not deadlock leased target work behind a queued exclusive request", async () => {
+    const rootPath = "C:/workspace";
+    const resolvedTarget = "C:/workspace/notes/a.md";
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (root, relativePath) => join(root, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    const order: string[] = [];
+    let firstExclusive!: Promise<void>;
+
+    await expect(
+      scheduler.staleSensitiveShared(rootPath, async (lease) => {
+        order.push("leased:start");
+        firstExclusive = scheduler.exclusive(rootPath, async () => {
+          order.push("exclusive:after-leased");
+        });
+        const value = await access.orderedOnResolvedTargetInLease(
+          rootPath,
+          lease,
+          resolvedTarget,
+          async () => {
+            order.push("leased:target");
+            return "leased";
+          },
+        );
+        order.push("leased:end");
+        return value;
+      }),
+    ).resolves.toBe("leased");
+    await firstExclusive;
+    expect(order).toEqual([
+      "leased:start",
+      "leased:target",
+      "leased:end",
+      "exclusive:after-leased",
+    ]);
+    order.length = 0;
+
+    let markSharedStarted!: () => void;
+    let releaseShared!: () => void;
+    const sharedStarted = new Promise<void>((resolve) => {
+      markSharedStarted = resolve;
+    });
+    const sharedHeld = new Promise<void>((resolve) => {
+      releaseShared = resolve;
+    });
+    const shared = scheduler.staleSensitiveShared(rootPath, async () => {
+      order.push("ordinary-shape:shared:start");
+      markSharedStarted();
+      await sharedHeld;
+      order.push("ordinary-shape:shared:end");
+    });
+    await sharedStarted;
+
+    let markExclusiveStarted!: () => void;
+    let releaseExclusive!: () => void;
+    const exclusiveStarted = new Promise<void>((resolve) => {
+      markExclusiveStarted = resolve;
+    });
+    const exclusiveHeld = new Promise<void>((resolve) => {
+      releaseExclusive = resolve;
+    });
+    const exclusive = scheduler.exclusive(rootPath, async () => {
+      order.push("ordinary-shape:exclusive:start");
+      markExclusiveStarted();
+      await exclusiveHeld;
+      order.push("ordinary-shape:exclusive:end");
+    });
+    const ordinaryRun = vi.fn(async () => {
+      order.push("ordinary-shape:target");
+      return "ordinary";
+    });
+    const ordinary = access.orderedOnResolvedTarget(
+      rootPath,
+      resolvedTarget,
+      ordinaryRun,
+    );
+
+    releaseShared();
+    await exclusiveStarted;
+    try {
+      expect(ordinaryRun).not.toHaveBeenCalled();
+      expect(order).toEqual([
+        "ordinary-shape:shared:start",
+        "ordinary-shape:shared:end",
+        "ordinary-shape:exclusive:start",
+      ]);
+    } finally {
+      releaseExclusive();
+    }
+    await Promise.all([shared, exclusive]);
+    await expect(ordinary).resolves.toBe("ordinary");
+    expect(ordinaryRun).toHaveBeenCalledOnce();
+    expect(order.slice(-2)).toEqual([
+      "ordinary-shape:exclusive:end",
+      "ordinary-shape:target",
+    ]);
+  });
+
   it("rejects queued leased target work after its scheduler callback returns", async () => {
     const rootPath = "C:/workspace";
     const resolvedTarget = "C:/workspace/notes/a.md";

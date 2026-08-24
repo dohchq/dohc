@@ -34,13 +34,11 @@ import {
   mountStoreWorkspaceIdFor,
 } from "./shareMounts";
 import {
-  createShareMountDirectoryThroughOwnerForTest as createMountDirectory,
+  createShareMountDirectoryThroughOwnerForTest,
   refreshShareMountThroughOwnerForTest,
   refreshStandaloneShareThroughOwnerForTest,
 } from "../testing/shareViewFilesMountHarness";
 import { syncJoinedSharedChannels } from "./sharedChannels";
-
-const refreshSharedViewOnce = refreshStandaloneShareThroughOwnerForTest;
 
 // Every test in this file pulls with the selector its share record pins. The
 // damaged-record path has its own tests in sharedView.test.ts. This is a REAL
@@ -916,7 +914,7 @@ describe("EngineRelayClient", () => {
       { workspaceId: "workspace-a", rootPath },
       sessions,
     ).store;
-    const outcome = await refreshSharedViewOnce({
+    const outcome = await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
       relay,
@@ -978,7 +976,7 @@ describe("EngineRelayClient", () => {
       { workspaceId: "workspace-a", rootPath },
       sessions,
     ).store;
-    await refreshSharedViewOnce({
+    await refreshStandaloneShareThroughOwnerForTest({
       rootDir: rootPath,
       workspaceId: "workspace-a",
       relay,
@@ -1301,7 +1299,7 @@ describe("EngineRelayClient", () => {
     ).store;
 
     await expect(
-      refreshSharedViewOnce({
+      refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
         relay,
@@ -1337,7 +1335,7 @@ describe("EngineRelayClient", () => {
   it("opens an owner-managed share mount store with capture disabled", async () => {
     const { rootPath, daemon, routes, sessions, live, relay } = await harness();
     const mount = { shareId: "share-mounted", label: "alex" };
-    await createMountDirectory(rootPath, mount.label);
+    await createShareMountDirectoryThroughOwnerForTest(rootPath, mount.label);
     const target = {
       workspaceId: mountStoreWorkspaceIdFor("workspace-a", mount.shareId),
       rootPath: mountRootFor(rootPath, mount.label),
@@ -1426,7 +1424,7 @@ describe("EngineRelayClient", () => {
       }),
     ).rejects.toBeInstanceOf(ShareUnavailableError);
     await expect(
-      refreshSharedViewOnce({
+      refreshStandaloneShareThroughOwnerForTest({
         rootDir: rootPath,
         workspaceId: "workspace-a",
         relay,

@@ -218,27 +218,120 @@ async function settleShareViewThroughOwner(
   return captured;
 }
 
+interface StoreMutationBoundaryObservation {
+  events: Array<
+    "ensure-main" | "list-file-metadata" | "read-text-file" | "replace"
+  >;
+  replacement: {
+    afterEventIndex: number;
+    lastContentReadEventIndex: number;
+    metadataOnlyPassEventIndex: number;
+  } | null;
+}
+
 function storeReplacingLeafAtMutationBoundary(
   store: CaptureVersionedTextStore,
   replace: () => Promise<void>,
-): CaptureVersionedTextStore {
-  let ensureMainCalls = 0;
-  return new Proxy(store, {
+): {
+  store: CaptureVersionedTextStore;
+  observation: StoreMutationBoundaryObservation;
+} {
+  const observation: StoreMutationBoundaryObservation = {
+    events: [],
+    replacement: null,
+  };
+  // Scoped capture reads the tracked content. The move/delete snapshot then
+  // lists metadata without reading content. The next metadata list belongs to
+  // the file-change primitive, immediately before its final disk-type check.
+  let currentPassReadContent = false;
+  let currentPassLastMetadataEventIndex: number | null = null;
+  let sawContentRead = false;
+  let mutationPass = false;
+  let metadataOnlyPassEventIndex = -1;
+  const proxied = new Proxy(store, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver) as unknown;
-      if (property !== "ensureMainVersion" || typeof value !== "function") {
-        return value;
+      if (typeof value !== "function") return value;
+      if (property === "ensureMainVersion") {
+        return async (...args: unknown[]) => {
+          mutationPass =
+            sawContentRead &&
+            currentPassLastMetadataEventIndex !== null &&
+            !currentPassReadContent;
+          if (mutationPass && currentPassLastMetadataEventIndex !== null) {
+            metadataOnlyPassEventIndex = currentPassLastMetadataEventIndex;
+          }
+          currentPassReadContent = false;
+          currentPassLastMetadataEventIndex = null;
+          observation.events.push("ensure-main");
+          return (value as (...inner: unknown[]) => unknown).apply(target, args);
+        };
       }
-      return async (...args: unknown[]) => {
-        ensureMainCalls += 1;
-        // capture -> canonical snapshot -> file-change primitive. Replacing
-        // on the third admission proves the primitive's own final lstat,
-        // rather than the earlier capture guard, preserves recipient data.
-        if (ensureMainCalls === 3) await replace();
-        return (value as (...inner: unknown[]) => unknown).apply(target, args);
-      };
+      if (property === "readTextFile") {
+        return async (...args: unknown[]) => {
+          const result = await (
+            value as (...inner: unknown[]) => Promise<unknown>
+          ).apply(target, args);
+          currentPassReadContent = true;
+          sawContentRead = true;
+          observation.events.push("read-text-file");
+          return result;
+        };
+      }
+      if (property === "listTextFileMetadata") {
+        return async (...args: unknown[]) => {
+          const result = await (
+            value as (...inner: unknown[]) => Promise<unknown>
+          ).apply(target, args);
+          const afterEventIndex = observation.events.push(
+            "list-file-metadata",
+          ) - 1;
+          currentPassLastMetadataEventIndex = afterEventIndex;
+          if (mutationPass && observation.replacement === null) {
+            observation.replacement = {
+              afterEventIndex,
+              lastContentReadEventIndex:
+                observation.events.lastIndexOf("read-text-file"),
+              metadataOnlyPassEventIndex,
+            };
+            observation.events.push("replace");
+            await replace();
+          }
+          return result;
+        };
+      }
+      return value;
     },
   }) as CaptureVersionedTextStore;
+  return { store: proxied, observation };
+}
+
+function expectLeafReplacementAtMutationBoundary(
+  observation: StoreMutationBoundaryObservation,
+): void {
+  const replacement = observation.replacement;
+  expect(replacement).not.toBeNull();
+  if (replacement === null) return;
+  expect(replacement.lastContentReadEventIndex).toBeGreaterThanOrEqual(0);
+  expect(replacement.lastContentReadEventIndex).toBeLessThan(
+    replacement.metadataOnlyPassEventIndex,
+  );
+  expect(replacement.metadataOnlyPassEventIndex).toBeLessThan(
+    replacement.afterEventIndex,
+  );
+  expect({
+    contentRead:
+      observation.events[replacement.lastContentReadEventIndex],
+    metadataOnlyPass:
+      observation.events[replacement.metadataOnlyPassEventIndex],
+    mutationMetadata: observation.events[replacement.afterEventIndex],
+    replacement: observation.events[replacement.afterEventIndex + 1],
+  }).toEqual({
+    contentRead: "read-text-file",
+    metadataOnlyPass: "list-file-metadata",
+    mutationMetadata: "list-file-metadata",
+    replacement: "replace",
+  });
 }
 
 async function applyOwnedShareViewChange(
@@ -1106,7 +1199,7 @@ describe("share-view file operations through the real store", () => {
         { path: "docs/notes.md", text: "granter\n" },
       ]);
       let replacementRan = false;
-      const lateStore = storeReplacingLeafAtMutationBoundary(
+      const late = storeReplacingLeafAtMutationBoundary(
         view.store,
         async () => {
           replacementRan = true;
@@ -1123,7 +1216,7 @@ describe("share-view file operations through the real store", () => {
       await expect(
         applyShareViewPathDelete({
           ...scope(view),
-          shareViewStore: () => lateStore,
+          shareViewStore: () => late.store,
           relativePath: "docs/notes.md",
         }),
         "MUTATION: deleting over a directory that replaced a tracked file recursively removes the directory and everything in it",
@@ -1131,6 +1224,7 @@ describe("share-view file operations through the real store", () => {
         "dohc did not delete docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
       );
       expect(replacementRan).toBe(true);
+      expectLeafReplacementAtMutationBoundary(late.observation);
 
       expect(
         (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
@@ -1156,7 +1250,7 @@ describe("share-view file operations through the real store", () => {
         { path: "docs/notes.md", text: "granter\n" },
       ]);
       let replacementRan = false;
-      const lateStore = storeReplacingLeafAtMutationBoundary(
+      const late = storeReplacingLeafAtMutationBoundary(
         view.store,
         async () => {
           replacementRan = true;
@@ -1173,7 +1267,7 @@ describe("share-view file operations through the real store", () => {
       await expect(
         applyShareViewPathMove({
           ...scope(view),
-          shareViewStore: () => lateStore,
+          shareViewStore: () => late.store,
           fromPath: "docs/notes.md",
           toPath: "docs/renamed.md",
         }),
@@ -1182,6 +1276,7 @@ describe("share-view file operations through the real store", () => {
         "dohc did not rename docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
       );
       expect(replacementRan).toBe(true);
+      expectLeafReplacementAtMutationBoundary(late.observation);
 
       expect(
         (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
