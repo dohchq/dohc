@@ -74,6 +74,28 @@ interface Deferred {
   resolve(): void;
 }
 
+interface TestUninstallQueueClaim {
+  decide(decision: "stop" | "cancel"): void;
+  release(): void;
+  readonly stopOutcome: Promise<
+    | { ok: true }
+    | { ok: false; error: unknown }
+  >;
+  readonly outcome: Promise<
+    | { ok: true }
+    | { ok: false; error: unknown }
+  >;
+}
+
+interface PluginPipelineQueueInternals {
+  enqueueActionValue<T>(pluginId: string, run: () => Promise<T>): Promise<T>;
+  claimUninstallCleanupQueues(
+    cleanupIds: ReadonlyArray<string>,
+    primaryPluginId: string,
+    reservations: ReadonlyMap<string, unknown>,
+  ): TestUninstallQueueClaim[];
+}
+
 type DoorWrittenDeltas = Map<
   string,
   Map<string, DoorWrittenDelta>
@@ -442,6 +464,53 @@ function fakeSpawnTransport(
     notify: () => undefined,
     dispose: async () => undefined,
   }));
+}
+
+async function createAliasUninstallFixture(options: {
+  drainTimeoutMs?: number;
+} = {}): Promise<{
+  fixture: Awaited<ReturnType<typeof createNamedPluginWorkspace>>;
+  host: PluginHost;
+  hostOwnership: PluginHostOwnership<PluginHost>;
+  pipeline: PluginPipeline;
+}> {
+  const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
+  await mutatePluginRecord(
+    fixture.stateDir,
+    fixture.workspaceRoot,
+    "original-id",
+    () => ({ directoryName: "shared-dir" }),
+  );
+  await mutatePluginRecord(
+    fixture.stateDir,
+    fixture.workspaceRoot,
+    "runtime-id",
+    () => ({ directoryName: "shared-dir" }),
+  );
+  let pipeline!: PluginPipeline;
+  const host = new PluginHost({
+    stateDir: fixture.stateDir,
+    workspaceRoot: fixture.workspaceRoot,
+    spawnTransport: fakeSpawnTransport(),
+    routeSdkRequest: async () => ({}),
+    onStatusChange: (pluginId, status) => {
+      pipeline.noteRuntimeStatus(pluginId, status);
+    },
+  });
+  const hostOwnership = new PluginHostOwnership(host, options);
+  pipeline = new PluginPipeline({
+    workspaceRoot: fixture.workspaceRoot,
+    stateDir: fixture.stateDir,
+    hostOwnership,
+    resourcesBasePath,
+    pnpmRunnerEntry,
+    operations: {
+      install: (input) =>
+        installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+    },
+  });
+  await pipeline.start();
+  return { fixture, host, hostOwnership, pipeline };
 }
 
 beforeAll(stagePluginTools);
@@ -1854,6 +1923,179 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await starting?.catch(() => undefined);
       await lease?.release();
       await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("cancels alias claims when a newer confirmation replaces the admitted one", async () => {
+    const setup = await createAliasUninstallFixture();
+    const primaryQueueEntered = deferred();
+    const releasePrimaryQueue = deferred();
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let primaryBlocker: Promise<void> | undefined;
+    let replacementPreflight: ReturnType<PluginPipeline["uninstallPreflight"]> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      const firstPreflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
+
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      const aliasRecord = setup.host.currentRecord("runtime-id");
+      expect(aliasRecord).toBeDefined();
+      const stop = vi.spyOn(setup.host, "stop");
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      primaryBlocker = internals.enqueueActionValue("original-id", async () => {
+        primaryQueueEntered.resolve();
+        await releasePrimaryQueue.promise;
+      });
+      await primaryQueueEntered.promise;
+
+      // Admission still sees the first token and claims runtime-id. The
+      // queued preflight replaces it before the primary uninstall executes.
+      replacementPreflight = setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      const reserveChange = vi.spyOn(setup.hostOwnership, "reserveChange");
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        firstPreflight.confirmationToken,
+      );
+      expect(reserveChange.mock.calls.map(([pluginId]) => pluginId)).toEqual([
+        "original-id",
+        "runtime-id",
+      ]);
+
+      let lateAliasJobEntered = false;
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+      expect(lateAliasJobEntered).toBe(false);
+
+      releasePrimaryQueue.resolve();
+      const newer = await replacementPreflight;
+      if (!newer.ok) throw new Error(newer.error.message);
+      const removed = await removing;
+      await lateAliasJob;
+
+      expect(removed).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-required" },
+      });
+      expect(lateAliasJobEntered).toBe(true);
+      expect(setup.host.currentRecord("runtime-id")).toBe(aliasRecord);
+      expect(stop.mock.calls.some(([pluginId]) => pluginId === "runtime-id"))
+        .toBe(false);
+      await expect(
+        setup.hostOwnership.runCommand("runtime-id", async () => "ready"),
+      ).resolves.toEqual({ kind: "completed", value: "ready" });
+    } finally {
+      releasePrimaryQueue.resolve();
+      await primaryBlocker?.catch(() => undefined);
+      await replacementPreflight?.catch(() => undefined);
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("holds alias queues until every uninstall stop attempt settles", async () => {
+    const setup = await createAliasUninstallFixture({ drainTimeoutMs: 0 });
+    const aliasStopEntered = deferred();
+    const primaryStopEntered = deferred();
+    const releasePrimaryStop = deferred();
+    let surface: Awaited<ReturnType<typeof ensureFromSurface>> | undefined;
+    let removing: Promise<PluginActionResult> | undefined;
+    let lateAliasJob: Promise<void> | undefined;
+    try {
+      const preflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      const aliasRecord = setup.host.currentRecord("runtime-id");
+      expect(aliasRecord).toBeDefined();
+
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      const claimCleanupQueues =
+        internals.claimUninstallCleanupQueues.bind(internals);
+      let primaryStopFinished = false;
+      let claimReleasedBeforePrimaryStop = false;
+      let claimReleaseCalls = 0;
+      vi.spyOn(internals, "claimUninstallCleanupQueues").mockImplementation(
+        (cleanupIds, primaryPluginId, reservations) =>
+          claimCleanupQueues(cleanupIds, primaryPluginId, reservations).map((claim) => ({
+            ...claim,
+            release: () => {
+              claimReleaseCalls += 1;
+              if (!primaryStopFinished) claimReleasedBeforePrimaryStop = true;
+              claim.release();
+            },
+          })),
+      );
+
+      const actualStop = setup.host.stop.bind(setup.host);
+      let failedAliasStop = false;
+      vi.spyOn(setup.host, "stop").mockImplementation(async (pluginId) => {
+        if (pluginId === "runtime-id" && !failedAliasStop) {
+          failedAliasStop = true;
+          aliasStopEntered.resolve();
+          throw new Error("simulated alias stop failure");
+        }
+        if (pluginId === "original-id") {
+          primaryStopEntered.resolve();
+          await releasePrimaryStop.promise;
+          await actualStop(pluginId);
+          primaryStopFinished = true;
+          return;
+        }
+        await actualStop(pluginId);
+      });
+
+      removing = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+      );
+      let lateAliasJobEntered = false;
+      lateAliasJob = internals.enqueueActionValue("runtime-id", async () => {
+        lateAliasJobEntered = true;
+      });
+
+      await Promise.all([aliasStopEntered.promise, primaryStopEntered.promise]);
+      // Let the rejected alias stop propagate through every promise already
+      // queued in this turn. The primary stop remains deliberately gated.
+      await new Promise<void>((resolveTurn) => setImmediate(resolveTurn));
+      expect(claimReleasedBeforePrimaryStop).toBe(false);
+      expect(lateAliasJobEntered).toBe(false);
+
+      releasePrimaryStop.resolve();
+      const removed = await removing;
+      await lateAliasJob;
+
+      expect(removed).toMatchObject({
+        ok: false,
+        error: { code: "delete-failed" },
+      });
+      expect(claimReleasedBeforePrimaryStop).toBe(false);
+      expect(claimReleaseCalls).toBe(1);
+      expect(lateAliasJobEntered).toBe(true);
+      expect(setup.host.currentRecord("runtime-id")).toBe(aliasRecord);
+      await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+    } finally {
+      releasePrimaryStop.resolve();
+      await removing?.catch(() => undefined);
+      await lateAliasJob?.catch(() => undefined);
+      await surface?.release();
+      await setup.pipeline.dispose();
     }
   }, 60_000);
 

@@ -3400,7 +3400,11 @@ export class PluginPipeline {
     if (cleanupIds.has(primaryPluginId)) {
       stops.push(this.stopOldRuntime(primaryPluginId, primaryChange));
     }
-    await Promise.all(stops);
+    const outcomes = await Promise.allSettled(stops);
+    const failure = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+    );
+    if (failure) throw failure.reason;
   }
 
   /**
