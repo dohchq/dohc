@@ -75,6 +75,7 @@ interface Deferred {
 }
 
 interface TestUninstallQueueClaim {
+  readonly ready: Promise<void>;
   decide(decision: "stop" | "cancel"): void;
   release(): void;
   readonly stopOutcome: Promise<
@@ -104,6 +105,16 @@ type DoorWrittenDeltas = Map<
 function doorWrittenDeltasOf(pipeline: PluginPipeline): DoorWrittenDeltas {
   return (pipeline as unknown as { doorWrittenDeltas: DoorWrittenDeltas })
     .doorWrittenDeltas;
+}
+
+function transientStateOf(pipeline: PluginPipeline): {
+  statuses: Map<string, unknown>;
+  lastApprovedAttemptHash: Map<string, string>;
+} {
+  return pipeline as unknown as {
+    statuses: Map<string, unknown>;
+    lastApprovedAttemptHash: Map<string, string>;
+  };
 }
 
 const roots: string[] = [];
@@ -1756,6 +1767,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
     try {
       await pipeline.start();
+      const transient = transientStateOf(pipeline);
+      const trackedStatus = pipeline.list().find((row) => row.directoryName === "mixed-dir");
+      expect(trackedStatus).toBeDefined();
+      transient.statuses.set("original-id", trackedStatus!);
+      transient.statuses.set("mixed-dir", trackedStatus!);
+      doorWrittenDeltasOf(pipeline).set("original-id", new Map());
+      doorWrittenDeltasOf(pipeline).set("mixed-dir", new Map());
+      transient.lastApprovedAttemptHash.set("original-id", "a".repeat(64));
+      transient.lastApprovedAttemptHash.set("mixed-dir", "b".repeat(64));
       // "original-id" is a valid pair for "mixed-dir": its own record
       // positively names this directory (#779 round 9 B3's own preserved
       // case, restated in round 14 finding 5's mismatch gate).
@@ -1782,12 +1802,18 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!state.ok) throw new Error(state.warning);
       expect(state.state.plugins["original-id"]).toBeUndefined();
       expect(state.state.plugins["mixed-dir"]).toBeUndefined();
+      expect(transient.statuses.has("original-id")).toBe(false);
+      expect(transient.statuses.has("mixed-dir")).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has("original-id")).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has("mixed-dir")).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has("original-id")).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has("mixed-dir")).toBe(false);
     } finally {
       await pipeline.dispose();
     }
   }, 60_000);
 
-  it("claims an alias queue before uninstall can race its cold surface build", async () => {
+  it("rejects an uninstall when earlier alias work changes the confirmed target", async () => {
     const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
     await mutatePluginRecord(
       fixture.stateDir,
@@ -1828,7 +1854,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
         uninstallPreflight: async (input) => {
           uninstallPreflightCalls += 1;
-          if (uninstallPreflightCalls === 3) {
+          if (uninstallPreflightCalls === 2) {
             preDeleteEntered.resolve();
             await releasePreDelete.promise;
           }
@@ -1881,7 +1907,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       // The claim is synchronous with uninstall admission. It sits behind
       // the build already in runtime-id's queue and ahead of anything that
-      // can arrive after the irreversible action was accepted.
+      // can arrive after the irreversible action was accepted. Exact target
+      // validation waits for that earlier build to settle, then rejects its
+      // durable-record drift before stopping either identity.
       expect(enqueueActionValue.mock.calls.map(([pluginId]) => pluginId))
         .toContain("runtime-id");
 
@@ -1902,21 +1930,22 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const removed = await removing;
       await lateAliasJob;
 
-      expect(removed.ok).toBe(true);
-      expect(lateAliasJobEntered).toBe(true);
-      expect(host.currentRecord("runtime-id")).toBeUndefined();
-      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
-        code: "ENOENT",
+      expect(removed).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-stale" },
       });
+      expect(lateAliasJobEntered).toBe(true);
+      expect(host.currentRecord("runtime-id")).toBeDefined();
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
       await expect(lstat(join(pluginsDataRoot(fixture), "runtime-id")))
-        .rejects.toMatchObject({ code: "ENOENT" });
+        .resolves.toBeDefined();
       const state = await readPluginLocalState(
         fixture.stateDir,
         fixture.workspaceRoot,
       );
       if (!state.ok) throw new Error(state.warning);
-      expect(state.state.plugins["original-id"]).toBeUndefined();
-      expect(state.state.plugins["runtime-id"]).toBeUndefined();
+      expect(state.state.plugins["original-id"]).toBeDefined();
+      expect(state.state.plugins["runtime-id"]).toBeDefined();
     } finally {
       releaseBuild.resolve();
       releasePreDelete.resolve();
@@ -2014,15 +2043,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     let removing: Promise<PluginActionResult> | undefined;
     let lateAliasJob: Promise<void> | undefined;
     try {
+      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
+      expect(surface.result.ok).toBe(true);
+      const aliasRecord = setup.host.currentRecord("runtime-id");
+      expect(aliasRecord).toBeDefined();
       const preflight = await setup.pipeline.uninstallPreflight(
         "original-id",
         "shared-dir",
       );
       if (!preflight.ok) throw new Error(preflight.error.message);
-      surface = await ensureFromSurface(setup.pipeline, "runtime-id");
-      expect(surface.result.ok).toBe(true);
-      const aliasRecord = setup.host.currentRecord("runtime-id");
-      expect(aliasRecord).toBeDefined();
 
       const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
       const claimCleanupQueues =
@@ -3127,6 +3156,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       // it, not only report on pluginId's own (empty) state.
       expect(retryPreflight.preflight.stateData).toMatchObject({ fileCount: 1 });
       expect(retryPreflight.preflight.stateData?.path).toContain(strandedStateRoot);
+      const transient = transientStateOf(pipeline);
+      const trackedStatus = pipeline.list()[0];
+      expect(trackedStatus).toBeDefined();
+      transient.statuses.set("codex", trackedStatus!);
+      doorWrittenDeltasOf(pipeline).set(pluginId, new Map());
+      doorWrittenDeltasOf(pipeline).set("codex", new Map());
+      transient.lastApprovedAttemptHash.set(pluginId, "a".repeat(64));
+      transient.lastApprovedAttemptHash.set("codex", "b".repeat(64));
       const finished = await pipeline.uninstall(pluginId, pluginId, retryPreflight.confirmationToken);
       expect(finished.ok).toBe(true);
 
@@ -3135,6 +3172,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!finalState.ok) throw new Error(finalState.warning);
       expect(finalState.state.plugins["codex"]).toBeUndefined();
       expect(finalState.state.plugins["my-codex-copy"]).toBeUndefined();
+      expect(transient.statuses.has(pluginId)).toBe(false);
+      expect(transient.statuses.has("codex")).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has(pluginId)).toBe(false);
+      expect(doorWrittenDeltasOf(pipeline).has("codex")).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has(pluginId)).toBe(false);
+      expect(transient.lastApprovedAttemptHash.has("codex")).toBe(false);
       expect(pipeline.list()).toEqual([]);
     } finally {
       await pipeline.dispose();
@@ -7013,6 +7056,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       return {
         pipeline,
+        host,
         fixture,
         entryPath: fixture.entryPath,
         manifestPath,
@@ -7064,6 +7108,53 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         },
       };
     }
+
+    it("refuses an uninstall token after the durable record retargets to another directory", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const preflight = await setup.pipeline.uninstallPreflight(
+          "example-plugin",
+          "example-plugin",
+        );
+        if (!preflight.ok) throw new Error(preflight.error.message);
+        const runningRecord = setup.host.currentRecord("example-plugin");
+        expect(runningRecord).toBeDefined();
+        const bundleBefore = await readFile(
+          liveBundlePath(setup.fixture, "example-plugin"),
+        );
+
+        await mutatePluginRecord(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+          "example-plugin",
+          (record) => ({ ...record, directoryName: "replacement-directory" }),
+        );
+
+        const result = await setup.pipeline.uninstall(
+          "example-plugin",
+          "example-plugin",
+          preflight.confirmationToken,
+        );
+
+        expect(result).toMatchObject({
+          ok: false,
+          error: { stage: "uninstall", code: "confirmation-stale" },
+        });
+        expect(setup.host.currentRecord("example-plugin")).toBe(runningRecord);
+        await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+        expect(await readFile(liveBundlePath(setup.fixture, "example-plugin")))
+          .toEqual(bundleBefore);
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.directoryName)
+          .toBe("replacement-directory");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
 
     it("retries against the durable approval after a later publish failure", async () => {
       const setup = await setupEstablishedPlugin();
@@ -9060,6 +9151,124 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       if (!state.ok) throw new Error(state.warning);
       expect(state.state.plugins["example-plugin"]).toBeUndefined();
       expect(pipeline.list()).toEqual([]);
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("refuses a sourceless token after the same id is restored and restarted", async () => {
+    const fixture = await createPluginWorkspace();
+    const backupRoot = join(fixture.root, "source-backup");
+    await cp(fixture.pluginRoot, backupRoot, { recursive: true });
+    let failDataRemoval = false;
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership: new PluginHostOwnership(host),
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        removePath: async (path, options) => {
+          if (
+            failDataRemoval &&
+            String(path).startsWith(pluginsDataRoot(fixture))
+          ) {
+            throw new Error("plugin data delete failed");
+          }
+          await rm(path, options);
+        },
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "Plugin did not reach ready after install.",
+      );
+
+      failDataRemoval = true;
+      const firstPreflight = await pipeline.uninstallPreflight(
+        "example-plugin",
+        "example-plugin",
+      );
+      if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
+      const partial = await pipeline.uninstall(
+        "example-plugin",
+        "example-plugin",
+        firstPreflight.confirmationToken,
+      );
+      expect(partial).toMatchObject({
+        ok: false,
+        error: { stage: "uninstall", code: "delete-failed" },
+      });
+      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
+
+      failDataRemoval = false;
+      const sourceless = await pipeline.uninstallPreflight(
+        "example-plugin",
+        "example-plugin",
+      );
+      if (!sourceless.ok) throw new Error(sourceless.error.message);
+      expect(sourceless.preflight.liveHash).toBeNull();
+
+      await cp(backupRoot, fixture.pluginRoot, { recursive: true });
+      await pipeline.handleWatcherEvents([{
+        path: "plugins/example-plugin",
+        operation: "update",
+      }]);
+      const enabled = await pipeline.enable("example-plugin");
+      if (!enabled.ok) throw new Error(enabled.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The restored plugin did not restart.",
+      );
+      const runningRecord = host.currentRecord("example-plugin");
+      expect(runningRecord).toBeDefined();
+      const dataBundle = await readFile(liveBundlePath(fixture, "example-plugin"));
+      const stateRoot = pluginStateRoot(
+        pluginDataDir(fixture.stateDir, fixture.workspaceRoot),
+        "example-plugin",
+      );
+      await mkdir(stateRoot, { recursive: true });
+      await writeFile(join(stateRoot, "new-session.json"), "new state\n");
+
+      const stale = await pipeline.uninstall(
+        "example-plugin",
+        "example-plugin",
+        sourceless.confirmationToken,
+      );
+
+      expect(stale).toMatchObject({
+        ok: false,
+        error: { stage: "uninstall", code: "confirmation-stale" },
+      });
+      expect(host.currentRecord("example-plugin")).toBe(runningRecord);
+      await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
+      expect(await readFile(liveBundlePath(fixture, "example-plugin")))
+        .toEqual(dataBundle);
+      expect(await readFile(join(stateRoot, "new-session.json"), "utf8"))
+        .toBe("new state\n");
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["example-plugin"]).toBeDefined();
     } finally {
       await pipeline.dispose();
     }

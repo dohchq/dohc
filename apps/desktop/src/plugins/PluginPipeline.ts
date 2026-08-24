@@ -258,25 +258,51 @@ interface PluginJobQueue {
   draining: Promise<void> | null;
 }
 
+interface UninstallRecordFingerprint {
+  approvedHash: string | null;
+  installedBaselineHash: string | null;
+  approvedBundleHash: string | null;
+  directoryName: string | null;
+}
+
+type UninstallSourceState =
+  | { kind: "present"; hash: string | null }
+  | { kind: "absent" };
+
+interface UninstallTargetSnapshot {
+  pluginId: string;
+  directoryName: string;
+  rootPath: string;
+  candidate: {
+    id: string;
+    directoryName: string;
+    rootPath: string;
+  } | null;
+  source: UninstallSourceState;
+  cleanupIds: string[];
+  records: Array<{
+    pluginId: string;
+    record: UninstallRecordFingerprint | null;
+  }>;
+}
+
+interface ResolvedUninstallTarget {
+  snapshot: UninstallTargetSnapshot;
+  candidate: InstalledPluginRecord | null;
+  state: PluginLocalState;
+  record: PluginRecordShape | undefined;
+  preflight: Awaited<ReturnType<typeof pluginUninstallPreflight>>;
+}
+
 interface UninstallConfirmation {
   token: string;
-  /** Null when preflight found no source tree left to delete. */
-  pluginRoot: string | null;
-  liveHash: string | null;
-  /**
-   * The directory preflight resolved and reported on — uninstall() re-
-   * resolves its own candidate from THIS, never from a fresh caller-
-   * supplied value, so the row an uninstall deletes can never drift from
-   * the one its own preflight named.
-   */
-  directoryName: string;
-  /** Every host identity the confirmed cleanup can stop. */
-  cleanupIds: string[];
+  target: UninstallTargetSnapshot;
 }
 
 type UninstallCleanupDecision = "stop" | "cancel";
 
 interface UninstallQueueClaim {
+  readonly ready: Promise<void>;
   decide(decision: UninstallCleanupDecision): void;
   release(): void;
   readonly stopOutcome: Promise<
@@ -526,6 +552,40 @@ function uninstallVerificationFailure(
     return "source could not be read to confirm what uninstall would delete";
   }
   return currentHash === confirmedHash ? null : changed;
+}
+
+function uninstallRecordFingerprint(
+  record: PluginRecordShape | undefined,
+): UninstallRecordFingerprint | null {
+  if (!record) return null;
+  return {
+    approvedHash: record.approvedHash ?? null,
+    installedBaselineHash: record.installedBaselineHash ?? null,
+    approvedBundleHash: record.approvedBundleHash ?? null,
+    directoryName: record.directoryName ?? null,
+  };
+}
+
+function uninstallTargetVerificationFailure(
+  current: UninstallTargetSnapshot,
+  confirmed: UninstallTargetSnapshot,
+  changed: string,
+): string | null {
+  if (current.source.kind !== confirmed.source.kind) return changed;
+  if (current.source.kind === "present" && confirmed.source.kind === "present") {
+    const sourceFailure = uninstallVerificationFailure(
+      current.source.hash,
+      confirmed.source.hash,
+      changed,
+    );
+    if (sourceFailure) return sourceFailure;
+  }
+  const withoutSource = ({ source: _source, ...snapshot }: UninstallTargetSnapshot) =>
+    snapshot;
+  return JSON.stringify(withoutSource(current)) ===
+      JSON.stringify(withoutSource(confirmed))
+    ? null
+    : changed;
 }
 
 function notDiscoveredError(pluginId: string): PluginPipelineError {
@@ -1410,86 +1470,16 @@ export class PluginPipeline {
   ): Promise<PluginPipelineUninstallPreflightResult> {
     return this.enqueueActionValue(pluginId, async () => {
       try {
-        const state = await this.localState();
-        const record = state.plugins[pluginId];
-        // The confirmation this produces has to report every identity
-        // cleanup will touch, not only pluginId's own — durable state
-        // filed under a record's ORIGINAL id (the same directoryName join
-        // that already resolves for the actual delete) must appear here
-        // too, or the dialog understates what Remove deletes. A
-        // sourceless retry (no discovery candidate left) still has a
-        // directory to join by — the exact same synthetic candidate
-        // finishSourcelessUninstall itself builds and deletes under, reused
-        // here so the confirmation and the delete always agree on what is
-        // left to warn about.
-        const candidate = this.uninstallableCandidate(directoryName, pluginId, record)
-          ?? this.sourcelessCandidate(pluginId);
-        // Reject an arbitrary or stale (pluginId, directoryName) pair
-        // before ANY side effect runs, resolved from it — no preflight
-        // report, no confirmation token, nothing.
-        // A candidate whose OWN directoryName differs from the one this
-        // call was actually asked about names a DIFFERENT row: byDirectory
-        // above failed to find "directoryName" at all — the invalid row
-        // this preflight described has vanished or been renamed — and one
-        // of uninstallableCandidate's id-keyed fallbacks resolved some
-        // other, unrelated installation whose real id only happens to
-        // collide with the vanished row's fallback id. pluginId trivially
-        // equals candidate.id in that case, so pluginIdIsProvenForDirectory's
-        // own check would pass it; only the requested directory itself
-        // proves this candidate is who this call is actually about. No
-        // match means the honest refusal, never a silent fallback onto
-        // whichever row an id happened to name.
-        if (
-          candidate &&
-          (candidate.directoryName !== directoryName ||
-            !this.pluginIdIsProvenForDirectory(pluginId, record, candidate))
-        ) {
-          throw new Error(
-            `Plugin "${pluginId}" does not match directory "${directoryName}".`,
-          );
-        }
-        const pluginRoot = this.uninstallRootPath(directoryName, pluginId, record);
-        const sourcePresent = await this.sourceRootPresent(pluginRoot);
-        const additionalCleanupIds = candidate
-          ? this.additionalCleanupIds(candidate, state)
-          : [];
-        const additionalStateRoots = additionalCleanupIds.map((id) =>
-            pluginStateRoot(this.dohcDir, id)
-          );
-        // pluginId's own path and baseline are only this row's to warn
-        // about when nothing proves otherwise — the same
-        // pluginIdTracesDirectory check cleanup itself uses. An invalid,
-        // never-installed row's fallback id can coincide with some OTHER,
-        // unrelated, installed plugin's real id: inventorying that path
-        // would threaten data cleanup already excludes, and comparing live
-        // source against that plugin's OWN installedBaselineHash compares
-        // the wrong plugin's files to the wrong plugin's baseline.
-        const pluginIdTracesHere = !candidate ||
-          this.pluginIdTracesDirectory(record, candidate);
-        const preflight = await this.operations.uninstallPreflight({
-          dohcDir: this.dohcDir,
-          pluginId,
-          pluginRoot,
-          stateRoot: pluginIdTracesHere ? pluginStateRoot(this.dohcDir, pluginId) : null,
-          additionalStateRoots,
-          installedBaselineHash: pluginIdTracesHere ? record?.installedBaselineHash : undefined,
-          engineCaptureAvailable: this.engineCaptureAvailable(),
-        });
+        const target = await this.resolveUninstallTarget(pluginId, directoryName);
         const confirmationToken = randomUUID();
         this.uninstallConfirmations.set(uninstallConfirmationKey(pluginId, directoryName), {
           token: confirmationToken,
-          pluginRoot: sourcePresent ? resolve(pluginRoot) : null,
-          liveHash: preflight.liveHash,
-          directoryName,
-          cleanupIds: [
-            ...(pluginIdTracesHere ? [pluginId] : []),
-            ...additionalCleanupIds,
-          ],
+          target: target.snapshot,
         });
         return {
           ok: true,
           confirmationToken,
-          preflight: summarizeUninstallPreflight(preflight),
+          preflight: summarizeUninstallPreflight(target.preflight),
         };
       } catch (error) {
         return {
@@ -1515,7 +1505,7 @@ export class PluginPipeline {
     const confirmationKey = uninstallConfirmationKey(pluginId, directoryName);
     const pendingConfirmation = this.uninstallConfirmations.get(confirmationKey);
     const cleanupIds = pendingConfirmation?.token === confirmationToken
-      ? pendingConfirmation.cleanupIds
+      ? pendingConfirmation.target.cleanupIds
       : [];
     const reservations = new Map<string, PluginHostChangeReservation>();
     for (const id of new Set([pluginId, ...cleanupIds])) {
@@ -1544,15 +1534,35 @@ export class PluginPipeline {
         ));
       }
 
-      const state = await this.localState();
-      const record = state.plugins[pluginId];
-      const cleanupIds = new Set(confirmation.cleanupIds);
-      if (confirmation.pluginRoot === null) {
+      // A cleanup identity may already have accepted work ahead of this
+      // uninstall. Wait until every claimed queue reaches this uninstall's
+      // boundary before validating the exact target, while the synchronous
+      // ownership reservations keep any later host change from starting.
+      // No runtime is stopped until this validation succeeds.
+      await Promise.all(cleanupQueueClaims.map((claim) => claim.ready));
+      const validated = await this.revalidateUninstallTarget(
+        confirmation.target,
+        "changed after uninstall preflight",
+      );
+      if (!validated.ok) {
+        return existingHostResult(this.failure(
+          pluginId,
+          pipelineError(
+            "uninstall",
+            "confirmation-stale",
+            `Plugin "${pluginId}" ${validated.reason}. Review it again.`,
+          ),
+        ));
+      }
+      const { record } = validated.target;
+      const cleanupIds = new Set(confirmation.target.cleanupIds);
+      if (confirmation.target.source.kind === "absent") {
         return this.finishSourcelessUninstall(
           pluginId,
           cleanupIds,
           change,
           cleanupQueueClaims,
+          confirmation.target,
         );
       }
       // Resolved from what THIS confirmation's own preflight named, never
@@ -1560,7 +1570,7 @@ export class PluginPipeline {
       // uninstall deletes can never drift from the one its own preflight
       // reported on.
       const candidate = this.requireUninstallableCandidate(
-        confirmation.directoryName,
+        confirmation.target.directoryName,
         pluginId,
         record,
       );
@@ -1586,47 +1596,6 @@ export class PluginPipeline {
       // never reviewed, and those late identities would not have received a
       // synchronous ownership reservation when uninstall() was called.
       const pluginIdTracesHere = cleanupIds.has(pluginId);
-      if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
-        return existingHostResult(this.failure(
-          pluginId,
-          pipelineError(
-            "uninstall",
-            "confirmation-stale",
-            `Plugin "${pluginId}" moved after uninstall preflight. Run preflight again.`,
-          ),
-        ));
-      }
-      const currentPreflight = await this.operations.uninstallPreflight({
-        dohcDir: this.dohcDir,
-        pluginId,
-        pluginRoot: candidate.rootPath,
-        // Same trace-to-directory rule cleanupIds and the top-level
-        // uninstallPreflight() already apply: pluginId's own state can
-        // genuinely belong to an unrelated survivor sharing this id, and
-        // naming that survivor's stateRoot here would fold its data into
-        // a recheck this candidate's confirmation never covered.
-        stateRoot: pluginIdTracesHere ? pluginStateRoot(this.dohcDir, pluginId) : null,
-        // Only .liveHash is read below — this call's stateData/warning are
-        // discarded, so there is nothing for additional identities to add.
-        additionalStateRoots: [],
-        installedBaselineHash: record?.installedBaselineHash,
-        engineCaptureAvailable: this.engineCaptureAvailable(),
-      });
-      const staleReason = uninstallVerificationFailure(
-        currentPreflight.liveHash,
-        confirmation.liveHash,
-        "changed after uninstall preflight",
-      );
-      if (staleReason !== null) {
-        return existingHostResult(this.failure(
-          pluginId,
-          pipelineError(
-            "uninstall",
-            "confirmation-stale",
-            `Plugin "${pluginId}" ${staleReason}. Review it again.`,
-          ),
-        ));
-      }
 
       // Guarded: candidate.id can collide with an unrelated, installed
       // plugin's real id, and this.statuses is keyed by that id alone — an
@@ -1648,7 +1617,7 @@ export class PluginPipeline {
         // can genuinely belong to a different, unrelated installation —
         // marking IT disabled would be exactly the harm this fix closes,
         // done a step earlier than the delete itself.
-        if (pluginIdTracesHere) {
+        if (pluginIdTracesHere && record) {
           await this.operations.mutateRecord(
             this.options.stateDir,
             this.workspaceRoot,
@@ -1677,28 +1646,15 @@ export class PluginPipeline {
         // before delete" once that wait has happened — this must never
         // delete content different from what the confirmation actually
         // covered.
-        const preDeletePreflight = await this.operations.uninstallPreflight({
-          dohcDir: this.dohcDir,
-          pluginId,
-          pluginRoot: candidate.rootPath,
-          // Same as currentPreflight above: the trace-to-directory rule
-          // applies at every recheck, not only the first.
-          stateRoot: pluginIdTracesHere ? pluginStateRoot(this.dohcDir, pluginId) : null,
-          // Same as currentPreflight above: only .liveHash is read.
-          additionalStateRoots: [],
-          installedBaselineHash: record?.installedBaselineHash,
-          engineCaptureAvailable: this.engineCaptureAvailable(),
-        });
-        const preDeleteReason = uninstallVerificationFailure(
-          preDeletePreflight.liveHash,
-          confirmation.liveHash,
+        const preDelete = await this.revalidateUninstallTarget(
+          confirmation.target,
           "changed while its process was stopping",
         );
-        if (preDeleteReason !== null) {
+        if (!preDelete.ok) {
           const detail = pipelineError(
             "uninstall",
             "confirmation-stale",
-            `Plugin "${pluginId}" ${preDeleteReason}. Review uninstall again.`,
+            `Plugin "${pluginId}" ${preDelete.reason}. Review uninstall again.`,
           );
           // Nothing was deleted, the record still says disabled, and the host
           // is stopped — but the status set above still reads "uninstalling",
@@ -1742,15 +1698,7 @@ export class PluginPipeline {
             )
           ),
         );
-        // Same guard: pluginId's tracked status, door-write deltas, and
-        // last-approved-attempt hash are not this action's to clear when
-        // the record proved they belong to a different, unrelated
-        // installation.
-        if (pluginIdTracesHere) {
-          this.statuses.delete(pluginId);
-          this.doorWrittenDeltas.delete(pluginId);
-          this.lastApprovedAttemptHash.delete(pluginId);
-        }
+        this.clearUninstalledIdentityState(cleanupIds);
         // One directory is one discovery entry, so the deleted root — not the
         // id, which an invalid candidate does not share with its record — is
         // what identifies the entry that just went away.
@@ -3305,6 +3253,105 @@ export class PluginPipeline {
   }
 
   /**
+   * Resolves everything one uninstall confirmation can touch. Both execution
+   * checks call this method, so normal removal and sourceless recovery compare
+   * the same root, source state, identities, and durable records.
+   */
+  private async resolveUninstallTarget(
+    pluginId: string,
+    directoryName: string,
+  ): Promise<ResolvedUninstallTarget> {
+    const state = await this.localState();
+    const record = state.plugins[pluginId];
+    const candidate = this.uninstallableCandidate(directoryName, pluginId, record)
+      ?? this.sourcelessCandidate(pluginId);
+    if (
+      candidate &&
+      (candidate.directoryName !== directoryName ||
+        !this.pluginIdIsProvenForDirectory(pluginId, record, candidate))
+    ) {
+      throw new Error(
+        `Plugin "${pluginId}" does not match directory "${directoryName}".`,
+      );
+    }
+
+    const rootPath = resolve(this.uninstallRootPath(directoryName, pluginId, record));
+    const sourcePresent = await this.sourceRootPresent(rootPath);
+    const additionalCleanupIds = candidate
+      ? this.additionalCleanupIds(candidate, state)
+      : [];
+    const pluginIdTracesHere = !candidate ||
+      this.pluginIdTracesDirectory(record, candidate);
+    const cleanupIds = [...new Set([
+      ...(pluginIdTracesHere ? [pluginId] : []),
+      ...additionalCleanupIds,
+    ])].sort();
+    const preflight = await this.operations.uninstallPreflight({
+      dohcDir: this.dohcDir,
+      pluginId,
+      pluginRoot: rootPath,
+      stateRoot: pluginIdTracesHere ? pluginStateRoot(this.dohcDir, pluginId) : null,
+      additionalStateRoots: additionalCleanupIds.map((id) =>
+        pluginStateRoot(this.dohcDir, id)
+      ),
+      installedBaselineHash: pluginIdTracesHere
+        ? record?.installedBaselineHash
+        : undefined,
+      engineCaptureAvailable: this.engineCaptureAvailable(),
+    });
+    return {
+      candidate,
+      state,
+      record,
+      preflight,
+      snapshot: {
+        pluginId,
+        directoryName,
+        rootPath,
+        candidate: candidate
+          ? {
+              id: candidate.id,
+              directoryName: candidate.directoryName,
+              rootPath: resolve(candidate.rootPath),
+            }
+          : null,
+        source: sourcePresent
+          ? { kind: "present", hash: preflight.liveHash }
+          : { kind: "absent" },
+        cleanupIds,
+        records: cleanupIds.map((id) => ({
+          pluginId: id,
+          record: uninstallRecordFingerprint(state.plugins[id]),
+        })),
+      },
+    };
+  }
+
+  private async revalidateUninstallTarget(
+    confirmed: UninstallTargetSnapshot,
+    changed: string,
+  ): Promise<
+    | { ok: true; target: ResolvedUninstallTarget }
+    | { ok: false; reason: string }
+  > {
+    let target: ResolvedUninstallTarget;
+    try {
+      target = await this.resolveUninstallTarget(
+        confirmed.pluginId,
+        confirmed.directoryName,
+      );
+    } catch {
+      return { ok: false, reason: changed };
+    }
+    const reason = uninstallTargetVerificationFailure(
+      target.snapshot,
+      confirmed,
+      changed,
+    );
+    return reason === null ? { ok: true, target } : { ok: false, reason };
+  }
+
+  /**
    * Only ENOENT means the source tree is gone. Any other inspection error —
    * a Windows EPERM or EBUSY on a locked root — used to read as "nothing
    * left to delete", and the confirmed uninstall then dropped the record and
@@ -3372,6 +3419,7 @@ export class PluginPipeline {
     cleanupIds: ReadonlySet<string>,
     change: PluginHostChangeAuthority,
     cleanupQueueClaims: ReadonlyArray<UninstallQueueClaim>,
+    confirmed: UninstallTargetSnapshot,
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const status = this.statuses.get(pluginId);
     const candidate = this.sourcelessCandidate(pluginId);
@@ -3394,6 +3442,25 @@ export class PluginPipeline {
         change,
         cleanupQueueClaims,
       );
+      const preDelete = await this.revalidateUninstallTarget(
+        confirmed,
+        "changed while its process was stopping",
+      );
+      if (!preDelete.ok) {
+        const detail = pipelineError(
+          "uninstall",
+          "confirmation-stale",
+          `Plugin "${pluginId}" ${preDelete.reason}. Review uninstall again.`,
+        );
+        this.setStatus(candidate, {
+          status: "disabled",
+          disabledReason: "user",
+          runtimeStatus: null,
+          valid: status.valid,
+          error: detail,
+        });
+        return existingHostResult(this.failure(pluginId, detail));
+      }
       await Promise.all([...cleanupIds].map((id) => this.removePluginData(id)));
       await Promise.all(
         [...cleanupIds].map((id) =>
@@ -3405,9 +3472,7 @@ export class PluginPipeline {
           )
         ),
       );
-      this.statuses.delete(pluginId);
-      this.doorWrittenDeltas.delete(pluginId);
-      this.lastApprovedAttemptHash.delete(pluginId);
+      this.clearUninstalledIdentityState(cleanupIds);
       this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
       return existingHostResult({
         ok: true,
@@ -3433,6 +3498,14 @@ export class PluginPipeline {
         error: detail,
       });
       return existingHostResult(this.failure(pluginId, detail));
+    }
+  }
+
+  private clearUninstalledIdentityState(cleanupIds: ReadonlySet<string>): void {
+    for (const pluginId of cleanupIds) {
+      this.statuses.delete(pluginId);
+      this.doorWrittenDeltas.delete(pluginId);
+      this.lastApprovedAttemptHash.delete(pluginId);
     }
   }
 
@@ -3506,7 +3579,12 @@ export class PluginPipeline {
           resolveStop(outcome);
         };
       });
+      let markReady!: () => void;
+      const ready = new Promise<void>((resolveReady) => {
+        markReady = resolveReady;
+      });
       const action = this.enqueueActionValue(pluginId, async () => {
+        markReady();
         if (await decision === "cancel") {
           try {
             await reservation.cancel();
@@ -3535,6 +3613,7 @@ export class PluginPipeline {
         if (stopFailure !== undefined) throw stopFailure;
       });
       claims.push({
+        ready,
         decide,
         release,
         stopOutcome,
