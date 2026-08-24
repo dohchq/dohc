@@ -35,7 +35,7 @@ Gate: each prototype has a written pass, or a design revision recorded as an ADR
 
 The first shippable vertical: accountless viewing.
 
-- Desktop: create, rotate, retune, and revoke a share link from the existing share dialog. Rotate, revoke, and raising a link's level warn before running: rotation and a level raise permanently kill the old URL, and revoke ends every session and dependent grant derived from the link.
+- Desktop: create, rotate, retune, and revoke a share link from the existing share dialog. Creation and retuning offer only levels whose phase gate has passed — View here, Comment after Phase 3, Edit after Phase 4 — so no link ever advertises authority its safeguards have not earned. Rotate, revoke, and raising a link's level warn before running: rotation and a level raise permanently kill the old URL, and revoke ends every session and dependent grant derived from the link.
 - `share-web`: secret exchange at the relay seam (ADR 0001), folder navigation, sanitized Markdown, safe images, Excalidraw view, forced download for untrusted formats. Secrets travel in the URL fragment and become short-lived cookies. A link secret comes from a CSPRNG with at least 256 bits of entropy, is stored only as a keyed hash, and verifies in constant time, with tests for all three properties.
 - Sessions are per-link: cookie naming or a server-side session map keyed by link id keeps two links open in one browser fully distinct. The gate includes a two-tab test covering reads, rotation, and revocation across different shares.
 - Honest freshness: the viewer shows settled content with a "last settled" indicator; it never calls a stale snapshot live.
@@ -52,7 +52,7 @@ Gate: hostile-content, refusal-oracle, and revocation tests pass; a leaked-URL w
 - Mint link principals on first interaction; claimed names are display metadata, marked unverified.
 - Extend the relay's chat author contract to recognize a server-minted link principal as the authenticated pusher without weakening named-user authorship.
 - One share-level discussion object; text only. No attachments, reactions, decisions, or anchored comments.
-- Owner moderation: delete comments, block principals, throttle notifications; a single "pause all link writes" control that preserves viewing. Blocking and pausing reverse in place (unblock, resume); comment deletion warns that it is permanent before it runs. Blocking an accountless principal ejects its sessions and stops its writes, and the UI says plainly that a determined holder can remint an identity from the same link: rotation is the durable response. The gate includes a fresh-profile remint test.
+- Owner moderation: delete comments, block principals, throttle notifications; a single "pause all link writes" control that preserves viewing. Blocking and pausing reverse in place (unblock, resume); comment deletion warns that it is permanent before it runs. Blocking an accountless principal ejects its sessions and stops its writes, and the UI says plainly that a determined holder can remint an identity from the same link: rotation is the durable response. The gate includes a fresh-profile remint test. Block and pause join revoke in the commit-time authority check — a buffered append from a blocked principal or paused link refuses at commit, and the gate races both transitions against in-flight appends.
 
 Gate: quota, moderation, and revoke-during-append tests pass; provenance shows link id and principal on every message; hostile markup, URL-scheme, and output-encoding tests cover comment bodies and claimed names, which are new attacker-controlled rendering inputs the Phase 2 gate never saw.
 
@@ -68,7 +68,7 @@ Gate: quota, moderation, and revoke-during-append tests pass; provenance shows l
 - Presence is server-projected per principal kind: define which fields an anonymous editor receives, redact server-side, and test what an anonymous session can see of named collaborators.
 - Scope: existing Markdown live documents on the main version. No create, rename, delete, Excalidraw editing, or pinned-version editing.
 
-Settle first: what a desktop named recipient's Edit means when no host is online (pause, or proposal); what the owner's local edits mean while a service host holds the session and the owner's device is offline, including which side settles on reconnect; when View joins the live Y.Doc read-only vs reads settled Markdown; settlement cadence and maximum document size.
+Settled: a desktop named recipient's live-document Edit pauses when no host is online, exactly like the browser — a proposal lane there would give Edit two meanings, which ADR 0002 and the glossary both forbid. Settle first: what the owner's local edits mean while a service host holds the session and the owner's device is offline, including which side settles on reconnect; when View joins the live Y.Doc read-only vs reads settled Markdown; settlement cadence and maximum document size.
 
 Gate: restart, stale-frame, selector-drift, access-change, and restore tests pass under load; the stop-and-restore drill completes against a live hostile session; an attributed-update test verifies link and principal audit records survive compaction, replication, settlement, and lineage replacement.
 
