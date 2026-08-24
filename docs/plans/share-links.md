@@ -9,6 +9,7 @@ The design is recorded in `CONTEXT.md` (vocabulary) and `docs/adr/0001` through 
 Build the data and authorization contracts before any route or UI.
 
 - Replace the one-row share model with share, grant, and link credential records (ADR 0005) in `packages/security-contract`. Grant and credential persistence records stay relay-side per ADR 0005; only `GrantBinding` crosses the engine boundary (a device session host checks it), so only it gets a Rust twin held equal by shared vectors.
+- The normalization covers chat-channel grants in the same table: a channel grant keeps its read-only or read-write access, typed by the share's selector kind, on the grant. No second access location survives. Channel shares still never get public links in this program.
 - Define grant generations and the `{grant, generation, access}` binding for every derived credential.
 - Define one `authorizeShareAction` seam owned by the relay: server-derived principal, action, resource in; effective capability or generic refusal out. Callers never combine link, selector, approval, and policy rules themselves. The seam reloads the share's active status and the granter's current standing on every check; deleting a share revokes every grant.
 - Define the link principal (server-minted, per link grant per browser) and the audit record that survives Y.Doc compaction, replication, and settlement.
@@ -36,6 +37,7 @@ The first shippable vertical: accountless viewing.
 
 - Desktop: create, rotate, retune, and revoke a share link from the existing share dialog. Rotate, revoke, and raising a link's level warn before running: rotation and a level raise permanently kill the old URL, and revoke ends every session and dependent grant derived from the link.
 - `share-web`: secret exchange at the relay seam (ADR 0001), folder navigation, sanitized Markdown, safe images, Excalidraw view, forced download for untrusted formats. Secrets travel in the URL fragment and become short-lived cookies. A link secret comes from a CSPRNG with at least 256 bits of entropy, is stored only as a keyed hash, and verifies in constant time, with tests for all three properties.
+- Sessions are per-link: cookie naming or a server-side session map keyed by link id keeps two links open in one browser fully distinct. The gate includes a two-tab test covering reads, rotation, and revocation across different shares.
 - Honest freshness: the viewer shows settled content with a "last settled" indicator; it never calls a stale snapshot live.
 - Refusal discipline: invalid id, bad secret, revoked, and rate-limited responses are indistinguishable before authentication.
 - Owner visibility: per-link usage, and a warning that a link exposes everything under the selector, including files added later.
@@ -49,9 +51,9 @@ Gate: hostile-content, refusal-oracle, and revocation tests pass; a leaked-URL w
 - Mint link principals on first interaction; claimed names are display metadata, marked unverified.
 - Extend the relay's chat author contract to recognize a server-minted link principal as the authenticated pusher without weakening named-user authorship.
 - One share-level discussion object; text only. No attachments, reactions, decisions, or anchored comments.
-- Owner moderation: delete comments, block principals, throttle notifications; a single "pause all link writes" control that preserves viewing. Blocking and pausing reverse in place (unblock, resume); comment deletion warns that it is permanent before it runs.
+- Owner moderation: delete comments, block principals, throttle notifications; a single "pause all link writes" control that preserves viewing. Blocking and pausing reverse in place (unblock, resume); comment deletion warns that it is permanent before it runs. Blocking an accountless principal ejects its sessions and stops its writes, and the UI says plainly that a determined holder can remint an identity from the same link: rotation is the durable response. The gate includes a fresh-profile remint test.
 
-Gate: quota, moderation, and revoke-during-append tests pass; provenance shows link id and principal on every message.
+Gate: quota, moderation, and revoke-during-append tests pass; provenance shows link id and principal on every message; hostile markup, URL-scheme, and output-encoding tests cover comment bodies and claimed names, which are new attacker-controlled rendering inputs the Phase 2 gate never saw.
 
 ## Phase 4: Edit
 
@@ -60,16 +62,19 @@ Gate: quota, moderation, and revoke-during-append tests pass; provenance shows l
 - Durable authorship records outside the prunable Y.Doc update cache; settlement references its audit interval.
 - Build the owner stop-and-restore action before exposing Edit to anyone.
 - Ship named-recipient browser Edit first; enable anonymous Edit only after the same path passes adversarial load with link principals.
+- Named browser sessions authenticate for real: sign-in on `share-web` maps a relay-derived account identity to its named grant, never a client claim, and a cookie for one grantee never authorizes another. Without this, "named Edit first" would silently run on the anonymous link path under a different label.
+- A device host maintains an authenticated outbound connection to `share-web` (registration, document routing, reconnect, and fencing over that pipe), because NAT means `share-web` can never dial the device. The gate includes a test where `share-web` cannot initiate connections.
+- Presence is server-projected per principal kind: define which fields an anonymous editor receives, redact server-side, and test what an anonymous session can see of named collaborators.
 - Scope: existing Markdown live documents on the main version. No create, rename, delete, Excalidraw editing, or pinned-version editing.
 
 Settle first: what a desktop named recipient's Edit means when no host is online (pause, or proposal); what the owner's local edits mean while a service host holds the session and the owner's device is offline, including which side settles on reconnect; when View joins the live Y.Doc read-only vs reads settled Markdown; settlement cadence and maximum document size.
 
-Gate: restart, stale-frame, selector-drift, access-change, and restore tests pass under load; the stop-and-restore drill completes against a live hostile session.
+Gate: restart, stale-frame, selector-drift, access-change, and restore tests pass under load; the stop-and-restore drill completes against a live hostile session; an attributed-update test verifies link and principal audit records survive compaction, replication, settlement, and lineage replacement.
 
 ## Phase 5: apps
 
 - Publications first (ADR 0006): immutable, capability-free bundles on isolated per-publication origins, served static. Choose the build trust model here, including whether Vite's plugin surface is admissible.
-- Then owner-approved read capabilities tied to the bundle digest, delivered through the scoped data API.
+- Then owner-approved read capabilities tied to the bundle digest, delivered through the scoped data API. Settle first: the app-session credential exchange — a one-time launch handoff mints an app-scoped session bound to grant, generation, and publication, because the viewer's host-only cookie cannot cross to the app origin and the link secret must never enter JavaScript-visible app state.
 - Then, only if a launch app needs it, one typed create-only collection per ADR 0004, after naming the authoritative app-data store and its sync, export, backup, and deletion path.
 - Service workers, persistent storage, raw HTML, inline SVG, and remote embeds stay disabled until a specific use case passes a threat test.
 - Publications and capabilities have visible withdrawal paths: unpublish a publication, and revoke or narrow an approved capability. Active app sessions lose the authority at their next data-API check. The phase gate tests both withdrawals.
