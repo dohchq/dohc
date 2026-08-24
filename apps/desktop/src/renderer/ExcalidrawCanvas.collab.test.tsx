@@ -769,3 +769,50 @@ it("drops asset hydration that resolves after the scene changes", async () => {
     expect.objectContaining({ id: "current" }),
   ]);
 });
+
+it("reports only the current asset hydration failure", async () => {
+  const firstDoc = new Y.Doc();
+  const secondDoc = new Y.Doc();
+  declareSceneRoots(firstDoc);
+  declareSceneRoots(secondDoc);
+  let rejectFirst!: (error: Error) => void;
+  let rejectSecond!: (error: Error) => void;
+  const first = new Promise<never>((_resolve, reject) => {
+    rejectFirst = reject;
+  });
+  const second = new Promise<never>((_resolve, reject) => {
+    rejectSecond = reject;
+  });
+  const onAssetRefusedChange = vi.fn();
+  const view = render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={firstDoc}
+      hydrateAssets={() => first}
+      onAssetRefusedChange={onAssetRefusedChange}
+    />,
+  );
+  view.rerender(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={secondDoc}
+      hydrateAssets={() => second}
+      onAssetRefusedChange={onAssetRefusedChange}
+    />,
+  );
+
+  await act(async () => {
+    rejectFirst(new Error("retired hydration failed"));
+    await first.catch(() => undefined);
+  });
+  expect(onAssetRefusedChange).not.toHaveBeenCalled();
+
+  await act(async () => {
+    rejectSecond(new Error("current hydration failed"));
+    await second.catch(() => undefined);
+  });
+  expect(onAssetRefusedChange).toHaveBeenCalledOnce();
+  expect(onAssetRefusedChange).toHaveBeenCalledWith(true);
+});
