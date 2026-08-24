@@ -1852,6 +1852,105 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  it("rejects a removed alias's confirmation after the same plugin is recreated", async () => {
+    const setup = await createAliasUninstallFixture();
+    const sourcePaths = [
+      join(setup.fixture.pluginRoot, "dohc-plugin.json"),
+      join(setup.fixture.pluginRoot, "package.json"),
+      join(setup.fixture.pluginRoot, "pnpm-lock.yaml"),
+      setup.fixture.entryPath,
+    ];
+    const source = await Promise.all(sourcePaths.map((path) => readFile(path)));
+    try {
+      const initialInstall = await setup.pipeline.install("runtime-id");
+      if (!initialInstall.ok) throw new Error(initialInstall.error.message);
+      await waitFor(
+        () => setup.pipeline.list().some(
+          (row) => row.directoryName === "shared-dir" && row.status === "ready",
+        ),
+        "The initial plugin did not reach ready.",
+      );
+      const installedState = await readPluginLocalState(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+      );
+      if (!installedState.ok) throw new Error(installedState.warning);
+      const originalRecord = installedState.state.plugins["original-id"];
+      const aliasRecord = installedState.state.plugins["runtime-id"];
+      if (!originalRecord || !aliasRecord) {
+        throw new Error("The alias uninstall fixture has incomplete records.");
+      }
+      const staleAlias = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!staleAlias.ok) throw new Error(staleAlias.error.message);
+      const primary = await setup.pipeline.uninstallPreflight(
+        "runtime-id",
+        "shared-dir",
+      );
+      if (!primary.ok) throw new Error(primary.error.message);
+
+      const removed = await setup.pipeline.uninstall(
+        "runtime-id",
+        "shared-dir",
+        primary.confirmationToken,
+      );
+      expect(removed.ok).toBe(true);
+
+      await mkdir(dirname(setup.fixture.entryPath), { recursive: true });
+      await Promise.all(
+        sourcePaths.map((path, index) => writeFile(path, source[index]!)),
+      );
+      await setup.pipeline.handleWatcherEvents([
+        { operation: "update", path: "plugins" },
+      ]);
+      const reinstalled = await setup.pipeline.install("runtime-id");
+      if (!reinstalled.ok) throw new Error(reinstalled.error.message);
+      await waitFor(
+        () => setup.pipeline.list().some(
+          (row) => row.directoryName === "shared-dir" && row.status === "ready",
+        ),
+        "The recreated plugin did not reach ready.",
+      );
+      await mutatePluginRecord(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+        "original-id",
+        () => originalRecord,
+      );
+      await mutatePluginRecord(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+        "runtime-id",
+        () => aliasRecord,
+      );
+      await setup.pipeline.handleWatcherEvents([
+        { operation: "update", path: "plugins" },
+      ]);
+
+      const staleRemoval = await setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        staleAlias.confirmationToken,
+      );
+      await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+      expect(staleRemoval).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-required" },
+      });
+      expect(setup.pipeline.list()).toContainEqual(
+        expect.objectContaining({
+          id: "runtime-id",
+          directoryName: "shared-dir",
+          status: "ready",
+        }),
+      );
+    } finally {
+      await setup.pipeline.dispose();
+    }
+  }, 60_000);
+
   it("rejects an uninstall when earlier alias work changes the confirmed target", async () => {
     const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
     await mutatePluginRecord(
@@ -2038,7 +2137,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(removedOriginal.ok).toBe(true);
       expect(removedRuntime).toMatchObject({
         ok: false,
-        error: { code: "confirmation-stale" },
+        error: { code: "confirmation-required" },
       });
       await expect(lstat(setup.fixture.pluginRoot)).rejects.toMatchObject({
         code: "ENOENT",
@@ -3365,6 +3464,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(pluginId).toBe("my-codex-copy");
 
       failCodexDataRemoval = true;
+      const staleAliasPreflight = await pipeline.uninstallPreflight(
+        "codex",
+        pluginId,
+      );
+      if (!staleAliasPreflight.ok) {
+        throw new Error(staleAliasPreflight.error.message);
+      }
       const firstPreflight = await pipeline.uninstallPreflight(pluginId, pluginId);
       if (!firstPreflight.ok) throw new Error(firstPreflight.error.message);
       const failed = await pipeline.uninstall(pluginId, pluginId, firstPreflight.confirmationToken);
@@ -3433,6 +3539,15 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(transient.lastApprovedAttemptHash.has(pluginId)).toBe(false);
       expect(transient.lastApprovedAttemptHash.has("codex")).toBe(false);
       expect(pipeline.list()).toEqual([]);
+      const staleAliasRemoval = await pipeline.uninstall(
+        "codex",
+        pluginId,
+        staleAliasPreflight.confirmationToken,
+      );
+      expect(staleAliasRemoval).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-required" },
+      });
     } finally {
       await pipeline.dispose();
     }

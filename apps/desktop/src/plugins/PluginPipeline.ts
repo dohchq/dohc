@@ -1726,7 +1726,10 @@ export class PluginPipeline {
             )
           ),
         );
-        this.clearUninstalledIdentityState(cleanupIds);
+        this.clearUninstalledIdentityState(
+          cleanupIds,
+          confirmation.target.directoryName,
+        );
         // One directory is one discovery entry, so the deleted root — not the
         // id, which an invalid candidate does not share with its record — is
         // what identifies the entry that just went away.
@@ -3541,7 +3544,7 @@ export class PluginPipeline {
           )
         ),
       );
-      this.clearUninstalledIdentityState(cleanupIds);
+      this.clearUninstalledIdentityState(cleanupIds, confirmed.directoryName);
       this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
       return existingHostResult({
         ok: true,
@@ -3570,11 +3573,17 @@ export class PluginPipeline {
     }
   }
 
-  private clearUninstalledIdentityState(cleanupIds: ReadonlySet<string>): void {
+  private clearUninstalledIdentityState(
+    cleanupIds: ReadonlySet<string>,
+    directoryName: string,
+  ): void {
     for (const pluginId of cleanupIds) {
       this.statuses.delete(pluginId);
       this.doorWrittenDeltas.delete(pluginId);
       this.lastApprovedAttemptHash.delete(pluginId);
+      this.uninstallConfirmations.delete(
+        uninstallConfirmationKey(pluginId, directoryName),
+      );
     }
   }
 
