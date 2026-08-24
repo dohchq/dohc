@@ -133,7 +133,7 @@ export function NoticeCenter(props: {
   const clearReadyUpdateError = useCallback((update: UpdateStateEvent) => {
     if (update.status === "ready") setUpdateActionError(null);
   }, []);
-  const { updateState: desktopUpdateState } =
+  const { updateState: desktopUpdateState, acceptUpdateResult } =
     useDesktopUpdateStateFeed(clearReadyUpdateError);
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
@@ -159,6 +159,7 @@ export function NoticeCenter(props: {
       // and its confirm makes the only quitAndInstall call.
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
+      acceptUpdateResult(result.state);
       if (!result.accepted || result.state.status === "error") {
         setUpdateActionError(
           result.state.status === "error"
@@ -171,7 +172,7 @@ export function NoticeCenter(props: {
     } finally {
       setInstallPending(false);
     }
-  }, [installPending]);
+  }, [acceptUpdateResult, installPending]);
 
   useEffect(() => {
     if (!open) return;

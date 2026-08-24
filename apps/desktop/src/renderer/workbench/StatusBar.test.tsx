@@ -2,7 +2,10 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { UpdateStateEvent } from "../../ipc/bridgeContract";
+import type {
+  UpdateActionResult,
+  UpdateStateEvent,
+} from "../../ipc/bridgeContract";
 import type { AgentNotification } from "./agentNotifications";
 import { StatusBar } from "./StatusBar";
 
@@ -11,7 +14,7 @@ import { StatusBar } from "./StatusBar";
 // isPackaged + DOHC_UPDATE_URL), so the surface is driven with a fake.
 let pushUpdate: ((state: UpdateStateEvent) => void) | null = null;
 const unsubscribe = vi.fn();
-const installUpdate = vi.fn(async () => ({
+const installUpdate = vi.fn(async (): Promise<UpdateActionResult> => ({
   accepted: true,
   completed: false,
   state: {
@@ -633,6 +636,58 @@ describe("notice center", () => {
     );
 
     expect(installUpdate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the install result after an older update event arrives", async () => {
+    const pendingInstall = deferred<UpdateActionResult>();
+    installUpdate.mockReturnValueOnce(pendingInstall.promise);
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", {
+        name: "Restart",
+      }),
+    );
+    await waitFor(() => expect(installUpdate).toHaveBeenCalledOnce());
+
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+    pendingInstall.resolve({
+      accepted: true,
+      completed: false,
+      state: {
+        status: "ready",
+        message: "Update 1.2.4 is ready — restart dohc to apply it.",
+        currentVersion: "1.2.2",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.4",
+      },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("update-toast").textContent).toContain(
+        "Update 1.2.4 is ready",
+      ),
+    );
   });
 
   it("shows restart failures in the update notice and toast", async () => {
