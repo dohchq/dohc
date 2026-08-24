@@ -2461,6 +2461,25 @@ export class PluginPipeline {
     );
   }
 
+  private restoreStatusAfterHostChangeRefusal(
+    candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+    priorStatus: PluginPipelinePluginStatus | undefined,
+    result: PluginHostStartResult<PluginPipelineActionResult>,
+  ): PluginHostStartResult<PluginPipelineActionResult> {
+    if (
+      !priorStatus ||
+      result.value.ok ||
+      result.value.error.code !== HOST_CHANGE_REFUSED_ERROR_CODE
+    ) {
+      return result;
+    }
+    const restored = this.setStatus(candidate, priorStatus);
+    return mapHostResult(result, (value) => ({
+      ...value,
+      plugin: cloneStatus(restored),
+    }));
+  }
+
   /**
    * Retries case recovery for every still-provisional delta before
    * doorApprovedHash hashes them: confirms a landing-time fold's guessed
@@ -3446,20 +3465,11 @@ export class PluginPipeline {
         }
         let stopFailure: unknown;
         try {
-          stopFailure = await reservation.run(async (change) => {
-            let failure: unknown;
-            try {
-              await this.stopOldRuntime(pluginId, change);
-            } catch (error) {
-              failure = error;
-            }
-            return change.preserve(existingHostResult(failure));
+          await reservation.run(async (change) => {
+            await this.stopOldRuntime(pluginId, change);
+            return change.preserve(existingHostResult(undefined));
           });
-          settleStop(
-            stopFailure === undefined
-              ? { ok: true }
-              : { ok: false, error: stopFailure },
-          );
+          settleStop({ ok: true });
         } catch (error) {
           stopFailure = error;
           settleStop({ ok: false, error });
@@ -3469,9 +3479,6 @@ export class PluginPipeline {
         // admitted behind this claim stays parked until primary cleanup ends.
         await released;
         if (stopFailure !== undefined) throw stopFailure;
-      });
-      void action.catch((error: unknown) => {
-        settleStop({ ok: false, error });
       });
       claims.push({
         decide,
@@ -3579,16 +3586,21 @@ export class PluginPipeline {
     },
     change?: PluginHostChangeAuthority,
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
+    const priorStatus = this.statuses.get(candidate.id);
     const verified = await this.verifyApprovedSource(candidate, approvedHash);
     if (verified.kind === "failed") return existingHostResult(verified.result);
     if (verified.kind === "changed") {
-      return this.holdForApproval(
+      return this.restoreStatusAfterHostChangeRefusal(
         candidate,
-        verified.sourceHash,
-        undefined,
-        "changed-after-install",
-        undefined,
-        change,
+        priorStatus,
+        await this.holdForApproval(
+          candidate,
+          verified.sourceHash,
+          undefined,
+          "changed-after-install",
+          undefined,
+          change,
+        ),
       );
     }
 
@@ -3599,10 +3611,14 @@ export class PluginPipeline {
         this.host.currentRecord(pluginId) &&
         (!change || change.checkStop().kind !== "ready")
       ) {
-        return existingHostResult(this.failure(
-          pluginId,
-          this.hostChangeInProgressError(pluginId),
-        ));
+        return this.restoreStatusAfterHostChangeRefusal(
+          candidate,
+          priorStatus,
+          existingHostResult(this.failure(
+            pluginId,
+            this.hostChangeInProgressError(pluginId),
+          )),
+        );
       }
       return this.runFullBuild({
         candidate,

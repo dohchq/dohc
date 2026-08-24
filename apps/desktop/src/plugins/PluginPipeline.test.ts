@@ -7714,6 +7714,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
         });
         expect(exactResult?.kind).toBe("existing");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
         const state = await readPluginLocalState(
           setup.fixture.stateDir,
           setup.fixture.workspaceRoot,
@@ -7761,6 +7762,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           },
         });
         expect(exactResult?.kind).toBe("existing");
+        expect(setup.pipeline.list()[0]?.status).toBe("ready");
         const stateAfter = await readPluginLocalState(
           setup.fixture.stateDir,
           setup.fixture.workspaceRoot,

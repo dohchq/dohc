@@ -492,7 +492,7 @@ describe("plugin panel main-process wiring", () => {
       disableAt,
     );
     const disableCallAt = mainSource.indexOf(
-      "const result = pipeline.disable(pluginId);",
+      "pipeline.disable(pluginId),",
       disableAt,
     );
 
