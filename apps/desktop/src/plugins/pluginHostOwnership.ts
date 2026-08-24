@@ -635,12 +635,17 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
     return this.#finishSurfaceRelease(lease);
   }
 
-  [runReservedChange]<T>(
+  async [runReservedChange]<T>(
     reservation: ChangeReservation,
     operation: (
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
+    const stopping = reservation.state.stopInFlight;
+    if (stopping) await stopping;
+    if (!reservation.active || this.#closed) {
+      throw new Error("Change reservation is no longer active.");
+    }
     reservation.invalidate();
     reservation.state.pendingChanges.delete(reservation);
     return this.#beginChange(reservation.state, undefined, operation);

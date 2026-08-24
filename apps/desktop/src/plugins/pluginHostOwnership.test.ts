@@ -270,7 +270,7 @@ describe("PluginHostOwnership", () => {
     expect(host.calls).toEqual(["stop:example-plugin"]);
   });
 
-  it("supersedes a nested change that stops during another stop", async () => {
+  it("starts a nested reserved change after another stop refreshes the epoch", async () => {
     const host = new FakePluginHost();
     host.start("example-plugin");
     const stopBegan = deferred<void>();
@@ -300,9 +300,12 @@ describe("PluginHostOwnership", () => {
 
     await expect(result).resolves.toEqual({
       first: { kind: "stopped", drained: true },
-      second: { kind: "superseded", drained: true },
+      second: { kind: "stopped", drained: true },
     });
-    expect(host.calls).toEqual(["stop:example-plugin"]);
+    expect(host.calls).toEqual([
+      "stop:example-plugin",
+      "stop:example-plugin",
+    ]);
   });
 
   it("runs a command in one scope and releases it on rejection", async () => {
@@ -508,6 +511,46 @@ describe("PluginHostOwnership", () => {
       value: "second",
     });
     expect(secondBegan).toBe(true);
+  });
+
+  it("parks a reserved change behind automatic teardown", async () => {
+    const host = new FakePluginHost();
+    const stopped = deferred<void>();
+    host.stopImpl = async (pluginId) => {
+      await stopped.promise;
+      host.records.delete(pluginId);
+    };
+    const owner = new PluginHostOwnership(host);
+    const command = owner.runCommand("example-plugin", async (authority) =>
+      authority.start(() => coldStart(host, "example-plugin", "command")),
+    );
+    await vi.waitFor(() => {
+      expect(host.calls).toEqual(["stop:example-plugin"]);
+    });
+
+    const reservation = owner.reserveChange("example-plugin");
+    let changeBegan = false;
+    let replacement!: PluginHostRecordToken;
+    const change = reservation.run(async (authority) => {
+      changeBegan = true;
+      const evidence = host.start("example-plugin");
+      replacement = evidence.record;
+      return authority.adopt({ kind: "started", value: "enabled", evidence });
+    });
+    let changeSettled = false;
+    void change.then(() => {
+      changeSettled = true;
+    });
+
+    await Promise.resolve();
+    expect(changeBegan).toBe(false);
+    expect(changeSettled).toBe(false);
+
+    stopped.resolve();
+    await command;
+    await expect(change).resolves.toBe("enabled");
+    expect(host.currentRecord("example-plugin")).toBe(replacement);
+    expect(host.calls).toEqual(["stop:example-plugin"]);
   });
 
   it("publishes automatic teardown before the host can re-enter", async () => {
