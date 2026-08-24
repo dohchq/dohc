@@ -378,6 +378,7 @@ describe("engine Y.Doc IPC adapter", () => {
       generationOf: () => 1,
       requireWorkspace: (workspaceId) => ({ workspaceId }),
       captureFor: () => capture,
+      ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,
       onError: vi.fn(),
     });

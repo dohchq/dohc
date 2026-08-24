@@ -553,6 +553,72 @@ describe("EngineYDocSessionOwner", () => {
     });
   });
 
+  it("announces a queued lineage replacement after acknowledging the current one", async () => {
+    const outbound: TestOutbound[] = [];
+    const owner = createOwner(outbound);
+    const sender = { id: 7, label: "window-a" };
+    let signals!: EngineYDocSessionSignals<string, string, string>;
+
+    await owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        openSession: async (openedSignals) => {
+          signals = openedSignals;
+          return {
+            session: { close: async () => undefined },
+            value: "opened",
+          };
+        },
+      }),
+    );
+
+    signals.replaceLineage("winner-1");
+    signals.remoteUpdate("update-1");
+    signals.replaceLineage("winner-2");
+    signals.remoteUpdate("update-2");
+
+    expect(outbound.map(({ message }) => message)).toEqual([
+      {
+        kind: "lineage-replacement",
+        replacement: "winner-1",
+        lineageGeneration: 2,
+      },
+    ]);
+    expect(
+      owner.acknowledgeLineageReplacement({
+        sender,
+        generation: 1,
+        sessionId: "renderer-session-1",
+        lineageGeneration: 2,
+      }),
+    ).toEqual({ kind: "applied", replacement: "winner-1", updates: [] });
+    expect(outbound.map(({ message }) => message)).toEqual([
+      {
+        kind: "lineage-replacement",
+        replacement: "winner-1",
+        lineageGeneration: 2,
+      },
+      {
+        kind: "lineage-replacement",
+        replacement: "winner-2",
+        lineageGeneration: 3,
+      },
+    ]);
+    expect(
+      owner.acknowledgeLineageReplacement({
+        sender,
+        generation: 1,
+        sessionId: "renderer-session-1",
+        lineageGeneration: 3,
+      }),
+    ).toEqual({
+      kind: "applied",
+      replacement: "winner-2",
+      updates: ["update-2"],
+    });
+  });
+
   it("keeps exact-owner session access available through a failed release", async () => {
     const owner = createOwner();
     const sender = { id: 7, label: "window-a" };

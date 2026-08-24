@@ -13,6 +13,36 @@ function handlerSource(channel: string): string {
 }
 
 describe("workspace file operation wiring", () => {
+  it("starts bounded engine shutdown before arming quit teardown (#564)", () => {
+    const closeAllStart = mainSource.indexOf(
+      "async function closeAllEngineYDocSessions",
+    );
+    expect(closeAllStart).toBeGreaterThan(-1);
+    const closeAllBody = mainSource.slice(
+      closeAllStart,
+      mainSource.indexOf("\n}", closeAllStart),
+    );
+    expect(closeAllBody).toContain("await engineYDocSessionIpc.shutdown()");
+
+    const willQuitStart = mainSource.indexOf('app.on("will-quit"');
+    expect(willQuitStart).toBeGreaterThan(-1);
+    const willQuitBody = mainSource.slice(
+      willQuitStart,
+      mainSource.indexOf("app.exit(0)", willQuitStart),
+    );
+    const beginShutdownAt = willQuitBody.indexOf(
+      "rustEngineWorkspaceSessions?.beginShutdown()",
+    );
+    const engineYDocStopAt = willQuitBody.indexOf(
+      "closeAllEngineYDocSessions()",
+    );
+    const firstStopAllAt = willQuitBody.indexOf(".stopAll()");
+
+    expect(beginShutdownAt).toBeGreaterThan(-1);
+    expect(beginShutdownAt).toBeLessThan(engineYDocStopAt);
+    expect(beginShutdownAt).toBeLessThan(firstStopAllAt);
+  });
+
   it("keeps each move and delete capture lifecycle inside one exclusive workspace operation", () => {
     for (const channel of ["moveWorkspacePath", "deleteWorkspacePath"]) {
       const handler = handlerSource(channel);
