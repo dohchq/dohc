@@ -31,6 +31,26 @@ export type AgentPermissionRequest = NonNullable<
   AgentPanelSnapshotResult["session"]
 >["pendingPermissions"][number];
 
+// AgentSessionManager replaces a pending entry's CONTENT in place when a
+// permission-request event reuses a requestId, so identity alone is not
+// equality: compare everything the AgentPermissionRequests card renders.
+function sameAsk(a: AgentPermissionRequest, b: AgentPermissionRequest): boolean {
+  return (
+    a.requestId === b.requestId &&
+    a.title === b.title &&
+    a.detail === b.detail &&
+    a.locations.length === b.locations.length &&
+    a.locations.every((location, i) => location === b.locations[i]) &&
+    a.options.length === b.options.length &&
+    a.options.every(
+      (option, i) =>
+        option.optionId === b.options[i]!.optionId &&
+        option.name === b.options[i]!.name &&
+        option.kind === b.options[i]!.kind,
+    )
+  );
+}
+
 export interface UseAgentNotifications {
   notifications: AgentNotification[];
   // The active session's unanswered permission requests (current workspace).
@@ -86,35 +106,44 @@ export function useAgentNotifications(params: {
     if (!enabled) return;
     let cancelled = false;
     let timer: number | undefined;
+    // Activity-wake guards: a ping while a poll is in flight must not stack a
+    // second poll — it marks the queue and the finally re-polls immediately.
+    let polling = false;
+    let repollQueued = false;
+    // True while the armed timer is the slow idle delay — the only cadence an
+    // activity ping needs to short-circuit.
+    let idleArmed = false;
 
     // Idle backoff: no session means no asks and nothing to notify about, so
     // the next look can wait. The poll that first sees a session — and every
-    // poll while one exists — schedules at the fast cadence again.
+    // poll while one exists — schedules at the fast cadence again. A
+    // workspace-activity ping wakes the idle cadence immediately (below), so
+    // a new run's first permission ask never waits out the slow timer.
     const idleIntervalMs = Math.max(pollIntervalMs, IDLE_POLL_INTERVAL_MS);
     const poll = async () => {
+      polling = true;
       // Fast cadence unless this poll proves there is no session; a transient
       // IPC failure (no panel) also retries fast.
       let nextDelayMs = pollIntervalMs;
-      let panel: AgentPanelSnapshotResult | undefined;
       try {
-        panel = await bridge().getAgentSessionState({ workspaceId });
-      } catch {
-        // transient IPC failure — retry at the fast cadence
-      }
-      if (cancelled) return;
-      if (panel) {
+        let panel: AgentPanelSnapshotResult | undefined;
+        try {
+          panel = await bridge().getAgentSessionState({ workspaceId });
+        } catch {
+          // transient IPC failure — retry at the fast cadence
+        }
+        if (cancelled || !panel) return;
         if (panel.session === null) nextDelayMs = idleIntervalMs;
         const runId = panel.session?.runId ?? null;
         const requests = panel.session?.pendingPermissions ?? [];
         // Reference-stable no-op (same rule as reduceAgentNotifications): a poll
         // that changes nothing MUST keep `prev` so setState bails out instead of
-        // re-rendering the host shell every tick. requestId is the request's
-        // identity — a new ask always gets a fresh one.
+        // re-rendering the host shell every tick.
         setPendingAsks((prev) =>
           prev.workspaceId === workspaceId &&
           prev.runId === runId &&
           prev.requests.length === requests.length &&
-          prev.requests.every((req, i) => req.requestId === requests[i]!.requestId)
+          prev.requests.every((req, i) => sameAsk(req, requests[i]!))
             ? prev
             : { workspaceId, runId, requests },
         );
@@ -133,12 +162,36 @@ export function useAgentNotifications(params: {
             }),
           );
         }
+      } finally {
+        // Re-arm in finally so a synchronous throw above cannot end the chain.
+        polling = false;
+        if (!cancelled) {
+          if (repollQueued) {
+            repollQueued = false;
+            nextDelayMs = 0;
+          }
+          idleArmed = nextDelayMs >= idleIntervalMs;
+          timer = window.setTimeout(() => void poll(), nextDelayMs);
+        }
       }
-      timer = window.setTimeout(() => void poll(), nextDelayMs);
     };
+    // Live wake: while idling, a workspace-activity ping means something
+    // happened — poll now instead of waiting out the slow timer (the poll
+    // restores the fast cadence if a session appeared). The fast cadence
+    // needs no wake; its next poll lands within pollIntervalMs anyway.
+    const unsubscribe = bridge().onWorkspaceActivity(() => {
+      if (cancelled || !idleArmed) return;
+      if (polling) {
+        repollQueued = true;
+        return;
+      }
+      if (timer !== undefined) window.clearTimeout(timer);
+      void poll();
+    });
     void poll();
     return () => {
       cancelled = true;
+      unsubscribe();
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [dismissedFor, enabled, pollIntervalMs, workspaceId]);

@@ -72,17 +72,20 @@ function availableModes(
 
 // Reference-stable no-op for the 1s dev-log poll: an unchanged log ring MUST
 // keep the previous array so setState bails out instead of re-rendering the
-// page every second. Logs only append (truncating from the front at the cap),
-// so equal length + equal last entry means nothing changed.
+// page every second. Compare every entry: once the ring is at its cap the
+// length stays pinned, and multi-line chunks share one `at`, so length plus
+// last entry alone can miss an interior shift.
 function sameLogs(
   prev: StartSitePreviewResult["logs"],
   next: StartSitePreviewResult["logs"],
 ): boolean {
-  if (prev.length !== next.length) return false;
-  const a = prev[prev.length - 1];
-  const b = next[next.length - 1];
-  if (!a || !b) return true; // both empty
-  return a.at === b.at && a.stream === b.stream && a.text === b.text;
+  return (
+    prev.length === next.length &&
+    prev.every((a, i) => {
+      const b = next[i]!;
+      return a.at === b.at && a.stream === b.stream && a.text === b.text;
+    })
+  );
 }
 
 const SITE_PREVIEW_MODE_STORAGE_PREFIX = "dohc.site-preview-mode.v1";

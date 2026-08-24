@@ -9,7 +9,9 @@ import { useAgentNotifications } from "./useAgentNotifications";
 
 const WS_A_PERMISSION = {
   requestId: "perm-1",
+  requestType: "file-change",
   title: "Write notes/plan.md",
+  locations: ["notes/plan.md"],
   options: [{ optionId: "o1", name: "Allow", kind: "allow_once" }],
 };
 
@@ -38,13 +40,27 @@ const getAgentSessionState = vi.fn(async ({ workspaceId }: { workspaceId: string
   panelFor(workspaceId),
 );
 
+// The hook subscribes to workspace-activity pings to wake the idle cadence;
+// tests fire them through this registry.
+let activityListeners: Array<() => void> = [];
+const onWorkspaceActivity = vi.fn((listener: () => void) => {
+  activityListeners.push(listener);
+  return () => {
+    activityListeners = activityListeners.filter((entry) => entry !== listener);
+  };
+});
+const fireWorkspaceActivity = () => {
+  for (const listener of [...activityListeners]) listener();
+};
+
 beforeEach(() => {
   // A test may swap the implementation (e.g. to start a session mid-test);
   // restore the workspace-keyed default so tests stay independent.
   getAgentSessionState.mockImplementation(
     async ({ workspaceId }: { workspaceId: string }) => panelFor(workspaceId),
   );
-  vi.stubGlobal("dohcDesktop", { getAgentSessionState });
+  activityListeners = [];
+  vi.stubGlobal("dohcDesktop", { getAgentSessionState, onWorkspaceActivity });
 });
 
 afterEach(() => {
@@ -190,5 +206,74 @@ describe("useAgentNotifications idle polling", () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
     expect(getAgentSessionState).toHaveBeenCalledTimes(4);
+  });
+
+  it("polls immediately on a workspace-activity ping during the idle cadence", async () => {
+    const { result } = renderHook(() =>
+      useAgentNotifications({
+        workspaceId: "ws-b",
+        ...baseProps,
+        pollIntervalMs: 1_500,
+      }),
+    );
+    // Immediate poll sees no session; the next timer is the slow 10s one.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(1);
+
+    // A run starts and pings: the hook polls NOW — the first permission ask
+    // must not sit invisible for up to 10s.
+    getAgentSessionState.mockImplementation(async () => panelFor("ws-a"));
+    await act(async () => {
+      fireWorkspaceActivity();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(2);
+    expect(result.current.pendingPermissions).toHaveLength(1);
+
+    // That poll saw a session, so the fast cadence is restored...
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(3);
+
+    // ...and pings on the fast cadence are a no-op (no stacked polls).
+    await act(async () => {
+      fireWorkspaceActivity();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(3);
+  });
+
+  it("repaints the card when a reused requestId carries changed content", async () => {
+    const { result } = renderHook(() =>
+      useAgentNotifications({
+        workspaceId: "ws-a",
+        ...baseProps,
+        pollIntervalMs: 1_500,
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const asks = result.current.pendingPermissions;
+    expect(asks).toEqual([WS_A_PERMISSION]);
+
+    // Same requestId, new content (AgentSessionManager replaces the entry in
+    // place on requestId reuse). The single-ask snapshot has the same length
+    // and ids, so only content-aware equality repaints the card.
+    getAgentSessionState.mockImplementation(async () => {
+      const panel = panelFor("ws-a");
+      panel.session!.pendingPermissions = [
+        { ...WS_A_PERMISSION, title: "Write notes/other.md" },
+      ];
+      return panel;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(result.current.pendingPermissions).not.toBe(asks);
+    expect(result.current.pendingPermissions[0]!.title).toBe("Write notes/other.md");
   });
 });
