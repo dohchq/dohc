@@ -256,8 +256,13 @@ describe("plugin web app main-process wiring", () => {
     expect(displacementAt).toBeGreaterThan(installAt);
 
     const dispose = functionSource("async function disposePluginWebAppViews(");
-    expect(dispose).toContain("destroyPluginWebAppViews(records);");
+    expect(dispose).toContain(
+      "destroyPluginWebAppViews(records.map((record) => record.view));",
+    );
     expect(dispose).toContain("record.view.hostLease.release()");
+    expect(start).toContain("destroyPluginWebAppViews([pendingView]);");
+    expect(start).not.toContain('origin: "",');
+    expect(start).not.toContain('partition: "",');
   });
 
   it("destroys guest views on every teardown path a view could outlive", () => {

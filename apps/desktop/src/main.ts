@@ -3419,10 +3419,9 @@ function pluginWebAppKey(
 }
 
 function destroyPluginWebAppViews(
-  records: readonly PluginWebAppViewRecord<AttachedWebAppView>[],
+  views: readonly AttachedWebAppView[],
 ): void {
-  for (const record of records) {
-    const { view, window } = record.view;
+  for (const { view, window } of views) {
     try {
       if (!window.isDestroyed()) window.contentView.removeChildView(view);
     } catch (error) {
@@ -3439,7 +3438,7 @@ function destroyPluginWebAppViews(
 async function disposePluginWebAppViews(
   records: readonly PluginWebAppViewRecord<AttachedWebAppView>[],
 ): Promise<void> {
-  destroyPluginWebAppViews(records);
+  destroyPluginWebAppViews(records.map((record) => record.view));
   const releases = await Promise.allSettled(
     records.map((record) => record.view.hostLease.release()),
   );
@@ -8465,14 +8464,7 @@ function registerIpcHandlers(
                 displacedRecord = null;
               }
               if (pendingView) {
-                destroyPluginWebAppViews([{
-                  ...identity,
-                  senderId: sender.id,
-                  generation,
-                  origin: "",
-                  partition: "",
-                  view: pendingView,
-                }]);
+                destroyPluginWebAppViews([pendingView]);
                 pendingView = null;
               }
               await disposePluginWebAppViews(records);

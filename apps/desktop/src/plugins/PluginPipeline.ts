@@ -3549,36 +3549,15 @@ export class PluginPipeline {
           `Plugin "${pluginId}" has no confirmed uninstall reservation.`,
         );
       }
-      let decide!: (decision: UninstallCleanupDecision) => void;
-      let decided = false;
-      const decision = new Promise<UninstallCleanupDecision>((resolveDecision) => {
-        decide = (next) => {
-          if (decided) return;
-          decided = true;
-          resolveDecision(next);
-        };
-      });
-      let release!: () => void;
-      const released = new Promise<void>((resolveReleased) => {
-        release = resolveReleased;
-      });
-      let settleStop!: (
-        outcome: { ok: true } | { ok: false; error: unknown },
-      ) => void;
-      let stopSettled = false;
-      const stopOutcome = new Promise<
+      const { promise: decision, resolve: decide } =
+        Promise.withResolvers<UninstallCleanupDecision>();
+      const { promise: released, resolve: release } =
+        Promise.withResolvers<void>();
+      const { promise: stopOutcome, resolve: settleStop } = Promise.withResolvers<
         { ok: true } | { ok: false; error: unknown }
-      >((resolveStop) => {
-        settleStop = (outcome) => {
-          if (stopSettled) return;
-          stopSettled = true;
-          resolveStop(outcome);
-        };
-      });
-      let markReady!: () => void;
-      const ready = new Promise<void>((resolveReady) => {
-        markReady = resolveReady;
-      });
+      >();
+      const { promise: ready, resolve: markReady } =
+        Promise.withResolvers<void>();
       const action = this.enqueueActionValue(pluginId, async () => {
         markReady();
         if (await decision === "cancel") {

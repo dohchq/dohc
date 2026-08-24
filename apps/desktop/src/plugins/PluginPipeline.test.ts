@@ -368,6 +368,25 @@ async function waitFor(
   }
 }
 
+async function settleWithin<T>(
+  promise: Promise<T>,
+  message: string,
+  timeoutMs = 10_000,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function ensureFromCommand(
   pipeline: PluginPipeline,
   pluginId: string,
@@ -1952,6 +1971,63 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await starting?.catch(() => undefined);
       await lease?.release();
       await pipeline.dispose();
+    }
+  }, 60_000);
+
+  it("enqueues crossed alias uninstall claims and actions in one turn", async () => {
+    const setup = await createAliasUninstallFixture();
+    try {
+      const originalPreflight = await setup.pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!originalPreflight.ok) throw new Error(originalPreflight.error.message);
+      const runtimePreflight = await setup.pipeline.uninstallPreflight(
+        "runtime-id",
+        "shared-dir",
+      );
+      if (!runtimePreflight.ok) throw new Error(runtimePreflight.error.message);
+
+      const internals = setup.pipeline as unknown as PluginPipelineQueueInternals;
+      const enqueueActionValue = vi.spyOn(internals, "enqueueActionValue");
+      const removeOriginal = setup.pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        originalPreflight.confirmationToken,
+      );
+      const removeRuntime = setup.pipeline.uninstall(
+        "runtime-id",
+        "shared-dir",
+        runtimePreflight.confirmationToken,
+      );
+
+      // Each call must synchronously park its secondary claim and its primary
+      // action. If either call yields between them, these crossed claims can
+      // both run ahead of the actions whose decisions they await.
+      expect(enqueueActionValue.mock.calls.map(([pluginId]) => pluginId)).toEqual([
+        "runtime-id",
+        "original-id",
+        "original-id",
+        "runtime-id",
+      ]);
+
+      const [removedOriginal, removedRuntime] = await settleWithin(
+        Promise.all([removeOriginal, removeRuntime]),
+        "Crossed alias uninstalls did not settle",
+      );
+      expect(removedOriginal.ok).toBe(true);
+      expect(removedRuntime).toMatchObject({
+        ok: false,
+        error: { code: "confirmation-stale" },
+      });
+      await expect(lstat(setup.fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await settleWithin(
+        setup.pipeline.dispose(),
+        "Pipeline disposal did not settle after crossed alias uninstalls",
+      );
     }
   }, 60_000);
 
