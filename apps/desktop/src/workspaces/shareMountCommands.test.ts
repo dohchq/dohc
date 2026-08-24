@@ -3,14 +3,18 @@ import {
   RelayUnauthorizedError,
   ShareUnavailableError,
 } from "@dohc/workspace-contracts/relay";
-import type { WorkspaceOperationLease } from "./workspaceAssets";
-import type {
-  PreparedShareViewFilesMount,
-  ShareViewFiles,
-  ShareViewFilesOwnerCapability,
+import {
+  withExclusiveWorkspaceOperation,
+  type WorkspaceOperationLease,
+} from "./workspaceAssets";
+import {
+  createShareViewFiles,
+  ShareViewMountRollbackError,
+  type PreparedShareViewFilesMount,
+  type ShareViewFiles,
+  type ShareViewFilesOwnerCapability,
 } from "./shareViewFiles";
 import type { ShareMountRecord } from "./registryStore";
-import { ShareViewMountRollbackError } from "./shareViewFiles";
 import {
   createShareMountCommands,
   type ShareMountCommandDependencies,
@@ -25,7 +29,87 @@ const SELECTOR = {
   access: "view" as const,
 };
 const LEASE = {} as WorkspaceOperationLease;
-const OWNER = {} as ShareViewFilesOwnerCapability;
+
+const LIVE_OWNER_COMPLETE = Symbol("live owner complete");
+
+async function withLiveMountOwner<T>(
+  target: PreparedShareViewFilesMount,
+  run: (owner: ShareViewFilesOwnerCapability) => Promise<T>,
+): Promise<T> {
+  let settled:
+    | { ok: true; value: T }
+    | { ok: false; error: unknown }
+    | undefined;
+  const files = createShareViewFiles({
+    resolveTarget: () => null,
+    openStore: () => {
+      throw new Error("Live owner test reached the store.");
+    },
+    resolveRelay: async () => null,
+    pull: async () => {
+      throw new Error("Live owner test reached relay pull.");
+    },
+    recordRefusals: async () => undefined,
+    markEnded: async () => undefined,
+    retireTarget: async () => undefined,
+    assertProjectionRoot: async () => undefined,
+    createMount: async (owner) => {
+      try {
+        settled = { ok: true, value: await run(owner) };
+      } catch (error) {
+        settled = { ok: false, error };
+      }
+      throw LIVE_OWNER_COMPLETE;
+    },
+    removeMount: async () => ({ folderLeft: false }),
+  });
+
+  try {
+    await withExclusiveWorkspaceOperation(
+      target.schedulingRootPath,
+      (_changed, lease) => files.mount(lease, target),
+    );
+    throw new Error("Live owner test did not stop after admission.");
+  } catch (error) {
+    if (error !== LIVE_OWNER_COMPLETE) throw error;
+  }
+  if (settled === undefined) {
+    throw new Error("Live owner test did not invoke its operation.");
+  }
+  if (!settled.ok) throw settled.error;
+  return settled.value;
+}
+
+function preparedTarget(
+  overrides: Partial<PreparedShareViewFilesMount> = {},
+): PreparedShareViewFilesMount {
+  return {
+    kind: "mount",
+    workspaceId: WORKSPACE.workspaceId,
+    storeWorkspaceId: "mount-store",
+    schedulingRootPath: WORKSPACE.rootPath,
+    rootPath: `${WORKSPACE.rootPath}/shared-with-me/alex`,
+    shareId: SHARE_ID,
+    mountLabel: "alex",
+    granterEmail: "alex@example.com",
+    relayUrl: "https://relay.example",
+    recipientEmail: null,
+    grantedSelector: SELECTOR,
+    ended: false,
+    ...overrides,
+  };
+}
+
+const CROSS_TARGET_CASES: ReadonlyArray<
+  readonly [string, Partial<PreparedShareViewFilesMount>]
+> = [
+  ["workspaceId", { workspaceId: "workspace-two" }],
+  ["storeWorkspaceId", { storeWorkspaceId: "mount-store-two" }],
+  ["shareId", { shareId: "22222222-2222-4222-8222-222222222222" }],
+  ["mountLabel", { mountLabel: "blair" }],
+  ["schedulingRootPath", { schedulingRootPath: "C:/workspace-two" }],
+  ["rootPath", { rootPath: "C:/workspace-two/shared-with-me/blair" }],
+];
 
 function harness() {
   const events: string[] = [];
@@ -39,7 +123,9 @@ function harness() {
   const files: ShareViewFiles = {
     mount: vi.fn(async (_lease, target: PreparedShareViewFilesMount) => {
       events.push("files:mount");
-      await filesLifecycle!.createMount(OWNER, target);
+      await withLiveMountOwner(target, (owner) =>
+        filesLifecycle!.createMount(owner, target),
+      );
       if (mountFailure !== undefined) throw mountFailure;
       return {
         status: "updated",
@@ -58,20 +144,19 @@ function harness() {
       const mount = mounts.find(
         (candidate) => candidate.shareId === target.shareId,
       )!;
-      return filesLifecycle!.removeMount(OWNER, {
-        kind: "mount",
-        workspaceId: WORKSPACE.workspaceId,
-        storeWorkspaceId: "mount-store",
-        schedulingRootPath: WORKSPACE.rootPath,
-        rootPath: `${WORKSPACE.rootPath}/shared-with-me/${mount.label}`,
+      const active = preparedTarget({
         shareId: mount.shareId,
         mountLabel: mount.label,
+        rootPath: `${WORKSPACE.rootPath}/shared-with-me/${mount.label}`,
         granterEmail: mount.granterEmail,
         relayUrl: mount.relayUrl,
         recipientEmail: mount.recipientEmail ?? null,
         grantedSelector: mount.grantedSelector,
         ended: mount.ended === true,
       });
+      return withLiveMountOwner(active, (owner) =>
+        filesLifecycle!.removeMount(owner, active),
+      );
     }),
     change: vi.fn(),
     read: vi.fn(),
@@ -269,23 +354,12 @@ describe("share mount commands", () => {
     };
     h.removeOutcome = { folderLeft: true };
     const commands = createShareMountCommands(h.dependencies);
-    const target = {
-      kind: "mount" as const,
-      workspaceId: WORKSPACE.workspaceId,
-      storeWorkspaceId: "mount-store",
-      schedulingRootPath: WORKSPACE.rootPath,
-      rootPath: `${WORKSPACE.rootPath}/shared-with-me/alex`,
-      shareId: SHARE_ID,
-      mountLabel: "alex",
-      granterEmail: "alex@example.com",
-      relayUrl: "https://relay.example",
-      recipientEmail: null,
-      grantedSelector: SELECTOR,
-      ended: false,
-    };
+    const target = preparedTarget();
 
     await expect(
-      commands.filesLifecycle.createMount(OWNER, target),
+      withLiveMountOwner(target, (owner) =>
+        commands.filesLifecycle.createMount(owner, target),
+      ),
     ).rejects.toBeInstanceOf(ShareViewMountRollbackError);
     expect(h.events).toEqual(["projection:create", "projection:remove"]);
   });
@@ -308,20 +382,10 @@ describe("share mount commands", () => {
     };
     const commands = createShareMountCommands(h.dependencies);
 
-    const result = await commands.filesLifecycle.removeMount(OWNER, {
-      kind: "mount",
-      workspaceId: WORKSPACE.workspaceId,
-      storeWorkspaceId: "mount-store",
-      schedulingRootPath: WORKSPACE.rootPath,
-      rootPath: `${WORKSPACE.rootPath}/shared-with-me/alex`,
-      shareId: SHARE_ID,
-      mountLabel: "alex",
-      granterEmail: null,
-      relayUrl: "https://relay.example",
-      recipientEmail: null,
-      grantedSelector: SELECTOR,
-      ended: false,
-    });
+    const target = preparedTarget({ granterEmail: null });
+    const result = await withLiveMountOwner(target, (owner) =>
+      commands.filesLifecycle.removeMount(owner, target),
+    );
 
     expect(result).toEqual({ folderLeft: false });
     expect(h.mounts).toEqual([]);
@@ -332,6 +396,40 @@ describe("share mount commands", () => {
       "registry:0",
     ]);
   });
+
+  it.each(CROSS_TARGET_CASES)(
+    "rejects createMount when a live owner belongs to another %s",
+    async (_field, overrides) => {
+      const h = harness();
+      const ownerTarget = preparedTarget();
+      const otherTarget = preparedTarget(overrides);
+
+      await expect(
+        withLiveMountOwner(ownerTarget, (owner) =>
+          h.commands.filesLifecycle.createMount(owner, otherTarget),
+        ),
+      ).rejects.toThrow("belongs to another target");
+      expect(h.events).toEqual([]);
+      expect(h.mounts).toEqual([]);
+    },
+  );
+
+  it.each(CROSS_TARGET_CASES)(
+    "rejects removeMount when a live owner belongs to another %s",
+    async (_field, overrides) => {
+      const h = harness();
+      const ownerTarget = preparedTarget();
+      const otherTarget = preparedTarget(overrides);
+
+      await expect(
+        withLiveMountOwner(ownerTarget, (owner) =>
+          h.commands.filesLifecycle.removeMount(owner, otherTarget),
+        ),
+      ).rejects.toThrow("belongs to another target");
+      expect(h.events).toEqual([]);
+      expect(h.mounts).toEqual([]);
+    },
+  );
 
   it("refreshes usable mounts one lease at a time and contains damaged rows", async () => {
     const h = harness();

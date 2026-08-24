@@ -20,6 +20,7 @@ import {
 } from "./shareMounts";
 import type { ShareViewInfo } from "./shareViewInfo";
 import {
+  assertActiveShareViewFilesOwner,
   ShareViewMountRollbackError,
   type PreparedShareViewFilesMount,
   type ShareViewFiles,
@@ -95,6 +96,29 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+type ShareMountLifecycleTarget =
+  | Parameters<ShareMountFilesLifecycle["createMount"]>[1]
+  | Parameters<ShareMountFilesLifecycle["removeMount"]>[1];
+
+function assertShareMountLifecycleOwner(
+  owner: Parameters<ShareMountFilesLifecycle["createMount"]>[0],
+  target: ShareMountLifecycleTarget,
+  invalidTargetMessage: string,
+): void {
+  if (target.kind !== "mount" || !target.mountLabel) {
+    throw new Error(invalidTargetMessage);
+  }
+  assertActiveShareViewFilesOwner(owner, {
+    kind: target.kind,
+    workspaceId: target.workspaceId,
+    storeWorkspaceId: target.storeWorkspaceId,
+    shareId: target.shareId,
+    mountLabel: target.mountLabel,
+    schedulingRootPath: target.schedulingRootPath,
+    rootPath: target.rootPath,
+  });
+}
+
 export function createShareMountCommands<WorkspaceSummary>(
   dependencies: ShareMountCommandDependencies<WorkspaceSummary>,
 ): ShareMountCommands<WorkspaceSummary> {
@@ -125,11 +149,12 @@ export function createShareMountCommands<WorkspaceSummary>(
   // cannot remove the projection it just created.
   const filesLifecycle: ShareMountFilesLifecycle = {
     async createMount(owner, target) {
-      if (
-        target.kind !== "mount" ||
-        !target.mountLabel ||
-        !target.relayUrl
-      ) {
+      assertShareMountLifecycleOwner(
+        owner,
+        target,
+        "Only a prepared share mount can be created.",
+      );
+      if (!target.relayUrl) {
         throw new Error("Only a prepared share mount can be created.");
       }
       const projection = dependencies.projectionFor(owner);
@@ -161,9 +186,11 @@ export function createShareMountCommands<WorkspaceSummary>(
     },
 
     async removeMount(owner, target) {
-      if (target.kind !== "mount" || !target.mountLabel) {
-        throw new Error("Only a registered share mount can be removed.");
-      }
+      assertShareMountLifecycleOwner(
+        owner,
+        target,
+        "Only a registered share mount can be removed.",
+      );
       await dependencies.closeRelayWorkspace(target.storeWorkspaceId).catch(
         (error) => {
           dependencies.logError(
