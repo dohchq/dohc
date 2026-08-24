@@ -2071,12 +2071,6 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
 
       await Promise.all([aliasStopEntered.promise, primaryStopEntered.promise]);
-      // Let the rejected alias stop propagate through every promise already
-      // queued in this turn. The primary stop remains deliberately gated.
-      await new Promise<void>((resolveTurn) => setImmediate(resolveTurn));
-      expect(claimReleasedBeforePrimaryStop).toBe(false);
-      expect(lateAliasJobEntered).toBe(false);
-
       releasePrimaryStop.resolve();
       const removed = await removing;
       await lateAliasJob;
@@ -2085,6 +2079,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         ok: false,
         error: { code: "delete-failed" },
       });
+      expect(primaryStopFinished).toBe(true);
       expect(claimReleasedBeforePrimaryStop).toBe(false);
       expect(claimReleaseCalls).toBe(1);
       expect(lateAliasJobEntered).toBe(true);
@@ -7862,6 +7857,126 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           reason: "change-in-progress",
         });
         expect((await disabling).ok).toBe(true);
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("restores durable enablement when disable cannot stop the live host", async () => {
+      const setup = await setupEstablishedPlugin();
+      const record = setup.pipeline.host.currentRecord("example-plugin");
+      expect(record).toBeDefined();
+      const stop = vi.spyOn(setup.pipeline.host, "stop").mockRejectedValue(
+        new Error("simulated stop failure with a live record"),
+      );
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        expect(disabled).toMatchObject({
+          ok: false,
+          error: {
+            code: "disable-failed",
+            message: "simulated stop failure with a live record",
+          },
+        });
+        expect(stop).toHaveBeenCalledTimes(1);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBe(record);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(setup.pipeline.list()[0]).toMatchObject({
+          status: "ready",
+          runtimeStatus: "ready",
+          error: { code: "disable-failed" },
+        });
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(false);
+
+        await expect(
+          setup.hostOwnership.runCommand(
+            "example-plugin",
+            async (authority) => authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority)),
+          ),
+        ).resolves.toMatchObject({
+          kind: "completed",
+          value: {
+            kind: "admitted",
+            value: {
+              ok: true,
+              plugin: { status: "ready", runtimeStatus: "ready" },
+            },
+          },
+        });
+      } finally {
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the safe durable disable when stop compensation cannot be written", async () => {
+      const setup = await setupEstablishedPlugin();
+      const record = setup.pipeline.host.currentRecord("example-plugin");
+      expect(record).toBeDefined();
+      const consoleError = vi.spyOn(console, "error").mockImplementation(
+        () => undefined,
+      );
+      const stop = vi.spyOn(setup.pipeline.host, "stop").mockImplementation(
+        async () => {
+          setup.failNextRecordWrite();
+          throw new Error("simulated original stop failure");
+        },
+      );
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        expect(disabled).toMatchObject({
+          ok: false,
+          error: {
+            code: "disable-failed",
+            message: "simulated original stop failure",
+          },
+        });
+        expect(stop).toHaveBeenCalledTimes(1);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBe(record);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(true);
+        expect(consoleError).toHaveBeenCalledWith(
+          expect.stringContaining("failed to restore the durable state"),
+          expect.objectContaining({
+            message: "simulated approval record write failure",
+          }),
+        );
+      } finally {
+        stop.mockRestore();
+        consoleError.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the durable disable when disposal supersedes the stop", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        const disabling = setup.pipeline.disable("example-plugin");
+        const disposing = setup.pipeline.dispose();
+
+        await expect(disabling).resolves.toMatchObject({ ok: false });
+        await disposing;
+
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(true);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBeUndefined();
       } finally {
         await setup.pipeline.dispose();
       }

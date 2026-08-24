@@ -1009,15 +1009,47 @@ export class PluginPipeline {
 
   disable(pluginId: string): Promise<PluginPipelineActionResult> {
     return this.enqueueAdoptedAction(pluginId, async (change) => {
+      let priorDisabled: boolean | undefined;
       try {
         const candidate = this.requireValidCandidate(pluginId);
         await this.operations.mutateRecord(
           this.options.stateDir,
           this.workspaceRoot,
           pluginId,
-          (record) => ({ ...record, disabled: true }),
+          (record) => {
+            priorDisabled = record?.disabled;
+            return { ...record, disabled: true };
+          },
         );
-        await this.stopOldRuntime(pluginId, change);
+        try {
+          await this.stopOldRuntime(pluginId, change);
+        } catch (stopError) {
+          if (
+            !this.disposed &&
+            this.host.currentRecord(pluginId)
+          ) {
+            try {
+              await this.operations.mutateRecord(
+                this.options.stateDir,
+                this.workspaceRoot,
+                pluginId,
+                (record) => {
+                  if (!record) return record;
+                  const restored = { ...record };
+                  if (priorDisabled === undefined) delete restored.disabled;
+                  else restored.disabled = priorDisabled;
+                  return restored;
+                },
+              );
+            } catch (compensationError) {
+              console.error(
+                `[PluginPipeline] failed to restore the durable state after stop failed for "${pluginId}".`,
+                compensationError,
+              );
+            }
+          }
+          throw stopError;
+        }
         return existingHostResult(this.success(this.setStatus(candidate, {
           status: "disabled",
           disabledReason: "user",
