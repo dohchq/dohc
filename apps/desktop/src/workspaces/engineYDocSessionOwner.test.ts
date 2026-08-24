@@ -12,7 +12,7 @@ interface TestSender {
 }
 
 interface TestSession {
-  close: () => Promise<void>;
+  close: (options?: { shuttingDown?: boolean }) => Promise<void>;
 }
 
 type TestOutbound = EngineYDocSessionOutbound<
@@ -535,7 +535,7 @@ describe("EngineYDocSessionOwner", () => {
         sessionId: "renderer-session-1",
         lineageGeneration: 2,
       }),
-    ).toEqual({ kind: "applied", updates: [] });
+    ).toEqual({ kind: "applied", replacement: "winner", updates: [] });
 
     signals.replaceLineage("next winner");
     signals.remoteUpdate("buffered delta");
@@ -546,7 +546,178 @@ describe("EngineYDocSessionOwner", () => {
         sessionId: "renderer-session-1",
         lineageGeneration: 3,
       }),
-    ).toEqual({ kind: "applied", updates: ["buffered delta"] });
+    ).toEqual({
+      kind: "applied",
+      replacement: "next winner",
+      updates: ["buffered delta"],
+    });
+  });
+
+  it("keeps exact-owner session access available through a failed release", async () => {
+    const owner = createOwner();
+    const sender = { id: 7, label: "window-a" };
+    const foreign = { id: 7, label: "window-b" };
+    let refuseRelease = true;
+
+    await owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        openSession: async () => ({
+          session: {
+            close: async () => {
+              if (refuseRelease) throw new Error("still held");
+            },
+          },
+          value: "opened",
+        }),
+      }),
+    );
+
+    expect(
+      owner.accessSession(
+        { sender, generation: 1, sessionId: "renderer-session-1" },
+        () => "pinned asset",
+      ),
+    ).toEqual({ kind: "available", value: "pinned asset" });
+    expect(
+      owner.accessSession(
+        { sender: foreign, generation: 1, sessionId: "renderer-session-1" },
+        () => "foreign asset",
+      ),
+    ).toEqual({ kind: "refused", reason: "session-unavailable" });
+
+    await owner.release({
+      sender,
+      generation: 1,
+      sessionId: "renderer-session-1",
+    });
+    expect(
+      owner.accessSession(
+        { sender, generation: 1, sessionId: "renderer-session-1" },
+        () => "recovery asset",
+      ),
+    ).toEqual({ kind: "available", value: "recovery asset" });
+
+    refuseRelease = false;
+    await owner.release({
+      sender,
+      generation: 1,
+      sessionId: "renderer-session-1",
+    });
+    expect(
+      owner.accessSession(
+        { sender, generation: 1, sessionId: "renderer-session-1" },
+        () => "gone",
+      ),
+    ).toEqual({ kind: "refused", reason: "session-unavailable" });
+  });
+
+  it("exposes workspace-path ownership and visits only matching sessions", async () => {
+    const owner = createOwner();
+    const sender = { id: 7, label: "window-a" };
+    const pendingOpen = deferred<{ session: TestSession; value: string }>();
+    const pending = owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "pending",
+        path: "notes/pending.md",
+        openSession: () => pendingOpen.promise,
+      }),
+    );
+
+    expect(owner.ownsDocument("workspace-1", "notes/pending.md")).toBe(true);
+
+    pendingOpen.resolve({
+      session: { close: async () => undefined },
+      value: "pending",
+    });
+    await pending;
+    await owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "nested",
+        path: "notes/folder/nested.md",
+        openSession: async () => ({
+          session: { close: async () => undefined },
+          value: "nested",
+        }),
+      }),
+    );
+    await owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "other-workspace",
+        workspaceId: "workspace-2",
+        path: "notes/folder/foreign.md",
+        openSession: async () => ({
+          session: { close: async () => undefined },
+          value: "foreign",
+        }),
+      }),
+    );
+
+    let visited = 0;
+    owner.forEachSessionUnderPath("workspace-1", "notes/folder", () => {
+      visited += 1;
+    });
+
+    expect(visited).toBe(1);
+    expect(owner.ownsDocument("workspace-2", "notes/folder/foreign.md")).toBe(
+      true,
+    );
+    expect(owner.ownsDocument("workspace-1", "notes/folder/foreign.md")).toBe(
+      false,
+    );
+  });
+
+  it("shuts down open and pending sessions with the quit-specific close", async () => {
+    const owner = createOwner();
+    const sender = { id: 7, label: "window-a" };
+    const pendingOpen = deferred<{ session: TestSession; value: string }>();
+    const openStarted = deferred<void>();
+    const close = vi.fn(async () => undefined);
+    const opening = owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        openSession: () => {
+          openStarted.resolve();
+          return pendingOpen.promise;
+        },
+      }),
+    );
+
+    await openStarted.promise;
+    const shutdown = owner.shutdown();
+    pendingOpen.resolve({ session: { close }, value: "too late" });
+
+    await expect(opening).resolves.toEqual({
+      kind: "cancelled",
+      reason: "shutting-down",
+      release: { kind: "released" },
+    });
+    await expect(shutdown).resolves.toEqual([{ kind: "released" }]);
+    expect(close).toHaveBeenCalledWith({ shuttingDown: true });
+
+    const afterShutdown = vi.fn();
+    await expect(
+      owner.open(
+        openInput({
+          sender,
+          generation: 2,
+          openSession: afterShutdown,
+        }),
+      ),
+    ).resolves.toEqual({
+      kind: "cancelled",
+      reason: "shutting-down",
+      release: { kind: "released" },
+    });
+    expect(afterShutdown).not.toHaveBeenCalled();
   });
 
   it("retains a failed release for an exact-owner retry and stays silent", async () => {

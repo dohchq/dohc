@@ -15,8 +15,12 @@ export interface EngineYDocSessionCaller<
   sessionId: string;
 }
 
+export interface EngineYDocSessionCloseOptions {
+  shuttingDown?: boolean;
+}
+
 export interface ReleasableEngineYDocSession {
-  close: () => Promise<void>;
+  close: (options?: EngineYDocSessionCloseOptions) => Promise<void>;
 }
 
 export interface EngineYDocSessionSignals<TEvent, TUpdate, TReplacement> {
@@ -65,6 +69,7 @@ export type EngineYDocSessionOpenResult<TValue> =
         | "lineage-announcement-failed"
         | "released"
         | "sender-retired"
+        | "shutting-down"
         | "superseded";
       release: EngineYDocSessionReleaseOutcome;
     }
@@ -79,8 +84,8 @@ export type EngineYDocSessionApplyResult<TValue> =
       reason: "session-unavailable" | "lineage-transition";
     };
 
-export type EngineYDocSessionAcknowledgeResult<TUpdate> =
-  | { kind: "applied"; updates: TUpdate[] }
+export type EngineYDocSessionAcknowledgeResult<TUpdate, TReplacement> =
+  | { kind: "applied"; replacement: TReplacement; updates: TUpdate[] }
   | {
       kind: "refused";
       reason: "session-unavailable" | "lineage-transition";
@@ -120,8 +125,9 @@ type OpenCancellation = Extract<
   { kind: "cancelled" }
 >["reason"];
 
-interface LineageHandoff<TUpdate> {
+interface LineageHandoff<TUpdate, TReplacement> {
   lineageGeneration: number;
+  replacement: TReplacement;
   updates: TUpdate[];
 }
 
@@ -155,8 +161,9 @@ interface SessionRecord<
   session: TSession | null;
   closeInFlight: Promise<EngineYDocSessionReleaseOutcome> | null;
   releaseFailure: { error: unknown } | null;
+  shuttingDown: boolean;
   lineageGeneration: number;
-  handoff: LineageHandoff<TUpdate> | null;
+  handoff: LineageHandoff<TUpdate, TReplacement> | null;
   queuedHandoff: QueuedLineageReplacement<TUpdate, TReplacement> | null;
 }
 
@@ -174,6 +181,13 @@ export interface EngineYDocSessionOwnerOptions<
       TReplacement
     >,
   ) => void;
+  onReleaseFailed?: (
+    failure: EngineYDocSessionCaller<TSender> & {
+      workspaceId: string;
+      path: string;
+      error: unknown;
+    },
+  ) => void;
 }
 
 /** Owns renderer-scoped engine Y.Doc sessions across every asynchronous state. */
@@ -190,6 +204,14 @@ export class EngineYDocSessionOwner<
     TUpdate,
     TReplacement
   >["onOutbound"];
+  readonly #onReleaseFailed: NonNullable<
+    EngineYDocSessionOwnerOptions<
+      TSender,
+      TEvent,
+      TUpdate,
+      TReplacement
+    >["onReleaseFailed"]
+  >;
   readonly #slots = new Map<
     string,
     SessionRecord<TSender, TSession, TUpdate, TReplacement>
@@ -198,6 +220,7 @@ export class EngineYDocSessionOwner<
     SessionRecord<TSender, TSession, TUpdate, TReplacement>
   >();
   readonly #senderGenerations = new Map<number, SenderGeneration<TSender>>();
+  #shuttingDown = false;
 
   constructor(
     options: EngineYDocSessionOwnerOptions<
@@ -208,6 +231,7 @@ export class EngineYDocSessionOwner<
     >,
   ) {
     this.#onOutbound = options.onOutbound;
+    this.#onReleaseFailed = options.onReleaseFailed ?? (() => undefined);
   }
 
   open<TValue>(
@@ -220,6 +244,13 @@ export class EngineYDocSessionOwner<
       TValue
     >,
   ): Promise<EngineYDocSessionOpenResult<TValue>> {
+    if (this.#shuttingDown) {
+      return Promise.resolve({
+        kind: "cancelled",
+        reason: "shutting-down",
+        release: { kind: "released" },
+      });
+    }
     const stale = this.#admitGeneration(input);
     if (stale) {
       return Promise.resolve({
@@ -258,6 +289,7 @@ export class EngineYDocSessionOwner<
       session: null,
       closeInFlight: null,
       releaseFailure: null,
+      shuttingDown: false,
       lineageGeneration: 1,
       handoff: null,
       queuedHandoff: null,
@@ -289,7 +321,7 @@ export class EngineYDocSessionOwner<
 
   acknowledgeLineageReplacement(
     input: EngineYDocSessionCaller<TSender> & { lineageGeneration: number },
-  ): EngineYDocSessionAcknowledgeResult<TUpdate> {
+  ): EngineYDocSessionAcknowledgeResult<TUpdate, TReplacement> {
     const record = this.#current(input);
     if (!record || record.state !== "open") {
       return { kind: "refused", reason: "session-unavailable" };
@@ -305,9 +337,54 @@ export class EngineYDocSessionOwner<
     record.queuedHandoff = null;
     if (queued) {
       this.#installHandoff(record, queued.replacement, queued.updates);
-      return { kind: "applied", updates: [] };
+      return {
+        kind: "applied",
+        replacement: handoff.replacement,
+        updates: [],
+      };
     }
-    return { kind: "applied", updates: handoff.updates };
+    return {
+      kind: "applied",
+      replacement: handoff.replacement,
+      updates: handoff.updates,
+    };
+  }
+
+  accessSession<TValue>(
+    input: EngineYDocSessionCaller<TSender>,
+    access: (session: TSession) => TValue,
+  ):
+    | { kind: "available"; value: TValue }
+    | { kind: "refused"; reason: "session-unavailable" } {
+    const record = this.#current(input);
+    if (!record || record.session === null) {
+      return { kind: "refused", reason: "session-unavailable" };
+    }
+    return { kind: "available", value: access(record.session) };
+  }
+
+  ownsDocument(workspaceId: string, path: string): boolean {
+    return [...this.#records].some(
+      (record) => record.workspaceId === workspaceId && record.path === path,
+    );
+  }
+
+  forEachSessionUnderPath(
+    workspaceId: string,
+    pathOrPrefix: string,
+    visit: (session: TSession) => void,
+  ): void {
+    for (const record of this.#records) {
+      if (
+        record.session === null ||
+        record.workspaceId !== workspaceId ||
+        (record.path !== pathOrPrefix &&
+          !record.path.startsWith(`${pathOrPrefix}/`))
+      ) {
+        continue;
+      }
+      visit(record.session);
+    }
   }
 
   release(
@@ -335,6 +412,15 @@ export class EngineYDocSessionOwner<
     );
     return Promise.all(
       records.map((record) => this.#retire(record, "sender-retired", true)),
+    );
+  }
+
+  shutdown(): Promise<EngineYDocSessionReleaseOutcome[]> {
+    this.#shuttingDown = true;
+    return Promise.all(
+      [...this.#records].map((record) =>
+        this.#retire(record, "shutting-down", true, true),
+      ),
     );
   }
 
@@ -456,6 +542,7 @@ export class EngineYDocSessionOwner<
   ): void {
     const handoff = {
       lineageGeneration: record.lineageGeneration + 1,
+      replacement,
       updates,
     };
     record.handoff = handoff;
@@ -598,7 +685,9 @@ export class EngineYDocSessionOwner<
     record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
     cancellation: OpenCancellation,
     vacateSlot: boolean,
+    shuttingDown = false,
   ): Promise<EngineYDocSessionReleaseOutcome> {
+    record.shuttingDown ||= shuttingDown;
     if (vacateSlot && this.#slots.get(record.key) === record) {
       this.#slots.delete(record.key);
     }
@@ -627,9 +716,23 @@ export class EngineYDocSessionOwner<
     record.releaseFailure = null;
     const close = (async (): Promise<EngineYDocSessionReleaseOutcome> => {
       try {
-        await session.close();
+        await session.close(
+          record.shuttingDown ? { shuttingDown: true } : undefined,
+        );
       } catch (error) {
         record.releaseFailure = { error };
+        try {
+          this.#onReleaseFailed({
+            sender: record.sender,
+            generation: record.generation,
+            sessionId: record.sessionId,
+            workspaceId: record.workspaceId,
+            path: record.path,
+            error,
+          });
+        } catch {
+          // Failure reporting cannot change the release result.
+        }
         return { kind: "failed", error };
       }
       this.#forget(record);

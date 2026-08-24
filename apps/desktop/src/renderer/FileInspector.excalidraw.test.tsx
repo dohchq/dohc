@@ -202,6 +202,7 @@ function bridgeFor(
       },
     ),
     acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+      accepted: true as const,
       updates: [],
     })),
     onEngineYDocSaveState: vi.fn(

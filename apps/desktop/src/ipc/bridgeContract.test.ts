@@ -25,6 +25,7 @@ import {
   EngineMomentDetailRecord,
   ApplyEngineYDocUpdatePayload,
   ApplyEngineYDocUpdateResult,
+  AcknowledgeEngineYDocLineageReplacementResult,
   OpenEngineYDocSessionResult,
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
@@ -2502,6 +2503,21 @@ describe("engine Y.Doc update IPC contract", () => {
         reason: "silently-dropped",
       }).success,
     ).toBe(false);
+  });
+
+  it("distinguishes lineage acknowledgement from refusal", () => {
+    expect(
+      AcknowledgeEngineYDocLineageReplacementResult.parse({
+        accepted: true,
+        updates: [],
+      }),
+    ).toEqual({ accepted: true, updates: [] });
+    expect(
+      AcknowledgeEngineYDocLineageReplacementResult.parse({
+        accepted: false,
+        reason: "session-unavailable",
+      }),
+    ).toEqual({ accepted: false, reason: "session-unavailable" });
   });
 });
 
