@@ -68,9 +68,7 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
     assert!(
         matches!(
             error,
-            RuntimeError::Collab(
-                CollabError::ReplayParityViolation { .. } | CollabError::MalformedUpdate { .. }
-            )
+            RuntimeError::Collab(CollabError::ReplayParityViolation { .. })
         ),
         "the durable validator names the defect: {error:?}"
     );

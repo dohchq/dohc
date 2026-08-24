@@ -19,7 +19,7 @@
 //! per-peer applied cursor is R11b's replication-drain job (the `origin_seq`
 //! carried on [`RemoteUpdate`] is that cursor's input).
 
-use dohc_engine_storage::{put_binary_blob, EngineStore, FaultInjector, TxnOutcome};
+use dohc_engine_storage::{put_binary_blob_with_sha, EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::Transaction;
 
 use crate::durable::{
@@ -147,7 +147,7 @@ pub fn apply_remote_update_in_transaction(
     if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }
-    put_binary_blob(tx, &remote.bytes)?;
+    put_binary_blob_with_sha(tx, &remote.bytes, &sha)?;
     let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
     Ok(ReplicationApplyOutcome::Applied {
         seq,

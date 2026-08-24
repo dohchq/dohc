@@ -9995,10 +9995,11 @@ fn ydoc_record_update_on_store(
         return Err(RuntimeError::Cancelled);
     }
     // Validation happens ONCE, in the durable layer's `validate_update_bytes`,
-    // inside the append transaction and before any row is touched — a
-    // malformed first seed rolls the whole transaction back, so it cannot
-    // strand a bare file_objects row for the deterministic object id (which
-    // regular writes then treat as already existing).
+    // inside the append transaction. The rows the transaction writes before it
+    // (the path stamp, the ensured file_objects parent) roll back with the
+    // rejection, so a malformed first seed cannot strand a bare file_objects
+    // row for the deterministic object id (which regular writes then treat as
+    // already existing).
     //
     // The origination decision is made inside the append transaction and read
     // after it commits, so a decline reported to the caller is one that
