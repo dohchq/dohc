@@ -345,7 +345,14 @@ export function createShareMountCommands<WorkspaceSummary>(
                 `mount-share rollback for ${mount.label}:`,
                 mountError,
               );
-              dependencies.notifyRenderer();
+              try {
+                dependencies.notifyRenderer();
+              } catch (notifyError) {
+                dependencies.logError(
+                  `could not notify renderer after mount-share failure for ${mount.label}:`,
+                  notifyError,
+                );
+              }
               if (mountError instanceof ShareUnavailableError) {
                 throw new Error(
                   "This share was ended before it could be added. Nothing was added to this workspace.",

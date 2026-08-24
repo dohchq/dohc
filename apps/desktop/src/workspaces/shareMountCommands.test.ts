@@ -304,9 +304,13 @@ describe("share mount commands", () => {
   it("preserves incomplete post-commit cleanup evidence", async () => {
     const h = harness();
     const cleanupFailure = new Error("folder is busy");
+    const notifyFailure = new Error("notify failed");
     const loggedErrors: unknown[] = [];
     h.dependencies.refreshNativeWorkspaceSurfaces = () => {
       throw new Error("native refresh failed");
+    };
+    h.dependencies.notifyRenderer = () => {
+      throw notifyFailure;
     };
     h.dependencies.logError = (_message, error) => {
       loggedErrors.push(error);
@@ -318,11 +322,14 @@ describe("share mount commands", () => {
       commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
     ).rejects.toThrow("cleanup did not finish");
 
-    const rollbackError = loggedErrors.at(-1);
+    const rollbackError = loggedErrors.find(
+      (error) => error instanceof ShareViewMountRollbackError,
+    );
     expect(rollbackError).toBeInstanceOf(ShareViewMountRollbackError);
     expect(
       (rollbackError as ShareViewMountRollbackError).rollbackError,
     ).toBe(cleanupFailure);
+    expect(loggedErrors).toContain(notifyFailure);
     expect(h.mounts).toEqual([]);
   });
 
@@ -403,6 +410,21 @@ describe("share mount commands", () => {
       h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
     ).rejects.toThrow("cleanup did not finish");
     expect(h.events.at(-1)).toBe("notify");
+  });
+
+  it("does not unmount again when files.mount rejects", async () => {
+    const h = harness();
+    vi.mocked(h.files.mount).mockImplementationOnce(async () => {
+      h.events.push("files:mount");
+      throw new Error("pull failed");
+    });
+
+    await expect(
+      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+    ).rejects.toThrow("Nothing was added");
+
+    expect(h.files.unmount).not.toHaveBeenCalled();
+    expect(h.mounts).toEqual([]);
   });
 
   it("turns registry-write plus projection-remove failure into rollback evidence", async () => {
