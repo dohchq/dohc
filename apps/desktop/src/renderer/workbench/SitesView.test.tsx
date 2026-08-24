@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
@@ -27,8 +27,18 @@ const site: SitePackageInfo = {
 };
 
 const bridgeMock = {
-  listSites: vi.fn(async () => ({ sites: [site] })),
+  listSites: vi.fn(async (_input: { workspaceId: string }) => ({
+    sites: [site],
+  })),
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 describe("SitesView", () => {
   beforeEach(() => {
@@ -106,6 +116,43 @@ describe("SitesView", () => {
     await Promise.resolve();
 
     expect(bridgeMock.listSites).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a late workspace response replace the current sites", async () => {
+    const workspaceA = deferred<{ sites: SitePackageInfo[] }>();
+    const workspaceB = deferred<{ sites: SitePackageInfo[] }>();
+    bridgeMock.listSites.mockImplementation((input: { workspaceId: string }) =>
+      input.workspaceId === "workspace-a"
+        ? workspaceA.promise
+        : workspaceB.promise,
+    );
+    const view = render(
+      <SitesView
+        workspaceId="workspace-a"
+        filesSettledRevision={0}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    view.rerender(
+      <SitesView
+        workspaceId="workspace-b"
+        filesSettledRevision={0}
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await act(async () => {
+      workspaceB.resolve({ sites: [{ ...site, title: "Current Site" }] });
+      await workspaceB.promise;
+    });
+    expect(await screen.findByText("Current Site")).toBeTruthy();
+
+    await act(async () => {
+      workspaceA.resolve({ sites: [{ ...site, title: "Stale Site" }] });
+      await workspaceA.promise;
+    });
+    expect(screen.getByText("Current Site")).toBeTruthy();
+    expect(screen.queryByText("Stale Site")).toBeNull();
   });
 
   it("does not fabricate sites from files while IPC is loading", () => {

@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
 type WorkspaceGraphNode = WorkspaceGraphResult["nodes"][number];
 
@@ -670,37 +671,35 @@ export function GraphView(props: {
     setReloadNonce((nonce) => nonce + 1);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    setState((current) => ({
-      workspaceId: props.workspaceId,
-      chatMentionsEnabled,
-      status: "loading",
-      graph:
-        current.workspaceId === props.workspaceId &&
-        current.chatMentionsEnabled === chatMentionsEnabled
-          ? current.graph
-          : null,
-      error: null,
-    }));
-    void bridge()
-      .readWorkspaceGraph({
+  useAsyncResponseEffect(
+    () => {
+      setState((current) => ({
+        workspaceId: props.workspaceId,
+        chatMentionsEnabled,
+        status: "loading",
+        graph:
+          current.workspaceId === props.workspaceId &&
+          current.chatMentionsEnabled === chatMentionsEnabled
+            ? current.graph
+            : null,
+        error: null,
+      }));
+      return bridge().readWorkspaceGraph({
         workspaceId: props.workspaceId,
         includeChatMentions: chatMentionsEnabled,
-      })
-      .then((graph) => {
-        if (!cancelled) {
-          setState({
-            workspaceId: props.workspaceId,
-            chatMentionsEnabled,
-            status: "ready",
-            graph,
-            error: null,
-          });
-        }
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return;
+      });
+    },
+    {
+      onSuccess: (graph) => {
+        setState({
+          workspaceId: props.workspaceId,
+          chatMentionsEnabled,
+          status: "ready",
+          graph,
+          error: null,
+        });
+      },
+      onError: (error: unknown) => {
         setState((current) => ({
           workspaceId: props.workspaceId,
           chatMentionsEnabled,
@@ -712,11 +711,10 @@ export function GraphView(props: {
               : null,
           error: error instanceof Error ? error.message : "Graph failed to load",
         }));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [chatMentionsEnabled, props.workspaceId, props.refreshKey, reloadNonce]);
+      },
+    },
+    [chatMentionsEnabled, props.workspaceId, props.refreshKey, reloadNonce],
+  );
 
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId &&
