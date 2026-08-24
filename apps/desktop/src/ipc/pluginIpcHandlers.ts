@@ -93,7 +93,7 @@ type PluginIpcHandler<TEvent> = (
   payload: unknown,
 ) => unknown | Promise<unknown>;
 
-export interface PluginIpcRegistrar<TEvent> {
+interface PluginIpcRegistrar<TEvent> {
   handle(channel: string, handler: PluginIpcHandler<TEvent>): void;
 }
 
@@ -101,7 +101,7 @@ const trustedPluginIpcRegistrarBrand: unique symbol = Symbol(
   "trustedPluginIpcRegistrar",
 );
 
-export interface TrustedPluginIpcRegistrar<TEvent>
+interface TrustedPluginIpcRegistrar<TEvent>
   extends PluginIpcRegistrar<TEvent> {
   readonly [trustedPluginIpcRegistrarBrand]: true;
 }
