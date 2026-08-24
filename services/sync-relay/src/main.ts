@@ -184,8 +184,21 @@ const fetchHandler = async (request: Request): Promise<Response> => {
 // memory waiting for the handler's MAX_BLOB_BYTES check. Small headroom over
 // the blob cap so a maximal valid blob PUT still passes.
 const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
+const MAX_LINK_EXCHANGE_BODY_BYTES = 4096;
+
+function isLinkExchangePath(pathname: string): boolean {
+  try {
+    const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    return parts.length === 2 && parts[0] === "sync" && parts[1] === "link-exchange";
+  } catch {
+    return false;
+  }
+}
 
 const server = createServer((request, response) => {
+  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  const isLinkExchange = isLinkExchangePath(url.pathname);
+  const maxBodyBytes = isLinkExchange ? MAX_LINK_EXCHANGE_BODY_BYTES : MAX_BODY_BYTES;
   const chunks: Buffer[] = [];
   let received = 0;
   let rejected = false;
@@ -206,19 +219,22 @@ const server = createServer((request, response) => {
   request.on("data", (chunk: Buffer) => {
     if (rejected) return;
     received += chunk.length;
-    if (received > MAX_BODY_BYTES) {
+    if (received > maxBodyBytes) {
       rejected = true;
       chunks.length = 0;
-      response.statusCode = RELAY_ERRORS.payload_too_large.status;
+      const refusal = isLinkExchange
+        ? { error: "not found", definition: RELAY_ERRORS.not_found }
+        : { error: "payload too large", definition: RELAY_ERRORS.payload_too_large };
+      response.statusCode = refusal.definition.status;
       response.setHeader("content-type", "application/json");
       response.setHeader("connection", "close");
-      // Flush the 413 for well-behaved clients, then destroy the socket so
+      // Flush the refusal for well-behaved clients, then destroy the socket so
       // the sender cannot keep streaming.
       response.end(
         JSON.stringify({
           ok: false,
-          error: "payload too large",
-          code: RELAY_ERRORS.payload_too_large.code,
+          error: refusal.error,
+          code: refusal.definition.code,
         }),
         () => {
           request.destroy();
@@ -230,7 +246,6 @@ const server = createServer((request, response) => {
   });
   request.on("end", () => {
     if (rejected) return;
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const headers = new Headers(request.headers as Record<string, string>);
     // Overwrite any caller-supplied value. The pre-auth token bucket keys on
     // the socket peer, not on a spoofable forwarding header.

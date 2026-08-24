@@ -690,13 +690,19 @@ export function createSyncRelayHandler({
       if (route.route === "shares-list" && request.method === "GET") {
         await claimPendingShares(actor.userId);
         const granted = await Promise.all(
-          storage.listSharesGrantedBy(actor.userId).map((row) => shareSummary(row, "granted")),
+          storage
+            .listSharesGrantedBy(actor.userId)
+            .filter((row) => row.grant.principalKind !== "link")
+            .map((row) => shareSummary(row, "granted")),
         );
         const receivedRows = await Promise.all(
-          storage.listSharesReceivedBy(actor.userId).map(async (row) => ({
-            row,
-            summary: await shareSummary(row, "received"),
-          })),
+          storage
+            .listSharesReceivedBy(actor.userId)
+            .filter((row) => row.grant.principalKind !== "link")
+            .map(async (row) => ({
+              row,
+              summary: await shareSummary(row, "received"),
+            })),
         );
         // Re-evaluate AFTER the async display-name lookups, immediately before
         // serialization. A pre-provisioned wire that became an agent channel
@@ -1571,6 +1577,7 @@ export function createSyncRelayHandler({
           !share ||
           share.workspaceId !== route.workspaceId ||
           share.granterUserId !== actor.userId ||
+          !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
           !selector ||
           "kind" in selector
         ) {

@@ -346,6 +346,107 @@ describe("relay link grants", () => {
     );
   });
 
+  it("keeps link grants out of legacy share lists and summaries", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    await createLink(h, "comment");
+
+    const ownerList = await json(await h(request(OWNER, "/sync/shares")));
+    const granted = ownerList.granted as Array<Record<string, unknown>>;
+    expect(granted).toHaveLength(1);
+    expect(granted[0]).toMatchObject({
+      shareId: "share-existing",
+      grantId: "grant-0",
+      principalKind: "user",
+    });
+
+    const recipientList = await json(await h(request(RECIPIENT, "/sync/shares")));
+    const received = recipientList.received as Array<Record<string, unknown>>;
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      shareId: "share-existing",
+      grantId: "grant-0",
+      principalKind: "user",
+    });
+
+    const summaryResponse = await h(request(RECIPIENT, "/sync/shares/share-existing"));
+    expect(summaryResponse.status).toBe(200);
+    expect(await json(summaryResponse)).toMatchObject({
+      shareId: "share-existing",
+      grantId: "grant-0",
+      principalKind: "user",
+    });
+  });
+
+  it("requires current workspace ownership to create a link", async () => {
+    const storage = await newStorage();
+    let ownershipAnswers = [true];
+    const ownershipStorage = new Proxy(storage, {
+      get(target, property, receiver) {
+        if (property === "workspaceIsOwnedBy") return () => ownershipAnswers.shift() ?? true;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(ownershipStorage);
+    expect(
+      (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
+    ).toBe(200);
+    storage.createShare({
+      share: {
+        shareId: "share-existing",
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+        createdAtMs: 2_000,
+      },
+      grant: {
+        grantId: "grant-ownership-user",
+        shareId: "share-existing",
+        principalKind: "user",
+        principalUserId: RECIPIENT,
+        principalEmail: null,
+        access: "view",
+        generation: 1,
+        status: "active",
+        createdAtMs: 2_000,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+
+    ownershipAnswers = [true];
+    const missing = await denialBytes(
+      await h(
+        request(
+          OWNER,
+          `/sync/${WORKSPACE}/shares/share-missing/links`,
+          jsonBody({ access: "view" }),
+        ),
+      ),
+    );
+    // The workspace route gate passes first. The create guard then observes
+    // the ownership loss that happened before its storage write.
+    ownershipAnswers = [true, false];
+    expect(
+      await denialBytes(
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/shares/share-existing/links`,
+            jsonBody({ access: "view" }),
+          ),
+        ),
+      ),
+    ).toBe(missing);
+    expect(storage.listSharesGrantedBy(OWNER).filter((row) => row.grant.principalKind === "link"))
+      .toHaveLength(0);
+
+    ownershipAnswers = [true, true];
+    await createLink(h, "view");
+  });
+
   it("lets the granter revoke a link after losing workspace ownership", async () => {
     const storage = await newStorage();
     const h = handler(storage);
