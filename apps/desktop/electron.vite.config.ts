@@ -51,48 +51,56 @@ function effectFree(surface: "preload" | "renderer"): Plugin {
   };
 }
 
-export default defineConfig({
-  main: {
-    // Workspace packages ship raw TS — they must be bundled, not
-    // externalized, or Node ESM fails on their extensionless imports.
-    // chokidar and other real npm deps stay external (loaded from node_modules).
-    plugins: [
-      externalizeDepsPlugin({
-        exclude: mainBundledWorkspaceDeps,
-      }),
-    ],
-    build: {
-      target: electronMainTarget,
-      outDir: "dist/main",
-      lib: {
-        entry: {
-          main: "src/main.ts",
-          "plugin-host": "src/plugins/pluginHostProcess.ts",
-          "pnpm-runner": "src/plugins/pluginPnpmRunnerProcess.ts",
+export default defineConfig(({ mode }) => {
+  // Minify production builds only. electron-vite also builds main and
+  // preload during dev, and minifying those mangles dev stack traces.
+  const minify = mode === "production" ? ("esbuild" as const) : false;
+  return {
+    main: {
+      // Workspace packages ship raw TS — they must be bundled, not
+      // externalized, or Node ESM fails on their extensionless imports.
+      // chokidar and other real npm deps stay external (loaded from node_modules).
+      plugins: [
+        externalizeDepsPlugin({
+          exclude: mainBundledWorkspaceDeps,
+        }),
+      ],
+      build: {
+        target: electronMainTarget,
+        minify,
+        outDir: "dist/main",
+        lib: {
+          entry: {
+            main: "src/main.ts",
+            "plugin-host": "src/plugins/pluginHostProcess.ts",
+            "pnpm-runner": "src/plugins/pluginPnpmRunnerProcess.ts",
+          },
         },
       },
     },
-  },
-  preload: {
-    plugins: [
-      effectFree("preload"),
-      externalizeDepsPlugin({
-        exclude: preloadBundledRuntimeDeps,
-      }),
-    ],
-    build: {
-      target: electronMainTarget,
-      outDir: "dist/preload",
-      // Sandboxed preloads must be CommonJS.
-      lib: { entry: "src/preload.ts", formats: ["cjs"] },
+    preload: {
+      plugins: [
+        effectFree("preload"),
+        externalizeDepsPlugin({
+          exclude: preloadBundledRuntimeDeps,
+        }),
+      ],
+      build: {
+        target: electronMainTarget,
+        minify,
+        outDir: "dist/preload",
+        // Sandboxed preloads must be CommonJS.
+        lib: { entry: "src/preload.ts", formats: ["cjs"] },
+      },
     },
-  },
-  renderer: {
-    root: "src/renderer",
-    plugins: [effectFree("renderer"), react(), tailwindcss()],
-    build: {
-      target: electronRendererTarget,
-      outDir: "dist/renderer",
+    renderer: {
+      root: "src/renderer",
+      plugins: [effectFree("renderer"), react(), tailwindcss()],
+      build: {
+        target: electronRendererTarget,
+        minify,
+        outDir: "dist/renderer",
+      },
     },
-  },
+  };
 });

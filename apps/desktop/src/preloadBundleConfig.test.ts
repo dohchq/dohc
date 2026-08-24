@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Plugin } from "vite";
-import desktopConfig, {
+import desktopConfigFn, {
   mainBundledWorkspaceDeps,
   preloadBundledRuntimeDeps,
 } from "../electron.vite.config";
+
+const desktopConfig = desktopConfigFn({ command: "build", mode: "production" });
 
 function configuredEffectGuard(surface: "preload" | "renderer"): Plugin {
   const plugins = desktopConfig[surface]?.plugins;
