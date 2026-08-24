@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { createRef, type Dispatch, type SetStateAction } from "react";
+import { createRef, useState, type Dispatch, type SetStateAction } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import {
@@ -8,9 +8,15 @@ import {
   ChatMessageList,
   MentionText,
   chatAuthorLabel,
+  formatChatTime,
   runReactionToggle,
   type ReactionToggleContext,
 } from "./chatMessages";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
+
+// Real implementations, spied: every message-body render runs the file-token
+// scan, so its call count shows whether a message actually re-rendered.
+vi.mock("./chatFileMentions", { spy: true });
 
 // Shared Chats pieces (PR 13, WS-E): both the file-rail panel and the Chats
 // view send through THIS composer, so its Enter semantics are load-bearing
@@ -325,6 +331,62 @@ describe("chat authorship display", () => {
     expect(screen.getByTestId("message").textContent).toContain(
       "@[docs/inert.md]\n@ice remains code",
     );
+  });
+});
+
+describe("formatChatTime", () => {
+  // The cached Intl.DateTimeFormat must format exactly like the
+  // toLocaleString call it replaced — same ambient locale, same options.
+  it("matches the ambient-locale toLocaleString output exactly", () => {
+    const at = 1_700_000_000_000;
+    expect(formatChatTime(at)).toEqual({
+      label: new Date(at).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }),
+      iso: new Date(at).toISOString(),
+    });
+  });
+});
+
+describe("ChatMessageList memo boundary", () => {
+  // Hosts keep composer drafts in the component that renders this list, so a
+  // keystroke re-renders the host. The list must not reconcile (and re-scan
+  // every message body) when its own props are unchanged.
+  it("skips re-rendering when the host re-renders with unchanged props", () => {
+    const messages: ChatMessageRecord[] = [
+      {
+        id: "message-1",
+        threadId: "thread-1",
+        authorKind: "human",
+        authorDisplayName: "Ice",
+        body: "Read @[docs/plan.md] before Friday.",
+        createdAtMs: 1_700_000_000_000,
+      },
+    ];
+    const endRef = createRef<HTMLDivElement>();
+    function Host() {
+      const [, setTick] = useState(0);
+      return (
+        <>
+          <button data-testid="bump" onClick={() => setTick((tick) => tick + 1)} />
+          <ChatMessageList
+            testIdPrefix="test-chat"
+            messages={messages}
+            loading={false}
+            emptyLabel="No messages"
+            endRef={endRef}
+          />
+        </>
+      );
+    }
+    render(<Host />);
+    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    expect(scans).toBeGreaterThan(0);
+    fireEvent.click(screen.getByTestId("bump"));
+    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
   });
 });
 

@@ -14,7 +14,9 @@ import {
   X,
 } from "lucide-react";
 import {
+  memo,
   type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useMemo,
@@ -443,6 +445,34 @@ export function reconcileResolvedChatDecision(
   };
 }
 
+// DM polls resolve fresh IPC arrays every tick whether or not anything
+// changed. Committing an equal-but-new array re-renders the whole open
+// conversation and invalidates every memo keyed on it, so poll commits keep
+// the current state when the data is unchanged — the same discipline
+// refreshOpenDm applies to setNav. Exported for its unit test.
+export function keepIfUnchanged<T>(next: T): (current: T) => T {
+  return (current) => (samePollData(current, next) ? current : next);
+}
+
+// Structural equality over plain IPC data (primitives, arrays, objects) —
+// exactly what a structured-clone bridge response can contain.
+function samePollData(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) {
+    return false;
+  }
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((key) =>
+    samePollData(
+      (a as Record<string, unknown>)[key],
+      (b as Record<string, unknown>)[key],
+    ),
+  );
+}
+
 interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
   feedPosts: Record<string, FeedPostData>;
@@ -497,6 +527,8 @@ const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
   pendingCount: 0,
   paused: false,
 };
+
+const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 
 export interface ChatsComposerReplyTarget {
   messageId: string;
@@ -1393,6 +1425,405 @@ function DmRequestListItem(props: {
   );
 }
 
+// The thread transcript: opening post plus the recursive comment tree.
+// Memoized because ChatsView keeps composer drafts as its own state, so
+// without this boundary every keystroke re-rendered — and re-ran the
+// mention/file-token scans for — every message in the conversation. ChatsView
+// keeps each prop referentially stable across draft and typing renders; the
+// transcript re-renders only when the conversation data itself changes.
+const ThreadMessages = memo(function ThreadMessages(props: {
+  nav: Extract<Nav, { level: "thread" }>;
+  messages: ChatMessageRecord[];
+  messagesLoading: boolean;
+  threadLocked: boolean;
+  flashMessageId: string | null;
+  runRecords: Record<string, ChatRunRecord>;
+  reactionsByMessage: Map<string, ChatReactionRecord[]>;
+  decisionsByMessage: Map<string, ChatDecisionRecord>;
+  attachmentsByMessage: Map<string, ChatAttachmentRecord[]>;
+  reactionControls: ChatReactionControls;
+  mentionCandidates: readonly MentionCandidate[];
+  bookmarkFor: (
+    targetKind: "message" | "thread",
+    targetId: string,
+  ) => ChatBookmarkRecord | undefined;
+  bookmarkBusy: Set<string>;
+  toggleBookmark: (input: {
+    target:
+      | { kind: "thread"; threadId: string }
+      | { kind: "message"; threadId: string; messageId: string };
+    mode: "live" | "snapshot";
+  }) => Promise<void>;
+  beginReply: (message: ChatMessageRecord) => void;
+  beginResolve: (message: ChatMessageRecord) => void;
+  scrollToMessage: (messageId: string) => void;
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
+  onNavCommand?: (nav: ChatsNav) => void;
+  setMessageNode: (messageId: string, element: HTMLElement | null) => void;
+  messagesEndRef: RefObject<HTMLDivElement | null>;
+}) {
+  const {
+    nav,
+    messages,
+    messagesLoading,
+    threadLocked,
+    flashMessageId,
+    runRecords,
+    reactionsByMessage,
+    decisionsByMessage,
+    attachmentsByMessage,
+    reactionControls,
+    mentionCandidates,
+    bookmarkFor,
+    bookmarkBusy,
+    toggleBookmark,
+    beginReply,
+    beginResolve,
+    scrollToMessage,
+    setMessageNode,
+    messagesEndRef,
+  } = props;
+  if (messagesLoading) {
+    return (
+      <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
+    );
+  }
+  const openingMessage = messages[0] ?? null;
+  if (openingMessage === null) {
+    return (
+      <p className="m-0 pt-4 text-center text-[11px] text-subtle">
+        No messages yet.
+      </p>
+    );
+  }
+  const commentTree = buildThreadCommentTree(openingMessage.id, messages.slice(1));
+  const openingTime = formatChatTime(openingMessage.createdAtMs);
+  const openingAttachments = attachmentsByMessage.get(openingMessage.id) ?? [];
+  const openingDecision = decisionsByMessage.get(openingMessage.id);
+  const openingBookmark = bookmarkFor("message", openingMessage.id);
+  const renderThreadComment = (
+    node: ThreadCommentNode,
+    depth: number,
+    parent: ChatMessageRecord | null,
+  ): ReactNode => {
+    const comment = node.message;
+    const commentTime = formatChatTime(comment.createdAtMs);
+    const commentDecision = decisionsByMessage.get(comment.id);
+    const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
+    const isAgent = comment.authorKind === "agent";
+    const replyCount = node.replies.length;
+    const commentBookmark = bookmarkFor("message", comment.id);
+    const commentBookmarkKey = `message:${comment.id}`;
+    return (
+      <li
+        key={comment.id}
+        ref={(element) => setMessageNode(comment.id, element)}
+        data-testid="chats-message"
+        data-message-id={comment.id}
+        data-parent-message-id={comment.parentMessageId}
+        data-thread-depth={depth}
+        data-author-kind={comment.authorKind}
+        className={`group flex min-w-0 flex-col transition-shadow ${
+          flashMessageId === comment.id
+            ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            : ""
+        }`}
+      >
+        {parent ? (
+          <button
+            type="button"
+            data-testid="chats-reply-context"
+            // The jump writes no navigation, so nothing else here cancels
+            // the pending cross-surface DM lookup — and a jump is still the
+            // user commanding this conversation. Report it as one, before
+            // the scroll, or the DM answers late and replaces the message
+            // they just jumped to.
+            onClick={() => {
+              props.onNavCommand?.(nav);
+              scrollToMessage(parent.id);
+            }}
+            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            ↳ replying to {chatAuthorLabel(parent)}
+          </button>
+        ) : null}
+        <div
+          data-testid="chats-comment-bubble"
+          style={
+            isAgent
+              ? {
+                  borderLeftColor:
+                    "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))",
+                }
+              : undefined
+          }
+          className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
+            isAgent ? "border-l-2" : ""
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span
+              data-testid="chats-message-author"
+              data-author-kind={comment.authorKind}
+              className={`text-[13px] font-semibold ${
+                isAgent ? "text-agent" : "text-ink"
+              }`}
+            >
+              {chatAuthorLabel(comment)}
+            </span>
+            {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+          </div>
+          <p
+            data-testid="chats-message-body"
+            className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
+          >
+            <MentionText
+              body={comment.body}
+              candidates={mentionCandidates}
+              attachments={commentAttachments}
+              testId="chats-message-body"
+              onOpenPath={props.onOpenPath}
+            />
+          </p>
+          {commentAttachments.length > 0 ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {commentAttachments.map((attachment) => (
+                <AttachmentChip
+                  key={attachment.attachmentId}
+                  attachment={attachment}
+                  onOpenPath={props.onOpenPath}
+                />
+              ))}
+            </div>
+          ) : null}
+          {commentDecision ? (
+            <div className="mt-2">
+              <DecisionStatus
+                decision={commentDecision}
+                onResolve={
+                  !threadLocked && commentDecision.state === "open"
+                    ? () => beginResolve(comment)
+                    : undefined
+                }
+                testIdPrefix="chats-comment"
+              />
+            </div>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
+          <MessageReactions
+            testIdPrefix="chats"
+            messageId={comment.id}
+            records={reactionsByMessage.get(comment.id) ?? []}
+            controls={reactionControls}
+            flush
+          />
+          {!threadLocked ? (
+            <button
+              type="button"
+              data-testid="chats-comment-reply"
+              onClick={() => beginReply(comment)}
+              className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              Reply
+            </button>
+          ) : null}
+          <BookmarkAction
+            active={Boolean(commentBookmark)}
+            busy={bookmarkBusy.has(commentBookmarkKey)}
+            destinationPath={commentBookmark?.destinationPath}
+            onToggle={
+              threadLocked
+                ? undefined
+                : (mode) =>
+                    void toggleBookmark({
+                      target: {
+                        kind: "message",
+                        threadId: nav.thread.id,
+                        messageId: comment.id,
+                      },
+                      mode,
+                    })
+            }
+            onOpen={
+              commentBookmark && props.onOpenPath
+                ? () => props.onOpenPath?.(commentBookmark.destinationPath)
+                : undefined
+            }
+            testId="chats-message-bookmark"
+          />
+          {replyCount > 0 ? (
+            <span data-testid="chats-reply-count">
+              {replyCount} {replyCount === 1 ? "reply" : "replies"}
+            </span>
+          ) : null}
+          {runRecords[comment.id] ? <RunChip run={runRecords[comment.id]} /> : null}
+          <time
+            data-testid="chats-message-time"
+            dateTime={commentTime.iso}
+            title={commentTime.iso}
+          >
+            {commentTime.label}
+          </time>
+        </div>
+        {replyCount > 0 ? (
+          <ol
+            data-testid="chats-replies"
+            aria-label={`Replies to ${chatAuthorLabel(comment)}`}
+            className={`relative mt-3 list-none space-y-3 border-l border-line/80 p-0 pl-3 sm:pl-4 ${
+              depth < 3 ? "ml-3 sm:ml-5" : "ml-0"
+            }`}
+          >
+            {node.replies.map((reply) =>
+              renderThreadComment(reply, depth + 1, comment),
+            )}
+          </ol>
+        ) : null}
+      </li>
+    );
+  };
+  return (
+    <>
+      <article
+        ref={(node) => setMessageNode(openingMessage.id, node)}
+        data-testid="chats-message"
+        data-message-id={openingMessage.id}
+        data-author-kind={openingMessage.authorKind}
+        className={`group pt-5 transition-shadow ${
+          flashMessageId === openingMessage.id
+            ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+            : ""
+        }`}
+      >
+        <p
+          data-testid="chats-thread-eyebrow"
+          className="m-0 font-mono text-[10px] uppercase tracking-wide text-subtle"
+        >
+          {nav.channel.kind === "agent"
+            ? "My agent · thread"
+            : `#${nav.channel.name} · thread`}
+        </p>
+        <h1
+          data-testid="chats-thread-post-title"
+          className="mb-0 mt-2 text-balance font-serif text-[22px] font-semibold leading-tight text-ink"
+        >
+          {nav.thread.title}
+        </h1>
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span
+            data-testid="chats-message-author"
+            data-author-kind={openingMessage.authorKind}
+            className={`text-[13px] font-medium ${
+              openingMessage.authorKind === "agent" ? "text-agent" : "text-ink"
+            }`}
+          >
+            {chatAuthorLabel(openingMessage)}
+          </span>
+          {openingMessage.authorKind === "agent" ? (
+            <AgentBadge testIdPrefix="chats-message" />
+          ) : null}
+          <time
+            data-testid="chats-message-time"
+            dateTime={openingTime.iso}
+            title={openingTime.iso}
+            className="font-mono text-[10px] text-subtle"
+          >
+            {openingTime.label}
+          </time>
+        </div>
+        <p
+          data-testid="chats-message-body"
+          className="mb-0 mt-3 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
+        >
+          <MentionText
+            body={openingMessage.body}
+            candidates={mentionCandidates}
+            attachments={openingAttachments}
+            testId="chats-message-body"
+            onOpenPath={props.onOpenPath}
+          />
+        </p>
+        {openingAttachments.length > 0 ? (
+          <div
+            data-testid="chats-message-attachments"
+            className="mt-3 flex flex-wrap items-center gap-1.5"
+          >
+            {openingAttachments.map((attachment) => (
+              <AttachmentChip
+                key={attachment.attachmentId}
+                attachment={attachment}
+                onOpenPath={props.onOpenPath}
+              />
+            ))}
+          </div>
+        ) : null}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <MessageReactions
+            testIdPrefix="chats"
+            messageId={openingMessage.id}
+            records={reactionsByMessage.get(openingMessage.id) ?? []}
+            controls={reactionControls}
+            flush
+          />
+          {openingDecision ? (
+            <DecisionStatus
+              decision={openingDecision}
+              onResolve={
+                !threadLocked && openingDecision.state === "open"
+                  ? () => beginResolve(openingMessage)
+                  : undefined
+              }
+              testIdPrefix="chats-message"
+            />
+          ) : null}
+          {runRecords[openingMessage.id] ? (
+            <RunChip run={runRecords[openingMessage.id]} />
+          ) : null}
+          <BookmarkAction
+            active={Boolean(openingBookmark)}
+            busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
+            destinationPath={openingBookmark?.destinationPath}
+            onToggle={
+              threadLocked
+                ? undefined
+                : (mode) =>
+                    void toggleBookmark({
+                      target: {
+                        kind: "message",
+                        threadId: nav.thread.id,
+                        messageId: openingMessage.id,
+                      },
+                      mode,
+                    })
+            }
+            onOpen={
+              openingBookmark && props.onOpenPath
+                ? () => props.onOpenPath?.(openingBookmark.destinationPath)
+                : undefined
+            }
+            testId="chats-message-bookmark"
+          />
+        </div>
+      </article>
+
+      <div
+        data-testid="chats-comments-divider"
+        className="mb-1 mt-5 flex items-center gap-2"
+      >
+        <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">
+          Comments
+        </span>
+        <span aria-hidden className="h-px flex-1 bg-line" />
+      </div>
+
+      <ol data-testid="chats-comments" className="m-0 list-none space-y-3 p-0 pt-2">
+        {commentTree.map((node) => renderThreadComment(node, 0, null))}
+      </ol>
+      <div ref={messagesEndRef} />
+    </>
+  );
+});
+
 export function ChatsView(props: {
   workspaceId: string;
   workspaces: readonly DmWorkspaceOption[];
@@ -1455,7 +1886,9 @@ export function ChatsView(props: {
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
   const collaboration = props.collaboration ?? null;
-  const mentionCandidates = props.mentionCandidates ?? [];
+  // A stable fallback: a fresh [] per render would defeat the message-list
+  // memo boundaries below for every roster-less host.
+  const mentionCandidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
   const fileMentionCandidates = useMemo(
     () =>
       (props.workspaceFiles ?? [])
@@ -1586,6 +2019,15 @@ export function ChatsView(props: {
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
+  // Stable so the ChatMessageList and ThreadMessages memo boundaries hold
+  // across draft keystrokes.
+  const setMessageNode = useCallback(
+    (messageId: string, element: HTMLElement | null) => {
+      if (element) messageNodes.current.set(messageId, element);
+      else messageNodes.current.delete(messageId);
+    },
+    [],
+  );
   const focusedMessageJump = useRef<string | null>(null);
 
   const sendContextKey =
@@ -2157,9 +2599,9 @@ export function ChatsView(props: {
           if (token !== liveToken.current) return;
           if (session !== sessionGeneration.current) continue;
           setDmAvailable(result.available);
-          setDms(result.dms);
-          setPendingDmRequests(result.pending);
-          setDeclinedDmRequests(result.declined);
+          setDms(keepIfUnchanged(result.dms));
+          setPendingDmRequests(keepIfUnchanged(result.pending));
+          setDeclinedDmRequests(keepIfUnchanged(result.declined));
           if (keepAcceptedNoticeRef.current) {
             keepAcceptedNoticeRef.current = false;
           } else {
@@ -2476,8 +2918,8 @@ export function ChatsView(props: {
       ) {
         return;
       }
-      setMessages(result.messages);
-      setReactions(reactionResult.reactions);
+      setMessages(keepIfUnchanged(result.messages));
+      setReactions(keepIfUnchanged(reactionResult.reactions));
       setViewerAuthorId(reactionResult.viewerAuthorId);
       if (dm.connected) {
         void bridge()
@@ -2513,9 +2955,9 @@ export function ChatsView(props: {
           return;
         }
         setDmAvailable(result.available);
-        setDms(result.dms);
-        setPendingDmRequests(result.pending);
-        setDeclinedDmRequests(result.declined);
+        setDms(keepIfUnchanged(result.dms));
+        setPendingDmRequests(keepIfUnchanged(result.pending));
+        setDeclinedDmRequests(keepIfUnchanged(result.declined));
         const syncedDm = result.dms.find(
           (entry) => entry.channelId === dm.channelId,
         );
@@ -2524,20 +2966,9 @@ export function ChatsView(props: {
           if (current.level !== "dm" || current.dm.channelId !== dm.channelId) {
             return current;
           }
-          const currentDm = current.dm;
-          if (
-            currentDm.channelWireId === syncedDm.channelWireId &&
-            currentDm.name === syncedDm.name &&
-            currentDm.peerLabel === syncedDm.peerLabel &&
-            currentDm.role === syncedDm.role &&
-            currentDm.shareId === syncedDm.shareId &&
-            currentDm.threadId === syncedDm.threadId &&
-            currentDm.unreadCount === syncedDm.unreadCount &&
-            currentDm.connected === syncedDm.connected
-          ) {
-            return current;
-          }
-          return { ...current, dm: syncedDm };
+          return samePollData(current.dm, syncedDm)
+            ? current
+            : { ...current, dm: syncedDm };
         });
         await loadDmConversation(syncedDm, token, request);
       } catch {
@@ -4015,6 +4446,24 @@ export function ChatsView(props: {
     return result;
   }, [reactions]);
 
+  // Memoized reaction controls: an inline object literal would change
+  // identity on every keystroke and defeat the message-list memo boundaries.
+  // The DM and thread surfaces render mutually exclusively, so one object
+  // serves both; readOnly is derived first so the memo keys on a boolean,
+  // not the whole nav object.
+  const threadLocked = nav.level === "thread" && channelIsLocked(nav.channel);
+  const reactionReadOnly =
+    nav.level === "dm" ? !nav.dm.connected : threadLocked;
+  const reactionControls = useMemo<ChatReactionControls>(
+    () => ({
+      reactions,
+      viewerAuthorId,
+      onToggle: toggleReaction,
+      readOnly: reactionReadOnly,
+    }),
+    [reactions, reactionReadOnly, toggleReaction, viewerAuthorId],
+  );
+
   const decisionsByMessage = useMemo(
     () => new Map(decisions.map((decision) => [decision.messageId, decision])),
     [decisions],
@@ -4510,16 +4959,8 @@ export function ChatsView(props: {
               mentionCandidates={mentionCandidates}
               onOpenPath={props.onOpenPath}
               flashMessageId={flashMessageId}
-              onMessageElement={(messageId, element) => {
-                if (element) messageNodes.current.set(messageId, element);
-                else messageNodes.current.delete(messageId);
-              }}
-              reactionControls={{
-                reactions,
-                viewerAuthorId,
-                onToggle: toggleReaction,
-                readOnly: !dm.connected,
-              }}
+              onMessageElement={setMessageNode}
+              reactionControls={reactionControls}
             />
           ) : (
             <div
@@ -4578,204 +5019,8 @@ export function ChatsView(props: {
 
   if (nav.level === "thread") {
     const threadJoined = joinedFor(nav.channel);
-    const threadLocked = channelIsLocked(nav.channel);
-    const openingMessage = messages[0] ?? null;
-    const comments = messages.slice(1);
     const threadBookmark = bookmarkFor("thread", nav.thread.id);
     const threadBookmarkKey = `thread:${nav.thread.id}`;
-    const reactionControls: ChatReactionControls = {
-      reactions,
-      viewerAuthorId,
-      onToggle: toggleReaction,
-      readOnly: threadLocked,
-    };
-    const commentTree = openingMessage
-      ? buildThreadCommentTree(openingMessage.id, comments)
-      : [];
-    const renderThreadComment = (
-      node: ThreadCommentNode,
-      depth: number,
-      parent: ChatMessageRecord | null,
-    ): ReactNode => {
-      const comment = node.message;
-      const commentTime = formatChatTime(comment.createdAtMs);
-      const commentDecision = decisionsByMessage.get(comment.id);
-      const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
-      const isAgent = comment.authorKind === "agent";
-      const replyCount = node.replies.length;
-      const commentBookmark = bookmarkFor("message", comment.id);
-      const commentBookmarkKey = `message:${comment.id}`;
-      return (
-        <li
-          key={comment.id}
-          ref={(element) => {
-            if (element) messageNodes.current.set(comment.id, element);
-            else messageNodes.current.delete(comment.id);
-          }}
-          data-testid="chats-message"
-          data-message-id={comment.id}
-          data-parent-message-id={comment.parentMessageId}
-          data-thread-depth={depth}
-          data-author-kind={comment.authorKind}
-          className={`group flex min-w-0 flex-col transition-shadow ${
-            flashMessageId === comment.id
-              ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
-              : ""
-          }`}
-        >
-          {parent ? (
-            <button
-              type="button"
-              data-testid="chats-reply-context"
-              // The jump writes no navigation, so nothing else here cancels
-              // the pending cross-surface DM lookup — and a jump is still the
-              // user commanding this conversation. Report it as one, before
-              // the scroll, or the DM answers late and replaces the message
-              // they just jumped to.
-              onClick={() => {
-                props.onNavCommand?.(nav);
-                scrollToMessage(parent.id);
-              }}
-              className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-            >
-              ↳ replying to {chatAuthorLabel(parent)}
-            </button>
-          ) : null}
-          <div
-            data-testid="chats-comment-bubble"
-            style={
-              isAgent
-                ? {
-                    borderLeftColor:
-                      "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))",
-                  }
-                : undefined
-            }
-            className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
-              isAgent ? "border-l-2" : ""
-            }`}
-          >
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span
-                data-testid="chats-message-author"
-                data-author-kind={comment.authorKind}
-                className={`text-[13px] font-semibold ${
-                  isAgent ? "text-agent" : "text-ink"
-                }`}
-              >
-                {chatAuthorLabel(comment)}
-              </span>
-              {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
-            </div>
-            <p
-              data-testid="chats-message-body"
-              className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
-            >
-              <MentionText
-                body={comment.body}
-                candidates={mentionCandidates}
-                attachments={commentAttachments}
-                testId="chats-message-body"
-                onOpenPath={props.onOpenPath}
-              />
-            </p>
-            {commentAttachments.length > 0 ? (
-              <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                {commentAttachments.map((attachment) => (
-                  <AttachmentChip
-                    key={attachment.attachmentId}
-                    attachment={attachment}
-                    onOpenPath={props.onOpenPath}
-                  />
-                ))}
-              </div>
-            ) : null}
-            {commentDecision ? (
-              <div className="mt-2">
-                <DecisionStatus
-                  decision={commentDecision}
-                  onResolve={
-                    !threadLocked && commentDecision.state === "open"
-                      ? () => beginResolve(comment)
-                      : undefined
-                  }
-                  testIdPrefix="chats-comment"
-                />
-              </div>
-            ) : null}
-          </div>
-          <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
-            <MessageReactions
-              testIdPrefix="chats"
-              messageId={comment.id}
-              records={reactionsByMessage.get(comment.id) ?? []}
-              controls={reactionControls}
-              flush
-            />
-            {!threadLocked ? (
-              <button
-                type="button"
-                data-testid="chats-comment-reply"
-                onClick={() => beginReply(comment)}
-                className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-              >
-                Reply
-              </button>
-            ) : null}
-            <BookmarkAction
-              active={Boolean(commentBookmark)}
-              busy={bookmarkBusy.has(commentBookmarkKey)}
-              destinationPath={commentBookmark?.destinationPath}
-              onToggle={
-                threadLocked
-                  ? undefined
-                  : (mode) =>
-                      void toggleBookmark({
-                        target: {
-                          kind: "message",
-                          threadId: nav.thread.id,
-                          messageId: comment.id,
-                        },
-                        mode,
-                      })
-              }
-              onOpen={
-                commentBookmark && props.onOpenPath
-                  ? () => props.onOpenPath?.(commentBookmark.destinationPath)
-                  : undefined
-              }
-              testId="chats-message-bookmark"
-            />
-            {replyCount > 0 ? (
-              <span data-testid="chats-reply-count">
-                {replyCount} {replyCount === 1 ? "reply" : "replies"}
-              </span>
-            ) : null}
-            {runRecords[comment.id] ? <RunChip run={runRecords[comment.id]} /> : null}
-            <time
-              data-testid="chats-message-time"
-              dateTime={commentTime.iso}
-              title={commentTime.iso}
-            >
-              {commentTime.label}
-            </time>
-          </div>
-          {replyCount > 0 ? (
-            <ol
-              data-testid="chats-replies"
-              aria-label={`Replies to ${chatAuthorLabel(comment)}`}
-              className={`relative mt-3 list-none space-y-3 border-l border-line/80 p-0 pl-3 sm:pl-4 ${
-                depth < 3 ? "ml-3 sm:ml-5" : "ml-0"
-              }`}
-            >
-              {node.replies.map((reply) =>
-                renderThreadComment(reply, depth + 1, comment),
-              )}
-            </ol>
-          ) : null}
-        </li>
-      );
-    };
     return (
       <div
         data-testid="chats-thread-view"
@@ -4883,163 +5128,29 @@ export function ChatsView(props: {
             data-testid="chats-thread-column"
             className="mx-auto w-full max-w-[640px] px-3 pb-16 sm:px-4"
           >
-            {messagesLoading ? (
-              <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
-            ) : openingMessage === null ? (
-              <p className="m-0 pt-4 text-center text-[11px] text-subtle">
-                No messages yet.
-              </p>
-            ) : (
-              <>
-                <article
-                  ref={(node) => {
-                    if (node) messageNodes.current.set(openingMessage.id, node);
-                    else messageNodes.current.delete(openingMessage.id);
-                  }}
-                  data-testid="chats-message"
-                  data-message-id={openingMessage.id}
-                  data-author-kind={openingMessage.authorKind}
-                  className={`group pt-5 transition-shadow ${
-                    flashMessageId === openingMessage.id
-                      ? "rounded-lg ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
-                      : ""
-                  }`}
-                >
-                  <p
-                    data-testid="chats-thread-eyebrow"
-                    className="m-0 font-mono text-[10px] uppercase tracking-wide text-subtle"
-                  >
-                    {nav.channel.kind === "agent"
-                      ? "My agent · thread"
-                      : `#${nav.channel.name} · thread`}
-                  </p>
-                  <h1
-                    data-testid="chats-thread-post-title"
-                    className="mb-0 mt-2 text-balance font-serif text-[22px] font-semibold leading-tight text-ink"
-                  >
-                    {nav.thread.title}
-                  </h1>
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    <span
-                      data-testid="chats-message-author"
-                      data-author-kind={openingMessage.authorKind}
-                      className={`text-[13px] font-medium ${
-                        openingMessage.authorKind === "agent" ? "text-agent" : "text-ink"
-                      }`}
-                    >
-                      {chatAuthorLabel(openingMessage)}
-                    </span>
-                    {openingMessage.authorKind === "agent" ? (
-                      <AgentBadge testIdPrefix="chats-message" />
-                    ) : null}
-                    <time
-                      data-testid="chats-message-time"
-                      dateTime={formatChatTime(openingMessage.createdAtMs).iso}
-                      title={formatChatTime(openingMessage.createdAtMs).iso}
-                      className="font-mono text-[10px] text-subtle"
-                    >
-                      {formatChatTime(openingMessage.createdAtMs).label}
-                    </time>
-                  </div>
-                  <p
-                    data-testid="chats-message-body"
-                    className="mb-0 mt-3 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
-                  >
-                    <MentionText
-                      body={openingMessage.body}
-                      candidates={mentionCandidates}
-                      attachments={attachmentsByMessage.get(openingMessage.id) ?? []}
-                      testId="chats-message-body"
-                      onOpenPath={props.onOpenPath}
-                    />
-                  </p>
-                  {(attachmentsByMessage.get(openingMessage.id) ?? []).length > 0 ? (
-                    <div
-                      data-testid="chats-message-attachments"
-                      className="mt-3 flex flex-wrap items-center gap-1.5"
-                    >
-                      {(attachmentsByMessage.get(openingMessage.id) ?? []).map(
-                        (attachment) => (
-                          <AttachmentChip
-                            key={attachment.attachmentId}
-                            attachment={attachment}
-                            onOpenPath={props.onOpenPath}
-                          />
-                        ),
-                      )}
-                    </div>
-                  ) : null}
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <MessageReactions
-                      testIdPrefix="chats"
-                      messageId={openingMessage.id}
-                      records={reactionsByMessage.get(openingMessage.id) ?? []}
-                      controls={reactionControls}
-                      flush
-                    />
-                    {decisionsByMessage.get(openingMessage.id) ? (
-                      <DecisionStatus
-                        decision={decisionsByMessage.get(openingMessage.id)!}
-                        onResolve={
-                          !threadLocked &&
-                          decisionsByMessage.get(openingMessage.id)?.state === "open"
-                            ? () => beginResolve(openingMessage)
-                            : undefined
-                        }
-                        testIdPrefix="chats-message"
-                      />
-                    ) : null}
-                    {runRecords[openingMessage.id] ? (
-                      <RunChip run={runRecords[openingMessage.id]} />
-                    ) : null}
-                    <BookmarkAction
-                      active={Boolean(bookmarkFor("message", openingMessage.id))}
-                      busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-                      destinationPath={
-                        bookmarkFor("message", openingMessage.id)?.destinationPath
-                      }
-                      onToggle={
-                        threadLocked
-                          ? undefined
-                          : (mode) =>
-                              void toggleBookmark({
-                                target: {
-                                  kind: "message",
-                                  threadId: nav.thread.id,
-                                  messageId: openingMessage.id,
-                                },
-                                mode,
-                              })
-                      }
-                      onOpen={
-                        bookmarkFor("message", openingMessage.id) && props.onOpenPath
-                          ? () =>
-                              props.onOpenPath?.(
-                                bookmarkFor("message", openingMessage.id)!.destinationPath,
-                              )
-                          : undefined
-                      }
-                      testId="chats-message-bookmark"
-                    />
-                  </div>
-                </article>
-
-                <div
-                  data-testid="chats-comments-divider"
-                  className="mb-1 mt-5 flex items-center gap-2"
-                >
-                  <span className="font-mono text-[10px] uppercase tracking-wide text-subtle">
-                    Comments
-                  </span>
-                  <span aria-hidden className="h-px flex-1 bg-line" />
-                </div>
-
-                <ol data-testid="chats-comments" className="m-0 list-none space-y-3 p-0 pt-2">
-                  {commentTree.map((node) => renderThreadComment(node, 0, null))}
-                </ol>
-                <div ref={messagesEndRef} />
-              </>
-            )}
+            <ThreadMessages
+              nav={nav}
+              messages={messages}
+              messagesLoading={messagesLoading}
+              threadLocked={threadLocked}
+              flashMessageId={flashMessageId}
+              runRecords={runRecords}
+              reactionsByMessage={reactionsByMessage}
+              decisionsByMessage={decisionsByMessage}
+              attachmentsByMessage={attachmentsByMessage}
+              reactionControls={reactionControls}
+              mentionCandidates={mentionCandidates}
+              bookmarkFor={bookmarkFor}
+              bookmarkBusy={bookmarkBusy}
+              toggleBookmark={toggleBookmark}
+              beginReply={beginReply}
+              beginResolve={beginResolve}
+              scrollToMessage={scrollToMessage}
+              onOpenPath={props.onOpenPath}
+              onNavCommand={props.onNavCommand}
+              setMessageNode={setMessageNode}
+              messagesEndRef={messagesEndRef}
+            />
           </div>
         </div>
         <TypingIndicator

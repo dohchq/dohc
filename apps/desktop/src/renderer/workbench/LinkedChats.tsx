@@ -1,5 +1,5 @@
 import { ArrowLeft, MessageSquare } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatMessageRecord,
   ChatReactionRecord,
@@ -298,6 +298,17 @@ export function LinkedChatsPanel(props: {
     [activeThread, props, viewerAuthorId, workspaceId],
   );
 
+  // Stable for ChatMessageList's memo — an inline literal would defeat it on
+  // every composer keystroke. A reaction is a WRITE, so a share that refuses
+  // writes offers no PICKER — but the reactions already on a message are part
+  // of the conversation and stay readable. `readOnly` is the affordance built
+  // for exactly this; omitting the whole prop would have hidden other
+  // people's reactions too.
+  const reactionControls = useMemo(
+    () => ({ reactions, viewerAuthorId, onToggle: toggleReaction, readOnly }),
+    [reactions, viewerAuthorId, toggleReaction, readOnly],
+  );
+
   if (activeThread) {
     return (
       <div
@@ -334,17 +345,7 @@ export function LinkedChatsPanel(props: {
           emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
           endRef={messagesEndRef}
           onOpenPath={props.onOpenPath}
-          reactionControls={{
-            reactions,
-            viewerAuthorId,
-            onToggle: toggleReaction,
-            // A reaction is a WRITE, so a share that refuses writes offers no
-            // PICKER — but the reactions already on a message are part of the
-            // conversation and stay readable. `readOnly` is the affordance
-            // built for exactly this; omitting the whole prop would have
-            // hidden other people's reactions too.
-            readOnly,
-          }}
+          reactionControls={reactionControls}
         />
         {readOnly ? (
           <ReadOnlyNotice />

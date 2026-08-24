@@ -1,5 +1,6 @@
 import { FileText, SmilePlus, Send } from "lucide-react";
 import {
+  memo,
   useEffect,
   useId,
   useRef,
@@ -145,15 +146,22 @@ export function runReactionToggle(
     });
 }
 
+// One formatter for the one options shape this function uses.
+// `toLocaleString(undefined, options)` is specified as
+// `new Intl.DateTimeFormat(undefined, options).format(date)`, but constructing
+// the formatter costs far more than formatting — and message lists call this
+// per message per render.
+const chatTimeFormat = new Intl.DateTimeFormat(undefined, {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
 export function formatChatTime(createdAtMs: number): { label: string; iso: string } {
   const createdAt = new Date(createdAtMs);
   return {
-    label: createdAt.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    }),
+    label: chatTimeFormat.format(createdAt),
     iso: createdAt.toISOString(),
   };
 }
@@ -520,7 +528,12 @@ export function MessageReactions(props: {
   );
 }
 
-export function ChatMessageList(props: {
+// Memoized because each message body re-runs the file-token and mention scans
+// on every render: the hosts keep composer drafts in the same component that
+// renders this list, so without the boundary every keystroke re-scanned the
+// whole conversation. Callers keep every prop referentially stable across
+// unrelated renders (drafts, typing indicators) for the memo to hold.
+export const ChatMessageList = memo(function ChatMessageList(props: {
   testIdPrefix: string;
   messages: ChatMessageRecord[];
   loading: boolean;
@@ -614,7 +627,7 @@ export function ChatMessageList(props: {
       <div ref={props.endRef} />
     </div>
   );
-}
+});
 
 // The fast composer: Enter sends (Shift+Enter for a newline), disabled while
 // a send is in flight, submit button gated on non-blank input.

@@ -13,10 +13,16 @@ import type {
 } from "../../ipc/bridgeContract";
 import {
   ChatsView as ProductionChatsView,
+  keepIfUnchanged,
   reconcileResolvedChatDecision,
   type ChatsNav,
 } from "./ChatsView";
 import { withholdDmsInRequestLanes } from "../../workspaces/dmRequests";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
+
+// Real implementations, spied: every message-body render runs the file-token
+// scan, so its call count is the render-cost probe for the memo boundaries.
+vi.mock("./chatFileMentions", { spy: true });
 
 type TestChatsViewProps = Omit<
   Parameters<typeof ProductionChatsView>[0],
@@ -7616,5 +7622,147 @@ describe("ChatsView expand-to-tab", () => {
     });
     expect(newButton.getAttribute("aria-pressed")).toBe("false");
     expect((newButton as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+// The perf contract for chat surfaces: composer drafts live in ChatsView, so
+// a keystroke re-renders the view — but it must not reconcile the message
+// list, whose bodies each re-run the file-token and mention scans. The spied
+// extractChatFileReferenceTokens call count is the probe: it grows only when
+// a message body actually renders.
+describe("chat render cost", () => {
+  it("DM composer keystrokes do not re-render the conversation's messages", async () => {
+    const user = userEvent.setup();
+    bridgeMock.syncDms.mockResolvedValue({
+      available: true,
+      dms: [dm()],
+      pending: [],
+      declined: [],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({ id: "m-1", threadId: "thread-dm-1", body: "see @[docs/plan.md] before Friday" }),
+        message({ id: "m-2", threadId: "thread-dm-1", body: "will do" }),
+      ],
+    });
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    await screen.findAllByTestId("chats-dm-message");
+
+    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    await user.type(screen.getByTestId("chats-dm-composer"), "abc");
+    expect((screen.getByTestId("chats-dm-composer") as HTMLTextAreaElement).value).toBe("abc");
+    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+  });
+
+  it("thread composer keystrokes do not re-render the transcript", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 2 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message(),
+        message({
+          id: "message-2",
+          parentMessageId: "message-1",
+          body: "Reply citing @[docs/plan.md#scope]",
+        }),
+      ],
+    });
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-post-card"));
+    await screen.findByTestId("chats-thread-view");
+    await screen.findAllByTestId("chats-message");
+
+    const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+    await user.type(screen.getByTestId("chats-composer"), "abc");
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("abc");
+    expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+  });
+
+  // The open-DM poll answers with FRESH structured-clone arrays every 4s tick.
+  // When nothing changed, the commits must keep the current state's identity
+  // so the memoized conversation does not repaint on every tick.
+  it("a no-change DM poll tick does not re-render the conversation", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      bridgeMock.syncDms.mockImplementation(async () => ({
+        available: true,
+        dms: [dm()],
+        pending: [],
+        declined: [],
+      }));
+      bridgeMock.listChatMessages.mockImplementation(async () => ({
+        messages: [
+          message({ id: "m-1", threadId: "thread-dm-1", body: "see @[docs/plan.md]" }),
+        ],
+      }));
+      bridgeMock.listChatReactions.mockImplementation(async () => ({
+        reactions: [],
+        viewerAuthorId: "you@example.com",
+      }));
+      renderView();
+      await user.click(await screen.findByTestId("chats-dm-item"));
+      await screen.findAllByTestId("chats-dm-message");
+
+      const scans = vi.mocked(extractChatFileReferenceTokens).mock.calls.length;
+      // Two full poll rounds (refreshOpenDm every 4s), each landing fresh
+      // equal arrays for dms, requests, messages, and reactions.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8_500);
+      });
+      expect(vi.mocked(extractChatFileReferenceTokens).mock.calls.length).toBe(scans);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("keepIfUnchanged", () => {
+  it("keeps current state for a deep-equal fresh IPC clone, including nested attachments", () => {
+    const current = [
+      message({
+        attachments: [
+          {
+            attachmentId: "a-1",
+            threadId: "thread-1",
+            messageId: "message-1",
+            targetKind: "file" as const,
+            pathHint: "docs/plan.md",
+            headingAnchor: "scope",
+            createdAtMs: NOW,
+          },
+        ],
+      }),
+    ];
+    expect(keepIfUnchanged(structuredClone(current))(current)).toBe(current);
+  });
+
+  it("replaces state when any field, nesting, or length changes", () => {
+    const current = [dm()];
+    const bumped = [dm({ unreadCount: 3 })];
+    expect(keepIfUnchanged(bumped)(current)).toBe(bumped);
+    const revoked = [dm({ connected: false })];
+    expect(keepIfUnchanged(revoked)(current)).toBe(revoked);
+    const emptied: DmRecord[] = [];
+    expect(keepIfUnchanged(emptied)(current)).toBe(emptied);
+    const attached = [message()];
+    const withAttachment = [
+      message({
+        attachments: [
+          {
+            attachmentId: "a-1",
+            threadId: "thread-1",
+            messageId: "message-1",
+            targetKind: "file" as const,
+            createdAtMs: NOW,
+          },
+        ],
+      }),
+    ];
+    expect(keepIfUnchanged(withAttachment)(attached)).toBe(withAttachment);
   });
 });
