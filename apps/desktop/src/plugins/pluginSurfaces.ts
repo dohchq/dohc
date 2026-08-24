@@ -272,11 +272,12 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         this.#assertPanelHostCurrent(attempt, ownedLease, spawnId);
         const releaseOrigin = this.#dependencies.allowPanelOrigin(preview.url);
         this.#assertPanelStartActive(attempt);
+        const grant = this.#registerPanelGrant(request);
         const next: PanelRecord = {
           ...request,
           preview: { ...preview, releaseOrigin },
           ownedLease,
-          grant: undefined as never,
+          grant,
           attempt,
           closed: false,
           disposed: false,
@@ -286,7 +287,6 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         installed = next;
         attempt.record = next;
         preview = null;
-        next.grant = this.#registerPanelGrant(next);
         this.#assertPanelStartActive(attempt);
         if (previous) await this.#disposePanel(previous);
         this.#assertPanelStartActive(attempt);
@@ -528,16 +528,10 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         this.#notifyWebAppFailed(attempt);
       }
     }
-    const stoppedWebApps = this.#settleCleanup(
+    void this.#settleCleanup(
       webAppAttempts.map((attempt) => this.#stopWebAppAttempt(attempt, false)),
       `stop plugin web apps after host change for "${change.pluginId}"`,
     );
-    void stoppedWebApps.catch((error) => {
-      this.#report(
-        error,
-        `settle terminal plugin host change for "${change.pluginId}"`,
-      );
-    });
   }
 
   hostReady(identity: PluginSurfaceHostReady): void {
@@ -625,7 +619,9 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     return this.#closePromise;
   }
 
-  #registerPanelGrant(record: PanelRecord): PanelGrant {
+  #registerPanelGrant(
+    record: PluginPanelIdentity & PluginSurfaceOwner,
+  ): PanelGrant {
     const grant = this.#panelAuthorities.register({
       senderId: record.senderId,
       generation: record.generation,
