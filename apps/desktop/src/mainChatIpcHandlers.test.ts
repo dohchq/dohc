@@ -668,6 +668,7 @@ describe("readRelayChatShareLanes", () => {
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-1" },
+              access: "read-write",
             },
           ],
         }),
