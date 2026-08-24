@@ -1939,6 +1939,16 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         ok: false,
         error: { code: "confirmation-required" },
       });
+      await expect(
+        Promise.all(sourcePaths.map((path) => readFile(path))),
+      ).resolves.toEqual(source);
+      const preservedState = await readPluginLocalState(
+        setup.fixture.stateDir,
+        setup.fixture.workspaceRoot,
+      );
+      if (!preservedState.ok) throw new Error(preservedState.warning);
+      expect(preservedState.state.plugins["original-id"]).toEqual(originalRecord);
+      expect(preservedState.state.plugins["runtime-id"]).toEqual(aliasRecord);
       expect(setup.pipeline.list()).toContainEqual(
         expect.objectContaining({
           id: "runtime-id",
