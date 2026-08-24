@@ -375,7 +375,8 @@ export function createSearchRegistry(deps: {
       // generation's active search when validation eventually finishes.
       if (!isCurrent()) return;
       active.get(ownerId)?.kill();
-      const handle = start({
+      let handle: SearchHandle | null = null;
+      handle = start({
         rgPath: deps.rgPath,
         realRoot,
         searchId,
@@ -385,7 +386,7 @@ export function createSearchRegistry(deps: {
           // Drop the registry entry when the CURRENT search finishes (a
           // superseded search's late done-batch must not delete its
           // replacement's handle).
-          if (batch.done && active.get(ownerId)?.searchId === batch.searchId) {
+          if (batch.done && active.get(ownerId) === handle) {
             active.delete(ownerId);
           }
           onBatch(batch);

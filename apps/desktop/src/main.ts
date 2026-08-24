@@ -13,7 +13,6 @@ import {
   CHATS_METHOD,
   VersionedLiveAdapter,
   WORKSPACE_METHOD,
-  WorkspaceDaemonRequester,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
 } from "@dohc/workspace-engine-client";
@@ -240,17 +239,11 @@ import {
   WorkspaceRegistryResult,
   WorkspaceSummary,
   WorkspaceGraphResult,
-  WorkspaceSearchPayload,
-  CancelWorkspaceSearchPayload,
-  SearchResultsEventSchema,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
 } from "./ipc/bridgeContract";
-import {
-  CHANNELS,
-  SEARCH_EVENT_MAX_ENTRIES,
-} from "./ipc/channels";
+import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import {
   createStartSitePreviewHandler,
@@ -260,6 +253,7 @@ import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
+import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -566,11 +560,6 @@ import {
 } from "./workspaces/engineCaptureGate";
 import { coalesceDispatchScopedSync } from "./workspaces/dispatchScopedSync";
 import {
-  readWorkspaceEnginePolicy,
-  resolveEngineSearchPolicy,
-} from "./workspaces/workspaceEnginePolicyFile";
-import { queryWorkspaceSearchDaemon } from "./workspaces/workspaceSearchDaemon";
-import {
   createAgentIntegration,
   type AgentRunRecord,
 } from "./agents/AgentIntegration";
@@ -707,10 +696,9 @@ import {
   resetWorkspaceSettingsFile,
   saveWorkspaceSettingsFile,
 } from "./workspaces/workspaceSettingsFile";
-import {
-  createSearchRegistry,
-  mountScopedIncludeGlob,
-} from "./workspaces/workspaceSearch";
+import { createSearchRegistry } from "./workspaces/workspaceSearch";
+import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
+import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemonAdapter";
 import { rgPath } from "@vscode/ripgrep";
 import {
   startCliServer,
@@ -1061,12 +1049,6 @@ function createPluginWorkspaceRuntimeParts(
   return { pipeline, agentDrivers: pluginDrivers, workspaceEvents };
 }
 
-// Latest search per renderer: the engine-backed search path awaits (flush +
-// index query) before its mount-scoped rg pass, so an OLDER search can reach
-// startSearch after a NEWER one already started — and the registry's
-// kill-and-replace would cancel the newer child. Stale handlers check this
-// before touching the registry.
-const latestSearchIdBySender = new Map<number, string>();
 const rendererGenerationBySender = new Map<number, number>();
 
 function rendererGeneration(senderId: number): number {
@@ -3580,13 +3562,6 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
   };
 }
 
-// Content search (Phase E5.0): at most one live ripgrep child per renderer,
-// tracked by handle. A new search, an explicit cancel, the renderer's
-// webContents going away, and app quit each kill the SPECIFIC tracked child.
-const searchRegistry = createSearchRegistry({ rgPath });
-// Senders whose 'destroyed' cleanup hook is already attached.
-const searchCleanupHooked = new WeakSet<Electron.WebContents>();
-
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   generationOf: rendererGeneration,
   requireWorkspace,
@@ -3627,8 +3602,7 @@ async function prepareForRendererReload(sender: WebContents): Promise<void> {
   advanceRendererGeneration(senderId);
   const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
   sitePreviews.cancelSender(senderId);
-  searchRegistry.disposeOwner(senderId);
-  latestSearchIdBySender.delete(senderId);
+  workspaceSearchOwner.disposeSender(senderId);
   await Promise.all([
     // Same exclusion as stopPluginWorkspace below, for the same reason: this
     // sender's own entry has not been cleared yet, so without excluding it
@@ -4104,6 +4078,19 @@ function ownedWorkspaceReads(
   });
 }
 
+const workspaceSearchOwner = new WorkspaceSearchOwner<
+  NonNullable<ReturnType<typeof findWorkspace>>
+>({
+  searchRegistry: createSearchRegistry({ rgPath }),
+  prepareOwnedSearch: async (workspace) =>
+    await ownedWorkspaceReads(workspace).prepareSearch(),
+  engineCaptureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
+  queryEngine: createWorkspaceSearchDaemonQuery(
+    () => rustEngineWorkspaceSessions,
+  ),
+  logError: (message, error) => console.error(`[desktop] ${message}`, error),
+});
+
 const ownedSiteCatalog = createOwnedSiteCatalog({
   reads: ownedWorkspaceReads,
 });
@@ -4298,7 +4285,7 @@ app.on("will-quit", (event) => {
   // leaves it: its update exists only in the canonical in-memory Y.Doc, so
   // abandoning that retry would discard the edit (codex P1).
   rustEngineWorkspaceSessions?.beginShutdown();
-  searchRegistry.killAll();
+  workspaceSearchOwner.dispose();
   // Here, not at before-quit: every window has closed, so every beforeunload
   // has had its chance to veto and this quit is now certain (#579 review,
   // r19). Fire-and-forget — skip locks and do not await async stops so
@@ -9477,219 +9464,15 @@ function registerIpcHandlers(
     await writeUiStateFile(workspace.rootPath, input.state);
   });
 
-  // Content search (Phase E5.0): spawns ripgrep rooted at the REAL workspace
-  // root (the registry refuses a root that doesn't realpath to a directory)
-  // and streams bounded batches back over the searchResults event channel.
-  // Every batch is validated against the contract schema BEFORE it is sent;
-  // the dependency-free preload re-validates on arrival. Starting a new
-  // search from the same renderer kills its previous rg child by handle.
-  ipcMain.handle(CHANNELS.searchWorkspace, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceSearchPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    latestSearchIdBySender.set(sender.id, input.searchId);
-    const isCurrentSearch = () =>
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation &&
-      latestSearchIdBySender.get(sender.id) === input.searchId;
-    const ownedSearchView = await ownedWorkspaceReads(
-      workspace,
-    ).prepareSearch();
-    if (!isCurrentSearch()) return;
-    const registeredMounts = storedShareMounts(
-      findWorkspace(workspace.workspaceId) ?? {},
-    );
-    const mounts = registeredMounts.filter((mount) =>
-      usableShareMountRecord(registeredMounts, mount),
-    );
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
-    if (capture) {
-      // Read-your-writes: the batch whose capture triggered this search must
-      // already be in the index the query runs against.
-      await capture.flush();
-      {
-        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
-        const decision = resolveEngineSearchPolicy(policy);
-        if (decision.kind === "blocked") {
-          // FAIL CLOSED: a malformed policy file must never widen search
-          // (resolveEffectivePolicy would default tracked paths to
-          // searchable). Capture stays floor-only per WS-F; search returns
-          // nothing until the policy file is fixed.
-          console.error(
-            `[desktop] workspace search blocked by policy validation for ${workspace.rootPath}: ${decision.message}`,
-          );
-          if (isCurrentSearch()) {
-            sender.send(
-              CHANNELS.searchResults,
-              SearchResultsEventSchema.parse({
-                searchId: input.searchId,
-                entries: [],
-                done: true,
-                limitHit: false,
-                // Surface WHY the results are empty instead of a silent blank:
-                // the workspace policy file could not be applied, so search
-                // fails closed until it is fixed.
-                notice: `Search paused: workspace policy could not be applied — ${decision.message}`.slice(
-                  0,
-                  500,
-                ),
-              }),
-            );
-          }
-          return;
-        }
-        const sessions = rustEngineWorkspaceSessions;
-        if (!sessions) {
-          throw new Error("Rust engine workspace sessions are unavailable.");
-        }
-        const results = await sessions.run(
-          engineWorkspaceForRegistryIdentity(workspace),
-          async (binding) => {
-            const requester = new WorkspaceDaemonRequester(binding.client);
-            return await queryWorkspaceSearchDaemon({
-              daemon: {
-                queryPage: async (params) =>
-                  await requester.request(
-                    WORKSPACE_METHOD.searchQueryPage,
-                    params,
-                    { workspace: binding.workspace },
-                  ),
-              },
-              query: input.query,
-              limit: SEARCH_EVENT_MAX_ENTRIES,
-              isCurrent: isCurrentSearch,
-            });
-          },
-          { retryTransportErrors: true },
-        );
-        if (results === null) return;
-        // The engine index deliberately excludes shared-with-me (host
-        // capture ignores mounts), so mounted content searches through the
-        // rg path, streamed AFTER the engine results under the SAME
-        // searchId. Skipped when the workspace has no mounts.
-        const searchMounts = mounts.length > 0;
-        if (!isCurrentSearch()) return;
-        if (isCurrentSearch()) {
-          sender.send(
-            CHANNELS.searchResults,
-            SearchResultsEventSchema.parse({
-              searchId: input.searchId,
-              entries: results.map((result) => ({
-                path: result.path,
-                line: result.line,
-                column: result.matchStart + 1,
-                preview: result.preview,
-                matchStart: result.matchStart,
-                matchEnd: result.matchEnd,
-                surface: result.surface,
-                title: result.title,
-                ...(result.threadId ? { threadId: result.threadId } : {}),
-                ...(result.objectId ? { objectId: result.objectId } : {}),
-              })),
-              done: !searchMounts,
-              limitHit: false,
-            }),
-          );
-        }
-        if (searchMounts) {
-          // Stale-search guard: a newer query may have started its own
-          // mount pass while this handler awaited the engine phase — the
-          // registry's kill-and-replace must never let the OLDER search
-          // cancel it. (The renderer already drops stale batches by id.)
-          if (!isCurrentSearch()) return;
-          // rg include globs are gitignore-style: basename globs float to
-          // any depth (so "*.md" intersects mounts and must be scoped),
-          // while anchored path globs outside the projection cannot match
-          // under it — the pass is skipped entirely.
-          const mountGlob = mountScopedIncludeGlob(input.includeGlob);
-          if (mountGlob === null) {
-            if (isCurrentSearch()) {
-              sender.send(
-                CHANNELS.searchResults,
-                SearchResultsEventSchema.parse({
-                  searchId: input.searchId,
-                  entries: [],
-                  done: true,
-                  limitHit: false,
-                }),
-              );
-            }
-            return;
-          }
-          if (!searchCleanupHooked.has(sender)) {
-            searchCleanupHooked.add(sender);
-            sender.once("destroyed", () => searchRegistry.disposeOwner(sender.id));
-          }
-          await searchRegistry.startSearch(
-            sender.id,
-            workspace.rootPath,
-            input.searchId,
-            {
-              query: input.query,
-              caseSensitive: input.caseSensitive,
-              wholeWord: input.wholeWord,
-              regex: input.regex,
-              includeGlob: mountGlob,
-              excludeGlob: input.excludeGlob,
-            },
-            (batch) => {
-              if (!isCurrentSearch()) return;
-              try {
-                sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
-              } catch (error) {
-                console.error("[desktop] mount search batch dropped:", error);
-              }
-            },
-            {
-              isCurrent: isCurrentSearch,
-              allowPath: ownedSearchView.allowPath,
-            },
-          );
-        }
-      }
-      return;
-    }
-    if (!searchCleanupHooked.has(sender)) {
-      searchCleanupHooked.add(sender);
-      // Window closed / renderer gone: kill this renderer's rg child.
-      sender.once("destroyed", () => searchRegistry.disposeOwner(sender.id));
-    }
-    await searchRegistry.startSearch(
-      sender.id,
-      workspace.rootPath,
-      input.searchId,
-      {
-        query: input.query,
-        caseSensitive: input.caseSensitive,
-        wholeWord: input.wholeWord,
-        regex: input.regex,
-        includeGlob: input.includeGlob,
-        excludeGlob: input.excludeGlob,
-      },
-      (batch) => {
-        if (!isCurrentSearch()) return;
-        try {
-          sender.send(CHANNELS.searchResults, SearchResultsEventSchema.parse(batch));
-        } catch {
-          // Defense in depth: a batch that fails the contract is DROPPED,
-          // never thrown through the engine's stream handler (an uncaught
-          // throw there would wedge the main process). The bounded done
-          // batch still arrives and settles the renderer.
-        }
-      },
-      {
-        isCurrent: isCurrentSearch,
-        allowPath: ownedSearchView.allowPath,
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.cancelWorkspaceSearch, (event, payload) => {
-    assertTrustedSender(event);
-    const input = CancelWorkspaceSearchPayload.parse(payload);
-    searchRegistry.cancel(event.sender.id, input.searchId);
+  registerWorkspaceSearchIpcHandlers<
+    IpcMainInvokeEvent,
+    NonNullable<ReturnType<typeof findWorkspace>>
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender,
+    requireWorkspace: (event, workspaceId) =>
+      requireAuthorizedWorkspace(event, workspaceId),
+    owner: workspaceSearchOwner,
   });
 
   ipcMain.handle(CHANNELS.engineYDocOpen, async (event, payload) => {

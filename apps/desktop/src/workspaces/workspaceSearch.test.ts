@@ -500,6 +500,38 @@ describe("createSearchRegistry", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("keeps a replacement tracked when a reused search id completes late", async () => {
+    const killed: string[] = [];
+    const batches: Array<(batch: SearchBatch) => void> = [];
+    let started = 0;
+    const registry = createSearchRegistry({
+      rgPath: "/unused",
+      start: (options) => {
+        started += 1;
+        const handleName = `handle-${started}`;
+        batches.push(options.onBatch);
+        return {
+          searchId: options.searchId,
+          kill: () => killed.push(handleName),
+        };
+      },
+    });
+    const root = await createTestScratch("dohc-reg-");
+    await registry.startSearch(1, root, "same-id", { query: "a" }, () => {}, current);
+    await registry.startSearch(1, root, "same-id", { query: "b" }, () => {}, current);
+
+    batches[0]?.({
+      searchId: "same-id",
+      entries: [],
+      done: true,
+      limitHit: false,
+    });
+    registry.cancel(1, "same-id");
+
+    expect(killed).toEqual(["handle-1", "handle-2"]);
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("cancel kills only a matching searchId; disposeOwner and killAll kill tracked children", async () => {
     const killed: string[] = [];
     const registry = createSearchRegistry({ rgPath: "/unused", start: fakeStart(killed) });
