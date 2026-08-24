@@ -10,10 +10,16 @@ import { describe, expect, it } from "vitest";
 
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
-function handler(channel: string): string {
-  const start = mainSource.indexOf(`ipcMain.handle(CHANNELS.${channel}`);
+function sourceBlock(startMarker: string, endMarker: string): string {
+  const start = mainSource.indexOf(startMarker);
   expect(start).toBeGreaterThan(-1);
-  return mainSource.slice(start, mainSource.indexOf("\n  });", start));
+  const end = mainSource.indexOf(endMarker, start);
+  expect(end).toBeGreaterThan(start);
+  return mainSource.slice(start, end);
+}
+
+function handler(channel: string): string {
+  return sourceBlock(`ipcMain.handle(CHANNELS.${channel}`, "\n  });");
 }
 
 /**
@@ -23,11 +29,7 @@ function handler(channel: string): string {
 const squeeze = (source: string): string => source.replace(/\s+/g, "");
 
 function functionSource(signature: string): string {
-  const start = mainSource.indexOf(signature);
-  expect(start).toBeGreaterThan(-1);
-  const end = mainSource.indexOf("\n}\n", start);
-  expect(end).toBeGreaterThan(start);
-  return mainSource.slice(start, end);
+  return sourceBlock(signature, "\n}\n");
 }
 
 describe("plugin web app main-process wiring", () => {
@@ -297,18 +299,24 @@ describe("plugin web app main-process wiring", () => {
       "void stopPluginWebAppsForPlugin(workspace.workspaceId, pluginId).catch(",
     );
 
-    const disableAt = mainSource.indexOf("pluginAction(CHANNELS.disablePlugin,");
-    const disableStopAt = mainSource.indexOf(
+    const disable = sourceBlock(
+      "pluginAction(CHANNELS.disablePlugin,",
+      "\n  });",
+    );
+    const disableCallAt = disable.indexOf(
+      "const result = await pipeline.disable(pluginId);",
+    );
+    const failureReturnAt = disable.indexOf(
+      "if (!result.ok) return result;",
+      disableCallAt,
+    );
+    const disableStopAt = disable.indexOf(
       "stopPluginWebAppsForPlugin(workspaceId, pluginId)",
-      disableAt,
+      failureReturnAt,
     );
-    const disableCallAt = mainSource.indexOf(
-      "pipeline.disable(pluginId),",
-      disableAt,
-    );
-    expect(disableCallAt).toBeGreaterThan(disableAt);
-    expect(disableStopAt).toBeGreaterThan(disableAt);
-    expect(disableStopAt).toBeGreaterThan(disableCallAt);
+    expect(disableCallAt).toBeGreaterThan(-1);
+    expect(failureReturnAt).toBeGreaterThan(disableCallAt);
+    expect(disableStopAt).toBeGreaterThan(failureReturnAt);
   });
 
   // The predicate itself, pinned once by name so every gate that reuses it

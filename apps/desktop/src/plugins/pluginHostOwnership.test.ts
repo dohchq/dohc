@@ -516,9 +516,11 @@ describe("PluginHostOwnership", () => {
   it("parks a reserved change behind automatic teardown", async () => {
     const host = new FakePluginHost();
     const stopped = deferred<void>();
+    let teardownFinished = false;
     host.stopImpl = async (pluginId) => {
       await stopped.promise;
       host.records.delete(pluginId);
+      teardownFinished = true;
     };
     const owner = new PluginHostOwnership(host);
     const command = owner.runCommand("example-plugin", async (authority) =>
@@ -532,6 +534,7 @@ describe("PluginHostOwnership", () => {
     let changeBegan = false;
     let replacement!: PluginHostRecordToken;
     const change = reservation.run(async (authority) => {
+      expect(teardownFinished).toBe(true);
       changeBegan = true;
       const evidence = host.start("example-plugin");
       replacement = evidence.record;
@@ -542,13 +545,13 @@ describe("PluginHostOwnership", () => {
       changeSettled = true;
     });
 
-    await Promise.resolve();
     expect(changeBegan).toBe(false);
     expect(changeSettled).toBe(false);
 
     stopped.resolve();
     await command;
     await expect(change).resolves.toBe("enabled");
+    expect(teardownFinished).toBe(true);
     expect(host.currentRecord("example-plugin")).toBe(replacement);
     expect(host.calls).toEqual(["stop:example-plugin"]);
   });

@@ -483,22 +483,26 @@ describe("plugin panel main-process wiring", () => {
     expect(checkAt).toBeGreaterThan(gateAt);
   });
 
-  it("reserves disable before it disposes the plugin's panel records", () => {
-    const disableAt = mainSource.indexOf(
+  it("disposes panel records only after disable succeeds", () => {
+    const disable = sourceBlock(
       "pluginAction(CHANNELS.disablePlugin,",
+      "\n  });",
     );
-    const disableCleanupAt = mainSource.indexOf(
+    const disableCallAt = disable.indexOf(
+      "const result = await pipeline.disable(pluginId);",
+    );
+    const failureReturnAt = disable.indexOf(
+      "if (!result.ok) return result;",
+      disableCallAt,
+    );
+    const disableCleanupAt = disable.indexOf(
       "stopPluginPanelsForPlugin(workspaceId, pluginId)",
-      disableAt,
-    );
-    const disableCallAt = mainSource.indexOf(
-      "pipeline.disable(pluginId),",
-      disableAt,
+      failureReturnAt,
     );
 
-    expect(disableAt).toBeGreaterThan(-1);
-    expect(disableCallAt).toBeGreaterThan(disableAt);
-    expect(disableCleanupAt).toBeGreaterThan(disableCallAt);
+    expect(disableCallAt).toBeGreaterThan(-1);
+    expect(failureReturnAt).toBeGreaterThan(disableCallAt);
+    expect(disableCleanupAt).toBeGreaterThan(failureReturnAt);
   });
 
   it("disposes a plugin's panel records only once no installed claimant survives uninstall", () => {

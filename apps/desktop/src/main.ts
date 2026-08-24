@@ -8783,8 +8783,9 @@ function registerIpcHandlers(
   pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
     pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, async (pipeline, pluginId, workspaceId) => {
-    const [result] = await Promise.all([
-      pipeline.disable(pluginId),
+    const result = await pipeline.disable(pluginId);
+    if (!result.ok) return result;
+    await Promise.all([
       stopPluginPanelsForPlugin(workspaceId, pluginId),
       stopPluginWebAppsForPlugin(workspaceId, pluginId),
     ]);
