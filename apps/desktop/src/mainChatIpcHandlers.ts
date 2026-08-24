@@ -448,13 +448,13 @@ function mapRelayShareListing(
 } {
   const chatSelector = (row: Record<string, unknown>) => {
     const selector = row.selector as
-      | { kind?: unknown; channelWireId?: unknown; access?: unknown }
+      | { kind?: unknown; channelWireId?: unknown }
       | undefined;
     return selector?.kind === "chat-channel" &&
       typeof selector.channelWireId === "string"
       ? {
           channelWireId: selector.channelWireId,
-          access: selector.access === "read-only" ? "read-only" : "read-write",
+          access: row.access === "read-only" ? "read-only" : "read-write",
         }
       : null;
   };

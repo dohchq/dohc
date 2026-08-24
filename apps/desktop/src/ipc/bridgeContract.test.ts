@@ -97,6 +97,10 @@ import {
   ListShareProposalsResult,
   ListMyShareChangesPayload,
   ListMyShareChangesResult,
+  ListRelaySharesResult,
+  RelayShareGrantedRow,
+  RelayShareReceivedRow,
+  RelayShareSelector,
   ReadShareProposalChangesResult,
   RefreshSharedViewResult,
   SettleShareProposalPayload,
@@ -116,6 +120,72 @@ import {
 } from "../renderer/workbench/workbenchState";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
+
+describe("relay share listing IPC contract", () => {
+  const selector = { paths: ["docs"], versionId: null };
+  const grant = { access: "edit" as const, grantId: "grant-1", generation: 2 };
+
+  it("keeps stored selector scope separate from grant fields", () => {
+    expect(RelayShareSelector.parse(selector)).toEqual(selector);
+    expect(
+      ListRelaySharesResult.parse({
+        granted: [
+          {
+            shareId: "share-1",
+            workspaceId: "remote-1",
+            recipientUserId: "recipient-1",
+            recipientEmail: "recipient@example.test",
+            selector,
+            ...grant,
+            createdAtMs: 1,
+            revokedAtMs: null,
+            shareCode: "dohc-share:share-1:https://relay.test",
+          },
+        ],
+        received: [
+          {
+            shareId: "share-2",
+            granterEmail: "owner@example.test",
+            selector,
+            ...grant,
+            createdAtMs: 1,
+            shareCode: "dohc-share:share-2:https://relay.test",
+          },
+        ],
+      }),
+    ).toMatchObject({
+      granted: [{ selector, ...grant }],
+      received: [{ selector, ...grant }],
+    });
+  });
+
+  it("refuses the retired nested-access listing shape and incomplete grant fields", () => {
+    const oldSelector = { ...selector, access: "edit" };
+    const granted = {
+      shareId: "share-1",
+      workspaceId: "remote-1",
+      recipientUserId: "recipient-1",
+      recipientEmail: "recipient@example.test",
+      selector: oldSelector,
+      createdAtMs: 1,
+      revokedAtMs: null,
+      shareCode: "dohc-share:share-1:https://relay.test",
+    };
+    const received = {
+      shareId: "share-2",
+      granterEmail: "owner@example.test",
+      selector: oldSelector,
+      createdAtMs: 1,
+      shareCode: "dohc-share:share-2:https://relay.test",
+    };
+
+    expect(RelayShareGrantedRow.safeParse(granted).success).toBe(false);
+    expect(RelayShareReceivedRow.safeParse(received).success).toBe(false);
+    expect(RelayShareGrantedRow.safeParse({ ...granted, ...grant, generation: 0 }).success).toBe(
+      false,
+    );
+  });
+});
 
 describe("shared view refresh IPC contract", () => {
   it("preserves pull exclusions and unjournalable paths independently", () => {

@@ -188,7 +188,15 @@ async function createChannelShare(
     ),
   );
   expect(response.status).toBe(200);
-  return (await json(response)).shareId as string;
+  const created = await json(response);
+  expect(created).toMatchObject({
+    selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+    access: access ?? "read-write",
+    grantId: expect.any(String),
+    generation: 1,
+  });
+  expect(created.selector).not.toHaveProperty("access");
+  return created.shareId as string;
 }
 
 async function fetchSharePage(
@@ -261,7 +269,10 @@ describe("shared channels (MU-C4)", () => {
     >;
     expect(granted[0]).toMatchObject({
       shareId,
-      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE, access: "read-write" },
+      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+      access: "read-write",
+      grantId: expect.any(String),
+      generation: 1,
     });
 
     const received = (await json(await h(request(MEMBER_A, "/sync/shares")))).received as Array<
@@ -270,7 +281,10 @@ describe("shared channels (MU-C4)", () => {
     expect(received[0]).toMatchObject({
       shareId,
       granterUserId: OWNER,
-      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE, access: "read-write" },
+      selector: { kind: "chat-channel", channelWireId: SHARED_WIRE },
+      access: "read-write",
+      grantId: expect.any(String),
+      generation: 1,
     });
     // The member never learns the owner's workspace id.
     expect(received[0]).not.toHaveProperty("workspaceId");

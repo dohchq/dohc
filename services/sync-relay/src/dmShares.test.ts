@@ -361,7 +361,11 @@ describe("DM grants over the relay", () => {
     expect(grantedRow?.selector).toEqual({
       kind: "chat-channel",
       channelWireId: DM_WIRE,
+    });
+    expect(grantedRow).toMatchObject({
       access: "read-write",
+      grantId: expect.any(String),
+      generation: 1,
     });
 
     const received = await json(await h(request(MEMBER, "/sync/shares")));
@@ -371,7 +375,11 @@ describe("DM grants over the relay", () => {
     expect(receivedRow?.selector).toEqual({
       kind: "chat-channel",
       channelWireId: DM_WIRE,
+    });
+    expect(receivedRow).toMatchObject({
       access: "read-write",
+      grantId: expect.any(String),
+      generation: 1,
     });
     // The received summary must not expose the granter's workspace id.
     expect(receivedRow?.workspaceId).toBeUndefined();

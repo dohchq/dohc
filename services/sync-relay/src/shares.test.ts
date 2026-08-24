@@ -173,9 +173,13 @@ describe("share grants", () => {
       ok: true,
       shareId: "share-0",
       workspaceId: WORKSPACE,
-      selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
+      selector: { paths: ["docs", "notes.md"], versionId: null },
+      access: "view",
+      grantId: expect.any(String),
+      generation: 1,
       createdAtMs: 5555,
     });
+    expect(created.selector).not.toHaveProperty("access");
     expect(created).not.toHaveProperty("recipientUserId");
 
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
@@ -185,7 +189,10 @@ describe("share grants", () => {
         workspaceId: WORKSPACE,
         recipientUserId: RECIPIENT,
         recipientEmail: `${RECIPIENT}@dohc.test`,
-        selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
+        selector: { paths: ["docs", "notes.md"], versionId: null },
+        access: "view",
+        grantId: expect.any(String),
+        generation: 1,
         createdAtMs: 5555,
         revokedAtMs: null,
       },
@@ -200,6 +207,10 @@ describe("share grants", () => {
       shareId: "share-0",
       granterUserId: GRANTER,
       granterEmail: `${GRANTER}@dohc.test`,
+      selector: { paths: ["docs", "notes.md"], versionId: null },
+      access: "view",
+      grantId: expect.any(String),
+      generation: 1,
     });
     // The recipient never learns the granter's workspace id.
     expect(received[0]).not.toHaveProperty("workspaceId");
@@ -209,7 +220,10 @@ describe("share grants", () => {
       ok: true,
       shareId: "share-0",
       granterUserId: GRANTER,
-      selector: { paths: ["docs", "notes.md"], versionId: null, access: "view" },
+      selector: { paths: ["docs", "notes.md"], versionId: null },
+      access: "view",
+      grantId: expect.any(String),
+      generation: 1,
     });
   });
 
@@ -227,16 +241,20 @@ describe("share grants", () => {
         ),
       );
       expect(create.status, access).toBe(200);
-      expect((await json(create)).selector, access).toMatchObject({ access });
+      const created = await json(create);
+      expect(created.access, access).toBe(access);
+      expect(created.selector, access).not.toHaveProperty("access");
     }
 
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
-    const granted = granterList.granted as Array<{ selector: { access: string } }>;
-    expect(granted.map((row) => row.selector.access)).toEqual(["view", "comment", "edit"]);
+    const granted = granterList.granted as Array<{ access: string; selector: object }>;
+    expect(granted.map((row) => row.access)).toEqual(["view", "comment", "edit"]);
+    expect(granted.every((row) => !("access" in row.selector))).toBe(true);
 
     const recipientList = await json(await h(request(RECIPIENT, "/sync/shares")));
-    const received = recipientList.received as Array<{ selector: { access: string } }>;
-    expect(received.map((row) => row.selector.access)).toEqual(["view", "comment", "edit"]);
+    const received = recipientList.received as Array<{ access: string; selector: object }>;
+    expect(received.map((row) => row.access)).toEqual(["view", "comment", "edit"]);
+    expect(received.every((row) => !("access" in row.selector))).toBe(true);
   });
 
   it("refuses an unrecognized access value at grant time", async () => {

@@ -50,7 +50,8 @@ export async function fetchSharedChannelInfo(input: {
   if (
     selector.kind !== "chat-channel" ||
     typeof selector.channelWireId !== "string" ||
-    selector.channelWireId.length === 0
+    selector.channelWireId.length === 0 ||
+    (body.access !== "read-only" && body.access !== "read-write")
   ) {
     throw new ShareUnavailableError();
   }
@@ -59,7 +60,7 @@ export async function fetchSharedChannelInfo(input: {
     granterUserId: String(body.granterUserId ?? ""),
     granterEmail: typeof body.granterEmail === "string" ? body.granterEmail : null,
     channelWireId: selector.channelWireId,
-    access: selector.access === "read-only" ? "read-only" : "read-write",
+    access: body.access,
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
 }

@@ -10,7 +10,6 @@ import {
 } from "./presence";
 import {
   MAIN_VERSION_ID,
-  effectiveShareSelector,
   filterOpForShare,
   filterOpForShareAppend,
   filterProposedChangeForShare,
@@ -414,19 +413,19 @@ export function createSyncRelayHandler({
     side: "granted" | "received",
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
-    const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
-    const selector = storedSelector
-      ? effectiveShareSelector(storedSelector, grant.access)
-      : null;
+    const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const base = {
       shareId: share.shareId,
-      // An unreadable row says so. It does NOT get a stand-in selector: a
-      // fabricated `view` would state a level nobody granted, on a row whose
-      // own reads answer 404. The row stays listed because it is the
+      // An unreadable row says so. It does NOT get a stand-in scope: empty
+      // paths with no version would claim the entire live workspace, on a row
+      // whose own reads answer 404. The row stays listed because it is the
       // caller's own share and ending it must remain possible — the reverse
       // path is the invariant here, and listing it reveals nothing the
       // caller did not already have.
       selector,
+      access: grant.access,
+      grantId: grant.grantId,
+      generation: grant.generation,
       // The KIND survives the damage when it can be read at all. It is what
       // routes a row to the right manager, and losing it made a damaged
       // chat-channel grant surface in the path/version lists as an unreadable
@@ -1277,7 +1276,7 @@ export function createSyncRelayHandler({
         // (MU-C4, addressed by channelWireId + optional access) or the PR-18
         // path/version grant. The recipient addressing, pending-invite, and
         // anti-enumeration behavior below is identical for both.
-        const { selector, access, wireSelector } = (() => {
+        const { selector, access } = (() => {
           if (input.channelWireId !== undefined) {
             // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
             // also carry a path/version selector. Silently preferring
@@ -1309,8 +1308,7 @@ export function createSyncRelayHandler({
               throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
             }
             const access = accessValidation.access;
-            const wireSelector = { ...selector, access };
-            return { selector, access, wireSelector };
+            return { selector, access };
           }
 
           const accessValidation = validateFileShareAccess(input.access);
@@ -1329,8 +1327,7 @@ export function createSyncRelayHandler({
           }
           const selector = validation.selector;
           const access = accessValidation.access;
-          const wireSelector = { ...selector, access };
-          return { selector, access, wireSelector };
+          return { selector, access };
         })();
         const shareId = newShareId();
         const grantId = newGrantId();
@@ -1375,7 +1372,10 @@ export function createSyncRelayHandler({
             shareId,
             workspaceId: route.workspaceId,
             recipientUserId,
-            selector: wireSelector,
+            selector,
+            access,
+            grantId,
+            generation: 1,
             createdAtMs,
           });
         }
@@ -1424,7 +1424,10 @@ export function createSyncRelayHandler({
           ok: true,
           shareId,
           workspaceId: route.workspaceId,
-          selector: wireSelector,
+          selector,
+          access,
+          grantId,
+          generation: 1,
           createdAtMs,
         });
       }

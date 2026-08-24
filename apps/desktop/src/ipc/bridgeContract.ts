@@ -3281,7 +3281,6 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
   versionId: z.string().min(1).max(128).nullable(),
-  access: SHARE_ACCESS,
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
@@ -3296,8 +3295,11 @@ export const RelayShareGrantedRow = z.object({
   recipientEmail: EMAIL_STRING.nullable(),
   // null when the relay could not read this row's stored selector. The row
   // stays listed so ending the share remains possible; it states the damage
-  // rather than a level nobody granted (#646).
+  // rather than a scope nobody granted (#646).
   selector: RelayShareSelector.nullable(),
+  access: SHARE_ACCESS,
+  grantId: z.string().min(1).max(200),
+  generation: z.number().int().min(1),
   damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   revokedAtMs: z.number().int().nonnegative().nullable(),
@@ -3313,6 +3315,9 @@ export const RelayShareReceivedRow = z.object({
   granterEmail: EMAIL_STRING.nullable(),
   // null when the relay could not read this row's stored selector (#646).
   selector: RelayShareSelector.nullable(),
+  access: SHARE_ACCESS,
+  grantId: z.string().min(1).max(200),
+  generation: z.number().int().min(1),
   damaged: z.literal(true).optional(),
   createdAtMs: z.number().int().nonnegative(),
   shareCode: z.string().min(1).max(4096),

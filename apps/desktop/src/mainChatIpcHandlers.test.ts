@@ -546,8 +546,10 @@ describe("readRelayChatShareLanes", () => {
               selector: {
                 kind: "chat-channel",
                 channelWireId: "wire-1",
-                access: "read-only",
               },
+              access: "read-only",
+              grantId: "grant-mine",
+              generation: 1,
             },
             // Managed by another workspace: not this listing's row.
             {
