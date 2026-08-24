@@ -3864,11 +3864,13 @@ export class PluginPipeline {
       }, change);
     }
 
-    // Crash-loop disable keeps an inert record for inspection. Retire it
-    // through this change before PluginHost admits the replacement record.
+    // Crash-loop termination keeps an inert record for inspection, including
+    // when persisting the disabled bit fails. Retire that exact record through
+    // this change before clearing durable state or admitting its replacement.
     if (
       options.clearDisabled &&
-      this.host.getStatus(pluginId) === "disabled"
+      this.host.currentRecord(pluginId) &&
+      !this.host.hasLiveSpawn(pluginId)
     ) {
       if (!change) {
         return this.restoreStatusAfterHostChangeRefusal(

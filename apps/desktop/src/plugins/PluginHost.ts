@@ -564,6 +564,12 @@ export class PluginHost {
     return this.plugins.get(pluginId)?.ownershipToken;
   }
 
+  hasLiveSpawn(pluginId: string): boolean {
+    const record = this.plugins.get(pluginId);
+    const spawn = record?.current;
+    return Boolean(record && spawn && this.isLive(record, spawn));
+  }
+
   getStderrLog(pluginId: string): string[] {
     return [...(this.plugins.get(pluginId)?.stderr ?? [])];
   }
