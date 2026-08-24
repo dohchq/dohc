@@ -447,17 +447,20 @@ function mapRelayShareListing(
   received: Array<Record<string, unknown>>;
 } {
   const chatSelector = (row: Record<string, unknown>) => {
-    if (row.access !== "read-only" && row.access !== "read-write") return null;
     const selector = row.selector as
       | { kind?: unknown; channelWireId?: unknown }
       | undefined;
-    return selector?.kind === "chat-channel" &&
-      typeof selector.channelWireId === "string"
-      ? {
-          channelWireId: selector.channelWireId,
-          access: row.access,
-        }
-      : null;
+    if (selector?.kind !== "chat-channel" || typeof selector.channelWireId !== "string") {
+      return null;
+    }
+    // A readable chat selector whose grant access is unreadable is a
+    // malformed listing, not an empty one: answering would clear cached
+    // grants the relay never disavowed. Throwing lands in the guard above,
+    // which reports the listing as unreachable.
+    if (row.access !== "read-only" && row.access !== "read-write") {
+      throw new Error("chat share row carries unreadable access");
+    }
+    return { channelWireId: selector.channelWireId, access: row.access };
   };
   const grantedRows = listing.granted ?? [];
   const receivedRows = listing.received ?? [];

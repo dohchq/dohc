@@ -597,7 +597,7 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
-  it("drops a chat-channel row whose access grants no chat authority", async () => {
+  it("reports a chat-channel row with unreadable access as unreachable", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -616,7 +616,7 @@ describe("readRelayChatShareLanes", () => {
       remoteWorkspaceId: "remote-1",
     });
 
-    expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
+    expect(lanes).toEqual({ state: "unreachable" });
   });
 
   it("excludes a cached DM share id from the ordinary received-channel lane", async () => {
