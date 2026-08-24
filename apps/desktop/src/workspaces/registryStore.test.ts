@@ -1,6 +1,7 @@
+import { renameSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_RETAINED_SKIPPED_OPS,
   MAX_TRACKED_BATCH_COORDINATES,
@@ -15,6 +16,11 @@ import {
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
 import { createTestScratch } from "./testTemp";
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
+
 let store: ReturnType<typeof createRegistryStore>;
 let registryPath: string;
 
@@ -26,6 +32,7 @@ const personal = {
 };
 
 beforeEach(async () => {
+  vi.mocked(renameSync).mockClear();
   const dir = await createTestScratch("dohc-registry-");
   registryPath = join(dir, "workspaces.json");
   store = createRegistryStore(registryPath);
@@ -542,6 +549,38 @@ describe("registry store", () => {
     });
   });
 
+  it("keeps the remote identity truthful when its atomic rename fails", () => {
+    const original = {
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-original",
+      ownerUserId: "user-original",
+    };
+    const replacement = {
+      serverUrl: "https://other.dohc.example",
+      remoteWorkspaceId: "rw-replacement",
+      ownerUserId: "user-replacement",
+    };
+    store.register(personal);
+    store.setRemote(personal.workspaceId, original);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+
+    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(
+      renameFailure,
+    );
+
+    expect(
+      store.find(personal.workspaceId)?.remote,
+      "MUTATION: a failed write publishes the replacement to the live cache",
+    ).toEqual(original);
+    expect(
+      createRegistryStore(registryPath).find(personal.workspaceId)?.remote,
+      "the atomic rename failure must leave the durable registry unchanged",
+    ).toEqual(original);
+  });
+
   it("persists and clears the first-pull join maintenance gate", () => {
     store.register({ ...personal, joinBootstrapPending: true });
     const reopened = createRegistryStore(registryPath);
@@ -626,6 +665,9 @@ describe("registry store", () => {
     // Leaving the last shared channel removes the key entirely.
     store.setSharedChannels("ws-1", []);
     expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
+    expect(
+      createRegistryStore(registryPath).find("ws-1")?.sharedChannels,
+    ).toBeUndefined();
   });
 
   it("leaves joined shared channels unchanged when the registry write fails", async () => {
@@ -767,6 +809,69 @@ describe("registry store", () => {
         grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       }),
     ).toThrow(/Unknown workspace/);
+  });
+
+  it("keeps the shared-view identity truthful when its atomic rename fails", () => {
+    const original = {
+      shareId: "share-original",
+      granterEmail: "granter@dohc.test",
+      grantedSelector: {
+        paths: ["docs"],
+        versionId: null,
+        access: "view" as const,
+      },
+    };
+    const replacement = {
+      ...original,
+      shareId: "share-replacement",
+      ended: true,
+    };
+    store.register(personal);
+    store.setShareView(personal.workspaceId, original);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+
+    expect(() => store.setShareView(personal.workspaceId, replacement)).toThrow(
+      renameFailure,
+    );
+
+    expect(
+      store.find(personal.workspaceId)?.shareView,
+      "MUTATION: a failed write publishes the replacement to the live cache",
+    ).toEqual(original);
+    expect(
+      createRegistryStore(registryPath).find(personal.workspaceId)?.shareView,
+      "the atomic rename failure must leave the durable registry unchanged",
+    ).toEqual(original);
+  });
+
+  it("removes its process temp file after a failed atomic rename", async () => {
+    store.register(personal);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+
+    let thrown: unknown;
+    try {
+      store.setRemote(personal.workspaceId, {
+        serverUrl: "https://cloud.dohc.example",
+        remoteWorkspaceId: "rw-99",
+        ownerUserId: "user-99",
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBe(renameFailure);
+
+    const { readdirSync } = await import("node:fs");
+    const leftovers = readdirSync(join(registryPath, "..")).filter((file) =>
+      file.includes(".tmp-"),
+    );
+    expect(leftovers).toEqual([]);
   });
 
   it("persists the share's origin relay so refresh can reject a foreign relay (PR 18 gate fix)", () => {

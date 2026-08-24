@@ -1,4 +1,10 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ShareViewSelector } from "./shareViewInfo";
@@ -350,9 +356,45 @@ export function createRegistryStore(registryFile: string) {
     // Atomic: write a temp file then rename over the target so a crash or
     // concurrent reader never sees a half-written registry.
     const tmp = `${registryFile}.tmp-${process.pid}`;
-    writeFileSync(tmp, `${JSON.stringify(registry, null, 2)}\n`);
-    renameSync(tmp, registryFile);
+    try {
+      writeFileSync(tmp, `${JSON.stringify(registry, null, 2)}\n`);
+      renameSync(tmp, registryFile);
+    } catch (error) {
+      // A failed write or rename must not leave this process's temp file
+      // behind. Cleanup is best-effort because the persistence error is the
+      // one the caller must receive.
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // Keep the original persistence error.
+      }
+      throw error;
+    }
     cache = registry;
+  }
+
+  function updateWorkspaceEntry(
+    workspaceId: string,
+    update: (entry: Readonly<RegistryEntry>) => RegistryEntry | undefined,
+    missingMessage = `Unknown workspace: ${workspaceId}`,
+  ): void {
+    // Entry writers receive a read-only current value and return a replacement.
+    // Only write() can publish that replacement to the cache, after rename.
+    const registry = read();
+    const index = registry.workspaces.findIndex(
+      (entry) => entry.workspaceId === workspaceId,
+    );
+    if (index < 0) throw new Error(missingMessage);
+    const current = registry.workspaces[index];
+    if (!current) throw new Error(missingMessage);
+    const updated = update(current);
+    if (!updated) return;
+    write({
+      ...registry,
+      workspaces: registry.workspaces.map((entry, entryIndex) =>
+        entryIndex === index ? updated : entry,
+      ),
+    });
   }
 
   return {
@@ -383,40 +425,66 @@ export function createRegistryStore(registryFile: string) {
             `If this is a copy, remove its .dohc folder to attach it as a new workspace.`,
         );
       }
-      registry.workspaces.push(workspace);
-      write(registry);
+      write({ ...registry, workspaces: [...registry.workspaces, workspace] });
     },
 
     setRemote(workspaceId: string, remote: RemoteIdentity): void {
-      const registry = read();
-      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      entry.remote = remote;
-      write(registry);
+      updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, remote }));
     },
 
     completeJoinBootstrap(workspaceId: string): void {
-      const registry = read();
-      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      if (entry.joinBootstrapPending !== true) return;
-      // Copy-on-write: the durable join gate may only clear in the cache when
-      // the same change reached disk — a failed write() must not leave this
-      // process believing bootstrap completed while the file still gates it.
-      const updated = { ...entry };
-      delete updated.joinBootstrapPending;
-      write({
-        ...registry,
-        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        if (entry.joinBootstrapPending !== true) return undefined;
+        const updated = { ...entry };
+        delete updated.joinBootstrapPending;
+        return updated;
       });
     },
 
     setShareView(workspaceId: string, shareView: ShareViewIdentity): void {
-      const registry = read();
-      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      entry.shareView = shareView;
-      write(registry);
+      updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, shareView }));
+    },
+
+    /**
+     * Record that the user has seen a share's skipped ops. Hides the warning;
+     * keeps the evidence. `shareId` names a mounted share, absent means the
+     * workspace's own shared view.
+     */
+    acknowledgeShareSkips(
+      workspaceId: string,
+      shareId: string | undefined,
+      generation: number,
+    ): void {
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        if (shareId === undefined) {
+          const shareView = entry.shareView;
+          if (!shareView) throw new Error(`Unknown shared view: ${workspaceId}`);
+          if (!shareView.skippedOps) return undefined;
+          return {
+            ...entry,
+            shareView: {
+              ...shareView,
+              skippedOps: acknowledgeShareSkips(shareView.skippedOps, generation),
+            },
+          };
+        }
+        const mounts = entry.shareMounts ?? [];
+        const target = mounts.find((mount) => mount.shareId === shareId);
+        if (!target) throw new Error(`Unknown share mount: ${shareId}`);
+        const skippedOps = target.skippedOps;
+        if (!skippedOps) return undefined;
+        return {
+          ...entry,
+          shareMounts: mounts.map((mount) =>
+            mount.shareId === shareId
+              ? {
+                  ...mount,
+                  skippedOps: acknowledgeShareSkips(skippedOps, generation),
+                }
+              : mount,
+          ),
+        };
+      });
     },
 
     /**
@@ -428,72 +496,20 @@ export function createRegistryStore(registryFile: string) {
      * those ops. So the read-and-merge lives here, where a caller cannot pass
      * a stale copy at all.
      */
-    /**
-     * Record that the user has seen a share's skipped ops. Hides the warning;
-     * keeps the evidence. `shareId` names a mounted share, absent means the
-     * workspace's own shared view.
-     */
-    acknowledgeShareSkips(
-      workspaceId: string,
-      shareId: string | undefined,
-      generation: number,
-    ): void {
-      const registry = read();
-      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      // Copy-on-write, like completeJoinBootstrap above: the cache may only
-      // show the warning hidden once the same change reached disk. Mutating
-      // first and writing after would hide it in this process while the file
-      // still holds it — quiet now, back after a restart.
-      let updated: RegistryEntry;
-      if (shareId === undefined) {
-        const shareView = entry.shareView;
-        if (!shareView) throw new Error(`Unknown shared view: ${workspaceId}`);
-        if (!shareView.skippedOps) return;
-        updated = {
-          ...entry,
-          shareView: {
-            ...shareView,
-            skippedOps: acknowledgeShareSkips(shareView.skippedOps, generation),
-          },
-        };
-      } else {
-        const mounts = entry.shareMounts ?? [];
-        const target = mounts.find((mount) => mount.shareId === shareId);
-        if (!target) throw new Error(`Unknown share mount: ${shareId}`);
-        const skippedOps = target.skippedOps;
-        if (!skippedOps) return;
-        updated = {
-          ...entry,
-          shareMounts: mounts.map((mount) =>
-            mount.shareId === shareId
-              ? {
-                  ...mount,
-                  skippedOps: acknowledgeShareSkips(skippedOps, generation),
-                }
-              : mount,
-          ),
-        };
-      }
-      write({
-        ...registry,
-        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
-      });
-    },
-
     markShareViewEnded(workspaceId: string): void {
-      const registry = read();
-      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
-      if (!entry?.shareView) throw new Error(`Unknown shared view: ${workspaceId}`);
-      // Copy-on-write for the same reason as the acknowledgement above.
-      const updated: RegistryEntry = {
-        ...entry,
-        shareView: { ...entry.shareView, ended: true },
-      };
-      write({
-        ...registry,
-        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
-      });
+      updateWorkspaceEntry(
+        workspaceId,
+        (entry) => {
+          if (!entry.shareView) {
+            throw new Error(`Unknown shared view: ${workspaceId}`);
+          }
+          return {
+            ...entry,
+            shareView: { ...entry.shareView, ended: true },
+          };
+        },
+        `Unknown shared view: ${workspaceId}`,
+      );
     },
 
     // MU-C4: replace the workspace's joined shared-channel set. Upserts and
@@ -503,36 +519,22 @@ export function createRegistryStore(registryFile: string) {
       workspaceId: string,
       sharedChannels: JoinedSharedChannel[],
     ): void {
-      const registry = read();
-      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      // Keep the cached entry unchanged until the replacement reaches disk.
-      // A failed write must not make a joined channel appear changed or gone
-      // for the rest of this process.
-      const updated: RegistryEntry = { ...entry };
-      if (sharedChannels.length === 0) delete updated.sharedChannels;
-      else updated.sharedChannels = sharedChannels;
-      write({
-        ...registry,
-        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      updateWorkspaceEntry(workspaceId, (entry) => {
+        const updated: RegistryEntry = { ...entry };
+        if (sharedChannels.length === 0) delete updated.sharedChannels;
+        else updated.sharedChannels = sharedChannels;
+        return updated;
       });
     },
 
     // Share mounts: replace the workspace's mount set (same replace-the-set
     // write shape as setSharedChannels — callers compute the next set).
     setShareMounts(workspaceId: string, shareMounts: ShareMountRecord[]): void {
-      const registry = read();
-      const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
-      if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
       // Keep an empty set as a durable ownership tombstone. A last unmount
       // can leave its projection folder behind when safe removal is refused;
       // deleting the field would immediately promote those known share bytes
       // to ordinary local authority on the next read.
-      const updated: RegistryEntry = { ...entry, shareMounts };
-      write({
-        ...registry,
-        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
-      });
+      updateWorkspaceEntry(workspaceId, (entry) => ({ ...entry, shareMounts }));
     },
 
     // Failed-join rollback (0P-C gate fix): removes a registration this
