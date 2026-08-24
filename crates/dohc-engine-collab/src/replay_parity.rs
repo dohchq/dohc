@@ -63,8 +63,9 @@
 //! shared choke point for both the local edit path and the remote replication
 //! path (`crates/dohc-engine-collab/src/durable.rs`,
 //! `crates/dohc-engine-collab/src/replication.rs`) — and this module's own
-//! `validate_replay_parity_inner` runs it before its own `Ydoc::validate_update`
-//! call for the same reason.
+//! `validate_replay_parity_inner` runs `scan_v1` on the candidate before any
+//! decode ([`Ydoc::apply`] pre-validates again at its own call site) for the
+//! same reason.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -229,13 +230,16 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
         panic!("injected replay-gate unwind for fail-closed test");
     }
     // `scan_v1` MUST run before anything that can reach yrs' own uncatchable
-    // `Update::decode_v1` hard-abort (`Ydoc::validate_update` below, and the
-    // scratch-doc `apply`s further down) — it never calls `decode_v1` and
-    // never uses yrs' unsafe string decode (see `safe_read_string`'s doc
-    // comment), so malformed/adversarial `candidate` bytes are rejected here,
-    // fail-closed, before anything unsafe ever sees them.
+    // `Update::decode_v1` hard-abort (the scratch-doc `apply`s further down) —
+    // it never calls `decode_v1` and never uses yrs' unsafe string decode (see
+    // `safe_read_string`'s doc comment), so malformed/adversarial `candidate`
+    // bytes are rejected here, fail-closed, before anything unsafe ever sees
+    // them. This is the gate's whole decode-side validation of `candidate`: a
+    // scan-passing update that yrs still cannot decode fails in the
+    // scratch-doc `apply` below with the same `MalformedUpdate` a standalone
+    // `Ydoc::validate_update` would report, so no extra pre-decode pass runs
+    // on this hot path.
     let candidate_structure = scan_v1(candidate)?;
-    Ydoc::validate_update(candidate)?;
     let base_full = base.encode_full_state();
     let base_structure = scan_v1(&base_full)?;
     let pending_bytes = base.pending_update_v1();

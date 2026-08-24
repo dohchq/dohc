@@ -351,7 +351,7 @@ fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
         Some("stale-session-request"),
         &NoFaults,
         1_100,
-        |_tx, _outcome| panic!("a stale lineage must not reach post-append"),
+        |_tx, _outcome, _update_sha| panic!("a stale lineage must not reach post-append"),
     )
     .expect_err("stale session claim must refuse the write");
     assert!(matches!(
