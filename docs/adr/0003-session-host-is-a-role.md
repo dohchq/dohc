@@ -14,3 +14,4 @@ Automatic movement of the role between device and service is deferred. Without d
 
 - `share-web` is not a dumb pipe: it authenticates upgrades, validates origins, enforces limits, and closes invalid sessions. It does not interpret Yjs semantics.
 - dohc Cloud's advantage is keeping sessions alive, not a capability self-hosters are denied.
+- Service-host mode leaves the owner's own offline edits unmerged until reconnect. The merge-and-settlement rule for that case is a named Phase 4 settle-first decision in the plan, not something this ADR silently assumes away.

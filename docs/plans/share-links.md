@@ -34,8 +34,8 @@ Gate: each prototype has a written pass, or a design revision recorded as an ADR
 
 The first shippable vertical: accountless viewing.
 
-- Desktop: create, rotate, retune, and revoke a share link from the existing share dialog.
-- `share-web`: secret exchange at the relay seam (ADR 0001), folder navigation, sanitized Markdown, safe images, Excalidraw view, forced download for untrusted formats. Secrets travel in the URL fragment and become short-lived cookies.
+- Desktop: create, rotate, retune, and revoke a share link from the existing share dialog. Rotate and revoke warn before running: rotation permanently kills the old URL, and revoke ends every session and dependent grant derived from the link.
+- `share-web`: secret exchange at the relay seam (ADR 0001), folder navigation, sanitized Markdown, safe images, Excalidraw view, forced download for untrusted formats. Secrets travel in the URL fragment and become short-lived cookies. A link secret comes from a CSPRNG with at least 256 bits of entropy, is stored only as a keyed hash, and verifies in constant time, with tests for all three properties.
 - Honest freshness: the viewer shows settled content with a "last settled" indicator; it never calls a stale snapshot live.
 - Refusal discipline: invalid id, bad secret, revoked, and rate-limited responses are indistinguishable before authentication.
 - Owner visibility: per-link usage, and a warning that a link exposes everything under the selector, including files added later.
@@ -49,7 +49,7 @@ Gate: hostile-content, refusal-oracle, and revocation tests pass; a leaked-URL w
 - Mint link principals on first interaction; claimed names are display metadata, marked unverified.
 - Extend the relay's chat author contract to recognize a server-minted link principal as the authenticated pusher without weakening named-user authorship.
 - One share-level discussion object; text only. No attachments, reactions, decisions, or anchored comments.
-- Owner moderation: delete comments, block principals, throttle notifications; a single "pause all link writes" control that preserves viewing.
+- Owner moderation: delete comments, block principals, throttle notifications; a single "pause all link writes" control that preserves viewing. Blocking and pausing reverse in place (unblock, resume); comment deletion warns that it is permanent before it runs.
 
 Gate: quota, moderation, and revoke-during-append tests pass; provenance shows link id and principal on every message.
 
@@ -62,7 +62,7 @@ Gate: quota, moderation, and revoke-during-append tests pass; provenance shows l
 - Ship named-recipient browser Edit first; enable anonymous Edit only after the same path passes adversarial load with link principals.
 - Scope: existing Markdown live documents on the main version. No create, rename, delete, Excalidraw editing, or pinned-version editing.
 
-Settle first: what a desktop named recipient's Edit means when no host is online (pause, or proposal); when View joins the live Y.Doc read-only vs reads settled Markdown; settlement cadence and maximum document size.
+Settle first: what a desktop named recipient's Edit means when no host is online (pause, or proposal); what the owner's local edits mean while a service host holds the session and the owner's device is offline, including which side settles on reconnect; when View joins the live Y.Doc read-only vs reads settled Markdown; settlement cadence and maximum document size.
 
 Gate: restart, stale-frame, selector-drift, access-change, and restore tests pass under load; the stop-and-restore drill completes against a live hostile session.
 
@@ -77,7 +77,7 @@ Gate: the Phase 1 isolation attacks re-run green against the real origin model; 
 
 ## Cross-cutting
 
-- Operational contract before Phase 2 ships: public base domains, wildcard DNS and TLS needs, trusted proxies, websocket timeouts, durable volumes, backup and restore, degraded modes, secret scrubbing in logs, and retention for link ids, IPs, and audit records. Self-hosting docs state plainly that the relay sees share plaintext and that per-publication origins need wildcard DNS or a second domain.
+- Operational contract before Phase 2 ships: public base domains, wildcard DNS and TLS needs, trusted proxies, websocket timeouts, durable volumes, backup and restore, degraded modes, secret scrubbing in logs, and retention for link ids, IPs, and audit records. Self-hosting docs state plainly that the relay sees share plaintext. App content is served from a separate registrable domain, never a subdomain of the viewer's site: wildcard subdomains under the viewer's domain stay same-site, which leaves cookie-tossing and CSRF paths open.
 - Abuse budgets are layered (per IP pre-auth, then per grant, principal, document, workspace, owner) and charged separately from the owner's own sync quota.
 - "Open in dohc" is an explicit acceptance step that tells the viewer the owner will learn their identity; the desktop handoff uses a single-purpose short-lived code, never the bearer URL.
 - Every phase runs the repository gates that its changed paths select, per `AGENTS.md`.
