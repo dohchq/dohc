@@ -1307,8 +1307,7 @@ export function createSyncRelayHandler({
             if (selectorTargetsBlockedChannel(storage, route.workspaceId, selector)) {
               throw relayHttpError(RELAY_ERRORS.invalid_channel, "channel is not shareable");
             }
-            const access = accessValidation.access;
-            return { selector, access };
+            return { selector, access: accessValidation.access };
           }
 
           const accessValidation = validateFileShareAccess(input.access);
@@ -1326,8 +1325,7 @@ export function createSyncRelayHandler({
             throw relayHttpError(RELAY_ERRORS[validation.code], validation.message);
           }
           const selector = validation.selector;
-          const access = accessValidation.access;
-          return { selector, access };
+          return { selector, access: accessValidation.access };
         })();
         const shareId = newShareId();
         const grantId = newGrantId();
