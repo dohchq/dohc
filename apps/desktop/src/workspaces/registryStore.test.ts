@@ -1,4 +1,4 @@
-import { renameSync } from "node:fs";
+import { renameSync, unlinkSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +18,11 @@ import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+  return {
+    ...actual,
+    renameSync: vi.fn(actual.renameSync),
+    unlinkSync: vi.fn(actual.unlinkSync),
+  };
 });
 
 let store: ReturnType<typeof createRegistryStore>;
@@ -33,6 +37,7 @@ const personal = {
 
 beforeEach(async () => {
   vi.mocked(renameSync).mockClear();
+  vi.mocked(unlinkSync).mockClear();
   const dir = await createTestScratch("dohc-registry-");
   registryPath = join(dir, "workspaces.json");
   store = createRegistryStore(registryPath);
@@ -670,7 +675,7 @@ describe("registry store", () => {
     ).toBeUndefined();
   });
 
-  it("leaves joined shared channels unchanged when the registry write fails", async () => {
+  it("leaves joined shared channels unchanged when the registry write fails", () => {
     const secondWorkspace = {
       ...personal,
       workspaceId: "ws-2",
@@ -694,9 +699,14 @@ describe("registry store", () => {
     store.setSharedChannels(personal.workspaceId, [joined]);
     store.setSharedChannels(secondWorkspace.workspaceId, [secondJoined]);
 
-    // Model a failed atomic rename while reads continue from the cache.
-    await rm(registryPath);
-    await mkdir(registryPath);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync)
+      .mockImplementationOnce(() => {
+        throw renameFailure;
+      })
+      .mockImplementationOnce(() => {
+        throw renameFailure;
+      });
 
     expect(() =>
       store.setSharedChannels(personal.workspaceId, [{ ...joined, ended: true }]),
@@ -712,6 +722,15 @@ describe("registry store", () => {
     expect.soft(
       store.find(secondWorkspace.workspaceId)?.sharedChannels,
       "MUTATION: a failed removal deletes the cached channel set before it reaches disk",
+    ).toEqual([secondJoined]);
+    const reopened = createRegistryStore(registryPath);
+    expect.soft(
+      reopened.find(personal.workspaceId)?.sharedChannels,
+      "the failed replacement must leave the durable channel set unchanged",
+    ).toEqual([joined]);
+    expect.soft(
+      reopened.find(secondWorkspace.workspaceId)?.sharedChannels,
+      "the failed removal must leave the durable channel set unchanged",
     ).toEqual([secondJoined]);
   });
 
@@ -872,6 +891,25 @@ describe("registry store", () => {
       file.includes(".tmp-"),
     );
     expect(leftovers).toEqual([]);
+  });
+
+  it("does not let temp cleanup mask the persistence failure", () => {
+    store.register(personal);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+    vi.mocked(unlinkSync).mockImplementationOnce(() => {
+      throw new Error("temp cleanup refused");
+    });
+
+    expect(() =>
+      store.setRemote(personal.workspaceId, {
+        serverUrl: "https://cloud.dohc.example",
+        remoteWorkspaceId: "rw-99",
+        ownerUserId: "user-99",
+      }),
+    ).toThrow(renameFailure);
   });
 
   it("persists the share's origin relay so refresh can reject a foreign relay (PR 18 gate fix)", () => {
