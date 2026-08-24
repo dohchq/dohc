@@ -63,6 +63,7 @@ export default defineConfig({
     ],
     build: {
       target: electronMainTarget,
+      minify: "esbuild",
       outDir: "dist/main",
       lib: {
         entry: {
@@ -82,6 +83,7 @@ export default defineConfig({
     ],
     build: {
       target: electronMainTarget,
+      minify: "esbuild",
       outDir: "dist/preload",
       // Sandboxed preloads must be CommonJS.
       lib: { entry: "src/preload.ts", formats: ["cjs"] },
@@ -92,6 +94,7 @@ export default defineConfig({
     plugins: [effectFree("renderer"), react(), tailwindcss()],
     build: {
       target: electronRendererTarget,
+      minify: "esbuild",
       outDir: "dist/renderer",
     },
   },
