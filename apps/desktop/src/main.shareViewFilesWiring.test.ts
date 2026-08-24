@@ -11,103 +11,33 @@ function sourceBlock(startMarker: string, endMarker: string): string {
   return mainSource.slice(start, end);
 }
 
-function functionSource(signature: string): string {
-  return sourceBlock(signature, "\n}\n");
-}
-
 function handlerSource(channel: string): string {
   return sourceBlock(`ipcMain.handle(CHANNELS.${channel}`, "\n  });");
 }
 
 describe("ShareViewFiles main-process wiring", () => {
-  it("routes mount creation and rollback through ShareViewFiles", () => {
-    const handler = handlerSource("mountShare");
-    expect(handler).toContain("await shareViewFiles.mount(");
-    expect(handler).toContain("error instanceof ShareViewMountRollbackError");
-    expect(handler).toContain("cleanup did not finish");
-    expect(handler).toContain("remove any leftover folder from shared-with-me");
-    expect(handler).not.toContain("createMountDirectory(");
-    expect(handler).not.toContain("removeMountFolder(");
-    expect(handler).not.toContain("removeShareMountProjection(");
+  it("composes the share mount commands with process-owned adapters", () => {
+    const composition = sourceBlock(
+      "const shareMountCommands = createShareMountCommands({",
+      "\n\nshareViewFiles = createShareViewFiles({",
+    );
+    expect(composition).toContain("storedShareMounts(findWorkspace(workspaceId)");
+    expect(composition).toContain("setWorkspaceShareMounts(workspaceId, mounts)");
+    expect(composition).toContain("loadAndCacheCurrentCredentials()");
+    expect(composition).toContain("fetchShareViewInfo({ relay, shareId })");
+    expect(composition).toContain("withExclusiveWorkspaceOperation(");
+    expect(composition).toContain("closeRelayTransportWorkspace(workspaceId)");
+    expect(composition).toContain("shareViewFilesMountProjection");
 
-    expect(handlerSource("openShare")).not.toContain(
-      "ShareViewMountRollbackError",
+    const filesComposition = sourceBlock(
+      "shareViewFiles = createShareViewFiles({",
+      "\n});\nconst ensureOwnedProjectionTargetCurrent",
     );
-  });
-
-  it("does not let relay shutdown skip owner-gated mount cleanup", () => {
-    const removeMount = sourceBlock(
-      "  removeMount: async (owner, target) => {",
-      "\n  },\n});",
+    expect(filesComposition).toContain(
+      "createMount: shareMountCommands.filesLifecycle.createMount",
     );
-    const relayCloseAt = removeMount.indexOf(
-      "await closeRelayTransportWorkspace(target.storeWorkspaceId)",
-    );
-    const ownerRemoveAt = removeMount.indexOf(
-      "await shareViewFilesMountProjection(owner).remove()",
-    );
-    const registryWriteAt = removeMount.indexOf("setWorkspaceShareMounts(");
-
-    expect(relayCloseAt).toBeGreaterThan(-1);
-    expect(removeMount.slice(relayCloseAt, ownerRemoveAt)).toContain(
-      ".catch((error) =>",
-    );
-    expect(ownerRemoveAt).toBeGreaterThan(relayCloseAt);
-    expect(registryWriteAt).toBeGreaterThan(ownerRemoveAt);
-
-    const unmount = handlerSource("unmountShare");
-    const registryOnlyAt = unmount.indexOf(
-      'if (removal.kind === "registry-only")',
-    );
-    const registryOnlyCloseAt = unmount.indexOf(
-      "await closeRelayTransportWorkspace(",
-      registryOnlyAt,
-    );
-    const registryOnlyWriteAt = unmount.indexOf(
-      "setWorkspaceShareMounts(",
-      registryOnlyCloseAt,
-    );
-    expect(registryOnlyAt).toBeGreaterThan(-1);
-    expect(unmount.slice(registryOnlyCloseAt, registryOnlyWriteAt)).toContain(
-      ").catch((error) =>",
-    );
-  });
-
-  it("holds the mount lock across preflight but leases the workspace only for local mount work", () => {
-    const mount = handlerSource("mountShare");
-    const mountLockAt = mount.indexOf("return withShareMountLock(");
-    const infoAt = mount.indexOf("await fetchShareViewInfo(");
-    const exclusiveAt = mount.indexOf("return withExclusiveWorkspaceOperation(");
-    const ownerMountAt = mount.indexOf("await shareViewFiles.mount(");
-
-    expect(mountLockAt).toBeGreaterThan(-1);
-    expect(infoAt).toBeGreaterThan(mountLockAt);
-    expect(exclusiveAt).toBeGreaterThan(infoAt);
-    expect(ownerMountAt).toBeGreaterThan(exclusiveAt);
-
-    const refresh = handlerSource("refreshShareMounts");
-    const refreshLockAt = refresh.indexOf("return withShareMountLock(");
-    const loopAt = refresh.indexOf("for (const mount of mounts)");
-    const perMountLeaseAt = refresh.indexOf(
-      "await withExclusiveWorkspaceOperation(",
-      loopAt,
-    );
-    const refreshReconcileAt = refresh.indexOf(
-      "shareViewFiles.reconcile(",
-      perMountLeaseAt,
-    );
-
-    expect(refreshLockAt).toBeGreaterThan(-1);
-    expect(loopAt).toBeGreaterThan(refreshLockAt);
-    expect(perMountLeaseAt).toBeGreaterThan(loopAt);
-    expect(refreshReconcileAt).toBeGreaterThan(perMountLeaseAt);
-    expect(refresh.slice(refreshLockAt, loopAt)).not.toContain(
-      "withExclusiveWorkspaceOperation(",
-    );
-
-    const unmount = handlerSource("unmountShare");
-    expect(unmount.indexOf("return withShareMountLock(")).toBeLessThan(
-      unmount.indexOf("withExclusiveWorkspaceOperation("),
+    expect(filesComposition).toContain(
+      "removeMount: shareMountCommands.filesLifecycle.removeMount",
     );
   });
 

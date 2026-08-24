@@ -380,7 +380,6 @@ import {
 import {
   createWorkspaceFolder,
   resetFailedJoinFolder,
-  SHARED_WITH_ME_FOLDER,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
 import {
@@ -526,20 +525,15 @@ import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
   assertMountableSelector,
   assertRealMountRoot,
-  allocateShareMountLabel,
-  mountRootFor,
-  mountStoreWorkspaceIdFor,
-  classifyShareMountRefreshError,
   overlayCanonicalShareMountFiles,
-  planShareMountRemoval,
   refuseImportIntoShareProjection,
   refuseMoveAcrossShareMount,
   resolveShareMountPath,
   shareViewFilesMountProjection,
   shareMountRecordsForId,
-  shareMountResultRow,
   usableShareMountRecord,
 } from "./workspaces/shareMounts";
+import { createShareMountCommands } from "./workspaces/shareMountCommands";
 import {
   collectOwnedWorkspaceZipEntries,
 } from "./workspaces/ownedWorkspaceZip";
@@ -765,11 +759,10 @@ import {
 import {
   createShareViewFiles,
   shareViewFilesStore,
-  ShareViewMountRollbackError,
   type ShareViewFileChangeOutcome,
   type ShareViewFileChangeValue,
+  type ShareViewFiles,
   type ShareViewFilesTarget,
-  type PreparedShareViewFilesMount,
 } from "./workspaces/shareViewFiles";
 import {
   resolveRegisteredShareViewFilesTarget,
@@ -4220,7 +4213,32 @@ function resolveShareViewFilesTarget(
   );
 }
 
-const shareViewFiles = createShareViewFiles({
+let shareViewFiles: ShareViewFiles;
+const shareMountCommands = createShareMountCommands({
+  readMounts: (workspaceId) =>
+    storedShareMounts(findWorkspace(workspaceId) ?? {}),
+  writeMounts: (workspaceId, mounts) =>
+    setWorkspaceShareMounts(workspaceId, mounts),
+  loadCredentials: () => loadAndCacheCurrentCredentials(),
+  fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
+  listDirectory: (absolutePath) => readdir(absolutePath).catch(() => []),
+  withWorkspaceOperation: (workspaceRoot, run) =>
+    withExclusiveWorkspaceOperation(
+      workspaceRoot,
+      (_markWorkspaceChanged, lease) => run(lease),
+    ),
+  files: () => shareViewFiles,
+  projectionFor: shareViewFilesMountProjection,
+  closeRelayWorkspace: (workspaceId) =>
+    closeRelayTransportWorkspace(workspaceId),
+  workspaceSummary: (workspaceId) =>
+    workspaceSummaryFor(requireWorkspace(workspaceId)),
+  refreshNativeWorkspaceSurfaces,
+  notifyRenderer,
+  logError: (message, error) => console.error(`[desktop] ${message}`, error),
+});
+
+shareViewFiles = createShareViewFiles({
   resolveTarget: resolveShareViewFilesTarget,
   openStore: (target) =>
     shareViewFilesStore(
@@ -4319,63 +4337,8 @@ const shareViewFiles = createShareViewFiles({
     if (!target.mountLabel) throw new Error("Share mount record has no label.");
     await assertRealMountRoot(target.schedulingRootPath, target.mountLabel);
   },
-  createMount: async (owner, target) => {
-    if (
-      target.kind !== "mount" ||
-      !target.mountLabel ||
-      !target.relayUrl
-    ) {
-      throw new Error("Only a prepared share mount can be created.");
-    }
-    const projection = shareViewFilesMountProjection(owner);
-    await projection.create();
-    try {
-      setWorkspaceShareMounts(target.workspaceId, [
-        ...storedShareMounts(findWorkspace(target.workspaceId) ?? {}),
-        {
-          shareId: target.shareId,
-          label: target.mountLabel,
-          granterEmail: target.granterEmail,
-          relayUrl: target.relayUrl,
-          recipientEmail: target.recipientEmail ?? null,
-          grantedSelector: target.grantedSelector,
-        },
-      ]);
-    } catch (error) {
-      const rollback = await projection.remove();
-      if (rollback.error) {
-        throw new ShareViewMountRollbackError(error, rollback.error);
-      }
-      throw error;
-    }
-  },
-  removeMount: async (owner, target) => {
-    if (target.kind !== "mount" || !target.mountLabel) {
-      throw new Error("Only a registered share mount can be removed.");
-    }
-    await closeRelayTransportWorkspace(target.storeWorkspaceId).catch((error) => {
-      console.error(
-        `[desktop] could not close share mount relay ${target.storeWorkspaceId}:`,
-        error,
-      );
-    });
-    const removed = await shareViewFilesMountProjection(owner).remove();
-    if (removed.error) {
-      console.error(
-        `[desktop] could not remove share mount folder ${target.mountLabel}:`,
-        removed.error,
-      );
-    }
-    const mounts = storedShareMounts(
-      findWorkspace(target.workspaceId) ?? {},
-    );
-    const matches = new Set(shareMountRecordsForId(mounts, target.shareId));
-    setWorkspaceShareMounts(
-      target.workspaceId,
-      mounts.filter((mount) => !matches.has(mount)),
-    );
-    return { folderLeft: removed.folderLeft };
-  },
+  createMount: shareMountCommands.filesLifecycle.createMount,
+  removeMount: shareMountCommands.filesLifecycle.removeMount,
 });
 const ensureOwnedProjectionTargetCurrent =
   createOwnedProjectionRepairer(shareViewFiles);
@@ -7227,25 +7190,6 @@ function registerIpcHandlers(
   });
 
   // ---- Share mounts ----
-  // ONE mount operation at a time per workspace: mount, bulk refresh, and
-  // unmount all interleave at their awaits, and unserialized they can drop
-  // each other's registry rows (stale replace-the-set snapshots) or
-  // re-materialize a folder the unmount just deleted (codex P2 pair). A
-  // simple promise chain is enough — operations are short and rare.
-  const shareMountLocks = new Map<string, Promise<unknown>>();
-  function withShareMountLock<T>(
-    workspaceId: string,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    const previous = shareMountLocks.get(workspaceId) ?? Promise.resolve();
-    const next = previous.then(run, run);
-    shareMountLocks.set(
-      workspaceId,
-      next.catch(() => undefined),
-    );
-    return next;
-  }
-
   // The receive side materialized INSIDE a host workspace: the share's
   // filtered files arrive under shared-with-me/<label>/ as ordinary
   // read-only files (agent-readable through normal tools). The mount's pull
@@ -7260,212 +7204,21 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     // A mount changes the host tree — shared views cannot host mounts.
     assertWritableWorkspace(workspace);
-    return withShareMountLock(workspace.workspaceId, async () => {
-    const parsed = parseShareCode(input.shareCode);
-    if (!parsed) {
-      throw new Error("That doesn't look like a share code. Copy it again and retry.");
-    }
-    const credentials = await loadAndCacheCurrentCredentials();
-    if (!credentials) throw new Error("Sign in to dohc Cloud first.");
-    const relayUrl = credentials.relayUrl;
-    if (!relayUrl || !relayUrlsMatch(relayUrl, parsed.relayUrl)) {
-      // Same security gate as openSharedView: the session token is only ever
-      // sent to the relay this machine signed in with.
-      throw new Error(
-        "This share lives on a different server than the one you're signed in to. " +
-          `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then try again.`,
-      );
-    }
-    const relay = { baseUrl: relayUrl, token: credentials.token };
-    const existing = storedShareMounts(
-      findWorkspace(workspace.workspaceId) ?? {},
-    );
-    if (shareMountRecordsForId(existing, parsed.shareId).length > 0) {
-      throw new Error("This share is already added to this workspace.");
-    }
-    let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
-    try {
-      info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
-    } catch (error) {
-      if (error instanceof ShareUnavailableError) {
-        throw new Error(
-          "No share matches that code for your account. Check the code and that you're signed in with the account it was shared with.",
-        );
-      }
-      if (error instanceof RelayUnauthorizedError) {
-        throw new Error("Your dohc Cloud session expired. Sign in again, then retry.");
-      }
-      throw error;
-    }
-    // A chat-channel code has no file content to mount — send the user to
-    // the right surface instead of creating an empty folder.
-    const grantedSelector = info.selector;
-    assertMountableSelector(grantedSelector);
-    // Relay preflight stays under the mount lock, but local mount state starts
-    // only after the workspace lease is held.
-    return withExclusiveWorkspaceOperation(
-      workspace.rootPath,
-      async (_markWorkspaceChanged, lease) => {
-    // Label dedupe considers BOTH registry mounts and whatever is already on
-    // disk under shared-with-me — a leftover or hand-made folder must never
-    // be adopted (its contents would be overwritten by the pull and deleted
-    // by rollback/unmount). The owned projection guards the container before
-    // mkdir and creates the label exclusively.
-    const sharedWithMeDir = join(workspace.rootPath, SHARED_WITH_ME_FOLDER);
-    const onDisk = await readdir(sharedWithMeDir).catch(() => [] as string[]);
-    const mount = {
-      shareId: parsed.shareId,
-      label: allocateShareMountLabel({
-        storedMounts: existing,
-        onDiskNames: onDisk,
-        granterEmail: info.granterEmail,
+    return MountShareResult.parse(
+      await shareMountCommands.mount({
+        workspace,
+        shareCode: input.shareCode,
       }),
-      granterEmail: info.granterEmail,
-      relayUrl,
-      recipientEmail: credentials.email ?? null,
-      // Pin the selector the relay just stated (same reason as a view).
-      grantedSelector,
-    };
-    const prepared: PreparedShareViewFilesMount = {
-      kind: "mount",
-      workspaceId: workspace.workspaceId,
-      storeWorkspaceId: mountStoreWorkspaceIdFor(
-        workspace.workspaceId,
-        mount.shareId,
-      ),
-      schedulingRootPath: workspace.rootPath,
-      rootPath: mountRootFor(workspace.rootPath, mount.label),
-      shareId: mount.shareId,
-      mountLabel: mount.label,
-      granterEmail: mount.granterEmail,
-      relayUrl: mount.relayUrl,
-      recipientEmail: mount.recipientEmail,
-      grantedSelector: mount.grantedSelector,
-      ended: false,
-    };
-    try {
-      const outcome = await shareViewFiles.mount(
-        lease,
-        prepared,
-      );
-      refreshNativeWorkspaceSurfaces();
-      notifyRenderer();
-      return MountShareResult.parse({
-        // Through the PROJECTION: a raw registry record nests each mount's
-        // level under its pinned grant, so a raw parse cannot satisfy the
-        // wire schema and every mount would fail here and roll back.
-        workspace: workspaceSummaryFor(requireWorkspace(workspace.workspaceId)),
-        mount: {
-          shareId: mount.shareId,
-          label: mount.label,
-          status: outcome.status,
-          changedPaths: outcome.changedPaths,
-        },
-      });
-    } catch (error) {
-      console.error(`[desktop] mount-share rollback for ${mount.label}:`, error);
-      notifyRenderer();
-      if (error instanceof ShareUnavailableError) {
-        throw new Error(
-          "This share was ended before it could be added. Nothing was added to this workspace.",
-        );
-      }
-      if (error instanceof ShareViewMountRollbackError) {
-        throw new Error(
-          "dohc could not add this share, and cleanup did not finish. " +
-            "If the share still appears, remove it from this workspace. " +
-            "Also remove any leftover folder from shared-with-me. Then try again.",
-        );
-      }
-      throw new Error(
-        "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
-      );
-    }
-      },
     );
-    });
   });
 
   ipcMain.handle(CHANNELS.refreshShareMounts, async (event, payload) => {
     assertTrustedSender(event);
     const input = RefreshShareMountsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return withShareMountLock(workspace.workspaceId, async () => {
-          const mounts = storedShareMounts(
-            findWorkspace(workspace.workspaceId) ?? {},
-          );
-          const results: Array<{
-            shareId: string;
-            label: string;
-            status: "updated" | "unchanged" | "ended" | "damaged";
-            changedPaths: number;
-          }> = [];
-          const pushMountResult = (
-            mount: unknown,
-            status: "updated" | "unchanged" | "ended" | "damaged",
-            changedPaths: number,
-          ): void => {
-            if (!isRecordValue(mount)) return;
-            const row = shareMountResultRow({
-              shareId: mount.shareId,
-              label: mount.label,
-              status,
-              changedPaths,
-            });
-            if (row) results.push(row);
-          };
-          try {
-            for (const mount of mounts) {
-              if (!usableShareMountRecord(mounts, mount)) {
-                pushMountResult(mount, "damaged", 0);
-                continue;
-              }
-              try {
-                // A slow relay can hold this mount's transaction, but it must
-                // not extend one workspace lease across every mounted share.
-                const reconciled = await withExclusiveWorkspaceOperation(
-                  workspace.rootPath,
-                  (_markWorkspaceChanged, lease) =>
-                    shareViewFiles.reconcile(
-                      lease,
-                      {
-                        kind: "mount",
-                        workspaceId: workspace.workspaceId,
-                        shareId: mount.shareId,
-                      },
-                      "refresh",
-                    ),
-                );
-                if (
-                  reconciled.kind !== "refresh" ||
-                  "ok" in reconciled.outcome
-                ) {
-                  throw new Error(
-                    "Share mount refresh returned an invalid result.",
-                  );
-                }
-                pushMountResult(
-                  mount,
-                  reconciled.outcome.status,
-                  reconciled.outcome.changedPaths,
-                );
-              } catch (error) {
-                const verdict = classifyShareMountRefreshError(error);
-                if (verdict.kind === "abort") {
-                  throw new Error(verdict.message);
-                }
-                console.error(
-                  `[desktop] share-mount refresh failed for ${mount.label}:`,
-                  error,
-                );
-                pushMountResult(mount, verdict.status, 0);
-              }
-            }
-            return RefreshShareMountsResult.parse({ results });
-          } finally {
-            notifyRenderer();
-          }
-    });
+    return RefreshShareMountsResult.parse(
+      await shareMountCommands.refresh({ workspace }),
+    );
   });
 
   ipcMain.handle(CHANNELS.unmountShare, async (event, payload) => {
@@ -7473,58 +7226,11 @@ function registerIpcHandlers(
     const input = UnmountSharePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    return withShareMountLock(workspace.workspaceId, () =>
-      withExclusiveWorkspaceOperation(
-        workspace.rootPath,
-        async (_markWorkspaceChanged, lease) => {
-          const registeredMounts = storedShareMounts(
-            findWorkspace(workspace.workspaceId) ?? {},
-          );
-          const removal = planShareMountRemoval(
-            registeredMounts,
-            input.shareId,
-          );
-          if (removal.kind === "missing") {
-            throw new Error("This share is not added to this workspace.");
-          }
-          if (removal.kind === "registry-only") {
-            await closeRelayTransportWorkspace(
-              mountStoreWorkspaceIdFor(workspace.workspaceId, input.shareId),
-            ).catch((error) => {
-              console.error(
-                `[desktop] could not close removed share relay ${input.shareId}:`,
-                error,
-              );
-            });
-            setWorkspaceShareMounts(
-              workspace.workspaceId,
-              removal.remaining,
-            );
-            refreshNativeWorkspaceSurfaces();
-            notifyRenderer();
-            return UnmountShareResult.parse({
-              workspace: workspaceSummaryFor(
-                requireWorkspace(workspace.workspaceId),
-              ),
-              folderLeft: true,
-            });
-          }
-          const mount = removal.mount;
-          const removed = await shareViewFiles.unmount(lease, {
-            kind: "mount",
-            workspaceId: workspace.workspaceId,
-            shareId: mount.shareId,
-          });
-          refreshNativeWorkspaceSurfaces();
-          notifyRenderer();
-          return UnmountShareResult.parse({
-            workspace: workspaceSummaryFor(
-              requireWorkspace(workspace.workspaceId),
-            ),
-            ...(removed.folderLeft ? { folderLeft: true as const } : {}),
-          });
-        },
-      ),
+    return UnmountShareResult.parse(
+      await shareMountCommands.unmount({
+        workspace,
+        shareId: input.shareId,
+      }),
     );
   });
 
