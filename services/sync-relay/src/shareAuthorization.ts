@@ -1,3 +1,4 @@
+import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   effectiveShareSelector,
   isChatChannelSelector,
@@ -180,8 +181,7 @@ function validStoredPrincipal(grant: SyncRelayShareGrantRow): boolean {
 }
 
 function accessAtMost(access: string, ceiling: string): boolean {
-  const order = ["view", "comment", "edit"];
-  const accessIndex = order.indexOf(access);
-  const ceilingIndex = order.indexOf(ceiling);
+  const accessIndex = shareAccessRank(access);
+  const ceilingIndex = shareAccessRank(ceiling);
   return accessIndex >= 0 && ceilingIndex >= 0 && accessIndex <= ceilingIndex;
 }

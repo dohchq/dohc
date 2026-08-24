@@ -8,6 +8,7 @@ export {
   isShareAccessValue,
   isValidShareVersionId,
   MAX_SHARE_PATH_CHARS,
+  shareAccessRank,
 } from "./shareSelector";
 export { MAX_SHARE_PROPOSAL_OPS } from "./shareProposalBound";
 export {

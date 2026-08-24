@@ -103,6 +103,10 @@ export const SHARE_ACCESS_VALUES = ["view", "comment", "edit"] as const;
 
 export type ShareAccess = (typeof SHARE_ACCESS_VALUES)[number];
 
+export function shareAccessRank(access: string): number {
+  return (SHARE_ACCESS_VALUES as readonly string[]).indexOf(access);
+}
+
 /**
  * Whether `value` is a level the relay could have issued: exactly one of the
  * three lowercase strings above. No case folding and no trimming — a level a

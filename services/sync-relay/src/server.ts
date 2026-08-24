@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   isChatShareAccessValue,
   isShareAccessValue,
+  shareAccessRank,
   type LinkExchangeResult,
 } from "@dohc/security-contract";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -434,6 +435,40 @@ export function createSyncRelayHandler({
     throw notFound();
   }
 
+  function requireOwnedLinkGrant(
+    shareId: string,
+    grantId: string,
+    actor: { userId: string },
+  ): SyncRelayShareWithGrantRow {
+    const share = storage.getShare(shareId);
+    const grant = storage.getShareGrant(grantId);
+    if (
+      !share ||
+      share.granterUserId !== actor.userId ||
+      !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
+      !grant ||
+      grant.shareId !== share.shareId ||
+      grant.principalKind !== "link" ||
+      grant.status !== "active" ||
+      grant.revokedAtMs !== null
+    ) {
+      throw notFound();
+    }
+    return { share, grant };
+  }
+
+  function shareActionGuard(
+    shareId: string,
+    actorUserId: string,
+    action: "append" | "propose",
+    workspaceId: string,
+  ): () => void {
+    return () => {
+      const fresh = requireShareAction(shareId, actorUserId, action);
+      if (fresh.share.workspaceId !== workspaceId) throw notFound();
+    };
+  }
+
   const shareSummary = async (
     row: SyncRelayShareWithGrantRow,
     side: "granted" | "received",
@@ -689,20 +724,11 @@ export function createSyncRelayHandler({
       if (route.route === "share") throw methodNotAllowed();
 
       if (route.route === "share-link-rotate" && request.method === "POST") {
-        const share = storage.getShare(route.shareId);
-        const grant = storage.getShareGrant(route.grantId);
-        if (
-          !share ||
-          share.granterUserId !== actor.userId ||
-          !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
-          !grant ||
-          grant.shareId !== share.shareId ||
-          grant.principalKind !== "link" ||
-          grant.status !== "active" ||
-          grant.revokedAtMs !== null
-        ) {
-          throw notFound();
-        }
+        const { share, grant } = requireOwnedLinkGrant(
+          route.shareId,
+          route.grantId,
+          actor,
+        );
         const secret = newLinkBearer();
         if (!linkKey) throw notFound();
         const result = storage.rotateLinkGrant({
@@ -718,20 +744,11 @@ export function createSyncRelayHandler({
       if (route.route === "share-link-rotate") throw methodNotAllowed();
 
       if (route.route === "share-link-retune" && request.method === "POST") {
-        const share = storage.getShare(route.shareId);
-        const grant = storage.getShareGrant(route.grantId);
-        if (
-          !share ||
-          share.granterUserId !== actor.userId ||
-          !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
-          !grant ||
-          grant.shareId !== share.shareId ||
-          grant.principalKind !== "link" ||
-          grant.status !== "active" ||
-          grant.revokedAtMs !== null
-        ) {
-          throw notFound();
-        }
+        const { share, grant } = requireOwnedLinkGrant(
+          route.shareId,
+          route.grantId,
+          actor,
+        );
         const input = await readJsonObject(request);
         const accessValidation = validateFileShareAccess(input.access);
         if (!accessValidation.ok) {
@@ -768,11 +785,7 @@ export function createSyncRelayHandler({
         const share = storage.getShare(route.shareId);
         // Only the granter may revoke; anyone else (including the recipient)
         // sees the byte-identical generic 404.
-        if (
-          !share ||
-          share.granterUserId !== actor.userId ||
-          !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId)
-        ) {
+        if (!share || share.granterUserId !== actor.userId) {
           throw notFound();
         }
         const input = await readOptionalJsonObject(request);
@@ -1000,10 +1013,12 @@ export function createSyncRelayHandler({
           // in standing, and STILL a selector that accepts appends at its
           // current level (#646) on the same workspace bucket — a level
           // narrowed mid-flight loses the race the same way a revoke does.
-          guard: () => {
-            const fresh = requireShareAction(route.shareId, actor.userId, "append");
-            if (fresh.share.workspaceId !== share.workspaceId) throw notFound();
-          },
+          guard: shareActionGuard(
+            route.shareId,
+            actor.userId,
+            "append",
+            share.workspaceId,
+          ),
         });
         return jsonResponse({
           ok: true,
@@ -1192,10 +1207,12 @@ export function createSyncRelayHandler({
           // The revoke race, closed exactly as the append route closes it: the
           // full gauntlet re-runs inside the write's own BEGIN IMMEDIATE, so a
           // revoke or a level narrowed mid-flight loses.
-          guard: () => {
-            const fresh = requireShareAction(route.shareId, actor.userId, "propose");
-            if (fresh.share.workspaceId !== share.workspaceId) throw notFound();
-          },
+          guard: shareActionGuard(
+            route.shareId,
+            actor.userId,
+            "propose",
+            share.workspaceId,
+          ),
         });
         return jsonResponse({
           ok: true,
@@ -2449,10 +2466,6 @@ function parseIfMatchSha256(header: string | null): string | null {
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-function shareAccessRank(access: string): number {
-  return ["view", "comment", "edit"].indexOf(access);
 }
 
 function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {

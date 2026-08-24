@@ -260,16 +260,6 @@ describe("relay link grants", () => {
       ).status,
     ).toBe(200);
 
-    // A dependent named grant may widen up to, but not above, its active parent.
-    expect(
-      storage.retuneShareGrant({
-        shareId: "share-existing",
-        grantId: "grant-dependent",
-        access: "edit",
-        changedAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true, grant: { access: "edit", generation: 4 } });
-
     // Rotate preserves access, replaces the URL, and bumps dependent bindings.
     const rotatedResponse = await h(
       request(
@@ -283,7 +273,7 @@ describe("relay link grants", () => {
     const rotatedSecret = String(rotated.secret);
     expect(rotatedSecret).not.toBe(widenedSecret);
     expect(storage.getShareGrant(linkGrantId)).toMatchObject({ access: "edit", generation: 4 });
-    expect(storage.getShareGrant("grant-dependent")).toMatchObject({ generation: 5 });
+    expect(storage.getShareGrant("grant-dependent")).toMatchObject({ generation: 4 });
 
     // Promote detaches one dependent permanently.
     expect(
@@ -291,7 +281,7 @@ describe("relay link grants", () => {
         shareId: "share-existing",
         grantId: "grant-dependent",
       }),
-    ).toMatchObject({ ok: true, grant: { generation: 6, parentGrantId: null } });
+    ).toMatchObject({ ok: true, grant: { generation: 5, parentGrantId: null } });
     expect(
       storage.convertLinkGrant({
         shareId: "share-existing",
@@ -323,35 +313,9 @@ describe("relay link grants", () => {
     });
     expect(storage.getShareGrant("grant-dependent")).toMatchObject({
       status: "active",
-      generation: 6,
+      generation: 5,
       parentGrantId: null,
     });
-
-    // Named grants widen and narrow in place without credentials.
-    expect(
-      storage.retuneShareGrant({
-        shareId: "share-existing",
-        grantId: "grant-0",
-        access: "edit",
-        changedAtMs: 2_003,
-      }),
-    ).toMatchObject({ ok: true, grant: { access: "edit", generation: 2 } });
-    expect(
-      storage.retuneShareGrant({
-        shareId: "share-existing",
-        grantId: "grant-0",
-        access: "comment",
-        changedAtMs: 2_004,
-      }),
-    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 3 } });
-    expect(
-      storage.retuneShareGrant({
-        shareId: "share-email",
-        grantId: "grant-email",
-        access: "comment",
-        changedAtMs: 2_005,
-      }),
-    ).toMatchObject({ ok: true, grant: { access: "comment", generation: 2 } });
 
     // A share may hold several independent links. Deleting it revokes all grants.
     const secondLink = await createLink(h, "view");
@@ -380,6 +344,140 @@ describe("relay link grants", () => {
     expect(storage.getShare("share-existing")?.selectorJson).toBe(
       JSON.stringify({ paths: ["docs"], versionId: null }),
     );
+  });
+
+  it("lets the granter revoke a link after losing workspace ownership", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h, "comment");
+    const grantId = String(created.grantId);
+    expect(
+      storage.convertLinkGrant({
+        shareId: "share-existing",
+        parentGrantId: grantId,
+        grantId: "grant-dependent-after-owner-loss",
+        principalUserId: "converted-user",
+        createdAtMs: 2_001,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const transferredStorage = new Proxy(storage, {
+      get(target, property, receiver) {
+        if (property === "workspaceIsOwnedBy") return () => false;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const transferredHandler = handler(transferredStorage);
+    expect(
+      (
+        await transferredHandler(
+          request(OWNER, `/sync/shares/share-existing/links/${grantId}/rotate`, {
+            method: "POST",
+          }),
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await transferredHandler(
+          request(
+            OWNER,
+            `/sync/shares/share-existing/links/${grantId}/retune`,
+            jsonBody({ access: "view" }),
+          ),
+        )
+      ).status,
+    ).toBe(404);
+
+    const revokedResponse = await transferredHandler(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/revoke",
+        jsonBody({ grantId }),
+      ),
+    );
+    expect(revokedResponse.status).toBe(200);
+    expect(storage.getShareGrant(grantId)).toMatchObject({
+      status: "revoked",
+      generation: 2,
+      revokedAtMs: 2_000,
+    });
+    expect(storage.getCurrentLinkCredential(grantId)).toBeNull();
+    expect(storage.findLinkGrantByCredentialHash(hmac(String(created.secret)))).toBeNull();
+    expect(storage.getShareGrant("grant-dependent-after-owner-loss")).toMatchObject({
+      status: "revoked",
+      generation: 2,
+      revokedAtMs: 2_000,
+    });
+  });
+
+  it("bumps every dependent generation when a link narrows", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h, "comment");
+    const grantId = String(created.grantId);
+    expect(
+      storage.convertLinkGrant({
+        shareId: "share-existing",
+        parentGrantId: grantId,
+        grantId: "grant-dependent-at-new-level",
+        principalUserId: "converted-user",
+        createdAtMs: 2_001,
+      }),
+    ).toMatchObject({ ok: true });
+
+    const widenedResponse = await h(
+      request(
+        OWNER,
+        `/sync/shares/share-existing/links/${grantId}/retune`,
+        jsonBody({ access: "edit" }),
+      ),
+    );
+    expect(widenedResponse.status).toBe(200);
+    const widened = await json(widenedResponse);
+    expect(storage.getShareGrant("grant-dependent-at-new-level")).toMatchObject({
+      access: "comment",
+      generation: 2,
+    });
+
+    const exchange = await json(
+      await h(
+        request(null, "/sync/link-exchange", jsonBody({ secret: widened.secret })),
+      ),
+    );
+    const capabilityToken = String(exchange.capabilityToken);
+    expect(
+      validateLinkCapability({
+        storage,
+        capabilityToken,
+        linkKey: LINK_KEY,
+        nowMs: 2_001,
+      }),
+    ).toMatchObject({ grantId, generation: 2, access: "edit" });
+
+    const narrowedResponse = await h(
+      request(
+        OWNER,
+        `/sync/shares/share-existing/links/${grantId}/retune`,
+        jsonBody({ access: "comment" }),
+      ),
+    );
+    expect(narrowedResponse.status).toBe(200);
+    expect(storage.getShareGrant("grant-dependent-at-new-level")).toMatchObject({
+      access: "comment",
+      generation: 3,
+    });
+    expect(
+      validateLinkCapability({
+        storage,
+        capabilityToken,
+        linkKey: LINK_KEY,
+        nowMs: 2_001,
+      }),
+    ).toBeNull();
   });
 
   it("refuses every invalid state-machine transition without changing records", async () => {
@@ -431,6 +529,14 @@ describe("relay link grants", () => {
           grantId: `converted-from-${grantId}`,
           principalUserId: "converted",
           createdAtMs: 2_100,
+        }),
+      ).toEqual({ ok: false });
+      expect(
+        storage.retuneShareGrant({
+          shareId: grantId === "grant-0" ? "share-existing" : "share-email",
+          grantId,
+          access: "comment",
+          changedAtMs: 2_100,
         }),
       ).toEqual({ ok: false });
     }
@@ -638,16 +744,6 @@ describe("relay link grants", () => {
             headers: { "content-type": "application/json" },
             body: "{",
           }),
-        ),
-      ),
-    ).toBe(missing);
-
-    const retired = await createLink(h, "view");
-    expect(storage.retireLinkCredential(String(retired.grantId), 2_010)).toBe(true);
-    expect(
-      await denialBytes(
-        await h(
-          request(null, "/sync/link-exchange", jsonBody({ secret: retired.secret })),
         ),
       ),
     ).toBe(missing);

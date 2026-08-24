@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
+import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   conflictResolveBlobShas,
   type ConflictResolveEnvelopeContext,
@@ -290,11 +291,9 @@ export interface SyncRelayStorage {
   }): boolean;
   getShareGrant(grantId: string): SyncRelayShareGrantRow | null;
   getCurrentLinkCredential(grantId: string): SyncRelayLinkCredentialRow | null;
-  mintLinkCredential(credential: SyncRelayLinkCredentialRow): boolean;
   findLinkGrantByCredentialHash(
     secretHash: string,
   ): SyncRelayLinkCredentialGrantRow | null;
-  retireLinkCredential(grantId: string, retiredAtMs: number): boolean;
   rotateLinkGrant(input: {
     shareId: string;
     grantId: string;
@@ -2152,24 +2151,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return row ? rowToLinkCredentialRow(row) : null;
   }
 
-  mintLinkCredential(credential: SyncRelayLinkCredentialRow): boolean {
-    if (credential.retiredAtMs !== null || !credential.secretHash) return false;
-    return this.tx(() => {
-      const grant = this.getShareGrant(credential.grantId);
-      if (
-        !grant ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.generation !== credential.generation
-      ) {
-        return false;
-      }
-      this.retireCurrentLinkCredential(credential.grantId, credential.mintedAtMs);
-      this.insertLinkCredential(credential);
-      return true;
-    });
-  }
-
   findLinkGrantByCredentialHash(
     secretHash: string,
   ): SyncRelayLinkCredentialGrantRow | null {
@@ -2195,10 +2176,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       }),
       grant: rowToShareGrantRow(row),
     };
-  }
-
-  retireLinkCredential(grantId: string, retiredAtMs: number): boolean {
-    return this.tx(() => this.retireCurrentLinkCredential(grantId, retiredAtMs));
   }
 
   rotateLinkGrant(input: {
@@ -2251,15 +2228,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }): ShareGrantTransitionResult {
     return this.tx(() => {
       const grant = this.getShareGrant(input.grantId);
-      const from = grant ? fileAccessRank(grant.access) : null;
-      const to = fileAccessRank(input.access);
+      const from = grant ? shareAccessRank(grant.access) : -1;
+      const to = shareAccessRank(input.access);
       if (
         !grant ||
         grant.shareId !== input.shareId ||
+        grant.principalKind !== "link" ||
         grant.status !== "active" ||
         grant.revokedAtMs !== null ||
-        from === null ||
-        to === null ||
+        from < 0 ||
+        to < 0 ||
         from === to
       ) {
         return { ok: false };
@@ -2268,35 +2246,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       const widening = to > from;
       const suppliedCredential =
         input.credentialId !== undefined || input.secretHash !== undefined;
-      const current =
-        grant.principalKind === "link"
-          ? this.getCurrentLinkCredential(grant.grantId)
+      const wideningCredential =
+        widening && input.credentialId && input.secretHash
+          ? { credentialId: input.credentialId, secretHash: input.secretHash }
           : null;
-      if (grant.principalKind === "link" && (!current || current.generation !== grant.generation)) {
+      const current = this.getCurrentLinkCredential(grant.grantId);
+      if (!current || current.generation !== grant.generation) {
         return { ok: false };
       }
-      if (widening && grant.parentGrantId !== null) {
-        const parent = this.getShareGrant(grant.parentGrantId);
-        const parentRank = parent ? fileAccessRank(parent.access) : null;
-        if (
-          !parent ||
-          parent.principalKind !== "link" ||
-          parent.status !== "active" ||
-          parent.shareId !== grant.shareId ||
-          parentRank === null ||
-          to > parentRank
-        ) {
-          return { ok: false };
-        }
-      }
-      if (
-        grant.principalKind === "link" &&
-        widening &&
-        (!input.credentialId || !input.secretHash)
-      ) {
+      if (widening && !wideningCredential) {
         return { ok: false };
       }
-      if ((!widening || grant.principalKind !== "link") && suppliedCredential) {
+      if (!widening && suppliedCredential) {
         return { ok: false };
       }
 
@@ -2307,40 +2268,39 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         )
         .run(input.access, generation, grant.grantId);
 
-      if (grant.principalKind === "link") {
-        if (widening) {
-          this.retireCurrentLinkCredential(grant.grantId, input.changedAtMs);
-          this.insertLinkCredential({
-            credentialId: input.credentialId!,
-            grantId: grant.grantId,
-            secretHash: input.secretHash!,
-            generation,
-            mintedAtMs: input.changedAtMs,
-            retiredAtMs: null,
-          });
-          this.incrementActiveDependentGenerations(grant.grantId);
-        } else {
-          this.db
-            .prepare(
-              `UPDATE sync_relay_link_credentials
-               SET generation = ?
-               WHERE grant_id = ? AND retired_at_ms IS NULL`,
-            )
-            .run(generation, grant.grantId);
-          const dependents = this.activeDependentGrants(grant.grantId);
-          for (const dependent of dependents) {
-            const dependentRank = fileAccessRank(dependent.access);
-            if (dependentRank !== null && dependentRank > to) {
-              this.db
-                .prepare(
-                  `UPDATE sync_relay_share_grants
-                   SET access = ?, generation = generation + 1
-                   WHERE grant_id = ? AND status = 'active'`,
-                )
-                .run(input.access, dependent.grantId);
-            }
+      if (wideningCredential) {
+        this.retireCurrentLinkCredential(grant.grantId, input.changedAtMs);
+        this.insertLinkCredential({
+          credentialId: wideningCredential.credentialId,
+          grantId: grant.grantId,
+          secretHash: wideningCredential.secretHash,
+          generation,
+          mintedAtMs: input.changedAtMs,
+          retiredAtMs: null,
+        });
+        this.incrementActiveDependentGenerations(grant.grantId);
+      } else {
+        this.db
+          .prepare(
+            `UPDATE sync_relay_link_credentials
+             SET generation = ?
+             WHERE grant_id = ? AND retired_at_ms IS NULL`,
+          )
+          .run(generation, grant.grantId);
+        const dependents = this.activeDependentGrants(grant.grantId);
+        for (const dependent of dependents) {
+          const dependentRank = shareAccessRank(dependent.access);
+          if (dependentRank > to) {
+            this.db
+              .prepare(
+                `UPDATE sync_relay_share_grants
+                 SET access = ?
+                 WHERE grant_id = ? AND status = 'active'`,
+              )
+              .run(input.access, dependent.grantId);
           }
         }
+        this.incrementActiveDependentGenerations(grant.grantId);
       }
       return { ok: true, grant: this.getShareGrant(grant.grantId)! };
     });
@@ -3236,19 +3196,6 @@ function nullableText(value: unknown): string | null {
 
 function nullableInt(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value);
-}
-
-function fileAccessRank(access: string): number | null {
-  switch (access) {
-    case "view":
-      return 0;
-    case "comment":
-      return 1;
-    case "edit":
-      return 2;
-    default:
-      return null;
-  }
 }
 
 function rowToObjectMomentRow(row: Record<string, unknown>): ObjectMomentRow {
