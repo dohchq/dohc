@@ -514,6 +514,7 @@ export const DEFAULT_WORKSPACE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
 // references it yet. Any blob younger than this window is untouchable. Ten
 // minutes comfortably covers a slow/retried push.
 export const DEFAULT_BLOB_GRACE_MS = 10 * 60 * 1000;
+const RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT = 10;
 
 export interface OpenSyncRelayStorageOptions {
   workspaceQuotaBytes?: number;
@@ -2213,6 +2214,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         mintedAtMs: input.rotatedAtMs,
         retiredAtMs: null,
       });
+      this.pruneRetiredLinkCredentials(grant.grantId);
       this.incrementActiveDependentGenerations(grant.grantId);
       return { ok: true, grant: this.getShareGrant(grant.grantId)! };
     });
@@ -2278,6 +2280,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           mintedAtMs: input.changedAtMs,
           retiredAtMs: null,
         });
+        this.pruneRetiredLinkCredentials(grant.grantId);
         this.incrementActiveDependentGenerations(grant.grantId);
       } else {
         this.db
@@ -2512,6 +2515,21 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       )
       .run(Math.trunc(retiredAtMs), grantId);
     return Number(result.changes ?? 0) > 0;
+  }
+
+  private pruneRetiredLinkCredentials(grantId: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM sync_relay_link_credentials
+         WHERE credential_id IN (
+           SELECT credential_id
+           FROM sync_relay_link_credentials
+           WHERE grant_id = ? AND retired_at_ms IS NOT NULL
+           ORDER BY minted_at_ms DESC
+           LIMIT -1 OFFSET ?
+         )`,
+      )
+      .run(grantId, RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT);
   }
 
   private activeDependentGrants(parentGrantId: string): SyncRelayShareGrantRow[] {

@@ -651,8 +651,9 @@ export function createSyncRelayHandler({
         capabilityExpiresAtMs,
       };
       return jsonResponse({ ok: true, ...exchange });
-    } catch {
-      return refused();
+    } catch (error) {
+      if (error instanceof HttpError) return refused();
+      throw error;
     }
   };
 
@@ -795,7 +796,7 @@ export function createSyncRelayHandler({
           throw notFound();
         }
         const input = await readOptionalJsonObject(request);
-        if (input.grantId !== undefined) {
+        if (Object.keys(input).length > 0) {
           const grantId = parseShareId(
             typeof input.grantId === "string" ? input.grantId : undefined,
           );

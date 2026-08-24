@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +23,24 @@ const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
 
 const roots: string[] = [];
 const storages: SyncRelayStorage[] = [];
+
+interface InspectionStatement {
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+}
+
+interface InspectionDatabase {
+  prepare(sql: string): InspectionStatement;
+  close(): void;
+}
+
+const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
+  "node:sqlite",
+) as {
+  DatabaseSync: new (
+    path: string,
+    options: { readOnly: boolean },
+  ) => InspectionDatabase;
+};
 
 afterEach(async () => {
   for (const storage of storages.splice(0)) storage.close();
@@ -47,12 +66,20 @@ async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
-async function newStorage(): Promise<SyncRelayStorage> {
+async function newStorageWithPath(): Promise<{
+  storage: SyncRelayStorage;
+  dbPath: string;
+}> {
   const root = await mkdtemp(join(tmpdir(), "dohc-link-grants-"));
   roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
+  const dbPath = join(root, "relay.sqlite");
+  const storage = openSyncRelayStorage(dbPath);
   storages.push(storage);
-  return storage;
+  return { storage, dbPath };
+}
+
+async function newStorage(): Promise<SyncRelayStorage> {
+  return (await newStorageWithPath()).storage;
 }
 
 function handler(
@@ -344,6 +371,32 @@ describe("relay link grants", () => {
     expect(storage.getShare("share-existing")?.selectorJson).toBe(
       JSON.stringify({ paths: ["docs"], versionId: null }),
     );
+  });
+
+  it("refuses keyed revoke bodies without a valid grantId", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h, "view");
+    const grantId = String(created.grantId);
+
+    const response = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/revoke",
+        jsonBody({ grantID: grantId }),
+      ),
+    );
+    expect.soft(response.status).toBe(404);
+    expect.soft(await json(response)).toEqual({
+      ok: false,
+      error: "not found",
+      code: "not_found",
+    });
+    expect(storage.getShareGrant(grantId)).toMatchObject({
+      status: "active",
+      revokedAtMs: null,
+    });
   });
 
   it("keeps link grants out of legacy share lists and summaries", async () => {
@@ -742,6 +795,110 @@ describe("relay link grants", () => {
     expect("changeShareSelector" in storage).toBe(false);
   });
 
+  it("bounds retired credential history across rotations and widening retunes", async () => {
+    const { storage, dbPath } = await newStorageWithPath();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h, "view");
+    const grantId = String(created.grantId);
+    const firstSecret = String(created.secret);
+    let currentSecret = firstSecret;
+
+    for (let index = 1; index <= 15; index += 1) {
+      currentSecret = Buffer.alloc(32, index).toString("base64url");
+      expect(
+        storage.rotateLinkGrant({
+          shareId: "share-existing",
+          grantId,
+          credentialId: `credential-rotation-${index}`,
+          secretHash: hmac(currentSecret),
+          rotatedAtMs: 2_000 + index,
+        }),
+      ).toMatchObject({ ok: true, grant: { generation: index + 1 } });
+    }
+
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const credentialCounts = (): {
+      total: number;
+      retired: number;
+      current: number;
+    } => {
+      const row = inspection
+        .prepare(
+          `SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN retired_at_ms IS NOT NULL THEN 1 ELSE 0 END) AS retired,
+                  SUM(CASE WHEN retired_at_ms IS NULL THEN 1 ELSE 0 END) AS current
+           FROM sync_relay_link_credentials
+           WHERE grant_id = ?`,
+        )
+        .get(grantId);
+      return {
+        total: Number(row?.total ?? 0),
+        retired: Number(row?.retired ?? 0),
+        current: Number(row?.current ?? 0),
+      };
+    };
+
+    try {
+      expect(credentialCounts()).toEqual({ total: 11, retired: 10, current: 1 });
+      expect(
+        inspection
+          .prepare(
+            `SELECT credential_id
+             FROM sync_relay_link_credentials
+             WHERE grant_id = ? AND secret_hash = ?`,
+          )
+          .get(grantId, hmac(firstSecret)),
+      ).toBeUndefined();
+
+      expect(
+        (
+          await h(
+            request(null, "/sync/link-exchange", jsonBody({ secret: currentSecret })),
+          )
+        ).status,
+      ).toBe(200);
+      const missing = await denialBytes(
+        await h(
+          request(
+            null,
+            "/sync/link-exchange",
+            jsonBody({ secret: "g".repeat(43) }),
+          ),
+        ),
+      );
+      expect(
+        await denialBytes(
+          await h(
+            request(null, "/sync/link-exchange", jsonBody({ secret: firstSecret })),
+          ),
+        ),
+      ).toBe(missing);
+
+      const wideningSecret = Buffer.alloc(32, 31).toString("base64url");
+      expect(
+        storage.retuneShareGrant({
+          shareId: "share-existing",
+          grantId,
+          access: "comment",
+          changedAtMs: 2_016,
+          credentialId: "credential-widening",
+          secretHash: hmac(wideningSecret),
+        }),
+      ).toMatchObject({ ok: true, grant: { access: "comment", generation: 17 } });
+      expect(credentialCounts()).toEqual({ total: 11, retired: 10, current: 1 });
+      expect(
+        (
+          await h(
+            request(null, "/sync/link-exchange", jsonBody({ secret: wideningSecret })),
+          )
+        ).status,
+      ).toBe(200);
+    } finally {
+      inspection.close();
+    }
+  });
+
   it("exchanges a current secret for an HMAC-stored short-lived capability", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -985,6 +1142,41 @@ describe("relay link grants", () => {
         ),
       ),
     ).toBe(missing);
+  });
+
+  it("returns the standard unexpected-error response when exchange storage fails", async () => {
+    const storage = await newStorage();
+    const throwingStorage = new Proxy(storage, {
+      get(target, property, receiver) {
+        if (property === "findLinkGrantByCredentialHash") {
+          return () => {
+            throw new Error("db unavailable");
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const h = handler(throwingStorage);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = await h(
+        request(
+          null,
+          "/sync/link-exchange",
+          jsonBody({ secret: "g".repeat(43) }),
+        ),
+      );
+      expect(response.status).toBe(500);
+      expect(await json(response)).toEqual({
+        ok: false,
+        error: "internal error",
+        code: "internal_error",
+      });
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("rate-limits by socket IP before a storage lookup and bounds the bucket map", async () => {
