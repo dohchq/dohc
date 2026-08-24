@@ -272,9 +272,11 @@ describe("share mount commands", () => {
 
   it("rolls back a durable mount when post-commit presentation fails", async () => {
     const h = harness();
-    h.dependencies.refreshNativeWorkspaceSurfaces = () => {
-      h.events.push("native");
-      throw new Error("native refresh failed");
+    let notifyCalls = 0;
+    h.dependencies.notifyRenderer = () => {
+      notifyCalls += 1;
+      h.events.push(`notify:${notifyCalls}`);
+      if (notifyCalls === 1) throw new Error("notify failed");
     };
     const commands = createShareMountCommands(h.dependencies);
 
@@ -292,22 +294,25 @@ describe("share mount commands", () => {
       "projection:create",
       "registry:1",
       "native",
+      "notify:1",
       "files:unmount",
       "relay:close",
       "projection:remove",
       "registry:0",
       "log",
-      "notify",
+      "native",
+      "notify:2",
     ]);
   });
 
   it("preserves incomplete post-commit cleanup evidence", async () => {
     const h = harness();
     const cleanupFailure = new Error("folder is busy");
+    const nativeFailure = new Error("native refresh failed");
     const notifyFailure = new Error("notify failed");
     const loggedErrors: unknown[] = [];
     h.dependencies.refreshNativeWorkspaceSurfaces = () => {
-      throw new Error("native refresh failed");
+      throw nativeFailure;
     };
     h.dependencies.notifyRenderer = () => {
       throw notifyFailure;
@@ -330,6 +335,7 @@ describe("share mount commands", () => {
       (rollbackError as ShareViewMountRollbackError).rollbackError,
     ).toBe(cleanupFailure);
     expect(loggedErrors).toContain(notifyFailure);
+    expect(loggedErrors).toContain(nativeFailure);
     expect(h.mounts).toEqual([]);
   });
 

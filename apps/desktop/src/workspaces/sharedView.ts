@@ -1705,8 +1705,25 @@ async function captureSharedViewLocalDivergence(
     // A pull can record the same collision on more than one applied page or
     // retry. Once the recipient resolves that collision, none of those
     // recovery counts describe outstanding materialization work anymore.
-    await clearAllPendingMaterializationPaths(rootDir, resolvedCollisionPaths);
-    await clearCollisionRecordPaths(rootDir, shareId, resolvedCollisionPaths);
+    try {
+      await clearAllPendingMaterializationPaths(
+        rootDir,
+        resolvedCollisionPaths,
+      );
+      await clearCollisionRecordPaths(
+        rootDir,
+        shareId,
+        resolvedCollisionPaths,
+      );
+    } catch (error) {
+      throw new CapturePartialFailureError(
+        capturedPaths,
+        repairedPaths,
+        resolvedCollisionPaths[0]!,
+        "other",
+        { cause: error },
+      );
+    }
   }
 
   if (
@@ -1717,7 +1734,17 @@ async function captureSharedViewLocalDivergence(
     // A crashed pull asks capture to verify every tracked path. Only that full,
     // successful pass can prove the broad marker is no longer needed; a
     // save-time scoped capture must leave it for the later full repair.
-    await clearPullInFlightMarker(rootDir);
+    try {
+      await clearPullInFlightMarker(rootDir);
+    } catch (error) {
+      throw new CapturePartialFailureError(
+        capturedPaths,
+        repairedPaths,
+        join(".dohc", PULL_IN_FLIGHT_FILE),
+        "other",
+        { cause: error },
+      );
+    }
   }
 
   return {

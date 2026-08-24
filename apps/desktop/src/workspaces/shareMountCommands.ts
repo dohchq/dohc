@@ -346,6 +346,14 @@ export function createShareMountCommands<WorkspaceSummary>(
                 mountError,
               );
               try {
+                dependencies.refreshNativeWorkspaceSurfaces();
+              } catch (surfaceError) {
+                dependencies.logError(
+                  `could not refresh native surfaces after mount-share failure for ${mount.label}:`,
+                  surfaceError,
+                );
+              }
+              try {
                 dependencies.notifyRenderer();
               } catch (notifyError) {
                 dependencies.logError(

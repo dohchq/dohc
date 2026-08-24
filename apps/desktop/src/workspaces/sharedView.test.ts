@@ -121,6 +121,8 @@ const captureSharedViewLocalDivergence = (
     ...options,
   });
 const captureStandaloneShareViewDivergence = testLifecycle.captureStandalone;
+const captureStandaloneShareViewRefresh =
+  testLifecycle.captureStandaloneRefresh;
 const reconcileStandaloneShareView = testLifecycle.reconcileStandalone;
 const refreshSharedViewOnceWithPull = testLifecycle.refreshOnce;
 
@@ -140,6 +142,7 @@ let realpathOverride:
   | ((path: string, resolved: string) => string | null)
   | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
+let failRemovePathOnce: { path: string; error: Error } | null = null;
 let failReaddirPathOnce: { path: string; error: Error } | null = null;
 let collisionRecordRenameTargets: string[] = [];
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -180,6 +183,17 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.rename(oldPath, newPath);
     }) as typeof actual.rename,
+    rm: (async (
+      path: Parameters<typeof actual.rm>[0],
+      options?: Parameters<typeof actual.rm>[1],
+    ) => {
+      const failure = failRemovePathOnce;
+      if (failure !== null && String(path) === failure.path) {
+        failRemovePathOnce = null;
+        throw failure.error;
+      }
+      return actual.rm(path, options);
+    }) as typeof actual.rm,
   };
 });
 
@@ -267,6 +281,7 @@ beforeEach(() => {
   observeRealpath = null;
   realpathOverride = null;
   failRenameToPathOnce = null;
+  failRemovePathOnce = null;
   failReaddirPathOnce = null;
   collisionRecordRenameTargets = [];
 });
@@ -274,6 +289,7 @@ beforeEach(() => {
 afterEach(async () => {
   realpathOverride = null;
   failRenameToPathOnce = null;
+  failRemovePathOnce = null;
   failReaddirPathOnce = null;
   collisionRecordRenameTargets = [];
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
@@ -5524,6 +5540,93 @@ describe("shared view refresh", () => {
       });
     } finally {
       failRenameToPathOnce = null;
+      await store.close();
+    }
+  });
+
+  it("preserves resolved collision repairs when clearing durable debt fails", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/resolved-collision.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+    await rm(join(rootDir, path));
+
+    const store = harness.openStore(target);
+    try {
+      const cleanupFailure = new Error("collision record unavailable");
+      failRemovePathOnce = {
+        path: join(rootDir, ".dohc", "share-collision-record.json"),
+        error: cleanupFailure,
+      };
+
+      await expect(
+        captureStandaloneShareViewRefresh({
+          rootDir,
+          workspaceId: WORKSPACE,
+          store,
+          pinnedSelector: PINNED_SELECTOR,
+          shareId: SHARE_ID,
+          ended: false,
+        }),
+      ).resolves.toEqual({
+        ok: false,
+        changedPaths: 1,
+        errorMessage: cleanupFailure.message,
+      });
+      expect(await readFile(join(rootDir, path), "utf8")).toBe(
+        "granter body",
+      );
+    } finally {
+      failRemovePathOnce = null;
+      await store.close();
+    }
+  });
+
+  it("preserves captured deletions when clearing the pull marker fails", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/captured-before-marker-cleanup.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter body");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await rm(join(rootDir, path));
+    const markerPath = join(rootDir, ".dohc", "pull-in-flight.marker");
+    await writeFile(markerPath, "", "utf8");
+
+    const store = harness.openStore(target);
+    try {
+      const cleanupFailure = new Error("pull marker unavailable");
+      failRemovePathOnce = { path: markerPath, error: cleanupFailure };
+
+      await expect(
+        captureStandaloneShareViewRefresh({
+          rootDir,
+          workspaceId: WORKSPACE,
+          store,
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          shareId: SHARE_ID,
+          ended: false,
+        }),
+      ).resolves.toEqual({
+        ok: false,
+        changedPaths: 1,
+        errorMessage: cleanupFailure.message,
+      });
+    } finally {
+      failRemovePathOnce = null;
       await store.close();
     }
   });
