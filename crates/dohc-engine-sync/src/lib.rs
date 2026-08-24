@@ -27,6 +27,7 @@ mod relay;
 mod router;
 mod secret_apply;
 mod share;
+mod share_grant;
 mod version_apply;
 mod ydoc_apply;
 mod ydoc_origination;
@@ -89,6 +90,11 @@ pub use secret_apply::apply_secret_envelope;
 pub use share::{
     MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareSurface,
     apply_shared_envelope, is_valid_share_version_id,
+};
+pub use share_grant::{
+    GrantBinding, GrantStatus, LinkCredentialRecord, ShareGrantRecord, SharePrincipal,
+    parse_grant_binding, parse_grant_status, parse_link_credential_record,
+    parse_share_grant_record, parse_share_principal,
 };
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
