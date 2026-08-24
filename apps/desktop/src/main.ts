@@ -3489,7 +3489,6 @@ async function stopPluginWebAppsForPlugin(
         });
       }
     },
-    () => undefined,
     (_record, error) =>
       console.warn(
         `[desktop] failed to notify a plugin web app's owner for "${pluginId}"`,
@@ -8381,7 +8380,6 @@ function registerIpcHandlers(
         let displacedRecord: PluginWebAppViewRecord<AttachedWebAppView> | null = null;
         let pendingView: AttachedWebAppView | null = null;
         let recoveryStarted = false;
-        let leaseOwnedByRecord = false;
         let host: PluginHost;
         try {
           host = await ensurePluginStarted(
@@ -8477,11 +8475,8 @@ function registerIpcHandlers(
                 }]);
                 pendingView = null;
               }
-              if (records.length > 0) {
-                await disposePluginWebAppViews(records);
-              } else if (!leaseOwnedByRecord) {
-                await hostLease.release();
-              }
+              await disposePluginWebAppViews(records);
+              await hostLease.release();
             },
             onError: (stage, error) => {
               console.warn(
@@ -8524,7 +8519,6 @@ function registerIpcHandlers(
               };
               displacedRecord = pluginWebAppViews.register(next);
               installedRecord = next;
-              leaseOwnedByRecord = true;
               pendingView = null;
             },
             onLoadFailure: () => {

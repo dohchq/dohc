@@ -92,17 +92,6 @@ describe("PluginWebAppViewRegistry", () => {
       registry.removeForWorkspace("ws-1").map((entry) => entry.view),
     ).toEqual(["2"]);
     expect(registry.removeForSender(9).map((entry) => entry.view)).toEqual(["3"]);
-    expect(registry.removeAll()).toEqual([]);
-  });
-
-  it("reports whether a plugin still has any open view", () => {
-    const registry = new PluginWebAppViewRegistry<string>();
-    expect(registry.hasForPlugin("ws-1", "t3-code")).toBe(false);
-    registry.register(record());
-    expect(registry.hasForPlugin("ws-1", "t3-code")).toBe(true);
-    expect(registry.hasForPlugin("ws-1", "other")).toBe(false);
-    registry.remove(record());
-    expect(registry.hasForPlugin("ws-1", "t3-code")).toBe(false);
   });
 });
 
@@ -165,7 +154,6 @@ describe("PluginWebAppViewRegistry across instances", () => {
     expect(twoInstances().removeForPlugin("ws-1", "t3-code")).toHaveLength(2);
     expect(twoInstances().removeForWorkspace("ws-1")).toHaveLength(2);
     expect(twoInstances().removeForSender(7)).toHaveLength(2);
-    expect(twoInstances().hasForPlugin("ws-1", "t3-code")).toBe(true);
   });
 
   describe("countOtherInstances", () => {
@@ -210,12 +198,8 @@ describe("PluginWebAppViewRegistry.all", () => {
 });
 
 describe("stopPluginWebAppGuests", () => {
-  // MUTATION (an early throw skips destruction): a renderer dying between
-  // notifying record 1 and record 2 must not leave every guest — including
-  // record 2's — attached to a server nothing will ever tear down again.
-  it("notifies every record even when an earlier one throws, and always destroys", () => {
+  it("notifies every record even when an earlier one throws", () => {
     const notified: number[] = [];
-    const destroyed: number[][] = [];
     const errors: unknown[] = [];
 
     stopPluginWebAppGuests(
@@ -224,37 +208,30 @@ describe("stopPluginWebAppGuests", () => {
         notified.push(id);
         if (id === 1) throw new Error("renderer already gone");
       },
-      (records) => destroyed.push([...records]),
       (id, error) => errors.push({ id, error }),
     );
 
     expect(notified).toEqual([1, 2, 3]);
-    expect(destroyed).toEqual([[1, 2, 3]]);
     expect(errors).toEqual([{ id: 1, error: new Error("renderer already gone") }]);
   });
 
-  it("still destroys every record when every notification throws", () => {
-    const destroyed: number[][] = [];
+  it("reports every notification failure", () => {
+    const errors: number[] = [];
 
     stopPluginWebAppGuests(
       [1, 2],
       () => {
         throw new Error("renderer already gone");
       },
-      (records) => destroyed.push([...records]),
+      (id) => errors.push(id),
     );
 
-    expect(destroyed).toEqual([[1, 2]]);
+    expect(errors).toEqual([1, 2]);
   });
 
-  it("destroys an empty set without notifying anything", () => {
-    const notify = () => {
+  it("does nothing for an empty set", () => {
+    stopPluginWebAppGuests([], () => {
       throw new Error("should never run");
-    };
-    const destroyed: number[][] = [];
-
-    stopPluginWebAppGuests([], notify, (records) => destroyed.push([...records]));
-
-    expect(destroyed).toEqual([[]]);
+    });
   });
 });

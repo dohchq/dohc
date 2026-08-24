@@ -102,15 +102,6 @@ export class PluginWebAppViewRegistry<TView> {
     return count;
   }
 
-  hasForPlugin(workspaceId: string, pluginId: string): boolean {
-    for (const record of this.views.values()) {
-      if (record.workspaceId === workspaceId && record.pluginId === pluginId) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   removeForWorkspace(workspaceId: string): PluginWebAppViewRecord<TView>[] {
     return this.removeWhere((record) => record.workspaceId === workspaceId);
   }
@@ -135,10 +126,6 @@ export class PluginWebAppViewRegistry<TView> {
     return this.removeWhere((record) => record.senderId === senderId);
   }
 
-  removeAll(): PluginWebAppViewRecord<TView>[] {
-    return this.removeWhere(() => true);
-  }
-
   private removeWhere(
     predicate: (record: PluginWebAppViewRecord<TView>) => boolean,
   ): PluginWebAppViewRecord<TView>[] {
@@ -153,26 +140,19 @@ export class PluginWebAppViewRegistry<TView> {
 }
 
 /**
- * Notifies every removed record's owner, one failure never silencing the
- * rest, then always destroys the whole set — even when a notification threw,
- * or when there was nothing to notify. A dying renderer must not leave a
- * guest attached to a server nothing will ever tear down.
+ * Notifies every removed record's owner. One notification failure never
+ * silences the rest.
  */
 export function stopPluginWebAppGuests<TRecord>(
   records: readonly TRecord[],
   notify: (record: TRecord) => void,
-  destroy: (records: readonly TRecord[]) => void,
   onNotifyError?: (record: TRecord, error: unknown) => void,
 ): void {
-  try {
-    for (const record of records) {
-      try {
-        notify(record);
-      } catch (error) {
-        onNotifyError?.(record, error);
-      }
+  for (const record of records) {
+    try {
+      notify(record);
+    } catch (error) {
+      onNotifyError?.(record, error);
     }
-  } finally {
-    destroy(records);
   }
 }

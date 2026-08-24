@@ -230,6 +230,10 @@ describe("plugin web app main-process wiring", () => {
     expect(exactRecordAt).toBeGreaterThan(stopViewAt);
     expect(recordReleaseAt).toBeGreaterThan(exactRecordAt);
     expect(pendingReleaseAt).toBeGreaterThan(recordReleaseAt);
+    expect(squeeze(start)).toContain(
+      "awaitdisposePluginWebAppViews(records);awaithostLease.release();",
+    );
+    expect(start).not.toContain("leaseOwnedByRecord");
   });
 
   it("stores and releases the lease owned by each web app record", () => {
@@ -361,9 +365,8 @@ describe("plugin web app main-process wiring", () => {
     expect(squeeze(stop)).toContain(
       "notifyPluginWebAppFailed(sender,record.generation,{workspaceId:record.workspaceId,pluginId:record.pluginId,webAppId:record.webAppId,instanceKey:record.instanceKey,})",
     );
-    // The isolation and always-destroy guarantees themselves are pinned
-    // behaviorally in pluginWebAppViews.test.ts, against the shared
-    // stopPluginWebAppGuests() this handler delegates to.
+    // Notification isolation is pinned in pluginWebAppViews.test.ts. This
+    // test pins disposal after notification in the production caller.
   });
 
   // round-13 finding 3 (CodeRabbit): WebContents ids recycle across a
