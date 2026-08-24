@@ -119,7 +119,6 @@ export interface PluginPanelSdkAuthorization {
 
 interface PluginPanelSdkGrantSuspension {
   restore(): Promise<void>;
-  commit(): void;
 }
 
 export interface PluginWebAppBoundsRequest
@@ -160,7 +159,7 @@ export interface PluginSurfacesDependencies<V extends PluginWebAppViewLike> {
   notifyPanelInvalidated(
     input: PluginPanelIdentity & PluginSurfaceOwner & { surfaceId: number },
   ): void;
-  onPanelAuthorityRevoked?(
+  onPanelDisposed?(
     input: PluginPanelIdentity & { surfaceId: number },
   ): void;
   onError(error: unknown, context: string): void;
@@ -203,7 +202,6 @@ interface SuspendedPanelGrant {
   readonly hostEpoch: number;
   readonly spawnId: string | undefined;
   readonly hostRecord: PluginHostRecordToken | undefined;
-  finalized: boolean;
 }
 
 interface WebAppRecord<V extends PluginWebAppViewLike>
@@ -274,7 +272,6 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
   readonly #pluginExclusions = new Map<string, Promise<void>>();
   readonly #hostEpochs = new Map<string, number>();
   readonly #hardenedGuestPartitions = new Set<string>();
-  readonly #tentativePanelGrantRevocations = new WeakSet<AbortSignal>();
   #nextPanelSurfaceId = 1;
   #closed = false;
   #closePromise: Promise<void> | null = null;
@@ -532,20 +529,18 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     if (!record || record.grant.signal !== authority.signal) {
       throw new Error("Plugin panel SDK authority is stale.");
     }
-    const hostEpoch = this.#hostEpoch(record);
     return {
       authority,
       surfaceId: record.surfaceId,
-      // files.watch retains this predicate after the SDK call returns. A
-      // failed host stop replaces the grant in the same host epoch, so that
-      // subscription resumes; a real host change advances the epoch and the
-      // old subscription stays dead after successor readiness.
+      // A files.watch subscription belongs to this exact panel record, not to
+      // one replaceable grant. It pauses while authority is revoked and can
+      // resume only when hostReady regrants this same mapped record. The event
+      // registry stays unbuffered, so it does not replay changes from the pause.
       isPushLive: () =>
         Boolean(
           this.#panels.get(key) === record &&
             !record.closed &&
             !record.grant.signal.aborted &&
-            this.#hostEpoch(record) === hostEpoch &&
             record.senderId === request.senderId &&
             record.generation === request.currentGeneration() &&
             request.activeWorkspaceId() === request.workspaceId &&
@@ -606,9 +601,7 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
       const result = await run((identity) => {
         suspensions.push(this.#suspendPluginSdkGrants(identity));
       });
-      if (result.ok) {
-        for (const suspension of suspensions) suspension.commit();
-      } else {
+      if (!result.ok) {
         await restore();
       }
       return result;
@@ -622,7 +615,7 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     identity: PluginSurfaceIdentity,
   ): PluginPanelSdkGrantSuspension {
     if (this.#closed) {
-      return { commit: () => undefined, restore: () => Promise.resolve() };
+      return { restore: () => Promise.resolve() };
     }
     // Capture the whole rollback set before revoking anything. If one lease
     // cannot report its spawn, the caller receives no suspension handle, so a
@@ -642,13 +635,8 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         hostEpoch: this.#hostEpoch(record),
         spawnId: record.ownedLease.lease.currentSpawnId(),
         hostRecord: record.ownedLease.lease.currentRecord(),
-        finalized: false,
       }));
-    for (const { record, grant } of suspended) {
-      // Subscription cleanup is destructive and cannot be reconstructed from
-      // a grant. Defer it until the action's result says whether this abort is
-      // permanent; the aborted grant still blocks calls and event delivery.
-      this.#tentativePanelGrantRevocations.add(grant.signal);
+    for (const { record } of suspended) {
       this.#panelAuthorities.revokePanel(
         record.workspaceId,
         record.pluginId,
@@ -658,11 +646,6 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
 
     let restorePromise: Promise<void> | null = null;
     return {
-      commit: () => {
-        for (const snapshot of suspended) {
-          this.#finalizeSuspendedPanelGrant(snapshot);
-        }
-      },
       restore: () => {
         if (restorePromise) return restorePromise;
         restorePromise = Promise.all(
@@ -683,12 +666,10 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
                 record.ownedLease.lease.currentSpawnId() !== spawnId ||
                 record.ownedLease.lease.currentRecord() !== hostRecord
               ) {
-                this.#finalizeSuspendedPanelGrant(snapshot);
                 return;
               }
               record.grant = this.#registerPanelGrant(record);
             }).catch((error) => {
-              this.#finalizeSuspendedPanelGrant(snapshot);
               this.#report(
                 error,
                 `restore suspended plugin panel authority for "${record.pluginId}"`,
@@ -833,49 +814,13 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
   #registerPanelGrant(
     record: PluginPanelIdentity & PluginSurfaceOwner & { surfaceId: number },
   ): PanelGrant {
-    const grant = this.#panelAuthorities.register({
+    return this.#panelAuthorities.register({
       senderId: record.senderId,
       generation: record.generation,
       workspaceId: record.workspaceId,
       pluginId: record.pluginId,
       panelId: record.panelId,
     });
-    grant.signal.addEventListener(
-      "abort",
-      () => {
-        try {
-          if (this.#tentativePanelGrantRevocations.delete(grant.signal)) return;
-          this.#dependencies.onPanelAuthorityRevoked?.({
-            workspaceId: record.workspaceId,
-            pluginId: record.pluginId,
-            panelId: record.panelId,
-            surfaceId: record.surfaceId,
-          });
-        } catch (error) {
-          this.#report(error, `revoke plugin panel authority for "${record.pluginId}"`);
-        }
-      },
-      { once: true },
-    );
-    return grant;
-  }
-
-  #finalizeSuspendedPanelGrant(snapshot: SuspendedPanelGrant): void {
-    if (snapshot.finalized) return;
-    snapshot.finalized = true;
-    try {
-      this.#dependencies.onPanelAuthorityRevoked?.({
-        workspaceId: snapshot.record.workspaceId,
-        pluginId: snapshot.record.pluginId,
-        panelId: snapshot.record.panelId,
-        surfaceId: snapshot.record.surfaceId,
-      });
-    } catch (error) {
-      this.#report(
-        error,
-        `revoke plugin panel authority for "${snapshot.record.pluginId}"`,
-      );
-    }
   }
 
   #queueRecovery(attempt: WebAppAttempt<V>): void {
@@ -1431,6 +1376,16 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     record.disposed = true;
     record.closed = true;
     this.#retirePanelAttempt(record.attempt);
+    try {
+      this.#dependencies.onPanelDisposed?.({
+        workspaceId: record.workspaceId,
+        pluginId: record.pluginId,
+        panelId: record.panelId,
+        surfaceId: record.surfaceId,
+      });
+    } catch (error) {
+      this.#report(error, `dispose plugin panel owner for "${record.pluginId}"`);
+    }
     try {
       await stopPluginPanelPreview(
         record.preview,

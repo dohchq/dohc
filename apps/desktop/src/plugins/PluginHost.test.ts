@@ -750,9 +750,11 @@ describe("PluginHost", () => {
     const first = await host.start(helloPluginRoot, "hello-plugin", manifest);
     expect(first.pluginId).toBe("hello-plugin");
     expect(host.currentRecord("hello-plugin")).toBe(first.record);
+    expect(host.hasLiveSpawn("hello-plugin")).toBe(true);
 
     await host.stop("hello-plugin");
     expect(host.currentRecord("hello-plugin")).toBeUndefined();
+    expect(host.hasLiveSpawn("hello-plugin")).toBe(false);
 
     const second = await host.start(helloPluginRoot, "hello-plugin", manifest);
     expect(host.currentRecord("hello-plugin")).toBe(second.record);

@@ -272,8 +272,10 @@ describe("plugin panel main-process wiring", () => {
   it("revokes surfaces synchronously when the exact host spawn ends", () => {
     const pipeline = functionSource("function createPluginPipeline(");
     const spawnEndAt = pipeline.indexOf("onSpawnEnd: (pluginId, spawnId) => {");
-    const markAt = pipeline.indexOf("pluginIdsWithEndedSpawn.add(pluginId);", spawnEndAt);
-    const changedAt = pipeline.indexOf("pluginSurfaces.hostChanged({", markAt);
+    const changedAt = pipeline.indexOf(
+      "surfaceHostLifecycle?.spawnEnded(pluginId);",
+      spawnEndAt,
+    );
     const cleanupAt = pipeline.indexOf("pluginDrivers.endSpawn(pluginId, spawnId);", changedAt);
     const returnAt = pipeline.indexOf(
       "return childProcessBroker.disposeSpawn(pluginId, spawnId);",
@@ -281,58 +283,51 @@ describe("plugin panel main-process wiring", () => {
     );
     expect(pipeline).toContain("utilityProcess.fork(");
     expect(spawnEndAt).toBeGreaterThan(-1);
-    expect(markAt).toBeGreaterThan(spawnEndAt);
-    expect(changedAt).toBeGreaterThan(markAt);
-    expect(pipeline.slice(changedAt, changedAt + 180)).toContain('kind: "terminal"');
+    expect(changedAt).toBeGreaterThan(spawnEndAt);
     expect(cleanupAt).toBeGreaterThan(changedAt);
     expect(returnAt).toBeGreaterThan(cleanupAt);
     expect(pipeline.slice(spawnEndAt, returnAt)).not.toContain("await ");
   });
 
-  it("does not treat an initial ready status as a replacement", () => {
+  it("routes host statuses through the surface lifecycle", () => {
     const pipeline = functionSource("function createPluginPipeline(");
     const statusAt = pipeline.indexOf("onStatusChange: (pluginId, status) => {");
-    const markerAt = pipeline.indexOf("pluginIdsWithEndedSpawn.delete(pluginId)", statusAt);
-    const readyAt = pipeline.indexOf("pluginSurfaces.hostReady({", markerAt);
+    const lifecycleAt = pipeline.indexOf(
+      "surfaceHostLifecycle?.statusChanged(pluginId, status);",
+      statusAt,
+    );
     expect(statusAt).toBeGreaterThan(-1);
-    expect(markerAt).toBeGreaterThan(statusAt);
-    expect(readyAt).toBeGreaterThan(markerAt);
-    expect(pipeline.match(/pluginIdsWithEndedSpawn\.add\(pluginId\)/g)).toHaveLength(1);
+    expect(lifecycleAt).toBeGreaterThan(statusAt);
   });
 
-  it("regrants only a current ready successor without consuming a stale marker", () => {
+  it("routes host recovery outcomes through the surface lifecycle", () => {
     const pipeline = functionSource("function createPluginPipeline(");
-    const statusAt = pipeline.indexOf("onStatusChange: (pluginId, status) => {");
-    const noteAt = pipeline.indexOf("pipeline?.noteRuntimeStatus(pluginId, status);", statusAt);
-    const readyAt = pipeline.indexOf('if (status !== "ready") return;', noteAt);
-    const spawnAt = pipeline.indexOf("const spawnId = pluginHost.getSpawnId(pluginId);", readyAt);
-    const currentAt = pipeline.indexOf(
-      'pluginHost.getStatus(pluginId) !== "ready"',
-      spawnAt,
+    const recoveryAt = pipeline.indexOf(
+      "onRecoveryDisposition: (pluginId, disposition) => {",
     );
-    const snapshotAt = pipeline.indexOf(
-      "pluginHost.readyPanelsForSpawn(pluginId, spawnId)",
-      currentAt,
+    const lifecycleAt = pipeline.indexOf(
+      "surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition);",
+      recoveryAt,
     );
-    const deleteAt = pipeline.indexOf("pluginIdsWithEndedSpawn.delete(pluginId)", snapshotAt);
-    const regrantAt = pipeline.indexOf("pluginSurfaces.hostReady({", deleteAt);
-    expect(noteAt).toBeGreaterThan(statusAt);
-    expect(readyAt).toBeGreaterThan(noteAt);
-    expect(spawnAt).toBeGreaterThan(readyAt);
-    expect(currentAt).toBeGreaterThan(spawnAt);
-    expect(snapshotAt).toBeGreaterThan(currentAt);
-    expect(deleteAt).toBeGreaterThan(snapshotAt);
-    expect(regrantAt).toBeGreaterThan(deleteAt);
-    const regrant = squeeze(pipeline.slice(regrantAt, regrantAt + 360));
-    expect(regrant).toContain(
-      "workspaceId:workspace.workspaceId,pluginId,spawnId,",
+    expect(recoveryAt).toBeGreaterThan(-1);
+    expect(lifecycleAt).toBeGreaterThan(recoveryAt);
+  });
+
+  it("composes host status with the pipeline and plugin surfaces once", () => {
+    const pipeline = functionSource("function createPluginPipeline(");
+    const lifecycleAt = pipeline.indexOf(
+      "surfaceHostLifecycle = new PluginSurfaceHostLifecycle({",
     );
-    expect(regrant).toContain(
-      "hostRecord:readyPanels.record,declaredPanels:readyPanels.panels,",
+    const hostAt = pipeline.indexOf("host: pluginHost,", lifecycleAt);
+    const surfacesAt = pipeline.indexOf("surfaces: pluginSurfaces,", hostAt);
+    const statusAt = pipeline.indexOf(
+      "pipeline?.noteRuntimeStatus(pluginId, status)",
+      surfacesAt,
     );
-    expect(pipeline.slice(statusAt, regrantAt)).not.toContain(
-      "pluginRegistration(pluginId)",
-    );
+    expect(lifecycleAt).toBeGreaterThan(-1);
+    expect(hostAt).toBeGreaterThan(lifecycleAt);
+    expect(surfacesAt).toBeGreaterThan(hostAt);
+    expect(statusAt).toBeGreaterThan(surfacesAt);
   });
 
   it("passes the derived plugin-host environment to the utility process", () => {

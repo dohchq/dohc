@@ -703,6 +703,7 @@ import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent";
+import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
 import {
   createPluginAgentDrivers,
   type PluginAgentDrivers,
@@ -1053,7 +1054,7 @@ let linuxStableCliBinDir: string | undefined;
 
 function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
   let pipeline: PluginPipeline | null = null;
-  const pluginIdsWithEndedSpawn = new Set<string>();
+  let surfaceHostLifecycle: PluginSurfaceHostLifecycle | null = null;
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
   const childProcessBroker = new PluginChildProcessBroker({
     dohcDir,
@@ -1155,12 +1156,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     // One seam ends a spawn: the driver's sessions fail here, and the broker
     // takes the harness's whole process tree down. Neither asks the plugin.
     onSpawnEnd: (pluginId, spawnId) => {
-      pluginIdsWithEndedSpawn.add(pluginId);
-      pluginSurfaces.hostChanged({
-        kind: "terminal",
-        workspaceId: workspace.workspaceId,
-        pluginId,
-      });
+      surfaceHostLifecycle?.spawnEnded(pluginId);
       pluginDrivers.endSpawn(pluginId, spawnId);
       workspaceEvents.disposeSpawn(pluginId, spawnId);
       return childProcessBroker.disposeSpawn(pluginId, spawnId);
@@ -1170,27 +1166,23 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       return childProcessBroker.dispose();
     },
     onStatusChange: (pluginId, status) => {
-      pipeline?.noteRuntimeStatus(pluginId, status);
-      if (status !== "ready") return;
-      const spawnId = pluginHost.getSpawnId(pluginId);
-      if (
-        pluginHost.getStatus(pluginId) !== "ready" ||
-        !spawnId
-      ) {
-        return;
-      }
-      const readyPanels = pluginHost.readyPanelsForSpawn(pluginId, spawnId);
-      if (!readyPanels || !pluginIdsWithEndedSpawn.delete(pluginId)) return;
-      void pluginSurfaces.hostReady({
-        workspaceId: workspace.workspaceId,
-        pluginId,
-        spawnId,
-        hostRecord: readyPanels.record,
-        declaredPanels: readyPanels.panels,
-      });
+      surfaceHostLifecycle?.statusChanged(pluginId, status);
+    },
+    onRecoveryDisposition: (pluginId, disposition) => {
+      surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition);
     },
   });
   pluginHostRef = pluginHost;
+  surfaceHostLifecycle = new PluginSurfaceHostLifecycle({
+    workspaceId: workspace.workspaceId,
+    host: pluginHost,
+    surfaces: pluginSurfaces,
+    onRuntimeStatus: (pluginId, status) =>
+      pipeline?.noteRuntimeStatus(pluginId, status),
+    onError: (error, context) => {
+      console.error(`[desktop] ${context}:`, error);
+    },
+  });
   const hostOwnership = new PluginHostOwnership(pluginHost, {
     onCleanupError: (pluginId, error) => {
       console.warn(
@@ -3421,7 +3413,7 @@ const pluginSurfaces = new PluginSurfaces<WebContentsView>({
     const sender = webContents.fromId(senderId);
     if (sender) notifyPluginPanelInvalidated(sender, generation, event);
   },
-  onPanelAuthorityRevoked: ({ workspaceId, pluginId, panelId, surfaceId }) => {
+  onPanelDisposed: ({ workspaceId, pluginId, panelId, surfaceId }) => {
     pluginWorkspaceEventsByWorkspace.get(workspaceId)?.disposeOwner({
       kind: "panel",
       workspaceId,

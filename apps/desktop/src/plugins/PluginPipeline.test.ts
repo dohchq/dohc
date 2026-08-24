@@ -11086,6 +11086,203 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 180_000);
 
+  it("retires a crash-loop-disabled host record before enabling its replacement", async () => {
+    const fixture = await createPluginWorkspace();
+    const exits: Array<() => void> = [];
+    let pipeline: PluginPipeline;
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>((params) => {
+      const attempt = exits.length + 1;
+      exits.push(() => params.onExit({ code: 1, signal: null }));
+      return {
+        request: async <T = unknown>(method: string): Promise<T> => {
+          if (method === PLUGIN_HOST_METHODS.activate && attempt <= 3) {
+            throw new Error(`plugin activation failed ${attempt}`);
+          }
+          return (method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [], drivers: [] }
+            : {}) as T;
+        },
+        notify: () => undefined,
+        dispose: async () => undefined,
+      };
+    });
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport,
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership: new PluginHostOwnership(host),
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.disabledReason === "crash-loop",
+        "The plugin never crash-loop disabled.",
+        60_000,
+      );
+      const disabledRecord = host.currentRecord("example-plugin");
+      expect(disabledRecord).toBeDefined();
+      expect(host.getStatus("example-plugin")).toBe("disabled");
+      expect(spawnTransport).toHaveBeenCalledTimes(3);
+      const disabledState = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      expect(disabledState.ok && disabledState.state.plugins["example-plugin"]?.disabled)
+        .toBe(true);
+
+      const enabled = await pipeline.enable("example-plugin");
+      expect(enabled.ok).toBe(true);
+      const replacementRecord = host.currentRecord("example-plugin");
+      expect(replacementRecord).toBeDefined();
+      expect(replacementRecord).not.toBe(disabledRecord);
+      expect(spawnTransport).toHaveBeenCalledTimes(4);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        () => `The enabled plugin stayed "${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
+
+      const enabledState = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      expect(enabledState.ok && enabledState.state.plugins["example-plugin"]?.disabled)
+        .toBe(false);
+
+      for (const exit of exits.slice(0, 3)) exit();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(host.currentRecord("example-plugin")).toBe(replacementRecord);
+      expect(host.getStatus("example-plugin")).toBe("ready");
+      expect(pipeline.list()[0]?.status).toBe("ready");
+      expect(spawnTransport).toHaveBeenCalledTimes(4);
+
+      exits[3]!();
+      await waitFor(
+        () => spawnTransport.mock.calls.length === 5 &&
+          pipeline.list()[0]?.status === "ready",
+        "The replacement did not respawn after its first crash.",
+        60_000,
+      );
+      expect(host.currentRecord("example-plugin")).toBe(replacementRecord);
+      expect(host.getStatus("example-plugin")).toBe("ready");
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
+  it("retires an inert crash-loop record when disabled-state persistence fails before enabling its replacement", async () => {
+    const fixture = await createPluginWorkspace();
+    const exits: Array<() => void> = [];
+    let pipeline: PluginPipeline;
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>((params) => {
+      exits.push(() => params.onExit({ code: 1, signal: null }));
+      return {
+        request: async <T = unknown>(method: string): Promise<T> => {
+          return (method === PLUGIN_HOST_METHODS.activate
+            ? { commands: [], drivers: [] }
+            : {}) as T;
+        },
+        notify: () => undefined,
+        dispose: async () => undefined,
+      };
+    });
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport,
+      routeSdkRequest: async () => ({}),
+      mutatePluginRecord: async () => {
+        throw new Error("simulated disabled-state write failure");
+      },
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership: new PluginHostOwnership(host),
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+      },
+    });
+
+    try {
+      await pipeline.start();
+      const installed = await pipeline.install("example-plugin");
+      if (!installed.ok) throw new Error(installed.error.message);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        "The installed plugin did not start.",
+      );
+      for (let crash = 0; crash < 2; crash += 1) {
+        exits[crash]!();
+        await waitFor(
+          () =>
+            spawnTransport.mock.calls.length === crash + 2 &&
+            pipeline.list()[0]?.status === "ready",
+          `The plugin did not recover from crash ${crash + 1}.`,
+        );
+      }
+      exits[2]!();
+      await waitFor(
+        () =>
+          spawnTransport.mock.calls.length === 3 &&
+          host.getSpawnId("example-plugin") === undefined &&
+          pipeline.list()[0]?.status === "crashed",
+        () =>
+          `The failed crash-loop persistence did not leave the expected inert record; ` +
+          `spawns=${spawnTransport.mock.calls.length}, ` +
+          `status="${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
+      const inertRecord = host.currentRecord("example-plugin");
+      expect(inertRecord).toBeDefined();
+      expect(host.hasLiveSpawn("example-plugin")).toBe(false);
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      expect(
+        state.ok && state.state.plugins["example-plugin"]?.disabled,
+      ).toBe(false);
+
+      const enabled = await pipeline.enable("example-plugin");
+      expect(enabled.ok).toBe(true);
+      expect(host.currentRecord("example-plugin")).not.toBe(inertRecord);
+      expect(host.getSpawnId("example-plugin")).toBeDefined();
+      expect(spawnTransport).toHaveBeenCalledTimes(4);
+      await waitFor(
+        () => pipeline.list()[0]?.status === "ready",
+        () => `The enabled plugin stayed "${pipeline.list()[0]?.status}".`,
+        60_000,
+      );
+    } finally {
+      await pipeline.dispose();
+    }
+  }, 180_000);
+
   it("carries every declared contribution across the bridge, so a plugin's views and web apps reach the renderer", async () => {
     const fixture = await createPluginWorkspace();
     await writeFile(join(fixture.pluginRoot, "dohc-plugin.json"), `${JSON.stringify({
