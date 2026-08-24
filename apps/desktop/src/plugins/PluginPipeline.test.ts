@@ -7670,6 +7670,41 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("releases reservations after action preconditions fail", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        expect((await setup.pipeline.rebuild("example-plugin")).ok).toBe(false);
+        await expect(
+          setup.hostOwnership.runCommand("example-plugin", async () => "ready"),
+        ).resolves.toEqual({ kind: "completed", value: "ready" });
+
+        expect((await setup.pipeline.disable("missing-plugin")).ok).toBe(false);
+        await expect(
+          setup.hostOwnership.runCommand("missing-plugin", async () => "ready"),
+        ).resolves.toEqual({ kind: "completed", value: "ready" });
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("propagates owner close failure after stopping the host", async () => {
+      const setup = await setupEstablishedPlugin();
+      const stopAll = setup.pipeline.host.stopAll.bind(setup.pipeline.host);
+      vi.spyOn(setup.pipeline.host, "stopAll").mockImplementationOnce(async () => {
+        await stopAll();
+        throw new Error("simulated owner close failure");
+      });
+
+      await expect(setup.pipeline.dispose()).rejects.toThrow(
+        "simulated owner close failure",
+      );
+      expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+      await expect(setup.pipeline.enable("example-plugin")).resolves.toMatchObject({
+        ok: false,
+        error: { code: "pipeline-closed" },
+      });
+    }, 60_000);
+
     it("waits for a live command before disposal stops the host", async () => {
       const setup = await setupEstablishedPlugin();
       const commandEntered = deferred();
