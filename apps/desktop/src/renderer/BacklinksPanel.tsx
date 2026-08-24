@@ -28,7 +28,11 @@ type BacklinksLoadOutcome =
       result: GetBacklinksResult;
       chatMentions: ChatFileMentionRecord[];
     }
-  | { ok: false; preserveCurrent: boolean };
+  | { ok: false };
+type BacklinksLoadRequest = {
+  identity: BacklinksLoadIdentity;
+  response: Promise<BacklinksLoadOutcome>;
+};
 
 function sameBacklinksLoadBase(
   left: BacklinksLoadIdentity,
@@ -85,7 +89,7 @@ export function BacklinksPanel(props: {
   // dohc ask for a capability it may not have.
   const chatMentionsAvailable = props.chatMentionsAvailable === true;
   const [focusNonce, setFocusNonce] = useState(0);
-  const previousLoad = useRef<BacklinksLoadIdentity | null>(null);
+  const previousRequest = useRef<BacklinksLoadRequest | null>(null);
   const current =
     loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
   const sources = current?.sources ?? [];
@@ -109,21 +113,23 @@ export function BacklinksPanel(props: {
         refreshKey,
         focusNonce,
       };
-      const prior = previousLoad.current;
-      const preserveCurrent = Boolean(
+      const prior = previousRequest.current;
+      const focusOnlyRefresh = Boolean(
         prior &&
-          sameBacklinksLoadBase(prior, identity) &&
-          prior.focusNonce !== identity.focusNonce,
+          sameBacklinksLoadBase(prior.identity, identity) &&
+          prior.identity.focusNonce !== identity.focusNonce,
       );
-      previousLoad.current = identity;
 
       const getBacklinks = bridge().getBacklinks;
       // Partial bridges (tests, older hosts) may not expose it — degrade to none.
-      if (typeof getBacklinks !== "function") return null;
+      if (typeof getBacklinks !== "function") {
+        previousRequest.current = null;
+        return null;
+      }
       const getChatMentions = chatMentionsAvailable
         ? bridge().listChatFileMentions
         : undefined;
-      return Promise.all([
+      const response = Promise.all([
         getBacklinks({ workspaceId, path }),
         typeof getChatMentions === "function"
           ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
@@ -134,17 +140,23 @@ export function BacklinksPanel(props: {
           result,
           chatMentions: chats.mentions,
         }),
-        () => ({ ok: false, preserveCurrent }),
+        () => ({ ok: false }),
       );
+      // Focus refreshes are opportunistic. If one fails, the preceding
+      // same-document request remains the last useful answer, even if pending.
+      const currentResponse =
+        focusOnlyRefresh && prior
+          ? response.then((outcome) =>
+              outcome.ok ? outcome : prior.response,
+            )
+          : response;
+      previousRequest.current = { identity, response: currentResponse };
+      return currentResponse;
     },
     {
       onSuccess: (outcome) => {
         if (!outcome.ok) {
-          // A focus-only refresh is opportunistic and keeps the last useful
-          // result. Identity and workspace-activity failures clear it.
-          if (!outcome.preserveCurrent) {
-            setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
-          }
+          setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
           return;
         }
         // Guard the async response against a workspace/path switch mid-flight

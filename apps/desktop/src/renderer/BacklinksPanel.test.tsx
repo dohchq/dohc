@@ -253,6 +253,33 @@ describe("BacklinksPanel", () => {
     expect(screen.getByTestId("backlink-source").textContent).toContain("Initial");
   });
 
+  it("keeps the pending initial result when a focus refresh fails", async () => {
+    const initial = deferred<GetBacklinksResult>();
+    const focused = deferred<GetBacklinksResult>();
+    const getBacklinks = vi
+      .fn()
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(focused.promise);
+    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    render(<BacklinksPanel workspaceId="ws-a" path="notes/target.md" />);
+    await waitFor(() => expect(getBacklinks).toHaveBeenCalledOnce());
+
+    act(() => window.dispatchEvent(new Event("focus")));
+    await waitFor(() => expect(getBacklinks).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      focused.reject(new Error("focus refresh failed"));
+      await focused.promise.catch(() => undefined);
+    });
+
+    await act(async () => {
+      initial.resolve(backlinksSource("Initial"));
+      await initial.promise;
+    });
+    expect((await screen.findByTestId("backlink-source")).textContent).toContain(
+      "Initial",
+    );
+  });
+
   it("clears the current backlinks when a workspace refresh fails", async () => {
     const refreshed = deferred<GetBacklinksResult>();
     const getBacklinks = vi
