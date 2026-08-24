@@ -628,6 +628,51 @@ describe("registry store", () => {
     expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
   });
 
+  it("leaves joined shared channels unchanged when the registry write fails", async () => {
+    const secondWorkspace = {
+      ...personal,
+      workspaceId: "ws-2",
+      rootPath: "/home/ice/dohc/second",
+    };
+    const joined = {
+      shareId: "share-1",
+      channelWireId: "wire-team",
+      access: "read-write" as const,
+      granterEmail: "owner@example.com",
+      relayUrl: "http://relay.test",
+      recipientUserId: "member-1",
+    };
+    const secondJoined = {
+      ...joined,
+      shareId: "share-2",
+      channelWireId: "wire-second",
+    };
+    store.register(personal);
+    store.register(secondWorkspace);
+    store.setSharedChannels(personal.workspaceId, [joined]);
+    store.setSharedChannels(secondWorkspace.workspaceId, [secondJoined]);
+
+    // Model a failed atomic rename while reads continue from the cache.
+    await rm(registryPath);
+    await mkdir(registryPath);
+
+    expect(() =>
+      store.setSharedChannels(personal.workspaceId, [{ ...joined, ended: true }]),
+    ).toThrow();
+    expect(() =>
+      store.setSharedChannels(secondWorkspace.workspaceId, []),
+    ).toThrow();
+
+    expect.soft(
+      store.find(personal.workspaceId)?.sharedChannels,
+      "MUTATION: a failed replacement changes the cached channel set before it reaches disk",
+    ).toEqual([joined]);
+    expect.soft(
+      store.find(secondWorkspace.workspaceId)?.sharedChannels,
+      "MUTATION: a failed removal deletes the cached channel set before it reaches disk",
+    ).toEqual([secondJoined]);
+  });
+
   it("records, marks ended, and keeps an empty ownership tombstone", () => {
     store.register(personal);
     const mount = {

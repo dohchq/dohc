@@ -499,13 +499,23 @@ export function createRegistryStore(registryFile: string) {
     // MU-C4: replace the workspace's joined shared-channel set. Upserts and
     // removals both go through this one write (callers compute the next set),
     // keeping the file format append-simple.
-    setSharedChannels(workspaceId: string, sharedChannels: JoinedSharedChannel[]): void {
+    setSharedChannels(
+      workspaceId: string,
+      sharedChannels: JoinedSharedChannel[],
+    ): void {
       const registry = read();
       const entry = registry.workspaces.find((w) => w.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      if (sharedChannels.length === 0) delete entry.sharedChannels;
-      else entry.sharedChannels = sharedChannels;
-      write(registry);
+      // Keep the cached entry unchanged until the replacement reaches disk.
+      // A failed write must not make a joined channel appear changed or gone
+      // for the rest of this process.
+      const updated: RegistryEntry = { ...entry };
+      if (sharedChannels.length === 0) delete updated.sharedChannels;
+      else updated.sharedChannels = sharedChannels;
+      write({
+        ...registry,
+        workspaces: registry.workspaces.map((w) => (w === entry ? updated : w)),
+      });
     },
 
     // Share mounts: replace the workspace's mount set (same replace-the-set
