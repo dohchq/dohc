@@ -1751,7 +1751,7 @@ export function VersionComparePage(props: {
   const windowGeneration = useRef(0);
 
   useAsyncResponseEffect(
-    () => {
+    async () => {
       windowGeneration.current += 1;
       setState({ status: "loading" });
       // The pending flag belongs to the window too (#602 review): without this

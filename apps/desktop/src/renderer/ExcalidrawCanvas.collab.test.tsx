@@ -17,10 +17,14 @@ const excalidraw = vi.hoisted(() => {
     }
   });
   const addFiles = vi.fn();
+  const defaultApi = { updateScene, addFiles };
+  let currentApi = defaultApi;
   return {
     updateScene,
     addFiles,
-    api: { updateScene, addFiles },
+    get api() {
+      return currentApi;
+    },
     props: null as null | Record<string, unknown>,
     beginRender: () => {
       rendering = true;
@@ -45,7 +49,11 @@ const excalidraw = vi.hoisted(() => {
         callback(excalidraw.api);
       }
     },
+    replaceApi: (replacement: typeof defaultApi) => {
+      currentApi = replacement;
+    },
     resetApiDelivery: () => {
+      currentApi = defaultApi;
       apiHeld = false;
       pendingApiCallback = null;
     },
@@ -164,6 +172,83 @@ it("adopts an API whose ready microtask drains before commit", async () => {
     expect(excalidraw.props?.isCollaborating).toBe(true);
     expect(presence.activePolls()).toBe(1);
   });
+});
+
+it("keeps asset installation best-effort when Excalidraw rejects the files", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  const hydrateAssets = vi.fn(async () => [
+    { id: "image", dataURL: "data:image/png;base64,QQ==" },
+  ] as never);
+  excalidraw.addFiles.mockImplementationOnce(() => {
+    throw new Error("asset install failed");
+  });
+
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+    />,
+  );
+
+  await waitFor(() => expect(excalidraw.addFiles).toHaveBeenCalledOnce());
+  excalidraw.updateScene.mockClear();
+  act(() => insertElementRevision(doc, rectangle(1, 10, 20)));
+  expect(excalidraw.updateScene).toHaveBeenCalledWith(
+    expect.objectContaining({
+      elements: [expect.objectContaining({ id: "shape", x: 20 })],
+    }),
+  );
+  await act(async () => {});
+});
+
+it("rejects hydration once Excalidraw replaces its imperative API", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  let resolveRetired!: (files: never) => void;
+  const retired = new Promise<never>((resolve) => {
+    resolveRetired = resolve;
+  });
+  const hydrateAssets = vi
+    .fn()
+    .mockImplementationOnce(() => retired)
+    .mockImplementationOnce(() => new Promise<never>(() => {}));
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+    />,
+  );
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledOnce());
+
+  const replacementAddFiles = vi.fn();
+  const replacementApi = {
+    updateScene: excalidraw.updateScene,
+    addFiles: replacementAddFiles,
+  };
+  excalidraw.replaceApi(replacementApi);
+  const replaceApi = excalidraw.props?.excalidrawAPI as (
+    api: typeof replacementApi,
+  ) => void;
+  await act(async () => {
+    // Resolve first so its continuation is already queued when the callback
+    // replaces apiRef. The readyApi state update has not committed yet, so
+    // only the exact imperative-API identity check can reject these files.
+    resolveRetired([
+      { id: "retired", dataURL: "data:image/png;base64,QQ==" },
+    ] as never);
+    replaceApi(replacementApi);
+    await retired;
+  });
+
+  expect(excalidraw.addFiles).not.toHaveBeenCalled();
+  expect(replacementAddFiles).not.toHaveBeenCalled();
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledTimes(2));
+  expect(replacementAddFiles).not.toHaveBeenCalled();
 });
 
 it("binds the initial scene after a production-scheduled mount", async () => {

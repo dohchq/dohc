@@ -155,7 +155,11 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
       onSuccess: (files) => {
         if (!readyApi || apiRef.current !== readyApi) return;
         for (const file of files) hydratedFileIds.current.add(file.id);
-        readyApi.addFiles([...files]);
+        try {
+          readyApi.addFiles([...files]);
+        } catch {
+          // Asset hydration is optional. A rejected file cannot break the scene.
+        }
       },
       onError: () => undefined,
     },

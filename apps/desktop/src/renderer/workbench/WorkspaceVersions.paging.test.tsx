@@ -491,6 +491,19 @@ describe("VersionComparePage paging", () => {
     ).toBe("second.md");
   });
 
+  it("shows the comparison error when an invoke throws synchronously", async () => {
+    bridgeMock.compareWorkspaceVersions.mockImplementation(() => {
+      throw new Error();
+    });
+
+    render(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
+    await settle();
+
+    expect(screen.getByRole("alert").textContent).toBe(
+      "Could not compare with Main.",
+    );
+  });
+
   it("appends the next page with the continuation and updates the count copy", async () => {
     bridgeMock.compareWorkspaceVersions.mockImplementation(
       async (payload: { afterPath?: string }) =>
