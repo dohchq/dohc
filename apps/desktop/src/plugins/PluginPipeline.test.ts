@@ -1718,6 +1718,119 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     }
   }, 60_000);
 
+  it("claims an alias queue before uninstall can race its cold surface build", async () => {
+    const fixture = await createNamedPluginWorkspace("shared-dir", "runtime-id");
+    await mutatePluginRecord(
+      fixture.stateDir,
+      fixture.workspaceRoot,
+      "original-id",
+      () => ({ directoryName: "shared-dir" }),
+    );
+    await mutatePluginRecord(
+      fixture.stateDir,
+      fixture.workspaceRoot,
+      "runtime-id",
+      () => ({ directoryName: "shared-dir" }),
+    );
+    const buildEntered = deferred();
+    const releaseBuild = deferred();
+    let pipeline: PluginPipeline;
+    const host = new PluginHost({
+      stateDir: fixture.stateDir,
+      workspaceRoot: fixture.workspaceRoot,
+      spawnTransport: fakeSpawnTransport(),
+      routeSdkRequest: async () => ({}),
+      onStatusChange: (pluginId, status) => {
+        pipeline.noteRuntimeStatus(pluginId, status);
+      },
+    });
+    const hostOwnership = new PluginHostOwnership(host);
+    pipeline = new PluginPipeline({
+      workspaceRoot: fixture.workspaceRoot,
+      stateDir: fixture.stateDir,
+      hostOwnership,
+      resourcesBasePath,
+      pnpmRunnerEntry,
+      operations: {
+        install: (input) =>
+          installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        build: async (input) => {
+          buildEntered.resolve();
+          await releaseBuild.promise;
+          return buildPluginBundle(input);
+        },
+      },
+    });
+
+    let lease: Exclude<
+      ReturnType<PluginHostOwnership<PluginHost>["acquireSurface"]>,
+      { kind: "refused" }
+    > | undefined;
+    let starting: Promise<unknown> | undefined;
+    try {
+      await pipeline.start();
+      const preflight = await pipeline.uninstallPreflight(
+        "original-id",
+        "shared-dir",
+      );
+      if (!preflight.ok) throw new Error(preflight.error.message);
+
+      const acquired = hostOwnership.acquireSurface("runtime-id");
+      if ("kind" in acquired) throw new Error("The alias surface was refused.");
+      lease = acquired;
+      starting = lease.start(async (authority) =>
+        pipeline.ensureStarted("runtime-id", authority)
+      );
+      await buildEntered.promise;
+
+      const pipelineInternals = pipeline as unknown as {
+        enqueueActionValue: <T>(
+          pluginId: string,
+          run: () => Promise<T>,
+        ) => Promise<T>;
+      };
+      const enqueueActionValue = vi.spyOn(
+        pipelineInternals,
+        "enqueueActionValue",
+      );
+      const removing = pipeline.uninstall(
+        "original-id",
+        "shared-dir",
+        preflight.confirmationToken,
+      );
+
+      // The claim is synchronous with uninstall admission. It sits behind
+      // the build already in runtime-id's queue and ahead of anything that
+      // can arrive after the irreversible action was accepted.
+      expect(enqueueActionValue.mock.calls.map(([pluginId]) => pluginId))
+        .toContain("runtime-id");
+
+      releaseBuild.resolve();
+      await starting;
+      const removed = await removing;
+
+      expect(removed.ok).toBe(true);
+      expect(host.currentRecord("runtime-id")).toBeUndefined();
+      await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(lstat(join(pluginsDataRoot(fixture), "runtime-id")))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      const state = await readPluginLocalState(
+        fixture.stateDir,
+        fixture.workspaceRoot,
+      );
+      if (!state.ok) throw new Error(state.warning);
+      expect(state.state.plugins["original-id"]).toBeUndefined();
+      expect(state.state.plugins["runtime-id"]).toBeUndefined();
+    } finally {
+      releaseBuild.resolve();
+      await starting?.catch(() => undefined);
+      await lease?.release();
+      await pipeline.dispose();
+    }
+  }, 60_000);
+
   // Conflict detection has to be side-agnostic: !plugin.valid alone only
   // catches THIS request's copy losing the tie-break. When the copy sorts
   // first and WINS instead, its own record stays valid and reads as a
@@ -7886,6 +7999,22 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         await expect(
           setup.hostOwnership.runCommand("example-plugin", async () => "ready"),
         ).resolves.toEqual({ kind: "completed", value: "ready" });
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("takes an ownership stop boundary when no host record exists yet", async () => {
+      const setup = await setupEstablishedPlugin();
+      try {
+        expect((await setup.pipeline.disable("example-plugin")).ok).toBe(true);
+        expect(setup.pipeline.host.currentRecord("example-plugin")).toBeUndefined();
+        const stop = vi.spyOn(setup.pipeline.host, "stop");
+
+        const disabled = await setup.pipeline.disable("example-plugin");
+
+        expect(disabled.ok).toBe(true);
+        expect(stop).toHaveBeenCalledTimes(1);
       } finally {
         await setup.pipeline.dispose();
       }

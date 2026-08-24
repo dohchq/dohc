@@ -272,6 +272,16 @@ interface UninstallConfirmation {
   cleanupIds: string[];
 }
 
+type UninstallCleanupDecision = "stop" | "cancel";
+
+interface UninstallQueueClaim {
+  decide(decision: UninstallCleanupDecision): void;
+  readonly outcome: Promise<
+    | { ok: true }
+    | { ok: false; error: unknown }
+  >;
+}
+
 interface FullBuildOptions {
   candidate: InstalledPluginRecord;
   startRuntime: boolean;
@@ -1456,6 +1466,11 @@ export class PluginPipeline {
     for (const id of new Set([pluginId, ...cleanupIds])) {
       reservations.set(id, this.hostOwnership.reserveChange(id));
     }
+    const cleanupQueueClaims = this.claimUninstallCleanupQueues(
+      cleanupIds,
+      pluginId,
+      reservations,
+    );
     const primaryReservation = reservations.get(pluginId);
     if (!primaryReservation) {
       throw new Error(`Plugin "${pluginId}" has no uninstall reservation.`);
@@ -1482,7 +1497,7 @@ export class PluginPipeline {
           pluginId,
           cleanupIds,
           change,
-          reservations,
+          cleanupQueueClaims,
         );
       }
       // Resolved from what THIS confirmation's own preflight named, never
@@ -1598,7 +1613,7 @@ export class PluginPipeline {
           cleanupIds,
           pluginId,
           change,
-          reservations,
+          cleanupQueueClaims,
         );
 
         // Re-verify immediately before the actual delete: pluginHost.stop()
@@ -1718,11 +1733,8 @@ export class PluginPipeline {
       }
     }, primaryReservation);
     return action.finally(async () => {
-      await Promise.all(
-        [...reservations.entries()]
-          .filter(([id]) => id !== pluginId)
-          .map(([, reservation]) => reservation.cancel()),
-      );
+      for (const claim of cleanupQueueClaims) claim.decide("cancel");
+      await Promise.all(cleanupQueueClaims.map((claim) => claim.outcome));
     });
   }
 
@@ -2389,7 +2401,6 @@ export class PluginPipeline {
     onStopped?: () => void,
     markStopped?: () => void,
   ): Promise<void> {
-    if (!this.host.currentRecord(pluginId)) return;
     const stopped = await change.stop();
     if (stopped.kind === "refused" || stopped.kind === "superseded") {
       throw new PipelineFailure(this.hostChangeInProgressError(pluginId));
@@ -3283,7 +3294,7 @@ export class PluginPipeline {
     pluginId: string,
     cleanupIds: ReadonlySet<string>,
     change: PluginHostChangeAuthority,
-    reservations: Map<string, PluginHostChangeReservation>,
+    cleanupQueueClaims: ReadonlyArray<UninstallQueueClaim>,
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const status = this.statuses.get(pluginId);
     const candidate = this.sourcelessCandidate(pluginId);
@@ -3304,7 +3315,7 @@ export class PluginPipeline {
         cleanupIds,
         pluginId,
         change,
-        reservations,
+        cleanupQueueClaims,
       );
       await Promise.all([...cleanupIds].map((id) => this.removePluginData(id)));
       await Promise.all(
@@ -3352,30 +3363,76 @@ export class PluginPipeline {
     cleanupIds: ReadonlySet<string>,
     primaryPluginId: string,
     primaryChange: PluginHostChangeAuthority,
-    reservations: Map<string, PluginHostChangeReservation>,
+    cleanupQueueClaims: ReadonlyArray<UninstallQueueClaim>,
   ): Promise<void> {
-    await Promise.all([...cleanupIds].map(async (pluginId) => {
-      if (pluginId === primaryPluginId) {
-        await this.stopOldRuntime(pluginId, primaryChange);
-        return;
-      }
+    const stops = cleanupQueueClaims.map(async (claim) => {
+      claim.decide("stop");
+      const outcome = await claim.outcome;
+      if (!outcome.ok) throw outcome.error;
+    });
+    if (cleanupIds.has(primaryPluginId)) {
+      stops.push(this.stopOldRuntime(primaryPluginId, primaryChange));
+    }
+    await Promise.all(stops);
+  }
+
+  /**
+   * Claims every secondary identity's pipeline queue at uninstall admission.
+   * The ownership reservations already close runtime admission, while these
+   * jobs order cleanup after work that the queue accepted earlier and before
+   * work submitted after uninstall. They wait for the primary action's
+   * decision, so a stale confirmation releases them without stopping a host.
+   */
+  private claimUninstallCleanupQueues(
+    cleanupIds: ReadonlyArray<string>,
+    primaryPluginId: string,
+    reservations: ReadonlyMap<string, PluginHostChangeReservation>,
+  ): UninstallQueueClaim[] {
+    const claims: UninstallQueueClaim[] = [];
+    const secondaryIds = [...new Set(cleanupIds)]
+      .filter((pluginId) => pluginId !== primaryPluginId)
+      .sort();
+    for (const pluginId of secondaryIds) {
       const reservation = reservations.get(pluginId);
       if (!reservation) {
         throw new Error(
           `Plugin "${pluginId}" has no confirmed uninstall reservation.`,
         );
       }
-      const failure = await reservation.run(async (change) => {
-        let stopFailure: unknown;
-        try {
-          await this.stopOldRuntime(pluginId, change);
-        } catch (error) {
-          stopFailure = error;
-        }
-        return change.adopt(existingHostResult(stopFailure));
+      let decide!: (decision: UninstallCleanupDecision) => void;
+      let decided = false;
+      const decision = new Promise<UninstallCleanupDecision>((resolveDecision) => {
+        decide = (next) => {
+          if (decided) return;
+          decided = true;
+          resolveDecision(next);
+        };
       });
-      if (failure !== undefined) throw failure;
-    }));
+      const action = this.enqueueActionValue(pluginId, async () => {
+        if (await decision === "cancel") {
+          await reservation.cancel();
+          return;
+        }
+        const failure = await reservation.run(async (change) => {
+          let stopFailure: unknown;
+          try {
+            await this.stopOldRuntime(pluginId, change);
+          } catch (error) {
+            stopFailure = error;
+          }
+          return change.preserve(existingHostResult(stopFailure));
+        });
+        if (failure !== undefined) throw failure;
+      });
+      claims.push({
+        decide,
+        outcome: action.then(
+          () => ({ ok: true as const }),
+          (error: unknown) => ({ ok: false as const, error }),
+        ),
+      });
+    }
+    return claims;
   }
 
   private engineCaptureAvailable(): boolean {
