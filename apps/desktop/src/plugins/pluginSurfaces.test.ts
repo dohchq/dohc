@@ -11,6 +11,7 @@ import {
 } from "./PluginHost";
 import { PluginSurfaceHostLifecycle } from "./pluginSurfaceHostLifecycle";
 import { PLUGIN_HOST_METHODS, type PluginRuntimeStatus } from "./pluginHostProtocol";
+import { readPluginLocalState } from "./pluginLocalState";
 import {
   PluginSurfaces,
   type PluginPanelStartRequest,
@@ -2378,7 +2379,10 @@ describe("PluginSurfaces panel authority", () => {
     expect(events.unsubscribe({ owner }, subscription)).toBe(false);
   });
 
-  it("retires a retained panel only when the real host crash loop becomes disabled", async () => {
+  it.each([
+    ["after its crash-loop disable is saved", false],
+    ["when its crash-loop disable cannot be saved", true],
+  ])("retires a retained panel %s", async (_description, rejectDisabledWrite) => {
     const scratch = await createTestScratch("dohc-plugin-surface-crash-loop-");
     const workspaceRoot = join(scratch, "workspace");
     const stateDir = join(scratch, "state");
@@ -2393,6 +2397,7 @@ describe("PluginSurfaces panel authority", () => {
     });
     const spawnCallbacks: Array<Parameters<PluginHostOptions["spawnTransport"]>[0]> = [];
     const statuses: PluginRuntimeStatus[] = [];
+    const disabledWriteFailure = new Error("disabled state write failed");
     let lifecycle!: PluginSurfaceHostLifecycle;
     const host = new PluginHost({
       stateDir,
@@ -2409,9 +2414,17 @@ describe("PluginSurfaces panel authority", () => {
         };
       },
       routeSdkRequest: async () => ({}),
+      ...(rejectDisabledWrite
+        ? {
+            mutatePluginRecord: () => Promise.reject(disabledWriteFailure),
+          }
+        : {}),
       onSpawnEnd: (pluginId) => {
         lifecycle.spawnEnded(pluginId);
         return Promise.resolve();
+      },
+      onRecoveryDisposition: (pluginId, disposition) => {
+        lifecycle.recoveryDisposition(pluginId, disposition);
       },
       onStatusChange: (pluginId, status) => {
         lifecycle.statusChanged(pluginId, status);
@@ -2517,15 +2530,28 @@ describe("PluginSurfaces panel authority", () => {
 
       spawnCallbacks[2]!.onExit({ code: 1, signal: null });
       expect(watch.isPushLive()).toBe(false);
-      await vi.waitFor(() => expect(host.getStatus("plugin")).toBe("disabled"));
+      if (rejectDisabledWrite) {
+        await vi.waitFor(() => expect(host.getStderrLog("plugin")).toContain(
+          `Could not save disabled state: ${disabledWriteFailure.message}`,
+        ));
+        expect(host.getStatus("plugin")).toBe("crashed");
+        expect(statuses).not.toContain("disabled");
+      } else {
+        await vi.waitFor(() => expect(host.getStatus("plugin")).toBe("disabled"));
+      }
       await vi.waitFor(() => expect(disposedSurfaceIds).toEqual([watch.surfaceId]));
 
       expect(ownedLease.releases).toBe(1);
       expect(previewStops).toBe(1);
       expect(events.unsubscribe({ owner }, subscription)).toBe(false);
       expect(spawnCallbacks).toHaveLength(3);
-      expect(statuses.at(-1)).toBe("disabled");
+      expect(statuses.at(-1)).toBe(rejectDisabledWrite ? "crashed" : "disabled");
       expect(statuses.filter((status) => status === "ready")).toHaveLength(3);
+      const localState = await readPluginLocalState(stateDir, workspaceRoot);
+      if (!localState.ok) throw new Error(localState.warning);
+      expect(localState.state.plugins.plugin?.disabled).toBe(
+        rejectDisabledWrite ? undefined : true,
+      );
     } finally {
       await host.stopAll();
       await surfaces.close();
@@ -2533,13 +2559,14 @@ describe("PluginSurfaces panel authority", () => {
     }
   });
 
-  it("reports a rejected disabled-surface stop", async () => {
+  it("reports a rejected terminal-surface stop", async () => {
     const failure = new Error("surface cleanup failed");
     const onError = vi.fn();
     const lifecycle = new PluginSurfaceHostLifecycle({
       workspaceId: "ws",
       host: {
-        getStatus: () => "disabled",
+        currentRecord: () => defaultHostRecord,
+        getStatus: () => "crashed",
         getSpawnId: () => undefined,
         readyPanelsForSpawn: () => undefined,
       },
@@ -2552,13 +2579,64 @@ describe("PluginSurfaces panel authority", () => {
       onError,
     });
 
-    lifecycle.statusChanged("plugin", "disabled");
+    lifecycle.spawnEnded("plugin");
+    lifecycle.recoveryDisposition("plugin", {
+      kind: "terminal",
+      record: defaultHostRecord,
+    });
     await vi.waitFor(() => expect(onError).toHaveBeenCalledOnce());
 
     expect(onError).toHaveBeenCalledWith(
       failure,
-      'stop retained surfaces for disabled plugin "plugin"',
+      'stop retained surfaces for terminal plugin "plugin"',
     );
+  });
+
+  it("ignores stale and duplicate terminal recovery outcomes", async () => {
+    const stop = vi.fn(() => Promise.resolve());
+    let currentRecord = defaultHostRecord;
+    const lifecycle = new PluginSurfaceHostLifecycle({
+      workspaceId: "ws",
+      host: {
+        currentRecord: () => currentRecord,
+        getStatus: () => "crashed",
+        getSpawnId: () => undefined,
+        readyPanelsForSpawn: () => undefined,
+      },
+      surfaces: {
+        hostChanged: () => undefined,
+        hostReady: () => Promise.resolve(),
+        stop,
+      },
+      onRuntimeStatus: () => undefined,
+      onError: (error) => {
+        throw error;
+      },
+    });
+    const staleRecord = {} as PluginHostRecordToken;
+
+    lifecycle.spawnEnded("plugin");
+    lifecycle.recoveryDisposition("plugin", {
+      kind: "terminal",
+      record: staleRecord,
+    });
+    currentRecord = staleRecord;
+    lifecycle.recoveryDisposition("plugin", {
+      kind: "terminal",
+      record: defaultHostRecord,
+    });
+    currentRecord = defaultHostRecord;
+    lifecycle.spawnEnded("plugin");
+    lifecycle.recoveryDisposition("plugin", {
+      kind: "terminal",
+      record: defaultHostRecord,
+    });
+    lifecycle.recoveryDisposition("plugin", {
+      kind: "terminal",
+      record: defaultHostRecord,
+    });
+
+    expect(stop).toHaveBeenCalledOnce();
   });
 
   it.each([

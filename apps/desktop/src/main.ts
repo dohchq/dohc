@@ -1179,6 +1179,9 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     onStatusChange: (pluginId, status) => {
       surfaceHostLifecycle?.statusChanged(pluginId, status);
     },
+    onRecoveryDisposition: (pluginId, disposition) => {
+      surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition);
+    },
   });
   pluginHostRef = pluginHost;
   surfaceHostLifecycle = new PluginSurfaceHostLifecycle({

@@ -300,6 +300,19 @@ describe("plugin panel main-process wiring", () => {
     expect(lifecycleAt).toBeGreaterThan(statusAt);
   });
 
+  it("routes host recovery outcomes through the surface lifecycle", () => {
+    const pipeline = functionSource("function createPluginPipeline(");
+    const recoveryAt = pipeline.indexOf(
+      "onRecoveryDisposition: (pluginId, disposition) => {",
+    );
+    const lifecycleAt = pipeline.indexOf(
+      "surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition);",
+      recoveryAt,
+    );
+    expect(recoveryAt).toBeGreaterThan(-1);
+    expect(lifecycleAt).toBeGreaterThan(recoveryAt);
+  });
+
   it("composes host status with the pipeline and plugin surfaces once", () => {
     const pipeline = functionSource("function createPluginPipeline(");
     const lifecycleAt = pipeline.indexOf(

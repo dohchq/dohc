@@ -43,6 +43,11 @@ export interface PluginHostRecordToken {
   readonly [pluginHostRecordBrand]: true;
 }
 
+export interface PluginHostRecoveryDisposition {
+  readonly kind: "will-respawn" | "terminal";
+  readonly record: PluginHostRecordToken;
+}
+
 export interface PluginHostStartEvidence {
   readonly [pluginHostStartBrand]: true;
   readonly pluginId: string;
@@ -122,6 +127,11 @@ export interface PluginHostOptions {
   /** Releases router resources that are not attached to a live host record. */
   onDispose?: () => Promise<void>;
   onStatusChange?: (pluginId: string, status: PluginRuntimeStatus) => void;
+  onRecoveryDisposition?: (
+    pluginId: string,
+    disposition: PluginHostRecoveryDisposition,
+  ) => void;
+  mutatePluginRecord?: typeof mutatePluginRecord;
   now?: () => number;
   activationTimeoutMs?: number;
   webAppStartTimeoutMs?: number;
@@ -880,7 +890,10 @@ export class PluginHost {
     record: PluginRecord,
     spawn: PluginSpawn,
   ): Promise<void> {
-    if (!this.isCurrent(record, spawn)) return;
+    if (!this.isCurrent(record, spawn)) {
+      this.emitRecoveryDisposition(record, "terminal");
+      return;
+    }
 
     const age = this.now() - spawn.spawnedAt;
     let failures = 0;
@@ -893,7 +906,7 @@ export class PluginHost {
 
     if (failures >= PLUGIN_CRASH_LOOP_THRESHOLD) {
       try {
-        await mutatePluginRecord(
+        await (this.options.mutatePluginRecord ?? mutatePluginRecord)(
           this.options.stateDir,
           this.options.workspaceRoot,
           record.pluginId,
@@ -904,12 +917,21 @@ export class PluginHost {
           record,
           `Could not save disabled state: ${this.errorMessage(error)}`,
         );
+        if (this.isCurrent(record, spawn)) {
+          record.current = undefined;
+          record.commands = undefined;
+        }
+        this.emitRecoveryDisposition(record, "terminal");
         return;
       }
-      if (!this.isCurrent(record, spawn)) return;
+      if (!this.isCurrent(record, spawn)) {
+        this.emitRecoveryDisposition(record, "terminal");
+        return;
+      }
       record.current = undefined;
       record.commands = undefined;
       this.setStatus(record, "disabled");
+      this.emitRecoveryDisposition(record, "terminal");
       return;
     }
 
@@ -917,7 +939,12 @@ export class PluginHost {
     // onStatusChange listener can call stop() from inside handleExit's own
     // setStatus call, in the same tick. A stop that arrived mid-accounting
     // must win over a respawn.
-    if (this.isCurrent(record, spawn) && !spawn.stopping) this.spawn(record);
+    if (this.isCurrent(record, spawn) && !spawn.stopping) {
+      this.emitRecoveryDisposition(record, "will-respawn");
+      this.spawn(record);
+      return;
+    }
+    this.emitRecoveryDisposition(record, "terminal");
   }
 
   private isCurrent(record: PluginRecord, spawn: PluginSpawn): boolean {
@@ -1034,6 +1061,20 @@ export class PluginHost {
     // synchronous callback could. This is what makes that whole class of
     // race impossible, not a fix for one more instance of it.
     queueMicrotask(() => onStatusChange(pluginId, status));
+  }
+
+  private emitRecoveryDisposition(
+    record: PluginRecord,
+    kind: PluginHostRecoveryDisposition["kind"],
+  ): void {
+    const onRecoveryDisposition = this.options.onRecoveryDisposition;
+    if (!onRecoveryDisposition) return;
+    const pluginId = record.pluginId;
+    const disposition = {
+      kind,
+      record: record.ownershipToken,
+    } satisfies PluginHostRecoveryDisposition;
+    queueMicrotask(() => onRecoveryDisposition(pluginId, disposition));
   }
 
   private now(): number {
