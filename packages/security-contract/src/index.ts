@@ -9,3 +9,16 @@ export {
   MAX_SHARE_PATH_CHARS,
 } from "./shareSelector";
 export { MAX_SHARE_PROPOSAL_OPS } from "./shareProposalBound";
+export {
+  GRANT_STATUS_VALUES,
+  isGrantBinding,
+  isGrantStatusValue,
+  isLinkCredentialRecord,
+  isShareGrantRecord,
+  isSharePrincipal,
+  type GrantBinding,
+  type GrantStatus,
+  type LinkCredentialRecord,
+  type ShareGrantRecord,
+  type SharePrincipal,
+} from "./shareGrant";

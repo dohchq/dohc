@@ -1,0 +1,266 @@
+{
+  "sharePrincipals": {
+    "accepted": [
+      { "kind": "user", "userId": "user-alex" },
+      { "kind": "email", "email": "alex@example.com" },
+      { "kind": "link" }
+    ],
+    "refused": [
+      { "kind": "team", "teamId": "team-1" },
+      { "kind": "user" },
+      { "kind": "email" },
+      {}
+    ]
+  },
+  "grantStatuses": {
+    "accepted": ["active", "revoked"],
+    "refused": ["revokd", "ACTIVE", "", null]
+  },
+  "shareGrantRecords": {
+    "accepted": [
+      {
+        "grantId": "grant-user-active",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "edit",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "grant-email-active",
+        "shareId": "share-1",
+        "principal": { "kind": "email", "email": "alex@example.com" },
+        "access": "comment",
+        "generation": 2,
+        "status": "active",
+        "createdAt": "2026-08-24T09:01:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "grant-link-active",
+        "shareId": "share-1",
+        "principal": { "kind": "link" },
+        "access": "view",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:02:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "grant-link-revoked",
+        "shareId": "share-1",
+        "principal": { "kind": "link" },
+        "access": "comment",
+        "generation": 3,
+        "status": "revoked",
+        "createdAt": "2026-08-24T09:03:00.000Z",
+        "revokedAt": "2026-08-24T10:03:00.000Z",
+        "parentGrantId": null
+      },
+      {
+        "grantId": "grant-derived-active",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-sam" },
+        "access": "view",
+        "generation": 2,
+        "status": "active",
+        "createdAt": "2026-08-24T09:04:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": "grant-link-active"
+      },
+      {
+        "grantId": "grant-derived-revoked",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-lee" },
+        "access": "edit",
+        "generation": 4,
+        "status": "revoked",
+        "createdAt": "2026-08-24T09:05:00.000Z",
+        "revokedAt": "2026-08-24T10:05:00.000Z",
+        "parentGrantId": "grant-link-active"
+      }
+    ],
+    "refused": [
+      {
+        "grantId": "bad-kind",
+        "shareId": "share-1",
+        "principal": { "kind": "team", "teamId": "team-1" },
+        "access": "view",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "zero-generation",
+        "shareId": "share-1",
+        "principal": { "kind": "link" },
+        "access": "view",
+        "generation": 0,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "negative-generation",
+        "shareId": "share-1",
+        "principal": { "kind": "link" },
+        "access": "view",
+        "generation": -1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "fractional-generation",
+        "shareId": "share-1",
+        "principal": { "kind": "link" },
+        "access": "view",
+        "generation": 1.5,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "edit",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "missing-created-at",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "edit",
+        "generation": 1,
+        "status": "active",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "bad-status",
+        "shareId": "share-1",
+        "principal": { "kind": "email", "email": "alex@example.com" },
+        "access": "comment",
+        "generation": 1,
+        "status": "revokd",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "active-with-revoked-at",
+        "shareId": "share-1",
+        "principal": { "kind": "link" },
+        "access": "view",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": "2026-08-24T10:00:00.000Z",
+        "parentGrantId": null
+      },
+      {
+        "grantId": "revoked-without-revoked-at",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "view",
+        "generation": 2,
+        "status": "revoked",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "grantId": "link-with-parent",
+        "shareId": "share-1",
+        "principal": { "kind": "link" },
+        "access": "view",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": "another-link"
+      }
+    ]
+  },
+  "linkCredentialRecords": {
+    "accepted": [
+      {
+        "credentialId": "credential-current",
+        "grantId": "grant-link-active",
+        "secretHash": "opaque-hash-1",
+        "generation": 1,
+        "mintedAt": "2026-08-24T09:02:00.000Z",
+        "retiredAt": null
+      },
+      {
+        "credentialId": "credential-retired",
+        "grantId": "grant-link-active",
+        "secretHash": "opaque-hash-2",
+        "generation": 3,
+        "mintedAt": "2026-08-24T10:02:00.000Z",
+        "retiredAt": "2026-08-24T11:02:00.000Z"
+      }
+    ],
+    "refused": [
+      {
+        "credentialId": "credential-zero",
+        "grantId": "grant-link-active",
+        "secretHash": "opaque-hash",
+        "generation": 0,
+        "mintedAt": "2026-08-24T09:02:00.000Z",
+        "retiredAt": null
+      },
+      {
+        "credentialId": "credential-negative",
+        "grantId": "grant-link-active",
+        "secretHash": "opaque-hash",
+        "generation": -1,
+        "mintedAt": "2026-08-24T09:02:00.000Z",
+        "retiredAt": null
+      },
+      {
+        "credentialId": "credential-fractional",
+        "grantId": "grant-link-active",
+        "secretHash": "opaque-hash",
+        "generation": 2.5,
+        "mintedAt": "2026-08-24T09:02:00.000Z",
+        "retiredAt": null
+      },
+      {
+        "credentialId": "credential-missing-hash",
+        "grantId": "grant-link-active",
+        "generation": 1,
+        "mintedAt": "2026-08-24T09:02:00.000Z",
+        "retiredAt": null
+      }
+    ]
+  },
+  "grantBindings": {
+    "accepted": [
+      { "grantId": "grant-1", "generation": 1, "access": "view" },
+      { "grantId": "grant-2", "generation": 2, "access": "comment" },
+      { "grantId": "grant-3", "generation": 4, "access": "edit" }
+    ],
+    "refused": [
+      { "grantId": "grant-1", "generation": 0, "access": "view" },
+      { "grantId": "grant-1", "generation": -1, "access": "view" },
+      { "grantId": "grant-1", "generation": 1.5, "access": "view" },
+      { "grantId": "grant-1", "access": "view" },
+      { "grantId": "grant-1", "generation": 1, "access": "viewer" }
+    ]
+  }
+}

@@ -95,6 +95,16 @@ impl ShareAccess {
             _ => None,
         }
     }
+
+    /// The exact strings `parse` accepts, so both directions of the level
+    /// vocabulary live beside each other and cannot drift apart.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Comment => "comment",
+            Self::Edit => "edit",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

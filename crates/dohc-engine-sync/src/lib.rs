@@ -27,6 +27,7 @@ mod relay;
 mod router;
 mod secret_apply;
 mod share;
+mod share_grant;
 mod version_apply;
 mod ydoc_apply;
 mod ydoc_origination;
@@ -90,6 +91,7 @@ pub use share::{
     MAX_SHARE_VERSION_ID_CHARS, ShareAccess, ShareBoundary, ShareGrant, ShareSurface,
     apply_shared_envelope, is_valid_share_version_id,
 };
+pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
     LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainResult,
