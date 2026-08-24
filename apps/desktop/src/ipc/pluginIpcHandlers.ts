@@ -47,11 +47,8 @@ import {
 import { readPluginManifestFile } from "../plugins/pluginManifest";
 import type { PluginHostPanelDeclaration } from "../plugins/PluginHost";
 import {
-  forgetUninstalledPlugin,
   loadPluginPanelRegistration,
   loadPluginWebAppRegistration,
-  rememberPluginRegistration,
-  resolveRegisteredPlugin,
   type RegisteredPlugin,
 } from "../plugins/pluginPanelRegistration";
 import {
@@ -150,11 +147,23 @@ interface RegisterPluginIpcHandlersOptions<
     require(workspaceId: string): TWorkspace;
   };
   rendererGeneration(senderId: number): number;
-  pipelines: ReadonlyMap<string, PluginPipeline>;
-  ensurePipeline(workspace: TWorkspace): Promise<PluginPipeline>;
-  registrations: Map<string, Map<string, RegisteredPlugin>>;
+  runtimes: {
+    current(workspaceId: string): PluginIpcRuntime | undefined;
+    ensure(workspace: TWorkspace): Promise<PluginIpcRuntime>;
+  };
   surfaces: PluginIpcSurfaces<TView>;
   platform: PluginIpcPlatform<TSender, TWorkspace, TView>;
+}
+
+interface PluginIpcRuntime {
+  readonly pipeline: PluginPipeline;
+  registeredPlugin(pluginId: string): RegisteredPlugin | undefined;
+  rememberPlugin(registration: RegisteredPlugin): RegisteredPlugin;
+  forgetUninstalledPlugin(input: {
+    pluginId: string;
+    directoryName: string;
+    released: boolean;
+  }): void;
 }
 
 interface ActiveWorkspacePolicy<TWorkspace extends PluginIpcWorkspace> {
@@ -191,9 +200,7 @@ export function registerPluginIpcHandlers<
     assertTrustedSender,
     workspaces,
     rendererGeneration,
-    pipelines,
-    ensurePipeline,
-    registrations,
+    runtimes,
     surfaces,
     platform,
   } = options;
@@ -271,11 +278,7 @@ export function registerPluginIpcHandlers<
     workspaceId: string,
     pluginId: string,
   ): RegisteredPlugin | undefined =>
-    resolveRegisteredPlugin(
-      pluginId,
-      pipelines.get(workspaceId),
-      registrations.get(workspaceId),
-    );
+    runtimes.current(workspaceId)?.registeredPlugin(pluginId);
 
   const requireDiscoveredDirectoryName = (
     pipeline: PluginPipeline,
@@ -313,10 +316,11 @@ export function registerPluginIpcHandlers<
     workspaceId: string,
   ) => {
     const policy = createWritableActiveWorkspacePolicy(event, workspaceId);
-    const pipeline = await ensurePipeline(policy.workspace);
+    const runtime = await runtimes.ensure(policy.workspace);
     policy.revalidate();
     return {
-      pipeline,
+      runtime,
+      pipeline: runtime.pipeline,
       workspace: policy.workspace,
     };
   };
@@ -332,19 +336,17 @@ export function registerPluginIpcHandlers<
       pluginRoot: input.pluginRoot,
       pluginId: input.pluginId,
       panelId: input.panelId,
-      pluginRegistration: pipelines.get(policy.workspace.workspaceId),
+      pluginRegistration:
+        runtimes.current(policy.workspace.workspaceId)?.pipeline,
     });
     policy.revalidate(CURRENT_RENDERER_MESSAGE);
-    const pipeline = await ensurePipeline(policy.workspace);
+    const runtime = await runtimes.ensure(policy.workspace);
+    const pipeline = runtime.pipeline;
     policy.revalidate(CURRENT_RENDERER_MESSAGE);
-    rememberPluginRegistration(
-      registrations,
-      policy.workspace.workspaceId,
-      {
-        ...registration,
-        directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
-      },
-    );
+    runtime.rememberPlugin({
+      ...registration,
+      directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
+    });
     return OpenPluginPanelResult.parse({
       pluginId: input.pluginId,
       panelId: input.panelId,
@@ -357,7 +359,8 @@ export function registerPluginIpcHandlers<
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
       trackRenderer: true,
     });
-    const currentPipeline = pipelines.get(policy.workspace.workspaceId);
+    const currentPipeline = runtimes.current(policy.workspace.workspaceId)
+      ?.pipeline;
     if (
       !currentPipeline?.host.currentRecord(input.pluginId) &&
       !registeredPlugin(policy.workspace.workspaceId, input.pluginId)
@@ -377,7 +380,7 @@ export function registerPluginIpcHandlers<
         assertAllowed: () => policy.revalidate(CURRENT_RENDERER_MESSAGE),
         acquireHostLease: async () => {
           policy.revalidate(CURRENT_RENDERER_MESSAGE);
-          const pipeline = await ensurePipeline(policy.workspace);
+          const pipeline = (await runtimes.ensure(policy.workspace)).pipeline;
           policy.revalidate(CURRENT_RENDERER_MESSAGE);
           return platform.createPanelHostLease(pipeline, input.pluginId);
         },
@@ -404,7 +407,7 @@ export function registerPluginIpcHandlers<
         "The plugin command request does not target the active workspace. Open the workspace and try again.",
       trackRenderer: true,
     });
-    const pipeline = await ensurePipeline(policy.workspace);
+    const pipeline = (await runtimes.ensure(policy.workspace)).pipeline;
     policy.revalidate();
     const plugin = registeredPlugin(policy.workspace.workspaceId, input.pluginId);
     if (!plugin) {
@@ -464,7 +467,9 @@ export function registerPluginIpcHandlers<
       activeWorkspaceId: () =>
         workspaces.activeWorkspaceIdBySender.get(event.sender.id),
       liveSpawnId: () =>
-        pipelines.get(input.workspaceId)?.host.getSpawnId(input.pluginId),
+        runtimes.current(input.workspaceId)?.pipeline.host.getSpawnId(
+          input.pluginId,
+        ),
     });
     const result = await platform.routePanelSdk({
       authorization,
@@ -485,19 +490,17 @@ export function registerPluginIpcHandlers<
       pluginRoot: input.pluginRoot,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
-      pluginRegistration: pipelines.get(policy.workspace.workspaceId),
+      pluginRegistration:
+        runtimes.current(policy.workspace.workspaceId)?.pipeline,
     });
     policy.revalidate(CURRENT_RENDERER_MESSAGE);
-    const pipeline = await ensurePipeline(policy.workspace);
+    const runtime = await runtimes.ensure(policy.workspace);
+    const pipeline = runtime.pipeline;
     policy.revalidate(CURRENT_RENDERER_MESSAGE);
-    const plugin = rememberPluginRegistration(
-      registrations,
-      policy.workspace.workspaceId,
-      {
-        ...registration,
-        directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
-      },
-    );
+    const plugin = runtime.rememberPlugin({
+      ...registration,
+      directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
+    });
     requireDeclaredWebApp(
       input.pluginId,
       plugin.manifest.webApps,
@@ -548,7 +551,7 @@ export function registerPluginIpcHandlers<
         assertAllowed: () => policy.revalidate(CURRENT_RENDERER_MESSAGE),
         acquireHostLease: async () => {
           policy.revalidate(CURRENT_RENDERER_MESSAGE);
-          const pipeline = await ensurePipeline(policy.workspace);
+          const pipeline = (await runtimes.ensure(policy.workspace)).pipeline;
           policy.revalidate(CURRENT_RENDERER_MESSAGE);
           return platform.createWebAppHostLease(
             pipeline,
@@ -798,7 +801,7 @@ export function registerPluginIpcHandlers<
   registrar.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
     const input = UninstallPluginPayload.parse(payload);
     try {
-      const { pipeline, workspace } = await activePipeline(
+      const { pipeline, runtime, workspace } = await activePipeline(
         event,
         input.workspaceId,
       );
@@ -828,12 +831,10 @@ export function registerPluginIpcHandlers<
           clearPartition: { workspaceRoot: workspace.rootPath },
         });
       }
-      forgetUninstalledPlugin({
-        registrations,
-        workspaceId: input.workspaceId,
+      runtime.forgetUninstalledPlugin({
         pluginId: input.pluginId,
         directoryName: input.directoryName,
-        uninstalled: released,
+        released,
       });
       return rendererResult;
     } catch (error) {

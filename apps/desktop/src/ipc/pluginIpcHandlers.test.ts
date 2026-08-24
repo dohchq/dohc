@@ -300,11 +300,29 @@ function createHarness() {
       error: actionFailure.error,
     })),
   };
-  const pipelineForHandlers = pipeline as unknown as PluginPipeline;
-  const pipelines = new Map([[workspace.workspaceId, pipelineForHandlers]]);
-  const registrations = new Map<string, Map<string, RegisteredPlugin>>([
-    [workspace.workspaceId, new Map([[pluginStatus.id, registration as RegisteredPlugin]])],
+  const registrations = new Map<string, typeof registration>([
+    [pluginStatus.id, registration],
   ]);
+  const runtime = {
+    pipeline,
+    registeredPlugin: vi.fn((pluginId: string) =>
+      pipeline.pluginRegistration() ?? registrations.get(pluginId)
+    ),
+    rememberPlugin: vi.fn((remembered: typeof registration) => {
+      registrations.set(remembered.manifest.name, remembered);
+      return remembered;
+    }),
+    forgetUninstalledPlugin: vi.fn((input: {
+      pluginId: string;
+      directoryName: string;
+      released: boolean;
+    }) => {
+      const remembered = registrations.get(input.pluginId);
+      if (input.released && remembered?.directoryName === input.directoryName) {
+        registrations.delete(input.pluginId);
+      }
+    }),
+  };
 
   let panelAdmission: { assertAllowed(): void; acquireHostLease(): Promise<unknown> } | null = null;
   let webAppAdmission: { assertAllowed(): void; acquireHostLease(): Promise<unknown> } | null = null;
@@ -401,8 +419,14 @@ function createHarness() {
   });
   const ensurePipeline = vi.fn(async () => {
     log.push("ensure-pipeline");
-    return pipelineForHandlers;
+    return runtime;
   });
+  const runtimes = {
+    current: vi.fn((workspaceId: string) =>
+      workspaceId === workspace.workspaceId ? runtime : undefined
+    ),
+    ensure: ensurePipeline,
+  };
 
   registerPluginIpcHandlers({
     registrar: {
@@ -427,9 +451,7 @@ function createHarness() {
       require: requireWorkspace,
     },
     rendererGeneration: () => state.generation,
-    pipelines,
-    ensurePipeline,
-    registrations,
+    runtimes,
     surfaces,
     platform: platform as never,
   });
@@ -715,7 +737,7 @@ describe("plugin IPC handlers", () => {
       panelId: "panel",
       pluginRegistration: harness.pipeline,
     });
-    expect(harness.registrations.get("workspace-1")?.get("example-plugin"))
+    expect(harness.registrations.get("example-plugin"))
       .toMatchObject({ directoryName: "example-plugin" });
 
     await expect(harness.invoke(CHANNELS.openPluginWebApp)).resolves.toEqual({
@@ -836,7 +858,7 @@ describe("plugin IPC handlers", () => {
       "commit-suspensions",
       "stop-partition",
     ]);
-    expect(harness.registrations.get("workspace-1")?.has("example-plugin"))
+    expect(harness.registrations.has("example-plugin"))
       .toBe(false);
   });
 
@@ -850,7 +872,7 @@ describe("plugin IPC handlers", () => {
 
     await retained.invoke(CHANNELS.uninstallPlugin);
     expect(retained.surfaces.stop).not.toHaveBeenCalled();
-    expect(retained.registrations.get("workspace-1")?.has("example-plugin"))
+    expect(retained.registrations.has("example-plugin"))
       .toBe(true);
 
     const failed = createHarness();
@@ -864,7 +886,7 @@ describe("plugin IPC handlers", () => {
     );
     expect(failed.log).toContain("restore-suspensions");
     expect(failed.surfaces.stop).not.toHaveBeenCalled();
-    expect(failed.registrations.get("workspace-1")?.has("example-plugin"))
+    expect(failed.registrations.has("example-plugin"))
       .toBe(true);
   });
 

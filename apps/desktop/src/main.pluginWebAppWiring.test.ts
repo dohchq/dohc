@@ -76,12 +76,12 @@ describe("plugin web app main-process wiring", () => {
     const surfacesAt = stopWorkspace.indexOf(
       'await pluginSurfaces.stop({ kind: "workspace", workspaceId });',
     );
-    const pipelineAt = stopWorkspace.indexOf(
-      "await stopPluginPipelineForWorkspace(workspaceId);",
+    const runtimeAt = stopWorkspace.indexOf(
+      "await pluginWorkspaceRuntimes.stop(workspaceId);",
       surfacesAt,
     );
     expect(surfacesAt).toBeGreaterThan(-1);
-    expect(pipelineAt).toBeGreaterThan(surfacesAt);
+    expect(runtimeAt).toBeGreaterThan(surfacesAt);
 
     const stopAll = functionSource("async function stopAllPluginWorkspaces(");
     const closeAt = stopAll.indexOf("const surfaceStop = pluginSurfaces.close();");
@@ -89,13 +89,13 @@ describe("plugin web app main-process wiring", () => {
       "await Promise.allSettled([sitePreviewStop, surfaceStop]);",
       closeAt,
     );
-    const allPipelinesAt = stopAll.indexOf(
-      "stopPluginPipelineForWorkspace(workspaceId)",
+    const allRuntimesAt = stopAll.indexOf(
+      "pluginWorkspaceRuntimes.close()",
       drainAt,
     );
     expect(closeAt).toBeGreaterThan(-1);
     expect(drainAt).toBeGreaterThan(closeAt);
-    expect(allPipelinesAt).toBeGreaterThan(drainAt);
+    expect(allRuntimesAt).toBeGreaterThan(drainAt);
   });
 
   it("generation-gates owner failure notification before sending", () => {

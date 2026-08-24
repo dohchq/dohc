@@ -22,13 +22,10 @@ function functionSource(signature: string): string {
 const squeeze = (source: string): string => source.replace(/\s+/g, "");
 
 describe("plugin panel main-process wiring", () => {
-  it("forwards watcher batches to the matching pipeline and workspace events", () => {
+  it("forwards watcher batches to the matching workspace runtime", () => {
     const batch = sourceBlock("onWatcherBatch: (workspace, events) => {", "\n  },");
-    expect(batch).toContain(
-      "pluginPipelines.get(workspace.workspaceId)?.handleWatcherEvents(events);",
-    );
     expect(batch).toMatch(
-      /pluginWorkspaceEventsByWorkspace\s*\.get\(workspace\.workspaceId\)\s*\?\.handleWatcherEvents\(events\);/,
+      /pluginWorkspaceRuntimes\.current\(workspace\.workspaceId\)\s*\?\.handleWatcherEvents\(events\);/,
     );
   });
 
@@ -111,20 +108,23 @@ describe("plugin panel main-process wiring", () => {
       router.indexOf("await requirePluginEngineCapture(input.workspaceId);", writerAt),
     ).toBeGreaterThan(writerAt);
     expect(
-      router.indexOf("pipeline: () => pluginPipelines.get(input.workspaceId),", writerAt),
+      router.indexOf(
+        "pluginWorkspaceRuntimes.current(input.workspaceId)?.pipeline",
+        writerAt,
+      ),
     ).toBeGreaterThan(writerAt);
   });
 
-  it("releases a removed identity's registration before status notification", () => {
-    const notify = functionSource("function notifyPluginStatusChanged(");
-    const forgetAt = notify.indexOf("forgetRemovedPlugin({");
-    const guardAt = notify.indexOf("PluginStatusChangedEvent.safeParse(");
-    expect(forgetAt).toBeGreaterThan(-1);
-    expect(guardAt).toBeGreaterThan(forgetAt);
+  it("routes runtime status through the validated main-process notifier", () => {
+    const owner = sourceBlock(
+      "const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
+      "\n});",
+    );
+    expect(owner).toContain("onPipelineStatus: notifyPluginStatusChanged,");
   });
 
   it("constructs one owner for the pipeline and its exact host", () => {
-    const createPipeline = functionSource("function createPluginPipeline(");
+    const createPipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const ownerAt = createPipeline.indexOf(
       "const hostOwnership = new PluginHostOwnership(pluginHost",
     );
@@ -136,7 +136,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("awaits surface cleanup when a watched plugin identity departs", () => {
-    const createPipeline = functionSource("function createPluginPipeline(");
+    const createPipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const pipelineAt = createPipeline.indexOf("pipeline = new PluginPipeline({");
     const hookAt = createPipeline.indexOf(
       "onRuntimeStopped: (pluginId) =>",
@@ -199,7 +199,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("revokes surfaces synchronously when the exact host spawn ends", () => {
-    const pipeline = functionSource("function createPluginPipeline(");
+    const pipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const spawnEndAt = pipeline.indexOf("onSpawnEnd: (pluginId, spawnId) => {");
     const changedAt = pipeline.indexOf(
       "surfaceHostLifecycle?.spawnEnded(pluginId);",
@@ -219,7 +219,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("routes host statuses through the surface lifecycle", () => {
-    const pipeline = functionSource("function createPluginPipeline(");
+    const pipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const statusAt = pipeline.indexOf("onStatusChange: (pluginId, status) => {");
     const lifecycleAt = pipeline.indexOf(
       "surfaceHostLifecycle?.statusChanged(pluginId, status);",
@@ -230,7 +230,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("routes host recovery outcomes through the surface lifecycle", () => {
-    const pipeline = functionSource("function createPluginPipeline(");
+    const pipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const recoveryAt = pipeline.indexOf(
       "onRecoveryDisposition: (pluginId, disposition) => {",
     );
@@ -243,7 +243,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("composes host status with the pipeline and plugin surfaces once", () => {
-    const pipeline = functionSource("function createPluginPipeline(");
+    const pipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const lifecycleAt = pipeline.indexOf(
       "surfaceHostLifecycle = new PluginSurfaceHostLifecycle({",
     );
@@ -260,7 +260,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("passes the derived plugin-host environment to the utility process", () => {
-    const pipeline = functionSource("function createPluginPipeline(");
+    const pipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const spawnAt = pipeline.indexOf("spawnTransport: (callbacks) => {");
     const spawnEnd = pipeline.indexOf("\n    },", spawnAt);
     const spawn = pipeline.slice(spawnAt, spawnEnd);
@@ -276,14 +276,11 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("refuses pipeline creation after the last workspace window closes", () => {
-    const ensure = functionSource("async function ensurePluginPipeline(");
-    const gateAt = ensure.indexOf("createOnlyWhile: () =>");
-    const checkAt = ensure.indexOf(
-      "isWorkspaceOpenInAnyWindow(workspace.workspaceId)",
-      gateAt,
+    const owner = sourceBlock(
+      "const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
+      "\n});",
     );
-    expect(gateAt).toBeGreaterThan(-1);
-    expect(checkAt).toBeGreaterThan(gateAt);
+    expect(owner).toContain("isOpen: isWorkspaceOpenInAnyWindow,");
   });
 
   it("does not warm a pipeline after a later workspace switch wins", () => {
@@ -293,7 +290,10 @@ describe("plugin panel main-process wiring", () => {
       "const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;",
       awaitAt,
     );
-    const warmAt = open.indexOf("void ensurePluginPipeline(workspace)", recheckAt);
+    const warmAt = open.indexOf(
+      "void pluginWorkspaceRuntimes.ensure(workspace)",
+      recheckAt,
+    );
     expect(awaitAt).toBeGreaterThan(-1);
     expect(recheckAt).toBeGreaterThan(awaitAt);
     expect(warmAt).toBeGreaterThan(recheckAt);
