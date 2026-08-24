@@ -239,6 +239,66 @@ describe("share-web sessions", () => {
     expect(relayCalls).toBe(1);
   });
 
+  it("rate-limits exchanges by socket IP before calling the relay", async () => {
+    let relayCalls = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 30).toString("base64url"),
+      fetchRelay: async () => {
+        relayCalls += 1;
+        return Response.json({
+          ok: true,
+          grantId: "grant-rate-limit",
+          capabilityToken: CAP_ALPHA_1,
+          capabilityExpiresAtMs: 901_000,
+        });
+      },
+    });
+    const sameIpHeaders = {
+      "content-type": "application/json",
+      "x-dohc-share-web-client-ip": "192.0.2.10",
+    };
+
+    for (let exchangeNumber = 1; exchangeNumber <= 12; exchangeNumber += 1) {
+      const accepted = await handler(
+        request("/api/exchange", {
+          method: "POST",
+          headers: sameIpHeaders,
+          body: JSON.stringify({ secret: SECRET_ALPHA }),
+        }),
+      );
+      expect(accepted.status, `exchange ${exchangeNumber}`).toBe(200);
+    }
+
+    const limitedRequest = request("/api/exchange", {
+      method: "POST",
+      headers: sameIpHeaders,
+      body: JSON.stringify({ secret: SECRET_ALPHA }),
+    });
+    const limited = await handler(limitedRequest);
+    const generic = await handler(request("/not-found"));
+    const otherIp = await handler(
+      request("/api/exchange", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-share-web-client-ip": "192.0.2.11",
+        },
+        body: JSON.stringify({ secret: SECRET_ALPHA }),
+      }),
+    );
+
+    expect(limited.status).toBe(404);
+    expect(Buffer.from(await limited.arrayBuffer())).toEqual(
+      Buffer.from(await generic.arrayBuffer()),
+    );
+    expect(limitedRequest.bodyUsed).toBe(false);
+    expect(otherIp.status).toBe(200);
+    expect(relayCalls).toBe(13);
+  });
+
   it("serves only raster signatures inline and forces SVG and other bytes to download", async () => {
     const pngSha = "a".repeat(64);
     const svgSha = "b".repeat(64);

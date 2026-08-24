@@ -9,6 +9,9 @@ export const SHARE_WEB_CSP =
 
 const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
+const EXCHANGE_BUCKET_CAPACITY = 12;
+const EXCHANGE_REFILL_PER_SECOND = 0.2;
+const EXCHANGE_MAX_IPS = 10_000;
 const DEFAULT_MAX_SESSIONS = 10_000;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
@@ -20,6 +23,11 @@ interface ShareWebSession {
   capabilityToken: string;
   expiresAtMs: number;
   createdAtMs: number;
+}
+
+interface ExchangeBucket {
+  tokens: number;
+  updatedAtMs: number;
 }
 
 export interface CreateShareWebHandlerOptions {
@@ -72,6 +80,41 @@ class ShareWebSessionStore {
   }
 }
 
+class ShareWebExchangeRateLimiter {
+  private readonly buckets = new Map<string, ExchangeBucket>();
+
+  allow(clientIp: string, nowMs: number): boolean {
+    const key = clientIp || "unknown";
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      if (this.buckets.size >= EXCHANGE_MAX_IPS) this.evictOldest();
+      bucket = { tokens: EXCHANGE_BUCKET_CAPACITY, updatedAtMs: nowMs };
+      this.buckets.set(key, bucket);
+    }
+    const elapsedSeconds = Math.max(0, nowMs - bucket.updatedAtMs) / 1_000;
+    bucket.tokens = Math.min(
+      EXCHANGE_BUCKET_CAPACITY,
+      bucket.tokens + elapsedSeconds * EXCHANGE_REFILL_PER_SECOND,
+    );
+    bucket.updatedAtMs = nowMs;
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
+  }
+
+  private evictOldest(): void {
+    let oldestKey: string | null = null;
+    let oldestMs = Number.POSITIVE_INFINITY;
+    for (const [key, bucket] of this.buckets) {
+      if (bucket.updatedAtMs < oldestMs) {
+        oldestKey = key;
+        oldestMs = bucket.updatedAtMs;
+      }
+    }
+    if (oldestKey !== null) this.buckets.delete(oldestKey);
+  }
+}
+
 function sessionKey(discriminator: string, token: string): string {
   return `${discriminator}:${createHash("sha256").update(token).digest("base64url")}`;
 }
@@ -84,29 +127,27 @@ function cookieName(discriminator: string): string {
   return `dohc_share_${discriminator}`;
 }
 
-function securityHeaders(authenticated: boolean): Headers {
-  const headers = new Headers({
+function securityHeaders(): Headers {
+  return new Headers({
     "content-security-policy": SHARE_WEB_CSP,
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
+    "cache-control": "private, no-store",
   });
-  if (authenticated) headers.set("cache-control", "private, no-store");
-  else headers.set("cache-control", "private, no-store");
-  return headers;
 }
 
 function response(
   body: BodyInit | null,
-  init: { status?: number; headers?: HeadersInit; authenticated?: boolean } = {},
+  init: { status?: number; headers?: HeadersInit } = {},
 ): Response {
-  const headers = securityHeaders(init.authenticated === true);
+  const headers = securityHeaders();
   for (const [key, value] of new Headers(init.headers)) headers.set(key, value);
   return new Response(body, { status: init.status ?? 200, headers });
 }
 
 function jsonResponse(
   body: unknown,
-  init: { status?: number; headers?: HeadersInit; authenticated?: boolean } = {},
+  init: { status?: number; headers?: HeadersInit } = {},
 ): Response {
   return response(JSON.stringify(body), {
     ...init,
@@ -114,10 +155,9 @@ function jsonResponse(
   });
 }
 
-function refused(authenticated = false): Response {
+function refused(): Response {
   return response(REFUSAL_BODY, {
     status: 404,
-    authenticated,
     headers: { "content-type": "application/json" },
   });
 }
@@ -215,6 +255,7 @@ export function createShareWebHandler({
   viewerAssetsDir,
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
   const sessions = new ShareWebSessionStore(maxSessions);
+  const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
 
   async function readSession(request: Request): Promise<{
     discriminator: string;
@@ -257,6 +298,8 @@ export function createShareWebHandler({
     }
 
     if (pathname === "/api/exchange" && request.method === "POST") {
+      const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
+      if (!exchangeRateLimiter.allow(clientIp, nowMs())) return refused();
       const secret = await exchangeInput(request);
       if (!secret) return refused();
       try {
@@ -324,7 +367,7 @@ export function createShareWebHandler({
         const sha = pathname.slice("/api/view/blob/".length);
         if (SHA256_HEX.test(sha)) relayPath = `/sync/link/blobs/${sha}`;
       }
-      if (!relayPath) return refused(true);
+      if (!relayPath) return refused();
 
       try {
         const relayResponse = await fetchRelay(
@@ -338,13 +381,12 @@ export function createShareWebHandler({
           if (relayResponse.status === 404) {
             sessions.delete(authenticated.discriminator, authenticated.token);
           }
-          return refused(true);
+          return refused();
         }
         const bytes = new Uint8Array(await relayResponse.arrayBuffer());
         if (pathname.startsWith("/api/view/blob/")) {
           const raster = rasterContentType(bytes);
           return response(bodyBuffer(bytes), {
-            authenticated: true,
             headers: raster
               ? { "content-type": raster }
               : {
@@ -354,11 +396,10 @@ export function createShareWebHandler({
           });
         }
         return response(bodyBuffer(bytes), {
-          authenticated: true,
           headers: { "content-type": "application/json" },
         });
       } catch {
-        return refused(true);
+        return refused();
       }
     }
 

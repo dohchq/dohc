@@ -41,9 +41,14 @@ const server = createServer((incoming, outgoing) => {
   });
   incoming.on("end", () => {
     const url = new URL(incoming.url ?? "/", `http://${incoming.headers.host ?? "localhost"}`);
+    const headers = new Headers(incoming.headers as Record<string, string>);
+    headers.set(
+      "x-dohc-share-web-client-ip",
+      incoming.socket.remoteAddress ?? "unknown",
+    );
     const request = new Request(url, {
       method: incoming.method,
-      headers: incoming.headers as Record<string, string>,
+      headers,
       body:
         oversized || chunks.length === 0
           ? undefined
