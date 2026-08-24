@@ -258,6 +258,84 @@ describe("shared channels (MU-C4)", () => {
     ).toBe("chat-channel");
   });
 
+  it("marks a chat selector with file access as damaged and keeps the share revocable", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await seedOwnerWorkspace(h);
+    storage.createShare({
+      share: {
+        shareId: "share-damaged-chat-access",
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({
+          kind: "chat-channel",
+          channelWireId: SHARED_WIRE,
+        }),
+        createdAtMs: 1000,
+      },
+      grant: {
+        grantId: "grant-damaged-chat-access",
+        shareId: "share-damaged-chat-access",
+        principalKind: "user",
+        principalUserId: MEMBER_A,
+        principalEmail: null,
+        access: "edit",
+        generation: 1,
+        status: "active",
+        createdAtMs: 1000,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+
+    const granted = (await json(await h(request(OWNER, "/sync/shares")))).granted as Array<
+      Record<string, unknown>
+    >;
+    expect(granted).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-chat-access",
+        selector: null,
+        selectorKind: "chat-channel",
+        access: "edit",
+        damaged: true,
+        revokedAtMs: null,
+      }),
+    );
+
+    const received = (await json(await h(request(MEMBER_A, "/sync/shares")))).received as Array<
+      Record<string, unknown>
+    >;
+    expect(received).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-chat-access",
+        selector: null,
+        selectorKind: "chat-channel",
+        access: "edit",
+        damaged: true,
+      }),
+    );
+    expect(received[0]).not.toHaveProperty("workspaceId");
+
+    const revoke = await h(
+      request(OWNER, "/sync/shares/share-damaged-chat-access/revoke", { method: "POST" }),
+    );
+    expect(revoke.status).toBe(200);
+    expect((await json(await h(request(MEMBER_A, "/sync/shares")))).received).toEqual([]);
+    expect(
+      ((await json(await h(request(OWNER, "/sync/shares")))).granted as Array<
+        Record<string, unknown>
+      >)[0],
+    ).toMatchObject({
+      shareId: "share-damaged-chat-access",
+      selector: null,
+      selectorKind: "chat-channel",
+      access: "edit",
+      damaged: true,
+      generation: 2,
+      revokedAtMs: 5555,
+    });
+  });
+
   it("creates a chat-channel grant (read-write default) and echoes the selector on both sides", async () => {
     const storage = await testStorage();
     const h = handler(storage);

@@ -227,6 +227,78 @@ describe("share grants", () => {
     });
   });
 
+  it("marks a file selector with chat access as damaged and keeps the share revocable", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    storage.createShare({
+      share: {
+        shareId: "share-damaged-file-access",
+        workspaceId: WORKSPACE,
+        granterUserId: GRANTER,
+        selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }),
+        createdAtMs: 1000,
+      },
+      grant: {
+        grantId: "grant-damaged-file-access",
+        shareId: "share-damaged-file-access",
+        principalKind: "user",
+        principalUserId: RECIPIENT,
+        principalEmail: null,
+        access: "read-write",
+        generation: 1,
+        status: "active",
+        createdAtMs: 1000,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
+    });
+
+    const granted = (await json(await h(request(GRANTER, "/sync/shares")))).granted as Array<
+      Record<string, unknown>
+    >;
+    expect(granted).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-file-access",
+        selector: null,
+        access: "read-write",
+        damaged: true,
+        revokedAtMs: null,
+      }),
+    );
+
+    const received = (await json(await h(request(RECIPIENT, "/sync/shares")))).received as Array<
+      Record<string, unknown>
+    >;
+    expect(received).toContainEqual(
+      expect.objectContaining({
+        shareId: "share-damaged-file-access",
+        selector: null,
+        access: "read-write",
+        damaged: true,
+      }),
+    );
+    expect(received[0]).not.toHaveProperty("workspaceId");
+
+    const revoke = await h(
+      request(GRANTER, "/sync/shares/share-damaged-file-access/revoke", { method: "POST" }),
+    );
+    expect(revoke.status).toBe(200);
+    expect((await json(await h(request(RECIPIENT, "/sync/shares")))).received).toEqual([]);
+    expect(
+      ((await json(await h(request(GRANTER, "/sync/shares")))).granted as Array<
+        Record<string, unknown>
+      >)[0],
+    ).toMatchObject({
+      shareId: "share-damaged-file-access",
+      selector: null,
+      access: "read-write",
+      damaged: true,
+      generation: 2,
+      revokedAtMs: 5555,
+    });
+  });
+
   it("creates a share at each level and carries it on the summary rows on both sides", async () => {
     const storage = await testStorage();
     const h = handler(storage);

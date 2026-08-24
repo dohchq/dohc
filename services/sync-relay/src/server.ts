@@ -1,4 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import {
+  isChatShareAccessValue,
+  isShareAccessValue,
+} from "@dohc/security-contract";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { stableJsonStringify } from "./canonicalJson";
@@ -413,7 +417,17 @@ export function createSyncRelayHandler({
     side: "granted" | "received",
   ): Promise<Record<string, unknown>> => {
     const { share, grant } = row;
-    const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
+    // This serialization boundary is the one authority that decides whether
+    // stored selector and grant access form a readable row. Every listing
+    // caller gets the same damage classification.
+    const selector =
+      storedSelector &&
+      ("kind" in storedSelector
+        ? isChatShareAccessValue(grant.access)
+        : isShareAccessValue(grant.access))
+        ? storedSelector
+        : null;
     const base = {
       shareId: share.shareId,
       // An unreadable row says so. It does NOT get a stand-in scope: empty

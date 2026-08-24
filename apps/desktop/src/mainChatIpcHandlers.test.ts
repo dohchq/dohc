@@ -558,6 +558,7 @@ describe("readRelayChatShareLanes", () => {
               recipientEmail: "bo@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-2" },
+              access: "read-write",
             },
             // Not a chat-channel share.
             { shareId: "share-doc", workspaceId: "remote-1", selector: { kind: "document" } },
@@ -567,6 +568,7 @@ describe("readRelayChatShareLanes", () => {
               shareId: "share-in",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-in" },
+              access: "read-write",
             },
             { shareId: "share-other", selector: { kind: "document" } },
           ],
@@ -595,6 +597,28 @@ describe("readRelayChatShareLanes", () => {
     });
   });
 
+  it("drops a chat-channel row whose access grants no chat authority", async () => {
+    const lanes = await readRelayChatShareLanes({
+      shareIdsClaimedElsewhere: new Set<string>(),
+      fetchListing: () =>
+        Promise.resolve({
+          granted: [
+            {
+              shareId: "share-corrupt",
+              workspaceId: "remote-1",
+              recipientEmail: "ana@example.com",
+              revokedAtMs: null,
+              selector: { kind: "chat-channel", channelWireId: "wire-corrupt" },
+              access: "edit",
+            },
+          ],
+        }),
+      remoteWorkspaceId: "remote-1",
+    });
+
+    expect(lanes).toEqual({ state: "answered", granted: [], received: [] });
+  });
+
   it("excludes a cached DM share id from the ordinary received-channel lane", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set(["share-dm"]),
@@ -605,11 +629,13 @@ describe("readRelayChatShareLanes", () => {
               shareId: "share-dm",
               granterEmail: "dm@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-dm" },
+              access: "read-write",
             },
             {
               shareId: "share-channel",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-channel" },
+              access: "read-write",
             },
           ],
         }),
@@ -664,6 +690,7 @@ describe("readRelayChatShareLanes", () => {
       granterEmail: "owner@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      access: "read-write",
     }));
     return { [lane]: rows };
   }
@@ -752,6 +779,7 @@ describe("readRelayChatShareLanes", () => {
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      access: "read-write",
     }));
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
@@ -781,6 +809,7 @@ describe("readRelayChatShareLanes", () => {
       recipientEmail: "ana@example.com",
       revokedAtMs: null,
       selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+      access: "read-write",
     }));
     const filteredOut = Array.from(
       { length: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 },
@@ -812,11 +841,13 @@ describe("readRelayChatShareLanes", () => {
               shareId: "share-in-work",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-work" },
+              access: "read-write",
             },
             {
               shareId: "share-unclaimed",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-free" },
+              access: "read-write",
             },
           ],
         }),
@@ -846,6 +877,7 @@ describe("readRelayChatShareLanes", () => {
         recipientEmail: "ana@example.com",
         revokedAtMs: index >= revokedFrom ? 1_700_000_000_000 : null,
         selector: { kind: "chat-channel", channelWireId: `wire-${index}` },
+        access: "read-write",
       }));
 
     // Every grant live: genuinely over the cap.
@@ -896,6 +928,7 @@ describe("readRelayChatShareLanes", () => {
             shareId: "share-left-elsewhere",
             granterEmail: "owner@example.com",
             selector: { kind: "chat-channel", channelWireId: "wire-left" },
+            access: "read-write",
           },
         ],
       });
@@ -930,6 +963,7 @@ describe("readRelayChatShareLanes", () => {
         shareId: `share-other-${index}`,
         granterEmail: "owner@example.com",
         selector: { kind: "chat-channel", channelWireId: `wire-other-${index}` },
+        access: "read-write",
       }),
     );
     const lanes = await readRelayChatShareLanes({
@@ -943,6 +977,7 @@ describe("readRelayChatShareLanes", () => {
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-mine" },
+              access: "read-write",
             },
           ],
           received: [
@@ -951,6 +986,7 @@ describe("readRelayChatShareLanes", () => {
               shareId: "share-here",
               granterEmail: "owner@example.com",
               selector: { kind: "chat-channel", channelWireId: "wire-here" },
+              access: "read-write",
             },
           ],
         }),
@@ -1222,6 +1258,7 @@ describe("readRelayChatShareLanes session classification", () => {
               recipientEmail: "ana@example.com",
               revokedAtMs: null,
               selector: { kind: "chat-channel", channelWireId: "wire-1" },
+              access: "read-write",
             },
           ],
         }),
@@ -1239,6 +1276,7 @@ describe("readRelayChatShareLanes session classification", () => {
               shareId: "share-in",
               granterEmail: 42,
               selector: { kind: "chat-channel", channelWireId: "wire-in" },
+              access: "read-write",
             },
           ],
         }),

@@ -447,6 +447,7 @@ function mapRelayShareListing(
   received: Array<Record<string, unknown>>;
 } {
   const chatSelector = (row: Record<string, unknown>) => {
+    if (row.access !== "read-only" && row.access !== "read-write") return null;
     const selector = row.selector as
       | { kind?: unknown; channelWireId?: unknown }
       | undefined;
@@ -454,7 +455,7 @@ function mapRelayShareListing(
       typeof selector.channelWireId === "string"
       ? {
           channelWireId: selector.channelWireId,
-          access: row.access === "read-only" ? "read-only" : "read-write",
+          access: row.access,
         }
       : null;
   };
