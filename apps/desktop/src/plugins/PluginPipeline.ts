@@ -1444,6 +1444,9 @@ export class PluginPipeline {
     directoryName: string,
     confirmationToken: string,
   ): Promise<PluginPipelineActionResult> {
+    if (this.disposed) {
+      return Promise.resolve(this.pipelineClosedFailure(pluginId));
+    }
     const confirmationKey = uninstallConfirmationKey(pluginId, directoryName);
     const pendingConfirmation = this.uninstallConfirmations.get(confirmationKey);
     const cleanupIds = pendingConfirmation?.token === confirmationToken
@@ -3717,10 +3720,19 @@ export class PluginPipeline {
     run: (
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostStartResult<PluginPipelineActionResult>>,
-    reservation = this.hostOwnership.reserveChange(pluginId),
+    reservation?: PluginHostChangeReservation,
   ): Promise<PluginPipelineActionResult> {
-    return this.enqueueActionValue(pluginId, () =>
-      reservation.run(async (change) => {
+    let changeReservation: PluginHostChangeReservation;
+    try {
+      changeReservation = reservation ?? this.hostOwnership.reserveChange(pluginId);
+    } catch (error) {
+      if (this.isCloseInvalidation(error)) {
+        return Promise.resolve(this.pipelineClosedFailure(pluginId));
+      }
+      throw error;
+    }
+    const action = this.enqueueActionValue(pluginId, () =>
+      changeReservation.run(async (change) => {
         let result: PluginHostStartResult<PluginPipelineActionResult>;
         try {
           result = await run(change);
@@ -3732,6 +3744,12 @@ export class PluginPipeline {
         }
         return change.adopt(result);
       }));
+    return action.catch((error: unknown) => {
+      if (this.isCloseInvalidation(error)) {
+        return this.pipelineClosedFailure(pluginId);
+      }
+      throw error;
+    });
   }
 
   private enqueueStartedValue(
@@ -3740,10 +3758,7 @@ export class PluginPipeline {
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     return this.enqueueActionValue(pluginId, async () => {
       if (this.disposed) {
-        return existingHostResult(this.failure(
-          pluginId,
-          pipelineError("runtime", "pipeline-closed", "Plugin pipeline is closed."),
-        ));
+        return existingHostResult(this.pipelineClosedFailure(pluginId));
       }
       try {
         return await run();
@@ -3754,6 +3769,20 @@ export class PluginPipeline {
         return existingHostResult(this.failure(pluginId, detail));
       }
     });
+  }
+
+  private isCloseInvalidation(error: unknown): boolean {
+    if (!this.disposed || !(error instanceof Error)) return false;
+    return error.message === "Change reservation is no longer active." ||
+      error.message === "Plugin pipeline is closed." ||
+      error.message === "Plugin host ownership is closed";
+  }
+
+  private pipelineClosedFailure(pluginId: string): PluginPipelineActionResult {
+    return this.failure(
+      pluginId,
+      pipelineError("runtime", "pipeline-closed", "Plugin pipeline is closed."),
+    );
   }
 
   private enqueueActionValue<T>(pluginId: string, run: () => Promise<T>): Promise<T> {

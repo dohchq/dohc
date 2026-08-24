@@ -7643,12 +7643,23 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         queueGate.resolve();
 
         await blocker;
-        await expect(enabling).rejects.toThrow(
-          "Change reservation is no longer active.",
-        );
+        await expect(enabling).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
         await firstDispose;
         expect(close).toHaveBeenCalledTimes(1);
         expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
+        await expect(setup.pipeline.enable("example-plugin")).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
+        await expect(
+          setup.pipeline.uninstall("example-plugin", "example-plugin", "expired"),
+        ).resolves.toMatchObject({
+          ok: false,
+          error: { code: "pipeline-closed" },
+        });
       } finally {
         queueGate.resolve();
         await setup.pipeline.dispose();
@@ -7659,6 +7670,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const setup = await setupEstablishedPlugin();
       const commandEntered = deferred();
       const commandGate = deferred();
+      const bumpGeneration = vi.spyOn(setup.pipeline.host, "bumpGeneration");
       try {
         const command = setup.hostOwnership.runCommand(
           "example-plugin",
@@ -7675,10 +7687,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           setup.hostOwnership.runCommand("example-plugin", async () => undefined),
         ).resolves.toEqual({ kind: "refused", reason: "closed" });
         expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        expect(bumpGeneration).not.toHaveBeenCalled();
 
         commandGate.resolve();
         await command;
         await disposing;
+        expect(bumpGeneration).toHaveBeenCalledTimes(1);
         expect(setup.pipeline.host.getStatus("example-plugin")).toBeUndefined();
       } finally {
         commandGate.resolve();
