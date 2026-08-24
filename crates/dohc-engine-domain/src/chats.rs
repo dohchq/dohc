@@ -3626,11 +3626,10 @@ impl<'a> LinkedChatStore<'a> {
             let mut opening_messages: HashMap<String, ChatMessage> = if opening_ids.is_empty() {
                 HashMap::new()
             } else {
-                let opening_ids_json = serde_json::to_string(&opening_ids).map_err(|_| {
-                    DomainError::StateCorrupt {
+                let opening_ids_json =
+                    serde_json::to_string(&opening_ids).map_err(|_| DomainError::StateCorrupt {
                         reason: "opening message id set is corrupt",
-                    }
-                })?;
+                    })?;
                 let mut stmt = conn
                     .prepare_cached(
                         "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
