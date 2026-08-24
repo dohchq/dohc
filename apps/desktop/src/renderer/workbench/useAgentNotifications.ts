@@ -107,12 +107,21 @@ export function useAgentNotifications(params: {
     let cancelled = false;
     let timer: number | undefined;
     // Activity-wake guards: a ping while a poll is in flight must not stack a
-    // second poll — it marks the queue and the finally re-polls immediately.
+    // second poll — it marks the queue and the finally schedules the re-poll.
     let polling = false;
     let repollQueued = false;
     // True while the armed timer is the slow idle delay — the only cadence an
     // activity ping needs to short-circuit.
     let idleArmed = false;
+    // Wake rate limit: main broadcasts workspace-activity to every window with
+    // no workspace scoping, so a busy sibling workspace pings this window on
+    // every settled batch. A wake-driven poll therefore never starts sooner
+    // than pollIntervalMs after the previous poll STARTED — an activity storm
+    // costs at worst the old fast cadence, while a quiet window still wakes
+    // instantly on the first ping.
+    let lastPollStartMs = Number.NEGATIVE_INFINITY;
+    const wakeDelayMs = () =>
+      Math.max(0, lastPollStartMs + pollIntervalMs - Date.now());
 
     // Idle backoff: no session means no asks and nothing to notify about, so
     // the next look can wait. The poll that first sees a session — and every
@@ -122,6 +131,7 @@ export function useAgentNotifications(params: {
     const idleIntervalMs = Math.max(pollIntervalMs, IDLE_POLL_INTERVAL_MS);
     const poll = async () => {
       polling = true;
+      lastPollStartMs = Date.now();
       // Fast cadence unless this poll proves there is no session; a transient
       // IPC failure (no panel) also retries fast.
       let nextDelayMs = pollIntervalMs;
@@ -168,7 +178,7 @@ export function useAgentNotifications(params: {
         if (!cancelled) {
           if (repollQueued) {
             repollQueued = false;
-            nextDelayMs = 0;
+            nextDelayMs = Math.min(nextDelayMs, wakeDelayMs());
           }
           idleArmed = nextDelayMs >= idleIntervalMs;
           timer = window.setTimeout(() => void poll(), nextDelayMs);
@@ -176,17 +186,32 @@ export function useAgentNotifications(params: {
       }
     };
     // Live wake: while idling, a workspace-activity ping means something
-    // happened — poll now instead of waiting out the slow timer (the poll
-    // restores the fast cadence if a session appeared). The fast cadence
-    // needs no wake; its next poll lands within pollIntervalMs anyway.
+    // happened — poll as soon as the rate limit allows instead of waiting out
+    // the slow timer (the poll restores the fast cadence if a session
+    // appeared). The fast cadence needs no wake; its next poll lands within
+    // pollIntervalMs anyway.
     const unsubscribe = bridge().onWorkspaceActivity(() => {
-      if (cancelled || !idleArmed) return;
+      if (cancelled) return;
+      // Queue while ANY poll is in flight — including the initial one, before
+      // idleArmed means anything. That poll may have captured a pre-session
+      // snapshot and be about to arm the slow timer just as the run's first
+      // ask arrives; the queued re-poll (rate-limited in finally) surfaces it.
       if (polling) {
         repollQueued = true;
         return;
       }
+      if (!idleArmed) return;
       if (timer !== undefined) window.clearTimeout(timer);
-      void poll();
+      const delayMs = wakeDelayMs();
+      if (delayMs === 0) {
+        void poll();
+      } else {
+        // Still inside the rate window: arm a short timer instead of polling
+        // now. Later pings need not touch it — the poll lands within
+        // pollIntervalMs regardless.
+        idleArmed = false;
+        timer = window.setTimeout(() => void poll(), delayMs);
+      }
     });
     void poll();
     return () => {

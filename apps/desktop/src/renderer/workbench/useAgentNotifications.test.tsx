@@ -221,6 +221,11 @@ describe("useAgentNotifications idle polling", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(getAgentSessionState).toHaveBeenCalledTimes(1);
+    // Quiet passes the wake rate window (pollIntervalMs since the last poll
+    // started) without reaching the 10s idle timer.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
 
     // A run starts and pings: the hook polls NOW — the first permission ask
     // must not sit invisible for up to 10s.
@@ -244,6 +249,60 @@ describe("useAgentNotifications idle polling", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(getAgentSessionState).toHaveBeenCalledTimes(3);
+  });
+
+  it("re-polls after an activity ping that lands during the initial in-flight poll", async () => {
+    // The initial poll captures the pre-session snapshot; a run starts and
+    // pings while that poll is still in flight. The ping must queue a re-poll
+    // — not be dropped — or the poll's null session arms the 10s idle timer
+    // and the run's first ask hides until it expires.
+    getAgentSessionState
+      .mockImplementationOnce(async () => panelFor("ws-b"))
+      .mockImplementation(async () => panelFor("ws-a"));
+    const { result } = renderHook(() =>
+      useAgentNotifications({
+        workspaceId: "ws-b",
+        ...baseProps,
+        pollIntervalMs: 1_500,
+      }),
+    );
+    act(() => fireWorkspaceActivity());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // The stale poll settled without stacking a second in-flight call.
+    expect(getAgentSessionState).toHaveBeenCalledTimes(1);
+    expect(result.current.pendingPermissions).toEqual([]);
+
+    // The queued re-poll runs at the fast cadence — the ask surfaces without
+    // waiting out the 10s idle timer.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(getAgentSessionState).toHaveBeenCalledTimes(2);
+    expect(result.current.pendingPermissions).toHaveLength(1);
+  });
+
+  it("caps wake-driven polls at one per pollIntervalMs under an activity storm", async () => {
+    // Main broadcasts workspace-activity to every window with no workspace
+    // scoping, so a busy sibling workspace pings this sessionless window on
+    // every settled batch. The wake rate limit pins the worst case at the old
+    // fast cadence: polls at 0, 1500, 3000, ... — never denser.
+    renderHook(() =>
+      useAgentNotifications({
+        workspaceId: "ws-b",
+        ...baseProps,
+        pollIntervalMs: 1_500,
+      }),
+    );
+    for (let elapsed = 0; elapsed < 15_000; elapsed += 100) {
+      await act(async () => {
+        fireWorkspaceActivity();
+        await vi.advanceTimersByTimeAsync(100);
+      });
+    }
+    // 15s of continuous pings: the mount poll plus one per 1.5s window.
+    expect(getAgentSessionState).toHaveBeenCalledTimes(11);
   });
 
   it("repaints the card when a reused requestId carries changed content", async () => {
