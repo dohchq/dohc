@@ -6,7 +6,7 @@ import {
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
 } from "../ipc/channels";
-import type { PluginHost } from "./PluginHost";
+import type { PluginHost, PluginHostStartEvidence } from "./PluginHost";
 import {
   discoverInstalledPlugins,
   type InstalledPluginRecord,
@@ -17,6 +17,13 @@ import {
   recoverOnDiskSegments,
 } from "./pluginCaseRecovery";
 import { CLAIMS_DRAINING_ERROR_CODE } from "./pluginCommandInvocation";
+import type {
+  PluginHostChangeAuthority,
+  PluginHostChangeReservation,
+  PluginHostChangeScope,
+  PluginHostOwnership,
+  PluginHostStartResult,
+} from "./pluginHostOwnership";
 import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
 import { scanPluginLifecycleScripts } from "./pluginLifecycleScan";
@@ -61,7 +68,10 @@ import {
   type PluginUninstallPreflightSummary,
 } from "./pluginUninstallPreflight";
 import { isInside } from "../security/pathContainment";
-import { errorMessage } from "./pluginShared";
+import {
+  COMMAND_CLAIMS_DRAIN_DEADLINE_MS,
+  errorMessage,
+} from "./pluginShared";
 
 export { PLUGIN_PIPELINE_ERROR_STAGES, PLUGIN_PIPELINE_STATUSES };
 
@@ -193,22 +203,6 @@ export type PluginPipelineActionResult =
     plugin: PluginPipelinePluginStatus | null;
   };
 
-/**
- * `startedHost` is true only when this very call took the plugin's host from
- * not-running to running. A panel owns stopping a host only when its own
- * ensureStarted caused that transition, and jobs are serialized per plugin,
- * so a queued workspace reconciliation can win the race and start the host
- * first — the panel's call then succeeds on an already-running host and must
- * not claim it.
- */
-export type PluginPipelineEnsureStartedResult =
-  | { ok: true; plugin: PluginPipelinePluginStatus; startedHost: boolean }
-  | {
-    ok: false;
-    error: PluginPipelineError;
-    plugin: PluginPipelinePluginStatus | null;
-  };
-
 export type PluginPipelineUninstallPreflightResult =
   | {
     ok: true;
@@ -235,7 +229,7 @@ interface PluginPipelineOperations {
 export interface PluginPipelineOptions {
   workspaceRoot: string;
   stateDir: string;
-  pluginHost: PluginHost;
+  hostOwnership: PluginHostOwnership<PluginHost>;
   resourcesBasePath?: string;
   /** See pluginInstallRunner's InstallPluginDependenciesInput.pnpmRunnerEntry. */
   pnpmRunnerEntry: string;
@@ -246,58 +240,6 @@ export interface PluginPipelineOptions {
    * wasn't running to record it). Defaults to true so existing callers and
    * tests that don't care about this keep their current behavior. */
   isEngineCaptureAvailable?: () => boolean;
-  /**
-   * Raises one hold on the caller's own command-claim barrier for this
-   * plugin, refusing new claims, and returns the function that lowers
-   * exactly that hold. Call before any queued work the caller is about to
-   * run, so a command cannot claim the plugin while that work is still
-   * waiting its turn. Optional: a caller with no command-claim concept of
-   * its own omits it.
-   */
-  raiseCommandClaimsBarrier?: (pluginId: string) => () => void;
-  /**
-   * Called the instant stopOldRuntime actually stops or begins replacing
-   * this plugin's old runtime — not just whenever the action that
-   * reached it settles. A caller's own barrier-lower (see
-   * raiseCommandClaimsBarrier) reads this to tell an action that
-   * genuinely decided the runtime from a no-op reconcile or a
-   * precondition failure that never touched it: eating a command's own
-   * cold-start marker for the latter leaks the host ownerless until
-   * workspace close (#779 round 26 note A). Optional: a caller with no
-   * command-claim concept of its own omits it.
-   */
-  onOldRuntimeStopBoundary?: (pluginId: string) => void;
-  /**
-   * Raises a hold (see raiseCommandClaimsBarrier) and waits for the
-   * caller's own in-flight command claims on this plugin to drain,
-   * resolving with the function that lowers the hold. Call the lower once
-   * the caller's own protected work — not just this wait — is done.
-   * Optional: a caller with no command-claim concept of its own omits it
-   * and proceeds immediately.
-   */
-  awaitCommandClaimsDrained?: (pluginId: string) => Promise<() => void>;
-  /**
-   * Clears all command-claim state for this plugin — every claim, its
-   * on-demand start marker, and any drain hold. Call once this pipeline
-   * is fully disposed: a marker left behind would misattribute a later
-   * session's host, opened under the same workspace/plugin key, to
-   * whatever this one left unconsumed. Optional: a caller with no
-   * command-claim concept of its own omits it.
-   */
-  resetCommandClaims?: (pluginId: string) => void;
-  /**
-   * True while the caller itself already holds one of this plugin's
-   * command claims. Checked right before startFromApprovedSource would
-   * hold for approval — holding always drains this plugin's command
-   * claims first, and a command that reached this through its own
-   * ensureStarted() call holds one of those claims itself, which can
-   * never release until this same call returns: draining anyway waits on
-   * itself until the deadline turns it into a stall. True here refuses
-   * with a retryable result instead of proceeding into that drain (#779
-   * round 25 finding 3). Optional: a caller with no command-claim concept
-   * of its own omits it.
-   */
-  hasOutstandingCommandClaim?: (pluginId: string) => boolean;
   platform?: NodeJS.Platform;
   operations?: Partial<PluginPipelineOperations>;
 }
@@ -326,6 +268,8 @@ interface UninstallConfirmation {
    * the one its own preflight named.
    */
   directoryName: string;
+  /** Every host identity the confirmed cleanup can stop. */
+  cleanupIds: string[];
 }
 
 interface FullBuildOptions {
@@ -361,6 +305,27 @@ class PipelineFailure extends Error {
     super(detail.message);
     this.name = "PipelineFailure";
   }
+}
+
+function existingHostResult<T>(value: T): PluginHostStartResult<T> {
+  return { kind: "existing", value };
+}
+
+function startedHostResult<T>(
+  value: T,
+  evidence: PluginHostStartEvidence,
+): PluginHostStartResult<T> {
+  return { kind: "started", value, evidence };
+}
+
+function mapHostResult<T, U>(
+  result: PluginHostStartResult<T>,
+  map: (value: T) => U,
+): PluginHostStartResult<U> {
+  const value = map(result.value);
+  return result.kind === "started"
+    ? startedHostResult(value, result.evidence)
+    : existingHostResult(value);
 }
 
 const DEFAULT_OPERATIONS: PluginPipelineOperations = {
@@ -674,6 +639,7 @@ export class PluginPipeline {
   private discovery: InstalledPluginRecord[] = [];
   private discoveryTail: Promise<void> = Promise.resolve();
   private startPromise: Promise<void> | null = null;
+  private disposePromise: Promise<void> | null = null;
   private readonly abortController = new AbortController();
   private disposed = false;
 
@@ -690,8 +656,12 @@ export class PluginPipeline {
    * panel and the install/build pipeline can never race two independent
    * hosts over the same plugin id.
    */
+  get hostOwnership(): PluginHostOwnership<PluginHost> {
+    return this.options.hostOwnership;
+  }
+
   get host(): PluginHost {
-    return this.options.pluginHost;
+    return this.hostOwnership.host;
   }
 
   /**
@@ -796,7 +766,7 @@ export class PluginPipeline {
     );
     // Not awaited: the value is already saved, and a plugin that is slow to
     // take the change must not make the user wait for a save that landed.
-    void this.options.pluginHost
+    void this.host
       .notifySettingsChanged(pluginId, directoryName, values)
       .catch((error: unknown) => {
         console.warn(
@@ -999,68 +969,71 @@ export class PluginPipeline {
   }
 
   install(pluginId: string): Promise<PluginPipelineActionResult> {
-    return this.withCommandClaimsBarrier(pluginId, () =>
-      this.enqueueAction(pluginId, async () => {
-        const candidate = this.requireValidCandidate(pluginId);
-        return this.runFullBuild({
-          candidate,
-          startRuntime: true,
-          disabledReasonAfterBuild: null,
-          resetCrashAccounting: true,
-          freshInstall: true,
-        });
-      }));
+    return this.enqueueAdoptedAction(pluginId, async (change) => {
+      const candidate = this.requireValidCandidate(pluginId);
+      return this.runFullBuild({
+        candidate,
+        startRuntime: true,
+        disabledReasonAfterBuild: null,
+        resetCrashAccounting: true,
+        freshInstall: true,
+      }, change);
+    });
   }
 
   disable(pluginId: string): Promise<PluginPipelineActionResult> {
-    return this.withCommandClaimsBarrier(pluginId, () =>
-      this.enqueueAction(pluginId, async () => {
-        try {
-          const candidate = this.requireValidCandidate(pluginId);
-          await this.operations.mutateRecord(
-            this.options.stateDir,
-            this.workspaceRoot,
-            pluginId,
-            (record) => ({ ...record, disabled: true }),
-          );
-          await this.stopOldRuntime(pluginId);
-          return this.success(this.setStatus(candidate, {
-            status: "disabled",
-            disabledReason: "user",
-            runtimeStatus: null,
-            error: null,
-          }));
-        } catch (error) {
-          return this.failure(
-            pluginId,
-            pipelineError("state", "disable-failed", errorMessage(error)),
-          );
-        }
-      }));
+    return this.enqueueAdoptedAction(pluginId, async (change) => {
+      try {
+        const candidate = this.requireValidCandidate(pluginId);
+        await this.operations.mutateRecord(
+          this.options.stateDir,
+          this.workspaceRoot,
+          pluginId,
+          (record) => ({ ...record, disabled: true }),
+        );
+        await this.stopOldRuntime(pluginId, change);
+        return existingHostResult(this.success(this.setStatus(candidate, {
+          status: "disabled",
+          disabledReason: "user",
+          runtimeStatus: null,
+          error: null,
+        })));
+      } catch (error) {
+        const detail = error instanceof PipelineFailure
+          ? error.detail
+          : pipelineError("state", "disable-failed", errorMessage(error));
+        return existingHostResult(this.failure(pluginId, detail));
+      }
+    });
   }
 
   enable(pluginId: string): Promise<PluginPipelineActionResult> {
-    return this.withCommandClaimsBarrier(pluginId, () =>
-      this.enqueueAction(pluginId, async () => {
-        const candidate = this.requireValidCandidate(pluginId);
-        const state = await this.localRecord(pluginId);
-        if (!state?.approvedHash) {
-          return this.failure(
-            pluginId,
-            pipelineError(
-              "state",
-              "install-required",
-              `Plugin "${pluginId}" must be installed before it can be enabled.`,
-            ),
-          );
-        }
-        return this.startFromApprovedSource(candidate, state, state.approvedHash, {
+    return this.enqueueAdoptedAction(pluginId, async (change) => {
+      const candidate = this.requireValidCandidate(pluginId);
+      const state = await this.localRecord(pluginId);
+      if (!state?.approvedHash) {
+        return existingHostResult(this.failure(
+          pluginId,
+          pipelineError(
+            "state",
+            "install-required",
+            `Plugin "${pluginId}" must be installed before it can be enabled.`,
+          ),
+        ));
+      }
+      return this.startFromApprovedSource(
+        candidate,
+        state,
+        state.approvedHash,
+        {
           clearDisabled: true,
           resetCrashAccounting:
             this.statuses.get(pluginId)?.disabledReason === "crash-loop",
           runtimeErrorCode: "enable-failed",
-        });
-      }));
+        },
+        change,
+      );
+    });
   }
 
   /**
@@ -1081,34 +1054,40 @@ export class PluginPipeline {
    * an agent or the user placed under plugins/ is trusted the same way any
    * local process is, the first time its panel opens as much as any other.
    */
-  ensureStarted(pluginId: string): Promise<PluginPipelineEnsureStartedResult> {
-    let startedHost = false;
-    return this.enqueueAction(pluginId, async () => {
-      // Sampled inside the job, not before it was queued: whatever ran ahead
-      // of this call in the queue has already finished starting the host.
-      const runningBefore = Boolean(this.options.pluginHost.getStatus(pluginId));
-      const result = await this.runEnsureStarted(pluginId);
-      startedHost = result.ok &&
-        !runningBefore &&
-        Boolean(this.options.pluginHost.getStatus(pluginId));
-      return result;
-    }).then((result) => (result.ok ? { ...result, startedHost } : result));
+  ensureStarted(
+    pluginId: string,
+    scope: PluginHostChangeScope,
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
+    return this.enqueueStartedValue(pluginId, async () => {
+      // Sampled inside the job. Work already ahead of this call has finished,
+      // so a cold start needs no change authority. A running host can be
+      // rebuilt only through the caller's own authority.
+      if (!this.host.currentRecord(pluginId)) {
+        return this.runEnsureStarted(pluginId);
+      }
+      const value = await scope.runChange(async (change) => {
+        const result = await this.runEnsureStarted(pluginId, change);
+        return change.preserve(result);
+      });
+      return existingHostResult(value);
+    });
   }
 
   private async runEnsureStarted(
     pluginId: string,
-  ): Promise<PluginPipelineActionResult> {
+    change?: PluginHostChangeAuthority,
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const candidate = this.requireValidCandidate(pluginId);
     const state = await this.localRecord(pluginId);
     if (state?.disabled === true) {
-      return this.failure(
+      return existingHostResult(this.failure(
         pluginId,
         pipelineError(
           "state",
           "plugin-disabled",
           `Plugin "${pluginId}" is disabled. Enable it before opening it.`,
         ),
-      );
+      ));
     }
     if (!state?.approvedHash) {
       return this.runFullBuild({
@@ -1117,18 +1096,25 @@ export class PluginPipeline {
         disabledReasonAfterBuild: null,
         resetCrashAccounting: true,
         freshInstall: true,
-      });
+      }, change);
     }
-    return this.startFromApprovedSource(candidate, state, state.approvedHash, {
-      clearDisabled: false,
-      resetCrashAccounting: false,
-      runtimeErrorCode: "start-failed",
-    });
+    return this.startFromApprovedSource(
+      candidate,
+      state,
+      state.approvedHash,
+      {
+        clearDisabled: false,
+        resetCrashAccounting: false,
+        runtimeErrorCode: "start-failed",
+      },
+      change,
+    );
   }
 
   private buildFromCurrentSource(
     pluginId: string,
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
+    change: PluginHostChangeAuthority,
     options: Pick<
       FullBuildOptions,
       | "expectedHash"
@@ -1136,7 +1122,7 @@ export class PluginPipeline {
       | "rememberAsApprovedAttempt"
       | "onOldRuntimeStopped"
     > = {},
-  ): Promise<PluginPipelineActionResult> {
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const staysDisabled =
       this.statuses.get(pluginId)?.disabledReason === "user";
     return this.runFullBuild({
@@ -1146,66 +1132,61 @@ export class PluginPipeline {
       resetCrashAccounting: true,
       freshInstall: false,
       ...options,
-    });
+    }, change);
   }
 
   approve(pluginId: string): Promise<PluginPipelineActionResult> {
-    return this.withCommandClaimsBarrier(pluginId, () =>
-      this.enqueueAction(pluginId, async () => {
-        const candidate = this.requireValidCandidate(pluginId);
-        // The disabled bit is the user's own choice, orthogonal to
-        // approval: approving new content trusts that content, but must
-        // never silently re-enable a plugin the user explicitly turned
-        // off before the out-of-band change arrived (#779 round 3
-        // finding 5).
-        return this.buildFromCurrentSource(pluginId, candidate, {
-          rememberAsApprovedAttempt: true,
-        });
-      }));
+    return this.enqueueAdoptedAction(pluginId, async (change) => {
+      const candidate = this.requireValidCandidate(pluginId);
+      // The disabled bit is the user's own choice, orthogonal to approval.
+      return this.buildFromCurrentSource(pluginId, candidate, change, {
+        rememberAsApprovedAttempt: true,
+      });
+    });
   }
 
   rebuild(
     pluginId: string,
     options?: { onOldRuntimeStopped?: () => void },
   ): Promise<PluginPipelineActionResult> {
-    return this.withCommandClaimsBarrier(pluginId, () =>
-      this.enqueueAction(pluginId, async () => {
+    return this.enqueueAdoptedAction(pluginId, async (change) => {
         const candidate = this.requireValidCandidate(pluginId);
         // A crash-loop respawn between the failure and this call flips
         // status back to whatever the still-running old build reports;
         // hasRecoverableFailure is the fact that survives it (round-8
         // finding 3, round-21 finding 1).
         if (!this.hasRecoverableFailure(pluginId)) {
-          return this.failure(
+          return existingHostResult(this.failure(
             pluginId,
             pipelineError(
               "state",
               "no-failed-build",
               `Plugin "${pluginId}" has no failed build to retry.`,
             ),
-          );
+          ));
         }
         const record = await this.localRecord(pluginId);
         if (!record?.approvedHash) {
-          return this.failure(
+          return existingHostResult(this.failure(
             pluginId,
             pipelineError(
               "state",
               "no-failed-build",
               `Plugin "${pluginId}" has no failed build to retry.`,
             ),
-          );
+          ));
         }
         return this.buildFromCurrentSource(
           pluginId,
           candidate,
+          change,
           {
             expectedHash: record.approvedHash,
             alsoAcceptHash: this.lastApprovedAttemptHash.get(pluginId),
             onOldRuntimeStopped: options?.onOldRuntimeStopped,
           },
         );
-      }));
+    });
   }
 
   /**
@@ -1244,8 +1225,8 @@ export class PluginPipeline {
       provisionalOrigin: exactRelPath === null ? write.absolutePath : undefined,
     });
     this.doorWrittenDeltas.set(pluginId, deltas);
-    this.enqueueSourceRefresh(pluginId, () =>
-      this.reconcileApprovedCandidate(pluginId, true));
+    this.enqueueSourceRefresh(pluginId, (change) =>
+      this.reconcileApprovedCandidate(pluginId, true, change));
   }
 
   /**
@@ -1275,15 +1256,15 @@ export class PluginPipeline {
       // is an ordinary out-of-band change to a distinct, real directory,
       // not this plugin's own source.
       deltas.delete(fromRelPath);
-      this.enqueueSourceRefresh(pluginId, () =>
-        this.reconcileApprovedCandidate(pluginId, true));
+      this.enqueueSourceRefresh(pluginId, (change) =>
+        this.reconcileApprovedCandidate(pluginId, true, change));
       return;
     }
 
     if (this.isExcludedRelPath(toRelPath)) {
       deltas.delete(fromRelPath);
-      this.enqueueSourceRefresh(pluginId, () =>
-        this.reconcileApprovedCandidate(pluginId, true));
+      this.enqueueSourceRefresh(pluginId, (change) =>
+        this.reconcileApprovedCandidate(pluginId, true, change));
       return;
     }
 
@@ -1294,8 +1275,8 @@ export class PluginPipeline {
       deltas.set(toRelPath, { sha256: delta.sha256, seq: delta.seq });
     }
     if (pathChanged) {
-      this.enqueueSourceRefresh(pluginId, () =>
-        this.reconcileApprovedCandidate(pluginId, true));
+      this.enqueueSourceRefresh(pluginId, (change) =>
+        this.reconcileApprovedCandidate(pluginId, true, change));
     }
   }
 
@@ -1404,11 +1385,12 @@ export class PluginPipeline {
         }
         const pluginRoot = this.uninstallRootPath(directoryName, pluginId, record);
         const sourcePresent = await this.sourceRootPresent(pluginRoot);
-        const additionalStateRoots = candidate
-          ? this.additionalCleanupIds(candidate, state).map((id) =>
-            pluginStateRoot(this.dohcDir, id)
-          )
+        const additionalCleanupIds = candidate
+          ? this.additionalCleanupIds(candidate, state)
           : [];
+        const additionalStateRoots = additionalCleanupIds.map((id) =>
+            pluginStateRoot(this.dohcDir, id)
+          );
         // pluginId's own path and baseline are only this row's to warn
         // about when nothing proves otherwise — the same
         // pluginIdTracesDirectory check cleanup itself uses. An invalid,
@@ -1434,6 +1416,10 @@ export class PluginPipeline {
           pluginRoot: sourcePresent ? resolve(pluginRoot) : null,
           liveHash: preflight.liveHash,
           directoryName,
+          cleanupIds: [
+            ...(pluginIdTracesHere ? [pluginId] : []),
+            ...additionalCleanupIds,
+          ],
         });
         return {
           ok: true,
@@ -1458,26 +1444,43 @@ export class PluginPipeline {
     directoryName: string,
     confirmationToken: string,
   ): Promise<PluginPipelineActionResult> {
-    return this.withCommandClaimsBarrier(pluginId, () =>
-      this.enqueueAction(pluginId, async () => {
-      const confirmationKey = uninstallConfirmationKey(pluginId, directoryName);
+    const confirmationKey = uninstallConfirmationKey(pluginId, directoryName);
+    const pendingConfirmation = this.uninstallConfirmations.get(confirmationKey);
+    const cleanupIds = pendingConfirmation?.token === confirmationToken
+      ? pendingConfirmation.cleanupIds
+      : [];
+    const reservations = new Map<string, PluginHostChangeReservation>();
+    for (const id of new Set([pluginId, ...cleanupIds])) {
+      reservations.set(id, this.hostOwnership.reserveChange(id));
+    }
+    const primaryReservation = reservations.get(pluginId);
+    if (!primaryReservation) {
+      throw new Error(`Plugin "${pluginId}" has no uninstall reservation.`);
+    }
+    const action = this.enqueueAdoptedAction(pluginId, async (change) => {
       const confirmation = this.uninstallConfirmations.get(confirmationKey);
       this.uninstallConfirmations.delete(confirmationKey);
       if (!confirmation || confirmation.token !== confirmationToken) {
-        return this.failure(
+        return existingHostResult(this.failure(
           pluginId,
           pipelineError(
             "uninstall",
             "confirmation-required",
             `Plugin "${pluginId}" requires a current uninstall preflight confirmation.`,
           ),
-        );
+        ));
       }
 
       const state = await this.localState();
       const record = state.plugins[pluginId];
+      const cleanupIds = new Set(confirmation.cleanupIds);
       if (confirmation.pluginRoot === null) {
-        return this.finishSourcelessUninstall(pluginId, state);
+        return this.finishSourcelessUninstall(
+          pluginId,
+          cleanupIds,
+          change,
+          reservations,
+        );
       }
       // Resolved from what THIS confirmation's own preflight named, never
       // a fresh lookup a caller could otherwise steer — the row an
@@ -1505,20 +1508,20 @@ export class PluginPipeline {
       // and that installation's record genuinely lives under this exact
       // key — disabling it, stopping its running process, and deleting its
       // build and state right along with the invalid row's source.
-      const pluginIdTracesHere = this.pluginIdTracesDirectory(record, candidate);
-      const cleanupIds = new Set([
-        ...(pluginIdTracesHere ? [pluginId] : []),
-        ...this.additionalCleanupIds(candidate, state),
-      ]);
+      // Cleanup is bound to the identities the confirmed preflight named.
+      // Re-discovering identities here could stop or delete state the user
+      // never reviewed, and those late identities would not have received a
+      // synchronous ownership reservation when uninstall() was called.
+      const pluginIdTracesHere = cleanupIds.has(pluginId);
       if (resolve(candidate.rootPath) !== confirmation.pluginRoot) {
-        return this.failure(
+        return existingHostResult(this.failure(
           pluginId,
           pipelineError(
             "uninstall",
             "confirmation-stale",
             `Plugin "${pluginId}" moved after uninstall preflight. Run preflight again.`,
           ),
-        );
+        ));
       }
       const currentPreflight = await this.operations.uninstallPreflight({
         dohcDir: this.dohcDir,
@@ -1542,14 +1545,14 @@ export class PluginPipeline {
         "changed after uninstall preflight",
       );
       if (staleReason !== null) {
-        return this.failure(
+        return existingHostResult(this.failure(
           pluginId,
           pipelineError(
             "uninstall",
             "confirmation-stale",
             `Plugin "${pluginId}" ${staleReason}. Review it again.`,
           ),
-        );
+        ));
       }
 
       // Guarded: candidate.id can collide with an unrelated, installed
@@ -1588,7 +1591,12 @@ export class PluginPipeline {
         // it also drains this id's own in-flight command claims and clears
         // its recovery state, for every identity being torn down here, not
         // only the primary one.
-        await Promise.all([...cleanupIds].map((id) => this.stopOldRuntime(id)));
+        await this.stopCleanupRuntimes(
+          cleanupIds,
+          pluginId,
+          change,
+          reservations,
+        );
 
         // Re-verify immediately before the actual delete: pluginHost.stop()
         // can take real wall-clock time (a grace period, then signal
@@ -1630,7 +1638,7 @@ export class PluginPipeline {
               error: detail,
             });
           }
-          return this.failure(pluginId, detail);
+          return existingHostResult(this.failure(pluginId, detail));
         }
 
         // Every delete is attempted even if another rejects, for every
@@ -1677,14 +1685,14 @@ export class PluginPipeline {
           resolve(entry.rootPath) !== resolve(candidate.rootPath)
         );
         this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
-        return {
+        return existingHostResult({
           ok: true,
           plugin: {
             ...this.baseStatus(candidate),
             status: "disabled",
             disabledReason: "user",
           },
-        };
+        });
       } catch (error) {
         // A failed delete must never disappear as a stuck "uninstalling"
         // spinner with orphaned files left behind and no way back in. The
@@ -1692,7 +1700,9 @@ export class PluginPipeline {
         // whatever survived) so a retry's preflight has something real to
         // re-check, and the status becomes the same actionable
         // disabled-pending-repair state a failed fresh install already uses.
-        const detail = pipelineError("uninstall", "delete-failed", errorMessage(error));
+        const detail = error instanceof PipelineFailure
+          ? error.detail
+          : pipelineError("uninstall", "delete-failed", errorMessage(error));
         if (this.ownsStatusEntry(candidate)) {
           this.setStatus(candidate, {
             status: "disabled-pending-repair",
@@ -1701,44 +1711,47 @@ export class PluginPipeline {
             error: detail,
           });
         }
-        return this.failure(pluginId, detail);
+        return existingHostResult(this.failure(pluginId, detail));
       }
-      }));
+    }, primaryReservation);
+    return action.finally(async () => {
+      await Promise.all(
+        [...reservations.entries()]
+          .filter(([id]) => id !== pluginId)
+          .map(([, reservation]) => reservation.cancel()),
+      );
+    });
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     this.abortController.abort();
-    await this.discoveryTail.catch(() => undefined);
-    await Promise.all(
-      [...this.queues.values()]
-        .map((queue) => queue.draining)
-        .filter((draining): draining is Promise<void> => draining !== null),
+    const closingOwnership = this.hostOwnership.close();
+    this.disposePromise = this.finishDispose(closingOwnership);
+    return this.disposePromise;
+  }
+
+  private async finishDispose(closingOwnership: Promise<void>): Promise<void> {
+    // Observe owner failure immediately even if a pipeline job takes longer
+    // to drain. Waiting to attach a handler until after the queues settle can
+    // surface a rejected stopAll() as an unhandled rejection in the interim.
+    const ownershipOutcome = closingOwnership.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
     );
-    // Drains every plugin's command claims before bumpGeneration/stopAll()
-    // abort their transports, so a command still mid-flight gets the wait
-    // this call exists to grant instead of being cut off the instant
-    // dispose starts (#779 round 19 finding 4: bumpGeneration aborts every
-    // spawn's in-flight SDK work synchronously, so it must run after this
-    // wait, not before it).
-    const pluginIds = [...this.statuses.keys()];
     try {
+      await this.discoveryTail.catch(() => undefined);
       await Promise.all(
-        pluginIds.map((pluginId) => this.options.awaitCommandClaimsDrained?.(pluginId)),
+        [...this.queues.values()]
+          .map((queue) => queue.draining)
+          .filter((draining): draining is Promise<void> => draining !== null),
       );
-      this.options.pluginHost.bumpGeneration();
-      await this.options.pluginHost.stopAll();
+      const outcome = await ownershipOutcome;
+      if (!outcome.ok) throw outcome.error;
     } finally {
-      // Resets rather than just lowers: this pipeline is gone for good,
-      // so any marker left under these keys would misattribute a later
-      // session's own host, opened under the same workspace/plugin key,
-      // to whatever this one never consumed.
-      for (const pluginId of pluginIds) {
-        this.options.resetCommandClaims?.(pluginId);
-      }
+      this.uninstallConfirmations.clear();
     }
-    this.uninstallConfirmations.clear();
   }
 
   private async startInternal(): Promise<void> {
@@ -1806,8 +1819,8 @@ export class PluginPipeline {
           // hash against this SAME approvedHash and correctly holds for
           // approval on the mismatch rather than auto-trusting it.
         }
-        this.enqueueSourceRefresh(candidate.id, () =>
-          this.reconcileApprovedCandidate(candidate.id, true));
+        this.enqueueSourceRefresh(candidate.id, (change) =>
+          this.reconcileApprovedCandidate(candidate.id, true, change));
       }
     } catch (error) {
       throw failureFromUnknown("discovery", "discovery-failed", error);
@@ -2086,14 +2099,14 @@ export class PluginPipeline {
     // both let byte-identical relocated content carry the old identity's
     // approval and running state across without ever holding for approval.
     for (const oldCandidate of departing) {
-      // The same exposure as any other action on this per-plugin queue
-      // (see withCommandClaimsBarrier): removeOldIdentity calls
-      // stopOldRuntime directly, so a command racing in while this
-      // cleanup still sits queued must refuse instead of claiming an
-      // identity this watcher batch is about to remove out from under it.
-      await this.withCommandClaimsBarrier(oldCandidate.id, () =>
-        this.enqueueActionValue(oldCandidate.id, () =>
-          this.removeOldIdentity(oldCandidate, renamedDirectory.get(oldCandidate.id))));
+      await this.enqueuePreservedBackground(oldCandidate.id, async (change) => {
+        await this.removeOldIdentity(
+          oldCandidate,
+          change,
+          renamedDirectory.get(oldCandidate.id),
+        );
+        return existingHostResult(undefined);
+      });
     }
     // The old identity's approval never carries to the replacement:
     // a manifest-name change or root swap is a new identity,
@@ -2103,8 +2116,8 @@ export class PluginPipeline {
     // does, and continuing seamlessly only when this identity's own
     // approval already matches its current content.
     for (const replacement of replacements) {
-      this.enqueueSourceRefresh(replacement.id, () =>
-        this.reconcileApprovedCandidate(replacement.id, true));
+      this.enqueueSourceRefresh(replacement.id, (change) =>
+        this.reconcileApprovedCandidate(replacement.id, true, change));
     }
 
     for (const candidate of nextValid) {
@@ -2120,8 +2133,8 @@ export class PluginPipeline {
         (entry.valid && entry.manifest !== null ? entry.id === candidate.id : true)
       );
       if (!old) continue;
-      this.enqueueSourceRefresh(candidate.id, () =>
-        this.reconcileApprovedCandidate(candidate.id, false));
+      this.enqueueSourceRefresh(candidate.id, (change) =>
+        this.reconcileApprovedCandidate(candidate.id, false, change));
     }
 
     // An invalid candidate (a broken manifest, or none at all) that was
@@ -2181,17 +2194,18 @@ export class PluginPipeline {
   private async reconcileApprovedCandidate(
     pluginId: string,
     startRuntime: boolean,
-  ): Promise<void> {
+    change: PluginHostChangeAuthority,
+  ): Promise<PluginHostStartResult<void>> {
     // Consumed first, before any early return: this is the refresh the racing
     // write queued, and a mark left behind by an install that never recorded
     // an approval would explain a later, unrelated hold (#803).
     const racedInstall = this.sourceChangedDuringInstall.delete(pluginId);
     const candidate = this.validCandidate(pluginId);
-    if (!candidate) return;
+    if (!candidate) return existingHostResult(undefined);
     const record = await this.localRecord(pluginId);
     if (!record?.approvedHash) {
       this.setStatus(candidate, { status: "discovered" });
-      return;
+      return existingHostResult(undefined);
     }
     // The disabled bit is the user's own choice only when the user chose
     // it: the approval path's hold also writes disabled: true, and a tree
@@ -2206,7 +2220,7 @@ export class PluginPipeline {
     // turns out to be a no-op (#779 round 20 finding 3).
     const priorStatus = this.statuses.get(pluginId);
     const verified = await this.verifyApprovedSource(candidate, record.approvedHash);
-    if (verified.kind === "failed") return;
+    if (verified.kind === "failed") return existingHostResult(undefined);
     if (verified.kind === "changed") {
       // The plugin's own last approved attempt, not a fresh out-of-band
       // change — buildFromCurrentSource's own retry path accepts this
@@ -2221,20 +2235,21 @@ export class PluginPipeline {
         verified.sourceHash === this.lastApprovedAttemptHash.get(pluginId)
       ) {
         this.setStatus(candidate, priorStatus);
-        return;
+        return existingHostResult(undefined);
       }
       const doorHash = await this.doorApprovedHash(pluginId, record.approvedHash);
       if (doorHash === null || verified.sourceHash !== doorHash) {
-        await this.holdForApproval(
+        return mapHostResult(await this.holdForApproval(
           candidate,
           verified.sourceHash,
           priorDisabledReason,
           racedInstall ? "changed-during-install" : "changed-after-install",
-        );
-        return;
+          undefined,
+          change,
+        ), () => undefined);
       }
       const disabled = priorDisabledReason === "user";
-      await this.runFullBuild({
+      return mapHostResult(await this.runFullBuild({
         candidate,
         startRuntime: !disabled,
         disabledReasonAfterBuild: disabled ? "user" : null,
@@ -2245,8 +2260,7 @@ export class PluginPipeline {
         // passed on is what stops a change landing in that window from
         // riding the door write to approval.
         expectedHash: doorHash,
-      });
-      return;
+      }, change), () => undefined);
     }
     this.setStatus(candidate, {
       sourceHash: verified.snapshot.sourceHash,
@@ -2271,33 +2285,32 @@ export class PluginPipeline {
           disabledReason: priorDisabledReason ?? "user",
           runtimeStatus: null,
         });
-        return;
+        return existingHostResult(undefined);
       }
-      await this.runFullBuild({
+      return mapHostResult(await this.runFullBuild({
         candidate,
         startRuntime: true,
         disabledReasonAfterBuild: null,
         resetCrashAccounting: true,
         freshInstall: false,
         expectedHash: record.approvedHash,
-      });
-      return;
+      }, change), () => undefined);
     }
-    if (!startRuntime || this.options.pluginHost.getStatus(pluginId)) {
+    if (!startRuntime || this.host.getStatus(pluginId)) {
       // A no-op reconcile (nothing to rebuild, nothing to start) must
       // restore the status this function's own snapshotOrThrow set to
       // "snapshotting" at the top — otherwise a watcher event for an
       // already-running, unchanged plugin left it permanently stuck
       // reading "Checking source" (fixround Section B item 12).
-      const runtimeStatus = this.options.pluginHost.getStatus(pluginId);
+      const runtimeStatus = this.host.getStatus(pluginId);
       this.setStatus(candidate, {
         status: runtimeStatus ?? "queued",
         runtimeStatus: runtimeStatus ?? null,
         error: null,
       });
-      return;
+      return existingHostResult(undefined);
     }
-    await this.runFullBuild({
+    return mapHostResult(await this.runFullBuild({
       candidate,
       startRuntime: true,
       disabledReasonAfterBuild: null,
@@ -2308,15 +2321,16 @@ export class PluginPipeline {
       // landing in between must hold for approval, not ride this reconcile
       // to auto-approval.
       expectedHash: record.approvedHash,
-    });
+    }, change), () => undefined);
   }
 
   private async removeOldIdentity(
     candidate: InstalledPluginRecord,
+    change: PluginHostChangeAuthority,
     renamedToDirectoryName?: string,
   ): Promise<void> {
     try {
-      await this.stopOldRuntime(candidate.id);
+      await this.stopOldRuntime(candidate.id, change);
       await this.operations.mutateRecord(
         this.options.stateDir,
         this.workspaceRoot,
@@ -2368,29 +2382,26 @@ export class PluginPipeline {
 
   private async stopOldRuntime(
     pluginId: string,
+    change: PluginHostChangeAuthority,
     onStopped?: () => void,
     markStopped?: () => void,
   ): Promise<void> {
-    // Waits for a command already running against this plugin to finish
-    // before the transport under it goes away, then lowers the hold in a
-    // finally so a stop that rejects still releases it.
-    const lowerBarrier = await this.options.awaitCommandClaimsDrained?.(pluginId);
-    try {
-      await this.options.pluginHost.stop(pluginId);
-    } catch (error) {
-      // PluginHost deletes its own record in shutdown()'s own finally
-      // regardless of whether the transport's own dispose() rejected, so a
-      // rejection here does not mean this runtime is still running. Only a
-      // record that is genuinely still there re-throws — this stop's own
-      // consequences below must not fire for a plugin that might still be
-      // alive (#779 round 19 finding 5).
-      if (this.options.pluginHost.getStatus(pluginId) !== undefined) throw error;
+    if (!this.host.currentRecord(pluginId)) return;
+    const stopped = await change.stop();
+    if (stopped.kind === "refused" || stopped.kind === "superseded") {
+      throw new PipelineFailure(this.hostChangeInProgressError(pluginId));
+    }
+    if (!stopped.drained) {
+      console.warn(
+        `[desktop] Plugin "${pluginId}" still has command claims outstanding ` +
+          `after ${COMMAND_CLAIMS_DRAIN_DEADLINE_MS} ms. Stopping its host anyway.`,
+      );
+    }
+    if (stopped.stopError !== undefined) {
       console.error(
         `[PluginPipeline] stop for "${pluginId}" rejected after its record was already gone.`,
-        error,
+        stopped.stopError,
       );
-    } finally {
-      lowerBarrier?.();
     }
     // The old runtime a recovery would have preserved is genuinely gone
     // now, whatever reason stopped it — the recovery this key stood for
@@ -2398,7 +2409,6 @@ export class PluginPipeline {
     // content that only happens to match again (#779 round 21 finding 3).
     this.recoveryState.delete(pluginId);
     this.lastApprovedAttemptHash.delete(pluginId);
-    this.options.onOldRuntimeStopBoundary?.(pluginId);
     // The stop already happened — mark it before running its consequences,
     // so a throwing notification can never look like the stop never occurred.
     markStopped?.();
@@ -2408,6 +2418,25 @@ export class PluginPipeline {
       // Best-effort: a notification failure must never corrupt build state.
       console.error(`[PluginPipeline] old-runtime-stopped notification failed for "${pluginId}".`, error);
     }
+  }
+
+  private startHost(
+    pluginRoot: string,
+    directoryName: string,
+    manifest: DohcPluginManifest,
+  ): Promise<PluginHostStartEvidence> {
+    // PluginHost.start returns as soon as the exact record exists. Activation
+    // continues under the host's own bounded promise and is not a pipeline
+    // admission condition.
+    return this.host.start(pluginRoot, directoryName, manifest);
+  }
+
+  private hostChangeInProgressError(pluginId: string): PluginPipelineError {
+    return pipelineError(
+      "runtime",
+      CLAIMS_DRAINING_ERROR_CODE,
+      `dohc is still working on plugin "${pluginId}". Try the command again in a moment.`,
+    );
   }
 
   /**
@@ -2495,14 +2524,15 @@ export class PluginPipeline {
 
   private async runFullBuild(
     input: FullBuildOptions,
-  ): Promise<PluginPipelineActionResult> {
+    change?: PluginHostChangeAuthority,
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const { candidate } = input;
-    const oldRuntime = this.options.pluginHost.getStatus(candidate.id) ?? null;
+    const oldRuntime = this.host.getStatus(candidate.id) ?? null;
     if (!candidate.manifest) {
-      return this.failure(
+      return existingHostResult(this.failure(
         candidate.id,
         pipelineError("discovery", "invalid-plugin", "Plugin manifest is invalid."),
-      );
+      ));
     }
     const validCandidate = { ...candidate, manifest: candidate.manifest };
     // Every setStatus call this attempt makes below — "snapshotting",
@@ -2514,6 +2544,7 @@ export class PluginPipeline {
     // whatever they drifted to along the way (#779 round 22 finding 5).
     const priorStatus = this.statuses.get(candidate.id) ?? null;
     let oldRuntimeStopped = false;
+    let startEvidence: PluginHostStartEvidence | null = null;
     let sourceHash: string | null = null;
     // The staged source tree, until it is published or discarded. Anything
     // that throws below leaves it staged, so the catch has to drop it.
@@ -2551,6 +2582,7 @@ export class PluginPipeline {
           priorDisabledReason,
           "changed-after-install",
           input.onOldRuntimeStopped,
+          change,
         );
       }
       // snapshotOrThrow's own digest is reused for the install baseline
@@ -2646,8 +2678,14 @@ export class PluginPipeline {
       // before the new process starts — unapproved bytes running under the
       // approvedBundleHash just recorded for them.
       if (oldRuntime) {
+        if (!change) {
+          throw new Error(
+            `Plugin "${candidate.id}" cannot replace a running host without change authority.`,
+          );
+        }
         await this.stopOldRuntime(
           candidate.id,
+          change,
           input.onOldRuntimeStopped,
           () => { oldRuntimeStopped = true; },
         );
@@ -2704,7 +2742,7 @@ export class PluginPipeline {
       if (input.startRuntime) {
         this.setStatus(candidate, { status: "starting", warnings });
         if (input.resetCrashAccounting) {
-          this.options.pluginHost.resetCrashAccounting(candidate.id);
+          this.host.resetCrashAccounting(candidate.id);
         }
         // The published bundle is re-read here, not trusted from the build:
         // approval binds the bytes that execute, and anything that reached
@@ -2719,7 +2757,7 @@ export class PluginPipeline {
               "for it. Install the plugin again.",
           ));
         }
-        await this.options.pluginHost.start(
+        startEvidence = await this.startHost(
           built.liveRoot,
           candidate.directoryName,
           generatedManifest(manifest),
@@ -2747,7 +2785,7 @@ export class PluginPipeline {
           ? { ...entry, manifest, iconPath: builtIcon }
           : entry
       );
-      return this.success(this.setStatus(candidate, {
+      const result = this.success(this.setStatus(candidate, {
         status: input.startRuntime ? "starting" : "disabled",
         disabledReason: input.disabledReasonAfterBuild,
         runtimeStatus: input.startRuntime ? "starting" : null,
@@ -2757,6 +2795,9 @@ export class PluginPipeline {
         warnings,
         error: null,
       }, { manifest, iconPath: builtIcon }));
+      return startEvidence
+        ? startedHostResult(result, startEvidence)
+        : existingHostResult(result);
     } catch (error) {
       await unpublishedSource?.discard().catch(() => undefined);
       const detail = error instanceof PipelineFailure
@@ -2769,7 +2810,7 @@ export class PluginPipeline {
       // the host directly reports what is actually running at the moment
       // of failure instead (#779 round 24 finding 2).
       const currentRuntimeStatus =
-        this.options.pluginHost.getStatus(candidate.id) ?? null;
+        this.host.getStatus(candidate.id) ?? null;
       if (input.freshInstall && oldRuntime === null) {
         await this.operations.mutateRecord(
           this.options.stateDir,
@@ -2812,7 +2853,10 @@ export class PluginPipeline {
             : {}),
         });
       }
-      return this.failure(candidate.id, detail);
+      const result = this.failure(candidate.id, detail);
+      return startEvidence
+        ? startedHostResult(result, startEvidence)
+        : existingHostResult(result);
     } finally {
       this.freshInstallsInFlight.delete(candidate.id);
     }
@@ -2834,7 +2878,8 @@ export class PluginPipeline {
     cause: "changed-after-install" | "changed-during-install" =
       "changed-after-install",
     onOldRuntimeStopped?: () => void,
-  ): Promise<PluginPipelineActionResult> {
+    change?: PluginHostChangeAuthority,
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const error = cause === "changed-during-install"
       ? pipelineError(
         "snapshot",
@@ -2849,15 +2894,22 @@ export class PluginPipeline {
           "Approve the new source to install it.",
       );
     try {
+      if (this.host.currentRecord(candidate.id)) {
+        if (!change) {
+          throw new Error(
+            `Plugin "${candidate.id}" cannot stop a running host without change authority.`,
+          );
+        }
+        await this.stopOldRuntime(candidate.id, change, onOldRuntimeStopped);
+      }
       await this.operations.mutateRecord(
         this.options.stateDir,
         this.workspaceRoot,
         candidate.id,
         (record) => ({ ...record, disabled: true }),
       );
-      await this.stopOldRuntime(candidate.id, onOldRuntimeStopped);
       const record = await this.localRecord(candidate.id);
-      return this.success(this.setStatus(candidate, {
+      return existingHostResult(this.success(this.setStatus(candidate, {
         status: "disabled-pending-approval",
         disabledReason: priorDisabledReason ?? "approval",
         runtimeStatus: null,
@@ -2865,12 +2917,12 @@ export class PluginPipeline {
         approvedHash: record?.approvedHash ?? null,
         installedBaselineHash: record?.installedBaselineHash ?? null,
         error,
-      }));
+      })));
     } catch (holdError) {
-      return this.failure(
-        candidate.id,
-        pipelineError("state", "approval-hold-failed", errorMessage(holdError)),
-      );
+      const detail = holdError instanceof PipelineFailure
+        ? holdError.detail
+        : pipelineError("state", "approval-hold-failed", errorMessage(holdError));
+      return existingHostResult(this.failure(candidate.id, detail));
     }
   }
 
@@ -2914,7 +2966,7 @@ export class PluginPipeline {
       const detail = error instanceof PipelineFailure
         ? error.detail
         : pipelineError("snapshot", "snapshot-failed", errorMessage(error));
-      const runtimeStatus = this.options.pluginHost.getStatus(candidate.id) ?? null;
+      const runtimeStatus = this.host.getStatus(candidate.id) ?? null;
       // This verify pass never touched the live root, so whatever it was
       // running is still running — the same "old runtime still serving a
       // failed candidate" case runFullBuild's own catch recovers from, and
@@ -3226,12 +3278,15 @@ export class PluginPipeline {
    */
   private async finishSourcelessUninstall(
     pluginId: string,
-    state: PluginLocalState,
-  ): Promise<PluginPipelineActionResult> {
+    cleanupIds: ReadonlySet<string>,
+    change: PluginHostChangeAuthority,
+    reservations: Map<string, PluginHostChangeReservation>,
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const status = this.statuses.get(pluginId);
     const candidate = this.sourcelessCandidate(pluginId);
-    if (!status || !candidate) return this.failure(pluginId, notDiscoveredError(pluginId));
-    const cleanupIds = new Set([pluginId, ...this.additionalCleanupIds(candidate, state)]);
+    if (!status || !candidate) {
+      return existingHostResult(this.failure(pluginId, notDiscoveredError(pluginId)));
+    }
     this.setStatus(candidate, {
       status: "uninstalling",
       disabledReason: "user",
@@ -3242,7 +3297,12 @@ export class PluginPipeline {
       // Every cleanup identity gets stopOldRuntime, not only pluginId's own
       // — cleanupIds is already scoped to identities that trace here, the
       // same reasoning uninstall()'s own normal path applies.
-      await Promise.all([...cleanupIds].map((id) => this.stopOldRuntime(id)));
+      await this.stopCleanupRuntimes(
+        cleanupIds,
+        pluginId,
+        change,
+        reservations,
+      );
       await Promise.all([...cleanupIds].map((id) => this.removePluginData(id)));
       await Promise.all(
         [...cleanupIds].map((id) =>
@@ -3258,20 +3318,22 @@ export class PluginPipeline {
       this.doorWrittenDeltas.delete(pluginId);
       this.lastApprovedAttemptHash.delete(pluginId);
       this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
-      return {
+      return existingHostResult({
         ok: true,
         plugin: {
           ...cloneStatus(status),
           status: "disabled",
           disabledReason: "user",
         },
-      };
+      });
     } catch (error) {
-      const detail = pipelineError(
-        "uninstall",
-        "delete-failed",
-        errorMessage(error),
-      );
+      const detail = error instanceof PipelineFailure
+        ? error.detail
+        : pipelineError(
+          "uninstall",
+          "delete-failed",
+          errorMessage(error),
+        );
       this.setStatus(candidate, {
         status: "disabled-pending-repair",
         disabledReason: "repair",
@@ -3279,8 +3341,38 @@ export class PluginPipeline {
         valid: status.valid,
         error: detail,
       });
-      return this.failure(pluginId, detail);
+      return existingHostResult(this.failure(pluginId, detail));
     }
+  }
+
+  private async stopCleanupRuntimes(
+    cleanupIds: ReadonlySet<string>,
+    primaryPluginId: string,
+    primaryChange: PluginHostChangeAuthority,
+    reservations: Map<string, PluginHostChangeReservation>,
+  ): Promise<void> {
+    await Promise.all([...cleanupIds].map(async (pluginId) => {
+      if (pluginId === primaryPluginId) {
+        await this.stopOldRuntime(pluginId, primaryChange);
+        return;
+      }
+      const reservation = reservations.get(pluginId);
+      if (!reservation) {
+        throw new Error(
+          `Plugin "${pluginId}" has no confirmed uninstall reservation.`,
+        );
+      }
+      const failure = await reservation.run(async (change) => {
+        let stopFailure: unknown;
+        try {
+          await this.stopOldRuntime(pluginId, change);
+        } catch (error) {
+          stopFailure = error;
+        }
+        return change.adopt(existingHostResult(stopFailure));
+      });
+      if (failure !== undefined) throw failure;
+    }));
   }
 
   private engineCaptureAvailable(): boolean {
@@ -3374,20 +3466,19 @@ export class PluginPipeline {
       resetCrashAccounting: boolean;
       runtimeErrorCode: string;
     },
-  ): Promise<PluginPipelineActionResult> {
+    change?: PluginHostChangeAuthority,
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const verified = await this.verifyApprovedSource(candidate, approvedHash);
-    if (verified.kind === "failed") return verified.result;
+    if (verified.kind === "failed") return existingHostResult(verified.result);
     if (verified.kind === "changed") {
-      // See hasOutstandingCommandClaim's own doc above (#779 round 25
-      // finding 3).
-      if (this.options.hasOutstandingCommandClaim?.(candidate.id)) {
-        return this.failure(candidate.id, pipelineError(
-          "runtime",
-          CLAIMS_DRAINING_ERROR_CODE,
-          `dohc is still working on plugin "${candidate.id}". Try the command again in a moment.`,
-        ));
-      }
-      return this.holdForApproval(candidate, verified.sourceHash);
+      return this.holdForApproval(
+        candidate,
+        verified.sourceHash,
+        undefined,
+        "changed-after-install",
+        undefined,
+        change,
+      );
     }
 
     const pluginId = candidate.id;
@@ -3404,9 +3495,10 @@ export class PluginPipeline {
         // what keeps an out-of-band write landing in that window from being
         // auto-approved — the same window closed on the door-write path.
         expectedHash: approvedHash,
-      });
+      }, change);
     }
 
+    let startEvidence: PluginHostStartEvidence | null = null;
     try {
       if (options.clearDisabled) {
         await this.operations.mutateRecord(
@@ -3417,26 +3509,32 @@ export class PluginPipeline {
         );
       }
       if (options.resetCrashAccounting) {
-        this.options.pluginHost.resetCrashAccounting(pluginId);
+        this.host.resetCrashAccounting(pluginId);
       }
-      if (!this.options.pluginHost.getStatus(pluginId)) {
-        await this.options.pluginHost.start(
+      if (!this.host.getStatus(pluginId)) {
+        startEvidence = await this.startHost(
           liveRoot,
           candidate.directoryName,
           generatedManifest(candidate.manifest),
         );
       }
-      return this.success(this.setStatus(candidate, {
+      const result = this.success(this.setStatus(candidate, {
         status: "starting",
         disabledReason: null,
         runtimeStatus: "starting",
         error: null,
       }));
+      return startEvidence
+        ? startedHostResult(result, startEvidence)
+        : existingHostResult(result);
     } catch (error) {
-      return this.failure(
+      const result = this.failure(
         pluginId,
         pipelineError("runtime", options.runtimeErrorCode, errorMessage(error)),
       );
+      return startEvidence
+        ? startedHostResult(result, startEvidence)
+        : existingHostResult(result);
     }
   }
 
@@ -3574,7 +3672,12 @@ export class PluginPipeline {
     });
   }
 
-  private enqueueSourceRefresh(pluginId: string, run: () => Promise<void>): void {
+  private enqueueSourceRefresh(
+    pluginId: string,
+    run: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostStartResult<void>>,
+  ): void {
     if (this.disposed) return;
     // Marked before the dedup: the refresh already queued is the one that
     // will read this change, so dropping this entry must not drop the fact
@@ -3585,66 +3688,70 @@ export class PluginPipeline {
     const queue = this.queueFor(pluginId);
     if (queue.sourceRefreshQueued) return;
     queue.sourceRefreshQueued = true;
-    // Raised inline rather than through withCommandClaimsBarrier: this
-    // method returns void (fire-and-forget, deduped), so there is no
-    // caller-held promise to lower on — the job's own closure below is the
-    // only thing that outlives this call. reconcileApprovedCandidate can
-    // reach stopOldRuntime the same way every other queued action can, so
-    // it shares the same rule (round-17 finding 4).
-    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
+    const reservation = this.hostOwnership.reserveChange(pluginId);
     queue.jobs.push({
       sourceRefresh: true,
       run: async () => {
         queue.sourceRefreshQueued = false;
-        try {
-          await run();
-        } finally {
-          lowerBarrier?.();
-        }
+        await reservation.run(async (change) =>
+          change.preserve(await run(change)));
       },
     });
     this.drain(pluginId, queue);
   }
 
-  /**
-   * Raises this plugin's command claims barrier before `run` enqueues, and
-   * lowers it once that call fully settles. Every queued job able to reach
-   * stopOldRuntime — directly, or via runFullBuild/holdForApproval — uses
-   * this uniformly: install, enable, disable, approve, rebuild, uninstall,
-   * the watcher's identity removal, and enqueueSourceRefresh's own
-   * reconciles (which raise inline, since their enqueue returns void).
-   * ensureStarted is the one exception: a command rechecks this same
-   * barrier at its own enqueue point instead (round-17 finding 2).
-   */
-  private withCommandClaimsBarrier<T>(
+  private enqueuePreservedBackground<T>(
     pluginId: string,
-    run: () => Promise<T>,
+    run: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostStartResult<T>>,
   ): Promise<T> {
-    const lowerBarrier = this.options.raiseCommandClaimsBarrier?.(pluginId);
-    if (!lowerBarrier) return run();
-    // A synchronous throw from run() never returns a promise for finally
-    // to attach to — caught here so the raise above is never stranded up
-    // (#779 round 22 findings 11-12).
-    try {
-      return run().finally(lowerBarrier);
-    } catch (error) {
-      lowerBarrier();
-      throw error;
-    }
+    const reservation = this.hostOwnership.reserveChange(pluginId);
+    return this.enqueueActionValue(pluginId, () =>
+      reservation.run(async (change) =>
+        change.preserve(await run(change))));
   }
 
-  private enqueueAction(
+  private enqueueAdoptedAction(
     pluginId: string,
-    run: () => Promise<PluginPipelineActionResult>,
+    run: (
+      change: PluginHostChangeAuthority,
+    ) => Promise<PluginHostStartResult<PluginPipelineActionResult>>,
+    reservation = this.hostOwnership.reserveChange(pluginId),
   ): Promise<PluginPipelineActionResult> {
+    return this.enqueueActionValue(pluginId, () =>
+      reservation.run(async (change) => {
+        let result: PluginHostStartResult<PluginPipelineActionResult>;
+        try {
+          result = await run(change);
+        } catch (error) {
+          const detail = error instanceof PipelineFailure
+            ? error.detail
+            : pipelineError("runtime", "action-failed", errorMessage(error));
+          result = existingHostResult(this.failure(pluginId, detail));
+        }
+        return change.adopt(result);
+      }));
+  }
+
+  private enqueueStartedValue(
+    pluginId: string,
+    run: () => Promise<PluginHostStartResult<PluginPipelineActionResult>>,
+  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     return this.enqueueActionValue(pluginId, async () => {
+      if (this.disposed) {
+        return existingHostResult(this.failure(
+          pluginId,
+          pipelineError("runtime", "pipeline-closed", "Plugin pipeline is closed."),
+        ));
+      }
       try {
         return await run();
       } catch (error) {
         const detail = error instanceof PipelineFailure
           ? error.detail
           : pipelineError("runtime", "action-failed", errorMessage(error));
-        return this.failure(pluginId, detail);
+        return existingHostResult(this.failure(pluginId, detail));
       }
     });
   }
