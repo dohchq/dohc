@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { assertInstanceBudget } from "./pluginWebAppInstances";
+import type {
+  PluginHostPanelDeclaration,
+  PluginHostRecordToken,
+} from "./PluginHost";
 import {
   PluginSurfaces,
+  type PluginPanelStartRequest,
   type PluginPanelStartAdmission,
   type PluginSurfaceHostLease,
   type PluginSurfaceStopTarget,
@@ -10,6 +15,7 @@ import {
   type PluginWebAppContainer,
   type PluginWebAppViewLike,
 } from "./pluginSurfaces";
+import { PluginWorkspaceEvents } from "./pluginWorkspaceEvents";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -89,15 +95,24 @@ beforeEach(() => {
   FakeView.onNextCreate = null;
 });
 
+const defaultHostRecord = {} as PluginHostRecordToken;
+
+type TestHostLease = PluginSurfaceHostLease & {
+  currentRecord(): PluginHostRecordToken | undefined;
+  releases: number;
+};
+
 function lease(options: {
   steps?: string[];
   label?: string;
   gate?: Promise<void>;
-} = {}): PluginSurfaceHostLease & { releases: number } {
+  record?: () => PluginHostRecordToken | undefined;
+} = {}): TestHostLease {
   return {
     releases: 0,
     start: async () => "spawn-1",
     currentSpawnId: () => "spawn-1",
+    currentRecord: options.record ?? (() => defaultHostRecord),
     async release() {
       this.releases += 1;
       options.steps?.push(`release:${options.label ?? "lease"}`);
@@ -183,8 +198,12 @@ function webAdmission(input: {
 
 function createSurfaces(options: {
   notifications?: string[];
+  invalidatedSurfaceIds?: number[];
+  invalidationError?: Error;
   errors?: unknown[];
   revoked?: string[];
+  revokedSurfaceIds?: number[];
+  workspaceEvents?: PluginWorkspaceEvents;
   boundWebContents?: FakeView["webContents"][];
 } = {}) {
   return new PluginSurfaces<FakeView>({
@@ -198,7 +217,26 @@ function createSurfaces(options: {
     clearGuestPartition: () => Promise.resolve(),
     notifyWebAppFailed: ({ pluginId }) =>
       options.notifications?.push(pluginId),
-    onPanelAuthorityRevoked: ({ panelId }) => options.revoked?.push(panelId),
+    notifyPanelInvalidated: ({ surfaceId }) => {
+      options.invalidatedSurfaceIds?.push(surfaceId);
+      if (options.invalidationError) throw options.invalidationError;
+    },
+    onPanelAuthorityRevoked: ({
+      workspaceId,
+      pluginId,
+      panelId,
+      surfaceId,
+    }) => {
+      options.revoked?.push(panelId);
+      options.revokedSurfaceIds?.push(surfaceId);
+      options.workspaceEvents?.disposeOwner({
+        kind: "panel",
+        workspaceId,
+        pluginId,
+        panelId,
+        surfaceId,
+      });
+    },
     onError: (error) => options.errors?.push(error),
   });
 }
@@ -207,18 +245,27 @@ const panelRequest = {
   workspaceId: "ws",
   pluginId: "plugin",
   panelId: "panel",
+  placement: "editor" as const,
   senderId: 7,
   generation: 1,
 };
 
+const declaredPanels = [{
+  id: "panel",
+  title: "Panel",
+  placement: "editor" as const,
+  entry: "panel/index.html",
+}];
+
 function panelAdmission(input: {
-  ownedLease: PluginSurfaceHostLease;
+  ownedLease: TestHostLease;
   spawn?: () => string;
   startGate?: Promise<void>;
   previewGate?: Promise<void>;
   onPreviewStart?: () => void;
   previewStop?: () => Promise<void>;
   url?: string;
+  panel?: Partial<PluginHostPanelDeclaration>;
 }): PluginPanelStartAdmission {
   const spawn = input.spawn ?? (() => "spawn-1");
   return {
@@ -228,7 +275,22 @@ function panelAdmission(input: {
         await input.startGate;
         return spawn();
       },
+      startPanel: async (panelId) => {
+        await input.startGate;
+        return {
+          spawnId: spawn(),
+          hostRecord: input.ownedLease.currentRecord() ?? defaultHostRecord,
+          panel: {
+            id: panelId,
+            title: "Panel",
+            entry: "panel/index.html",
+            placement: "editor",
+            ...input.panel,
+          },
+        };
+      },
       currentSpawnId: spawn,
+      currentRecord: () => input.ownedLease.currentRecord(),
       release: () => input.ownedLease.release(),
     }),
     startPreview: async () => {
@@ -257,6 +319,7 @@ async function startSurfacePair(
     ...scope,
     generation: 1,
     panelId: `${suffix}-panel`,
+    placement: "editor" as const,
   };
   const webApp = {
     ...scope,
@@ -325,6 +388,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
       clearPanelStorage: () => Promise.resolve(),
       clearGuestPartition: () => Promise.resolve(),
       notifyWebAppFailed: ({ pluginId }) => notifications.push(pluginId),
+      notifyPanelInvalidated: () => undefined,
       onError: (error) => {
         throw error;
       },
@@ -409,6 +473,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
       clearPanelStorage: () => Promise.resolve(),
       clearGuestPartition: () => Promise.resolve(),
       notifyWebAppFailed: () => steps.push("notify"),
+      notifyPanelInvalidated: () => undefined,
       onError: () => undefined,
     });
     const request = webRequest();
@@ -910,7 +975,18 @@ describe("PluginSurfaces web app attempt ownership", () => {
             assertAllowed: () => undefined,
             acquireHostLease: async () => ({
               start,
+              startPanel: async (panelId) => ({
+                spawnId: await start(),
+                hostRecord: defaultHostRecord,
+                panel: {
+                  id: panelId,
+                  title: "Panel",
+                  entry: "panel/index.html",
+                  placement: "editor",
+                },
+              }),
               currentSpawnId: () => "spawn-1",
+              currentRecord: () => defaultHostRecord,
               release,
             }),
             startPreview: async () => ({
@@ -1435,6 +1511,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
       notifyWebAppFailed: () => {
         throw new Error("renderer gone");
       },
+      notifyPanelInvalidated: () => undefined,
       onError: (error) => reported.push(error),
     });
     const request = webRequest();
@@ -1482,7 +1559,7 @@ describe("PluginSurfaces web app attempt ownership", () => {
 describe("PluginSurfaces panel authority", () => {
   function authorizeExact(
     surfaces: PluginSurfaces<FakeView>,
-    request: typeof panelRequest,
+    request: PluginPanelStartRequest,
     current: {
       generation: number;
       workspaceId: string | undefined;
@@ -1584,6 +1661,106 @@ describe("PluginSurfaces panel authority", () => {
     expect(restored.isPushLive()).toBe(true);
   });
 
+  it("keeps existing panel watch liveness across a failed host stop", async () => {
+    const revoked: string[] = [];
+    const surfaces = createSurfaces({ revoked });
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    const existingWatchAuthority = authorize(surfaces, current);
+
+    await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+      suspend({ workspaceId: "ws", pluginId: "plugin" });
+      expect(existingWatchAuthority.isPushLive()).toBe(false);
+      expect(revoked).toEqual([]);
+      return { ok: false };
+    });
+
+    expect(existingWatchAuthority.isPushLive()).toBe(true);
+    expect(revoked).toEqual([]);
+  });
+
+  it("failed suspension retires only the replaced panel's watches", async () => {
+    const events = new PluginWorkspaceEvents();
+    const revokedSurfaceIds: number[] = [];
+    const oldEvents: string[] = [];
+    const successorEvents: string[] = [];
+    const surfaces = createSurfaces({
+      revokedSurfaceIds,
+      workspaceEvents: events,
+    });
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    const old = authorize(surfaces, current);
+    const oldOwner = {
+      kind: "panel" as const,
+      workspaceId: "ws",
+      pluginId: "plugin",
+      panelId: "panel",
+      surfaceId: old.surfaceId,
+    };
+    const oldSubscription = events.subscribe(
+      {
+        owner: oldOwner,
+        emitEvent: () => {
+          if (old.isPushLive()) oldEvents.push("change");
+        },
+      },
+      { path: "docs" },
+    );
+
+    let successor!: ReturnType<typeof authorize>;
+    let successorOwner!: typeof oldOwner;
+    await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+      suspend({ workspaceId: "ws", pluginId: "plugin" });
+      await surfaces.startPanel(
+        panelRequest,
+        panelAdmission({ ownedLease: lease() }),
+      );
+      successor = authorize(surfaces, current);
+      successorOwner = { ...oldOwner, surfaceId: successor.surfaceId };
+      events.subscribe(
+        {
+          owner: successorOwner,
+          emitEvent: () => {
+            if (successor.isPushLive()) successorEvents.push("change");
+          },
+        },
+        { path: "docs" },
+      );
+      return { ok: false };
+    });
+
+    expect(successor.surfaceId).not.toBe(old.surfaceId);
+    expect(revokedSurfaceIds).toEqual([old.surfaceId]);
+    expect(old.isPushLive()).toBe(false);
+    expect(successor.isPushLive()).toBe(true);
+    expect(
+      events.unsubscribe(
+        { owner: oldOwner },
+        { subscriptionId: oldSubscription.subscriptionId },
+      ),
+    ).toBe(false);
+    events.handleWatcherEvents([
+      { path: "docs/after.md", operation: "update", sha256: "next" },
+    ]);
+    expect(oldEvents).toEqual([]);
+    expect(successorEvents).toEqual(["change"]);
+  });
+
   it("restores every still-live alias and primary suspension after a failed uninstall", async () => {
     const surfaces = createSurfaces();
     const current = {
@@ -1623,6 +1800,47 @@ describe("PluginSurfaces panel authority", () => {
     expect(authorizeExact(surfaces, alias, current).isPushLive()).toBe(true);
   });
 
+  it("finalizes an earlier alias stop while restoring a later failed alias", async () => {
+    const revoked: string[] = [];
+    const surfaces = createSurfaces({ revoked });
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    const stopped = { ...panelRequest, panelId: "stopped-panel" };
+    const retained = {
+      ...panelRequest,
+      pluginId: "plugin-alias",
+      panelId: "retained-panel",
+    };
+    await surfaces.startPanel(
+      stopped,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    await surfaces.startPanel(
+      retained,
+      panelAdmission({ ownedLease: lease() }),
+    );
+    const retainedWatchAuthority = authorizeExact(surfaces, retained, current);
+
+    await surfaces.withPluginSdkGrantSuspensions(async (suspend) => {
+      suspend({ workspaceId: "ws", pluginId: stopped.pluginId });
+      await surfaces.stop({
+        kind: "plugin",
+        workspaceId: "ws",
+        pluginId: stopped.pluginId,
+      });
+      suspend({ workspaceId: "ws", pluginId: retained.pluginId });
+      return { ok: false };
+    });
+
+    expect(revoked).toEqual(["stopped-panel"]);
+    expect(retainedWatchAuthority.isPushLive()).toBe(true);
+    expect(() => authorizeExact(surfaces, stopped, current)).toThrow();
+    expect(authorizeExact(surfaces, retained, current).isPushLive()).toBe(true);
+  });
+
   it.each(["changed", "absent"] as const)(
     "does not restore a tentative grant when the captured spawn is %s",
     async (change) => {
@@ -1652,7 +1870,8 @@ describe("PluginSurfaces panel authority", () => {
   );
 
   it("does not restore a tentative grant after a successful stop", async () => {
-    const surfaces = createSurfaces();
+    const revoked: string[] = [];
+    const surfaces = createSurfaces({ revoked });
     await surfaces.startPanel(
       panelRequest,
       panelAdmission({ ownedLease: lease() }),
@@ -1674,6 +1893,7 @@ describe("PluginSurfaces panel authority", () => {
         spawnId: "spawn-1",
       })
     ).toThrow();
+    expect(revoked).toEqual(["panel"]);
   });
 
   it("restores tentative grants before rethrowing an action failure", async () => {
@@ -1790,7 +2010,8 @@ describe("PluginSurfaces panel authority", () => {
   it("regrants only the retained exact panel after terminal then ready", async () => {
     FakeView.created = [];
     const revoked: string[] = [];
-    const surfaces = createSurfaces({ revoked });
+    const invalidatedSurfaceIds: number[] = [];
+    const surfaces = createSurfaces({ revoked, invalidatedSurfaceIds });
     const current = {
       generation: 1,
       workspaceId: "ws" as string | undefined,
@@ -1831,12 +2052,15 @@ describe("PluginSurfaces panel authority", () => {
     });
     expect(second.authority.signal.aborted).toBe(true);
     expect(second.isPushLive()).toBe(false);
+    expect(invalidatedSurfaceIds).toEqual([]);
     await turns();
     expect(FakeView.created[0]!.closed).toBe(1);
     surfaces.hostReady({
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "stale-spawn",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     await turns();
     expect(() => authorize(surfaces, current)).toThrow();
@@ -1844,11 +2068,15 @@ describe("PluginSurfaces panel authority", () => {
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "spawn-2",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     surfaces.hostReady({
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "spawn-2",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     await turns();
 
@@ -1858,6 +2086,184 @@ describe("PluginSurfaces panel authority", () => {
     expect(first.isPushLive()).toBe(false);
     expect(second.isPushLive()).toBe(false);
     expect(revoked).toEqual(["panel", "panel"]);
+    expect(invalidatedSurfaceIds).toEqual([]);
+  });
+
+  it.each([
+    ["removed", []],
+    [
+      "moved",
+      [{
+        id: "panel",
+        title: "Panel",
+        placement: "view" as const,
+        entry: "panel/index.html",
+      }],
+    ],
+    [
+      "entry changed",
+      [{
+        id: "panel",
+        title: "Panel",
+        placement: "editor" as const,
+        entry: "other/index.html",
+      }],
+    ],
+  ] as const)(
+    "disposes a retained panel whose declaration was %s before host ready",
+    async (_case, currentDeclarations) => {
+      const current = {
+        generation: 1,
+        workspaceId: "ws" as string | undefined,
+        spawnId: "spawn-1" as string | undefined,
+      };
+      const ownedLease = lease();
+      const stopPreview = vi.fn(async () => undefined);
+      const invalidatedSurfaceIds: number[] = [];
+      const surfaces = createSurfaces({ invalidatedSurfaceIds });
+      const started = await surfaces.startPanel(
+        panelRequest,
+        panelAdmission({
+          ownedLease,
+          spawn: () => current.spawnId ?? "missing",
+          previewStop: stopPreview,
+        }),
+      );
+      current.spawnId = "spawn-2";
+
+      surfaces.hostChanged({
+        kind: "terminal",
+        workspaceId: "ws",
+        pluginId: "plugin",
+      });
+      await surfaces.hostReady({
+        workspaceId: "ws",
+        pluginId: "plugin",
+        spawnId: "spawn-2",
+        hostRecord: defaultHostRecord,
+        declaredPanels: currentDeclarations,
+      });
+      await turns();
+
+      expect(stopPreview).toHaveBeenCalledOnce();
+      expect(ownedLease.releases).toBe(1);
+      expect(invalidatedSurfaceIds).toEqual([started.surfaceId]);
+      expect(() => authorize(surfaces, current)).toThrow();
+    },
+  );
+
+  it("disposes a retained panel when a new host record runs the same entry", async () => {
+    const firstRecord = {} as PluginHostRecordToken;
+    const replacementRecord = {} as PluginHostRecordToken;
+    let currentRecord = firstRecord;
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    const ownedLease = lease({ record: () => currentRecord });
+    const stopPreview = vi.fn(async () => undefined);
+    const invalidatedSurfaceIds: number[] = [];
+    const invalidationError = new Error("renderer disappeared");
+    const errors: unknown[] = [];
+    const surfaces = createSurfaces({
+      errors,
+      invalidatedSurfaceIds,
+      invalidationError,
+    });
+    const started = await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({
+        ownedLease,
+        spawn: () => current.spawnId ?? "missing",
+        previewStop: stopPreview,
+      }),
+    );
+
+    current.spawnId = "spawn-2";
+    currentRecord = replacementRecord;
+    surfaces.hostChanged({
+      kind: "terminal",
+      workspaceId: "ws",
+      pluginId: "plugin",
+    });
+    await surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-2",
+      hostRecord: replacementRecord,
+      declaredPanels,
+    });
+    await turns();
+
+    expect(stopPreview).toHaveBeenCalledOnce();
+    expect(ownedLease.releases).toBe(1);
+    expect(invalidatedSurfaceIds).toEqual([started.surfaceId]);
+    expect(errors).toEqual([invalidationError]);
+    expect(() => authorize(surfaces, current)).toThrow();
+  });
+
+  it("does not let stale-declaration cleanup cancel an admitted moved successor", async () => {
+    const current = {
+      generation: 1,
+      workspaceId: "ws" as string | undefined,
+      spawnId: "spawn-1" as string | undefined,
+    };
+    const oldLease = lease();
+    const successorLease = lease();
+    const stopOldPreview = vi.fn(async () => undefined);
+    const surfaces = createSurfaces();
+    await surfaces.startPanel(
+      panelRequest,
+      panelAdmission({
+        ownedLease: oldLease,
+        spawn: () => current.spawnId ?? "missing",
+        previewStop: stopOldPreview,
+      }),
+    );
+    current.spawnId = "spawn-2";
+    surfaces.hostChanged({
+      kind: "terminal",
+      workspaceId: "ws",
+      pluginId: "plugin",
+    });
+
+    const successor = { ...panelRequest, placement: "view" as const };
+    const successorStart = surfaces.startPanel(
+      successor,
+      panelAdmission({
+        ownedLease: successorLease,
+        spawn: () => current.spawnId ?? "missing",
+        panel: { placement: "view" },
+      }),
+    );
+    const ready = surfaces.hostReady({
+      workspaceId: "ws",
+      pluginId: "plugin",
+      spawnId: "spawn-2",
+      hostRecord: defaultHostRecord,
+      declaredPanels: [
+        {
+          id: "panel",
+          title: "Panel",
+          placement: "view",
+          entry: "panel/index.html",
+        },
+      ],
+    });
+
+    await expect(successorStart).resolves.toEqual({
+      url: "http://127.0.0.1:4100/panel.html",
+      title: "Panel",
+      surfaceId: expect.any(Number),
+    });
+    await ready;
+
+    expect(stopOldPreview).toHaveBeenCalledOnce();
+    expect(oldLease.releases).toBe(1);
+    expect(successorLease.releases).toBe(0);
+    expect(authorizeExact(surfaces, successor, current).isPushLive()).toBe(true);
+    await surfaces.close();
   });
 
   it("rejects an installed panel replacement overtaken by a host change", async () => {
@@ -2000,7 +2406,11 @@ describe("PluginSurfaces panel authority", () => {
         panelRequest,
         panelAdmission({ ownedLease: lease() }),
       ),
-    ).resolves.toEqual({ url: "http://127.0.0.1:4100/panel.html" });
+    ).resolves.toEqual({
+      url: "http://127.0.0.1:4100/panel.html",
+      title: "Panel",
+      surfaceId: expect.any(Number),
+    });
   });
 
   it("does not regrant a ready event queued before permanent close", async () => {
@@ -2033,6 +2443,8 @@ describe("PluginSurfaces panel authority", () => {
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "spawn-2",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     const closing = surfaces.close();
     await Promise.resolve();
@@ -2048,6 +2460,8 @@ describe("PluginSurfaces panel authority", () => {
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "spawn-2",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     await turns();
     expect(() => authorize(surfaces, current)).toThrow();
@@ -2080,6 +2494,8 @@ describe("PluginSurfaces panel authority", () => {
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "spawn-2",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     surfaces.hostChanged({
       kind: "terminal",
@@ -2139,15 +2555,21 @@ describe("PluginSurfaces panel authority", () => {
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "spawn-1",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     surfaces.hostReady({
       workspaceId: "ws",
       pluginId: "plugin",
       spawnId: "spawn-1",
+      hostRecord: defaultHostRecord,
+      declaredPanels,
     });
     previewGate.resolve();
     await expect(successorPanelStart).resolves.toEqual({
       url: "http://127.0.0.1:4101/new",
+      title: "Panel",
+      surfaceId: expect.any(Number),
     });
     const successorGrant = authorize(surfaces, {
       generation: 2,
@@ -2363,6 +2785,7 @@ describe("PluginSurfaces view operations", () => {
         notifications.push(instanceKey);
         if (instanceKey === "first") throw failure;
       },
+      notifyPanelInvalidated: () => undefined,
       onError: (error) => errors.push(error),
     });
     await surfaces.startWebApp(
@@ -2400,6 +2823,7 @@ describe("PluginSurfaces view operations", () => {
         cleared.push(partition);
       },
       notifyWebAppFailed: ({ pluginId }) => notifications.push(pluginId),
+      notifyPanelInvalidated: () => undefined,
       onError: () => undefined,
     });
     await surfaces.startWebApp(
@@ -2432,6 +2856,7 @@ describe("PluginSurfaces view operations", () => {
         await clear.promise;
       },
       notifyWebAppFailed: () => undefined,
+      notifyPanelInvalidated: () => undefined,
       onError: () => undefined,
     });
     await surfaces.startWebApp(
@@ -2472,6 +2897,7 @@ describe("PluginSurfaces view operations", () => {
         if (clearCount === 1) await firstClear.promise;
       },
       notifyWebAppFailed: () => undefined,
+      notifyPanelInvalidated: () => undefined,
       onError: () => undefined,
     });
     const target = {
@@ -2513,6 +2939,7 @@ describe("PluginSurfaces view operations", () => {
       clearPanelStorage: () => Promise.resolve(),
       clearGuestPartition: () => clear.promise,
       notifyWebAppFailed: () => undefined,
+      notifyPanelInvalidated: () => undefined,
       onError: () => undefined,
     });
     const stopping = surfaces.stop({

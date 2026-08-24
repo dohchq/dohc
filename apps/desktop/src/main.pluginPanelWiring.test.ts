@@ -75,22 +75,28 @@ describe("plugin panel main-process wiring", () => {
     );
   });
 
-  it("keeps manifest placement and snapshot serving outside the surface owner", () => {
+  it("starts panel previews from the exact active host declaration", () => {
     const start = handler("startPluginPanel");
-    const panelAt = start.indexOf("plugin.manifest.panels?.find(");
-    const placementAt = start.indexOf("panel.placement !== input.placement", panelAt);
-    const ownerAt = start.indexOf("pluginSurfaces.startPanel(", placementAt);
+    const ownerAt = start.indexOf("pluginSurfaces.startPanel(");
+    const leaseAt = start.indexOf(
+      "createPluginPanelSurfaceHostLease(pipeline, input.pluginId)",
+      ownerAt,
+    );
+    const declarationAt = start.indexOf("startPreview: async (panel) =>", leaseAt);
     const snapshotAt = start.indexOf("pluginSnapshotRoot(workspace, input.pluginId)", ownerAt);
     const previewAt = start.indexOf("startStaticDirectoryPreview(dirname(entryPath)", snapshotAt);
-    expect(panelAt).toBeGreaterThan(-1);
-    expect(placementAt).toBeGreaterThan(panelAt);
-    expect(ownerAt).toBeGreaterThan(placementAt);
-    expect(snapshotAt).toBeGreaterThan(ownerAt);
+    expect(ownerAt).toBeGreaterThan(-1);
+    expect(leaseAt).toBeGreaterThan(ownerAt);
+    expect(declarationAt).toBeGreaterThan(leaseAt);
+    expect(snapshotAt).toBeGreaterThan(declarationAt);
     expect(previewAt).toBeGreaterThan(snapshotAt);
     expect(start).toContain("assertAllowed: () => {");
     expect(start).toContain("acquireHostLease: async () => {");
-    expect(start).toContain("return createPluginSurfaceHostLease(pipeline, input.pluginId);");
-    expect(start).toContain("title: panel.title,");
+    expect(start).toContain("placement: input.placement,");
+    expect(start).toContain("const entryPath = join(snapshotRoot, panel.entry);");
+    expect(start).toContain("title: started.title,");
+    expect(start).toContain("surfaceId: started.surfaceId,");
+    expect(start).not.toContain("plugin.manifest.panels");
 
     const lookup = functionSource("function registeredPlugin(");
     expect(lookup).toContain("resolveRegisteredPlugin(");
@@ -117,6 +123,36 @@ describe("plugin panel main-process wiring", () => {
     );
     expect(invoke).toContain(
       "workspaceEvents.unsubscribe({ owner }, watchParams)",
+    );
+  });
+
+  it("sends panel invalidation only to the exact renderer generation", () => {
+    const notify = functionSource("function notifyPluginPanelInvalidated(");
+    const destroyedAt = notify.indexOf("sender.isDestroyed()");
+    const generationAt = notify.indexOf(
+      "rendererGeneration(sender.id) !== generation",
+      destroyedAt,
+    );
+    const parseAt = notify.indexOf(
+      "PluginPanelInvalidatedEvent.parse(event)",
+      generationAt,
+    );
+    const sendAt = notify.indexOf("sender.send(", generationAt);
+    expect(destroyedAt).toBeGreaterThan(-1);
+    expect(generationAt).toBeGreaterThan(destroyedAt);
+    expect(sendAt).toBeGreaterThan(generationAt);
+    expect(parseAt).toBeGreaterThan(sendAt);
+
+    const surfaces = sourceBlock(
+      "const pluginSurfaces = new PluginSurfaces<WebContentsView>({",
+      "\n});",
+    );
+    expect(surfaces).toContain(
+      "notifyPanelInvalidated: ({ senderId, generation, ...event }) => {",
+    );
+    expect(surfaces).toContain("webContents.fromId(senderId)");
+    expect(surfaces).toContain(
+      "notifyPluginPanelInvalidated(sender, generation, event)",
     );
   });
 
@@ -192,6 +228,30 @@ describe("plugin panel main-process wiring", () => {
     expect(pipelineStartAt).toBeGreaterThan(startAt);
     expect(adapter).toContain("currentSpawnId: () => host.getSpawnId(pluginId)");
     expect(adapter).toContain("release: () => lease.release()");
+
+    const panelAdapter = functionSource(
+      "function createPluginPanelSurfaceHostLease(",
+    );
+    const startPanelAt = panelAdapter.indexOf("startPanel: async (panelId) => {");
+    const panelStartAt = panelAdapter.indexOf(
+      "const spawnId = await lease.start();",
+      startPanelAt,
+    );
+    const snapshotAt = panelAdapter.indexOf(
+      "host.readyPanelsForSpawn(pluginId, spawnId)",
+      panelStartAt,
+    );
+    const declarationAt = panelAdapter.indexOf(
+      "ready?.panels.find((candidate) => candidate.id === panelId)",
+      snapshotAt,
+    );
+    expect(startPanelAt).toBeGreaterThan(-1);
+    expect(panelStartAt).toBeGreaterThan(startPanelAt);
+    expect(snapshotAt).toBeGreaterThan(panelStartAt);
+    expect(declarationAt).toBeGreaterThan(snapshotAt);
+    expect(panelAdapter).toContain(
+      "return { spawnId, hostRecord: ready.record, panel };",
+    );
   });
 
   it("revokes surfaces synchronously when the exact host spawn ends", () => {
@@ -235,16 +295,28 @@ describe("plugin panel main-process wiring", () => {
       'pluginHost.getStatus(pluginId) !== "ready"',
       spawnAt,
     );
-    const deleteAt = pipeline.indexOf("pluginIdsWithEndedSpawn.delete(pluginId)", currentAt);
+    const snapshotAt = pipeline.indexOf(
+      "pluginHost.readyPanelsForSpawn(pluginId, spawnId)",
+      currentAt,
+    );
+    const deleteAt = pipeline.indexOf("pluginIdsWithEndedSpawn.delete(pluginId)", snapshotAt);
     const regrantAt = pipeline.indexOf("pluginSurfaces.hostReady({", deleteAt);
     expect(noteAt).toBeGreaterThan(statusAt);
     expect(readyAt).toBeGreaterThan(noteAt);
     expect(spawnAt).toBeGreaterThan(readyAt);
     expect(currentAt).toBeGreaterThan(spawnAt);
-    expect(deleteAt).toBeGreaterThan(currentAt);
+    expect(snapshotAt).toBeGreaterThan(currentAt);
+    expect(deleteAt).toBeGreaterThan(snapshotAt);
     expect(regrantAt).toBeGreaterThan(deleteAt);
-    expect(squeeze(pipeline.slice(regrantAt, regrantAt + 180))).toContain(
+    const regrant = squeeze(pipeline.slice(regrantAt, regrantAt + 360));
+    expect(regrant).toContain(
       "workspaceId:workspace.workspaceId,pluginId,spawnId,",
+    );
+    expect(regrant).toContain(
+      "hostRecord:readyPanels.record,declaredPanels:readyPanels.panels,",
+    );
+    expect(pipeline.slice(statusAt, regrantAt)).not.toContain(
+      "pluginRegistration(pluginId)",
     );
   });
 

@@ -148,6 +148,7 @@ import {
   LaunchMarksResult,
   OpenPluginPanelPayload,
   OpenPluginPanelResult,
+  PluginPanelInvalidatedEvent,
   StartPluginPanelPayload,
   StartPluginPanelResult,
   StopPluginPanelPayload,
@@ -747,6 +748,7 @@ import {
 } from "./plugins/pluginWebAppInstances";
 import {
   PluginSurfaces,
+  type PluginPanelHostLease,
   type PluginSurfaceHostLease,
   type PluginWebAppContainer,
   type PluginWebAppHostLease,
@@ -1184,15 +1186,18 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       const spawnId = pluginHost.getSpawnId(pluginId);
       if (
         pluginHost.getStatus(pluginId) !== "ready" ||
-        !spawnId ||
-        !pluginIdsWithEndedSpawn.delete(pluginId)
+        !spawnId
       ) {
         return;
       }
-      pluginSurfaces.hostReady({
+      const readyPanels = pluginHost.readyPanelsForSpawn(pluginId, spawnId);
+      if (!readyPanels || !pluginIdsWithEndedSpawn.delete(pluginId)) return;
+      void pluginSurfaces.hostReady({
         workspaceId: workspace.workspaceId,
         pluginId,
         spawnId,
+        hostRecord: readyPanels.record,
+        declaredPanels: readyPanels.panels,
       });
     },
   });
@@ -3308,6 +3313,29 @@ function createPluginSurfaceHostLease(
   };
 }
 
+function createPluginPanelSurfaceHostLease(
+  pipeline: PluginPipeline,
+  pluginId: string,
+): PluginPanelHostLease {
+  const host = pipeline.host;
+  const lease = createPluginSurfaceHostLease(pipeline, pluginId);
+  return {
+    ...lease,
+    currentRecord: () => host.currentRecord(pluginId),
+    startPanel: async (panelId) => {
+      const spawnId = await lease.start();
+      const ready = host.readyPanelsForSpawn(pluginId, spawnId);
+      const panel = ready?.panels.find((candidate) => candidate.id === panelId);
+      if (!ready || !panel) {
+        throw new Error(
+          `Plugin "${pluginId}" does not declare panel "${panelId}" in its active runtime.`,
+        );
+      }
+      return { spawnId, hostRecord: ready.record, panel };
+    },
+  };
+}
+
 function createPluginWebAppHostLease(
   pipeline: PluginPipeline,
   pluginId: string,
@@ -3370,6 +3398,18 @@ function notifyPluginWebAppFailed(
   sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
 }
 
+function notifyPluginPanelInvalidated(
+  sender: WebContents,
+  generation: number,
+  event: PluginPanelInvalidatedEvent,
+): void {
+  if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) return;
+  sender.send(
+    CHANNELS.pluginPanelInvalidated,
+    PluginPanelInvalidatedEvent.parse(event),
+  );
+}
+
 const pluginSurfaces = new PluginSurfaces<WebContentsView>({
   ViewClass: WebContentsView,
   bindWebAppZoom: bindGuestZoom,
@@ -3382,12 +3422,17 @@ const pluginSurfaces = new PluginSurfaces<WebContentsView>({
     const sender = webContents.fromId(senderId);
     if (sender) notifyPluginWebAppFailed(sender, generation, event);
   },
-  onPanelAuthorityRevoked: ({ workspaceId, pluginId, panelId }) => {
+  notifyPanelInvalidated: ({ senderId, generation, ...event }) => {
+    const sender = webContents.fromId(senderId);
+    if (sender) notifyPluginPanelInvalidated(sender, generation, event);
+  },
+  onPanelAuthorityRevoked: ({ workspaceId, pluginId, panelId, surfaceId }) => {
     pluginWorkspaceEventsByWorkspace.get(workspaceId)?.disposeOwner({
       kind: "panel",
       workspaceId,
       pluginId,
       panelId,
+      surfaceId,
     });
   },
   onError: (error, context) => {
@@ -7696,33 +7741,19 @@ function registerIpcHandlers(
       activeWorkspaceIdBySender.get(sender.id) === workspace.workspaceId;
     requireCurrentRenderer(isCurrent);
     assertWritableWorkspace(workspace);
-    const plugin = registeredPlugin(workspace.workspaceId, input.pluginId);
-    if (!plugin) {
+    const currentPipeline = pluginPipelines.get(workspace.workspaceId);
+    if (
+      !currentPipeline?.host.currentRecord(input.pluginId) &&
+      !registeredPlugin(workspace.workspaceId, input.pluginId)
+    ) {
       return StartPluginPanelResult.parse({ status: "not-registered" });
-    }
-    const panel = plugin.manifest.panels?.find(
-      (candidate) => candidate.id === input.panelId,
-    );
-    if (!panel) {
-      throw new Error(
-        `Plugin "${input.pluginId}" does not declare panel "${input.panelId}".`,
-      );
-    }
-    // One panel runs once per workspace, so it belongs in one place. A tab
-    // restored from before an update can still name a panel the plugin has
-    // since moved to the view rail.
-    if (panel.placement !== input.placement) {
-      throw new Error(
-        `Plugin "${input.pluginId}" panel "${input.panelId}" has placement ` +
-          `"${panel.placement}", so it cannot open with placement ` +
-          `"${input.placement}".`,
-      );
     }
     const started = await pluginSurfaces.startPanel(
       {
         workspaceId: workspace.workspaceId,
         pluginId: input.pluginId,
         panelId: input.panelId,
+        placement: input.placement,
         senderId: sender.id,
         generation,
       },
@@ -7735,9 +7766,9 @@ function registerIpcHandlers(
           const pipeline = await ensurePluginPipeline(workspace);
           requireCurrentRenderer(isCurrent);
           assertWritableWorkspace(workspace);
-          return createPluginSurfaceHostLease(pipeline, input.pluginId);
+          return createPluginPanelSurfaceHostLease(pipeline, input.pluginId);
         },
-        startPreview: async () => {
+        startPreview: async (panel) => {
           const snapshotRoot = pluginSnapshotRoot(workspace, input.pluginId);
           const entryPath = join(snapshotRoot, panel.entry);
           const handle = await startStaticDirectoryPreview(dirname(entryPath), {
@@ -7752,7 +7783,8 @@ function registerIpcHandlers(
     return StartPluginPanelResult.parse({
       status: "ok",
       url: started.url,
-      title: panel.title,
+      title: started.title,
+      surfaceId: started.surfaceId,
     });
   });
 
@@ -7836,7 +7868,7 @@ function registerIpcHandlers(
     const input = InvokePluginPanelSdkPayload.parse(payload);
     const sender = event.sender;
     const workspaceEvents = pluginWorkspaceEventsByWorkspace.get(input.workspaceId);
-    const { authority, isPushLive } = pluginSurfaces.authorizePanelSdk({
+    const { authority, surfaceId, isPushLive } = pluginSurfaces.authorizePanelSdk({
       workspaceId: input.workspaceId,
       pluginId: input.pluginId,
       panelId: input.panelId,
@@ -7854,6 +7886,7 @@ function registerIpcHandlers(
       workspaceId: authority.workspaceId,
       pluginId: authority.pluginId,
       panelId: authority.panelId,
+      surfaceId,
     };
     const emitEvent = workspaceEvents
       ? createPluginPanelFileWatchEmitter({

@@ -12,6 +12,10 @@ import {
   type PluginPanelSdkGrant,
 } from "./pluginPanelSdkAuthority";
 import { withKeyedStartLock } from "../workspaces/sitePreviewLifecycle";
+import type {
+  PluginHostPanelDeclaration,
+  PluginHostRecordToken,
+} from "./PluginHost";
 
 export interface PluginSurfaceIdentity {
   workspaceId: string;
@@ -40,6 +44,18 @@ export interface PluginSurfaceHostLease {
   release(): Promise<void>;
 }
 
+interface PluginPanelHostBinding {
+  readonly spawnId: string;
+  readonly hostRecord: PluginHostRecordToken;
+  readonly panel: PluginHostPanelDeclaration;
+}
+
+export interface PluginPanelHostLease extends PluginSurfaceHostLease {
+  /** Reads the exact host record that owns the live spawn. */
+  currentRecord(): PluginHostRecordToken | undefined;
+  startPanel(panelId: string): Promise<PluginPanelHostBinding>;
+}
+
 export interface PluginWebAppHostLease extends PluginSurfaceHostLease {
   startWebApp(): Promise<{ url: string; title?: string }>;
   unpair(expectedSpawnId: string): Promise<void>;
@@ -47,12 +63,16 @@ export interface PluginWebAppHostLease extends PluginSurfaceHostLease {
 
 export interface PluginPanelStartRequest
   extends PluginPanelIdentity,
-    PluginSurfaceOwner {}
+    PluginSurfaceOwner {
+  placement: "editor" | "view";
+}
 
 export interface PluginPanelStartAdmission {
   assertAllowed(): void;
-  acquireHostLease(): Promise<PluginSurfaceHostLease>;
-  startPreview(): Promise<Omit<PluginPanelPreview, "releaseOrigin">>;
+  acquireHostLease(): Promise<PluginPanelHostLease>;
+  startPreview(
+    panel: PluginHostPanelDeclaration,
+  ): Promise<Omit<PluginPanelPreview, "releaseOrigin">>;
 }
 
 export interface PluginWebAppViewLike extends GuestViewLike {
@@ -93,11 +113,13 @@ export interface PluginPanelSdkAuthorizationRequest
 
 export interface PluginPanelSdkAuthorization {
   authority: PluginPanelSdkGrant;
+  surfaceId: number;
   isPushLive(): boolean;
 }
 
 interface PluginPanelSdkGrantSuspension {
   restore(): Promise<void>;
+  commit(): void;
 }
 
 export interface PluginWebAppBoundsRequest
@@ -124,6 +146,8 @@ export type PluginSurfaceHostChange = {
 
 export interface PluginSurfaceHostReady extends PluginSurfaceIdentity {
   spawnId: string;
+  hostRecord: PluginHostRecordToken;
+  declaredPanels: readonly PluginHostPanelDeclaration[];
 }
 
 export interface PluginSurfacesDependencies<V extends PluginWebAppViewLike> {
@@ -133,7 +157,12 @@ export interface PluginSurfacesDependencies<V extends PluginWebAppViewLike> {
   clearPanelStorage(options: { origin: string }): Promise<void>;
   clearGuestPartition(partition: string): Promise<void>;
   notifyWebAppFailed(input: PluginWebAppIdentity & PluginSurfaceOwner): void;
-  onPanelAuthorityRevoked?(input: PluginPanelIdentity): void;
+  notifyPanelInvalidated(
+    input: PluginPanelIdentity & PluginSurfaceOwner & { surfaceId: number },
+  ): void;
+  onPanelAuthorityRevoked?(
+    input: PluginPanelIdentity & { surfaceId: number },
+  ): void;
   onError(error: unknown, context: string): void;
 }
 
@@ -147,8 +176,12 @@ interface OwnedLease<L extends PluginSurfaceHostLease = PluginSurfaceHostLease> 
 }
 
 interface PanelRecord extends PluginPanelIdentity, PluginSurfaceOwner {
+  placement: "editor" | "view";
+  entry: string;
+  hostRecord: PluginHostRecordToken;
+  surfaceId: number;
   preview: PluginPanelPreview;
-  ownedLease: OwnedLease;
+  ownedLease: OwnedLease<PluginPanelHostLease>;
   grant: PanelGrant;
   attempt: PanelAttempt;
   closed: boolean;
@@ -158,7 +191,7 @@ interface PanelRecord extends PluginPanelIdentity, PluginSurfaceOwner {
 interface PanelAttempt {
   readonly request: PluginPanelStartRequest;
   hostEpoch: number;
-  ownedLease: OwnedLease | null;
+  ownedLease: OwnedLease<PluginPanelHostLease> | null;
   cancelled: boolean;
   active: boolean;
   record: PanelRecord | null;
@@ -169,6 +202,8 @@ interface SuspendedPanelGrant {
   readonly grant: PanelGrant;
   readonly hostEpoch: number;
   readonly spawnId: string | undefined;
+  readonly hostRecord: PluginHostRecordToken | undefined;
+  finalized: boolean;
 }
 
 interface WebAppRecord<V extends PluginWebAppViewLike>
@@ -238,6 +273,8 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
   readonly #pluginExclusions = new Map<string, Promise<void>>();
   readonly #hostEpochs = new Map<string, number>();
   readonly #hardenedGuestPartitions = new Set<string>();
+  readonly #tentativePanelGrantRevocations = new WeakSet<AbortSignal>();
+  #nextPanelSurfaceId = 1;
   #closed = false;
   #closePromise: Promise<void> | null = null;
 
@@ -248,7 +285,7 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
   startPanel(
     request: PluginPanelStartRequest,
     admission: PluginPanelStartAdmission,
-  ): Promise<{ url: string }> {
+  ): Promise<{ url: string; title: string; surfaceId: number }> {
     this.#assertOpen();
     const key = panelKey(request);
     // Register before entering the lane so a scope stop can include starts
@@ -265,7 +302,8 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     const pluginBarrier = this.#pluginExclusions.get(this.#pluginKey(request));
     return this.#inPanelLane(request, async () => {
       await pluginBarrier?.catch(() => undefined);
-      let ownedLease: OwnedLease | null = null;
+      let ownedLease: OwnedLease<PluginPanelHostLease> | null = null;
+      let hostBinding: PluginPanelHostBinding | null = null;
       let preview: Omit<PluginPanelPreview, "releaseOrigin"> | null = null;
       let installed: PanelRecord | null = null;
       try {
@@ -274,18 +312,33 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         ownedLease = this.#ownLease(await admission.acquireHostLease());
         attempt.ownedLease = ownedLease;
         this.#assertPanelStartActive(attempt);
-        const spawnId = await ownedLease.lease.start();
+        hostBinding = await ownedLease.lease.startPanel(request.panelId);
         this.#assertPanelStartActive(attempt);
-        preview = await admission.startPreview();
+        if (
+          hostBinding.panel.id !== request.panelId ||
+          hostBinding.panel.placement !== request.placement
+        ) {
+          throw new Error(
+            `Plugin "${request.pluginId}" panel "${request.panelId}" has placement ` +
+              `"${hostBinding.panel.placement}", so it cannot open with placement ` +
+              `"${request.placement}".`,
+          );
+        }
+        preview = await admission.startPreview(hostBinding.panel);
         this.#assertPanelStartActive(attempt);
         admission.assertAllowed();
         this.#assertPanelStartActive(attempt);
-        this.#assertPanelHostCurrent(attempt, ownedLease, spawnId);
+        this.#assertPanelHostCurrent(attempt, ownedLease, hostBinding);
         const releaseOrigin = this.#dependencies.allowPanelOrigin(preview.url);
         this.#assertPanelStartActive(attempt);
-        const grant = this.#registerPanelGrant(request);
+        const surfaceId = this.#nextPanelSurfaceId;
+        this.#nextPanelSurfaceId += 1;
+        const grant = this.#registerPanelGrant({ ...request, surfaceId });
         const next: PanelRecord = {
           ...request,
+          entry: hostBinding.panel.entry,
+          hostRecord: hostBinding.hostRecord,
+          surfaceId,
           preview: { ...preview, releaseOrigin },
           ownedLease,
           grant,
@@ -301,8 +354,12 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         this.#assertPanelStartActive(attempt);
         if (previous) await this.#disposePanel(previous);
         this.#assertPanelStartActive(attempt);
-        this.#assertPanelHostCurrent(attempt, ownedLease, spawnId);
-        return { url: next.preview.url };
+        this.#assertPanelHostCurrent(attempt, ownedLease, hostBinding);
+        return {
+          url: next.preview.url,
+          title: hostBinding.panel.title,
+          surfaceId,
+        };
       } catch (error) {
         if (installed && this.#panels.get(key) === installed) {
           this.#panels.delete(key);
@@ -468,18 +525,24 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     if (!record || record.grant.signal !== authority.signal) {
       throw new Error("Plugin panel SDK authority is stale.");
     }
+    const hostEpoch = this.#hostEpoch(record);
     return {
       authority,
+      surfaceId: record.surfaceId,
+      // files.watch retains this predicate after the SDK call returns. A
+      // failed host stop replaces the grant in the same host epoch, so that
+      // subscription resumes; a real host change advances the epoch and the
+      // old subscription stays dead after successor readiness.
       isPushLive: () =>
         Boolean(
-          !authority.signal.aborted &&
-            this.#panels.get(key) === record &&
+          this.#panels.get(key) === record &&
             !record.closed &&
-            record.grant.signal === authority.signal &&
+            !record.grant.signal.aborted &&
+            this.#hostEpoch(record) === hostEpoch &&
             record.senderId === request.senderId &&
             record.generation === request.currentGeneration() &&
             request.activeWorkspaceId() === request.workspaceId &&
-            request.liveSpawnId() === authority.spawnId,
+            request.liveSpawnId() === record.ownedLease.lease.currentSpawnId(),
         ),
     };
   }
@@ -536,7 +599,11 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
       const result = await run((identity) => {
         suspensions.push(this.#suspendPluginSdkGrants(identity));
       });
-      if (!result.ok) await restore();
+      if (result.ok) {
+        for (const suspension of suspensions) suspension.commit();
+      } else {
+        await restore();
+      }
       return result;
     } catch (error) {
       await restore();
@@ -547,7 +614,9 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
   #suspendPluginSdkGrants(
     identity: PluginSurfaceIdentity,
   ): PluginPanelSdkGrantSuspension {
-    if (this.#closed) return { restore: () => Promise.resolve() };
+    if (this.#closed) {
+      return { commit: () => undefined, restore: () => Promise.resolve() };
+    }
     // Capture the whole rollback set before revoking anything. If one lease
     // cannot report its spawn, the caller receives no suspension handle, so a
     // partial revocation here would have no reverse path.
@@ -565,8 +634,14 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         grant: record.grant,
         hostEpoch: this.#hostEpoch(record),
         spawnId: record.ownedLease.lease.currentSpawnId(),
+        hostRecord: record.ownedLease.lease.currentRecord(),
+        finalized: false,
       }));
-    for (const { record } of suspended) {
+    for (const { record, grant } of suspended) {
+      // Subscription cleanup is destructive and cannot be reconstructed from
+      // a grant. Defer it until the action's result says whether this abort is
+      // permanent; the aborted grant still blocks calls and event delivery.
+      this.#tentativePanelGrantRevocations.add(grant.signal);
       this.#panelAuthorities.revokePanel(
         record.workspaceId,
         record.pluginId,
@@ -576,11 +651,17 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
 
     let restorePromise: Promise<void> | null = null;
     return {
+      commit: () => {
+        for (const snapshot of suspended) {
+          this.#finalizeSuspendedPanelGrant(snapshot);
+        }
+      },
       restore: () => {
         if (restorePromise) return restorePromise;
         restorePromise = Promise.all(
-          suspended.map(({ record, grant, hostEpoch, spawnId }) =>
-            this.#inPanelLane(record, async () => {
+          suspended.map((snapshot) => {
+            const { record, grant, hostEpoch, spawnId, hostRecord } = snapshot;
+            return this.#inPanelLane(record, async () => {
               if (
                 this.#closed ||
                 record.closed ||
@@ -591,18 +672,22 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
                 !grant.signal.aborted ||
                 this.#hostEpoch(record) !== hostEpoch ||
                 spawnId === undefined ||
-                record.ownedLease.lease.currentSpawnId() !== spawnId
+                hostRecord === undefined ||
+                record.ownedLease.lease.currentSpawnId() !== spawnId ||
+                record.ownedLease.lease.currentRecord() !== hostRecord
               ) {
+                this.#finalizeSuspendedPanelGrant(snapshot);
                 return;
               }
               record.grant = this.#registerPanelGrant(record);
             }).catch((error) => {
+              this.#finalizeSuspendedPanelGrant(snapshot);
               this.#report(
                 error,
                 `restore suspended plugin panel authority for "${record.pluginId}"`,
               );
-            }),
-          ),
+            });
+          }),
         ).then(() => undefined);
         return restorePromise;
       },
@@ -632,8 +717,8 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     );
   }
 
-  hostReady(identity: PluginSurfaceHostReady): void {
-    if (this.#closed) return;
+  hostReady(identity: PluginSurfaceHostReady): Promise<void> {
+    if (this.#closed) return Promise.resolve();
     const readyEpoch = this.#hostEpoch(identity);
     const panels = [...this.#panels.values()].filter(
       (record) =>
@@ -641,9 +726,29 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
         record.pluginId === identity.pluginId &&
         record.grant.signal.aborted,
     );
-    void Promise.all(
-      panels.map((record) =>
-        this.#inPanelLane(record, async () => {
+    const declaredPanels = new Map(
+      identity.declaredPanels.map((panel) => [panel.id, panel]),
+    );
+    return Promise.all(
+      panels.map((record) => {
+        const declaration = declaredPanels.get(record.panelId);
+        if (
+          !declaration ||
+          identity.hostRecord !== record.hostRecord ||
+          declaration.placement !== record.placement ||
+          declaration.entry !== record.entry
+        ) {
+          // Stop the exact retained attempt. A newly admitted panel with the
+          // same key can already be queued behind it after the catalog update;
+          // that successor was checked against the new declaration and must
+          // not be cancelled with the stale record.
+          if (!record.attempt.cancelled) {
+            record.attempt.cancelled = true;
+            this.#notifyPanelInvalidated(record);
+          }
+          return this.#stopPanelAttempt(record.attempt);
+        }
+        return this.#inPanelLane(record, async () => {
           // A later host end, stop, replacement, or close supersedes this
           // queued ready event. Recheck the grant too so repeated ready
           // events cannot replace a grant the first event already restored.
@@ -654,14 +759,15 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
             this.#panels.get(panelKey(record)) !== record ||
             record.closed ||
             !record.grant.signal.aborted ||
-            record.ownedLease.lease.currentSpawnId() !== identity.spawnId
+            record.ownedLease.lease.currentSpawnId() !== identity.spawnId ||
+            record.ownedLease.lease.currentRecord() !== identity.hostRecord
           ) {
             return;
           }
           record.attempt.hostEpoch = readyEpoch;
           record.grant = this.#registerPanelGrant(record);
-        }),
-      ),
+        });
+      }),
     ).then(() => undefined).catch((error) => {
       this.#report(
         error,
@@ -718,7 +824,7 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
   }
 
   #registerPanelGrant(
-    record: PluginPanelIdentity & PluginSurfaceOwner,
+    record: PluginPanelIdentity & PluginSurfaceOwner & { surfaceId: number },
   ): PanelGrant {
     const grant = this.#panelAuthorities.register({
       senderId: record.senderId,
@@ -731,10 +837,12 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
       "abort",
       () => {
         try {
+          if (this.#tentativePanelGrantRevocations.delete(grant.signal)) return;
           this.#dependencies.onPanelAuthorityRevoked?.({
             workspaceId: record.workspaceId,
             pluginId: record.pluginId,
             panelId: record.panelId,
+            surfaceId: record.surfaceId,
           });
         } catch (error) {
           this.#report(error, `revoke plugin panel authority for "${record.pluginId}"`);
@@ -743,6 +851,24 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
       { once: true },
     );
     return grant;
+  }
+
+  #finalizeSuspendedPanelGrant(snapshot: SuspendedPanelGrant): void {
+    if (snapshot.finalized) return;
+    snapshot.finalized = true;
+    try {
+      this.#dependencies.onPanelAuthorityRevoked?.({
+        workspaceId: snapshot.record.workspaceId,
+        pluginId: snapshot.record.pluginId,
+        panelId: snapshot.record.panelId,
+        surfaceId: snapshot.record.surfaceId,
+      });
+    } catch (error) {
+      this.#report(
+        error,
+        `revoke plugin panel authority for "${snapshot.record.pluginId}"`,
+      );
+    }
   }
 
   #queueRecovery(attempt: WebAppAttempt<V>): void {
@@ -927,6 +1053,24 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     }
   }
 
+  #notifyPanelInvalidated(record: PanelRecord): void {
+    try {
+      this.#dependencies.notifyPanelInvalidated({
+        workspaceId: record.workspaceId,
+        pluginId: record.pluginId,
+        panelId: record.panelId,
+        senderId: record.senderId,
+        generation: record.generation,
+        surfaceId: record.surfaceId,
+      });
+    } catch (error) {
+      this.#report(
+        error,
+        `notify invalidated plugin panel "${record.pluginId}"`,
+      );
+    }
+  }
+
   #exactOwnerError(target: PluginSurfaceStopTarget): Error | null {
     if (target.kind === "panel" && target.owner) {
       const owner = target.owner;
@@ -999,11 +1143,12 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
 
   #assertPanelHostCurrent(
     attempt: PanelAttempt,
-    ownedLease: OwnedLease,
-    spawnId: string,
+    ownedLease: OwnedLease<PluginPanelHostLease>,
+    binding: PluginPanelHostBinding,
   ): void {
     if (
-      ownedLease.lease.currentSpawnId() === spawnId &&
+      ownedLease.lease.currentSpawnId() === binding.spawnId &&
+      ownedLease.lease.currentRecord() === binding.hostRecord &&
       this.#hostEpoch(attempt.request) === attempt.hostEpoch
     ) {
       return;

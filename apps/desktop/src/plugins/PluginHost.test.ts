@@ -762,6 +762,58 @@ describe("PluginHost", () => {
     expect(host.currentRecord("hello-plugin")).toBe(second.record);
   });
 
+  it("returns panel declarations only for the exact live ready spawn", async () => {
+    const root = await workspaceRoot();
+    const harness = createProcessHarness();
+    const host = trackHost({
+      stateDir: await stateDir(),
+      workspaceRoot: root,
+      spawnTransport: harness.spawnTransport,
+      routeSdkRequest: defaultRouter,
+    });
+    const manifest = await fixtureManifest();
+
+    const starting = host.start(
+      helloPluginRoot,
+      "hello-plugin",
+      manifest,
+    );
+    manifest.panels![0]!.title = "Mutated after admission";
+    const started = await starting;
+    await waitFor(
+      () => host.getStatus("hello-plugin") === "ready",
+      "The plugin did not become ready.",
+    );
+    const spawnId = host.getSpawnId("hello-plugin");
+    expect(spawnId).toBeDefined();
+    expect(
+      host.readyPanelsForSpawn("hello-plugin", "stale-spawn"),
+    ).toBeUndefined();
+    expect(host.readyPanelsForSpawn("hello-plugin", spawnId!)).toEqual({
+      record: started.record,
+      panels: [
+        {
+          id: "main",
+          title: "Hello",
+          entry: "panel/index.html",
+          placement: "editor",
+        },
+        {
+          id: "hello-view",
+          title: "Hello view",
+          entry: "view/index.html",
+          placement: "view",
+          icon: "icon.svg",
+        },
+      ],
+    });
+
+    await host.stop("hello-plugin");
+    expect(
+      host.readyPanelsForSpawn("hello-plugin", spawnId!),
+    ).toBeUndefined();
+  });
+
   it("rejects a pending start that stop aborts before spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness();

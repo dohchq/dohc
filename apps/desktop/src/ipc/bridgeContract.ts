@@ -2488,10 +2488,30 @@ export const StartPluginPanelResult = z.discriminatedUnion("status", [
     status: z.literal("ok"),
     url: LoopbackPreviewUrl,
     title: z.string().min(1).max(120),
+    surfaceId: z.number().int().positive(),
   }).strict(),
   z.object({ status: z.literal("not-registered") }).strict(),
 ]);
 export type StartPluginPanelResult = z.infer<typeof StartPluginPanelResult>;
+
+/** Main retired this exact panel preview because the active runtime no
+ * longer matches it. The page restarts only when it still shows surfaceId. */
+export const PluginPanelInvalidatedEvent = z.object({
+  workspaceId: WORKSPACE_ID,
+  pluginId: PLUGIN_ID,
+  panelId: PLUGIN_PANEL_ID,
+  surfaceId: z.number().int().positive(),
+}).strict();
+export type PluginPanelInvalidatedEvent = z.infer<
+  typeof PluginPanelInvalidatedEvent
+>;
+
+export function parsePluginPanelInvalidatedEventForIpc(
+  value: unknown,
+): PluginPanelInvalidatedEvent | null {
+  const parsed = PluginPanelInvalidatedEvent.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 export const InvokePluginCommandPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -4752,6 +4772,9 @@ export interface DohcDesktopBridge {
     listener: (event: PluginPanelOpenedEvent) => void,
   ): () => void;
   startPluginPanel(payload: StartPluginPanelPayload): Promise<StartPluginPanelResult>;
+  onPluginPanelInvalidated(
+    listener: (event: PluginPanelInvalidatedEvent) => void,
+  ): () => void;
   invokePluginCommand(
     payload: InvokePluginCommandPayload,
   ): Promise<InvokePluginCommandResult>;
