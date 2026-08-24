@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
@@ -15,7 +15,10 @@ import {
   writePendingMaterializationPaths,
 } from "./sharedView";
 import { SharePinInvalidError } from "./shareViewRecords";
-import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
+import {
+  withExclusiveWorkspaceOperation,
+  withStaleSensitiveWorkspaceOperation,
+} from "./workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { createTestScratch } from "./testTemp";
 
@@ -285,6 +288,196 @@ describe("ShareViewFiles", () => {
     expect(resolves).toBe(2);
     expect(openStore).not.toHaveBeenCalled();
   });
+
+  it("reuses its workspace lease when capture orders a path", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/a.md";
+    const canonical = "canonical before\n";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), canonical, "utf8");
+    const baseStore = mutableTextStore({
+      initial: [{ path, text: canonical }],
+    });
+    const metadataRead = deferred();
+    const releaseMetadata = deferred();
+    const pathOrdered = deferred();
+    let metadataReads = 0;
+    const store: ShareViewFilesStore = {
+      ...baseStore,
+      listTextFileMetadata: vi.fn(async (input) => {
+        const rows = await baseStore.listTextFileMetadata!(input);
+        metadataReads += 1;
+        if (metadataReads === 1) {
+          metadataRead.resolve();
+          await releaseMetadata.promise;
+        }
+        return rows;
+      }),
+      readTextFile: vi.fn(async (input) => {
+        pathOrdered.resolve();
+        return baseStore.readTextFile(input);
+      }),
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+    const order: string[] = [];
+
+    const changing = withStaleSensitiveWorkspaceOperation(
+      rootPath,
+      (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "save",
+            path,
+            text: "recipient edit\n",
+            expectedContentHash: createHash("sha256")
+              .update(canonical)
+              .digest("hex"),
+          },
+        ),
+    ).then((outcome) => {
+      order.push("change");
+      return outcome;
+    });
+    await metadataRead.promise;
+    const exclusive = withExclusiveWorkspaceOperation(rootPath, async () => {
+      order.push("exclusive");
+    });
+    releaseMetadata.resolve();
+
+    // Capture must order the target through the workspace lease already held
+    // by ShareViewFiles. Reacquiring the root scheduler here queues this read
+    // behind `exclusive`, while `exclusive` waits for `changing`: a deadlock.
+    await pathOrdered.promise;
+    await expect(changing).resolves.toMatchObject({
+      status: "committed",
+      kind: "save",
+    });
+    await exclusive;
+    expect(order).toEqual(["change", "exclusive"]);
+  }, 2_000);
+
+  it("keeps reconcile behind a save's projection gap", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/a.md";
+    const canonical = "canonical before\n";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), canonical, "utf8");
+    const baseStore = mutableTextStore({
+      initial: [{ path, text: canonical }],
+    });
+    const saveStored = deferred();
+    const releaseSave = deferred();
+    const reconcileWaiting = deferred();
+    const store: ShareViewFilesStore = {
+      ...baseStore,
+      writeTextFile: vi.fn(async (input) => {
+        const outcome = await baseStore.writeTextFile(input);
+        saveStored.resolve();
+        await releaseSave.promise;
+        return outcome;
+      }),
+    };
+    let resolves = 0;
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => {
+        resolves += 1;
+        if (resolves === 3) reconcileWaiting.resolve();
+        return target(rootPath);
+      },
+      openStore: () => store,
+    });
+    const pending: Promise<unknown>[] = [];
+
+    try {
+      const changing = withStaleSensitiveWorkspaceOperation(
+        rootPath,
+        (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "save",
+              path,
+              text: "saved in app\n",
+              expectedContentHash: createHash("sha256")
+                .update(canonical)
+                .digest("hex"),
+            },
+          ),
+      );
+      pending.push(changing);
+      await saveStored.promise;
+      await rm(join(rootPath, path));
+
+      const reconciling = withStaleSensitiveWorkspaceOperation(
+        rootPath,
+        (lease) =>
+          files.reconcile(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            "settle",
+          ),
+      );
+      pending.push(reconciling);
+      await reconcileWaiting.promise;
+
+      expect(store.listTextFileMetadata).toHaveBeenCalledTimes(1);
+      expect(store.deleteTextFile).not.toHaveBeenCalled();
+      releaseSave.resolve();
+
+      await expect(changing).resolves.toMatchObject({
+        status: "committed",
+        kind: "save",
+      });
+      await expect(reconciling).resolves.toMatchObject({
+        kind: "settle",
+        capturedPaths: 0,
+        repairedPaths: 0,
+      });
+      expect(await readFile(join(rootPath, path), "utf8")).toBe("saved in app\n");
+      expect(store.deleteTextFile).not.toHaveBeenCalled();
+    } finally {
+      releaseSave.resolve();
+      await Promise.allSettled(pending);
+    }
+  });
+
+  it("reuses an exclusive workspace lease while capturing a delete", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/a.md";
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, path), "canonical\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path, text: "canonical\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    const outcome = await withExclusiveWorkspaceOperation(
+      rootPath,
+      (_markChanged, lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "delete", path },
+        ),
+    );
+
+    expect(outcome).toMatchObject({ status: "committed", kind: "delete" });
+    await expect(readFile(join(rootPath, path), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  }, 2_000);
 
   it("repairs tracked files without replacing recipient-owned directories", async () => {
     const rootPath = await workspaceRoot();

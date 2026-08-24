@@ -668,6 +668,7 @@ export function createShareViewFiles(
   }
 
   async function applyChange(
+    lease: WorkspaceOperationLease,
     target: ActiveShareViewFilesTarget,
     change: ShareViewFileChange,
     selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
@@ -691,6 +692,7 @@ export function createShareViewFiles(
         shareId: target.shareId,
         ended: target.ended,
         paths: divergenceScopes,
+        workspaceLease: lease,
       });
       if (captured.collisionRecordQuarantined) {
         throw new Error(
@@ -815,7 +817,7 @@ export function createShareViewFiles(
         assertLease(lease, target);
         assertActiveTarget(target);
         const selector = writableSelector(target);
-        return applyChange(target, change, selector);
+        return applyChange(lease, target, change, selector);
       });
     },
 
@@ -986,6 +988,7 @@ export function createShareViewFiles(
                 pinnedSelector: target.grantedSelector,
                 shareId: target.shareId,
                 ended: target.ended,
+                workspaceLease: lease,
               })
             : captureSharedViewLocalDivergence(
                 target.rootPath,

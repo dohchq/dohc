@@ -23,6 +23,7 @@ import {
   resolveWorkspaceFile,
   restoreWorkspaceText,
   withExclusiveWorkspaceOperation,
+  type WorkspaceOperationLease,
   writeWorkspaceAsset,
   writeWorkspaceText,
 } from "./workspaceAssets";
@@ -736,6 +737,57 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
       "exclusive",
       "shared:later",
     ]);
+  });
+
+  it("rejects a leased target order for the wrong root or after admission ends", async () => {
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (rootPath, relativePath) => join(rootPath, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    let escapedLease!: WorkspaceOperationLease;
+
+    await scheduler.exclusive("C:/workspace", async (_markChanged, lease) => {
+      escapedLease = lease;
+      await expect(
+        access.orderedOnResolvedTargetInLease(
+          "C:/other-workspace",
+          lease,
+          "C:/other-workspace/notes/a.md",
+          async () => "wrong-root",
+        ),
+      ).rejects.toThrow(
+        "Workspace operation lease is inactive or belongs to another root.",
+      );
+      await expect(
+        access.orderedOnResolvedTargetInLease(
+          "C:/workspace",
+          lease,
+          "C:/workspace/notes/a.md",
+          async () => "ordered",
+        ),
+      ).resolves.toBe("ordered");
+    });
+
+    await expect(
+      access.orderedOnResolvedTargetInLease(
+        "C:/workspace",
+        escapedLease,
+        "C:/workspace/notes/a.md",
+        async () => "late",
+      ),
+    ).rejects.toThrow(
+      "Workspace operation lease is inactive or belongs to another root.",
+    );
   });
 
   it("holds later direct-text reads and writes behind an exclusive workspace operation", async () => {

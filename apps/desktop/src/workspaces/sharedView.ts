@@ -26,8 +26,10 @@ import {
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
+  type WorkspaceOperationLease,
   withExclusiveWorkspaceOperation,
   withOrderedWorkspaceTargetPath,
+  withOrderedWorkspaceTargetPathInLease,
 } from "./workspaceAssets";
 import { readDiskContent, type DiskTextState } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
@@ -174,6 +176,7 @@ export async function resolvedShareViewTarget(
 async function withCaptureMutationLock<T>(
   rootDir: string,
   path: string,
+  workspaceLease: WorkspaceOperationLease | undefined,
   operation: (resolvedTarget: string) => Promise<T>,
 ): Promise<T> {
   let resolvedTarget: string;
@@ -182,9 +185,15 @@ async function withCaptureMutationLock<T>(
   } catch (error) {
     throw new SharedViewTargetResolutionError({ cause: error });
   }
-  return withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, () =>
-    operation(resolvedTarget),
-  );
+  const run = () => operation(resolvedTarget);
+  return workspaceLease === undefined
+    ? withOrderedWorkspaceTargetPath(rootDir, resolvedTarget, run)
+    : withOrderedWorkspaceTargetPathInLease(
+        rootDir,
+        workspaceLease,
+        resolvedTarget,
+        run,
+      );
 }
 
 export async function materializeSharedViewPaths(
@@ -909,6 +918,7 @@ export async function captureSharedViewLocalDivergence(
   options?: {
     beforeCaptureWrite?: (path: string) => Promise<void>;
     paths?: readonly string[];
+    workspaceLease?: WorkspaceOperationLease;
   },
 ): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const realRoot = await realpath(rootDir).catch(() => null);
@@ -920,6 +930,17 @@ export async function captureSharedViewLocalDivergence(
       collisionRecordQuarantined: false,
     };
   }
+
+  const withMutationLock = <T>(
+    path: string,
+    operation: (resolvedTarget: string) => Promise<T>,
+  ) =>
+    withCaptureMutationLock(
+      rootDir,
+      path,
+      options?.workspaceLease,
+      operation,
+    );
 
   const main = await store.ensureMainVersion({ workspaceId });
   if (!store.listTextFileMetadata) {
@@ -1062,8 +1083,7 @@ export async function captureSharedViewLocalDivergence(
         | { kind: "unchanged" }
         | { kind: "unjournalable"; path: UnjournalablePath };
       try {
-        result = await withCaptureMutationLock(
-          rootDir,
+        result = await withMutationLock(
           entry.path,
           async (resolvedTarget) => {
             const disk = await readDiskContent(resolvedTarget);
@@ -1134,8 +1154,7 @@ export async function captureSharedViewLocalDivergence(
         | { kind: "unjournalable"; path: UnjournalablePath }
         | { kind: "unchanged" };
       try {
-        result = await withCaptureMutationLock(
-          rootDir,
+        result = await withMutationLock(
           entry.path,
           async (resolvedTarget): Promise<
             | { kind: "captured" }
@@ -1328,8 +1347,7 @@ export async function captureSharedViewLocalDivergence(
     }
 
     if (onDisk === "absent") {
-      const deleted = await withCaptureMutationLock(
-        rootDir,
+      const deleted = await withMutationLock(
         entry.path,
         (resolvedTarget) =>
           captureAbsentTrackedPath(
@@ -1348,8 +1366,7 @@ export async function captureSharedViewLocalDivergence(
       continue;
     }
 
-    const result = await withCaptureMutationLock(
-      rootDir,
+    const result = await withMutationLock(
       entry.path,
       async (resolvedTarget) => {
         const disk = await readDiskContent(resolvedTarget);
@@ -1419,8 +1436,7 @@ export async function captureSharedViewLocalDivergence(
       | { kind: "unchanged" }
       | { kind: "unjournalable"; path: UnjournalablePath };
     try {
-      result = await withCaptureMutationLock(
-        rootDir,
+      result = await withMutationLock(
         path,
         async (resolvedTarget): Promise<
           | { kind: "repaired" }
@@ -1504,8 +1520,7 @@ export async function captureSharedViewLocalDivergence(
       | { kind: "repaired" }
       | { kind: "unjournalable"; path: UnjournalablePath };
     try {
-      result = await withCaptureMutationLock(
-        rootDir,
+      result = await withMutationLock(
         path,
         async (resolvedTarget) => {
           const disk = await readDiskContent(resolvedTarget);
@@ -1577,6 +1592,7 @@ export async function captureStandaloneShareViewDivergence(input: {
   shareId: string;
   ended: boolean;
   paths?: readonly string[];
+  workspaceLease?: WorkspaceOperationLease;
 }): Promise<CaptureSharedViewLocalDivergenceOutcome> {
   const grantedSelector = recordedShareSelector(input.pinnedSelector);
   if (grantedSelector === null) throw new SharePinInvalidError(input.shareId);
@@ -1590,7 +1606,10 @@ export async function captureStandaloneShareViewDivergence(input: {
     input.store,
     allowLocalJournaling,
     input.shareId,
-    input.paths === undefined ? undefined : { paths: input.paths },
+    {
+      paths: input.paths,
+      workspaceLease: input.workspaceLease,
+    },
   );
 }
 
