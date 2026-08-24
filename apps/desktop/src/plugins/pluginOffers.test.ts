@@ -300,13 +300,13 @@ describe("listOfferedPlugins", () => {
 
   // listOfferedPlugins suppresses by manifest id, and
   // findDirectorySupersededBy is asked about a plugin id too — but
-  // addOfferedPlugin's own caller in main.ts hands it a built-in's
+  // addOfferedPlugin's caller in pluginIpcHandlers.ts hands it a built-in's
   // directoryName, trusting the two to name the same thing for a shipped
   // built-in. Nothing else pins that trust; a packaged manifest whose name
   // drifted from its own directory would silently break both.
   //
-  // The same pass also pins packagedBuiltinDisplayName's own invariant (main
-  // resolves it as `manifest.displayName ?? manifest.name`, never a bare
+  // The same pass also pins packagedBuiltinDisplayName's own invariant (the
+  // handler resolves `manifest.displayName ?? manifest.name`, never a bare
   // displayName): null on that field must mean ONLY "not a built-in", never
   // "a built-in whose packaged manifest has nothing to call itself" — the
   // uninstall dialog reads that field's nullness as exactly that signal.
