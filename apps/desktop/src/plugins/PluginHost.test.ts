@@ -18,6 +18,7 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
+import { PluginHostOwnership } from "./pluginHostOwnership";
 import {
   mutatePluginRecord,
   pluginDataDir,
@@ -1784,7 +1785,7 @@ describe("PluginHost", () => {
     await engine.stop();
   });
 
-  it("aborts a queued panel write when its plugin is disabled (#779 round 12 A4)", async () => {
+  it("aborts a queued panel write when onWillStop revokes its authority", async () => {
     const root = await workspaceRoot();
     const entered = deferredVoid();
     const release = deferredVoid();
@@ -1836,6 +1837,7 @@ describe("PluginHost", () => {
       }),
       routeSdkRequest: defaultRouter,
     });
+    const ownership = new PluginHostOwnership(host);
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
@@ -1871,23 +1873,42 @@ describe("PluginHost", () => {
     );
     await writeQueued.promise;
 
-    // What the disable action site does before it stops the plugin. Stopping
-    // the process alone leaves this queued write holding a live authority.
-    revokePluginPanelAuthorities({
-      workspaceId: "workspace-a",
-      pluginId: "hello-plugin",
-      panels: [
-        {
-          workspaceId: "workspace-a",
-          pluginId: "hello-plugin",
-          panelId: "main",
-        },
-      ],
-      revokePanel: registry.revokePanel,
+    const steps: string[] = [];
+    const originalStop = host.stop.bind(host);
+    const stop = vi.spyOn(host, "stop").mockImplementation(async (pluginId) => {
+      steps.push("host-stop");
+      await originalStop(pluginId);
     });
-    await host.stop("hello-plugin");
+    // Ownership calls this hook after it proves the change owns the stop and
+    // immediately before PluginHost.stop starts.
+    const stopOutcome = await ownership.runChange(
+      "hello-plugin",
+      async (change) => {
+        const outcome = await change.stop({
+          onWillStop: () => {
+            steps.push("revoke");
+            revokePluginPanelAuthorities({
+              workspaceId: "workspace-a",
+              pluginId: "hello-plugin",
+              panels: [
+                {
+                  workspaceId: "workspace-a",
+                  pluginId: "hello-plugin",
+                  panelId: "main",
+                },
+              ],
+              revokePanel: registry.revokePanel,
+            });
+          },
+        });
+        return change.preserve({ kind: "existing", value: outcome });
+      },
+    );
+    stop.mockRestore();
     release.resolve();
 
+    expect(stopOutcome).toMatchObject({ kind: "stopped" });
+    expect(steps).toEqual(["revoke", "host-stop"]);
     await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
     expect(grant.signal.aborted).toBe(true);
     expect(existsSync(join(root, "disabled.txt"))).toBe(false);

@@ -213,6 +213,11 @@ export type PluginPipelineUninstallPreflightResult =
   }
   | { ok: false; error: PluginPipelineError };
 
+export interface PluginPipelineRuntimeStopHooks {
+  /** Revokes authority immediately before this pipeline stops a proven runtime. */
+  onWillStopRuntime?: (pluginId: string) => void;
+}
+
 interface PluginPipelineOperations {
   discover: typeof discoverInstalledPlugins;
   snapshot: typeof snapshotPluginSource;
@@ -223,6 +228,7 @@ interface PluginPipelineOperations {
   mutateRecord: typeof mutatePluginRecord;
   writeBaseline: typeof writePluginBaselineManifest;
   uninstallPreflight: typeof pluginUninstallPreflight;
+  hashSource: typeof hashPluginSourceFiles;
   removePath: typeof rm;
   inspectPath: typeof lstat;
   readFile: typeof readFile;
@@ -290,6 +296,14 @@ interface ResolvedUninstallTarget {
   snapshot: UninstallTargetSnapshot;
   record: PluginRecordShape | undefined;
   preflight: Awaited<ReturnType<typeof pluginUninstallPreflight>>;
+}
+
+interface ResolvedUninstallIdentity {
+  record: PluginRecordShape | undefined;
+  rootPath: string;
+  sourcePresent: boolean;
+  preflightInput: Parameters<typeof pluginUninstallPreflight>[0];
+  snapshot(liveHash: string | null): UninstallTargetSnapshot;
 }
 
 interface UninstallConfirmation {
@@ -388,6 +402,7 @@ const DEFAULT_OPERATIONS: PluginPipelineOperations = {
   mutateRecord: mutatePluginRecord,
   writeBaseline: writePluginBaselineManifest,
   uninstallPreflight: pluginUninstallPreflight,
+  hashSource: hashPluginSourceFiles,
   removePath: rm,
   inspectPath: lstat,
   readFile,
@@ -1065,7 +1080,10 @@ export class PluginPipeline {
     });
   }
 
-  disable(pluginId: string): Promise<PluginPipelineActionResult> {
+  disable(
+    pluginId: string,
+    hooks: PluginPipelineRuntimeStopHooks = {},
+  ): Promise<PluginPipelineActionResult> {
     return this.enqueueAdoptedAction(pluginId, async (change) => {
       let priorDisabled: boolean | undefined;
       try {
@@ -1080,7 +1098,9 @@ export class PluginPipeline {
           },
         );
         try {
-          await this.stopOldRuntime(pluginId, change);
+          await this.stopOldRuntime(pluginId, change, {
+            onWillStop: () => hooks.onWillStopRuntime?.(pluginId),
+          });
         } catch (stopError) {
           if (
             !this.disposed &&
@@ -1496,6 +1516,7 @@ export class PluginPipeline {
     pluginId: string,
     directoryName: string,
     confirmationToken: string,
+    hooks: PluginPipelineRuntimeStopHooks = {},
   ): Promise<PluginPipelineActionResult> {
     if (this.disposed) {
       return Promise.resolve(this.pipelineClosedFailure(pluginId));
@@ -1513,6 +1534,7 @@ export class PluginPipeline {
       cleanupIds,
       pluginId,
       reservations,
+      hooks,
     );
     const primaryReservation = reservations.get(pluginId);
     if (!primaryReservation) {
@@ -1552,7 +1574,7 @@ export class PluginPipeline {
           ),
         ));
       }
-      const { record } = validated.target;
+      const { record } = validated;
       const cleanupIds = new Set(confirmation.target.cleanupIds);
       if (confirmation.target.source.kind === "absent") {
         return this.finishSourcelessUninstall(
@@ -1561,6 +1583,7 @@ export class PluginPipeline {
           change,
           cleanupQueueClaims,
           confirmation.target,
+          hooks,
         );
       }
       // Resolved from what THIS confirmation's own preflight named, never
@@ -1636,6 +1659,7 @@ export class PluginPipeline {
           pluginId,
           change,
           cleanupQueueClaims,
+          hooks,
         );
 
         // Re-verify immediately before the actual delete: pluginHost.stop()
@@ -2402,10 +2426,13 @@ export class PluginPipeline {
   private async stopOldRuntime(
     pluginId: string,
     change: PluginHostChangeAuthority,
-    onStopped?: () => void,
-    markStopped?: () => void,
+    callbacks: {
+      onWillStop?: () => void;
+      onStopped?: () => void;
+      markStopped?: () => void;
+    } = {},
   ): Promise<void> {
-    const stopped = await change.stop();
+    const stopped = await change.stop({ onWillStop: callbacks.onWillStop });
     if (stopped.kind === "refused" || stopped.kind === "superseded") {
       throw new PipelineFailure(this.hostChangeInProgressError(pluginId));
     }
@@ -2429,9 +2456,9 @@ export class PluginPipeline {
     this.lastApprovedAttemptHash.delete(pluginId);
     // The stop already happened — mark it before running its consequences,
     // so a throwing notification can never look like the stop never occurred.
-    markStopped?.();
+    callbacks.markStopped?.();
     try {
-      onStopped?.();
+      callbacks.onStopped?.();
     } catch (error) {
       // Best-effort: a notification failure must never corrupt build state.
       console.error(`[PluginPipeline] old-runtime-stopped notification failed for "${pluginId}".`, error);
@@ -2723,8 +2750,10 @@ export class PluginPipeline {
         await this.stopOldRuntime(
           candidate.id,
           change,
-          input.onOldRuntimeStopped,
-          () => { oldRuntimeStopped = true; },
+          {
+            onStopped: input.onOldRuntimeStopped,
+            markStopped: () => { oldRuntimeStopped = true; },
+          },
         );
       }
 
@@ -2937,7 +2966,9 @@ export class PluginPipeline {
             `Plugin "${candidate.id}" cannot stop a running host without change authority.`,
           );
         }
-        await this.stopOldRuntime(candidate.id, change, onOldRuntimeStopped);
+        await this.stopOldRuntime(candidate.id, change, {
+          onStopped: onOldRuntimeStopped,
+        });
       }
       await this.operations.mutateRecord(
         this.options.stateDir,
@@ -3250,15 +3281,11 @@ export class PluginPipeline {
     throw new PipelineFailure(notDiscoveredError(pluginId));
   }
 
-  /**
-   * Resolves everything one uninstall confirmation can touch. Both execution
-   * checks call this method, so normal removal and sourceless recovery compare
-   * the same root, source state, identities, and durable records.
-   */
-  private async resolveUninstallTarget(
+  /** Resolves the identity and durable state one uninstall can touch. */
+  private async resolveUninstallIdentity(
     pluginId: string,
     directoryName: string,
-  ): Promise<ResolvedUninstallTarget> {
+  ): Promise<ResolvedUninstallIdentity> {
     const state = await this.localState();
     const record = state.plugins[pluginId];
     const candidate = this.uninstallableCandidate(directoryName, pluginId, record)
@@ -3284,7 +3311,7 @@ export class PluginPipeline {
       ...(pluginIdTracesHere ? [pluginId] : []),
       ...additionalCleanupIds,
     ])].sort();
-    const preflight = await this.operations.uninstallPreflight({
+    const preflightInput: Parameters<typeof pluginUninstallPreflight>[0] = {
       dohcDir: this.dohcDir,
       pluginId,
       pluginRoot: rootPath,
@@ -3296,30 +3323,45 @@ export class PluginPipeline {
         ? record?.installedBaselineHash
         : undefined,
       engineCaptureAvailable: this.engineCaptureAvailable(),
+    };
+    const snapshot = (liveHash: string | null): UninstallTargetSnapshot => ({
+      pluginId,
+      directoryName,
+      rootPath,
+      candidate: candidate
+        ? {
+            id: candidate.id,
+            directoryName: candidate.directoryName,
+            rootPath: resolve(candidate.rootPath),
+          }
+        : null,
+      source: sourcePresent
+        ? { kind: "present", hash: liveHash }
+        : { kind: "absent" },
+      cleanupIds,
+      records: cleanupIds.map((id) => ({
+        pluginId: id,
+        record: uninstallRecordFingerprint(state.plugins[id]),
+      })),
     });
+    return { record, rootPath, sourcePresent, preflightInput, snapshot };
+  }
+
+  /**
+   * Adds the irreversible-delete warning and inventory only for the dialog.
+   * Execution revalidation reuses the same identity resolver and snapshot
+   * constructor, but probes only the live source hash it actually compares.
+   */
+  private async resolveUninstallTarget(
+    pluginId: string,
+    directoryName: string,
+  ): Promise<ResolvedUninstallTarget> {
+    const identity = await this.resolveUninstallIdentity(pluginId, directoryName);
+    const preflight = await this.operations.uninstallPreflight(identity.preflightInput);
     return {
-      record,
+      record: identity.record,
       preflight,
-      snapshot: {
-        pluginId,
-        directoryName,
-        rootPath,
-        candidate: candidate
-          ? {
-              id: candidate.id,
-              directoryName: candidate.directoryName,
-              rootPath: resolve(candidate.rootPath),
-            }
-          : null,
-        source: sourcePresent
-          ? { kind: "present", hash: preflight.liveHash }
-          : { kind: "absent" },
-        cleanupIds,
-        records: cleanupIds.map((id) => ({
-          pluginId: id,
-          record: uninstallRecordFingerprint(state.plugins[id]),
-        })),
-      },
+      snapshot: identity.snapshot(preflight.liveHash),
     };
   }
 
@@ -3327,24 +3369,36 @@ export class PluginPipeline {
     confirmed: UninstallTargetSnapshot,
     changed: string,
   ): Promise<
-    | { ok: true; target: ResolvedUninstallTarget }
+    | { ok: true; record: PluginRecordShape | undefined }
     | { ok: false; reason: string }
   > {
-    let target: ResolvedUninstallTarget;
+    let identity: ResolvedUninstallIdentity;
     try {
-      target = await this.resolveUninstallTarget(
+      identity = await this.resolveUninstallIdentity(
         confirmed.pluginId,
         confirmed.directoryName,
       );
     } catch {
       return { ok: false, reason: changed };
     }
+    let liveHash: string | null = null;
+    if (identity.sourcePresent) {
+      try {
+        liveHash = (await this.operations.hashSource(identity.rootPath)).sourceHash;
+      } catch {
+        // The full preflight maps every hash failure, including an ENOENT
+        // after the lstat above, to a present-but-unverifiable source. Keep
+        // that exact fail-closed distinction from an already-absent root.
+      }
+    }
     const reason = uninstallTargetVerificationFailure(
-      target.snapshot,
+      identity.snapshot(liveHash),
       confirmed,
       changed,
     );
-    return reason === null ? { ok: true, target } : { ok: false, reason };
+    return reason === null
+      ? { ok: true, record: identity.record }
+      : { ok: false, reason };
   }
 
   /**
@@ -3416,6 +3470,7 @@ export class PluginPipeline {
     change: PluginHostChangeAuthority,
     cleanupQueueClaims: ReadonlyArray<UninstallQueueClaim>,
     confirmed: UninstallTargetSnapshot,
+    hooks: PluginPipelineRuntimeStopHooks,
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     const status = this.statuses.get(pluginId);
     const candidate = this.sourcelessCandidate(pluginId);
@@ -3437,6 +3492,7 @@ export class PluginPipeline {
         pluginId,
         change,
         cleanupQueueClaims,
+        hooks,
       );
       const preDelete = await this.revalidateUninstallTarget(
         confirmed,
@@ -3510,6 +3566,7 @@ export class PluginPipeline {
     primaryPluginId: string,
     primaryChange: PluginHostChangeAuthority,
     cleanupQueueClaims: ReadonlyArray<UninstallQueueClaim>,
+    hooks: PluginPipelineRuntimeStopHooks,
   ): Promise<void> {
     const stops = cleanupQueueClaims.map(async (claim) => {
       claim.decide("stop");
@@ -3517,7 +3574,9 @@ export class PluginPipeline {
       if (!outcome.ok) throw outcome.error;
     });
     if (cleanupIds.has(primaryPluginId)) {
-      stops.push(this.stopOldRuntime(primaryPluginId, primaryChange));
+      stops.push(this.stopOldRuntime(primaryPluginId, primaryChange, {
+        onWillStop: () => hooks.onWillStopRuntime?.(primaryPluginId),
+      }));
     }
     const outcomes = await Promise.allSettled(stops);
     const failure = outcomes.find(
@@ -3537,6 +3596,7 @@ export class PluginPipeline {
     cleanupIds: ReadonlyArray<string>,
     primaryPluginId: string,
     reservations: ReadonlyMap<string, PluginHostChangeReservation>,
+    hooks: PluginPipelineRuntimeStopHooks,
   ): UninstallQueueClaim[] {
     const claims: UninstallQueueClaim[] = [];
     const secondaryIds = [...new Set(cleanupIds)]
@@ -3573,7 +3633,9 @@ export class PluginPipeline {
         let stopFailure: unknown;
         try {
           await reservation.run(async (change) => {
-            await this.stopOldRuntime(pluginId, change);
+            await this.stopOldRuntime(pluginId, change, {
+              onWillStop: () => hooks.onWillStopRuntime?.(pluginId),
+            });
             return change.preserve(existingHostResult(undefined));
           });
           settleStop({ ok: true });

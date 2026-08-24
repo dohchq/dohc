@@ -296,6 +296,27 @@ describe("PluginHostOwnership", () => {
     expect(host.calls).toEqual(["stop:example-plugin"]);
   });
 
+  it("revokes external authority at the owned stop boundary", async () => {
+    const host = new FakePluginHost();
+    host.start("example-plugin");
+    const steps: string[] = [];
+    host.stopImpl = async (pluginId) => {
+      steps.push("host-stop");
+      host.records.delete(pluginId);
+    };
+    const owner = new PluginHostOwnership(host);
+
+    await owner.runChange("example-plugin", async (authority) =>
+      authority.preserve({
+        kind: "existing",
+        value: await authority.stop({
+          onWillStop: () => steps.push("revoke"),
+        }),
+      }));
+
+    expect(steps).toEqual(["revoke", "host-stop"]);
+  });
+
   it("starts a nested reserved change after another stop refreshes the epoch", async () => {
     const host = new FakePluginHost();
     host.start("example-plugin");

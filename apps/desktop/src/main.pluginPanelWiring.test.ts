@@ -483,13 +483,17 @@ describe("plugin panel main-process wiring", () => {
     expect(checkAt).toBeGreaterThan(gateAt);
   });
 
-  it("disposes panel records only after disable succeeds", () => {
+  it("revokes panel authority through the disable hook, then disposes records only after success", () => {
     const disable = sourceBlock(
       "pluginAction(CHANNELS.disablePlugin,",
       "\n  });",
     );
     const disableCallAt = disable.indexOf(
-      "const result = await pipeline.disable(pluginId);",
+      "const result = await pipeline.disable(pluginId, {",
+    );
+    const revokeHookAt = disable.indexOf(
+      "onWillStopRuntime: () => revokePluginPanels(workspaceId, pluginId)",
+      disableCallAt,
     );
     const failureReturnAt = disable.indexOf(
       "if (!result.ok) return result;",
@@ -501,18 +505,27 @@ describe("plugin panel main-process wiring", () => {
     );
 
     expect(disableCallAt).toBeGreaterThan(-1);
-    expect(failureReturnAt).toBeGreaterThan(disableCallAt);
+    expect(revokeHookAt).toBeGreaterThan(disableCallAt);
+    expect(failureReturnAt).toBeGreaterThan(revokeHookAt);
     expect(disableCleanupAt).toBeGreaterThan(failureReturnAt);
   });
 
-  it("disposes a plugin's panel records only once no installed claimant survives uninstall", () => {
+  it("revokes panel authority through the uninstall hook, then disposes records only once no claimant survives", () => {
     const uninstall = handler("uninstallPlugin");
     const uninstallCallAt = uninstall.indexOf(
-      "await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),",
+      "await pipeline.uninstall(",
+    );
+    const revokeHookAt = uninstall.indexOf(
+      "onWillStopRuntime: (pluginId) =>",
+      uninstallCallAt,
+    );
+    const revokeAt = uninstall.indexOf(
+      "revokePluginPanels(input.workspaceId, pluginId)",
+      revokeHookAt,
     );
     const stillInstalledClaimantAt = uninstall.indexOf(
       "pluginIdHasInstalledClaimant(pipeline, input.pluginId)",
-      uninstallCallAt,
+      revokeAt,
     );
     const uninstallCleanupAt = uninstall.indexOf(
       "stopPluginPanelsForPlugin(input.workspaceId, input.pluginId)",
@@ -526,7 +539,9 @@ describe("plugin panel main-process wiring", () => {
     // name in main.pluginWebAppWiring.test.ts, and its partition-clear
     // sibling is pinned end to end there too.
     expect(uninstallCallAt).toBeGreaterThan(-1);
-    expect(stillInstalledClaimantAt).toBeGreaterThan(uninstallCallAt);
+    expect(revokeHookAt).toBeGreaterThan(uninstallCallAt);
+    expect(revokeAt).toBeGreaterThan(revokeHookAt);
+    expect(stillInstalledClaimantAt).toBeGreaterThan(revokeAt);
     expect(uninstallCleanupAt).toBeGreaterThan(stillInstalledClaimantAt);
   });
 

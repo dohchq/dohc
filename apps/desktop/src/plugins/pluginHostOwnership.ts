@@ -53,6 +53,14 @@ export type PluginHostChangeStopCheck =
   | { kind: "refused"; reason: "self-drain" }
   | { kind: "superseded" };
 
+export interface PluginHostChangeStopOptions {
+  /**
+   * Runs after admission and drain checks prove this change still owns the
+   * exact host stop, immediately before that stop starts.
+   */
+  onWillStop?: () => void;
+}
+
 const commandAuthorityBrand: unique symbol = Symbol(
   "PluginHostCommandAuthority",
 );
@@ -118,7 +126,7 @@ export interface PluginHostChangeAuthority {
   readonly [changeAuthorityBrand]: true;
 
   checkStop(): PluginHostChangeStopCheck;
-  stop(): Promise<PluginHostChangeStopOutcome>;
+  stop(options?: PluginHostChangeStopOptions): Promise<PluginHostChangeStopOutcome>;
   adopt<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
   preserve<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
 }
@@ -440,8 +448,8 @@ class ChangeAuthority implements PluginHostChangeAuthority {
     this.epoch = epoch;
   }
 
-  stop(): Promise<PluginHostChangeStopOutcome> {
-    this.stopPromise ??= this.owner[stopChange](this);
+  stop(options?: PluginHostChangeStopOptions): Promise<PluginHostChangeStopOutcome> {
+    this.stopPromise ??= this.owner[stopChange](this, options);
     return this.stopPromise;
   }
 
@@ -698,6 +706,7 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
 
   async [stopChange](
     change: ChangeAuthority,
+    options?: PluginHostChangeStopOptions,
   ): Promise<PluginHostChangeStopOutcome> {
     const check = this[checkChangeStop](change);
     if (check.kind === "superseded") {
@@ -734,6 +743,7 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
       }
     }
 
+    options?.onWillStop?.();
     const attempt = await this.#runHostStop(change.state, change.epoch);
     if (attempt.kind === "failed") throw attempt.error;
     // This change owns the stop, so its replacement belongs to the new epoch.

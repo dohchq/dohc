@@ -36,6 +36,7 @@ import {
   type DoorWrittenDelta,
   overlayDoorWrittenSourceDeltas,
   PluginPipeline,
+  type PluginPipelineRuntimeStopHooks,
   type PluginPipelineStatusEvent,
 } from "./PluginPipeline";
 import {
@@ -63,7 +64,11 @@ import {
 } from "./pluginCommandInvocation";
 import { PluginHostOwnership } from "./pluginHostOwnership";
 import type { PluginSettingDeclaration } from "./pluginManifestSchema";
-import { pluginStateRoot, snapshotPluginSource } from "./pluginSourceSnapshot";
+import {
+  hashPluginSourceFiles,
+  pluginStateRoot,
+  snapshotPluginSource,
+} from "./pluginSourceSnapshot";
 import {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
@@ -94,6 +99,7 @@ interface PluginPipelineQueueInternals {
     cleanupIds: ReadonlyArray<string>,
     primaryPluginId: string,
     reservations: ReadonlyMap<string, unknown>,
+    hooks: PluginPipelineRuntimeStopHooks,
   ): TestUninstallQueueClaim[];
 }
 
@@ -1194,13 +1200,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     );
 
     let pipeline: PluginPipeline;
-    // Round 21 finding 2: uninstall() re-verifies immediately before
-    // stopping the process AND immediately before the actual delete, each
-    // through the same operations.uninstallPreflight() this records here —
-    // every stateRoot it names must apply the same trace-to-directory rule
-    // the initial uninstallPreflight() action already does, not only the
-    // first check.
+    // The dialog gathers the destructive inventory once. Execution then
+    // re-resolves the same identity twice and probes only the source hash.
     const preflightStateRoots: (string | null)[] = [];
+    const revalidatedSourceRoots: string[] = [];
     // #779-offers round 24 finding 4: the "removed" event this uninstall
     // emits must name the row that actually left — never the id alone,
     // which the still-installed survivor shares.
@@ -1229,6 +1232,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           uninstallPreflight: async (input) => {
             preflightStateRoots.push(input.stateRoot);
             return pluginUninstallPreflight(input);
+          },
+          hashSource: async (rootPath) => {
+            revalidatedSourceRoots.push(rootPath);
+            return hashPluginSourceFiles(rootPath);
           },
         },
       });
@@ -1317,14 +1324,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         directoryName: "target-dir",
       });
 
-      // Round 21 finding 2: uninstall()'s own two internal rechecks —
-      // immediately before stopping the process, and immediately before
-      // the actual delete — must apply the same trace-to-directory rule
-      // as the initial preflight above, not fall back to naming the
-      // survivor's real state directory unconditionally. Three total
-      // calls: the uninstallPreflight() action itself, then the two
-      // rechecks inside uninstall().
-      expect(preflightStateRoots).toEqual([null, null, null]);
+      // Inventory and warning traversal belong only to the dialog. The two
+      // execution checks fingerprint the exact source root without walking
+      // the unrelated survivor's state.
+      expect(preflightStateRoots).toEqual([null]);
+      expect(revalidatedSourceRoots).toEqual([invalidRoot, invalidRoot]);
 
       // The invalid directory is gone...
       await expect(lstat(invalidRoot)).rejects.toMatchObject({ code: "ENOENT" });
@@ -1801,10 +1805,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       const preflight = await pipeline.uninstallPreflight("original-id", "mixed-dir");
       if (!preflight.ok) throw new Error(preflight.error.message);
       const reserveChange = vi.spyOn(hostOwnership, "reserveChange");
+      const revokedRuntimeIds: string[] = [];
       const removing = pipeline.uninstall(
         "original-id",
         "mixed-dir",
         preflight.confirmationToken,
+        {
+          onWillStopRuntime: (pluginId) => revokedRuntimeIds.push(pluginId),
+        },
       );
       expect(reserveChange.mock.calls.map(([pluginId]) => pluginId)).toEqual([
         "original-id",
@@ -1812,6 +1820,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       ]);
       const removed = await removing;
       expect(removed.ok).toBe(true);
+      expect(revokedRuntimeIds.toSorted()).toEqual([
+        "mixed-dir",
+        "original-id",
+      ]);
 
       await expect(lstat(pluginRoot)).rejects.toMatchObject({ code: "ENOENT" });
       // Both identities' state are gone — not only pluginId's own.
@@ -1848,9 +1860,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
     );
     const buildEntered = deferred();
     const releaseBuild = deferred();
-    const preDeleteEntered = deferred();
-    const releasePreDelete = deferred();
-    let uninstallPreflightCalls = 0;
+    const revalidationEntered = deferred();
+    const releaseRevalidation = deferred();
+    let hashSourceCalls = 0;
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -1871,13 +1883,13 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-        uninstallPreflight: async (input) => {
-          uninstallPreflightCalls += 1;
-          if (uninstallPreflightCalls === 2) {
-            preDeleteEntered.resolve();
-            await releasePreDelete.promise;
+        hashSource: async (rootPath) => {
+          hashSourceCalls += 1;
+          if (hashSourceCalls === 1) {
+            revalidationEntered.resolve();
+            await releaseRevalidation.promise;
           }
-          return pluginUninstallPreflight(input);
+          return hashPluginSourceFiles(rootPath);
         },
         build: async (input) => {
           buildEntered.resolve();
@@ -1934,7 +1946,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
 
       releaseBuild.resolve();
       await starting;
-      await preDeleteEntered.promise;
+      await revalidationEntered.promise;
 
       let lateAliasJobEntered = false;
       const lateAliasJob = pipelineInternals.enqueueActionValue(
@@ -1945,7 +1957,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       );
       expect(lateAliasJobEntered).toBe(false);
 
-      releasePreDelete.resolve();
+      releaseRevalidation.resolve();
       const removed = await removing;
       await lateAliasJob;
 
@@ -1967,7 +1979,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(state.state.plugins["runtime-id"]).toBeDefined();
     } finally {
       releaseBuild.resolve();
-      releasePreDelete.resolve();
+      releaseRevalidation.resolve();
       await starting?.catch(() => undefined);
       await lease?.release();
       await pipeline.dispose();
@@ -2138,8 +2150,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let lateAliasJobEntered = false;
       let lateAliasJobEnteredBeforeRelease = false;
       vi.spyOn(internals, "claimUninstallCleanupQueues").mockImplementation(
-        (cleanupIds, primaryPluginId, reservations) =>
-          claimCleanupQueues(cleanupIds, primaryPluginId, reservations).map((claim) => ({
+        (cleanupIds, primaryPluginId, reservations, hooks) =>
+          claimCleanupQueues(cleanupIds, primaryPluginId, reservations, hooks).map((claim) => ({
             ...claim,
             release: () => {
               claimReleaseCalls += 1;
@@ -5289,13 +5301,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("refuses to delete when source changed after the last check, immediately before the delete (#779 round 3 finding 3)", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;
-    // Real pluginUninstallPreflight, with liveHash forced to change starting
-    // on its 3rd call — the one this fix adds, running right before the
-    // actual delete, after pluginHost.stop()'s own real await window. Calls
-    // 1 and 2 (the uninstallPreflight() action, then uninstall()'s existing
-    // pre-stop check) see the real, unchanged hash, so the confirmation
-    // token itself is genuinely valid at issuance.
+    // The full preflight runs once for the dialog. Execution hashes the source
+    // before stopping and again immediately before deletion; the second probe
+    // sees drift across the real host-stop await window.
     let preflightCalls = 0;
+    let hashSourceCalls = 0;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
       workspaceRoot: fixture.workspaceRoot,
@@ -5316,9 +5326,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
         uninstallPreflight: async (input) => {
           preflightCalls += 1;
-          const real = await pluginUninstallPreflight(input);
-          if (preflightCalls <= 2) return real;
-          return { ...real, liveHash: "f".repeat(64) };
+          return pluginUninstallPreflight(input);
+        },
+        hashSource: async (rootPath) => {
+          hashSourceCalls += 1;
+          const real = await hashPluginSourceFiles(rootPath);
+          return hashSourceCalls === 1
+            ? real
+            : { ...real, sourceHash: "f".repeat(64) };
         },
       },
     });
@@ -5352,7 +5367,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       });
       // Refused, not deleted.
       await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
-      expect(preflightCalls).toBe(3);
+      expect(preflightCalls).toBe(1);
+      expect(hashSourceCalls).toBe(2);
       // And not a stuck "uninstalling" spinner: the status set on the way in
       // is restored to an actionable one the user can retry from (#779 round
       // 7 B6).
@@ -5372,9 +5388,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("refuses to delete when the source could not be fingerprinted (#779 round 11 A2)", async () => {
     const fixture = await createPluginWorkspace();
     let pipeline: PluginPipeline;
-    // Preflight cannot hash the tree (a symlink or an unreadable entry), so
-    // every call records liveHash: null. Comparing null against null says
-    // "unchanged" while proving nothing — and the delete is irreversible.
+    // The dialog can read the source, but execution's fail-closed hash probe
+    // cannot. A present source with an unreadable hash must never compare as
+    // equivalent to an absent source.
+    let preflightCalls = 0;
+    let hashSourceCalls = 0;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
       workspaceRoot: fixture.workspaceRoot,
@@ -5393,10 +5411,14 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
-        uninstallPreflight: async (input) => ({
-          ...await pluginUninstallPreflight(input),
-          liveHash: null,
-        }),
+        uninstallPreflight: async (input) => {
+          preflightCalls += 1;
+          return pluginUninstallPreflight(input);
+        },
+        hashSource: async () => {
+          hashSourceCalls += 1;
+          throw new Error("simulated unreadable source");
+        },
       },
     });
 
@@ -5430,6 +5452,8 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       expect(result.error.message).toContain(
         "could not be read to confirm what uninstall would delete",
       );
+      expect(preflightCalls).toBe(1);
+      expect(hashSourceCalls).toBe(1);
       await expect(lstat(fixture.pluginRoot)).resolves.toBeDefined();
       await expect(lstat(join(fixture.pluginRoot, "dohc-plugin.json")))
         .resolves.toBeDefined();
@@ -8088,6 +8112,119 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("revokes external authority before a committed disable stops the host", async () => {
+      const setup = await setupEstablishedPlugin();
+      const steps: string[] = [];
+      const originalStop = setup.pipeline.host.stop.bind(setup.pipeline.host);
+      const stop = vi.spyOn(setup.pipeline.host, "stop").mockImplementation(
+        async (pluginId) => {
+          steps.push("host-stop");
+          await originalStop(pluginId);
+        },
+      );
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin", {
+          onWillStopRuntime: (pluginId) => steps.push(`revoke:${pluginId}`),
+        });
+
+        expect(disabled.ok).toBe(true);
+        expect(steps).toEqual(["revoke:example-plugin", "host-stop"]);
+      } finally {
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps external authority when disable fails before the stop boundary", async () => {
+      const setup = await setupEstablishedPlugin();
+      const revoke = vi.fn();
+      try {
+        setup.failNextRecordWrite();
+        const disabled = await setup.pipeline.disable("example-plugin", {
+          onWillStopRuntime: revoke,
+        });
+
+        expect(disabled.ok).toBe(false);
+        expect(revoke).not.toHaveBeenCalled();
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+      } finally {
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps the live host when disable cannot revoke its external authority", async () => {
+      const setup = await setupEstablishedPlugin();
+      const runningRecord = setup.pipeline.host.currentRecord("example-plugin");
+      const stop = vi.spyOn(setup.pipeline.host, "stop");
+      try {
+        const disabled = await setup.pipeline.disable("example-plugin", {
+          onWillStopRuntime: () => {
+            throw new Error("simulated authority revocation failure");
+          },
+        });
+
+        expect(disabled).toMatchObject({
+          ok: false,
+          error: {
+            code: "disable-failed",
+            message: "simulated authority revocation failure",
+          },
+        });
+        expect(stop).not.toHaveBeenCalled();
+        expect(setup.pipeline.host.currentRecord("example-plugin"))
+          .toBe(runningRecord);
+        expect(setup.pipeline.host.getStatus("example-plugin")).toBe("ready");
+        const state = await readPluginLocalState(
+          setup.fixture.stateDir,
+          setup.fixture.workspaceRoot,
+        );
+        if (!state.ok) throw new Error(state.warning);
+        expect(state.state.plugins["example-plugin"]?.disabled).toBe(false);
+      } finally {
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("preserves a live plugin when uninstall cannot revoke its external authority", async () => {
+      const setup = await setupEstablishedPlugin();
+      const runningRecord = setup.pipeline.host.currentRecord("example-plugin");
+      const stop = vi.spyOn(setup.pipeline.host, "stop");
+      try {
+        const preflight = await setup.pipeline.uninstallPreflight(
+          "example-plugin",
+          "example-plugin",
+        );
+        if (!preflight.ok) throw new Error(preflight.error.message);
+
+        const removed = await setup.pipeline.uninstall(
+          "example-plugin",
+          "example-plugin",
+          preflight.confirmationToken,
+          {
+            onWillStopRuntime: () => {
+              throw new Error("simulated authority revocation failure");
+            },
+          },
+        );
+
+        expect(removed).toMatchObject({
+          ok: false,
+          error: {
+            code: "delete-failed",
+            message: "simulated authority revocation failure",
+          },
+        });
+        expect(stop).not.toHaveBeenCalled();
+        expect(setup.pipeline.host.currentRecord("example-plugin"))
+          .toBe(runningRecord);
+        await expect(lstat(setup.fixture.pluginRoot)).resolves.toBeDefined();
+      } finally {
+        stop.mockRestore();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("restores durable enablement when disable cannot stop the live host", async () => {
       const setup = await setupEstablishedPlugin();
       const record = setup.pipeline.host.currentRecord("example-plugin");
@@ -9110,6 +9247,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
   it("finishes an uninstall whose source delete succeeded and whose data delete failed (#779 round 12 A2)", async () => {
     const fixture = await createPluginWorkspace();
     let failDataRemoval = false;
+    let hashSourceCalls = 0;
     let pipeline: PluginPipeline;
     const host = new PluginHost({
       stateDir: fixture.stateDir,
@@ -9129,6 +9267,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       operations: {
         install: (input) =>
           installPluginDependencies({ ...input, forkProcess: nodeForkProcess }),
+        hashSource: async (rootPath) => {
+          hashSourceCalls += 1;
+          return hashPluginSourceFiles(rootPath);
+        },
         removePath: async (path, options) => {
           if (
             failDataRemoval &&
@@ -9172,6 +9314,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       await expect(lstat(fixture.pluginRoot)).rejects.toMatchObject({
         code: "ENOENT",
       });
+      expect(hashSourceCalls).toBe(2);
       expect(await readdir(pluginsDataRoot(fixture))).toEqual([
         "example-plugin",
       ]);
@@ -9218,6 +9361,9 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         retryPreflight.confirmationToken,
       );
       expect(finished.ok).toBe(true);
+      // A confirmed absent source still re-resolves its identity twice, but
+      // neither check tries to hash a path already proven absent.
+      expect(hashSourceCalls).toBe(2);
 
       expect(await readdir(pluginsDataRoot(fixture))).toEqual([]);
       const state = await readPluginLocalState(

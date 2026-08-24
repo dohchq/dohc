@@ -8775,7 +8775,9 @@ function registerIpcHandlers(
   pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
     pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, async (pipeline, pluginId, workspaceId) => {
-    const result = await pipeline.disable(pluginId);
+    const result = await pipeline.disable(pluginId, {
+      onWillStopRuntime: () => revokePluginPanels(workspaceId, pluginId),
+    });
     if (!result.ok) return result;
     await Promise.all([
       stopPluginPanelsForPlugin(workspaceId, pluginId),
@@ -8912,7 +8914,15 @@ function registerIpcHandlers(
     try {
       const { pipeline, workspace } = await activePluginPipelineFor(event, input.workspaceId);
       const result = PluginActionResult.parse(
-        await pipeline.uninstall(input.pluginId, input.directoryName, input.confirmationToken),
+        await pipeline.uninstall(
+          input.pluginId,
+          input.directoryName,
+          input.confirmationToken,
+          {
+            onWillStopRuntime: (pluginId) =>
+              revokePluginPanels(input.workspaceId, pluginId),
+          },
+        ),
       );
       // Teardown below must key on THIS id's own claimant having genuinely
       // stopped — never on result.ok alone, and never eagerly before
