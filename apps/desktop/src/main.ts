@@ -6772,6 +6772,7 @@ function registerIpcHandlers(
         rendererGeneration(senderId),
       );
       advanceRendererGeneration(senderId);
+      workspaceSearchOwner.disposeSender(senderId);
       // Per-sender, not per-workspace: this window's own in-flight site
       // preview start is tied to ITS request, so aborting it on switch-away
       // is correct regardless of whether another window still has
