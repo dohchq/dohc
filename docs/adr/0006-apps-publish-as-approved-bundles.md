@@ -1,0 +1,7 @@
+# Apps publish as owner-approved immutable bundles
+
+An app's manifest is a request, not a boundary: source can ask for authority, and only the owner can confer it. Serving an app to link holders therefore goes through a **publication**: an immutable, content-addressed bundle tied to a source revision, dependency lock, manifest digest, and explicit owner approval. A source, dependency, or manifest change creates a new unpublished revision; nothing publishes automatically. A missing manifest requests no capabilities; a malformed manifest fails publication rather than falling back to static serving.
+
+The effective authority an app receives is the intersection of the pinned publication's requests, the owner's approval, the active link grant, and server policy. External network access counts as a capability, because it lets an app exfiltrate anything it can read. A zero-capability app is still untrusted code and runs under the full browser sandbox on its own origin.
+
+Builds are part of the trust boundary: Vite runs arbitrary code at build time through config, plugins, and dependency hooks, so builds never run inside `share-web`. The build trust model (owner builds locally, a fixed no-plugin compiler, or an isolated credential-free builder) is chosen when the app phase is planned. The local option is acceptable only sandboxed — credential-free, network-denied, limited to declared build inputs — because in a shared workspace, building app source someone else edited is running their code with the owner's authority.
