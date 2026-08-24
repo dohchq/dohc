@@ -17,6 +17,15 @@ export interface PluginHostOwnershipOptions {
   onCleanupError?: (pluginId: string, error: unknown) => void;
 }
 
+export class PluginHostOwnershipClosedError extends Error {
+  readonly code = "plugin-host-ownership-closed";
+
+  constructor() {
+    super("Plugin host ownership is closed.");
+    this.name = "PluginHostOwnershipClosedError";
+  }
+}
+
 export type PluginHostAdmissionRefusal = {
   kind: "refused";
   reason: "change-in-progress" | "closed";
@@ -117,6 +126,12 @@ export interface PluginHostChangeAuthority {
 export interface PluginHostChangeCompletion<T> {
   readonly [changeCompletionBrand]: true;
   readonly value: T;
+}
+
+export function isPluginHostCommandAuthority(
+  scope: PluginHostChangeScope,
+): scope is PluginHostCommandAuthority {
+  return commandAuthorityBrand in scope;
 }
 
 interface PluginOwnershipState {
@@ -298,6 +313,7 @@ class ChangeReservation implements PluginHostChangeReservation {
   readonly [changeReservationBrand] = true;
   readonly released = signal();
   active = true;
+  closed = false;
   cancelPromise: Promise<void> | null = null;
 
   constructor(
@@ -311,6 +327,9 @@ class ChangeReservation implements PluginHostChangeReservation {
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
     if (!this.active) {
+      if (this.closed) {
+        return Promise.reject(new PluginHostOwnershipClosedError());
+      }
       return Promise.reject(
         new Error("Change reservation is no longer active."),
       );
@@ -327,6 +346,11 @@ class ChangeReservation implements PluginHostChangeReservation {
     if (!this.active) return;
     this.active = false;
     this.released.resolve();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.invalidate();
   }
 }
 
@@ -513,7 +537,7 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
   }
 
   reserveChange(pluginId: string): PluginHostChangeReservation {
-    if (this.#closed) throw new Error("Plugin host ownership is closed");
+    if (this.#closed) throw new PluginHostOwnershipClosedError();
     const state = this.#state(pluginId);
     const reservation = new ChangeReservation(this, state);
     state.pendingChanges.add(reservation);
@@ -525,7 +549,7 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
     this.#closed = true;
     const releases: Promise<void>[] = [];
     for (const state of this.#states.values()) {
-      for (const reservation of state.pendingChanges) reservation.invalidate();
+      for (const reservation of state.pendingChanges) reservation.close();
       state.pendingChanges.clear();
       for (const command of state.commands) {
         if (!command.overranDrain) releases.push(command.released.promise);
@@ -574,6 +598,9 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
       change: PluginHostChangeAuthority,
     ) => Promise<PluginHostChangeCompletion<T>>,
   ): Promise<T> {
+    if (this.#closed) {
+      return Promise.reject(new PluginHostOwnershipClosedError());
+    }
     return this.#beginChange(authority.state, authority, operation);
   }
 
@@ -643,7 +670,10 @@ export class PluginHostOwnership<H extends OwnedPluginHost> {
   ): Promise<T> {
     const stopping = reservation.state.stopInFlight;
     if (stopping) await stopping;
-    if (!reservation.active || this.#closed) {
+    if (this.#closed || reservation.closed) {
+      throw new PluginHostOwnershipClosedError();
+    }
+    if (!reservation.active) {
       throw new Error("Change reservation is no longer active.");
     }
     reservation.invalidate();

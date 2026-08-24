@@ -5,6 +5,7 @@ import type {
 } from "./PluginHost";
 import {
   PluginHostOwnership,
+  PluginHostOwnershipClosedError,
   type PluginHostChangeScope,
   type OwnedPluginHost,
   type PluginHostCommandAuthority,
@@ -211,10 +212,35 @@ describe("PluginHostOwnership", () => {
         began = true;
         return change.preserve({ kind: "existing", value: undefined });
       }),
-    ).rejects.toThrow(/reservation is no longer active/i);
+    ).rejects.toMatchObject({
+      name: "PluginHostOwnershipClosedError",
+      code: "plugin-host-ownership-closed",
+    });
+    await expect(
+      reservation.run(async (change) =>
+        change.preserve({ kind: "existing", value: undefined })),
+    ).rejects.toBeInstanceOf(PluginHostOwnershipClosedError);
     expect(began).toBe(false);
     await close;
     expect(host.calls).toEqual(["bump-generation", "stop-all"]);
+  });
+
+  it("keeps an ordinarily consumed reservation distinct from owner close", async () => {
+    const owner = new PluginHostOwnership(new FakePluginHost());
+    const stale = owner.reserveChange("example-plugin");
+    await stale.cancel();
+    const closing = owner.reserveChange("example-plugin");
+    const close = owner.close();
+
+    await expect(
+      stale.run(async (change) =>
+        change.preserve({ kind: "existing", value: undefined })),
+    ).rejects.not.toBeInstanceOf(PluginHostOwnershipClosedError);
+    await expect(
+      closing.run(async (change) =>
+        change.preserve({ kind: "existing", value: undefined })),
+    ).rejects.toBeInstanceOf(PluginHostOwnershipClosedError);
+    await close;
   });
 
   it("raises change admission synchronously and composes nested holds", async () => {

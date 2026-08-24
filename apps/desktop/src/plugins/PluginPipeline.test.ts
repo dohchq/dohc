@@ -6836,6 +6836,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       let nextStopGate: { entered: Deferred; release: Deferred } | null = null;
       let nextBuildGate: { entered: Deferred; release: Deferred } | null = null;
       let failNextStop = false;
+      let nextSnapshotGate: { entered: Deferred; release: Deferred } | null = null;
       let buildCalls = 0;
       let registeredCommands = (options.commands ?? [])
         .map((command) => command.id);
@@ -6900,6 +6901,12 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             return mutatePluginRecord(stateDir, workspaceRoot, pluginId, mutate);
           },
           snapshot: async (input) => {
+            const gate = nextSnapshotGate;
+            if (gate) {
+              nextSnapshotGate = null;
+              gate.entered.resolve();
+              await gate.release.promise;
+            }
             const result = await snapshotPluginSource(input);
             if (!result.ok || !mismatchNextSnapshot) return result;
             mismatchNextSnapshot = false;
@@ -6975,6 +6982,11 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         gateNextBuild: () => {
           const gate = { entered: deferred(), release: deferred() };
           nextBuildGate = gate;
+          return gate;
+        },
+        gateNextSnapshot: () => {
+          const gate = { entered: deferred(), release: deferred() };
+          nextSnapshotGate = gate;
           return gate;
         },
         failNextStop: () => {
@@ -7855,6 +7867,90 @@ describe("PluginPipeline real filesystem lifecycle", () => {
       }
     }, 60_000);
 
+    it("keeps warm command admission open while approved source is verified", async () => {
+      const setup = await setupEstablishedPlugin();
+      const snapshotGate = setup.gateNextSnapshot();
+      let runChangeCalls = () => -1;
+      try {
+        const first = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            const runChange = vi.spyOn(authority, "runChange");
+            runChangeCalls = () => runChange.mock.calls.length;
+            return authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+          },
+        );
+        await snapshotGate.entered.promise;
+        expect(runChangeCalls()).toBe(0);
+
+        const secondEntered = deferred();
+        const second = setup.hostOwnership.runCommand(
+          "example-plugin",
+          async (authority) => {
+            secondEntered.resolve();
+            return authority.start(() =>
+              setup.pipeline.ensureStarted("example-plugin", authority));
+          },
+        );
+        await expect(Promise.race([
+          secondEntered.promise.then(() => "entered"),
+          second.then(() => "settled"),
+        ])).resolves.toBe("entered");
+
+        snapshotGate.release.resolve();
+        await expect(first).resolves.toMatchObject({
+          kind: "completed",
+          value: { kind: "admitted", value: { ok: true } },
+        });
+        await expect(second).resolves.toMatchObject({
+          kind: "completed",
+          value: { kind: "admitted", value: { ok: true } },
+        });
+        expect(runChangeCalls()).toBe(0);
+      } finally {
+        snapshotGate.release.resolve();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
+    it("keeps surface verification under change admission", async () => {
+      const setup = await setupEstablishedPlugin();
+      const snapshotGate = setup.gateNextSnapshot();
+      const lease = setup.hostOwnership.acquireSurface("example-plugin");
+      if ("kind" in lease) throw new Error("Surface lease was refused.");
+      let runChangeCalls = () => -1;
+      try {
+        const starting = lease.start(async (authority) => {
+          const runChange = vi.spyOn(authority, "runChange");
+          runChangeCalls = () => runChange.mock.calls.length;
+          return setup.pipeline.ensureStarted("example-plugin", authority);
+        });
+        await snapshotGate.entered.promise;
+
+        expect(runChangeCalls()).toBe(1);
+        await expect(
+          setup.hostOwnership.runCommand(
+            "example-plugin",
+            async () => "ran",
+          ),
+        ).resolves.toEqual({
+          kind: "refused",
+          reason: "change-in-progress",
+        });
+
+        snapshotGate.release.resolve();
+        await expect(starting).resolves.toMatchObject({
+          kind: "admitted",
+          value: { ok: true },
+        });
+      } finally {
+        snapshotGate.release.resolve();
+        await lease.release();
+        await setup.pipeline.dispose();
+      }
+    }, 60_000);
+
     it("returns exact evidence for a cold command start", async () => {
       const fixture = await createPluginWorkspace();
       let pipeline: PluginPipeline;
@@ -8104,6 +8200,21 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         queueGate.resolve();
         await setup.pipeline.dispose();
       }
+    }, 60_000);
+
+    it("does not translate an ordinary stale reservation into pipeline close", async () => {
+      const setup = await setupEstablishedPlugin();
+      const stale = setup.hostOwnership.reserveChange("example-plugin");
+      await stale.cancel();
+      vi.spyOn(setup.hostOwnership, "reserveChange").mockReturnValueOnce(stale);
+
+      const disabling = setup.pipeline.disable("example-plugin");
+      const disposing = setup.pipeline.dispose();
+
+      await expect(disabling).rejects.toThrow(
+        "Change reservation is no longer active.",
+      );
+      await disposing;
     }, 60_000);
 
     it("releases reservations after action preconditions fail", async () => {

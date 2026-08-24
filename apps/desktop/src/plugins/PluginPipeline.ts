@@ -17,12 +17,14 @@ import {
   recoverOnDiskSegments,
 } from "./pluginCaseRecovery";
 import { HOST_CHANGE_REFUSED_ERROR_CODE } from "./pluginCommandInvocation";
-import type {
-  PluginHostChangeAuthority,
-  PluginHostChangeReservation,
-  PluginHostChangeScope,
-  PluginHostOwnership,
-  PluginHostStartResult,
+import {
+  isPluginHostCommandAuthority,
+  PluginHostOwnershipClosedError,
+  type PluginHostChangeAuthority,
+  type PluginHostChangeReservation,
+  type PluginHostChangeScope,
+  type PluginHostOwnership,
+  type PluginHostStartResult,
 } from "./pluginHostOwnership";
 import { verifyPluginIcon } from "./pluginIcon";
 import { installPluginDependencies } from "./pluginInstallRunner";
@@ -319,6 +321,15 @@ class PipelineFailure extends Error {
   constructor(readonly detail: PluginPipelineError) {
     super(detail.message);
     this.name = "PipelineFailure";
+  }
+}
+
+class PluginPipelineClosedError extends Error {
+  readonly code = "plugin-pipeline-closed";
+
+  constructor() {
+    super("Plugin pipeline is closed.");
+    this.name = "PluginPipelineClosedError";
   }
 }
 
@@ -1074,16 +1085,14 @@ export class PluginPipeline {
     scope: PluginHostChangeScope,
   ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
     return this.enqueueStartedValue(pluginId, async () => {
-      // Sampled inside the job. Work already ahead of this call has finished,
-      // so a cold start needs no change authority. A running host can be
-      // rebuilt only through the caller's own authority.
-      if (!this.host.currentRecord(pluginId)) {
+      if (
+        !this.host.currentRecord(pluginId) ||
+        isPluginHostCommandAuthority(scope)
+      ) {
         return this.runEnsureStarted(pluginId);
       }
-      const value = await scope.runChange(async (change) => {
-        const result = await this.runEnsureStarted(pluginId, change);
-        return change.preserve(result);
-      });
+      const value = await scope.runChange(async (change) =>
+        change.preserve(await this.runEnsureStarted(pluginId, change)));
       return existingHostResult(value);
     });
   }
@@ -1105,6 +1114,12 @@ export class PluginPipeline {
       ));
     }
     if (!state?.approvedHash) {
+      if (this.host.currentRecord(pluginId) && !change) {
+        return existingHostResult(this.failure(
+          pluginId,
+          this.hostChangeInProgressError(pluginId),
+        ));
+      }
       return this.runFullBuild({
         candidate,
         startRuntime: true,
@@ -3594,6 +3609,16 @@ export class PluginPipeline {
     const verified = await this.verifyApprovedSource(candidate, approvedHash);
     if (verified.kind === "failed") return existingHostResult(verified.result);
     if (verified.kind === "changed") {
+      if (this.host.currentRecord(candidate.id) && !change) {
+        return this.restoreStatusAfterHostChangeRefusal(
+          candidate,
+          priorStatus,
+          existingHostResult(this.failure(
+            candidate.id,
+            this.hostChangeInProgressError(candidate.id),
+          )),
+        );
+      }
       return this.restoreStatusAfterHostChangeRefusal(
         candidate,
         priorStatus,
@@ -3911,10 +3936,10 @@ export class PluginPipeline {
   }
 
   private isCloseInvalidation(error: unknown): boolean {
-    if (!this.disposed || !(error instanceof Error)) return false;
-    return error.message === "Change reservation is no longer active." ||
-      error.message === "Plugin pipeline is closed." ||
-      error.message === "Plugin host ownership is closed";
+    return this.disposed && (
+      error instanceof PluginHostOwnershipClosedError ||
+      error instanceof PluginPipelineClosedError
+    );
   }
 
   private pipelineClosedFailure(pluginId: string): PluginPipelineActionResult {
@@ -3926,7 +3951,7 @@ export class PluginPipeline {
 
   private enqueueActionValue<T>(pluginId: string, run: () => Promise<T>): Promise<T> {
     if (this.disposed) {
-      return Promise.reject(new Error("Plugin pipeline is closed."));
+      return Promise.reject(new PluginPipelineClosedError());
     }
     return new Promise<T>((resolveResult, rejectResult) => {
       const queue = this.queueFor(pluginId);
