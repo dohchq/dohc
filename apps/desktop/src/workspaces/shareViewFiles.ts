@@ -856,17 +856,18 @@ export function createShareViewFiles(
       await dependencies.assertProjectionRoot(target);
     }
     const store = dependencies.openStore(target);
+    const standaloneCaptureInput = () => ({
+      rootDir: target.rootPath,
+      workspaceId: target.storeWorkspaceId,
+      store,
+      pinnedSelector: target.grantedSelector,
+      shareId: target.shareId,
+      ended: target.ended,
+      workspaceLease: lease,
+    });
     const capture = () =>
       target.kind === "standalone"
-        ? lifecycle.captureStandalone({
-            rootDir: target.rootPath,
-            workspaceId: target.storeWorkspaceId,
-            store,
-            pinnedSelector: target.grantedSelector,
-            shareId: target.shareId,
-            ended: target.ended,
-            workspaceLease: lease,
-          })
+        ? lifecycle.captureStandalone(standaloneCaptureInput())
         : lifecycle.captureShared({
             rootDir: target.rootPath,
             workspaceId: target.storeWorkspaceId,
@@ -885,16 +886,16 @@ export function createShareViewFiles(
     }
 
     let recovered: CaptureSharedViewLocalDivergenceOutcome;
-    try {
-      recovered = await capture();
-    } catch (error) {
-      if (target.kind === "standalone" && request === "refresh") {
-        return {
-          kind: "refresh",
-          outcome: lifecycle.standaloneRefreshFailure(error),
-        };
+    if (target.kind === "standalone" && request === "refresh") {
+      const captureOutcome = await lifecycle.captureStandaloneRefresh(
+        standaloneCaptureInput(),
+      );
+      if (!captureOutcome.ok) {
+        return { kind: "refresh", outcome: captureOutcome };
       }
-      throw error;
+      recovered = captureOutcome.captured;
+    } else {
+      recovered = await capture();
     }
     const localChanges = recovered.capturedPaths + recovered.repairedPaths;
 

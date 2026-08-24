@@ -347,17 +347,28 @@ describe("ShareViewFiles", () => {
     expect(() => projection.markPending(rootPath, ["notes/forged.md"])).toThrow(
       "ownership admission is inactive",
     );
+    const forgedStore = readStore({ text: "" });
+    const lifecycle = sharedView.createShareViewLifecycle(forged);
     expect(() =>
-      sharedView
-        .createShareViewLifecycle(forged)
-        .captureShared({
-          rootDir: "unused",
-          workspaceId: "unused",
-          store: readStore({ text: "" }),
-          allowLocalJournaling: true,
-          shareId: "unused",
-        }),
+      lifecycle.captureShared({
+        rootDir: "unused",
+        workspaceId: "unused",
+        store: forgedStore,
+        allowLocalJournaling: true,
+        shareId: "unused",
+      }),
     ).toThrow("ownership admission is inactive");
+    expect(() =>
+      lifecycle.captureStandaloneRefresh({
+        rootDir: "unused",
+        workspaceId: "unused",
+        store: forgedStore,
+        pinnedSelector: { paths: [], versionId: "main", access: "edit" },
+        shareId: "unused",
+        ended: false,
+      }),
+    ).toThrow("ownership admission is inactive");
+    expect(forgedStore.ensureMainVersion).not.toHaveBeenCalled();
 
     const forgedChanges = fileChanges.createShareViewFileChanges(forged);
     const store = mutableTextStore({

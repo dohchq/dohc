@@ -2088,6 +2088,19 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
     ) => {
       return active(input, () => captureStandaloneShareViewDivergence(input));
     },
+    captureStandaloneRefresh: (
+      input: Parameters<typeof captureStandaloneShareViewDivergence>[0],
+    ) =>
+      active(input, async () => {
+        try {
+          return {
+            ok: true as const,
+            captured: await captureStandaloneShareViewDivergence(input),
+          };
+        } catch (error) {
+          return standaloneShareViewFailureOutcome(error, 0);
+        }
+      }),
     refreshOnce: (input: Parameters<typeof refreshSharedViewOnce>[0]) => {
       return active(input, () => refreshSharedViewOnce(input));
     },
@@ -2101,7 +2114,5 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
     ) => {
       return active(input, () => reconcileStandaloneShareView(input));
     },
-    standaloneRefreshFailure: (error: unknown, changedPaths = 0) =>
-      standaloneShareViewFailureOutcome(error, changedPaths),
   };
 }
