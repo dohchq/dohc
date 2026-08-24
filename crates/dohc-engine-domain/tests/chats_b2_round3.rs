@@ -946,6 +946,97 @@ fn channel_summary_returns_only_active_opening_reactions_in_stable_order() {
 }
 
 #[test]
+fn channel_summary_batch_keeps_per_thread_aggregates_apart() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "full", "full-opening", 20, false);
+    send(&mut store, "full", "full-reply", 30, false);
+    set_reaction(
+        &mut store,
+        "full-react",
+        "full",
+        "full-opening",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        35,
+    )
+    .expect("reaction");
+    start(&mut store, "pruned", "pruned-first", 40, false);
+    send(&mut store, "pruned", "pruned-second", 50, false);
+    start(&mut store, "empty", "empty-opening", 60, false);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "DELETE FROM chat_messages WHERE workspace_id = ?1 \
+                 AND message_id IN ('pruned-first', 'empty-opening')",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "DELETE FROM chat_thread_read_state WHERE workspace_id = ?1 \
+                 AND thread_id = 'empty'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "UPDATE chat_thread_read_state SET last_read_sequence = 2 \
+                 WHERE workspace_id = ?1 AND thread_id = 'pruned'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "UPDATE chat_thread_read_state SET last_read_sequence = 1 \
+                 WHERE workspace_id = ?1 AND thread_id = 'full'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("fixture");
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("summaries");
+    // MUTATION: batching the per-thread aggregates without distributing by thread
+    // -> counts, read cursors, opening messages, or reactions leak across the
+    // page's threads, or a deleted/absent row breaks its neighbors.
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|summary| summary.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["empty", "pruned", "full"]
+    );
+    let empty = &summaries[0];
+    assert_eq!(empty.message_count, 0);
+    assert_eq!(empty.last_read_sequence, 0);
+    assert_eq!(empty.unread_count, 0);
+    assert!(empty.opening_message.is_none());
+    let pruned = &summaries[1];
+    assert_eq!(pruned.message_count, 1);
+    assert_eq!(pruned.last_read_sequence, 1, "cursor clamps to live count");
+    assert_eq!(pruned.unread_count, 0);
+    let pruned_opening = pruned.opening_message.as_ref().expect("pruned opening");
+    assert_eq!(pruned_opening.message_id, "pruned-second");
+    assert_eq!(pruned_opening.body_snippet, "message pruned-second");
+    assert!(pruned_opening.reactions.is_empty());
+    let full = &summaries[2];
+    assert_eq!(full.message_count, 2);
+    assert_eq!(full.last_read_sequence, 1);
+    assert_eq!(full.unread_count, 1);
+    let full_opening = full.opening_message.as_ref().expect("full opening");
+    assert_eq!(full_opening.message_id, "full-opening");
+    assert_eq!(
+        full_opening
+            .reactions
+            .iter()
+            .map(|reaction| reaction.emoji.as_str())
+            .collect::<Vec<_>>(),
+        vec!["👍"]
+    );
+}
+
+#[test]
 fn js_trimmed_author_user_id_matches_person_follow() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
