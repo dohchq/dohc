@@ -6821,6 +6821,10 @@ describe("PluginPipeline real filesystem lifecycle", () => {
             commandId: "old.cmd",
           },
           plugin: recoveredRegistration,
+          runCommand: (operation) =>
+            setup.hostOwnership.runCommand("example-plugin", operation),
+          // This test isolates the recovered registration and old host. The
+          // production start/activation seam has its own behavior tests.
           ensureStarted: async () => setup.pipeline.host,
           ensureCurrent: () => {},
         });
