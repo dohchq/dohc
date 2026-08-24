@@ -871,6 +871,72 @@ describe("ShareViewFiles", () => {
     }
   });
 
+  it("reports a partial standalone refresh when capture fails after a commit", async () => {
+    const rootPath = await workspaceRoot();
+    const path = "notes/partial-capture.md";
+    const before = "before\n";
+    const after = "agent edit\n";
+    const pendingPath = join(
+      rootPath,
+      ".dohc",
+      "pending-materialization.json",
+    );
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await mkdir(join(rootPath, ".dohc"), { recursive: true });
+    await writeFile(join(rootPath, path), after, "utf8");
+    await writeFile(
+      pendingPath,
+      JSON.stringify({ counts: { [path]: 2 } }),
+      "utf8",
+    );
+    const store = mutableTextStore({ initial: [{ path, text: before }] });
+    const pull = vi.fn(async () => {
+      throw new Error("capture failure must stop the pull");
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+      resolveRelay: async () => ({
+        baseUrl: "https://relay.example",
+        token: "test-token",
+      }),
+      pull,
+    });
+    sidecarRenameFailure = {
+      path: pendingPath,
+      error: new Error("pending marker unavailable"),
+    };
+
+    try {
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.reconcile(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            "refresh",
+          ),
+        ),
+      ).resolves.toEqual({
+        kind: "refresh",
+        outcome: {
+          ok: false,
+          changedPaths: 1,
+          errorMessage: "pending marker unavailable",
+        },
+      });
+      expect(pull).not.toHaveBeenCalled();
+      await expect(
+        files.read(
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "text", path },
+        ),
+      ).resolves.toMatchObject({ text: after });
+    } finally {
+      sidecarRenameFailure = null;
+    }
+  });
+
   it("keeps newer projection debt behind a refresh that has not cleared", async () => {
     const rootPath = await workspaceRoot();
     const path = "docs/late-clear.md";

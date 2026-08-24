@@ -41,6 +41,7 @@ import {
 import {
   recordedShareSelector,
   SharePinInvalidError,
+  unjournalablePathMessages,
   type UnjournalablePath,
 } from "./shareViewRecords";
 
@@ -117,6 +118,32 @@ class SharedViewTargetResolutionError extends Error {
     );
     this.name = "SharedViewTargetResolutionError";
   }
+}
+
+function standaloneShareViewFailureOutcome(
+  error: unknown,
+  changedPaths: number,
+): Extract<StandaloneShareViewRefreshOutcome, { ok: false }> {
+  // A damaged pin never heals on retry. Main turns this into a specific
+  // "record is damaged" message, so keep it as a rejection.
+  if (error instanceof SharePinInvalidError) throw error;
+  if (error instanceof CapturePartialFailureError) {
+    return {
+      ok: false,
+      changedPaths: error.capturedPaths + error.repairedPaths,
+      errorMessage:
+        error.reason === "unreadable"
+          ? (unjournalablePathMessages([
+              { path: error.path, reason: "unreadable" },
+            ])[0] ?? error.message)
+          : error.message,
+    };
+  }
+  return {
+    ok: false,
+    changedPaths,
+    errorMessage: error instanceof Error ? error.message : String(error),
+  };
 }
 
 // Containment before any disk write: the engine already restricts paths to
@@ -2031,15 +2058,7 @@ async function reconcileStandaloneShareView(
       collisionRecordQuarantined: captured.collisionRecordQuarantined,
     };
   } catch (error) {
-    // A damaged pin never heals on retry; main.ts turns it into a specific
-    // "record is damaged" message and depends on it escaping as a
-    // rejection, not becoming a generic outcome.
-    if (error instanceof SharePinInvalidError) throw error;
-    return {
-      ok: false,
-      changedPaths: totalLocalChanges,
-      errorMessage: error instanceof Error ? error.message : String(error),
-    };
+    return standaloneShareViewFailureOutcome(error, totalLocalChanges);
   }
 }
 
@@ -2082,5 +2101,7 @@ export function createShareViewLifecycle(owner: ShareViewFilesOwnerCapability) {
     ) => {
       return active(input, () => reconcileStandaloneShareView(input));
     },
+    standaloneRefreshFailure: (error: unknown, changedPaths = 0) =>
+      standaloneShareViewFailureOutcome(error, changedPaths),
   };
 }

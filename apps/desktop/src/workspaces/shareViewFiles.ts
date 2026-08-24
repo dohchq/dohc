@@ -884,7 +884,18 @@ export function createShareViewFiles(
       return { kind: "settle", ...(await capture()) };
     }
 
-    const recovered = await capture();
+    let recovered: CaptureSharedViewLocalDivergenceOutcome;
+    try {
+      recovered = await capture();
+    } catch (error) {
+      if (target.kind === "standalone" && request === "refresh") {
+        return {
+          kind: "refresh",
+          outcome: lifecycle.standaloneRefreshFailure(error),
+        };
+      }
+      throw error;
+    }
     const localChanges = recovered.capturedPaths + recovered.repairedPaths;
 
     if (request === "repair") {
