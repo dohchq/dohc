@@ -838,6 +838,13 @@ const atomicTextWriter = createAtomicTextWriter({
 
 const workspaceOperationScheduler = createWorkspaceOperationScheduler();
 
+export function assertActiveWorkspaceOperationLease(
+  rootPath: string,
+  lease: WorkspaceOperationLease,
+): void {
+  workspaceOperationScheduler.assertActiveLease(rootPath, lease);
+}
+
 const orderedWorkspaceTextAccess = createOrderedWorkspaceTextAccess({
   resolveTarget: async (rootPath, relativePath, access) => {
     try {

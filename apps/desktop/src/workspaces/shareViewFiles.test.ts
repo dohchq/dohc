@@ -8,6 +8,7 @@ import {
   type ResolvedShareViewFilesTarget,
   type ShareViewFilesDependencies,
   type ShareViewFilesStore,
+  type ShareViewFilesTarget,
 } from "./shareViewFiles";
 import {
   captureSharedViewLocalDivergence,
@@ -16,6 +17,7 @@ import {
 } from "./sharedView";
 import { SharePinInvalidError } from "./shareViewRecords";
 import {
+  type WorkspaceOperationLease,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
 } from "./workspaceAssets";
@@ -287,6 +289,91 @@ describe("ShareViewFiles", () => {
     await blocker;
     expect(resolves).toBe(2);
     expect(openStore).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired lease before resolving any mutation target", async () => {
+    const rootPath = await workspaceRoot();
+    const mountRoot = join(rootPath, "mount");
+    await mkdir(mountRoot, { recursive: true });
+    let expiredLease!: WorkspaceOperationLease;
+    await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+      expiredLease = lease;
+    });
+    const exclusiveStarted = deferred();
+    const releaseExclusive = deferred();
+    const exclusive = withExclusiveWorkspaceOperation(rootPath, async () => {
+      exclusiveStarted.resolve();
+      await releaseExclusive.promise;
+    });
+    await exclusiveStarted.promise;
+
+    const mounted = {
+      ...mountTarget(mountRoot),
+      schedulingRootPath: rootPath,
+    };
+    const resolveTarget = vi.fn((requested: ShareViewFilesTarget) =>
+      requested.kind === "mount" ? mounted : target(rootPath),
+    );
+    const store = mutableTextStore();
+    const removeMount = vi.fn(async () => ({ folderLeft: false }));
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget,
+      openStore: () => store,
+      removeMount,
+    });
+    const standalone = {
+      kind: "standalone" as const,
+      workspaceId: "workspace-a",
+    };
+    const mount = {
+      kind: "mount" as const,
+      workspaceId: "host-a",
+      shareId: "share-a",
+    };
+
+    try {
+      const outcomes = await Promise.all(
+        [
+          files.change(expiredLease, standalone, {
+            kind: "create",
+            path: "notes/new.md",
+            initialText: "new\n",
+          }),
+          files.change(expiredLease, standalone, {
+            kind: "move",
+            fromPath: "notes/same.md",
+            toPath: "notes/same.md",
+          }),
+          files.change(expiredLease, standalone, {
+            kind: "import",
+            absolutePaths: [],
+            screenAgainstRoots: null,
+            targetDir: undefined,
+          }),
+          files.reconcile(expiredLease, mount, "repair"),
+          files.unmount(expiredLease, mount),
+        ].map(async (attempt) => {
+          try {
+            await attempt;
+            return "resolved";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }),
+      );
+
+      expect(outcomes).toEqual(
+        Array(5).fill(
+          "Workspace operation lease is inactive or belongs to another root.",
+        ),
+      );
+      expect(resolveTarget).not.toHaveBeenCalled();
+      expect(removeMount).not.toHaveBeenCalled();
+    } finally {
+      releaseExclusive.resolve();
+      await exclusive;
+    }
   });
 
   it("reuses its workspace lease when capture orders a path", async () => {

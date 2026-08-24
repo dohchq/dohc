@@ -790,6 +790,67 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     );
   });
 
+  it("keeps leased target work behind an ordinary order on the same target", async () => {
+    const rootPath = "C:/workspace";
+    const resolvedTarget = "C:/workspace/notes/a.md";
+    const scheduler = createWorkspaceOperationScheduler();
+    const access = createOrderedWorkspaceTextAccess({
+      resolveTarget: async (root, relativePath) => join(root, relativePath),
+      readTarget: async () => ({
+        text: "",
+        truncated: false,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      writeTarget: async () => ({
+        status: "written" as const,
+        contentHash: INITIAL_CONTENT_HASH,
+      }),
+      scheduler,
+    });
+    let markFirstStarted!: () => void;
+    let releaseFirst!: () => void;
+    let markLeasedAdmitted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const leasedAdmitted = new Promise<void>((resolve) => {
+      markLeasedAdmitted = resolve;
+    });
+    const order: string[] = [];
+
+    const first = access.orderedOnResolvedTarget(
+      rootPath,
+      resolvedTarget,
+      async () => {
+        order.push("first:start");
+        markFirstStarted();
+        await firstHeld;
+        order.push("first:end");
+      },
+    );
+    await firstStarted;
+    const leased = scheduler.staleSensitiveShared(rootPath, async (lease) => {
+      markLeasedAdmitted();
+      return access.orderedOnResolvedTargetInLease(
+        rootPath,
+        lease,
+        resolvedTarget,
+        async () => {
+          order.push("leased");
+        },
+      );
+    });
+    await leasedAdmitted;
+
+    expect(order).toEqual(["first:start"]);
+    releaseFirst();
+    await Promise.all([first, leased]);
+    expect(order).toEqual(["first:start", "first:end", "leased"]);
+  });
+
   it("holds later direct-text reads and writes behind an exclusive workspace operation", async () => {
     const root = await makeWorkspace();
     let releaseExclusive!: () => void;

@@ -18,6 +18,7 @@ import type {
   WorkspaceFileEntry,
 } from "../ipc/bridgeContract";
 import {
+  assertActiveWorkspaceOperationLease,
   mediaTypeForExtension,
   type WorkspaceOperationLease,
   type WorkspaceTextReadResult,
@@ -627,8 +628,13 @@ export function createShareViewFiles(
 
   function assertLease(
     lease: WorkspaceOperationLease,
-    target: ResolvedShareViewFilesTarget,
+    target?: ResolvedShareViewFilesTarget,
   ): void {
+    assertActiveWorkspaceOperationLease(
+      target?.schedulingRootPath ?? lease.rootPath,
+      lease,
+    );
+    if (target === undefined) return;
     if (!samePath(lease.rootPath, target.schedulingRootPath)) {
       throw new Error(
         "Received-share mutation did not hold its owning workspace scheduler.",
@@ -813,6 +819,7 @@ export function createShareViewFiles(
 
   return {
     async change(lease, requested, change) {
+      assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
@@ -972,6 +979,7 @@ export function createShareViewFiles(
     },
 
     async reconcile(lease, requested, request) {
+      assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
@@ -1103,6 +1111,7 @@ export function createShareViewFiles(
     },
 
     async unmount(lease, requested) {
+      assertLease(lease);
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
