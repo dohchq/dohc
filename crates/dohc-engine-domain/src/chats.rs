@@ -3491,9 +3491,7 @@ impl<'a> LinkedChatStore<'a> {
                 .query_map(params![workspace_id, thread_id], map_message_row)
                 .map_err(DomainError::sql_corrupt)?;
             let mut messages: Vec<ChatMessage> = collect(rows)?;
-            for message in &mut messages {
-                hydrate_message_attachments(conn, workspace_id, message)?;
-            }
+            hydrate_attachments_for_messages(conn, workspace_id, &mut messages)?;
             Ok(ChatThreadProjection {
                 path: linked_chat_projection_path(workspace_id, &thread.thread_id, None)?,
                 read_only: true,
@@ -3523,7 +3521,10 @@ impl<'a> LinkedChatStore<'a> {
         };
         self.store.read_with(|conn| {
             let channel = require_channel(conn, workspace_id, channel_id)?;
-            let threads = {
+            // One page query carries every per-thread aggregate as a correlated
+            // index lookup, so a full page costs a fixed number of statements
+            // instead of five point queries per thread.
+            let page = {
                 let mut stmt = conn
                     .prepare_cached(
                         "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
@@ -3535,7 +3536,23 @@ impl<'a> LinkedChatStore<'a> {
                                  ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
                                 EXISTS(SELECT 1 FROM chat_channels c \
                                   WHERE c.workspace_id = t.workspace_id \
-                                    AND c.channel_id = t.channel_id) \
+                                    AND c.channel_id = t.channel_id), \
+                                (SELECT COUNT(*) FROM chat_messages m \
+                                 WHERE m.workspace_id = t.workspace_id \
+                                   AND m.thread_id = t.thread_id), \
+                                (SELECT r.last_read_sequence FROM chat_thread_read_state r \
+                                 WHERE r.workspace_id = t.workspace_id \
+                                   AND r.thread_id = t.thread_id), \
+                                (SELECT COUNT(*) FROM chat_decisions d \
+                                 JOIN chat_messages m ON m.workspace_id = d.workspace_id \
+                                   AND m.thread_id = d.thread_id \
+                                   AND m.message_id = d.message_id \
+                                 WHERE d.workspace_id = t.workspace_id \
+                                   AND d.thread_id = t.thread_id AND d.state = 'open'), \
+                                (SELECT m.message_id FROM chat_messages m \
+                                 WHERE m.workspace_id = t.workspace_id \
+                                   AND m.thread_id = t.thread_id \
+                                 ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
                          FROM chat_threads t \
                          WHERE t.workspace_id = ?1 AND t.channel_id = ?2 \
                            AND (?3 = 0 OR t.updated_at_ms < ?4 \
@@ -3553,35 +3570,35 @@ impl<'a> LinkedChatStore<'a> {
                             after_thread_id,
                             limit
                         ],
-                        map_thread_row,
+                        |row| {
+                            let thread = map_thread_row(row)?;
+                            let message_count: i64 = row.get(11)?;
+                            let stored_read_sequence: Option<i64> = row.get(12)?;
+                            let open_decision_count: i64 = row.get(13)?;
+                            let opening_message_id: Option<String> = row.get(14)?;
+                            Ok(thread.map(|thread| {
+                                (
+                                    thread,
+                                    message_count,
+                                    stored_read_sequence,
+                                    open_decision_count,
+                                    opening_message_id,
+                                )
+                            }))
+                        },
                     )
                     .map_err(DomainError::sql_corrupt)?;
                 collect(rows)?
             };
-            let mut summaries = Vec::with_capacity(threads.len());
-            for thread in threads {
-                let message_count: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM chat_messages \
-                         WHERE workspace_id = ?1 AND thread_id = ?2",
-                        params![workspace_id, thread.thread_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(DomainError::sql_corrupt)?;
+            let mut validated = Vec::with_capacity(page.len());
+            for (thread, message_count, stored_read_sequence, open_decision_count, opening_id) in
+                page
+            {
                 if !persisted_nonnegative_safe(message_count) {
                     return Err(DomainError::StateCorrupt {
                         reason: "channel summary message count is corrupt",
                     });
                 }
-                let stored_read_sequence: Option<i64> = conn
-                    .query_row(
-                        "SELECT last_read_sequence FROM chat_thread_read_state \
-                         WHERE workspace_id = ?1 AND thread_id = ?2",
-                        params![workspace_id, thread.thread_id],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(DomainError::sql_corrupt)?;
                 let stored_read_sequence = stored_read_sequence.unwrap_or(0);
                 if !persisted_nonnegative_safe(stored_read_sequence) {
                     return Err(DomainError::StateCorrupt {
@@ -3589,41 +3606,64 @@ impl<'a> LinkedChatStore<'a> {
                     });
                 }
                 let last_read_sequence = stored_read_sequence.min(message_count);
-                let open_decision_count: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM chat_decisions d \
-                         JOIN chat_messages m ON m.workspace_id = d.workspace_id \
-                           AND m.thread_id = d.thread_id AND m.message_id = d.message_id \
-                         WHERE d.workspace_id = ?1 AND d.thread_id = ?2 AND d.state = 'open'",
-                        params![workspace_id, thread.thread_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(DomainError::sql_corrupt)?;
                 if !persisted_nonnegative_safe(open_decision_count) {
                     return Err(DomainError::StateCorrupt {
                         reason: "channel summary decision count is corrupt",
                     });
                 }
-                let opening_message =
-                    first_message_for_thread(conn, workspace_id, &thread.thread_id)?
-                        .map(|message| {
-                            let reactions = active_reactions_for_messages(
-                                conn,
-                                workspace_id,
-                                std::slice::from_ref(&message.message_id),
-                            )?
-                            .remove(&message.message_id)
-                            .unwrap_or_default();
-                            Ok::<_, DomainError>(ChannelOpeningMessage {
-                                message_id: message.message_id,
-                                author_kind: message.author_kind,
-                                author_display_name: message.author_display_name,
-                                created_at_ms: message.created_at_ms,
-                                body_snippet: opening_message_body_snippet(&message.body),
-                                reactions,
-                            })
-                        })
-                        .transpose()?;
+                validated.push((
+                    thread,
+                    message_count,
+                    last_read_sequence,
+                    open_decision_count,
+                    opening_id,
+                ));
+            }
+            let opening_ids: Vec<String> = validated
+                .iter()
+                .filter_map(|(_, _, _, _, opening_id)| opening_id.clone())
+                .collect();
+            let mut opening_messages: HashMap<String, ChatMessage> = if opening_ids.is_empty() {
+                HashMap::new()
+            } else {
+                let opening_ids_json =
+                    serde_json::to_string(&opening_ids).map_err(|_| DomainError::StateCorrupt {
+                        reason: "opening message id set is corrupt",
+                    })?;
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+                         author_display_name, author_user_id, parent_message_id, origin, body, \
+                         created_at_ms \
+                         FROM chat_messages WHERE workspace_id = ?1 \
+                           AND message_id IN (SELECT value FROM json_each(?2))",
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                let rows = stmt
+                    .query_map(params![workspace_id, opening_ids_json], map_message_row)
+                    .map_err(DomainError::sql_corrupt)?;
+                let mut messages: Vec<ChatMessage> = collect(rows)?;
+                hydrate_attachments_for_messages(conn, workspace_id, &mut messages)?;
+                messages
+                    .into_iter()
+                    .map(|message| (message.message_id.clone(), message))
+                    .collect()
+            };
+            let mut reactions = active_reactions_for_messages(conn, workspace_id, &opening_ids)?;
+            let mut summaries = Vec::with_capacity(validated.len());
+            for (thread, message_count, last_read_sequence, open_decision_count, opening_id) in
+                validated
+            {
+                let opening_message = opening_id
+                    .and_then(|opening_id| opening_messages.remove(&opening_id))
+                    .map(|message| ChannelOpeningMessage {
+                        reactions: reactions.remove(&message.message_id).unwrap_or_default(),
+                        body_snippet: opening_message_body_snippet(&message.body),
+                        message_id: message.message_id,
+                        author_kind: message.author_kind,
+                        author_display_name: message.author_display_name,
+                        created_at_ms: message.created_at_ms,
+                    });
                 summaries.push(ChannelThreadSummary {
                     thread,
                     message_count,
@@ -4137,9 +4177,7 @@ impl<'a> LinkedChatStore<'a> {
                 .query_map(params![workspace_id, thread_id, after, probe], map_message_row)
                 .map_err(DomainError::sql_corrupt)?;
             let mut messages: Vec<ChatMessage> = collect(rows)?;
-            for message in &mut messages {
-                hydrate_message_attachments(conn, workspace_id, message)?;
-            }
+            hydrate_attachments_for_messages(conn, workspace_id, &mut messages)?;
             let next = if messages.len() as i64 > limit {
                 messages.truncate(limit as usize);
                 messages.last().map(|m| m.message_order)
@@ -6784,6 +6822,56 @@ fn hydrate_message_attachments(
 ) -> Result<(), DomainError> {
     message.attachments =
         attachments_for_message(conn, workspace_id, &message.thread_id, &message.message_id)?;
+    Ok(())
+}
+
+/// Batched [`hydrate_message_attachments`]: one query for the whole slice
+/// instead of one per message. The `chat_messages` join pins each attachment to
+/// its own message's thread, so the result is exactly the union of the
+/// per-message lookups, and the global `(created_at_ms, attachment_id)` order
+/// preserves each message's per-message order.
+fn hydrate_attachments_for_messages(
+    conn: &Connection,
+    workspace_id: &str,
+    messages: &mut [ChatMessage],
+) -> Result<(), DomainError> {
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let message_ids: Vec<&str> = messages
+        .iter()
+        .map(|message| message.message_id.as_str())
+        .collect();
+    let message_ids_json =
+        serde_json::to_string(&message_ids).map_err(|_| DomainError::StateCorrupt {
+            reason: "attachment hydration id set is corrupt",
+        })?;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT a.attachment_id, a.thread_id, a.message_id, a.target_kind, a.object_id, \
+                    a.path_hint, a.heading_text, a.heading_anchor, a.heading_occurrence, \
+                    a.created_at_ms \
+             FROM json_each(?2) AS ids \
+             JOIN chat_messages m ON m.workspace_id = ?1 AND m.message_id = ids.value \
+             JOIN chat_attachments a ON a.workspace_id = m.workspace_id \
+               AND a.thread_id = m.thread_id AND a.message_id = m.message_id \
+             ORDER BY a.created_at_ms, a.attachment_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(params![workspace_id, message_ids_json], map_attachment_row)
+        .map_err(DomainError::sql_corrupt)?;
+    let mut grouped: HashMap<String, Vec<ChatAttachment>> = HashMap::new();
+    for row in rows {
+        let attachment = row.map_err(DomainError::sql_corrupt)??;
+        grouped
+            .entry(attachment.message_id.clone())
+            .or_default()
+            .push(attachment);
+    }
+    for message in messages.iter_mut() {
+        message.attachments = grouped.remove(&message.message_id).unwrap_or_default();
+    }
     Ok(())
 }
 
