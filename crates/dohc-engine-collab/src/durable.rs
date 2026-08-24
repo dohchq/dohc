@@ -16,8 +16,8 @@
 //! peer bootstraps from the persisted lineage.
 
 use dohc_engine_storage::{
-    enqueue_job, put_binary_blob, EngineStore, FaultInjector, MaterializationJobSpec, Preimage,
-    TxnOutcome,
+    enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
+    MaterializationJobSpec, Preimage, TxnOutcome,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
@@ -449,44 +449,12 @@ pub fn record_local_update_with_origin(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_with_origin_and_hook(
-        store,
-        key,
-        update,
-        actor_origin_id,
-        faults,
-        now_ms,
-        |_tx, _outcome| Ok(()),
-    )
-}
-
-/// [`record_local_update_with_origin`] with a post-append hook running in the
-/// SAME transaction as the CRDT append. The live-session path uses it to
-/// journal the outbound `ydoc.update` replication op atomically with the
-/// append (blob-before-log holds — the append stored the blob earlier in this
-/// transaction). The hook runs only for a genuinely-new append.
-pub fn record_local_update_with_origin_and_hook<F>(
-    store: &mut EngineStore,
-    key: &DocKey,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-    post_append: F,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError>
-where
-    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
-{
     validate_update_bytes(update)?;
     let sha = crate::hex_sha256(update);
 
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        let outcome = append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
-        if !outcome.deduped {
-            post_append(tx, &outcome)?;
-        }
-        Ok(outcome)
+        append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
@@ -507,39 +475,6 @@ pub fn record_local_update_creating_marker(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_creating_marker_with_hook(
-        store,
-        key,
-        path,
-        content_kind,
-        regime,
-        update,
-        actor_origin_id,
-        faults,
-        now_ms,
-        |_tx, _outcome| Ok(()),
-    )
-}
-
-/// [`record_local_update_creating_marker`] with a post-append hook in the same
-/// transaction (see [`record_local_update_with_origin_and_hook`]). The hook
-/// runs only for a genuinely-new append.
-#[allow(clippy::too_many_arguments)]
-pub fn record_local_update_creating_marker_with_hook<F>(
-    store: &mut EngineStore,
-    key: &DocKey,
-    path: Option<&str>,
-    content_kind: ContentKind,
-    regime: Regime,
-    update: &[u8],
-    actor_origin_id: Option<&str>,
-    faults: &dyn FaultInjector,
-    now_ms: i64,
-    post_append: F,
-) -> Result<TxnOutcome<AppendOutcome>, CollabError>
-where
-    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
-{
     record_local_update_creating_marker_guarded(
         store,
         key,
@@ -553,7 +488,7 @@ where
         None,
         faults,
         now_ms,
-        post_append,
+        |_tx, _outcome| Ok(()),
     )
 }
 
@@ -596,13 +531,17 @@ where
         request_id,
         faults,
         now_ms,
-        post_append,
+        |tx, outcome, _update_sha| post_append(tx, outcome),
     )
 }
 
 /// [`record_local_update_creating_marker_guarded`] with an active-lineage CAS.
 /// `None` means the caller is bound to an unclaimed lineage, not "skip the
 /// guard". The idempotency hash binds the expected claim before replay.
+///
+/// The post-append hook also receives the update's hex sha256 — the digest
+/// this append journals — so a caller journaling an outbound op keyed by the
+/// blob sha does not hash the bytes a second time.
 ///
 /// `seed_source_sha256` is the captured head whose content this update
 /// imports, recorded on the marker with the append (#815). Pass it only for a
@@ -628,7 +567,7 @@ pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
     post_append: F,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError>
 where
-    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+    F: FnOnce(&Transaction<'_>, &AppendOutcome, &str) -> Result<(), CollabError>,
 {
     record_local_update_creating_marker_guarded_inner(
         store,
@@ -668,8 +607,12 @@ fn record_local_update_creating_marker_guarded_inner<F>(
     post_append: F,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError>
 where
-    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+    F: FnOnce(&Transaction<'_>, &AppendOutcome, &str) -> Result<(), CollabError>,
 {
+    // Hashed ONCE per append: the idempotency key, the seed-retry dedupe
+    // probe, the blob row, and the caller's post-append hook all reuse this
+    // digest instead of re-walking the update bytes.
+    let update_sha = crate::hex_sha256(update);
     // The caller's idempotency key hashes over the DOC COORDINATES and the
     // update bytes: content-addressed dedupe alone only holds while the
     // original row survives compaction — a retry after the fold would
@@ -686,7 +629,7 @@ where
                 key.workspace_id,
                 key.version_id,
                 key.object_id,
-                crate::hex_sha256(update),
+                update_sha,
                 match lineage_guard {
                     None => "unguarded".to_owned(),
                     Some(None) => "unclaimed".to_owned(),
@@ -753,8 +696,7 @@ where
         if guarded_marker.is_some_and(|marker| marker.head_update_seq > 0) {
             // A retry of the SAME first update after a timed-out commit must
             // dedupe, not refuse: check the blob before the guard.
-            let sha = crate::hex_sha256(update);
-            if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+            if let Some(existing) = blob_seq_in_log(tx, key, &update_sha)? {
                 return Ok(AppendOutcome {
                     seq: existing,
                     deduped: true,
@@ -805,10 +747,16 @@ where
                 }
             }
         };
-        let sha = crate::hex_sha256(update);
         {
-            let outcome =
-                append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
+            let outcome = append_local_update(
+                tx,
+                key,
+                &marker,
+                update,
+                &update_sha,
+                actor_origin_id,
+                now_ms,
+            )?;
             if !outcome.deduped {
                 // The seed's provenance commits WITH the seed append: the
                 // marker now records which captured head this lineage's
@@ -831,7 +779,7 @@ where
                     )
                     .map_err(map_sql)?;
                 }
-                post_append(tx, &outcome)?;
+                post_append(tx, &outcome, &update_sha)?;
             }
             if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
                 // NEGATIVE namespace (-seq): rollback cleanup deletes ledger
@@ -870,7 +818,7 @@ fn append_local_update(
             emit_outbound: false,
         });
     }
-    put_binary_blob(conn, update)?;
+    put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     Ok(AppendOutcome {
         seq,
@@ -1241,7 +1189,7 @@ fn claim_base_with_coordinate_in_tx(
             }
         }
 
-        let base_sha = put_binary_blob(tx, base_bytes)?;
+        let base_sha = put_binary_blob_with_sha(tx, base_bytes, &incoming_claim_id)?;
         let sv_sha = put_binary_blob(tx, sv_bytes)?;
         // Seq 0 is the base snapshot. INSERT makes the primary key reject a
         // second base.
@@ -1414,7 +1362,9 @@ fn replace_base_snapshot(
         rusqlite::params![key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(map_sql)?;
-    let base_sha = put_binary_blob(tx, base_bytes)?;
+    // `incoming_claim_id` IS `hex_sha256(base_bytes)` — the caller computed it
+    // from these exact bytes before the claim comparison above.
+    let base_sha = put_binary_blob_with_sha(tx, base_bytes, incoming_claim_id)?;
     let sv_sha = put_binary_blob(tx, state_vector_bytes)?;
     tx.execute(
         "INSERT INTO ydoc_snapshots (workspace_id,version_id,object_id,up_to_seq, \
@@ -1576,7 +1526,10 @@ pub fn replace_lineage_with_successor_in_tx(
     )
     .map_err(map_sql)?;
 
-    let successor_base_sha = put_binary_blob(tx, &successor.update)?;
+    // `validate_successor_base` above verified the claim id equals
+    // `hex_sha256(&successor.update)`, so it is this blob's content address.
+    let successor_base_sha =
+        put_binary_blob_with_sha(tx, &successor.update, &successor.lineage_claim_id)?;
     let successor_state_vector_sha = put_binary_blob(tx, &successor.state_vector)?;
     tx.execute(
         "DELETE FROM ydoc_updates \
@@ -1959,8 +1912,10 @@ pub fn settle(
     let sv_bytes = persisted.doc.encode_state_vector();
 
     store.write_with(faults, |tx| {
-        // Persist the content and its provenance state vector as blobs.
-        put_binary_blob(tx, &content_bytes)?;
+        // Persist the content and its provenance state vector as blobs. The
+        // content digest was computed once above; the settle rows below reuse
+        // it too.
+        put_binary_blob_with_sha(tx, &content_bytes, &content_sha)?;
         put_binary_blob(tx, &sv_bytes)?;
 
         // Durable per-doc settle counter + last-materialized content.

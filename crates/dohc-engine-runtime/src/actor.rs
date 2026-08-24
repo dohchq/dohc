@@ -9994,10 +9994,13 @@ fn ydoc_record_update_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // Validate BEFORE anything touches the store: a malformed first seed
-    // must not strand a bare file_objects row for the deterministic object
-    // id (which regular writes then treat as already existing).
-    Ydoc::validate_update(update)?;
+    // Validation happens ONCE, in the durable layer's `validate_update_bytes`,
+    // inside the append transaction. The rows the transaction writes before it
+    // (the path stamp, the ensured file_objects parent) roll back with the
+    // rejection, so a malformed first seed cannot strand a bare file_objects
+    // row for the deterministic object id (which regular writes then treat as
+    // already existing).
+    //
     // The origination decision is made inside the append transaction and read
     // after it commits, so a decline reported to the caller is one that
     // actually survived the commit.
@@ -10006,7 +10009,6 @@ fn ydoc_record_update_on_store(
     // transaction as the append. This keeps blob-before-log order and TS
     // parity. Local-only lineages journal nothing; their workspace file is the
     // artifact.
-    let update_sha = dohc_engine_storage::hex_sha256(update);
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
@@ -10029,7 +10031,7 @@ fn ydoc_record_update_on_store(
         request_id.as_deref(),
         faults,
         now_ms,
-        |tx, outcome| {
+        |tx, outcome, update_sha| {
             // Origination is asked FIRST and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the
@@ -10065,7 +10067,7 @@ fn ydoc_record_update_on_store(
                         &journal_key,
                         &journal_path,
                         journal_kind,
-                        &update_sha,
+                        update_sha,
                         &lineage_claim_id,
                         false,
                     ),
