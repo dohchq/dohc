@@ -9,6 +9,7 @@ import {
   filterOpForShare,
   parseAnyShareSelectorJson,
   validateChatChannelShareSelector,
+  validateChatShareAccess,
   type ChatChannelShareSelector,
   type ChatShareThreadResolver,
   type ShareFileChatResolver,
@@ -228,17 +229,15 @@ async function denialBytes(response: Response): Promise<string> {
 describe("chat-channel share selector (DM grants)", () => {
   it("validates grant-time chat selectors fail-closed", () => {
     expect(validateChatChannelShareSelector({ channelWireId: DM_WIRE }).ok).toBe(true);
-    expect(
-      validateChatChannelShareSelector({ channelWireId: DM_WIRE, access: "read-only" }).ok,
-    ).toBe(true);
+    expect(validateChatShareAccess("read-only").ok).toBe(true);
     for (const bad of [
       { channelWireId: "" },
       { channelWireId: "  padded  " },
       { channelWireId: "x".repeat(300) },
-      { channelWireId: DM_WIRE, access: "admin" },
     ]) {
       expect(validateChatChannelShareSelector(bad).ok, JSON.stringify(bad)).toBe(false);
     }
+    expect(validateChatShareAccess("admin").ok).toBe(false);
   });
 
   it("parses stored selectors for both shapes and fails closed on unknown kinds", () => {

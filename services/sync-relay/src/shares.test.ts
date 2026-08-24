@@ -613,6 +613,11 @@ describe("share grants", () => {
     await createShare(h);
 
     expect((await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0"))).status).toBe(200);
+    expect(storage.listSharesGrantedBy(GRANTER)[0]?.grant).toMatchObject({
+      generation: 1,
+      status: "active",
+      revokedAtMs: null,
+    });
 
     // The recipient cannot revoke; only the granter can.
     const recipientRevoke = await h(request(RECIPIENT, "/sync/shares/share-0/revoke", { method: "POST" }));
@@ -622,6 +627,11 @@ describe("share grants", () => {
     expect(revoke.status).toBe(200);
     // Idempotent for the granter.
     expect((await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }))).status).toBe(200);
+    expect(storage.listSharesGrantedBy(GRANTER)[0]?.grant).toMatchObject({
+      generation: 2,
+      status: "revoked",
+      revokedAtMs: 5555,
+    });
 
     const missing = await denialBytes(await h(request(RECIPIENT, "/sync/shares/share-404/log?since=0")));
     expect(await denialBytes(await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0")))).toBe(missing);

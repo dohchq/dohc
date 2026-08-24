@@ -214,17 +214,29 @@ describe("shared channels (MU-C4)", () => {
     // A stored row damaged in every dimension EXCEPT its kind, written
     // through the same API the create route uses.
     storage.createShare({
-      shareId: "share-damaged-channel",
-      workspaceId: WORKSPACE,
-      granterUserId: OWNER,
-      recipientUserId: MEMBER_A,
-      recipientEmail: null,
-      selectorJson: JSON.stringify({
-        kind: "chat-channel",
-        channelWireId: "",
+      share: {
+        shareId: "share-damaged-channel",
+        workspaceId: WORKSPACE,
+        granterUserId: OWNER,
+        selectorJson: JSON.stringify({
+          kind: "chat-channel",
+          channelWireId: "",
+        }),
+        createdAtMs: 1000,
+      },
+      grant: {
+        grantId: "grant-damaged-channel",
+        shareId: "share-damaged-channel",
+        principalKind: "user",
+        principalUserId: MEMBER_A,
+        principalEmail: null,
         access: "nonsense",
-      }),
-      createdAtMs: 1000,
+        generation: 1,
+        status: "active",
+        createdAtMs: 1000,
+        revokedAtMs: null,
+        parentGrantId: null,
+      },
     });
 
     const listing = await json(await h(request(OWNER, "/sync/shares")));
@@ -282,6 +294,15 @@ describe("shared channels (MU-C4)", () => {
     );
     expect(badAccess.status).toBe(400);
     expect((await json(badAccess)).code).toBe("invalid_access");
+    const bothInvalid = await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: MEMBER_A, channelWireId: "", access: "admin" }),
+      ),
+    );
+    expect(bothInvalid.status).toBe(400);
+    expect((await json(bothInvalid)).code).toBe("invalid_channel");
   });
 
   it("serves a member ONLY the granted channel's ops — private channels, files, and secrets never leak", async () => {

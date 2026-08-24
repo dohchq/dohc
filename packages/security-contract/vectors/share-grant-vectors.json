@@ -16,9 +16,14 @@
     "accepted": ["active", "revoked"],
     "refused": ["revokd", "ACTIVE", "", null]
   },
+  "chatShareAccesses": {
+    "accepted": ["read-write", "read-only"],
+    "refused": ["view", "comment", "edit", "READ-WRITE", "", null]
+  },
   "shareGrantRecords": {
     "accepted": [
       {
+        "kind": "file",
         "grantId": "grant-user-active",
         "shareId": "share-1",
         "principal": { "kind": "user", "userId": "user-alex" },
@@ -30,6 +35,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "grant-email-active",
         "shareId": "share-1",
         "principal": { "kind": "email", "email": "alex@example.com" },
@@ -41,6 +47,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "grant-link-active",
         "shareId": "share-1",
         "principal": { "kind": "link" },
@@ -52,6 +59,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "grant-link-revoked",
         "shareId": "share-1",
         "principal": { "kind": "link" },
@@ -63,6 +71,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "grant-derived-active",
         "shareId": "share-1",
         "principal": { "kind": "user", "userId": "user-sam" },
@@ -74,6 +83,7 @@
         "parentGrantId": "grant-link-active"
       },
       {
+        "kind": "file",
         "grantId": "grant-derived-revoked",
         "shareId": "share-1",
         "principal": { "kind": "user", "userId": "user-lee" },
@@ -83,10 +93,35 @@
         "createdAt": "2026-08-24T09:05:00.000Z",
         "revokedAt": "2026-08-24T10:05:00.000Z",
         "parentGrantId": "grant-link-active"
+      },
+      {
+        "kind": "chat-channel",
+        "grantId": "grant-chat-write",
+        "shareId": "share-chat",
+        "principal": { "kind": "user", "userId": "user-riley" },
+        "access": "read-write",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:06:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "kind": "chat-channel",
+        "grantId": "grant-chat-read",
+        "shareId": "share-chat",
+        "principal": { "kind": "email", "email": "riley@example.com" },
+        "access": "read-only",
+        "generation": 2,
+        "status": "active",
+        "createdAt": "2026-08-24T09:07:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
       }
     ],
     "refused": [
       {
+        "kind": "file",
         "grantId": "bad-kind",
         "shareId": "share-1",
         "principal": { "kind": "team", "teamId": "team-1" },
@@ -98,6 +133,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "zero-generation",
         "shareId": "share-1",
         "principal": { "kind": "link" },
@@ -109,6 +145,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "negative-generation",
         "shareId": "share-1",
         "principal": { "kind": "link" },
@@ -120,6 +157,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "fractional-generation",
         "shareId": "share-1",
         "principal": { "kind": "link" },
@@ -131,6 +169,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "shareId": "share-1",
         "principal": { "kind": "user", "userId": "user-alex" },
         "access": "edit",
@@ -141,6 +180,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "missing-created-at",
         "shareId": "share-1",
         "principal": { "kind": "user", "userId": "user-alex" },
@@ -151,6 +191,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "bad-status",
         "shareId": "share-1",
         "principal": { "kind": "email", "email": "alex@example.com" },
@@ -162,6 +203,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "active-with-revoked-at",
         "shareId": "share-1",
         "principal": { "kind": "link" },
@@ -173,6 +215,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "revoked-without-revoked-at",
         "shareId": "share-1",
         "principal": { "kind": "user", "userId": "user-alex" },
@@ -184,6 +227,7 @@
         "parentGrantId": null
       },
       {
+        "kind": "file",
         "grantId": "link-with-parent",
         "shareId": "share-1",
         "principal": { "kind": "link" },
@@ -193,6 +237,53 @@
         "createdAt": "2026-08-24T09:00:00.000Z",
         "revokedAt": null,
         "parentGrantId": "another-link"
+      },
+      {
+        "grantId": "missing-kind",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "view",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "kind": "workspace",
+        "grantId": "unknown-kind",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "view",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "kind": "file",
+        "grantId": "file-with-chat-access",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "read-write",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
+      },
+      {
+        "kind": "chat-channel",
+        "grantId": "chat-with-file-access",
+        "shareId": "share-1",
+        "principal": { "kind": "user", "userId": "user-alex" },
+        "access": "edit",
+        "generation": 1,
+        "status": "active",
+        "createdAt": "2026-08-24T09:00:00.000Z",
+        "revokedAt": null,
+        "parentGrantId": null
       }
     ]
   },

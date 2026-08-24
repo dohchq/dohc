@@ -549,6 +549,80 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(push.status).toBe(404);
   });
 
+  it("rechecks the active grant inside the append transaction", async () => {
+    const { storage, dbPath } = await testStorage();
+    const h = handler(storage);
+    await seedWorkspace(h);
+    const shareId = await createShare(h, "comment");
+
+    const requireModule = createRequire(import.meta.url);
+    const { DatabaseSync } = requireModule("node:sqlite") as {
+      DatabaseSync: new (path: string) => {
+        prepare(sql: string): { run(...params: unknown[]): unknown };
+        close(): void;
+      };
+    };
+    let revoked = false;
+    const original = storage.appendLogBatch.bind(storage);
+    storage.appendLogBatch = (input) => {
+      if (!revoked) {
+        revoked = true;
+        const raw = new DatabaseSync(dbPath);
+        try {
+          raw
+            .prepare(
+              `UPDATE sync_relay_share_grants
+               SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
+               WHERE share_id = ?`,
+            )
+            .run(9999, shareId);
+        } finally {
+          raw.close();
+        }
+      }
+      return original(input);
+    };
+
+    const push = await h(
+      request(
+        RECIPIENT,
+        `/sync/shares/${shareId}/log`,
+        jsonBody({
+          originId: "recipient-origin",
+          ops: [
+            {
+              originSeq: 0,
+              opKind: "chat.message.append",
+              recordedAtMs: 5000,
+              payload: {
+                messageId: "m-grant-raced",
+                threadId: "thread-in",
+                authorKind: "human",
+                authorDisplayName: "Recipient",
+                authorUserId: RECIPIENT,
+                body: "too late for this grant",
+                createdAtMs: 5000,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(revoked).toBe(true);
+    expect(
+      push.status,
+      "MUTATION: without the in-transaction active-grant check this append lands",
+    ).toBe(404);
+    const ownerLog = storage.fetchLogPage({
+      workspaceId: WORKSPACE,
+      sinceRelaySeq: 0,
+      limit: 500,
+    });
+    expect(ownerLog.rows.map((row) => row.payloadJson).join("\n")).not.toContain(
+      "m-grant-raced",
+    );
+  });
+
   it("re-reads the LEVEL inside the write transaction, not just the entry check", async () => {
     // The entry check reads the selector once. The guard re-reads it under the
     // write lock, so a row that stops admitting appends between the two loses
@@ -574,8 +648,12 @@ describe("chat over a file share (#646 PR2)", () => {
         tampered = true;
         const raw = new DatabaseSync(dbPath);
         raw
-          .prepare("UPDATE sync_relay_shares SET selector_json = ? WHERE share_id = ?")
-          .run(JSON.stringify({ paths: ["docs"], versionId: null, access: "view" }), shareId);
+          .prepare(
+            `UPDATE sync_relay_share_grants
+             SET access = 'view', generation = generation + 1
+             WHERE share_id = ?`,
+          )
+          .run(shareId);
         raw.close();
       }
       return original(input);
