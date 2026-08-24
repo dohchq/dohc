@@ -7952,6 +7952,7 @@ function registerIpcHandlers(
     );
     assertWritableWorkspace(workspace);
     const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
+    assertPluginPanelRequestCurrent(isCurrent);
     rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,
@@ -8049,6 +8050,11 @@ function registerIpcHandlers(
           });
           throw new Error(
             "Plugin panel start was cancelled because the renderer changed.",
+          );
+        }
+        if (host.getSpawnId(input.pluginId) !== spawnId) {
+          throw new Error(
+            `Plugin "${input.pluginId}" restarted while its panel was starting. Try again.`,
           );
         }
         const releaseOrigin = allowLoopbackFrameOrigin(handle.url);
@@ -8294,6 +8300,7 @@ function registerIpcHandlers(
     );
     assertWritableWorkspace(workspace);
     const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);
+    assertPluginPanelRequestCurrent(isCurrent);
     const plugin = rememberPluginRegistration(
       pluginRegistrations,
       workspace.workspaceId,

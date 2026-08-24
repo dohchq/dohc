@@ -100,6 +100,22 @@ describe("plugin panel main-process wiring", () => {
     );
   });
 
+  it("rejects an open whose renderer generation changes while the pipeline starts", () => {
+    const open = handler("openPluginPanel");
+    const pipelineAt = open.indexOf(
+      "const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);",
+    );
+    const currentAt = open.indexOf(
+      "assertPluginPanelRequestCurrent(isCurrent);",
+      pipelineAt,
+    );
+    const rememberAt = open.indexOf("rememberPluginRegistration(", pipelineAt);
+
+    expect(pipelineAt).toBeGreaterThan(-1);
+    expect(currentAt).toBeGreaterThan(pipelineAt);
+    expect(rememberAt).toBeGreaterThan(currentAt);
+  });
+
   it("serves the manifest panel and grants only main-derived SDK context", () => {
     const start = handler("startPluginPanel");
     const serveAt = start.indexOf("startStaticDirectoryPreview(dirname(entryPath)");
@@ -126,6 +142,39 @@ describe("plugin panel main-process wiring", () => {
     expect(stop).toContain("withPluginPanelStartLock(key");
     expect(stop).toContain("await stopRunningPluginPanelPreview(panel);");
     expect(stop).toContain("await panel.hostLease.release();");
+  });
+
+  it("discards a panel when its host changes while the preview starts", () => {
+    const start = handler("startPluginPanel");
+    const spawnAt = start.indexOf("const spawnId = host.getSpawnId(input.pluginId);");
+    const previewAt = start.indexOf("handle = await startStaticDirectoryPreview(", spawnAt);
+    const recheckAt = start.indexOf(
+      "host.getSpawnId(input.pluginId) !== spawnId",
+      previewAt,
+    );
+    const installAt = start.indexOf("runningPluginPanels.set(key, next);", recheckAt);
+    const grantAt = start.indexOf("registerPluginPanelGrant({", installAt);
+    const catchAt = start.indexOf("} catch (error) {", grantAt);
+    const pendingPreviewAt = start.indexOf("} else if (handle) {", catchAt);
+    const pendingPreviewStopAt = start.indexOf(
+      "await stopRunningPluginPanelPreview({",
+      pendingPreviewAt,
+    );
+    const releaseAt = start.indexOf("await hostLease.release();", pendingPreviewStopAt);
+
+    // A disable, rebuild, or close can replace the spawn during the preview
+    // await. The exact-spawn check throws before either durable surface
+    // effect; the shared catch then stops the pending preview and releases
+    // this start's lease.
+    expect(spawnAt).toBeGreaterThan(-1);
+    expect(previewAt).toBeGreaterThan(spawnAt);
+    expect(recheckAt).toBeGreaterThan(previewAt);
+    expect(installAt).toBeGreaterThan(recheckAt);
+    expect(grantAt).toBeGreaterThan(installAt);
+    expect(catchAt).toBeGreaterThan(grantAt);
+    expect(pendingPreviewAt).toBeGreaterThan(catchAt);
+    expect(pendingPreviewStopAt).toBeGreaterThan(pendingPreviewAt);
+    expect(releaseAt).toBeGreaterThan(pendingPreviewStopAt);
   });
 
   it("starts a panel only where its manifest places it, and serves a view with no tab (B1)", () => {

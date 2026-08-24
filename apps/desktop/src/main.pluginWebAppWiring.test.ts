@@ -46,6 +46,22 @@ describe("plugin web app main-process wiring", () => {
     );
   });
 
+  it("rejects an open whose renderer generation changes while the pipeline starts", () => {
+    const open = handler("openPluginWebApp");
+    const pipelineAt = open.indexOf(
+      "const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);",
+    );
+    const currentAt = open.indexOf(
+      "assertPluginPanelRequestCurrent(isCurrent);",
+      pipelineAt,
+    );
+    const rememberAt = open.indexOf("rememberPluginRegistration(", pipelineAt);
+
+    expect(pipelineAt).toBeGreaterThan(-1);
+    expect(currentAt).toBeGreaterThan(pipelineAt);
+    expect(rememberAt).toBeGreaterThan(currentAt);
+  });
+
   it("builds the guest only after readiness and both post-start rechecks", () => {
     const start = handler("startPluginWebApp");
     const startWebAppAt = start.indexOf("await host.startWebApp(");
