@@ -59,6 +59,39 @@ impl Scratch {
         std::fs::rename(&from, &to).expect("rename file");
     }
 
+    /// The file's current mtime (for reapplying it exactly in the forged-mtime
+    /// pin tests).
+    pub fn mtime(&self, rel: &str) -> std::time::SystemTime {
+        let path = self
+            .inner
+            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        std::fs::metadata(&path)
+            .expect("stat file")
+            .modified()
+            .expect("read mtime")
+    }
+
+    /// Set the file's mtime to an exact instant.
+    pub fn set_mtime(&self, rel: &str, when: std::time::SystemTime) {
+        let path = self
+            .inner
+            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open for mtime");
+        file.set_modified(when).expect("set mtime");
+    }
+
+    /// Move the file's mtime `seconds` into the past, so a reconcile that runs
+    /// immediately afterwards can record the (mtime, hash) pairing without
+    /// tripping the racy-write guard (a same-millisecond mtime is never
+    /// recorded) — no sleeps needed.
+    pub fn age_mtime(&self, rel: &str, seconds: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        self.set_mtime(rel, when);
+    }
+
     /// Best-effort file symlink; returns whether it was created (Windows without
     /// Developer Mode refuses, and the caller skips the symlink-specific
     /// expectation honestly).

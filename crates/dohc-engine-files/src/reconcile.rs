@@ -58,6 +58,11 @@ pub enum CaptureOp {
         path: String,
         size: u64,
         sha256: String,
+        /// The mtime the manifest may pair with `sha256` at acknowledgement,
+        /// already passed through [`recordable_mtime_ms`]; `0` means no
+        /// trustworthy pairing (the next scan re-hashes this path once). Never
+        /// sent to the sink — the receipt protocol is untouched.
+        mtime_ms: i64,
         media_type: &'static str,
         reason: IngestReason,
     },
@@ -122,6 +127,7 @@ impl ReconcilePlan {
                 path: file.path,
                 size: file.size,
                 sha256: file.sha256,
+                mtime_ms: file.mtime_ms,
                 media_type: file.media_type,
                 reason: IngestReason::Added,
             });
@@ -131,6 +137,7 @@ impl ReconcilePlan {
                 path: file.path,
                 size: file.size,
                 sha256: file.sha256,
+                mtime_ms: file.mtime_ms,
                 media_type: file.media_type,
                 reason: IngestReason::Changed,
             });
@@ -338,12 +345,34 @@ impl ReconcileController {
         if self.outstanding {
             return Err(FilesError::StaleReconcilePlan);
         }
-        let listing = match scanner.scan(root, token)? {
+        let scan_started_ms = now_ms();
+        let listing = match scanner.scan_with_prior(root, &self.manifest, token)? {
             // Cancelled mid-scan: commit nothing. Dirty and generation stay put
             // — the state is consistent and the work is resumable.
             ScanOutcome::Cancelled => return Ok(ReconcileRun::Cancelled),
             ScanOutcome::Completed(listing) => listing,
         };
+
+        // Refresh the mtime pairing of every hash-verified unchanged file, so
+        // the NEXT scan can reuse its hash: a rehydrated seed carries no
+        // mtimes, and a touch-without-change moves the mtime while the hash
+        // stays put. Content identity (size + hash) is never touched here, and
+        // this is deliberately not part of the capture receipt: the pairing is
+        // a true observation from a completed scan whether or not the plan
+        // below is ever applied. Changed/added files get their pairing at
+        // acknowledgement instead — recording it before the sink ran would let
+        // the next scan skip a path whose capture failed.
+        for file in &listing.files {
+            if let Some(entry) = self.manifest.entry_mut(&file.path)
+                && entry.size == file.size
+                && entry.sha256 == file.sha256
+            {
+                let recordable = recordable_mtime_ms(file.mtime_ms, scan_started_ms);
+                if entry.mtime_ms != recordable {
+                    entry.mtime_ms = recordable;
+                }
+            }
+        }
 
         let scan_degraded = listing.degraded();
         let mut degraded_paths: Vec<String> = listing
@@ -376,6 +405,13 @@ impl ReconcileController {
         degraded_paths.sort();
         degraded_paths.dedup();
         let degraded = scan_degraded || !diff.unconfirmed_removed.is_empty();
+
+        // Clamp the diff's mtimes to what the manifest may PAIR at
+        // acknowledgement (the racy-write guard); the plan's ops carry the
+        // clamped value, never the raw observation.
+        for file in diff.added.iter_mut().chain(diff.changed.iter_mut()) {
+            file.mtime_ms = recordable_mtime_ms(file.mtime_ms, scan_started_ms);
+        }
 
         let from = self.generation;
         let to = from.next();
@@ -443,7 +479,13 @@ impl ReconcileController {
                 continue;
             }
             match op {
-                CaptureOp::Ingest { path, .. } => {
+                CaptureOp::Ingest {
+                    path,
+                    size: op_size,
+                    sha256: op_sha,
+                    mtime_ms: op_mtime_ms,
+                    ..
+                } => {
                     // A re-reading sink can persist newer bytes than the scan
                     // hashed; record what was ACTUALLY captured so a later
                     // revert to the scan-time bytes still diffs as a change.
@@ -454,11 +496,22 @@ impl ReconcileController {
                     let Some((size, sha)) = captured.get(path.as_str()) else {
                         return Err(FilesError::InvalidCaptureReceipt { path: path.clone() });
                     };
+                    // The scan-time mtime pairs ONLY with the scan-time hash: a
+                    // sink that persisted different bytes than the scan hashed
+                    // leaves no mtime observation for what it captured, so
+                    // that entry records 0 and the next scan re-hashes it once
+                    // (the refresh pass then records a real pairing).
+                    let mtime_ms = if *size == *op_size && *sha == op_sha.as_str() {
+                        *op_mtime_ms
+                    } else {
+                        0
+                    };
                     next.insert(
                         path.clone(),
                         ManifestEntry {
                             size: *size,
                             sha256: (*sha).to_owned(),
+                            mtime_ms,
                         },
                     );
                 }
@@ -526,6 +579,32 @@ impl ReconcileController {
     }
 }
 
+/// The mtime a manifest entry may pair with a hash computed by a scan that
+/// began at `scan_started_ms` — git's racy-clean rule. A file whose mtime is
+/// not strictly OLDER than the scan's start millisecond could have been
+/// rewritten after hashing without moving its millisecond timestamp; recording
+/// that pairing would let every later scan reuse a hash of bytes that are
+/// already gone. Such files record `0` (no pairing) and are simply re-hashed
+/// on the next scan, by which point their mtime is in the past and pairs
+/// safely. `0` (no observation) stays `0`, and a broken clock (`now_ms() ==
+/// 0`) disables pairing entirely — always failing toward the hash.
+fn recordable_mtime_ms(mtime_ms: i64, scan_started_ms: i64) -> i64 {
+    if mtime_ms != 0 && mtime_ms < scan_started_ms {
+        mtime_ms
+    } else {
+        0
+    }
+}
+
+/// Milliseconds since the Unix epoch, or `0` when the clock is unusable.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 fn degraded_path_signature(paths: &[String]) -> u64 {
     let mut hasher = DefaultHasher::new();
     paths.len().hash(&mut hasher);
@@ -589,6 +668,7 @@ mod ack_receipt_tests {
             ManifestEntry {
                 size: 10,
                 sha256: "abc".to_owned(),
+                mtime_ms: 0,
             },
         );
         controller.outstanding = true;

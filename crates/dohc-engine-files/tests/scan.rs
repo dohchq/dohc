@@ -7,8 +7,8 @@ mod common;
 
 use common::{Scratch, sha256_hex};
 use dohc_engine_files::{
-    CancellationToken, OverCapPolicy, ScanBounds, ScanIoFaultInjector, ScanIoOperation,
-    ScanListing, ScanOutcome, Scanner, SkipReason,
+    CancellationToken, ManifestEntry, OverCapPolicy, ScanBounds, ScanIoFaultInjector,
+    ScanIoOperation, ScanListing, ScanManifest, ScanOutcome, Scanner, SkipReason,
 };
 use std::io::ErrorKind;
 use std::sync::Arc;
@@ -261,6 +261,85 @@ fn symlink_directory_cycle_terminates_and_tracks_nothing_under_loop() {
     if !made {
         eprintln!("note: directory symlink unavailable on this host; termination holds vacuously");
     }
+}
+
+/// The amended-N8 short-circuit, pinned at the scanner seam: a matching
+/// (size, mtime) pairing returns the manifest's RECORDED hash — provably
+/// without reading the file, because the recorded hash here is a deliberate
+/// lie that a re-hash could never produce — while a zero-mtime entry and a
+/// mismatched size each force the real hash.
+#[test]
+fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
+    let ws = Scratch::new();
+    ws.write("doc.md", b"content\n");
+    ws.age_mtime("doc.md", 30);
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+
+    // Learn the observed pairing from a full-hash scan.
+    let baseline = scan(&scanner, ws.path());
+    let observed = &baseline.files[0];
+    assert_eq!(observed.sha256, sha256_hex(b"content\n"));
+    assert_ne!(observed.mtime_ms, 0, "the scratch file must carry an mtime");
+    let hashed_after_baseline = scanner.pool().gauge().hashed();
+
+    // Matching pairing → the recorded (lying) hash comes back, no read.
+    let matching = ScanManifest::from_entries([(
+        "doc.md".to_owned(),
+        ManifestEntry {
+            size: observed.size,
+            sha256: "recorded-not-recomputed".to_owned(),
+            mtime_ms: observed.mtime_ms,
+        },
+    )]);
+    let reused = match scanner
+        .scan_with_prior(ws.path(), &matching, &CancellationToken::new())
+        .expect("scan ok")
+    {
+        ScanOutcome::Completed(listing) => listing,
+        ScanOutcome::Cancelled => panic!("unexpected cancellation"),
+    };
+    assert_eq!(reused.files[0].sha256, "recorded-not-recomputed");
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        hashed_after_baseline,
+        "a matching pairing must not read the file"
+    );
+
+    // A zero-mtime entry never authorizes reuse, even with a matching size.
+    let no_pairing = ScanManifest::from_entries([(
+        "doc.md".to_owned(),
+        ManifestEntry {
+            size: observed.size,
+            sha256: "recorded-not-recomputed".to_owned(),
+            mtime_ms: 0,
+        },
+    )]);
+    let hashed = match scanner
+        .scan_with_prior(ws.path(), &no_pairing, &CancellationToken::new())
+        .expect("scan ok")
+    {
+        ScanOutcome::Completed(listing) => listing,
+        ScanOutcome::Cancelled => panic!("unexpected cancellation"),
+    };
+    assert_eq!(hashed.files[0].sha256, sha256_hex(b"content\n"));
+
+    // A size mismatch forces the hash even when the mtime matches.
+    let wrong_size = ScanManifest::from_entries([(
+        "doc.md".to_owned(),
+        ManifestEntry {
+            size: observed.size + 1,
+            sha256: "recorded-not-recomputed".to_owned(),
+            mtime_ms: observed.mtime_ms,
+        },
+    )]);
+    let rehashed = match scanner
+        .scan_with_prior(ws.path(), &wrong_size, &CancellationToken::new())
+        .expect("scan ok")
+    {
+        ScanOutcome::Completed(listing) => listing,
+        ScanOutcome::Cancelled => panic!("unexpected cancellation"),
+    };
+    assert_eq!(rehashed.files[0].sha256, sha256_hex(b"content\n"));
 }
 
 #[test]
