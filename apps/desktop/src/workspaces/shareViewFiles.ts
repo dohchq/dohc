@@ -634,12 +634,6 @@ export function createShareViewFiles(
       target?.schedulingRootPath ?? lease.rootPath,
       lease,
     );
-    if (target === undefined) return;
-    if (!samePath(lease.rootPath, target.schedulingRootPath)) {
-      throw new Error(
-        "Received-share mutation did not hold its owning workspace scheduler.",
-      );
-    }
   }
 
   async function withStore<T>(
