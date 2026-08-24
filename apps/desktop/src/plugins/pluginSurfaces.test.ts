@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { assertInstanceBudget } from "./pluginWebAppInstances";
 import {
   PluginSurfaces,
@@ -80,6 +80,14 @@ class FakeView implements PluginWebAppViewLike {
     this.visibility.push(visible);
   }
 }
+
+beforeEach(() => {
+  FakeView.created = [];
+  FakeView.throwOnNextLoad = false;
+  FakeView.throwOnNextSessionHardening = false;
+  FakeView.onNextClose = null;
+  FakeView.onNextCreate = null;
+});
 
 function lease(options: {
   steps?: string[];
