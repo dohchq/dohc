@@ -664,7 +664,7 @@ pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
-    open_lock: tokio::sync::Mutex<()>,
+    open_lock: Arc<tokio::sync::Mutex<()>>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
     leases: LeaseRegistry,
@@ -801,7 +801,7 @@ impl EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
             pending_cursors: Mutex::new(HashMap::new()),
-            open_lock: tokio::sync::Mutex::new(()),
+            open_lock: Arc::new(tokio::sync::Mutex::new(())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             leases: {
@@ -1504,7 +1504,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("workspace open (queued)"));
             }
-            serial = self.open_lock.lock() => serial,
+            serial = Arc::clone(&self.open_lock).lock_owned() => serial,
         };
         let validated =
             shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
@@ -1653,15 +1653,18 @@ impl EngineService {
             };
             // Establish cleanup ownership inside the blocking task that creates
             // the actor. If the awaiting request is cancelled, Tokio drops this
-            // task's unobserved output and the guard closes the actor.
-            let open_guard = opened.as_ref().ok().and_then(|open| {
-                open.created_actor.then(|| OpenGuard {
-                    supervisor,
-                    db_path: Some(actor_path.clone()),
-                })
-            });
+            // task's unobserved output and the guard closes the actor. The guard
+            // also retains open serialization until cleanup installs Closing.
+            let open_guard = OpenGuard {
+                supervisor,
+                db_path: opened
+                    .as_ref()
+                    .ok()
+                    .and_then(|open| open.created_actor.then(|| actor_path.clone())),
+                _open_serial,
+            };
             #[cfg(test)]
-            if open_guard.is_some()
+            if open_guard.db_path.is_some()
                 && let Some((reached, release, armed)) = open_install_probe
                 && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
             {
@@ -1686,7 +1689,6 @@ impl EngineService {
                 "workspace database is already attached",
             ));
         }
-        let open_guard = open_guard.expect("new actor carries its open guard");
         let actor = actor_open.actor;
         let binding = actor.bind_shadow_clone(validated.token).await;
         let binding_error = match binding {
@@ -8814,10 +8816,12 @@ impl OperationCancellation {
 
 /// Closes a just-opened store actor if `workspace_open` is dropped before the
 /// handle reaches `handles` (a cancelled/deadline-expired open). Disarmed on
-/// the success path, where the handle owns the actor.
+/// the success path, where the handle owns the actor. Open serialization stays
+/// held until either transfer or `begin_close` installs the Closing marker.
 struct OpenGuard {
     supervisor: &'static WorkspaceSupervisor,
     db_path: Option<PathBuf>,
+    _open_serial: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl OpenGuard {
@@ -13405,11 +13409,26 @@ mod tests {
                 .expect_err("workspace.open was cancelled")
                 .is_cancelled()
         );
+        let cleanup_retains_serialization = service.open_lock.try_lock().is_err();
+        let reopening_service = Arc::clone(&service);
+        let reopening = tokio::spawn(async move {
+            reopening_service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+        });
+        assert!(
+            !reopening.is_finished(),
+            "immediate reopen must wait for cancelled-open cleanup"
+        );
         service.open_install_probe.as_ref().unwrap().1.notify_one();
+        assert!(
+            cleanup_retains_serialization,
+            "cancelled open must retain serialization until cleanup starts"
+        );
 
-        let reopened = service
-            .workspace_open(&RequestContext::unbounded(), params)
+        let reopened = reopening
             .await
+            .expect("reopen task completed")
             .expect("immediate workspace reopen");
         let handle: WorkspaceHandle =
             serde_json::from_value(reopened["workspace"].clone()).expect("workspace handle");
