@@ -199,6 +199,7 @@ function mutableTextStore(input?: {
   afterWrite?: (path: string) => void;
   beforeDelete?: (path: string) => void;
   afterRename?: (fromPath: string, toPath: string) => void;
+  afterMetadataRead?: (read: number) => void | Promise<void>;
 }): ShareViewFilesStore {
   const rows = new Map<
     string,
@@ -209,6 +210,7 @@ function mutableTextStore(input?: {
     }
   >();
   let nextId = 1;
+  let metadataReads = 0;
   for (const initial of input?.initial ?? []) {
     const id = nextId++;
     rows.set(initial.path, {
@@ -233,9 +235,14 @@ function mutableTextStore(input?: {
   return {
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
     listTextFiles: vi.fn(async () => snapshots()),
-    listTextFileMetadata: vi.fn(async () =>
-      snapshots().map(({ text: _text, metadata: _metadata, ...row }) => row),
-    ),
+    listTextFileMetadata: vi.fn(async () => {
+      const rows = snapshots().map(
+        ({ text: _text, metadata: _metadata, ...row }) => row,
+      );
+      metadataReads += 1;
+      await input?.afterMetadataRead?.(metadataReads);
+      return rows;
+    }),
     getMoment: vi.fn(async () => ({ payload: { before: null } })),
     readTextFile: vi.fn(async ({ path }: { path: string }) => {
       return snapshots().find((row) => row.path === path) ?? null;
@@ -2440,6 +2447,46 @@ describe("ShareViewFiles", () => {
 
     expect(store.renameTextFile).not.toHaveBeenCalled();
     await expect(readFile(join(plans, "a.md"), "utf8")).resolves.toBe("a\n");
+    await expect(
+      readSharedViewProjectionDebt(rootPath, "share-a"),
+    ).resolves.toMatchObject({ pendingPaths: new Set() });
+  });
+
+  it("refuses when the physical source disappears before move identity preflight", async () => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "Plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "a\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/Plans/a.md", text: "a\n" }],
+      afterMetadataRead: async (read) => {
+        // Capture and the canonical before-snapshot have finished. Remove the
+        // source after the file-change seam reads its canonical paths but
+        // before its move-identity preflight touches the projection.
+        if (read === 3) await rm(plans, { recursive: true });
+      },
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "move",
+            fromPath: "docs/Plans",
+            toPath: "docs/plans/archive",
+          },
+        ),
+      ),
+    ).rejects.toThrow("missing from this shared view");
+
+    expect(store.renameTextFile).not.toHaveBeenCalled();
     await expect(
       readSharedViewProjectionDebt(rootPath, "share-a"),
     ).resolves.toMatchObject({ pendingPaths: new Set() });

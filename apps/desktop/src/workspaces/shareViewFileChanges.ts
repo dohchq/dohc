@@ -375,6 +375,11 @@ async function applyShareViewPathMove(
   if (sources.length === 0) {
     throw new Error(notInThisShareView(from, "Rename"));
   }
+  const { renamesInPlace } = await preflightProjectionMoveIdentity(
+    input,
+    from,
+    to,
+  );
   await refuseNonFileReplacement(input, from, "Rename", held, sources);
   await refuseUntrackedUnder(input.rootPath, from, held);
   // The DESTINATION is screened too. A folder move merges into whatever is
@@ -382,10 +387,6 @@ async function applyShareViewPathMove(
   // the store holds are checked one by one below, so what is left to ask is
   // whether the destination holds anything the store does not. Skipped when the
   // two are the same entry, which is what a case-only rename is.
-  const renamesInPlace = await sameProjectionEntry(input.rootPath, from, to);
-  if (!renamesInPlace) {
-    await refuseProjectionDescendantMove(input, from, to);
-  }
   if (!renamesInPlace) await refuseUntrackedUnder(input.rootPath, to, held);
   if (!renamesInPlace && pathsUnder(held, to).length > 0) {
     throw new Error(`Destination already exists: ${to}`);
@@ -959,8 +960,10 @@ async function projectionHolds(
  * the platform dohc ships on first — and two of the places that asked with
  * strings answered by destroying data.
  *
- * Both ends must resolve for them to BE the same entry: a path that resolves to
- * nothing is not the same as anything, which keeps every caller failing closed.
+ * Both ends must resolve for them to BE the same entry. This helper serves only
+ * per-file collision checks after the destination was proven occupied. A
+ * missing or unreadable endpoint therefore returns false and keeps the
+ * collision refusal closed.
  */
 async function sameProjectionEntry(
   rootPath: string,
@@ -975,18 +978,20 @@ async function sameProjectionEntry(
 }
 
 /**
- * Refuse when the destination physically resolves inside the source.
+ * Resolve one physical identity snapshot for the whole top-level move.
  *
  * Relative path spelling cannot answer this on a case-insensitive filesystem
- * or through an in-workspace alias. Resolve both entries through the same
- * projection boundary materialization uses, then compare canonical paths. A
- * case-only rename is excluded by sameProjectionEntry before this runs.
+ * or through an in-workspace alias. Both entries resolve through the same
+ * projection boundary materialization uses. The source must still exist:
+ * without it, a later recursive source cleanup could remove a newly
+ * materialized case alias. The destination may be absent, because its resolved
+ * target still carries the canonical existing ancestor and unresolved tail.
  */
-async function refuseProjectionDescendantMove(
+async function preflightProjectionMoveIdentity(
   input: ShareViewFileChangeScope,
   from: string,
   to: string,
-): Promise<void> {
+): Promise<{ renamesInPlace: boolean }> {
   const sourceTarget = await input.projection.resolvedTarget(
     input.rootPath,
     from,
@@ -996,7 +1001,11 @@ async function refuseProjectionDescendantMove(
     source = await realpath(sourceTarget);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      throw new Error(
+        `dohc did not rename ${from}. The file or folder is missing from this shared view. Refresh the shared view and try again.`,
+      );
+    }
     throw error;
   }
 
@@ -1014,9 +1023,11 @@ async function refuseProjectionDescendantMove(
     // unresolved tail can therefore participate directly in containment.
     destination = destinationTarget;
   }
-  if (isInside(source, destination)) {
+  const renamesInPlace = source === destination;
+  if (!renamesInPlace && isInside(source, destination)) {
     throw new Error(`Cannot move a path into itself: ${from}`);
   }
+  return { renamesInPlace };
 }
 
 /**
