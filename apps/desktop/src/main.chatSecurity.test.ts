@@ -852,12 +852,6 @@ describe("main-process chat authorization", () => {
       shareViewFiles,
       "MUTATION: a second copy of the level rule is a copy that drifts",
     ).toContain("!shareViewTakesLocalWrites({");
-    const writeHandler = handlerSource("writeWorkspaceText");
-    expect(writeHandler).toContain(
-      "const shareView = sharedViewOf(workspace.workspaceId);",
-    );
-    expect(writeHandler).toContain("await shareViewFiles.change(");
-    expect(writeHandler).not.toContain("shareViewTakesLocalWrites(");
   });
 
   // The menu is a UX MIRROR of the gates below it, and it has to mirror the
@@ -915,13 +909,11 @@ describe("main-process chat authorization", () => {
   // asserts it refuses — the property that keeps every writer below closed on
   // a share view at every level. Position and decision together are the
   // claim; neither alone is.
-  it("keeps every raw-disk writer and the plugin pipeline behind the workspace write gate", () => {
-    // Each of these writes the workspace FOLDER. A share view's folder is a
-    // projection of its engine store, so a write here would leave the
-    // projection stating content no moment does — unsendable, and overwritten
-    // by the next pull.
+  it("keeps each main-owned raw-disk writer and the plugin pipeline behind the workspace write gate", () => {
+    // Each of these writes the workspace folder. A share view's folder is a
+    // projection of its engine store, so a write here would leave content no
+    // moment states. The next pull would overwrite it.
     const rawDiskWriters = [
-      "writeWorkspaceAsset",
       "pickImageFiles",
       "applyDatabaseEdit",
       "importToDatabase",
@@ -945,44 +937,18 @@ describe("main-process chat authorization", () => {
       "MUTATION: an ungated pipeline writes plugin state into someone else's workspace",
     ).toContain("assertWritableWorkspace(workspace);");
 
-    // And the handlers that do NOT take the blanket refusal, each stated here
-    // so widening one is a visible edit rather than a silent one. Every one of
-    // them is decided at its own routed seam instead, and none of them spells
-    // a level in main.
-    const routed = [
-      ["writeWorkspaceText", 'kind: "save"'],
-      ["createWorkspaceFile", 'kind: "create"'],
-      ["moveWorkspacePath", 'kind: "move"'],
-      ["deleteWorkspacePath", 'kind: "delete"'],
-      ["importWorkspaceFiles", 'kind: "import"'],
-    ] as const;
-    for (const [channel, changeKind] of routed) {
-      const handler = handlerSource(channel);
-      expect(
-        handler,
-        `${channel}: MUTATION: an unrouted share view takes the blanket refusal and its write never becomes a change`,
-      ).toContain("if (shareView === null) assertWritableWorkspace(workspace);");
-      expect(handler, channel).toContain("await shareViewFiles.change(");
-      expect(handler, channel).toContain(changeKind);
-      expect(
-        handler,
-        `${channel}: MUTATION: a second copy of the level rule in main is a copy that drifts`,
-      ).not.toContain("shareViewTakesLocalWrites(");
-    }
-
-    // Folder creation has no canonical shared-file operation. It stays behind
-    // the blanket gate and never enters the received-share owner.
-    const folder = handlerSource("createWorkspaceFolder");
-    expect(folder).toContain(
-      "throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);",
-    );
+    // Import remains in main and routes received-share writes through the
+    // same owner as before. WorkspaceFileMutationOwner behavior-tests the six
+    // file handlers that no longer keep policy in main.
+    const routedImport = handlerSource("importWorkspaceFiles");
     expect(
-      folder,
-      "MUTATION: a folder create that asks the level lets an edit share view make a folder no moment can state",
-    ).toContain("assertWritableWorkspace(workspace);");
-    expect(folder).not.toContain("shareViewFiles.change(");
-    expect(folder.indexOf("assertWritableWorkspace(workspace);")).toBeLessThan(
-      folder.indexOf("createFolder("),
+      routedImport,
+      "MUTATION: an unrouted share view takes the blanket refusal and its write never becomes a change",
+    ).toContain("if (shareView === null) assertWritableWorkspace(workspace);");
+    expect(routedImport).toContain("await shareViewFiles.change(");
+    expect(routedImport).toContain('kind: "import"');
+    expect(routedImport).not.toContain(
+      "shareViewTakesLocalWrites(",
     );
   });
 

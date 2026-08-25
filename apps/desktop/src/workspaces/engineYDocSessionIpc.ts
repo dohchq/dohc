@@ -43,6 +43,9 @@ import {
   type EngineYDocSessionOutbound,
   type EngineYDocSessionReleaseOutcome,
 } from "./engineYDocSessionOwner";
+import type {
+  WorkspaceFileMutationYDocPort,
+} from "./workspaceFileMutationOwner";
 import {
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
@@ -87,7 +90,7 @@ interface LineageReplacement {
   artifactAssets: readonly ArtifactAssetDescriptor[];
 }
 
-interface OwnedSession {
+interface EngineYDocIpcOwnedSession {
   workspaceId: string;
   provider: WorkspaceEngineYDocProviderSession;
   saveSeq: EngineYDocSaveSeqState;
@@ -95,12 +98,13 @@ interface OwnedSession {
   retiredArtifactAssets: ArtifactAssetDescriptor[];
   deleted: boolean;
   emit: (event: SessionEvent) => void;
+  markDeleted(): void;
   close: WorkspaceEngineYDocProviderSession["close"];
 }
 
-type SessionOwner = EngineYDocSessionOwner<
+type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
   EngineYDocIpcSender,
-  OwnedSession,
+  EngineYDocIpcOwnedSession,
   SessionEvent,
   Uint8Array,
   LineageReplacement
@@ -135,7 +139,8 @@ class EngineYDocSessionIpc {
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
-  readonly #owner: SessionOwner;
+  readonly #owner: EngineYDocIpcSessionOwner;
+  readonly #fileMutationPort: WorkspaceFileMutationYDocPort;
   readonly #cleanupHooked = new WeakSet<EngineYDocIpcSender>();
   readonly #trackedGeneration = new WeakMap<EngineYDocIpcSender, number>();
 
@@ -156,6 +161,18 @@ class EngineYDocSessionIpc {
         );
       },
     });
+    const fileMutationPort: WorkspaceFileMutationYDocPort = {
+      ownsDocument: (workspaceId: string, path: string) =>
+        this.#owner.ownsDocument(workspaceId, path),
+      forEachSessionUnderPath: (workspaceId, pathOrPrefix, visit) => {
+        this.#owner.forEachSessionUnderPath(
+          workspaceId,
+          pathOrPrefix,
+          (session) => visit({ markDeleted: () => session.markDeleted() }),
+        );
+      },
+    };
+    this.#fileMutationPort = Object.freeze(fileMutationPort);
   }
 
   async open(
@@ -238,7 +255,7 @@ class EngineYDocSessionIpc {
           throw error;
         }
 
-        const owned: OwnedSession = {
+        const owned: EngineYDocIpcOwnedSession = {
           workspaceId: workspace.workspaceId,
           provider,
           saveSeq,
@@ -251,6 +268,10 @@ class EngineYDocSessionIpc {
           retiredArtifactAssets: [],
           deleted: false,
           emit: signals.emit,
+          markDeleted() {
+            owned.deleted = true;
+            owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
+          },
           close: (options) => provider.close(options),
         };
         if (provider.contentKind === requestedKind) {
@@ -431,25 +452,8 @@ class EngineYDocSessionIpc {
     return this.#owner.shutdown();
   }
 
-  ownsDocument(workspaceId: string, path: string): boolean {
-    const validatedPath = validateUserWritePath(path);
-    return (
-      validatedPath.ok &&
-      this.#owner.ownsDocument(workspaceId, validatedPath.normalized)
-    );
-  }
-
-  notifyDeleted(workspaceId: string, pathOrPrefix: string): void {
-    const validatedPath = validateUserWritePath(pathOrPrefix);
-    if (!validatedPath.ok) return;
-    this.#owner.forEachSessionUnderPath(
-      workspaceId,
-      validatedPath.normalized,
-      (owned) => {
-        owned.deleted = true;
-        owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
-      },
-    );
+  fileMutationPort(): WorkspaceFileMutationYDocPort {
+    return this.#fileMutationPort;
   }
 
   #trackSender(sender: EngineYDocIpcSender, generation: number): void {

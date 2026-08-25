@@ -147,7 +147,9 @@ describe("engine Y.Doc IPC adapter", () => {
       path: "notes/a.md",
       contentKind: "richdoc",
     });
-    expect(h.ipc.ownsDocument("workspace-1", "notes/a.md")).toBe(true);
+    expect(
+      h.ipc.fileMutationPort().ownsDocument("workspace-1", "notes/a.md"),
+    ).toBe(true);
 
     expect(
       h.ipc.applyUpdate(sender, {
@@ -309,7 +311,11 @@ describe("engine Y.Doc IPC adapter", () => {
     });
 
     h.setReadOnly(false);
-    h.ipc.notifyDeleted("workspace-1", "notes/");
+    h.ipc
+      .fileMutationPort()
+      .forEachSessionUnderPath("workspace-1", "notes", (session) =>
+        session.markDeleted(),
+      );
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       state: "deleted",
@@ -401,7 +407,11 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     ).rejects.toThrow("does not reference artifact asset image");
 
-    h.ipc.notifyDeleted("workspace-1", "notes/a.md");
+    h.ipc
+      .fileMutationPort()
+      .forEachSessionUnderPath("workspace-1", "notes/a.md", (session) =>
+        session.markDeleted(),
+      );
     await expect(
       h.ipc.readArtifactAsset(sender, {
         sessionId: openPayload.sessionId,
