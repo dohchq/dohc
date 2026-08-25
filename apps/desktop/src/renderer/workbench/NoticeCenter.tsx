@@ -16,7 +16,6 @@ import {
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalSentence,
   type SyncStatusResult,
-  type UpdateStateEvent,
 } from "../../ipc/bridgeContract";
 import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
@@ -130,12 +129,10 @@ export function NoticeCenter(props: {
   >(null);
   const [updateActionError, setUpdateActionError] = useState<string | null>(null);
   const [installPending, setInstallPending] = useState(false);
-  const clearFinishedUpdateAction = useCallback((update: UpdateStateEvent) => {
-    if (update.status === "error") return;
-    setUpdateActionError(null);
-  }, []);
   const { updateState: desktopUpdateState, acceptUpdateResult } =
-    useDesktopUpdateStateFeed(clearFinishedUpdateAction);
+    useDesktopUpdateStateFeed((update) => {
+      if (update.status !== "error") setUpdateActionError(null);
+    });
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
   const centerRef = useRef<HTMLDivElement | null>(null);
@@ -475,12 +472,8 @@ export function NoticeCenter(props: {
             type="button"
             aria-label="Dismiss update notice"
             onClick={() => {
-              if (updateActionError) {
-                setUpdateActionError(null);
-                if (readyUpdateKey) {
-                  setDismissedUpdateToastKey(readyUpdateKey);
-                }
-              } else if (readyUpdateKey) {
+              setUpdateActionError(null);
+              if (readyUpdateKey) {
                 setDismissedUpdateToastKey(readyUpdateKey);
               }
             }}

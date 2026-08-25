@@ -142,9 +142,8 @@ export function SettingsDialog(props: {
   const [error, setError] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
-  const clearUpdateError = useCallback(() => setUpdateError(null), []);
   const { updateState, acceptUpdateResult } =
-    useDesktopUpdateStateFeed(clearUpdateError);
+    useDesktopUpdateStateFeed(() => setUpdateError(null));
   const saveStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearSaveStateTimer = useCallback(() => {
