@@ -1335,6 +1335,38 @@ describe("restoreWorkspaceText", () => {
     expect(await readdir(join(root, "assets"))).toEqual(["pixel.png"]);
   });
 
+  it("fails closed when the filesystem cannot publish without replacing a target", async () => {
+    const hardLinkUnsupported = Object.assign(new Error("hard links unsupported"), {
+      code: "ENOTSUP",
+    });
+    vi.doMock("node:fs/promises", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("node:fs/promises")>()),
+      link: vi.fn(async () => {
+        throw hardLinkUnsupported;
+      }),
+    }));
+    vi.resetModules();
+    try {
+      const fallbackWrites = await import("./workspaceAssets");
+      const root = await makeWorkspace();
+
+      await expect(
+        fallbackWrites.writeWorkspaceAsset(
+          root,
+          "assets/pixel.png",
+          new Uint8Array([1, 2, 3]),
+        ),
+      ).rejects.toBe(hardLinkUnsupported);
+      await expect(readFile(join(root, "assets", "pixel.png"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readdir(join(root, "assets"))).toEqual([]);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
   it("refuses the asset writer for a document path", async () => {
     const root = await makeWorkspace();
 
