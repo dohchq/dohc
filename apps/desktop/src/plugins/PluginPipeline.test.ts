@@ -7120,7 +7120,7 @@ describe("PluginPipeline real filesystem lifecycle", () => {
         displayName: "Renamed plugin",
         entry: "src/index.ts",
       }, null, 2)}\n`);
-      pipeline.handleWatcherEvents([{
+      await pipeline.handleWatcherEvents([{
         path: "plugins/example-plugin/dohc-plugin.json",
         operation: "update",
       }]);
