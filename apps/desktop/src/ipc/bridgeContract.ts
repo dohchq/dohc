@@ -4577,7 +4577,7 @@ export const OpenEngineYDocSessionResult = z.object({
   artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR).optional(),
   lineageGeneration: z.number().int().positive().optional(),
   // The path is not in the version the workspace is on — a version switch
-  // removed it while this open was queued behind that switch (#534). Every
+  // removed it while this open was queued behind that switch (#534).
   // This reason must not downgrade to the writable plain editor, because that
   // editor would autosave the path back into the version as a phantom file.
   notInVersion: z.boolean().optional(),

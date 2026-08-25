@@ -184,8 +184,8 @@ export type UseEngineDoc = {
   // its generic error text so it can name the constraint and measured bytes.
   saveError: string | null;
   // The path is not in the version this workspace is on: a version switch
-  // removed it while this open was queued behind that switch (#534). Unlike
-  // the caller must NOT fall back to the writable plain editor, whose autosave
+  // removed it while this open was queued behind that switch (#534).
+  // The caller must NOT fall back to the writable plain editor, whose autosave
   // would write the file back into the version the user just entered.
   notInVersion: boolean;
   // Main could no longer resolve the live file at the path the renderer read.
