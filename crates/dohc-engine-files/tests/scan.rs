@@ -362,6 +362,84 @@ impl ScanIoFaultInjector for DenyHash {
     }
 }
 
+/// A racing writer standing in for the stat→read gap: the injector's Hash
+/// probe runs after the pool's read and before the post-hash re-stat, so a
+/// side-effect write from it lands inside the exact window the pairing guard
+/// must cover.
+struct MutateOnHashProbe {
+    target: std::path::PathBuf,
+    bytes: &'static [u8],
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl ScanIoFaultInjector for MutateOnHashProbe {
+    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+        if path == "doc.md"
+            && operation == ScanIoOperation::Hash
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            std::fs::write(&self.target, self.bytes).expect("racing write");
+        }
+        None
+    }
+}
+
+/// The recorded (mtime, hash) pairing takes its mtime from the enumerate-time
+/// stat and its hash from a later read. A same-size write between the two
+/// would pair the STALE mtime with the other bytes' hash — and an
+/// mtime-preserving restore of the original bytes would then reuse the wrong
+/// hash forever. Pinned: any (size, mtime) drift between the enumerate stat
+/// and the post-hash re-stat voids the pairing (the entry records mtime 0),
+/// so the next scan re-hashes and observes the racing write.
+#[test]
+fn mid_scan_write_voids_the_mtime_pairing_and_the_next_scan_rehashes() {
+    let ws = Scratch::new();
+    ws.write("doc.md", b"AAAAAAAA\n");
+    ws.age_mtime("doc.md", 30);
+    let injector = Arc::new(MutateOnHashProbe {
+        target: ws.path().join("doc.md"),
+        bytes: b"BBBBBBBB\n", // same size, different content, fresh mtime
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    let scanner = Scanner::new_with_io_faults(ScanBounds::default(), injector).expect("scanner");
+
+    let raced = scan(&scanner, ws.path());
+    assert_eq!(
+        raced.files[0].sha256,
+        sha256_hex(b"AAAAAAAA\n"),
+        "the hash is of the bytes the pool actually read"
+    );
+    assert_eq!(
+        raced.files[0].mtime_ms, 0,
+        "a (size, mtime) drift across the stat→read→stat window must void the pairing"
+    );
+
+    // With no pairing recorded, a scan seeded from that listing cannot reuse
+    // the stale hash: it re-hashes and sees the racing write's bytes.
+    let prior = ScanManifest::from_entries([(
+        "doc.md".to_owned(),
+        ManifestEntry {
+            size: raced.files[0].size,
+            sha256: raced.files[0].sha256.clone(),
+            mtime_ms: raced.files[0].mtime_ms,
+        },
+    )]);
+    let hashed_before = scanner.pool().gauge().hashed();
+    let next = match scanner
+        .scan_with_prior(ws.path(), &prior, &CancellationToken::new())
+        .expect("scan ok")
+    {
+        ScanOutcome::Completed(listing) => listing,
+        ScanOutcome::Cancelled => panic!("unexpected cancellation"),
+    };
+    assert_eq!(next.files[0].sha256, sha256_hex(b"BBBBBBBB\n"));
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        hashed_before + 1,
+        "a voided pairing must force the re-hash"
+    );
+}
+
 #[test]
 fn permission_denied_file_is_reported_degraded_without_aborting_other_files() {
     let ws = Scratch::new();

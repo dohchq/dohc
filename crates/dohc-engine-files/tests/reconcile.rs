@@ -817,3 +817,37 @@ fn rehydrated_manifest_without_mtimes_never_authorizes_reuse() {
         "post-open rescans reuse the pairings the first scan recorded"
     );
 }
+
+/// Coarse-timestamp guard: filesystems truncate mtimes (exFAT to 2s), so a
+/// write landing AFTER scan start can still stat below it. An mtime inside
+/// the worst-case 2s granule below scan start must not record a pairing —
+/// the next rescan re-hashes — while the aged-mtime pins above show an mtime
+/// a full granule older still records normally.
+#[test]
+fn mtime_inside_the_granularity_margin_is_not_recorded() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"alpha\n");
+    // Exactly "now": strictly below the imminent scan start (a strict fence
+    // would record it) but inside the 2000ms granularity margin (must not).
+    ws.age_mtime("a.md", 0);
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let baseline_hashed = scanner.pool().gauge().hashed();
+    assert_eq!(baseline_hashed, 1, "the baseline hashes the file once");
+
+    ctrl.mark_dirty();
+    let rescan = plan(reconcile_if_dirty_and_apply(
+        &mut ctrl,
+        &scanner,
+        ws.path(),
+        &token,
+    ));
+    assert!(rescan.is_empty(), "nothing changed, nothing planned");
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 1,
+        "an mtime within the coarse-timestamp granule below scan start must not pair, so the rescan re-hashes"
+    );
+}

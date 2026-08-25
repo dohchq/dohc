@@ -260,16 +260,40 @@ impl Scanner {
                 continue;
             }
             match outcome {
-                HashOutcome::Hashed { sha256, bytes } => files.push(FileEntry {
-                    media_type: media_type_for_path(&candidate.rel),
-                    path: candidate.rel,
-                    // The metadata size and the streamed byte count agree in
-                    // the absence of a concurrent truncation; trust the streamed
-                    // count (what was actually hashed).
-                    size: bytes,
-                    mtime_ms: candidate.mtime_ms,
-                    sha256,
-                }),
+                HashOutcome::Hashed { sha256, bytes } => {
+                    // The candidate mtime comes from the enumerate-time stat,
+                    // but the hashed bytes come from a later read. A same-size
+                    // write inside that gap would pair the STALE mtime with the
+                    // new bytes' hash, and an mtime-preserving restore of the
+                    // original bytes would then reuse the wrong hash forever.
+                    // Re-stat after hashing: the entry carries the enumerate
+                    // mtime only when the post-hash (size, mtime) equals the
+                    // enumerate observation — the file provably sat still
+                    // across the whole stat→read→stat window. Any drift, or a
+                    // failed re-stat, records 0 (no pairing) and the next scan
+                    // re-hashes. One extra stat per hashed file; reused files
+                    // never reach this arm.
+                    let mtime_ms = match std::fs::metadata(&candidate.abs) {
+                        Ok(metadata)
+                            if metadata.is_file()
+                                && metadata.len() == candidate.size
+                                && mtime_ms(&metadata) == candidate.mtime_ms =>
+                        {
+                            candidate.mtime_ms
+                        }
+                        _ => 0,
+                    };
+                    files.push(FileEntry {
+                        media_type: media_type_for_path(&candidate.rel),
+                        path: candidate.rel,
+                        // The metadata size and the streamed byte count agree in
+                        // the absence of a concurrent truncation; trust the streamed
+                        // count (what was actually hashed).
+                        size: bytes,
+                        mtime_ms,
+                        sha256,
+                    })
+                }
                 // Vanished between enumeration and hashing: benign race, skip.
                 HashOutcome::Vanished => {}
                 // Grew past the cap after enumeration measured it under: move it
@@ -300,6 +324,14 @@ impl Scanner {
                     });
                 }
             }
+        }
+
+        // Two-sided accounting: one outcome per non-reused candidate means the
+        // iterator must be exactly exhausted here, not merely never short.
+        if outcomes.next().is_some() {
+            return Err(FilesError::PoolUnavailable {
+                reason: "hash pool produced an extra result",
+            });
         }
 
         // A stream-detected over-cap may have appended to `skipped` out of

@@ -579,17 +579,25 @@ impl ReconcileController {
     }
 }
 
+/// Worst-case filesystem mtime granularity: exFAT/FAT truncate mtimes to 2s
+/// (ext3, HFS+, and SMB servers to 1s), so a stat can report an mtime up to a
+/// full granule OLDER than the write that produced it.
+const MTIME_GRANULARITY_MARGIN_MS: i64 = 2000;
+
 /// The mtime a manifest entry may pair with a hash computed by a scan that
-/// began at `scan_started_ms` — git's racy-clean rule. A file whose mtime is
-/// not strictly OLDER than the scan's start millisecond could have been
-/// rewritten after hashing without moving its millisecond timestamp; recording
-/// that pairing would let every later scan reuse a hash of bytes that are
-/// already gone. Such files record `0` (no pairing) and are simply re-hashed
-/// on the next scan, by which point their mtime is in the past and pairs
-/// safely. `0` (no observation) stays `0`, and a broken clock (`now_ms() ==
-/// 0`) disables pairing entirely — always failing toward the hash.
+/// began at `scan_started_ms` — git's racy-clean rule, widened for coarse
+/// timestamps. A file whose mtime is not at least one worst-case granule
+/// older than the scan's start could have been rewritten after hashing while
+/// its truncated timestamp still stats below the fence (on exFAT a write up
+/// to 2s after scan start can); recording that pairing would let every later
+/// scan reuse a hash of bytes that are already gone, and a second same-size
+/// write in the same granule would stay invisible forever. Such files record
+/// `0` (no pairing) and are simply re-hashed on the next scan, by which point
+/// their mtime is safely in the past. `0` (no observation) stays `0`, and a
+/// broken clock (`now_ms() == 0`) disables pairing entirely — always failing
+/// toward the hash.
 fn recordable_mtime_ms(mtime_ms: i64, scan_started_ms: i64) -> i64 {
-    if mtime_ms != 0 && mtime_ms < scan_started_ms {
+    if mtime_ms != 0 && mtime_ms.saturating_add(MTIME_GRANULARITY_MARGIN_MS) <= scan_started_ms {
         mtime_ms
     } else {
         0
@@ -628,6 +636,39 @@ fn absolute_path(root: &Path, relative: &str) -> Option<PathBuf> {
         out.push(segment);
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod fence_tests {
+    use super::recordable_mtime_ms;
+
+    /// The racy-clean fence must hold on coarse-timestamp filesystems: only
+    /// an mtime a full worst-case granule (2000ms, exFAT) below scan start
+    /// may pair; anything younger — including the exact boundary minus one —
+    /// records no pairing, as do a missing observation and a broken clock.
+    #[test]
+    fn fence_requires_a_full_granularity_margin() {
+        let start = 1_700_000_000_000;
+        assert_eq!(recordable_mtime_ms(start - 2000, start), start - 2000);
+        assert_eq!(recordable_mtime_ms(start - 1999, start), 0);
+        assert_eq!(recordable_mtime_ms(start - 1, start), 0);
+        assert_eq!(recordable_mtime_ms(start, start), 0);
+        assert_eq!(
+            recordable_mtime_ms(0, start),
+            0,
+            "no observation stays no pairing"
+        );
+        assert_eq!(
+            recordable_mtime_ms(1000, 0),
+            0,
+            "a broken clock disables pairing"
+        );
+        assert_eq!(
+            recordable_mtime_ms(i64::MAX, start),
+            0,
+            "a saturating margin cannot wrap a pathological mtime past the fence"
+        );
+    }
 }
 
 #[cfg(test)]
