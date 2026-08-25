@@ -1029,7 +1029,10 @@ describe("PluginHost", () => {
     const stop = host.stopAll().then(() => {
       stopSettled = true;
     });
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await waitFor(
+      () => host.getStatus("hello-plugin") === undefined,
+      "Plugin shutdown did not cross the transport-disposal boundary.",
+    );
     const settledBeforeMutation = stopSettled;
 
     releaseMutation.resolve();
