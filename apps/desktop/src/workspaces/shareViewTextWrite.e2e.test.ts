@@ -2,8 +2,10 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import {
   EngineDaemonLifecycle,
+  type EngineWorkspace,
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -13,6 +15,7 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import {
   readWorkspaceText,
   withStaleSensitiveWorkspaceOperation,
@@ -49,6 +52,7 @@ const requireModule = createRequire(import.meta.url);
 interface Harness {
   workspaceId: string;
   rootPath: string;
+  engineWorkspace: EngineWorkspace;
   store: CaptureVersionedTextStore;
   sessions: EngineWorkspaceSessions;
 }
@@ -101,29 +105,48 @@ async function harness(
     new RelayConfiguredDaemonClientSource(lifecycle, routes),
   );
   sessionSets.push(sessions);
+  const workspace = { workspaceId, rootPath };
+  const receivedShareLocation = { engineWorkspaceId: workspaceId, rootPath };
+  const relayClient = new EngineRelayClient({
+    sessions,
+    routes,
+    allowInsecureLoopbackForTests: true,
+    requestDeadlineMs: 10_000,
+  });
+  const receivedShareEngine = createReceivedShareEngineAccess({
+    sessions: () => sessions,
+    createStores: createCaptureLiveStores,
+    relayClient: () => relayClient,
+  });
+  const engineWorkspace = access
+    ? receivedShareEngine.workspaceFor(receivedShareLocation)
+    : workspace;
   if (access) {
     // The relay is never contacted: recording an identity writes local rows
     // only. The URL exists because the daemon refuses a relay operation on a
     // workspace opened without a relay configuration.
-    const client = new EngineRelayClient({
-      sessions,
-      routes,
-      allowInsecureLoopbackForTests: true,
-      requestDeadlineMs: 10_000,
-    }).bind({
-      workspaceId,
-      rootPath,
+    const client = receivedShareEngine.relayFor({
+      ...receivedShareLocation,
       relay: { baseUrl: "http://127.0.0.1:9", token: "share-view-test-token" },
     });
     await client.recordShareViewIdentity({
       grantedSelector: { paths: ["docs"], versionId: null, access },
     });
   }
-  const { store } = createCaptureLiveStores(
-    { workspaceId, rootPath },
-    sessions,
+  const store = access
+    ? receivedShareEngine.storeFor(receivedShareLocation)
+    : createCaptureLiveStores(workspace, sessions).store;
+  return { workspaceId, rootPath, engineWorkspace, store, sessions };
+}
+
+async function flushCapture(harnessed: Harness) {
+  return await harnessed.sessions.run(
+    harnessed.engineWorkspace,
+    async ({ client, workspace }) =>
+      await new VersionedLiveAdapter(client, workspace, {
+        workspaceId: harnessed.workspaceId,
+      }).flushCapture(),
   );
-  return { workspaceId, rootPath, store, sessions };
 }
 
 /** The granter's file, as the share's pull leaves it: a moment and a projection. */
@@ -271,6 +294,19 @@ function replicationLogRows(rootPath: string): number {
 }
 
 describe("share-view text writes through the real store", () => {
+  it.skipIf(engine.missing)(
+    "opens an access-bearing received share with capture disabled",
+    async () => {
+      const view = await harness("dohc-share-text-capture-posture-", "edit");
+
+      await expect(flushCapture(view)).resolves.toEqual({
+        running: false,
+        settled: false,
+        degraded: true,
+      });
+    },
+  );
+
   it("rejects a text change for another share-view identity before opening the store", async () => {
     const rootPath = join(process.cwd(), "share-view-text-write-identity-test");
     const openStore = vi.fn((): CaptureVersionedTextStore => {

@@ -562,6 +562,7 @@ import {
   isYDocSessionUnreleasedError,
   probeEngineStoreRefusal,
 } from "./workspaces/workspaceEngineCapture";
+import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
@@ -591,7 +592,10 @@ import {
   settleShareProposal,
   withdrawShareProposal,
 } from "./workspaces/shareProposalRelay";
-import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import {
+  EngineWorkspaceSessions,
+  type EngineWorkspace,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   createDesktopLinkedChatStore,
   type DesktopLinkedChatStore,
@@ -2133,9 +2137,8 @@ async function runSharedChannelSyncPass(
       token: syncCredentials.token,
       fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
     };
-    const daemonRelay = relayClientForWorkspace({
-      workspaceId: entry.workspaceId,
-      rootPath: entry.rootPath,
+    const daemonRelay = receivedShareEngine.relayForRegistered({
+      ...entry,
       relay,
     });
     const result = await syncJoinedSharedChannels({
@@ -2298,7 +2301,6 @@ function testSyncTimingOverrides(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
-  shareMount?: true;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
   if (!rustEngineRelayClient) {
@@ -2535,16 +2537,14 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
 
 // Linked Chats (PR 0M-5): one lazy Rust-backed store per workspace.
 const linkedChatStores = new Map<string, DesktopLinkedChatStore>();
-function linkedChatStoreFor(workspace: {
-  workspaceId: string;
-  rootPath: string;
-}): DesktopLinkedChatStore {
+function linkedChatStoreFor(workspace: EngineWorkspace): DesktopLinkedChatStore {
+  const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);
   const existing = linkedChatStores.get(workspace.workspaceId);
   if (existing) return existing;
   if (!rustEngineWorkspaceSessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
   }
-  const store = createDesktopLinkedChatStore(workspace, {
+  const store = createDesktopLinkedChatStore(engineWorkspace, {
     sessions: rustEngineWorkspaceSessions,
   });
   linkedChatStores.set(workspace.workspaceId, store);
@@ -2585,14 +2585,14 @@ function agentDispatchStoreHandleFor(workspace: {
 // listTextFileMetadata is the right call: it pages (limit 500 + afterPath) so
 // a workspace past one page is no longer silently truncated, and it never
 // hydrates file bodies.
-async function engineSearchIndexFor(workspace: {
-  workspaceId: string;
-  rootPath: string;
-}): Promise<{ versionId: string; files: { objectId: string; path: string }[] } | null> {
+async function engineSearchIndexFor(
+  workspace: EngineWorkspace,
+): Promise<{ versionId: string; files: { objectId: string; path: string }[] } | null> {
   const sessions = rustEngineWorkspaceSessions;
   if (!sessions) return null;
+  const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);
   return await sessions.run(
-    { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
+    engineWorkspace,
     async (binding) => {
       const adapter = new VersionedLiveAdapter(binding.client, binding.workspace, {
         workspaceId: workspace.workspaceId,
@@ -2613,10 +2613,7 @@ async function engineSearchIndexFor(workspace: {
   );
 }
 
-async function activeEngineFileIndex(workspace: {
-  workspaceId: string;
-  rootPath: string;
-}): Promise<{
+async function activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
   pathByObjectId: Map<string, string>;
   objectIdByPath: Map<string, string>;
 }> {
@@ -2670,6 +2667,7 @@ function localUserId(): string {
 async function chatRelayIdentityFor(
   workspaceId: string,
   target: ChatRelayIdentityTarget,
+  store: DesktopLinkedChatStore,
 ) {
   await warmCredentialCache();
   const workspace = requireWorkspace(workspaceId);
@@ -2682,7 +2680,7 @@ async function chatRelayIdentityFor(
       resolveChatRelayIdentity({
         workspace,
         credentials,
-        store: linkedChatStoreFor(workspace),
+        store,
         target,
       }),
   });
@@ -2691,8 +2689,9 @@ async function chatRelayIdentityFor(
 async function verifiedChatAuthorUserIdFor(
   workspaceId: string,
   target: ChatRelayIdentityTarget,
+  store: DesktopLinkedChatStore,
 ): Promise<string | undefined> {
-  const identity = await chatRelayIdentityFor(workspaceId, target);
+  const identity = await chatRelayIdentityFor(workspaceId, target, store);
   assertSharedChannelMessageIdentity({
     joinedChannel: identity.joinedChannel,
     credentials: cachedCredentials,
@@ -2706,16 +2705,18 @@ async function revalidateChatWrite(
   workspace: { workspaceId: string; rootPath: string },
   target: ChatRelayIdentityTarget,
   authorUserId: string | undefined,
+  store: DesktopLinkedChatStore,
 ): Promise<void> {
   await assertSharedChannelWritable({
     workspaceId: workspace.workspaceId,
     sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-    store: linkedChatStoreFor(workspace),
+    store,
     target,
   });
   const currentAuthorUserId = await verifiedChatAuthorUserIdFor(
     workspace.workspaceId,
     target,
+    store,
   );
   if (currentAuthorUserId !== authorUserId) {
     throw new Error("Your dohc Cloud session changed. Try again.");
@@ -3034,7 +3035,8 @@ const chatDispatchService = createChatDispatchService({
     const workspace = findWorkspace(workspaceId);
     const verifiedUserId = workspace
       ? target
-        ? (await chatRelayIdentityFor(workspaceId, target)).authorUserId
+        ? (await chatRelayIdentityFor(workspaceId, target, linkedChatStoreFor(workspace)))
+            .authorUserId
         : resolveWorkspaceRelayAuthorId(workspace, cachedCredentials)
       : undefined;
     return {
@@ -3083,15 +3085,16 @@ const chatDispatchService = createChatDispatchService({
   },
   authorizeServiceNote: async (workspace, threadId, verifiedUserId) => {
     try {
+      const store = linkedChatStoreFor(workspace);
       await assertSharedChannelWritable({
         workspaceId: workspace.workspaceId,
         sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-        store: linkedChatStoreFor(workspace),
+        store,
         target: { threadId },
       });
       const identity = await chatRelayIdentityFor(workspace.workspaceId, {
         threadId,
-      });
+      }, store);
       return (
         identity.authorUserId === verifiedUserId &&
         (identity.joinedChannel === null || verifiedUserId !== undefined)
@@ -3678,7 +3681,11 @@ async function openCliWorkspace(
       });
     },
     assertMessageWritable: async (target, authorUserId) => {
-      const identity = await chatRelayIdentityFor(workspace.workspaceId, target);
+      const identity = await chatRelayIdentityFor(
+        workspace.workspaceId,
+        target,
+        store,
+      );
       assertSharedChannelMessageIdentity({
         joinedChannel: identity.joinedChannel,
         credentials: cachedCredentials,
@@ -3708,7 +3715,13 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       const workspace = findWorkspace(workspaceId);
       const authorUserId = workspace
         ? target
-          ? (await chatRelayIdentityFor(workspaceId, target)).authorUserId
+          ? (
+              await chatRelayIdentityFor(
+                workspaceId,
+                target,
+                linkedChatStoreFor(workspace),
+              )
+            ).authorUserId
           : resolveWorkspaceRelayAuthorId(workspace, cachedCredentials)
         : undefined;
       return {
@@ -4179,8 +4192,7 @@ let rustEngineRelayClient: EngineRelayClient | null = null;
 let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
 const relayTransportRoutes = new RelayTransportRouteGuard();
 
-// Narrowing for the capture gate, matching what `linkedChatStoreFor` and
-// `sharedViewStoreFor` already do (same error text). The invariant is real:
+// Narrowing for the engine-access gates. The invariant is real:
 // every boot-time path that can reach the engine awaits engineDaemonStartup
 // first (openWorkspaceActivityWith, cloudStatus, the share-view file and
 // mount lanes), and startRustEngineDaemon
@@ -4195,15 +4207,23 @@ function requireEngineSessions(): EngineWorkspaceSessions {
   return rustEngineWorkspaceSessions;
 }
 
-function sharedViewStoreFor(workspace: {
-  workspaceId: string;
-  rootPath: string;
-  shareMount?: true;
-}) {
-  if (!rustEngineWorkspaceSessions) {
-    throw new Error("Rust engine workspace sessions are unavailable.");
-  }
-  return createCaptureLiveStores(workspace, rustEngineWorkspaceSessions).store;
+const receivedShareEngine = createReceivedShareEngineAccess({
+  sessions: requireEngineSessions,
+  createStores: createCaptureLiveStores,
+  relayClient: () => {
+    if (!rustEngineRelayClient) {
+      throw new Error("Rust engine relay client is unavailable.");
+    }
+    return rustEngineRelayClient;
+  },
+});
+
+function engineWorkspaceForRegistryIdentity(
+  workspace: EngineWorkspace,
+): EngineWorkspace {
+  const registered = findWorkspace(workspace.workspaceId);
+  if (!registered || registered.rootPath !== workspace.rootPath) return workspace;
+  return receivedShareEngine.workspaceForRegistered(registered);
 }
 
 function resolveShareViewFilesTarget(
@@ -4244,10 +4264,9 @@ shareViewFiles = createShareViewFiles({
   resolveTarget: resolveShareViewFilesTarget,
   openStore: (target) =>
     shareViewFilesStore(
-      sharedViewStoreFor({
-        workspaceId: target.storeWorkspaceId,
+      receivedShareEngine.storeFor({
+        engineWorkspaceId: target.storeWorkspaceId,
         rootPath: target.rootPath,
-        ...(target.kind === "mount" ? { shareMount: true as const } : {}),
       }),
     ),
   resolveRelay: async (target) => {
@@ -4272,10 +4291,9 @@ shareViewFiles = createShareViewFiles({
     return { baseUrl: credentials.relayUrl, token: credentials.token };
   },
   pull: async (target, relay, input) =>
-    relayClientForWorkspace({
-      workspaceId: target.storeWorkspaceId,
+    receivedShareEngine.relayFor({
+      engineWorkspaceId: target.storeWorkspaceId,
       rootPath: target.rootPath,
-      ...(target.kind === "mount" ? { shareMount: true as const } : {}),
       relay,
     }).pullShareView({
       shareId: target.shareId,
@@ -5999,8 +6017,7 @@ function registerIpcHandlers(
       await engineDaemonStartup;
       const sessions = requireEngineSessions();
       workspaceSecretState = await readWorkspaceSecretState(
-        workspace.rootPath,
-        workspace.workspaceId,
+        receivedShareEngine.workspaceForRegistered(workspace),
         sessions,
       );
     }
@@ -6049,6 +6066,10 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CloudEnableSyncPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    // A received share replicates through its pinned share lane. Enrolling its
+    // projection as an owned workspace would claim someone else's filtered
+    // copy and creates another engine-open path that has no reason to exist.
+    assertWritableWorkspace(workspace);
     const credentials = await loadAndCacheCurrentCredentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first");
     if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
@@ -6080,8 +6101,7 @@ function registerIpcHandlers(
         throw new Error("Rust engine workspace sessions are unavailable.");
       }
       const dataKey = await readWorkspaceDataKeyForEnrollment(
-        workspace.rootPath,
-        workspace.workspaceId,
+        receivedShareEngine.workspaceForRegistered(workspace),
         sessions,
       );
       await enrollWorkspaceKeyEnvelope({
@@ -6944,8 +6964,8 @@ function registerIpcHandlers(
     return resolveSubmitShareChangesResult(
       reconciled.capturedPaths + reconciled.repairedPaths,
       () =>
-        relayClientForWorkspace({
-          workspaceId: scope.workspace.workspaceId,
+        receivedShareEngine.relayFor({
+          engineWorkspaceId: scope.workspace.workspaceId,
           rootPath: scope.workspace.rootPath,
           relay: scope.relay,
         }).submitShareProposal({
@@ -7605,10 +7625,13 @@ function registerIpcHandlers(
         kind: "workspace";
         workspace: RegistryEntry;
         capture: WorkspaceEngineCapture;
+        store: DesktopLinkedChatStore;
       }
     | {
         kind: "share";
         workspace: RegistryEntry;
+        engineWorkspace: EngineWorkspace;
+        store: DesktopLinkedChatStore;
         // The pinned level, or null when the stored grant cannot be read.
         // The registry file is DATA, not a contract (see
         // workspaceSummaryProjection.ts), so the level is read through
@@ -7632,15 +7655,26 @@ function registerIpcHandlers(
     // surface — the enforcement layer failing open.
     if (!shareViewIsPresent(workspace.shareView)) {
       const local = await requireEngineCapture(workspaceId, "Chats");
-      return { kind: "workspace", workspace: local.workspace, capture: local.capture };
+      return {
+        kind: "workspace",
+        workspace: local.workspace,
+        capture: local.capture,
+        store: linkedChatStoreFor(local.workspace),
+      };
     }
     // Idempotent, and the same guarantee requireEngineCapture makes: the
     // workspace's daemon session is live before any store call reaches it.
     await openWorkspaceActivity(workspace);
     await warmCredentialCache();
+    const engineWorkspace = receivedShareEngine.workspaceFor({
+      engineWorkspaceId: workspace.workspaceId,
+      rootPath: workspace.rootPath,
+    });
     return {
       kind: "share",
       workspace,
+      engineWorkspace,
+      store: linkedChatStoreFor(engineWorkspace),
       // The level the PINNED grant names, or null when the grant cannot be
       // read completely. Read through the same function the refresh path
       // uses, so this gate and the pull cannot disagree about what a share
@@ -7692,8 +7726,8 @@ function registerIpcHandlers(
       relayUrlsMatch,
     });
     if (!grantedSelector || !credentials?.relayUrl) return;
-    await relayClientForWorkspace({
-      workspaceId: workspace.workspaceId,
+    await receivedShareEngine.relayFor({
+      engineWorkspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
     }).recordShareViewIdentity({ grantedSelector });
@@ -7721,8 +7755,8 @@ function registerIpcHandlers(
     if (shareView.relayUrl && !relayUrlsMatch(credentials.relayUrl, shareView.relayUrl)) {
       return;
     }
-    await relayClientForWorkspace({
-      workspaceId: workspace.workspaceId,
+    await receivedShareEngine.relayFor({
+      engineWorkspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
     }).pushShareView({ shareId: shareView.shareId, grantedSelector });
@@ -7747,7 +7781,7 @@ function registerIpcHandlers(
   // the mentions path already reads, over files that arrived by replay.
   async function chatFileObjectId(scope: ChatScope, path: string): Promise<string | null> {
     if (scope.kind === "workspace") return await scope.capture.fileObjectIdForPath(path);
-    const index = await activeEngineFileIndex(scope.workspace);
+    const index = await activeEngineFileIndex(scope.engineWorkspace);
     return index.objectIdByPath.get(path) ?? null;
   }
 
@@ -8284,10 +8318,10 @@ function registerIpcHandlers(
     // never served by the relay nor applied by the engine boundary — there is
     // no superset here to filter.
     const scope = await requireChatScope(input.workspaceId);
-    const { workspace } = scope;
+    const { workspace, store } = scope;
     const fileObjectId = await chatFileObjectId(scope, input.path);
     const threads = fileObjectId
-      ? await linkedChatStoreFor(workspace).listThreadsForFile({
+      ? await store.listThreadsForFile({
           workspaceId: workspace.workspaceId,
           objectId: fileObjectId,
         })
@@ -8462,7 +8496,7 @@ function registerIpcHandlers(
     // with the same words if this one is ever skipped.
     const scope = await requireChatScope(input.workspaceId);
     assertChatWritable(scope);
-    const { workspace } = scope;
+    const { workspace, store } = scope;
     // The chat links to the file's STABLE engine object id (never the path),
     // so the link survives renames; the path rides along as a display hint.
     const fileObjectId = await chatFileObjectId(scope, input.path);
@@ -8471,7 +8505,7 @@ function registerIpcHandlers(
         "Chats aren't available for this file yet — only text files dohc tracks can have Chats.",
       );
     }
-    const thread = await linkedChatStoreFor(workspace).createThread({
+    const thread = await store.createThread({
       workspaceId: workspace.workspaceId,
       title: input.title,
       linkedFile: { objectId: fileObjectId, pathHint: input.path },
@@ -8485,8 +8519,8 @@ function registerIpcHandlers(
     const input = ListChatMessagesPayload.parse(payload);
     // Reachable from a share view at every level (#646 PR2), for a thread on
     // a file the share already served.
-    const { workspace } = await requireChatScope(input.workspaceId);
-    const messages = await linkedChatStoreFor(workspace).listMessages({
+    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const messages = await store.listMessages({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
     });
@@ -8504,23 +8538,22 @@ function registerIpcHandlers(
     // the share views this scope now admits at comment and edit.
     const scope = await requireChatScope(input.workspaceId);
     assertChatWritable(scope);
-    const { workspace } = scope;
+    const { workspace, store } = scope;
     // MU-C4 (CodeRabbit security): a READ-ONLY shared-channel grant rejects
     // writes at the main boundary, BEFORE any durable local row — the
     // renderer disabling its composer is honesty, not authorization.
     await assertSharedChannelWritable({
       workspaceId: workspace.workspaceId,
       sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-      store: linkedChatStoreFor(workspace),
+      store,
       target: { threadId: input.threadId },
     });
     // Resolve one relay-scoped identity before attachments or any durable
     // write. Shared channels require it; local history may omit it.
-    const store = linkedChatStoreFor(workspace);
     const target = { threadId: input.threadId };
     const message = await writeChatMessageFromMain({
       resolveAuthorUserId: () =>
-        verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
+        verifiedChatAuthorUserIdFor(workspace.workspaceId, target, store),
       resolveAttachments: () =>
         resolveChatFileReferences(
           workspace,
@@ -8528,7 +8561,7 @@ function registerIpcHandlers(
           input.fileReferences,
         ),
       revalidateAuthorUserId: (authorUserId) =>
-        revalidateChatWrite(workspace, target, authorUserId),
+        revalidateChatWrite(workspace, target, authorUserId, store),
       // Author is derived HERE: renderer-sent messages are always the local
       // human user. Agent authorship arrives through agent tooling, never
       // through this channel.
@@ -8595,8 +8628,7 @@ function registerIpcHandlers(
     // #646 PR2: reachable from a share view at comment and edit.
     const scope = await requireChatScope(input.workspaceId);
     assertChatWritable(scope);
-    const { workspace } = scope;
-    const store = linkedChatStoreFor(workspace);
+    const { workspace, store } = scope;
     await assertSharedChannelWritable({
       workspaceId: workspace.workspaceId,
       sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
@@ -8996,13 +9028,14 @@ function registerIpcHandlers(
       "Chats",
     );
     const localFallbackAuthorId = localReactorFallbackId();
+    const store = linkedChatStoreFor(workspace);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId,
       resolveReplicationAuthorId: async () =>
         (
           await chatRelayIdentityFor(workspace.workspaceId, {
             channelId: input.channelId,
-          })
+          }, store)
         ).authorUserId,
     });
     // MU-C4: refresh before reading, the way listChatChannels does. A channel
@@ -9012,7 +9045,7 @@ function registerIpcHandlers(
     await syncSharedChannelsForChatTarget(workspace.workspaceId, {
       channelId: input.channelId,
     });
-    const threads = await linkedChatStoreFor(workspace).listChannelThreads({
+    const threads = await store.listChannelThreads({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
     });
@@ -9049,11 +9082,11 @@ function registerIpcHandlers(
     const target = { channelId: input.channelId };
     const started = await writeChatMessageFromMain({
       resolveAuthorUserId: () =>
-        verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
+        verifiedChatAuthorUserIdFor(workspace.workspaceId, target, store),
       resolveAttachments: () =>
         resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
       revalidateAuthorUserId: (authorUserId) =>
-        revalidateChatWrite(workspace, target, authorUserId),
+        revalidateChatWrite(workspace, target, authorUserId, store),
       // No title, ever, on this path: the thread displays its first-message
       // snippet. Author is main-derived like every renderer send.
       write: ({ authorUserId, attachments }) =>
@@ -9098,8 +9131,8 @@ function registerIpcHandlers(
       parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
       // #646 PR2: reachable from a share view at EVERY level, view included.
       requireContext: requireChatScope,
-      run: async ({ workspace }, input) => {
-        const state = await linkedChatStoreFor(workspace).markThreadRead({
+      run: async ({ workspace, store }, input) => {
+        const state = await store.markThreadRead({
           workspaceId: workspace.workspaceId,
           threadId: input.threadId,
           upToSequence: input.upToSequence,
@@ -9134,17 +9167,17 @@ function registerIpcHandlers(
     // #646 PR2: reachable from a share view at EVERY level. The panel loads
     // messages and reactions together, so a capture gate here refuses the
     // whole thread open, not just its reactions.
-    const { workspace } = await requireChatScope(input.workspaceId);
+    const { workspace, store } = await requireChatScope(input.workspaceId);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId: localReactorFallbackId(),
       resolveReplicationAuthorId: async () =>
         (
           await chatRelayIdentityFor(workspace.workspaceId, {
             threadId: input.threadId,
-          })
+          }, store)
         ).authorUserId,
     });
-    const reactions = await linkedChatStoreFor(workspace).listReactions({
+    const reactions = await store.listReactions({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
     });
@@ -9166,7 +9199,7 @@ function registerIpcHandlers(
       requireContext: requireChatScope,
       assertWritable: assertChatWritable,
       run: async (scope, input) => {
-        const { workspace } = scope;
+        const { workspace, store } = scope;
         await warmCredentialCache();
         const target = { threadId: input.threadId };
         // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
@@ -9174,7 +9207,7 @@ function registerIpcHandlers(
         await assertSharedChannelWritable({
           workspaceId: workspace.workspaceId,
           sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-          store: linkedChatStoreFor(workspace),
+          store,
           target,
         });
         const reaction = await setChatReactionFromMain({
@@ -9185,16 +9218,15 @@ function registerIpcHandlers(
           localFallbackAuthorId: localReactorFallbackId(),
           localAuthorDisplayName: localUserDisplayName(),
           resolveReplicationAuthorId: () =>
-            verifiedChatAuthorUserIdFor(workspace.workspaceId, target),
+            verifiedChatAuthorUserIdFor(workspace.workspaceId, target, store),
           revalidateReplicationAuthorId: (authorUserId) =>
-            revalidateChatWrite(workspace, target, authorUserId),
+            revalidateChatWrite(workspace, target, authorUserId, store),
           listReactions: () =>
-            linkedChatStoreFor(workspace).listReactions({
+            store.listReactions({
               workspaceId: workspace.workspaceId,
               threadId: input.threadId,
             }),
-          setReaction: (mutation) =>
-            linkedChatStoreFor(workspace).setReaction(mutation),
+          setReaction: (mutation) => store.setReaction(mutation),
           state: input.state,
         });
         // #646 PR2: a reaction is a pushable share kind, so a share scope
@@ -10213,7 +10245,7 @@ function registerIpcHandlers(
           throw new Error("Rust engine workspace sessions are unavailable.");
         }
         const results = await sessions.run(
-          workspace,
+          engineWorkspaceForRegistryIdentity(workspace),
           async (binding) => {
             const requester = new WorkspaceDaemonRequester(binding.client);
             return await queryWorkspaceSearchDaemon({
@@ -11151,6 +11183,13 @@ async function startRustEngineDaemon(): Promise<boolean> {
       relayTransportRoutes,
     );
     rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource);
+    // Existing received shares can ask for cloud status as soon as the daemon
+    // startup promise resolves. Pin all of them before that happens, so even a
+    // sibling that later reconstructs a plain descriptor remains
+    // capture-disabled on its first workspace.open.
+    for (const workspace of listWorkspaces()) {
+      receivedShareEngine.workspaceForRegistered(workspace);
+    }
     rustEngineRelayClient = new EngineRelayClient({
       sessions: rustEngineWorkspaceSessions,
       routes: relayTransportRoutes,
