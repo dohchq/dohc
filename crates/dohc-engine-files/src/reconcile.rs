@@ -58,6 +58,11 @@ pub enum CaptureOp {
         path: String,
         size: u64,
         sha256: String,
+        /// The mtime the manifest may pair with `sha256` at acknowledgement,
+        /// already passed through [`recordable_mtime_ms`]; `0` means no
+        /// trustworthy pairing (the next scan re-hashes this path once). Never
+        /// sent to the sink — the receipt protocol is untouched.
+        mtime_ms: i64,
         media_type: &'static str,
         reason: IngestReason,
     },
@@ -122,6 +127,7 @@ impl ReconcilePlan {
                 path: file.path,
                 size: file.size,
                 sha256: file.sha256,
+                mtime_ms: file.mtime_ms,
                 media_type: file.media_type,
                 reason: IngestReason::Added,
             });
@@ -131,6 +137,7 @@ impl ReconcilePlan {
                 path: file.path,
                 size: file.size,
                 sha256: file.sha256,
+                mtime_ms: file.mtime_ms,
                 media_type: file.media_type,
                 reason: IngestReason::Changed,
             });
@@ -338,12 +345,37 @@ impl ReconcileController {
         if self.outstanding {
             return Err(FilesError::StaleReconcilePlan);
         }
-        let listing = match scanner.scan(root, token)? {
+        let scan_started_ms = now_ms();
+        let mut listing = match scanner.scan_with_prior(root, &self.manifest, token)? {
             // Cancelled mid-scan: commit nothing. Dirty and generation stay put
             // — the state is consistent and the work is resumable.
             ScanOutcome::Cancelled => return Ok(ReconcileRun::Cancelled),
             ScanOutcome::Completed(listing) => listing,
         };
+
+        // Clamp every observed mtime to what the manifest may PAIR with this
+        // scan's hashes ([`recordable_mtime_ms`], the racy-write fence).
+        // Everything downstream — the refresh pass and the plan's ops — carries
+        // the clamped value, never the raw observation.
+        for file in &mut listing.files {
+            file.mtime_ms = recordable_mtime_ms(file.mtime_ms, scan_started_ms);
+        }
+
+        // Refresh the mtime pairing of every hash-verified unchanged file so
+        // the NEXT scan can reuse its hash (a rehydrated seed carries no
+        // mtimes; a touch-without-change moves the mtime while the hash stays
+        // put). Content identity (size + hash) is never touched. Changed/added
+        // files get their pairing at acknowledgement instead — recording it
+        // before the sink ran would let the next scan skip a path whose
+        // capture failed.
+        for file in &listing.files {
+            if let Some(entry) = self.manifest.entry_mut(&file.path)
+                && entry.size == file.size
+                && entry.sha256 == file.sha256
+            {
+                entry.mtime_ms = file.mtime_ms;
+            }
+        }
 
         let scan_degraded = listing.degraded();
         let mut degraded_paths: Vec<String> = listing
@@ -443,7 +475,13 @@ impl ReconcileController {
                 continue;
             }
             match op {
-                CaptureOp::Ingest { path, .. } => {
+                CaptureOp::Ingest {
+                    path,
+                    size: op_size,
+                    sha256: op_sha,
+                    mtime_ms: op_mtime_ms,
+                    ..
+                } => {
                     // A re-reading sink can persist newer bytes than the scan
                     // hashed; record what was ACTUALLY captured so a later
                     // revert to the scan-time bytes still diffs as a change.
@@ -454,11 +492,22 @@ impl ReconcileController {
                     let Some((size, sha)) = captured.get(path.as_str()) else {
                         return Err(FilesError::InvalidCaptureReceipt { path: path.clone() });
                     };
+                    // The scan-time mtime pairs ONLY with the scan-time hash: a
+                    // sink that persisted different bytes than the scan hashed
+                    // leaves no mtime observation for what it captured, so
+                    // that entry records 0 and the next scan re-hashes it once
+                    // (the refresh pass then records a real pairing).
+                    let mtime_ms = if *size == *op_size && *sha == op_sha.as_str() {
+                        *op_mtime_ms
+                    } else {
+                        0
+                    };
                     next.insert(
                         path.clone(),
                         ManifestEntry {
                             size: *size,
                             sha256: (*sha).to_owned(),
+                            mtime_ms,
                         },
                     );
                 }
@@ -526,6 +575,40 @@ impl ReconcileController {
     }
 }
 
+/// Worst-case filesystem mtime granularity: exFAT/FAT truncate mtimes to 2s
+/// (ext3, HFS+, and SMB servers to 1s), so a stat can report an mtime up to a
+/// full granule OLDER than the write that produced it.
+const MTIME_GRANULARITY_MARGIN_MS: i64 = 2000;
+
+/// The mtime a manifest entry may pair with a hash computed by a scan that
+/// began at `scan_started_ms` — git's racy-clean rule, widened for coarse
+/// timestamps. A file whose mtime is not at least one worst-case granule
+/// older than the scan's start could have been rewritten after hashing while
+/// its truncated timestamp still stats below the fence (on exFAT a write up
+/// to 2s after scan start can); recording that pairing would let every later
+/// scan reuse a hash of bytes that are already gone, and a second same-size
+/// write in the same granule would stay invisible forever. Such files record
+/// `0` (no pairing) and are simply re-hashed on the next scan, by which point
+/// their mtime is safely in the past. `0` (no observation) stays `0`, and a
+/// broken clock (`now_ms() == 0`) disables pairing entirely — always failing
+/// toward the hash.
+fn recordable_mtime_ms(mtime_ms: i64, scan_started_ms: i64) -> i64 {
+    if mtime_ms != 0 && mtime_ms.saturating_add(MTIME_GRANULARITY_MARGIN_MS) <= scan_started_ms {
+        mtime_ms
+    } else {
+        0
+    }
+}
+
+/// Milliseconds since the Unix epoch, or `0` when the clock is unusable.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 fn degraded_path_signature(paths: &[String]) -> u64 {
     let mut hasher = DefaultHasher::new();
     paths.len().hash(&mut hasher);
@@ -549,6 +632,39 @@ fn absolute_path(root: &Path, relative: &str) -> Option<PathBuf> {
         out.push(segment);
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod fence_tests {
+    use super::recordable_mtime_ms;
+
+    /// The racy-clean fence must hold on coarse-timestamp filesystems: only
+    /// an mtime a full worst-case granule (2000ms, exFAT) below scan start
+    /// may pair; anything younger — including the exact boundary minus one —
+    /// records no pairing, as do a missing observation and a broken clock.
+    #[test]
+    fn fence_requires_a_full_granularity_margin() {
+        let start = 1_700_000_000_000;
+        assert_eq!(recordable_mtime_ms(start - 2000, start), start - 2000);
+        assert_eq!(recordable_mtime_ms(start - 1999, start), 0);
+        assert_eq!(recordable_mtime_ms(start - 1, start), 0);
+        assert_eq!(recordable_mtime_ms(start, start), 0);
+        assert_eq!(
+            recordable_mtime_ms(0, start),
+            0,
+            "no observation stays no pairing"
+        );
+        assert_eq!(
+            recordable_mtime_ms(1000, 0),
+            0,
+            "a broken clock disables pairing"
+        );
+        assert_eq!(
+            recordable_mtime_ms(i64::MAX, start),
+            0,
+            "a saturating margin cannot wrap a pathological mtime past the fence"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -589,6 +705,7 @@ mod ack_receipt_tests {
             ManifestEntry {
                 size: 10,
                 sha256: "abc".to_owned(),
+                mtime_ms: 0,
             },
         );
         controller.outstanding = true;

@@ -1899,6 +1899,7 @@ mod tests {
             path: path.to_owned(),
             size: 1,
             sha256: "stale".to_owned(),
+            mtime_ms: 0,
             media_type: "text/markdown",
             reason: IngestReason::Added,
         };

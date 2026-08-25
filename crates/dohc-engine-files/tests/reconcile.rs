@@ -567,7 +567,10 @@ fn retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained() {
 /// dirty, same as `new`), and (2) NOT re-report already-tracked, unchanged
 /// files as freshly `Added` -- only genuinely new/changed/removed paths
 /// should appear. An empty-manifest restart (the pre-R14 behavior) would
-/// mis-report every unchanged file as `Added`.
+/// mis-report every unchanged file as `Added`. Also the amended-N8 safety
+/// valve: a rehydration seed carries no mtime observation, so the first scan
+/// after open must hash every file rather than trust the seed — and the
+/// pairings that scan records make the rescans after it cheap.
 #[test]
 fn rehydrated_manifest_reconciles_only_real_changes() {
     let ws = Scratch::new();
@@ -575,6 +578,8 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     let stale_bytes: &[u8] = b"old content\n";
     ws.write("unchanged.md", unchanged_bytes);
     ws.write("about-to-change.md", stale_bytes);
+    ws.age_mtime("unchanged.md", 30);
+    ws.age_mtime("about-to-change.md", 30);
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let token = CancellationToken::new();
 
@@ -586,6 +591,7 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
         ["about-to-change.md", "unchanged.md"]
     );
     let recovered_generation = live.generation();
+    let baseline_hashed = scanner.pool().gauge().hashed();
 
     // Simulate a restart: a FRESH controller, but rehydrated from the prior
     // manifest instead of ReconcileController::new()'s empty baseline.
@@ -595,6 +601,9 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
             ManifestEntry {
                 size: unchanged_bytes.len() as u64,
                 sha256: dohc_engine_storage::hex_sha256(unchanged_bytes),
+                // A rehydration seed records no mtime observation (the domain
+                // stores none), so it must never authorize hash reuse.
+                mtime_ms: 0,
             },
         ),
         (
@@ -602,6 +611,7 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
             ManifestEntry {
                 size: stale_bytes.len() as u64,
                 sha256: dohc_engine_storage::hex_sha256(stale_bytes),
+                mtime_ms: 0,
             },
         ),
     ]);
@@ -614,12 +624,9 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
 
     // Only one file actually changed while the process was "down".
     ws.write("about-to-change.md", b"new content\n");
+    ws.age_mtime("about-to-change.md", 10);
 
-    let plan = plan(
-        rehydrated
-            .reconcile(&scanner, ws.path(), &token)
-            .expect("post-restart reconcile"),
-    );
+    let plan = reconcile_and_apply(&mut rehydrated, &scanner, ws.path(), &token);
     assert!(
         ingest_paths(&plan, IngestReason::Added).is_empty(),
         "rehydrated manifest must not re-report unchanged tracked files as newly Added"
@@ -627,5 +634,177 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     assert_eq!(
         ingest_paths(&plan, IngestReason::Changed),
         ["about-to-change.md"]
+    );
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 2,
+        "a zero-mtime seed entry must be hashed, never reused"
+    );
+
+    // The pairings the post-restart scan recorded (refresh pass for the
+    // unchanged file, acknowledgement for the changed one) make the rescans
+    // after open cheap again.
+    rehydrated.mark_dirty();
+    let _ = reconcile_if_dirty_and_apply(&mut rehydrated, &scanner, ws.path(), &token);
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 2,
+        "post-open rescans reuse the pairings the first scan recorded"
+    );
+}
+
+// ---- amended N8: the manifest's (size, mtime) pairing short-circuits hashing.
+// The hash stays the source of truth for classification; equal size+mtime
+// reuses the recorded hash; any size or mtime difference re-hashes; a
+// same-size edit that forges its mtime back is the documented git tradeoff.
+
+/// (a) A converged workspace is not re-read on the next full rescan: every
+/// file whose size and mtime still match its recorded pairing reuses the
+/// manifest hash, so the watcher's full-rescan model stops costing a full
+/// re-hash of the workspace per event.
+#[test]
+fn unchanged_size_and_mtime_is_not_rehashed_on_the_next_rescan() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"alpha\n");
+    ws.write("b.md", b"beta\n");
+    // Move both mtimes safely into the past so the baseline can RECORD the
+    // pairing (a same-millisecond mtime is refused by the racy-write guard).
+    ws.age_mtime("a.md", 30);
+    ws.age_mtime("b.md", 30);
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let baseline_hashed = scanner.pool().gauge().hashed();
+    assert_eq!(baseline_hashed, 2, "the baseline hashes everything once");
+
+    // A watcher event forces a full rescan of the untouched workspace.
+    ctrl.mark_dirty();
+    let rescan = plan(reconcile_if_dirty_and_apply(
+        &mut ctrl,
+        &scanner,
+        ws.path(),
+        &token,
+    ));
+    assert!(rescan.is_empty(), "nothing changed, nothing planned");
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed,
+        "unchanged size+mtime must reuse the recorded hash, not re-read the workspace"
+    );
+}
+
+/// (b, d-mtime) A touch without a content change re-hashes (the mtime moved,
+/// so the pairing no longer authorizes reuse), yields the same hash, and emits
+/// NO spurious change op; the refreshed pairing then makes the next rescan
+/// cheap again.
+#[test]
+fn touched_mtime_with_same_content_rehashes_without_a_spurious_change() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"alpha\n");
+    ws.age_mtime("a.md", 30);
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let baseline_hashed = scanner.pool().gauge().hashed();
+
+    // Touch: new mtime (still in the past), identical bytes.
+    ws.age_mtime("a.md", 10);
+    let touched = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert!(
+        touched.is_empty(),
+        "an mtime-only touch must not produce a change event"
+    );
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 1,
+        "a moved mtime invalidates the pairing, so the file is re-hashed"
+    );
+
+    // The refresh pass recorded the new pairing, so the next rescan reuses it.
+    let converged = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert!(converged.is_empty());
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 1,
+        "the refreshed (mtime, hash) pairing must make the next rescan reuse again"
+    );
+}
+
+/// (c, d-size) The documented tradeoff, pinned as a chosen fact: an edit that
+/// keeps the byte size AND forges the mtime back to the recorded pairing is
+/// NOT detected — exactly git's blind spot. A size change under the same
+/// forged mtime IS detected, because either mismatch forces the hash.
+#[test]
+fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
+    let ws = Scratch::new();
+    ws.write("doc.md", b"aaaa\n");
+    ws.age_mtime("doc.md", 30);
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let baseline_hashed = scanner.pool().gauge().hashed();
+    let recorded = ws.mtime("doc.md");
+
+    // Same size, different bytes, mtime forged back to the recorded pairing.
+    ws.write("doc.md", b"bbbb\n");
+    ws.set_mtime("doc.md", recorded);
+    let forged = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert!(
+        forged.is_empty(),
+        "a forged-mtime same-size edit goes unseen — the documented git tradeoff"
+    );
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed,
+        "the forged pairing is reused without a read"
+    );
+
+    // A size change defeats the forgery: the pairing mismatches, the file is
+    // re-hashed, and the edit is captured.
+    ws.write("doc.md", b"cccccc\n");
+    ws.set_mtime("doc.md", recorded);
+    let resized = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert_eq!(ingest_paths(&resized, IngestReason::Changed), ["doc.md"]);
+    assert!(
+        scanner.pool().gauge().hashed() > baseline_hashed,
+        "a size mismatch must force the hash even under a forged mtime"
+    );
+}
+
+/// Coarse-timestamp guard: filesystems truncate mtimes (exFAT to 2s), so a
+/// write landing AFTER scan start can still stat below it. An mtime inside
+/// the worst-case 2s granule below scan start must not record a pairing —
+/// the next rescan re-hashes — while the aged-mtime pins above show an mtime
+/// a full granule older still records normally.
+#[test]
+fn mtime_inside_the_granularity_margin_is_not_recorded() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"alpha\n");
+    // Exactly "now": strictly below the imminent scan start (a strict fence
+    // would record it) but inside the 2000ms granularity margin (must not).
+    ws.age_mtime("a.md", 0);
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let baseline_hashed = scanner.pool().gauge().hashed();
+    assert_eq!(baseline_hashed, 1, "the baseline hashes the file once");
+
+    ctrl.mark_dirty();
+    let rescan = plan(reconcile_if_dirty_and_apply(
+        &mut ctrl,
+        &scanner,
+        ws.path(),
+        &token,
+    ));
+    assert!(rescan.is_empty(), "nothing changed, nothing planned");
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 1,
+        "an mtime within the coarse-timestamp granule below scan start must not pair, so the rescan re-hashes"
     );
 }

@@ -1,9 +1,10 @@
 //! Scan-generation diff ("hash-changed"): compare a prior scan generation's
 //! manifest against a fresh listing to classify **added / changed / removed**.
 //!
-//! Change detection is by content hash and size, never mtime — "hashes, not
+//! Classification is by content hash and size, never mtime — "hashes, not
 //! timestamps, are the source of truth" (the retired reference accelerator's own
-//! contract). The classification
+//! contract). The manifest's recorded mtime feeds only the scanner's hash-reuse
+//! short-circuit (the amended N8 rule on [`crate::scan::FileEntry`]). The classification
 //! predicate is factored into [`diff_core`] behind a seam so the seeded-bug
 //! proof (a flipped hash comparison) exercises the real machinery with only the
 //! predicate mutated — the differential harness must be able to catch exactly
@@ -20,6 +21,11 @@ use std::collections::BTreeMap;
 pub struct ManifestEntry {
     pub size: u64,
     pub sha256: String,
+    /// The mtime (ms since epoch) observed by the scan that hashed `sha256`,
+    /// or `0` when no trustworthy observation exists. Only a non-zero value
+    /// authorizes the scanner's hash-reuse short-circuit (the amended N8 rule
+    /// on [`crate::scan::FileEntry`]); `0` always re-hashes.
+    pub mtime_ms: i64,
 }
 
 /// A prior scan generation as a path → (size, hash) manifest. `BTreeMap` keeps
@@ -47,24 +53,6 @@ impl ScanManifest {
         }
     }
 
-    /// Build a manifest from a completed listing (its tracked files).
-    pub fn from_listing(listing: &ScanListing) -> Self {
-        let entries = listing
-            .files
-            .iter()
-            .map(|f| {
-                (
-                    f.path.clone(),
-                    ManifestEntry {
-                        size: f.size,
-                        sha256: f.sha256.clone(),
-                    },
-                )
-            })
-            .collect();
-        ScanManifest { entries }
-    }
-
     /// The prior entry for a path, if tracked.
     pub fn get(&self, path: &str) -> Option<&ManifestEntry> {
         self.entries.get(path)
@@ -72,6 +60,12 @@ impl ScanManifest {
 
     pub(crate) fn insert(&mut self, path: String, entry: ManifestEntry) {
         self.entries.insert(path, entry);
+    }
+
+    /// Mutable access for the reconcile controller's mtime-refresh pass; the
+    /// entry's content identity (size + hash) is never rewritten through this.
+    pub(crate) fn entry_mut(&mut self, path: &str) -> Option<&mut ManifestEntry> {
+        self.entries.get_mut(path)
     }
 
     pub(crate) fn remove(&mut self, path: &str) {
@@ -262,6 +256,7 @@ mod tests {
                     ManifestEntry {
                         size: *s,
                         sha256: (*h).to_owned(),
+                        mtime_ms: 0,
                     },
                 )
             })
