@@ -17,6 +17,7 @@ import type {
   ShareViewFileChangeValue,
   ShareViewFiles,
 } from "./shareViewFiles";
+import { readableShareLevel } from "./shareViewMarker";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
@@ -496,10 +497,19 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(test.change).not.toHaveBeenCalled();
   });
 
-  it("reads the received-share marker for each create and write", async () => {
-    const test = await harness();
-    await writeFile(join(test.rootPath, "notes.txt"), "local\n");
-    test.workspace.shareView = { granterEmail: "owner@example.com" };
+  it("routes edit-granted received-share creates and writes without touching disk", async () => {
+    const grantedSelector = {
+      paths: ["notes.txt"],
+      versionId: null,
+      access: "edit",
+    } as const;
+    const test = await harness({
+      shareView: {
+        granterEmail: "owner@example.com",
+        grantedSelector,
+      },
+    });
+    expect(readableShareLevel(grantedSelector)).toBe("edit");
 
     await expect(
       test.owner.createFile(trustedEvent, {
@@ -541,12 +551,7 @@ describe("WorkspaceFileMutationOwner", () => {
       "create",
       "save",
     ]);
-    await expect(access(join(test.rootPath, "new.txt"))).rejects.toThrow();
-    expect(await readFile(join(test.rootPath, "notes.txt"), "utf8")).toBe(
-      "local\n",
-    );
-    await expect(access(join(test.rootPath, "empty"))).rejects.toThrow();
-    await expect(access(join(test.rootPath, "asset.bin"))).rejects.toThrow();
+    expect(await readdir(test.rootPath)).toEqual([]);
   });
 
   it("refuses moves into or out of a mounted share", async () => {
