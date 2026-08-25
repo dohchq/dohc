@@ -17,7 +17,6 @@ import {
   WorkspaceDaemonRequester,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
-  isYdocArtifactAssetsInvalidRefusal,
 } from "@dohc/workspace-engine-client";
 import {
   app,
@@ -39,7 +38,6 @@ import {
   type IpcMainInvokeEvent,
   type WebContents,
 } from "electron";
-import * as Y from "yjs";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -257,18 +255,6 @@ import {
   WorkspaceSearchPayload,
   CancelWorkspaceSearchPayload,
   SearchResultsEventSchema,
-  OpenEngineYDocSessionPayload,
-  OpenEngineYDocSessionResult,
-  ReadEngineYDocArtifactAssetPayload,
-  ReadEngineYDocArtifactAssetResult,
-  ApplyEngineYDocUpdatePayload,
-  ApplyEngineYDocUpdateResult,
-  AcknowledgeEngineYDocLineageReplacementPayload,
-  AcknowledgeEngineYDocLineageReplacementResult,
-  CloseEngineYDocSessionPayload,
-  EngineYDocRemoteUpdateEventSchema,
-  EngineYDocLineageReplacementEventSchema,
-  EngineYDocSaveStateEventSchema,
   UpdateActionResult,
   UpdateCheckResult,
   UpdateStateEvent,
@@ -276,23 +262,11 @@ import {
 import {
   CHANNELS,
   SEARCH_EVENT_MAX_ENTRIES,
-  type EngineYDocSaveStateName,
 } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
-import {
-  createEngineYDocSaveSeqState,
-  noteLocalEdit,
-  noteSettleOutcome,
-  noteSettleStart,
-  type EngineYDocSaveSeqState,
-} from "./workspaces/engineYDocSaveSeq";
-import { releaseEngineYDocSession } from "./workspaces/engineYDocSessionRelease";
-import {
-  claimEngineYDocSessionSlot,
-  engineYDocSessionKey,
-} from "./workspaces/engineYDocSessionRegistry";
+import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -552,22 +526,13 @@ import {
   closeWorkspaceActivityAndRelay,
   createWorkspaceActivity,
 } from "./workspaces/workspaceActivity";
-import type {
-  WorkspaceEngineCapture,
-  WorkspaceEngineYDocProviderSession,
-} from "./workspaces/workspaceEngineCapture";
-import {
-  isYDocPathNotInVersionError,
-  isYDocRemovalInProgressError,
-  isYDocSessionUnreleasedError,
-  probeEngineStoreRefusal,
-} from "./workspaces/workspaceEngineCapture";
+import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
+import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
-  isEngineWorkspaceOpenRefusedError,
   type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
@@ -3784,188 +3749,22 @@ const searchRegistry = createSearchRegistry({ rgPath });
 // Senders whose 'destroyed' cleanup hook is already attached.
 const searchCleanupHooked = new WeakSet<Electron.WebContents>();
 
-type EngineYDocArtifactAsset = NonNullable<
-  WorkspaceEngineYDocProviderSession["artifactAssets"]
->[number];
+const engineYDocSessionIpc = createEngineYDocSessionIpc({
+  generationOf: rendererGeneration,
+  requireWorkspace,
+  captureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
+  ensureCaptureFor: async (workspaceId) => {
+    await openWorkspaceActivity(requireWorkspace(workspaceId));
+  },
+  isSharedView: (workspaceId) => sharedViewOf(workspaceId) !== null,
+  onError: (message, error) => {
+    if (error === undefined) console.error(message);
+    else console.error(message, error);
+  },
+});
 
-function sameEngineYDocArtifactAsset(
-  left: EngineYDocArtifactAsset,
-  right: EngineYDocArtifactAsset,
-): boolean {
-  return (
-    left.id === right.id &&
-    left.mimeType === right.mimeType &&
-    left.created === right.created &&
-    left.ref === right.ref &&
-    left.sha256 === right.sha256 &&
-    left.lastRetrieved === right.lastRetrieved &&
-    left.version === right.version
-  );
-}
-
-// WS-G2-C-2 engine Y.Doc editor binding: the live node-only sessions main owns
-// on the renderer's behalf, keyed by engineYDocSessionKey — the renderer-minted
-// sessionId under the sender main owns. Each holds the single-canonical
-// reservation for its object; closing it (renderer close, window gone, app
-// quit) releases the reservation so the object can reopen.
-interface EngineYDocSessionEntry {
-  session: WorkspaceEngineYDocProviderSession;
-  sessionId: string;
-  senderId: number;
-  workspaceId: string;
-  // The document this session holds. A renderer retries a failed open under a
-  // NEW session id, so the path — not the id — is what lets that retry find the
-  // session whose close failed and release it (#657).
-  path: string;
-  // The renderer that owns this session, and the generation it was opened
-  // under: a crash-reload reuses the WebContents id, so both are required
-  // before pushing a save state back.
-  sender: Electron.WebContents;
-  generation: number;
-  // Session-local renderer generation. It changes only when the daemon
-  // replaces the durable lineage, so updates from the retired Y.Doc cannot
-  // be journaled into the winner.
-  lineageGeneration: number;
-  // Edit/settle bookkeeping for the honest save indicator. Several settles
-  // are routinely in flight at once, so this is a FIFO, not a scalar — see
-  // engineYDocSaveSeq.ts.
-  saveSeq: EngineYDocSaveSeqState;
-  artifactAssetsById: ReadonlyMap<string, EngineYDocArtifactAsset>;
-  // Descriptors from every lineage this session already replaced. A retired
-  // document's recovery can retry a failed asset read after the
-  // acknowledgement swapped `artifactAssetsById` to the winner, so losing
-  // descriptors stay readable until the normal session close. Kept per
-  // descriptor identity, not per id: successive replacements can reuse one
-  // file id for different content, and each retired lineage's recovery needs
-  // its own descriptor. The current lineage wins an id collision.
-  retiredArtifactAssets: EngineYDocArtifactAsset[];
-  // Set by releaseEngineYDocSession when a close failed. The next open of this
-  // document retries the release before it binds anything.
-  closeFailed?: boolean;
-  // The session is closing and no longer accepts renderer updates. The entry
-  // stays registered until close settles so a failed release remains owned.
-  releasing?: boolean;
-  // A successful delete removed this path after capture closed the engine
-  // session. Main keeps the renderer entry until its normal close, but every
-  // later update is an inert no-op and repeats the deleted state.
-  deleted?: boolean;
-}
-const engineYDocSessions = new Map<string, EngineYDocSessionEntry>();
-type EngineYDocLineageHandoff = {
-  lineageGeneration: number;
-  remoteUpdates: Uint8Array[];
-  artifactAssets: readonly NonNullable<
-    WorkspaceEngineYDocProviderSession["artifactAssets"]
-  >[number][];
-  acknowledge: () => AcknowledgeEngineYDocLineageReplacementResult;
-};
-const pendingEngineYDocLineageHandoffs = new Map<
-  string,
-  EngineYDocLineageHandoff
->();
-
-// Every NON-QUIT teardown of an engine Y.Doc session goes through here: a
-// discarded open, the close IPC, the renderer teardown. What a failed close
-// means, and why the entry is kept, is stated once in
-// engineYDocSessionRelease.ts. Returns true when the session was released.
-function releaseEngineYDocSessionEntry(
-  sessionKey: string,
-  entry: EngineYDocSessionEntry,
-  reason: string,
-): Promise<boolean> {
-  entry.releasing = true;
-  pendingEngineYDocLineageHandoffs.delete(sessionKey);
-  return releaseEngineYDocSession({
-    sessions: engineYDocSessions,
-    sessionKey,
-    entry,
-    reason,
-    onCloseFailed: (message, error) => console.error(message, error),
-  });
-}
-
-// Push a document's REAL save state to the renderer that owns its session.
-// Never throws: this is called from session status hooks and from the IPC
-// no-op boundaries, neither of which may fail.
-function sendEngineYDocSaveState(
-  sender: Electron.WebContents,
-  generation: number,
-  sessionId: string,
-  state: EngineYDocSaveStateName,
-  seq: number,
-): void {
-  if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) return;
-  try {
-    sender.send(
-      CHANNELS.engineYDocSaveState,
-      EngineYDocSaveStateEventSchema.parse({ sessionId, state, seq }),
-    );
-  } catch {
-    // A malformed status is DROPPED, never thrown through a status hook.
-  }
-}
-
-function notifyEngineYDocSessionsDeleted(
-  workspaceId: string,
-  pathOrPrefix: string,
-): void {
-  for (const entry of engineYDocSessions.values()) {
-    if (entry.workspaceId !== workspaceId) continue;
-    if (
-      entry.path !== pathOrPrefix &&
-      !entry.path.startsWith(`${pathOrPrefix}/`)
-    ) {
-      continue;
-    }
-    entry.deleted = true;
-    sendEngineYDocSaveState(
-      entry.sender,
-      entry.generation,
-      entry.sessionId,
-      "deleted",
-      entry.saveSeq.dirtySeq,
-    );
-  }
-}
-const pendingEngineYDocOpensBySender = new Map<number, Set<Promise<void>>>();
-// Senders whose engine-ydoc 'destroyed' cleanup hook is already attached.
-const engineYDocCleanupHooked = new WeakSet<Electron.WebContents>();
-
-function beginPendingEngineYDocOpen(senderId: number): () => void {
-  let finish: () => void = () => undefined;
-  const pending = new Promise<void>((resolve) => {
-    finish = resolve;
-  });
-  const pendingForSender =
-    pendingEngineYDocOpensBySender.get(senderId) ?? new Set<Promise<void>>();
-  pendingForSender.add(pending);
-  pendingEngineYDocOpensBySender.set(senderId, pendingForSender);
-  return () => {
-    pendingForSender.delete(pending);
-    if (pendingForSender.size === 0) pendingEngineYDocOpensBySender.delete(senderId);
-    finish();
-  };
-}
-
-async function waitForPendingEngineYDocOpens(senderId: number): Promise<void> {
-  await Promise.all([...(pendingEngineYDocOpensBySender.get(senderId) ?? [])]);
-}
-
-// Close every engine Y.Doc session owned by one renderer (window gone /
-// crashed / reloading). Settles the converged state and releases each
-// reservation.
-async function closeEngineYDocSessionsForSender(senderId: number): Promise<void> {
-  const closing: Promise<boolean>[] = [];
-  for (const [sessionKey, entry] of [...engineYDocSessions]) {
-    if (entry.senderId !== senderId) continue;
-    closing.push(
-      releaseEngineYDocSessionEntry(sessionKey, entry, "renderer teardown"),
-    );
-  }
-  await Promise.all(closing);
-}
-
-async function prepareForRendererReload(senderId: number): Promise<void> {
+async function prepareForRendererReload(sender: WebContents): Promise<void> {
+  const senderId = sender.id;
   // `openWorkspace` records the active workspace before awaiting watcher
   // startup. Re-prioritize that sender's workspace so its replacement renderer
   // boots back into the same place, while closing every main-owned resource
@@ -3973,6 +3772,10 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   const activeWorkspaceId =
     activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+  const engineYDocStop = engineYDocSessionIpc.retireSender(
+    sender,
+    rendererGeneration(senderId),
+  );
   advanceRendererGeneration(senderId);
   const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
   sitePreviewStarts.abortForSender(senderId);
@@ -3988,8 +3791,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
       !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
       ? stopSitePreviewsForWorkspace(activeWorkspaceId)
       : Promise.resolve(),
-    closeEngineYDocSessionsForSender(senderId),
-    waitForPendingEngineYDocOpens(senderId),
+    engineYDocStop,
     pluginSurfaceStop,
     // This sender's own entry has not been cleared yet, so it would
     // otherwise always count as "another window" — excluded here so full
@@ -4000,32 +3802,12 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
       ? stopPluginWorkspace(activeWorkspaceId)
       : Promise.resolve(),
   ]);
-  // An open still in flight above registers its session AFTER that sweep read
-  // the registry: the generation advanced, so the open discards the session it
-  // just got, and a discard whose close FAILS registers it. Sweep once more now
-  // that no open is pending, so the reload retries it instead of leaving it for
-  // the next open of that path.
-  await closeEngineYDocSessionsForSender(senderId);
 }
 
 // Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
 // stopped, so no session settles onto a closed store.
-//
-// The one teardown that does NOT go through releaseEngineYDocSession, and the
-// only one where that is safe: keeping a failed close reachable buys a retry,
-// and nothing here will ever run it — the process is going away. No surface
-// follows this either, so there is no plain editor to refuse (#657).
 async function closeAllEngineYDocSessions(): Promise<void> {
-  const entries = [...engineYDocSessions.values()];
-  engineYDocSessions.clear();
-  // `shuttingDown` ONLY here: this is the one close that runs inside the
-  // will-quit budget, so it is the one close that must not wait for a daemon
-  // to come back. A user closing a document still gets the full ladder.
-  await Promise.all(
-    entries.map((entry) =>
-      entry.session.close({ shuttingDown: true }).catch(() => undefined),
-    ),
-  );
+  await engineYDocSessionIpc.shutdown();
 }
 
 function fallbackUpdateState(): PublicUpdateState {
@@ -5007,7 +4789,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.reloadRenderer, async (event) => {
     assertTrustedSender(event);
     const sender = event.sender;
-    await prepareForRendererReload(sender.id);
+    await prepareForRendererReload(sender);
     if (!sender.isDestroyed()) sender.reload();
   });
 
@@ -5281,17 +5063,9 @@ function registerIpcHandlers(
             throw new Error("Shared file delete returned an invalid result.");
           }
           markWorkspaceChanged();
-          // `deletePath` matches its own disk target against the CANONICAL form
-          // `validateUserWritePath` normalizes to (a trailing slash stripped, for
-          // example) — but the schema for this payload does not enforce that
-          // normalization, so a raw "notes/" would otherwise widen its own
-          // prefix match to "notes//" and miss every live session under it.
-          const validatedDeletePath = validateUserWritePath(input.relativePath);
-          notifyEngineYDocSessionsDeleted(
+          engineYDocSessionIpc.notifyDeleted(
             workspace.workspaceId,
-            validatedDeletePath.ok
-              ? validatedDeletePath.normalized
-              : input.relativePath,
+            input.relativePath,
           );
           finishDebts?.(true);
           return DeleteWorkspacePathResult.parse(result);
@@ -5653,17 +5427,15 @@ function registerIpcHandlers(
     const workspace = requireWorkspace(input.workspaceId);
     const shareView = sharedViewOf(workspace.workspaceId);
     if (shareView === null) assertWritableWorkspace(workspace);
-    const writePath = validateUserWritePath(input.relativePath);
-    for (const entry of engineYDocSessions.values()) {
-      if (
-        writePath.ok &&
-        entry.workspaceId === workspace.workspaceId &&
-        entry.path === writePath.normalized
-      ) {
-        throw new Error(
-          "The engine owns this live document. Close its editor before writing the file directly.",
-        );
-      }
+    if (
+      engineYDocSessionIpc.ownsDocument(
+        workspace.workspaceId,
+        input.relativePath,
+      )
+    ) {
+      throw new Error(
+        "The engine owns this live document. Close its editor before writing the file directly.",
+      );
     }
     const result = await withStaleSensitiveWorkspaceOperation(
       workspace.rootPath,
@@ -7487,6 +7259,10 @@ function registerIpcHandlers(
     // of registering into this sweep's blind spot after it already ran
     // (#779 round 22 finding 3).
     if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
+      const engineYDocStop = engineYDocSessionIpc.retireSender(
+        event.sender,
+        rendererGeneration(senderId),
+      );
       advanceRendererGeneration(senderId);
       // Per-sender, not per-workspace: this window's own in-flight site
       // preview start is tied to ITS request, so aborting it on switch-away
@@ -7495,7 +7271,10 @@ function registerIpcHandlers(
       // previews below, which must not stop a preview another window is
       // still showing.
       sitePreviewStarts.abortForSender(senderId);
-      await pluginSurfaces.stop({ kind: "sender", senderId });
+      await Promise.all([
+        engineYDocStop,
+        pluginSurfaces.stop({ kind: "sender", senderId }),
+      ]);
     }
     // A→B then A→C both read previousWorkspaceId=A above and raced through
     // the await — if B's call resumes after C's already assigned C, B's
@@ -10392,601 +10171,38 @@ function registerIpcHandlers(
     searchRegistry.cancel(event.sender.id, input.searchId);
   });
 
-  // WS-G2-C-2 engine Y.Doc editor binding. Main owns the node-only live session
-  // (constructed through the workspace's engine capture, which reuses its store)
-  // and forwards remote CRDT deltas back to the sender that opened it. No
-  // websocket or token is needed. Gated on an engine-flagged workspace + a
-  // classified live-document path; a
-  // secret/already-live throw surfaces as available:false so the renderer falls
-  // back to the plain local autosave editor. The ONE refusal that must not fall
-  // back that way is path-not-in-version (#534): the plain editor is writable
-  // too, and its autosave would write the very phantom file the engine refusal
-  // prevented. That one comes back as available:false + notInVersion:true, and
-  // the renderer stops editing instead of downgrading.
   ipcMain.handle(CHANNELS.engineYDocOpen, async (event, payload) => {
     assertTrustedSender(event);
-    const input = OpenEngineYDocSessionPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // WS-G2-C-2 (gate fix 4): a shared view is read-only, but a live engine
-    // Y.Doc session is WRITABLE (applyLocalUpdate journals edits + settles to
-    // disk). Refuse it at the IPC boundary — same class as the PR-18 shared-view
-    // write bypass — so a read-only recipient can never open a writable session.
-    // The renderer falls back to the read-only rendered markdown.
-    if (sharedViewOf(workspace.workspaceId)) {
-      return OpenEngineYDocSessionResult.parse({ available: false });
-    }
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const validatedPath = validateUserWritePath(input.path);
-    if (!validatedPath.ok) {
-      return OpenEngineYDocSessionResult.parse({ available: false });
-    }
-    const path = validatedPath.normalized;
-    const requestedKind = liveDocumentKindForPath(path);
-    // The shared classifier is the main-side authority for which paths bind
-    // to a Y.Doc.
-    if (requestedKind === null) {
-      return OpenEngineYDocSessionResult.parse({ available: false });
-    }
-    // Only engine-flagged workspaces have a capture — but the capture is
-    // DECIDED by the workspace-activity open, and a restored tab's open can
-    // land while the shell's own openWorkspace still awaits the daemon
-    // handshake (the window loads during it). Answering from that undecided
-    // state reads as "not engine-backed", which the renderer never retries:
-    // the tab falls to the plain autosave editor for its whole session and
-    // its edits take the disk path the engine owns. Open the activity
-    // instead — idempotent, and a concurrent open is handed the first one's
-    // promise (ensureWorkspaceActivityOpen) — and answer from the decision.
-    let capture = activity.engineCaptureFor(workspace.workspaceId);
-    if (!capture) {
-      try {
-        await openWorkspaceActivity(workspace);
-      } catch (error) {
-        // A failed open leaves no capture; the re-read below answers it the
-        // same way the shell's own failed open does (no recorder).
-        console.error(
-          `[desktop] engine Y.Doc open could not open the workspace activity for ${path}:`,
-          error,
-        );
-      }
-      // The await can span the daemon handshake. The renderer that asked may
-      // be gone or reloaded by now, and a session must never be taken for a
-      // generation that no longer exists (#616).
-      if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) {
-        return OpenEngineYDocSessionResult.parse({ available: false });
-      }
-      capture = activity.engineCaptureFor(workspace.workspaceId);
-      if (!capture) {
-        return OpenEngineYDocSessionResult.parse({ available: false });
-      }
-    }
-    // PENDING FROM THE FIRST AWAIT that can hold a daemon session, not from
-    // the open. A renderer reload waits
-    // on this registration (prepareForRendererReload), and the releases below
-    // await the daemon: outside it, a reload could finish both its sweeps while
-    // this handler sat in a release, and then this handler would take a daemon
-    // session for a generation that no longer exists. The check after the open
-    // does release that session — but the replacement renderer racing the same
-    // document meanwhile gets ydoc-session-busy, and is then stuck read-only
-    // over a document nothing is going to release (#616).
-    const finishPendingOpen = beginPendingEngineYDocOpen(sender.id);
-    // The renderer mints the session id; main owns the sender it came from, so
-    // that is what the registry files it under (engineYDocSessionRegistry.ts).
-    const sessionKey = engineYDocSessionKey(sender.id, input.sessionId);
-    try {
-      // A stale session under this key — a renderer that reused an id after a
-      // crash — is released before opening a new one.
-      const existing = engineYDocSessions.get(sessionKey);
-      if (
-        existing &&
-        !(await releaseEngineYDocSessionEntry(
-          sessionKey,
-          existing,
-          "stale session replaced",
-        ))
-      ) {
-        return OpenEngineYDocSessionResult.parse({
-          available: false,
-          engineMayHoldDocument: true,
-        });
-      }
-      // THIS OPEN IS THE RETRY, and it has to find its session by DOCUMENT: a
-      // marked session keeps its own id and the renderer's "Try again" mints a
-      // new one, so nothing keyed by id would ever reach it. The daemon would
-      // then answer this open ydoc-session-busy (workspaceEngineCapture.ts,
-      // openYDocSessionTask — a failing-close session someone still HOLDS keeps
-      // refusing), and the retry that was meant to recover the document would
-      // instead be the answer that never can: read-only over a session only
-      // this loop knows how to release (#616).
-      for (const [failedKey, entry] of [...engineYDocSessions]) {
-        if (!entry.closeFailed) continue;
-        if (entry.workspaceId !== workspace.workspaceId) continue;
-        if (entry.path !== path) continue;
-        if (
-          !(await releaseEngineYDocSessionEntry(
-            failedKey,
-            entry,
-            "unreleased session retried by a new open",
-          ))
-        ) {
-          return OpenEngineYDocSessionResult.parse({
-            available: false,
-            engineMayHoldDocument: true,
-          });
-        }
-      }
-      // This open owns its save sequence. A refused open can keep reporting
-      // after its close fails, so callbacks must not look up state by session id.
-      const saveSeq = createEngineYDocSaveSeqState();
-      // Stop callbacks after this open loses its session id to another document.
-      let refused = false;
-      let lineageGeneration = 1;
-      let registeredEntry: EngineYDocSessionEntry | null = null;
-      let queuedLineageReplacement: {
-        update: Uint8Array;
-        recoveredPaths: string[];
-        remoteUpdates: Uint8Array[];
-        artifactAssets: readonly NonNullable<
-          WorkspaceEngineYDocProviderSession["artifactAssets"]
-        >[number][];
-      } | null = null;
-      const announceLineageReplacement = (replacement: {
-        update: Uint8Array;
-        recoveredPaths: string[];
-        remoteUpdates: Uint8Array[];
-        artifactAssets: readonly NonNullable<
-          WorkspaceEngineYDocProviderSession["artifactAssets"]
-        >[number][];
-      }): void => {
-        if (
-          refused ||
-          sender.isDestroyed() ||
-          rendererGeneration(sender.id) !== generation
-        ) {
-          return;
-        }
-        const nextLineageGeneration = lineageGeneration + 1;
-        const handoff: EngineYDocLineageHandoff = {
-          lineageGeneration: nextLineageGeneration,
-          remoteUpdates: replacement.remoteUpdates,
-          artifactAssets: replacement.artifactAssets,
-          acknowledge: () => {
-            if (pendingEngineYDocLineageHandoffs.get(sessionKey) !== handoff) {
-              return { updates: [] };
-            }
-            lineageGeneration = nextLineageGeneration;
-            if (registeredEntry !== null) {
-              registeredEntry.lineageGeneration = nextLineageGeneration;
-              for (const asset of registeredEntry.artifactAssetsById.values()) {
-                if (
-                  !registeredEntry.retiredArtifactAssets.some((retired) =>
-                    sameEngineYDocArtifactAsset(retired, asset),
-                  )
-                ) {
-                  registeredEntry.retiredArtifactAssets.push(asset);
-                }
-              }
-              registeredEntry.artifactAssetsById = new Map(
-                handoff.artifactAssets.map((asset) => [asset.id, asset]),
-              );
-            }
-            pendingEngineYDocLineageHandoffs.delete(sessionKey);
-            const queued = queuedLineageReplacement;
-            queuedLineageReplacement = null;
-            if (queued !== null) {
-              announceLineageReplacement(queued);
-              // The queued full snapshot supersedes every delta from the
-              // intermediate lineage. Its own later deltas travel with its
-              // acknowledgement instead.
-              return { updates: [] };
-            }
-            return { updates: handoff.remoteUpdates };
-          },
-        };
-        // From this point until acknowledgement, neither lineage may accept
-        // renderer updates. The losing CRDT cannot merge into the independent
-        // winner, and the winner is not editable until its mirror has replaced
-        // the losing document.
-        pendingEngineYDocLineageHandoffs.set(sessionKey, handoff);
-        try {
-          sender.send(
-            CHANNELS.engineYDocLineageReplacement,
-            EngineYDocLineageReplacementEventSchema.parse({
-              sessionId: input.sessionId,
-              update: replacement.update,
-              recoveredPaths: replacement.recoveredPaths,
-              artifactAssets: replacement.artifactAssets,
-              lineageGeneration: nextLineageGeneration,
-            }),
-          );
-        } catch (error) {
-          // The provider already installed the winner, so the retired lineage
-          // cannot safely resume. Release this session instead of leaving an
-          // unacknowledgeable handoff armed forever.
-          if (pendingEngineYDocLineageHandoffs.get(sessionKey) === handoff) {
-            pendingEngineYDocLineageHandoffs.delete(sessionKey);
-          }
-          refused = true;
-          console.error(
-            `[desktop] could not announce the engine Y.Doc lineage replacement for ${input.path}:`,
-            error,
-          );
-          if (registeredEntry !== null) {
-            void releaseEngineYDocSessionEntry(
-              sessionKey,
-              registeredEntry,
-              "lineage replacement announcement failed",
-            );
-          }
-        }
-      };
-      let session: WorkspaceEngineYDocProviderSession;
-      try {
-        session = await capture.openYDocSession({
-          path,
-          // Explicit, because the daemon defaults an unspecified session to
-          // PLAINTEXT (actor.rs requested_content_kind.unwrap_or(Plaintext)).
-          // The requested kind must match the editor selected for this path.
-          // A mismatched session binds the editor to the wrong Y.Doc root.
-          contentKind: requestedKind,
-          // The document's REAL save state. A settle failure used to reach
-          // nothing at all while the editor's own timer kept saying "Saved" —
-          // three dogfood journeys watched a doc report Saved over a
-          // zero-byte .md. Report every outcome to the renderer that owns it.
-          onSaveState: (state, token) => {
-            // Pair every outcome with ITS OWN start BY TOKEN. Not by order:
-            // an aborting settle never queues on settleChain, and
-            // settleChain is per generation while this state is per session.
-            const seq =
-              state === "settling"
-                ? noteSettleStart(saveSeq, token)
-                : noteSettleOutcome(saveSeq, token);
-            if (refused) return;
-            sendEngineYDocSaveState(
-              sender,
-              generation,
-              input.sessionId,
-              state,
-              seq,
-            );
-          },
-          onRemoteUpdate: (update) => {
-            // Forward a co-editor's delta only to the renderer generation that
-            // opened this session, and only while this open owns its session
-            // id: a refused session whose close failed still hears its
-            // document, and the renderer would apply that delta to whichever
-            // document holds the id now.
-            if (
-              refused ||
-              sender.isDestroyed() ||
-              rendererGeneration(sender.id) !== generation
-            ) {
-              return;
-            }
-            const handoff = pendingEngineYDocLineageHandoffs.get(sessionKey);
-            if (handoff) {
-              (queuedLineageReplacement?.remoteUpdates ?? handoff.remoteUpdates).push(
-                update,
-              );
-              return;
-            }
-            try {
-              sender.send(
-                CHANNELS.engineYDocRemoteUpdate,
-                EngineYDocRemoteUpdateEventSchema.parse({
-                  sessionId: input.sessionId,
-                  update,
-                  lineageGeneration,
-                }),
-              );
-            } catch {
-              // A malformed delta is DROPPED, never thrown through the session's
-              // update observer (an uncaught throw there would wedge main).
-            }
-          },
-          onLineageReplaced: (update, recoveredPaths) => {
-            if (
-              refused ||
-              sender.isDestroyed() ||
-              rendererGeneration(sender.id) !== generation
-            ) {
-              return;
-            }
-            const replacement = {
-              update,
-              recoveredPaths,
-              remoteUpdates: [],
-              artifactAssets: session.artifactAssets ?? [],
-            };
-            if (pendingEngineYDocLineageHandoffs.has(sessionKey)) {
-              // Keep only the newest full snapshot. It contains every earlier
-              // lineage; deltas observed after it are buffered on this object.
-              queuedLineageReplacement = replacement;
-              return;
-            }
-            announceLineageReplacement(replacement);
-          },
-        });
-      } catch (error) {
-        // Secret path, already-live, or an uncaptured artifact: fall back
-        // gracefully — but never silently. A refusal here downgrades the doc to
-        // the plain editor, and an unlogged permanent refusal is
-        // indistinguishable from intended fallback (it hid a dead engine editor
-        // for weeks). Two flags below refuse that downgrade instead:
-        // path-not-in-version (#534, the plain editor would write the phantom
-        // back) and an open the engine refused while it may still hold this
-        // document (#564) — a spent retry budget, a region refused because the
-        // app is quitting, or an open whose session the daemon would not
-        // release. A writable plain editor for any of them would take the disk
-        // path #533 closed. An uncaptured artifact whose session WAS released
-        // is really on disk, so it keeps the plain editor: claiming the
-        // version does not have it would be false.
-        console.error(
-          `[desktop] engine Y.Doc open refused for ${path}:`,
-          error,
-        );
-        return OpenEngineYDocSessionResult.parse({
-          available: false,
-          ...(isYDocPathNotInVersionError(error) ? { notInVersion: true } : {}),
-          ...(isYDocRemovalInProgressError(error)
-            ? {
-                removalInProgress: {
-                  operation: error.removalOperation,
-                  message: error.inProgress,
-                },
-              }
-            : {}),
-          ...(isYdocArtifactAssetsInvalidRefusal(error)
-            ? { artifactAssetsInvalid: true }
-            : isEngineWorkspaceOpenRefusedError(error) ||
-                isYDocSessionUnreleasedError(error)
-              ? { engineMayHoldDocument: true }
-              : {}),
-        });
-      }
-      const entry: EngineYDocSessionEntry = {
-        session,
-        sessionId: input.sessionId,
-        senderId: sender.id,
-        workspaceId: workspace.workspaceId,
-        path,
-        sender,
-        generation,
-        lineageGeneration,
-        saveSeq,
-        artifactAssetsById: new Map(
-          (session.artifactAssets ?? []).map((asset) => [asset.id, asset]),
-        ),
-        retiredArtifactAssets: [],
-      };
-      registeredEntry = entry;
-      // Every path below that refuses this session releases it through the
-      // same helper, and answers read-only unless the release succeeded.
-      const release = (reason: string): Promise<boolean> => {
-        refused = true;
-        return releaseEngineYDocSessionEntry(sessionKey, entry, reason);
-      };
-      if (refused) {
-        const released = await release("lineage replacement announcement failed");
-        return OpenEngineYDocSessionResult.parse({
-          available: false,
-          ...(released ? {} : { engineMayHoldDocument: true }),
-        });
-      }
-      // The renderer can die or reload DURING the await above. Close the stale
-      // session before crash cleanup completes so its reservation cannot block
-      // the replacement renderer's open.
-      if (
-        sender.isDestroyed() ||
-        rendererGeneration(sender.id) !== generation
-      ) {
-        const released = await release("renderer gone before hand-over");
-        return OpenEngineYDocSessionResult.parse({
-          available: false,
-          ...(released ? {} : { engineMayHoldDocument: true }),
-        });
-      }
-      // Hooked here, not after the kind check: the sender is known alive from
-      // this line on, and a kind-mismatched session whose close FAILS stays
-      // registered — the hook is what lets a renderer teardown retry it.
-      if (!engineYDocCleanupHooked.has(sender)) {
-        engineYDocCleanupHooked.add(sender);
-        sender.once("destroyed", () => {
-          void closeEngineYDocSessionsForSender(sender.id);
-        });
-      }
-      // The daemon honors the requested kind only for state-free markers; a
-      // lineage with durable state keeps its own. Binding an editor to a
-      // different content kind is silent data loss. Refuse the session and
-      // fall back to the plain editor only once the session is released.
-      if (session.contentKind !== requestedKind) {
-        console.error(
-          `[desktop] engine Y.Doc open for ${path} came back ${session.contentKind}; ` +
-            `the editor requested ${requestedKind} (kind-mismatched lineage).`,
-        );
-        const released = await release("kind-mismatched lineage");
-        return OpenEngineYDocSessionResult.parse({
-          available: false,
-          ...(released ? {} : { engineMayHoldDocument: true }),
-        });
-      }
-      // The slot has to be free STILL: two opens under one id both passed the
-      // look above while neither had registered. Burying the winner would keep
-      // its daemon session live and unreachable, so the newcomer yields (#683).
-      const claim = await claimEngineYDocSessionSlot({
-        sessions: engineYDocSessions,
-        key: sessionKey,
-        entry,
-        release,
-        onRefused: (message) => console.error(message),
-      });
-      if (!claim.claimed) {
-        return OpenEngineYDocSessionResult.parse({
-          available: false,
-          ...(claim.released ? {} : { engineMayHoldDocument: true }),
-        });
-      }
-      return OpenEngineYDocSessionResult.parse({
-        available: true,
-        initialUpdate: Y.encodeStateAsUpdate(session.doc),
-        ...(session.objectId ? { objectId: session.objectId } : {}),
-        ...(session.versionId ? { versionId: session.versionId } : {}),
-        artifactAssets: session.artifactAssets ?? [],
-        lineageGeneration,
-      });
-    } finally {
-      finishPendingOpen();
-    }
+    return engineYDocSessionIpc.open(event.sender, payload);
   });
 
   ipcMain.handle(
     CHANNELS.engineYDocReadArtifactAsset,
     async (event, payload) => {
       assertTrustedSender(event);
-      const input = ReadEngineYDocArtifactAssetPayload.parse(payload);
-      const entry = engineYDocSessions.get(
-        engineYDocSessionKey(event.sender.id, input.sessionId),
-      );
-      // Deletion marks this entry before the renderer can capture its recovery
-      // draft. Keep the version-bound asset reader available until the normal
-      // session close so an image-bearing drawing can finish that recovery.
-      if (
-        !entry ||
-        entry.sender !== event.sender ||
-        entry.generation !== rendererGeneration(event.sender.id)
-      ) {
-        throw new Error(
-          "The live document session is no longer available. Open the file again.",
-        );
-      }
-      // The renderer's descriptor only selects among the descriptors this
-      // session has pinned; the read hydrates from the pinned copy. One id
-      // can name the winner's asset and a retired lineage's, so the match is
-      // field-exact and the current lineage is tried first.
-      const requested = input.descriptor;
-      const descriptor = [
-        entry.artifactAssetsById.get(requested.id),
-        ...entry.retiredArtifactAssets,
-      ].find(
-        (candidate) =>
-          candidate !== undefined &&
-          sameEngineYDocArtifactAsset(candidate, requested),
-      );
-      if (!descriptor) {
-        throw new Error(
-          `The live document does not reference artifact asset ${requested.id}.`,
-        );
-      }
-      const hydrated = await entry.session.readArtifactAsset(descriptor);
-      return ReadEngineYDocArtifactAssetResult.parse(hydrated);
+      return engineYDocSessionIpc.readArtifactAsset(event.sender, payload);
     },
   );
 
   ipcMain.handle(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
     assertTrustedSender(event);
-    const input = ApplyEngineYDocUpdatePayload.parse(payload);
-    // Owner-scoped BY THE KEY: the sender comes from the event, so a renderer
-    // can only ever reach a session it opened. Refusals are returned as data so
-    // the renderer can preserve its canonical mirror.
-    const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
-    const entry = engineYDocSessions.get(sessionKey);
-    if (!entry) {
-      return ApplyEngineYDocUpdateResult.parse({
-        accepted: false,
-        reason: "session-unavailable",
-      });
-    }
-    if (entry.releasing) {
-      return ApplyEngineYDocUpdateResult.parse({
-        accepted: false,
-        reason: "session-unavailable",
-      });
-    }
-    // Main has installed an independent winner, but the renderer may still be
-    // inside a transaction on the losing mirror. Never merge that update into
-    // the winner and never accept winner edits before the renderer has exposed
-    // it. The renderer persists the losing mirror before acknowledging.
-    if (
-      pendingEngineYDocLineageHandoffs.has(sessionKey) ||
-      input.lineageGeneration !== entry.lineageGeneration
-    ) {
-      return ApplyEngineYDocUpdateResult.parse({
-        accepted: false,
-        reason: "lineage-transition",
-      });
-    }
-    if (entry.deleted) {
-      sendEngineYDocSaveState(
-        entry.sender,
-        entry.generation,
-        entry.sessionId,
-        "deleted",
-        input.seq,
-      );
-      return ApplyEngineYDocUpdateResult.parse({
-        accepted: false,
-        reason: "deleted",
-      });
-    }
-    // WS-G2-C-2 (gate fix 4): RE-CHECK the shared-view guard before applying — a
-    // workspace can become a read-only shared view after a session opened, and
-    // an update must never write into a shared view. The IPC answer stays an
-    // inert no-op (it must never throw), but the edit IS being discarded, so
-    // the document must not be left implying it is still on its way to disk.
-    if (sharedViewOf(entry.workspaceId)) {
-      sendEngineYDocSaveState(
-        entry.sender,
-        entry.generation,
-        input.sessionId,
-        "read-only",
-        input.seq,
-      );
-      return ApplyEngineYDocUpdateResult.parse({
-        accepted: false,
-        reason: "read-only",
-      });
-    }
-    // Count the edit when it REACHES the settle, not when it arrives here.
-    // The session queues updates, so hand-over runs ahead of journaling: a
-    // settle armed by an earlier update would otherwise start while this one
-    // is still queued and report "Saved" for content it never carried — the
-    // indicator read Saved over a half-written 140 KiB document (#514).
-    entry.session.applyLocalUpdate(input.update, () =>
-      noteLocalEdit(entry.saveSeq, input.seq),
-    );
-    return ApplyEngineYDocUpdateResult.parse({ accepted: true });
+    return engineYDocSessionIpc.applyUpdate(event.sender, payload);
   });
 
   ipcMain.handle(
     CHANNELS.engineYDocAcknowledgeLineageReplacement,
     (event, payload) => {
       assertTrustedSender(event);
-      const input = AcknowledgeEngineYDocLineageReplacementPayload.parse(payload);
-      const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
-      const handoff = pendingEngineYDocLineageHandoffs.get(sessionKey);
-      if (!handoff || handoff.lineageGeneration !== input.lineageGeneration) {
-        return AcknowledgeEngineYDocLineageReplacementResult.parse({ updates: [] });
-      }
-      return AcknowledgeEngineYDocLineageReplacementResult.parse(
-        handoff.acknowledge(),
+      return engineYDocSessionIpc.acknowledgeLineageReplacement(
+        event.sender,
+        payload,
       );
     },
   );
 
   ipcMain.handle(CHANNELS.engineYDocClose, async (event, payload) => {
     assertTrustedSender(event);
-    const input = CloseEngineYDocSessionPayload.parse(payload);
-    const sessionKey = engineYDocSessionKey(event.sender.id, input.sessionId);
-    const entry = engineYDocSessions.get(sessionKey);
-    if (!entry) return;
-    // Deregistering the entry here and swallowing the close is what turned a
-    // held document into a clean fallback (#657): the renderer's retry opens
-    // under a new id, and nothing was left for that open to release.
-    await releaseEngineYDocSessionEntry(
-      sessionKey,
-      entry,
-      "renderer closed the document",
-    );
+    await engineYDocSessionIpc.close(event.sender, payload);
   });
 
   ipcMain.handle(CHANNELS.getUpdateState, (event) => {

@@ -364,6 +364,9 @@ function makeTransport(
         sessionId,
         lineageGeneration: nextLineageGeneration,
       });
+      if (!result.accepted) {
+        throw new EngineYDocDeliveryRefusedError(result.reason);
+      }
       lineageGeneration = nextLineageGeneration;
       return result.updates;
     },

@@ -3233,7 +3233,10 @@ describe("editor groups", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     renderShell(bridge);
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });
@@ -6221,6 +6224,7 @@ describe("engine store recovery", () => {
         onEngineYDocSaveState: vi.fn(() => () => undefined),
         onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
         acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+          accepted: true as const,
           updates: [],
         })),
       });
@@ -6312,7 +6316,10 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     vi.stubGlobal("dohcDesktop", bridge);
     const first = render(
@@ -6419,7 +6426,10 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     const view = renderShell(bridge, WORKSPACE, [WORKSPACE, workspaceB]);
     await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledOnce());
@@ -6480,7 +6490,10 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+      acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+        accepted: true as const,
+        updates: [],
+      })),
     });
     const { user, dialog } = await openRebuildDialog(bridge);
     await screen.findByTestId("markdown-source-toggle", {}, { timeout: 5_000 });

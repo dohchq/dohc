@@ -1,4 +1,10 @@
-import { app, BrowserWindow, nativeTheme, screen } from "electron";
+import {
+  app,
+  BrowserWindow,
+  nativeTheme,
+  screen,
+  type WebContents,
+} from "electron";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -159,7 +165,7 @@ function trackWindowState(window: BrowserWindow): void {
 }
 
 export function createMainWindow(options?: {
-  beforeRendererReload?: (senderId: number) => void | Promise<void>;
+  beforeRendererReload?: (sender: WebContents) => void | Promise<void>;
 }): BrowserWindow {
   const preloadPath = join(import.meta.dirname, "../preload/preload.cjs");
   const placement = loadPlacement();
@@ -212,7 +218,7 @@ export function createMainWindow(options?: {
     window.webContents,
     Date.now,
     options?.beforeRendererReload
-      ? () => options.beforeRendererReload?.(window.webContents.id)
+      ? () => options.beforeRendererReload?.(window.webContents)
       : undefined,
   );
 

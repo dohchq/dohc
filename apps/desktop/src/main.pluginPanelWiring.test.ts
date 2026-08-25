@@ -337,7 +337,7 @@ describe("plugin panel main-process wiring", () => {
     );
     const bumpAt = open.indexOf("advanceRendererGeneration(senderId);", switchAt);
     const stopAt = open.indexOf(
-      'await pluginSurfaces.stop({ kind: "sender", senderId });',
+      'pluginSurfaces.stop({ kind: "sender", senderId })',
       bumpAt,
     );
     const setAt = open.indexOf(

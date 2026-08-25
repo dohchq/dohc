@@ -4670,9 +4670,17 @@ export const AcknowledgeEngineYDocLineageReplacementPayload = z.object({
 export type AcknowledgeEngineYDocLineageReplacementPayload = z.infer<
   typeof AcknowledgeEngineYDocLineageReplacementPayload
 >;
-export const AcknowledgeEngineYDocLineageReplacementResult = z.object({
-  updates: z.array(ENGINE_YDOC_UPDATE),
-});
+export const AcknowledgeEngineYDocLineageReplacementResult =
+  z.discriminatedUnion("accepted", [
+    z.object({
+      accepted: z.literal(true),
+      updates: z.array(ENGINE_YDOC_UPDATE),
+    }),
+    z.object({
+      accepted: z.literal(false),
+      reason: z.enum(["session-unavailable", "lineage-transition"]),
+    }),
+  ]);
 export type AcknowledgeEngineYDocLineageReplacementResult = z.infer<
   typeof AcknowledgeEngineYDocLineageReplacementResult
 >;

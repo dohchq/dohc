@@ -124,7 +124,7 @@ export class EngineYDocUpdateTooLargeError extends Error {
 
 export class EngineYDocDeliveryRefusedError extends Error {
   constructor(readonly reason: string) {
-    super(`The engine refused the Y.Doc update: ${reason}.`);
+    super(`The engine refused the Y.Doc operation: ${reason}.`);
     this.name = "EngineYDocDeliveryRefusedError";
   }
 }

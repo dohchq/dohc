@@ -77,7 +77,10 @@ function sharedBridge() {
       return () => saveStateListeners.delete(listener);
     },
     onEngineYDocLineageReplacement: () => () => undefined,
-    acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({ updates: [] })),
+    acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
+      accepted: true as const,
+      updates: [],
+    })),
     closeEngineYDocSession: vi.fn(async () => {
       await closeGate;
     }),

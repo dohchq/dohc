@@ -239,29 +239,24 @@ describe("bootstrap window gate", () => {
     }
   });
 
-  // A restored live-document tab's open can land while the shell's own
-  // openWorkspace still awaits the daemon handshake. Answering from the
-  // undecided capture reads as "not engine-backed", which the renderer never
-  // retries — the tab keeps the plain autosave editor for its whole session
-  // over a document the engine owns.
-  it("decides the capture before answering an engine Y.Doc open", () => {
+  // The adapter behavior suite owns the startup/reload interleavings. This
+  // source check pins only the Electron composition that supplies that port.
+  it("routes engine Y.Doc opens through the startup-aware owner", () => {
+    const ownerAt = mainSource.indexOf("const engineYDocSessionIpc =");
+    expect(ownerAt).toBeGreaterThanOrEqual(0);
+    const owner = mainSource.slice(ownerAt, mainSource.indexOf("\n});", ownerAt));
+    expect(owner).toContain(
+      "captureFor: (workspaceId) => activity.engineCaptureFor(workspaceId)",
+    );
+    expect(owner).toContain("ensureCaptureFor: async (workspaceId) => {");
+    expect(owner).toContain(
+      "await openWorkspaceActivity(requireWorkspace(workspaceId));",
+    );
+
     const handler = ipcHandlerSource("engineYDocOpen");
-    const captureReadAt = handler.indexOf("activity.engineCaptureFor(");
-    const activityOpenAt = handler.indexOf(
-      "await openWorkspaceActivity(workspace);",
+    expect(handler).toContain(
+      "return engineYDocSessionIpc.open(event.sender, payload);",
     );
-    const sessionOpenAt = handler.indexOf("capture.openYDocSession({");
-    expect(captureReadAt).toBeGreaterThanOrEqual(0);
-    expect(activityOpenAt).toBeGreaterThan(captureReadAt);
-    expect(sessionOpenAt).toBeGreaterThan(activityOpenAt);
-    // The open awaited the handshake; a session must never be taken for a
-    // renderer generation that reloaded away during it (#616).
-    const guardAt = handler.indexOf(
-      "rendererGeneration(sender.id) !== generation",
-      activityOpenAt,
-    );
-    expect(guardAt).toBeGreaterThan(activityOpenAt);
-    expect(guardAt).toBeLessThan(sessionOpenAt);
   });
 
   // The persisted zoom must be KNOWN before the first window exists:
