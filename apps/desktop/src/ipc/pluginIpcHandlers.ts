@@ -405,7 +405,7 @@ export function registerPluginIpcHandlers<
       trackRenderer: true,
     });
     const pipeline = await ensurePipeline(policy.workspace);
-    workspaces.assertWritable(policy.workspace);
+    policy.revalidate();
     const plugin = registeredPlugin(policy.workspace.workspaceId, input.pluginId);
     if (!plugin) {
       return InvokePluginCommandResult.parse({

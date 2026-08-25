@@ -577,6 +577,20 @@ describe("plugin IPC handlers", () => {
     expect(harness.pipeline.hostOwnership.runCommand).not.toHaveBeenCalled();
   });
 
+  it("revalidates active workspace after command pipeline startup", async () => {
+    const harness = createHarness();
+    const pipelineReady = deferred<PluginPipeline>();
+    harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+
+    const request = harness.invoke(CHANNELS.invokePluginCommand);
+    await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
+    harness.activeWorkspaceIdBySender.set(41, "workspace-2");
+    pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
+
+    await expect(request).rejects.toThrow("does not target the active workspace");
+    expect(harness.pipeline.hostOwnership.runCommand).not.toHaveBeenCalled();
+  });
+
   it("uses readable active-workspace policy and exact owner identity for stops", async () => {
     const harness = createHarness();
     harness.state.writable = false;
