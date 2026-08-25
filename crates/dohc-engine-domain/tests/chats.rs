@@ -9,7 +9,7 @@ use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
     ChatReactionState, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
     LinkedChatStore, LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, attachment_id_for,
     base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
     encode_feed_cursor, linked_chat_projection_path,
 };
@@ -1532,6 +1532,139 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
         page2.items[0].message.message_id,
         chan_feed.items[0].message.message_id
     );
+}
+
+#[test]
+fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let attach = |object: &str| LocalAttachmentInput {
+        object_id: object.to_owned(),
+        path_hint: Some(format!("notes/{object}.md")),
+        heading_text: None,
+        heading_anchor: None,
+        heading_occurrence: None,
+    };
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("general");
+    let mut o1 = start_thread("gen-1", "t1", "o1", "opening one", ChatActorKind::Human, 20);
+    o1.attachments = vec![attach("alpha")];
+    chats.start_channel_thread(&o1, &NO_FAULTS).expect("t1");
+    let mut r1 = send_msg("t1", "r1", Some("o1"), "reply one", 30);
+    r1.attachments = vec![attach("beta"), attach("gamma")];
+    chats.send_message(&r1, &NO_FAULTS).expect("r1");
+    chats
+        .send_message(
+            &send_msg("t1", "r2", Some("o1"), "reply two", 40),
+            &NO_FAULTS,
+        )
+        .expect("r2");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t2", "o2", "opening two", ChatActorKind::Human, 50),
+            &NO_FAULTS,
+        )
+        .expect("t2");
+    let mut r3 = send_msg("t2", "r3", None, "reply three", 60);
+    r3.attachments = vec![attach("delta")];
+    chats.send_message(&r3, &NO_FAULTS).expect("r3");
+    chats
+        .send_message(
+            &send_msg("t2", "r4", Some("r3"), "reply four", 70),
+            &NO_FAULTS,
+        )
+        .expect("r4");
+    for (thread, at) in [("t1", 80), ("t2", 81)] {
+        chats
+            .set_follow(
+                &SetFollow {
+                    workspace_id: WS.to_owned(),
+                    owner_user_id: "owner".to_owned(),
+                    replication_owner_user_id: None,
+                    target_kind: FollowTargetKind::Thread,
+                    target_id: thread.to_owned(),
+                    state: FollowState::Following,
+                    now_ms: at,
+                },
+                &NO_FAULTS,
+            )
+            .expect("follow");
+    }
+    // r3's row disappears while its attachment row dangles: the batch join
+    // must not resurrect "delta" anywhere, and r4 keeps a None parent.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "DELETE FROM chat_messages WHERE workspace_id = ?1 AND message_id = 'r3'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("prune r3");
+
+    let page = LinkedChatStore::new(&mut store)
+        .list_personal_feed(WS, "owner", Some(10), None)
+        .expect("feed");
+    // MUTATION: hydrating the page's attachments in one query without
+    // distributing per occurrence -> the opening/parent shared by several
+    // items goes empty for all but one of them, a bare message collects a
+    // neighbor's attachments, a dangling attachment resurfaces, or the
+    // per-message (created_at_ms, attachment_id) order breaks.
+    fn objects(message: &dohc_engine_domain::ChatMessage) -> Vec<&str> {
+        message
+            .attachments
+            .iter()
+            .map(|attachment| attachment.object_id.as_deref().expect("object id"))
+            .collect()
+    }
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.message.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["r4", "o2", "r2", "r1", "o1"]
+    );
+    let [r4, o2, r2, r1, o1] = page.items.as_slice() else {
+        panic!("five feed items");
+    };
+    assert!(objects(&r4.message).is_empty());
+    assert!(r4.parent_message.is_none(), "deleted parent stays absent");
+    let r4_opening = r4.opening_message.as_ref().expect("r4 opening");
+    assert_eq!(r4_opening.message_id, "o2");
+    assert!(objects(r4_opening).is_empty());
+    assert!(objects(&o2.message).is_empty());
+    assert!(o2.opening_message.is_none() && o2.parent_message.is_none());
+    let mut r1_objects = vec!["beta", "gamma"];
+    r1_objects.sort_by_key(|object| attachment_id_for("r1", object, None, None));
+    assert_eq!(objects(&r1.message), r1_objects);
+    assert!(objects(&r2.message).is_empty());
+    for item in [r2, r1] {
+        let opening = item.opening_message.as_ref().expect("shared opening");
+        assert_eq!(opening.message_id, "o1");
+        assert_eq!(objects(opening), vec!["alpha"]);
+        let parent = item.parent_message.as_ref().expect("shared parent");
+        assert_eq!(parent.message_id, "o1");
+        assert_eq!(objects(parent), vec!["alpha"]);
+    }
+    assert_eq!(objects(&o1.message), vec!["alpha"]);
+    assert!(o1.opening_message.is_none() && o1.parent_message.is_none());
+    for item in &page.items {
+        for message in std::iter::once(&item.message)
+            .chain(item.opening_message.as_ref())
+            .chain(item.parent_message.as_ref())
+        {
+            assert_eq!(message.thread_id, item.thread.thread_id);
+            for attachment in &message.attachments {
+                assert_eq!(attachment.message_id, message.message_id);
+                assert_eq!(attachment.thread_id, message.thread_id);
+                assert_ne!(attachment.object_id.as_deref(), Some("delta"));
+            }
+        }
+    }
 }
 
 #[test]
