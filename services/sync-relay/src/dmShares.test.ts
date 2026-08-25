@@ -562,7 +562,9 @@ describe("DM grants over the relay", () => {
     expect((await fetchSharedOps(h, MEMBER, shareId)).length).toBe(3);
     expect((await memberAppend(h, shareId, [memberMessage(0)])).status).toBe(200);
 
-    const revoke = await h(request(OWNER, `/sync/shares/${shareId}/revoke`, jsonBody({})));
+    const revoke = await h(
+      request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }),
+    );
     expect(revoke.status).toBe(200);
 
     const absent = await denialBytes(await h(request(MEMBER, "/sync/shares/never-existed")));

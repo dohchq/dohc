@@ -343,7 +343,7 @@ describe("presence over a share (cross-user, gated)", () => {
 
     // Owner revokes WHILE the guest is parked, then touches the scope (the
     // wake that would otherwise hand the revoked guest a final snapshot).
-    await h(post("owner", `/sync/shares/${shareId}/revoke`, {}));
+    await h(req("owner", `/sync/shares/${shareId}/revoke`, { method: "POST" }));
     await h(post("owner", "/sync/w/presence?topic=notes/a.md", { clientId: "o2", state: {} }));
 
     // The woken poll re-runs authorization and fails closed.
@@ -356,7 +356,7 @@ describe("presence over a share (cross-user, gated)", () => {
     const storage = await testStorage();
     const h = makeHandler(storage, new PresenceHub());
     const shareId = await shareFile(h);
-    await h(post("owner", `/sync/shares/${shareId}/revoke`, {}));
+    await h(req("owner", `/sync/shares/${shareId}/revoke`, { method: "POST" }));
     const r = await h(
       post("guest", `/sync/shares/${shareId}/presence?topic=${encodeURIComponent("notes/a.md")}`, {
         clientId: "g",

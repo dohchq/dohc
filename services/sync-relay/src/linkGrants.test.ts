@@ -11,6 +11,7 @@ import {
   validateLinkCapability,
 } from "./linkSecurity";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import { authorizeShareAction } from "./shareAuthorization";
 import {
   openSyncRelayStorage,
   type SyncRelayStorage,
@@ -108,7 +109,10 @@ function handler(
   return createSyncRelayHandler(options);
 }
 
-async function seedFileShare(h: SyncRelayHandler): Promise<void> {
+async function seedFileShare(
+  h: SyncRelayHandler,
+  access: "view" | "comment" | "edit" = "view",
+): Promise<void> {
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
   ).toBe(200);
@@ -118,7 +122,7 @@ async function seedFileShare(h: SyncRelayHandler): Promise<void> {
         request(
           OWNER,
           `/sync/${WORKSPACE}/shares`,
-          jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "view" }),
+          jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access }),
         ),
       )
     ).status,
@@ -138,6 +142,29 @@ async function createLink(
   );
   expect(response.status).toBe(200);
   return json(response);
+}
+
+async function seedIndependentEditAndDependentView(
+  storage: SyncRelayStorage,
+  h: SyncRelayHandler,
+): Promise<{ dependentGrantId: string; linkGrantId: string }> {
+  await seedFileShare(h, "edit");
+  const link = await createLink(h, "view");
+  const linkGrantId = String(link.grantId);
+  const dependentGrantId = "grant-dependent-view";
+  expect(
+    storage.convertLinkGrant({
+      shareId: "share-existing",
+      parentGrantId: linkGrantId,
+      grantId: dependentGrantId,
+      principalUserId: RECIPIENT,
+      createdAtMs: 2_001,
+    }),
+  ).toMatchObject({
+    ok: true,
+    grant: { access: "view", parentGrantId: linkGrantId },
+  });
+  return { dependentGrantId, linkGrantId };
 }
 
 async function denialBytes(response: Response): Promise<string> {
@@ -396,6 +423,120 @@ describe("relay link grants", () => {
     expect(storage.getShareGrant(grantId)).toMatchObject({
       status: "active",
       revokedAtMs: null,
+    });
+  });
+
+  it("requires an absent body to revoke a whole share", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const firstLink = await createLink(h, "view");
+    const secondLink = await createLink(h, "comment");
+    const grantIds = ["grant-0", String(firstLink.grantId), String(secondLink.grantId)];
+
+    const emptyObject = await h(
+      request(OWNER, "/sync/shares/share-existing/revoke", jsonBody({})),
+    );
+    expect(emptyObject.status).toBe(404);
+    expect(await json(emptyObject)).toEqual({
+      ok: false,
+      error: "not found",
+      code: "not_found",
+    });
+    for (const grantId of grantIds) {
+      expect(storage.getShareGrant(grantId)).toMatchObject({
+        status: "active",
+        revokedAtMs: null,
+      });
+    }
+
+    const absentBody = await h(
+      request(OWNER, "/sync/shares/share-existing/revoke", { method: "POST" }),
+    );
+    expect(absentBody.status).toBe(200);
+    for (const grantId of grantIds) {
+      expect(storage.getShareGrant(grantId)).toMatchObject({ status: "revoked" });
+    }
+  });
+
+  it("uses the highest authority across every active recipient grant", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedIndependentEditAndDependentView(storage, h);
+
+    for (const action of ["append", "propose"] as const) {
+      expect(
+        authorizeShareAction({
+          storage,
+          actorUserId: RECIPIENT,
+          shareId: "share-existing",
+          action,
+        }),
+        action,
+      ).toMatchObject({
+        ok: true,
+        grant: { grantId: "grant-0", access: "edit" },
+        effectiveSelector: { access: "edit" },
+      });
+    }
+
+    const metadata = await json(
+      await h(request(RECIPIENT, "/sync/shares/share-existing")),
+    );
+    expect(metadata).toMatchObject({
+      grantId: "grant-0",
+      access: "edit",
+    });
+
+    const received = (
+      await json(await h(request(RECIPIENT, "/sync/shares")))
+    ).received as Array<Record<string, unknown>>;
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      shareId: "share-existing",
+      grantId: "grant-0",
+      access: "edit",
+    });
+  });
+
+  it("keeps independent authority after revoking a parent link", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const { dependentGrantId, linkGrantId } =
+      await seedIndependentEditAndDependentView(storage, h);
+
+    const revoked = await h(
+      request(
+        OWNER,
+        "/sync/shares/share-existing/revoke",
+        jsonBody({ grantId: linkGrantId }),
+      ),
+    );
+    expect(revoked.status).toBe(200);
+    expect(storage.getShareGrant(dependentGrantId)).toMatchObject({ status: "revoked" });
+    expect(storage.getShareGrant("grant-0")).toMatchObject({
+      status: "active",
+      access: "edit",
+    });
+    for (const action of ["append", "propose"] as const) {
+      expect(
+        authorizeShareAction({
+          storage,
+          actorUserId: RECIPIENT,
+          shareId: "share-existing",
+          action,
+        }),
+        action,
+      ).toMatchObject({
+        ok: true,
+        grant: { grantId: "grant-0", access: "edit" },
+      });
+    }
+    expect(
+      await json(await h(request(RECIPIENT, "/sync/shares/share-existing"))),
+    ).toMatchObject({
+      grantId: "grant-0",
+      access: "edit",
     });
   });
 

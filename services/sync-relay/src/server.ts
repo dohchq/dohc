@@ -696,14 +696,31 @@ export function createSyncRelayHandler({
             .filter((row) => row.grant.principalKind !== "link")
             .map((row) => shareSummary(row, "granted")),
         );
+        const receivedByShare = new Map<string, SyncRelayShareWithGrantRow[]>();
+        for (const row of storage
+          .listSharesReceivedBy(actor.userId)
+          .filter((candidate) => candidate.grant.principalKind !== "link")) {
+          const rows = receivedByShare.get(row.share.shareId);
+          if (rows) rows.push(row);
+          else receivedByShare.set(row.share.shareId, [row]);
+        }
         const receivedRows = await Promise.all(
-          storage
-            .listSharesReceivedBy(actor.userId)
-            .filter((row) => row.grant.principalKind !== "link")
-            .map(async (row) => ({
+          [...receivedByShare.values()].map(async (rows) => {
+            const fallback = rows[0]!;
+            const effective = authorizeShareAction({
+              storage,
+              actorUserId: actor.userId,
+              shareId: fallback.share.shareId,
+              action: "read",
+            });
+            const row = effective.ok
+              ? { share: effective.share, grant: effective.grant }
+              : fallback;
+            return {
               row,
               summary: await shareSummary(row, "received"),
-            })),
+            };
+          }),
         );
         // Re-evaluate AFTER the async display-name lookups, immediately before
         // serialization. A pre-provisioned wire that became an agent channel
@@ -796,7 +813,7 @@ export function createSyncRelayHandler({
           throw notFound();
         }
         const input = await readOptionalJsonObject(request);
-        if (Object.keys(input).length > 0) {
+        if (input !== null) {
           const grantId = parseShareId(
             typeof input.grantId === "string" ? input.grantId : undefined,
           );
@@ -2148,9 +2165,11 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
   return value as Record<string, unknown>;
 }
 
-async function readOptionalJsonObject(request: Request): Promise<Record<string, unknown>> {
+async function readOptionalJsonObject(
+  request: Request,
+): Promise<Record<string, unknown> | null> {
   const text = await request.text();
-  if (text.length === 0) return {};
+  if (text.length === 0) return null;
   let value: unknown;
   try {
     value = JSON.parse(text);

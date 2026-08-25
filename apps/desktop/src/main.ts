@@ -6303,7 +6303,6 @@ function registerIpcHandlers(
     const input = RevokeRelaySharePayload.parse(payload);
     await relayShareJson(`/sync/shares/${encodeURIComponent(input.shareId)}/revoke`, {
       method: "POST",
-      body: JSON.stringify({}),
     });
     return undefined;
   });

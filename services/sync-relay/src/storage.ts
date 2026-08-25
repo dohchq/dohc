@@ -338,10 +338,10 @@ export interface SyncRelayStorage {
   // of grants claimed.
   claimPendingSharesForEmail(email: string, userId: string): number;
   getShare(shareId: string): SyncRelayShareRow | null;
-  getShareGrantForRecipient(
+  listActiveShareGrantsForRecipient(
     shareId: string,
     recipientUserId: string,
-  ): SyncRelayShareGrantRow | null;
+  ): SyncRelayShareGrantRow[];
   listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[];
   // Received listings exclude revoked shares entirely: after revocation the
   // recipient must not be able to read even the share's metadata (paths,
@@ -2578,22 +2578,21 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return row ? rowToShareRow(row) : null;
   }
 
-  getShareGrantForRecipient(
+  listActiveShareGrantsForRecipient(
     shareId: string,
     recipientUserId: string,
-  ): SyncRelayShareGrantRow | null {
-    const row = this.db
+  ): SyncRelayShareGrantRow[] {
+    return this.db
       .prepare(
         `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
                 access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
          FROM sync_relay_share_grants
          WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?
-         ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END,
-                  created_at_ms DESC, grant_id
-         LIMIT 1`,
+           AND status = 'active'
+         ORDER BY created_at_ms DESC, grant_id`,
       )
-      .get(shareId, recipientUserId);
-    return row ? rowToShareGrantRow(row) : null;
+      .all(shareId, recipientUserId)
+      .map(rowToShareGrantRow);
   }
 
   listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[] {

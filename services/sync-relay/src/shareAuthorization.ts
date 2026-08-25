@@ -26,7 +26,7 @@ type ShareAuthorizationStorage = Pick<
   | "findChannelCreateKind"
   | "getShare"
   | "getShareGrant"
-  | "getShareGrantForRecipient"
+  | "listActiveShareGrantsForRecipient"
   | "workspaceIsOwnedBy"
 >;
 
@@ -71,20 +71,34 @@ export function authorizeShareAction(
 ): ShareAuthorizationResult<ShareSelector>;
 export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult;
 export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult {
-  const grant = input.storage.getShareGrantForRecipient(input.shareId, input.actorUserId);
-  if (
-    !grant ||
-    grant.shareId !== input.shareId
-  ) {
-    return { ok: false, reason: "gauntlet" };
+  const grants = input.storage.listActiveShareGrantsForRecipient(
+    input.shareId,
+    input.actorUserId,
+  );
+  let authorized: AuthorizedShareAction | null = null;
+  let denied = false;
+  for (const grant of grants) {
+    if (grant.shareId !== input.shareId) continue;
+    const result = authorizeShareGrantAction({
+      storage: input.storage,
+      grantId: grant.grantId,
+      action: input.action,
+      principalKind: "user",
+      principalUserId: input.actorUserId,
+    });
+    if (!result.ok) {
+      denied ||= result.reason === "denied";
+      continue;
+    }
+    if (
+      authorized === null ||
+      effectiveAccessRank(result.effectiveSelector) >
+        effectiveAccessRank(authorized.effectiveSelector)
+    ) {
+      authorized = result;
+    }
   }
-  return authorizeShareGrantAction({
-    storage: input.storage,
-    grantId: grant.grantId,
-    action: input.action,
-    principalKind: "user",
-    principalUserId: input.actorUserId,
-  });
+  return authorized ?? { ok: false, reason: denied ? "denied" : "gauntlet" };
 }
 
 export function authorizeLinkShareAction(
@@ -184,4 +198,11 @@ function accessAtMost(access: string, ceiling: string): boolean {
   const accessIndex = shareAccessRank(access);
   const ceilingIndex = shareAccessRank(ceiling);
   return accessIndex >= 0 && ceilingIndex >= 0 && accessIndex <= ceilingIndex;
+}
+
+function effectiveAccessRank(selector: AnyShareSelector): number {
+  if (isChatChannelSelector(selector)) {
+    return selector.access === "read-write" ? 1 : 0;
+  }
+  return shareAccessRank(selector.access);
 }

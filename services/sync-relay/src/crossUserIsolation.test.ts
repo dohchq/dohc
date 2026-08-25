@@ -578,7 +578,9 @@ describe("MU-C5 · revocation closes read AND append byte-identically", () => {
       ).status,
     ).toBe(200);
 
-    const revoke = await h(request(OWNER, `/sync/shares/${shareId}/revoke`, jsonBody({})));
+    const revoke = await h(
+      request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }),
+    );
     expect(revoke.status).toBe(200);
 
     const absentRead = await denialBytes(await h(request(MEMBER, "/sync/shares/never-existed")));
