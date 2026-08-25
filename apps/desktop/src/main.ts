@@ -2137,9 +2137,8 @@ async function runSharedChannelSyncPass(
       token: syncCredentials.token,
       fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
     };
-    const daemonRelay = relayClientForWorkspace({
-      workspaceId: entry.workspaceId,
-      rootPath: entry.rootPath,
+    const daemonRelay = receivedShareEngine.relayForRegistered({
+      ...entry,
       relay,
     });
     const result = await syncJoinedSharedChannels({
@@ -2539,12 +2538,13 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
 // Linked Chats (PR 0M-5): one lazy Rust-backed store per workspace.
 const linkedChatStores = new Map<string, DesktopLinkedChatStore>();
 function linkedChatStoreFor(workspace: EngineWorkspace): DesktopLinkedChatStore {
+  const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);
   const existing = linkedChatStores.get(workspace.workspaceId);
   if (existing) return existing;
   if (!rustEngineWorkspaceSessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
   }
-  const store = createDesktopLinkedChatStore(workspace, {
+  const store = createDesktopLinkedChatStore(engineWorkspace, {
     sessions: rustEngineWorkspaceSessions,
   });
   linkedChatStores.set(workspace.workspaceId, store);
@@ -2590,8 +2590,9 @@ async function engineSearchIndexFor(
 ): Promise<{ versionId: string; files: { objectId: string; path: string }[] } | null> {
   const sessions = rustEngineWorkspaceSessions;
   if (!sessions) return null;
+  const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);
   return await sessions.run(
-    workspace,
+    engineWorkspace,
     async (binding) => {
       const adapter = new VersionedLiveAdapter(binding.client, binding.workspace, {
         workspaceId: workspace.workspaceId,
@@ -4216,6 +4217,14 @@ const receivedShareEngine = createReceivedShareEngineAccess({
     return rustEngineRelayClient;
   },
 });
+
+function engineWorkspaceForRegistryIdentity(
+  workspace: EngineWorkspace,
+): EngineWorkspace {
+  const registered = findWorkspace(workspace.workspaceId);
+  if (!registered || registered.rootPath !== workspace.rootPath) return workspace;
+  return receivedShareEngine.workspaceForRegistered(registered);
+}
 
 function resolveShareViewFilesTarget(
   target: ShareViewFilesTarget,
@@ -6008,8 +6017,7 @@ function registerIpcHandlers(
       await engineDaemonStartup;
       const sessions = requireEngineSessions();
       workspaceSecretState = await readWorkspaceSecretState(
-        workspace.rootPath,
-        workspace.workspaceId,
+        receivedShareEngine.workspaceForRegistered(workspace),
         sessions,
       );
     }
@@ -6058,6 +6066,10 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = CloudEnableSyncPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
+    // A received share replicates through its pinned share lane. Enrolling its
+    // projection as an owned workspace would claim someone else's filtered
+    // copy and creates another engine-open path that has no reason to exist.
+    assertWritableWorkspace(workspace);
     const credentials = await loadAndCacheCurrentCredentials();
     if (!credentials) throw new Error("Sign in to dohc Cloud first");
     if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
@@ -6089,8 +6101,7 @@ function registerIpcHandlers(
         throw new Error("Rust engine workspace sessions are unavailable.");
       }
       const dataKey = await readWorkspaceDataKeyForEnrollment(
-        workspace.rootPath,
-        workspace.workspaceId,
+        receivedShareEngine.workspaceForRegistered(workspace),
         sessions,
       );
       await enrollWorkspaceKeyEnvelope({
@@ -10234,7 +10245,7 @@ function registerIpcHandlers(
           throw new Error("Rust engine workspace sessions are unavailable.");
         }
         const results = await sessions.run(
-          workspace,
+          engineWorkspaceForRegistryIdentity(workspace),
           async (binding) => {
             const requester = new WorkspaceDaemonRequester(binding.client);
             return await queryWorkspaceSearchDaemon({
@@ -11172,6 +11183,13 @@ async function startRustEngineDaemon(): Promise<boolean> {
       relayTransportRoutes,
     );
     rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource);
+    // Existing received shares can ask for cloud status as soon as the daemon
+    // startup promise resolves. Pin all of them before that happens, so even a
+    // sibling that later reconstructs a plain descriptor remains
+    // capture-disabled on its first workspace.open.
+    for (const workspace of listWorkspaces()) {
+      receivedShareEngine.workspaceForRegistered(workspace);
+    }
     rustEngineRelayClient = new EngineRelayClient({
       sessions: rustEngineWorkspaceSessions,
       routes: relayTransportRoutes,

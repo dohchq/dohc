@@ -18,6 +18,8 @@ import {
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
 } from "./workspaceSecretEnrollmentState";
+import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
+import type { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 
 const WORKSPACE_ID = "workspace-secret-enrollment-state";
@@ -72,11 +74,61 @@ describe("desktop workspace secret enrollment state", () => {
     });
 
     await expect(
-      readWorkspaceSecretState(root, WORKSPACE_ID, sessions),
+      readWorkspaceSecretState(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ),
     ).resolves.toBe("none");
     expect(daemon.requests.at(-1)).toMatchObject({
       method: "secrets.stateExists",
       params: { workspaceId: WORKSPACE_ID },
+    });
+    const open = daemon.requests.find(
+      (request) => request.method === "workspace.open",
+    );
+    expect(open?.params).not.toHaveProperty("captureMode");
+    await sessions.closeAll();
+  });
+
+  it("keeps a reopened received share capture-disabled before mount-time cloud status", async () => {
+    const root = await tempRoot();
+    await createEngineDb(root);
+    const daemon = new SecretStateDaemon();
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => daemon,
+    });
+    const access = createReceivedShareEngineAccess({
+      sessions: () => sessions,
+      relayClient: () => {
+        throw new Error("cloud status must not open a relay client");
+      },
+      createStores: (() => {
+        throw new Error("cloud status must not create capture stores");
+      }) as unknown as typeof createCaptureLiveStores,
+    });
+
+    // Startup resolves the registry entry through the received-share owner.
+    // The status reader below deliberately reconstructs a plain descriptor,
+    // modeling any sibling path that forgets the share flag. The session pin
+    // must still make the first workspace.open capture-disabled.
+    access.workspaceForRegistered({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      shareView: null,
+    });
+    await readWorkspaceSecretState(
+      { workspaceId: WORKSPACE_ID, rootPath: root },
+      sessions,
+    );
+
+    const opens = daemon.requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(opens).toHaveLength(1);
+    expect(opens[0]?.params).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      rootDir: root,
+      captureMode: "none",
     });
     await sessions.closeAll();
   });
@@ -93,11 +145,13 @@ describe("desktop workspace secret enrollment state", () => {
     await installWorkspaceDataKey(root, key);
 
     await expect(
-      readWorkspaceSecretState(root, WORKSPACE_ID, sessions),
+      readWorkspaceSecretState(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ),
     ).resolves.toBe("protected-key-present");
     const loaded = await readWorkspaceDataKeyForEnrollment(
-      root,
-      WORKSPACE_ID,
+      { workspaceId: WORKSPACE_ID, rootPath: root },
       sessions,
     );
     expect(loaded).toEqual(key);
@@ -120,7 +174,10 @@ describe("desktop workspace secret enrollment state", () => {
       currentClient: () => daemon,
     });
 
-    await readWorkspaceSecretState(forwardSlashed, WORKSPACE_ID, sessions);
+    await readWorkspaceSecretState(
+      { workspaceId: WORKSPACE_ID, rootPath: forwardSlashed },
+      sessions,
+    );
 
     const open = daemon.requests.find(
       (request) => request.method === "workspace.open",
@@ -137,11 +194,17 @@ describe("desktop workspace secret enrollment state", () => {
     });
 
     await expect(
-      readWorkspaceSecretState(root, WORKSPACE_ID, sessions),
+      readWorkspaceSecretState(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ),
     ).resolves.toBe("none");
     expect(daemon.requests).toEqual([]);
     await expect(
-      readWorkspaceDataKeyForEnrollment(root, WORKSPACE_ID, sessions),
+      readWorkspaceDataKeyForEnrollment(
+        { workspaceId: WORKSPACE_ID, rootPath: root },
+        sessions,
+      ),
     ).resolves.toBeNull();
     expect(daemon.requests).toEqual([]);
     expect(existsSync(join(root, SECRET_FILE_STORE_RELATIVE_PATH))).toBe(false);

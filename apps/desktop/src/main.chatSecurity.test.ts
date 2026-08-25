@@ -25,7 +25,10 @@ describe("main-process chat authorization", () => {
     );
     const factory = mainSource.slice(factoryStart, factoryEnd);
 
-    expect(factory).toContain("createDesktopLinkedChatStore(workspace, {");
+    expect(factory).toContain(
+      "const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);",
+    );
+    expect(factory).toContain("createDesktopLinkedChatStore(engineWorkspace, {");
     expect(factory).toContain("sessions: rustEngineWorkspaceSessions");
     expect(factory).not.toContain("createLinkedChatStore(");
   });
@@ -199,6 +202,9 @@ describe("main-process chat authorization", () => {
     expect(mainSource).not.toContain("pinLegacyWorkspaceRemotesForCurrentAccount");
     expect(handlerSource("cloudEnableSync")).toContain(
       "syncEnrollmentRemoteWorkspaceId(",
+    );
+    expect(handlerSource("cloudEnableSync")).toContain(
+      "assertWritableWorkspace(workspace);",
     );
     expect(handlerSource("cloudEnableSync")).toContain(
       "workspaceId: remoteWorkspaceId",
