@@ -134,10 +134,15 @@ async function resolveWorkspaceFileTarget(
 }
 
 /** Resolve a not-yet-created disk target to the path whose identity it uses. */
+export interface WorkspaceMaterializePath {
+  requestedPath: string;
+  resolvedPath: string;
+}
+
 export async function resolveWorkspaceMaterializePath(
   rootPath: string,
   relativePath: string,
-): Promise<string> {
+): Promise<WorkspaceMaterializePath> {
   const validated = validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     throw new Error(
@@ -151,7 +156,10 @@ export async function resolveWorkspaceMaterializePath(
     label: "Materialize path",
     access: "write",
   });
-  return resolvedPath.replaceAll("\\", "/");
+  return {
+    requestedPath: validated.normalized,
+    resolvedPath: resolvedPath.replaceAll("\\", "/"),
+  };
 }
 
 export async function resolveWorkspaceFile(
@@ -1176,26 +1184,29 @@ export async function writeWorkspaceAsset(
 ): Promise<void> {
   await workspaceOperationScheduler.staleSensitiveShared(
     rootPath,
-    (lease) =>
-      writeWorkspaceAssetInLease(rootPath, lease, relativePath, bytes),
+    async (lease) => {
+      const path = await resolveWorkspaceMaterializePath(rootPath, relativePath);
+      await writeWorkspaceAssetInLease(rootPath, lease, path, bytes);
+    },
   );
 }
 
 export async function writeWorkspaceAssetInLease(
   rootPath: string,
   lease: WorkspaceOperationLease,
-  relativePath: string,
+  target: WorkspaceMaterializePath,
   bytes: Uint8Array,
 ): Promise<void> {
   workspaceOperationScheduler.assertActiveLease(rootPath, lease);
-  const path = normalizeWorkspaceImageAssetPath(relativePath);
+  const requestedPath = normalizeWorkspaceImageAssetPath(target.requestedPath);
+  const resolvedPath = normalizeWorkspaceImageAssetPath(target.resolvedPath);
   if (bytes.byteLength > MAX_ASSET_WRITE_BYTES) {
     throw new Error(
       `Asset exceeds the ${MAX_ASSET_WRITE_BYTES}-byte write limit`,
     );
   }
   try {
-    await writeContainedFile(rootPath, path, bytes, "asset", {
+    await writeContainedFile(rootPath, resolvedPath, bytes, "asset", {
       exclusive: true,
     });
     return;
@@ -1203,14 +1214,18 @@ export async function writeWorkspaceAssetInLease(
     if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
   }
 
-  const existingLeaf = await lstat(join(rootPath, path));
+  const existingLeaf = await lstat(join(rootPath, requestedPath));
   if (!existingLeaf.isFile()) {
     throw new Error(
-      `An image attachment already exists at ${path} and is not a regular file.`,
+      `An image attachment already exists at ${requestedPath} and is not a regular file.`,
     );
   }
-  const target = await resolveWorkspaceFile(rootPath, path, "read");
-  const handle = await open(target.realTarget, "r");
+  const resolvedTarget = await resolveWorkspaceFile(
+    rootPath,
+    resolvedPath,
+    "read",
+  );
+  const handle = await open(resolvedTarget.realTarget, "r");
   try {
     const existing = await readFileHandleExact(handle, MAX_ASSET_WRITE_BYTES);
     if (Buffer.from(bytes).equals(existing.bytes)) return;
@@ -1225,7 +1240,7 @@ export async function writeWorkspaceAssetInLease(
     await handle.close();
   }
   throw new Error(
-    `An image attachment already exists at ${path} with different content.`,
+    `An image attachment already exists at ${requestedPath} with different content.`,
   );
 }
 

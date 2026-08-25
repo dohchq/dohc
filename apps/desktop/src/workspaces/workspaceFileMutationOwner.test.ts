@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   access,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -952,6 +953,32 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(await readFile(join(test.rootPath, "assets/pixel.png"))).toEqual(
       Buffer.from([1]),
     );
+  });
+
+  it("refuses an identical asset write through a symlink leaf", async () => {
+    const test = await harness();
+    await mkdir(join(test.rootPath, "assets"));
+    const target = join(test.rootPath, "assets/target.png");
+    const alias = join(test.rootPath, "assets/pixel.png");
+    await writeFile(target, new Uint8Array([1, 2, 3]));
+    await symlink(target, alias);
+
+    await expect(
+      test.owner.writeAsset(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "assets/pixel.png",
+        bytes: new Uint8Array([1, 2, 3]),
+      }),
+    ).rejects.toThrow(
+      "An image attachment already exists at assets/pixel.png and is not a regular file.",
+    );
+
+    expect(test.ownsDocument).toHaveBeenCalledWith(
+      test.workspace.workspaceId,
+      "assets/target.png",
+    );
+    expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
   });
 
   it("settles Y.Doc work before a recoverable fallback delete, then marks it deleted", async () => {

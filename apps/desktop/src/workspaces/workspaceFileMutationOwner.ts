@@ -478,14 +478,14 @@ export function createWorkspaceFileMutationOwner<
             workspace.rootPath,
             requestedPath,
           );
-          if (liveDocumentKindForPath(path) !== null) {
+          if (liveDocumentKindForPath(path.resolvedPath) !== null) {
             throw new Error(
               "A live document cannot be replaced by an image attachment.",
             );
           }
           await dependencies.yDocSessions.withDocumentUnowned(
             workspace.workspaceId,
-            path,
+            path.resolvedPath,
             () =>
               writeWorkspaceAssetInLease(
                 workspace.rootPath,
