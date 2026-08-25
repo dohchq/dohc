@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
-import {
-  createTrustedPluginIpcRegistrar,
-  registerPluginIpcHandlers,
-} from "./pluginIpcHandlers";
+import { registerPluginIpcHandlers } from "./pluginIpcHandlers";
+import type { PluginPipeline } from "../plugins/PluginPipeline";
+import type { RegisteredPlugin } from "../plugins/pluginPanelRegistration";
 
 const directOperations = vi.hoisted(() => ({
   addOffer: vi.fn(),
@@ -301,9 +300,10 @@ function createHarness() {
       error: actionFailure.error,
     })),
   };
-  const pipelines = new Map([[workspace.workspaceId, pipeline]]);
-  const registrations = new Map([
-    [workspace.workspaceId, new Map([[pluginStatus.id, registration]])],
+  const pipelineForHandlers = pipeline as unknown as PluginPipeline;
+  const pipelines = new Map([[workspace.workspaceId, pipelineForHandlers]]);
+  const registrations = new Map<string, Map<string, RegisteredPlugin>>([
+    [workspace.workspaceId, new Map([[pluginStatus.id, registration as RegisteredPlugin]])],
   ]);
 
   let panelAdmission: { assertAllowed(): void; acquireHostLease(): Promise<unknown> } | null = null;
@@ -401,28 +401,26 @@ function createHarness() {
   });
   const ensurePipeline = vi.fn(async () => {
     log.push("ensure-pipeline");
-    return pipeline;
+    return pipelineForHandlers;
   });
 
   registerPluginIpcHandlers({
-    registrar: createTrustedPluginIpcRegistrar(
-      {
-        handle: (
-          channel: string,
-          handler: (
-            capturedEvent: typeof event,
-            payload: unknown,
-          ) => unknown | Promise<unknown>,
-        ) => {
-          if (handlers.has(channel)) throw new Error(`Duplicate handler: ${channel}`);
-          handlers.set(channel, handler);
-        },
+    registrar: {
+      handle: (
+        channel: string,
+        handler: (
+          capturedEvent: typeof event,
+          payload: unknown,
+        ) => unknown | Promise<unknown>,
+      ) => {
+        if (handlers.has(channel)) throw new Error(`Duplicate handler: ${channel}`);
+        handlers.set(channel, handler);
       },
-      () => {
-        log.push("trust");
-        if (!state.trusted) throw new Error("Untrusted sender");
-      },
-    ),
+    },
+    assertTrustedSender: () => {
+      log.push("trust");
+      if (!state.trusted) throw new Error("Untrusted sender");
+    },
     workspaces: {
       activeWorkspaceIdBySender,
       assertWritable,
@@ -433,8 +431,8 @@ function createHarness() {
     ensurePipeline,
     registrations,
     surfaces,
-    platform,
-  } as never);
+    platform: platform as never,
+  });
 
   const invoke = async (channel: string, payload = validPayloads[channel]) => {
     const handler = handlers.get(channel);
@@ -526,6 +524,7 @@ describe("plugin IPC handlers", () => {
       "require-workspace",
       "assert-writable",
       "ensure-pipeline",
+      "assert-writable",
       "install",
     ]);
 
@@ -549,13 +548,13 @@ describe("plugin IPC handlers", () => {
     "revalidates write authority after pipeline startup for %s",
     async (channel, effect) => {
       const harness = createHarness();
-      const pipelineReady = deferred<typeof harness.pipeline>();
+      const pipelineReady = deferred<PluginPipeline>();
       harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
 
       const request = harness.invoke(channel);
       await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
       harness.state.writable = false;
-      pipelineReady.resolve(harness.pipeline);
+      pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
 
       await expect(request).resolves.toMatchObject({ ok: false });
       expect(harness.assertWritable).toHaveBeenCalledTimes(2);
@@ -565,13 +564,13 @@ describe("plugin IPC handlers", () => {
 
   it("revalidates write authority after command pipeline startup", async () => {
     const harness = createHarness();
-    const pipelineReady = deferred<typeof harness.pipeline>();
+    const pipelineReady = deferred<PluginPipeline>();
     harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
 
     const request = harness.invoke(CHANNELS.invokePluginCommand);
     await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
     harness.state.writable = false;
-    pipelineReady.resolve(harness.pipeline);
+    pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
 
     await expect(request).rejects.toThrow("read-only");
     expect(harness.assertWritable).toHaveBeenCalledTimes(2);
@@ -795,6 +794,7 @@ describe("plugin IPC handlers", () => {
       "require-workspace",
       "assert-writable",
       "ensure-pipeline",
+      "assert-writable",
       "disable",
       "suspend:example-plugin",
       "disable-result",
@@ -815,6 +815,7 @@ describe("plugin IPC handlers", () => {
       "require-workspace",
       "assert-writable",
       "ensure-pipeline",
+      "assert-writable",
       "uninstall",
       "suspend:example-plugin",
       "uninstall-result",

@@ -97,30 +97,6 @@ interface PluginIpcRegistrar<TEvent> {
   handle(channel: string, handler: PluginIpcHandler<TEvent>): void;
 }
 
-const trustedPluginIpcRegistrarBrand: unique symbol = Symbol(
-  "trustedPluginIpcRegistrar",
-);
-
-interface TrustedPluginIpcRegistrar<TEvent>
-  extends PluginIpcRegistrar<TEvent> {
-  readonly [trustedPluginIpcRegistrarBrand]: true;
-}
-
-export function createTrustedPluginIpcRegistrar<TEvent>(
-  registrar: PluginIpcRegistrar<TEvent>,
-  assertTrustedSender: (event: TEvent) => void,
-): TrustedPluginIpcRegistrar<TEvent> {
-  return {
-    [trustedPluginIpcRegistrarBrand]: true,
-    handle(channel, handler) {
-      registrar.handle(channel, (event, payload) => {
-        assertTrustedSender(event);
-        return handler(event, payload);
-      });
-    },
-  };
-}
-
 type PluginIpcSurfaces<TView extends PluginWebAppViewLike> = Pick<
   PluginSurfaces<TView>,
   | "applyWebAppBounds"
@@ -166,7 +142,8 @@ interface RegisterPluginIpcHandlersOptions<
   TWorkspace extends PluginIpcWorkspace,
   TView extends PluginWebAppViewLike,
 > {
-  registrar: TrustedPluginIpcRegistrar<TEvent>;
+  registrar: PluginIpcRegistrar<TEvent>;
+  assertTrustedSender(event: TEvent): void;
   workspaces: {
     activeWorkspaceIdBySender: ReadonlyMap<number, string>;
     assertWritable(workspace: TWorkspace): void;
@@ -210,7 +187,8 @@ export function registerPluginIpcHandlers<
   TView extends PluginWebAppViewLike,
 >(options: RegisterPluginIpcHandlersOptions<TEvent, TSender, TWorkspace, TView>): void {
   const {
-    registrar,
+    registrar: rawRegistrar,
+    assertTrustedSender,
     workspaces,
     rendererGeneration,
     pipelines,
@@ -219,6 +197,14 @@ export function registerPluginIpcHandlers<
     surfaces,
     platform,
   } = options;
+  const registrar: PluginIpcRegistrar<TEvent> = {
+    handle(channel, handler) {
+      rawRegistrar.handle(channel, (event, payload) => {
+        assertTrustedSender(event);
+        return handler(event, payload);
+      });
+    },
+  };
 
   const createReadableActiveWorkspacePolicy = (
     event: TEvent,
@@ -327,8 +313,10 @@ export function registerPluginIpcHandlers<
     workspaceId: string,
   ) => {
     const policy = createWritableActiveWorkspacePolicy(event, workspaceId);
+    const pipeline = await ensurePipeline(policy.workspace);
+    policy.revalidate();
     return {
-      pipeline: await ensurePipeline(policy.workspace),
+      pipeline,
       workspace: policy.workspace,
     };
   };
@@ -624,7 +612,6 @@ export function registerPluginIpcHandlers<
     const input = ListOfferedPluginsPayload.parse(payload);
     try {
       const { pipeline, workspace } = await activePipeline(event, input.workspaceId);
-      workspaces.assertWritable(workspace);
       const existingPluginIds = new Set(
         pipeline.list().map((plugin) => plugin.id),
       );
@@ -646,7 +633,6 @@ export function registerPluginIpcHandlers<
     const input = AddOfferedPluginPayload.parse(payload);
     try {
       const { pipeline, workspace } = await activePipeline(event, input.workspaceId);
-      workspaces.assertWritable(workspace);
       await pipeline.handleWatcherEvents([
         { operation: "update", path: "plugins" },
       ]);

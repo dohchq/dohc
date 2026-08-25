@@ -280,10 +280,7 @@ import {
 } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
-import {
-  createTrustedPluginIpcRegistrar,
-  registerPluginIpcHandlers,
-} from "./ipc/pluginIpcHandlers";
+import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -7335,14 +7332,12 @@ function registerIpcHandlers(
     CreatedWorkspace,
     WebContentsView
   >({
-    registrar: createTrustedPluginIpcRegistrar(
-      {
-        handle: (channel, handler) => {
-          ipcMain.handle(channel, handler);
-        },
+    registrar: {
+      handle: (channel, handler) => {
+        ipcMain.handle(channel, handler);
       },
-      assertTrustedSender,
-    ),
+    },
+    assertTrustedSender,
     workspaces: {
       activeWorkspaceIdBySender,
       assertWritable: assertWritableWorkspace,
