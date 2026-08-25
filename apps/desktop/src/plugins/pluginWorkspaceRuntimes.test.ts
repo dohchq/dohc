@@ -264,6 +264,32 @@ describe("plugin workspace runtimes", () => {
     expect(harness.created[0]?.events.dispose).toHaveBeenCalledOnce();
   });
 
+  it("retains a failed teardown and refuses a successor runtime", async () => {
+    const cleanupFailure = new Error("plugin descendants are still live");
+    const harness = createHarness({
+      create: () => makeParts({
+        dispose: async () => {
+          throw cleanupFailure;
+        },
+      }),
+    });
+    await harness.owner.ensure(workspace());
+
+    const stopping = harness.owner.stop("workspace-1");
+    const reopening = harness.owner.ensure(workspace());
+    const repeatedStop = harness.owner.stop("workspace-1");
+    const closing = harness.owner.close();
+
+    await Promise.all([
+      expect(stopping).rejects.toBe(cleanupFailure),
+      expect(reopening).rejects.toBe(cleanupFailure),
+      expect(repeatedStop).rejects.toBe(cleanupFailure),
+      expect(closing).rejects.toBe(cleanupFailure),
+    ]);
+    expect(harness.created).toHaveLength(1);
+    expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
+  });
+
   it("stops nothing when the workspace has no runtime", async () => {
     const harness = createHarness();
 

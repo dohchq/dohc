@@ -184,7 +184,7 @@ export class PluginWorkspaceRuntimes<
       if (slot) {
         slot.record.assertSameRoot(workspaceRoot);
         if (slot.kind === "stopping") {
-          await slot.stop.catch(() => undefined);
+          await slot.stop;
           continue;
         }
         const record = slot.record;
@@ -313,12 +313,9 @@ export class PluginWorkspaceRuntimes<
     workspaceId: string,
     slot: StoppingRuntimeSlot,
   ): Promise<void> {
-    try {
-      await slot.record.dispose();
-    } finally {
-      if (this.slots.get(workspaceId) === slot) {
-        this.slots.delete(workspaceId);
-      }
+    await slot.record.dispose();
+    if (this.slots.get(workspaceId) === slot) {
+      this.slots.delete(workspaceId);
     }
   }
 
