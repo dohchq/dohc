@@ -1,5 +1,8 @@
 import {
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -297,6 +300,43 @@ export interface RegistryEntry extends CreatedWorkspace {
   shareMounts?: ShareMountRecord[];
 }
 
+function fsyncAndClose(fd: number): void {
+  let syncFailed = false;
+  try {
+    fsyncSync(fd);
+  } catch (error) {
+    syncFailed = true;
+    throw error;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch (closeError) {
+      if (!syncFailed) throw closeError;
+    }
+  }
+}
+
+function writeAndSync(path: string, data: Buffer): void {
+  const fd = openSync(path, "w");
+  let writeFailed = false;
+  try {
+    writeFileSync(fd, data);
+  } catch (error) {
+    writeFailed = true;
+    throw error;
+  } finally {
+    if (writeFailed) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Keep the write failure.
+      }
+    } else {
+      fsyncAndClose(fd);
+    }
+  }
+}
+
 interface RegistryFile {
   version: 1;
   workspaces: RegistryEntry[];
@@ -352,14 +392,28 @@ export function createRegistryStore(registryFile: string) {
   }
 
   function write(registry: RegistryFile): void {
-    mkdirSync(dirname(registryFile), { recursive: true });
-    // Atomic: write a temp file then rename over the target so a crash or
-    // concurrent reader never sees a half-written registry.
+    const directory = dirname(registryFile);
+    mkdirSync(directory, { recursive: true });
+    // Flush the complete temp file before the atomic replacement. On POSIX,
+    // flush the directory entry too before publishing the new cache value.
+    // Node/libuv cannot fsync directory handles on Windows, where it returns
+    // EPERM, so the flushed file plus atomic rename is the strongest Node API.
     const tmp = `${registryFile}.tmp-${process.pid}`;
+    let replaced = false;
     try {
-      writeFileSync(tmp, `${JSON.stringify(registry, null, 2)}\n`);
+      writeAndSync(
+        tmp,
+        Buffer.from(`${JSON.stringify(registry, null, 2)}\n`),
+      );
       renameSync(tmp, registryFile);
+      replaced = true;
+      if (process.platform !== "win32") {
+        fsyncAndClose(openSync(directory, "r"));
+      }
     } catch (error) {
+      // A failed directory sync happens after replacement. Drop the old cache
+      // so the next read observes the file that rename made visible.
+      if (replaced) cache = null;
       // A failed write or rename must not leave this process's temp file
       // behind. Cleanup is best-effort because the persistence error is the
       // one the caller must receive.

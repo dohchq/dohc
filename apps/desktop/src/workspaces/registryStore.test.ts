@@ -1,4 +1,12 @@
-import { renameSync, unlinkSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,8 +28,13 @@ vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    closeSync: vi.fn(actual.closeSync),
+    fsyncSync: vi.fn(actual.fsyncSync),
+    openSync: vi.fn(actual.openSync),
+    readFileSync: vi.fn(actual.readFileSync),
     renameSync: vi.fn(actual.renameSync),
     unlinkSync: vi.fn(actual.unlinkSync),
+    writeFileSync: vi.fn(actual.writeFileSync),
   };
 });
 
@@ -36,12 +49,28 @@ const personal = {
 };
 
 beforeEach(async () => {
+  vi.mocked(closeSync).mockClear();
+  vi.mocked(fsyncSync).mockClear();
+  vi.mocked(openSync).mockClear();
+  vi.mocked(readFileSync).mockClear();
   vi.mocked(renameSync).mockClear();
   vi.mocked(unlinkSync).mockClear();
+  vi.mocked(writeFileSync).mockClear();
   const dir = await createTestScratch("dohc-registry-");
   registryPath = join(dir, "workspaces.json");
   store = createRegistryStore(registryPath);
 });
+
+function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  if (!descriptor) throw new Error("process.platform has no property descriptor");
+  Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", descriptor);
+  }
+}
 
 describe("share skip records", () => {
   const op = (originSeq: number) => ({
@@ -910,6 +939,180 @@ describe("registry store", () => {
         ownerUserId: "user-99",
       }),
     ).toThrow(renameFailure);
+  });
+
+  it("does not let a temp close failure mask the write failure", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const writeFailure = new Error("temp write refused");
+    vi.mocked(writeFileSync).mockImplementationOnce(() => {
+      throw writeFailure;
+    });
+    vi.mocked(closeSync).mockImplementationOnce((fd) => {
+      actual.closeSync(fd);
+      throw new Error("temp close refused");
+    });
+
+    expect(() => store.register(personal)).toThrow(writeFailure);
+    expect(fsyncSync).not.toHaveBeenCalled();
+    expect(renameSync).not.toHaveBeenCalled();
+    const leftovers = (await import("node:fs")).readdirSync(
+      join(registryPath, ".."),
+    ).filter((file) => file.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+  });
+
+  it("flushes the temp file and parent directory before publishing the cache", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let registryDuringDirectorySync: ReturnType<typeof store.list> | undefined;
+    vi.mocked(fsyncSync)
+      .mockImplementationOnce((fd) => actual.fsyncSync(fd))
+      .mockImplementationOnce(() => {
+        registryDuringDirectorySync = store.list();
+      });
+
+    withPlatform("linux", () => store.register(personal));
+
+    expect(writeFileSync).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.any(Buffer),
+    );
+    expect(openSync).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining(".tmp-"),
+      "w",
+    );
+    expect(openSync).toHaveBeenNthCalledWith(2, join(registryPath, ".."), "r");
+    expect(fsyncSync).toHaveBeenCalledTimes(2);
+    expect(closeSync).toHaveBeenCalledTimes(2);
+    expect(registryDuringDirectorySync).toEqual([]);
+    expect(store.list()).toEqual([personal]);
+
+    const tempOpenOrder = vi.mocked(openSync).mock.invocationCallOrder[0];
+    const writeOrder = vi.mocked(writeFileSync).mock.invocationCallOrder[0];
+    const fileSyncOrder = vi.mocked(fsyncSync).mock.invocationCallOrder[0];
+    const fileCloseOrder = vi.mocked(closeSync).mock.invocationCallOrder[0];
+    const renameOrder = vi.mocked(renameSync).mock.invocationCallOrder[0];
+    const directoryOpenOrder = vi.mocked(openSync).mock.invocationCallOrder[1];
+    const directorySyncOrder = vi.mocked(fsyncSync).mock.invocationCallOrder[1];
+    expect(tempOpenOrder).toBeLessThan(writeOrder ?? 0);
+    expect(writeOrder).toBeLessThan(fileSyncOrder ?? 0);
+    expect(fileSyncOrder).toBeLessThan(fileCloseOrder ?? 0);
+    expect(fileCloseOrder).toBeLessThan(renameOrder ?? 0);
+    expect(renameOrder).toBeLessThan(directoryOpenOrder ?? 0);
+    expect(directoryOpenOrder).toBeLessThan(directorySyncOrder ?? 0);
+  });
+
+  it("keeps cache and disk unchanged when the temp-file sync fails", async () => {
+    const original = {
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-original",
+      ownerUserId: "user-original",
+    };
+    const replacement = {
+      serverUrl: "https://other.dohc.example",
+      remoteWorkspaceId: "rw-replacement",
+      ownerUserId: "user-replacement",
+    };
+    store.register(personal);
+    store.setRemote(personal.workspaceId, original);
+    vi.mocked(renameSync).mockClear();
+
+    const syncFailure = new Error("temp sync refused");
+    vi.mocked(fsyncSync).mockImplementationOnce(() => {
+      throw syncFailure;
+    });
+
+    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(
+      syncFailure,
+    );
+
+    expect(renameSync).not.toHaveBeenCalled();
+    expect(store.find(personal.workspaceId)?.remote).toEqual(original);
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      original,
+    );
+    const leftovers = (await import("node:fs")).readdirSync(
+      join(registryPath, ".."),
+    ).filter((file) => file.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+
+    store.setRemote(personal.workspaceId, replacement);
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      replacement,
+    );
+  });
+
+  it("invalidates the cache when the parent-directory sync fails after rename", async () => {
+    const original = {
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-original",
+      ownerUserId: "user-original",
+    };
+    const replacement = {
+      serverUrl: "https://other.dohc.example",
+      remoteWorkspaceId: "rw-replacement",
+      ownerUserId: "user-replacement",
+    };
+    const retried = { ...replacement, remoteWorkspaceId: "rw-retried" };
+    store.register(personal);
+    store.setRemote(personal.workspaceId, original);
+    vi.mocked(readFileSync).mockClear();
+    vi.mocked(renameSync).mockClear();
+    vi.mocked(fsyncSync).mockClear();
+    vi.mocked(closeSync).mockClear();
+
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const syncFailure = new Error("directory sync refused");
+    const closeFailure = new Error("directory close refused");
+    vi.mocked(fsyncSync)
+      .mockImplementationOnce((fd) => actual.fsyncSync(fd))
+      .mockImplementationOnce(() => {
+        throw syncFailure;
+      });
+    vi.mocked(closeSync)
+      .mockImplementationOnce((fd) => actual.closeSync(fd))
+      .mockImplementationOnce((fd) => {
+        actual.closeSync(fd);
+        throw closeFailure;
+      });
+
+    expect(() =>
+      withPlatform("linux", () =>
+        store.setRemote(personal.workspaceId, replacement),
+      ),
+    ).toThrow(syncFailure);
+
+    expect(renameSync).toHaveBeenCalledOnce();
+    expect(closeSync).toHaveBeenCalledTimes(2);
+    expect(readFileSync).not.toHaveBeenCalled();
+    expect(store.find(personal.workspaceId)?.remote).toEqual(replacement);
+    expect(readFileSync).toHaveBeenCalledOnce();
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      replacement,
+    );
+    const leftovers = (await import("node:fs")).readdirSync(
+      join(registryPath, ".."),
+    ).filter((file) => file.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+
+    store.setRemote(personal.workspaceId, retried);
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      retried,
+    );
+  });
+
+  it("skips unsupported directory fsync on Windows", () => {
+    withPlatform("win32", () => store.register(personal));
+
+    expect(fsyncSync).toHaveBeenCalledOnce();
+    expect(openSync).toHaveBeenCalledOnce();
+    expect(openSync).toHaveBeenCalledWith(
+      expect.stringContaining(".tmp-"),
+      "w",
+    );
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)).toEqual(
+      personal,
+    );
   });
 
   it("persists the share's origin relay so refresh can reject a foreign relay (PR 18 gate fix)", () => {
