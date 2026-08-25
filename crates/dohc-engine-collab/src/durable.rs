@@ -696,7 +696,7 @@ where
         if guarded_marker.is_some_and(|marker| marker.head_update_seq > 0) {
             // A retry of the SAME first update after a timed-out commit must
             // dedupe, not refuse: check the blob before the guard.
-            if let Some(existing) = blob_seq_in_log(tx, key, &update_sha)? {
+            if let Some(existing) = blob_seq_in_log(tx, key, &update_sha, update)? {
                 return Ok(AppendOutcome {
                     seq: existing,
                     deduped: true,
@@ -809,15 +809,16 @@ fn append_local_update(
     actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
-    let base = load_for_replay_gate(conn, key)?;
-    crate::validate_replay_parity(&base, update)?;
-    if let Some(existing) = blob_seq_in_log(conn, key, sha)? {
+    // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
+    if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
             seq: existing,
             deduped: true,
             emit_outbound: false,
         });
     }
+    let base = load_for_replay_gate(conn, key)?;
+    crate::validate_replay_parity(&base, update)?;
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     Ok(AppendOutcome {
@@ -1821,7 +1822,7 @@ pub fn load_doc_from_connection(conn: &Connection, key: &DocKey) -> Result<Ydoc,
 
 /// Append one locally-produced update inside the caller's transaction — the
 /// transaction-composable core of [`record_local_update`]. Validates the
-/// bytes, runs the replay-parity gate, content-dedupes, and advances the
+/// bytes, content-dedupes, runs the replay-parity gate, and advances the
 /// head.
 pub fn record_update_in_tx(
     tx: &Transaction<'_>,
@@ -2442,20 +2443,53 @@ pub(crate) fn head_of(
     ))
 }
 
+/// The content-addressed dedup probe: the earliest un-folded log row already
+/// holding exactly these bytes. Both admission paths run it BEFORE the
+/// replay-parity gate: an in-log sha means the gate already admitted these
+/// bytes against the base they extended, and re-applying them is a CRDT no-op —
+/// re-gating against today's newer base could only spuriously refuse. Folded
+/// bytes (row pruned by compaction) miss the probe and take the full gate (the
+/// DEDUP SPAN in [`crate::replication`]'s module doc).
+///
+/// A hit acks only after re-reading the canonical stored blob and comparing it
+/// to the incoming `bytes`. The gate's lineage rebuild verifies every stored
+/// blob it reads, so before the hoist a rotted blob surfaced as
+/// [`CollabError::Corrupt`]; a probe that skipped this check would false-ack a
+/// dedup while the retry in hand carries the intact bytes, leaving the rot
+/// undetected.
 pub(crate) fn blob_seq_in_log(
     conn: &Connection,
     key: &DocKey,
     sha: &str,
+    bytes: &[u8],
 ) -> Result<Option<i64>, CollabError> {
-    conn.query_row(
-        "SELECT seq FROM ydoc_updates \
-         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-           AND update_blob_sha256 = ?4 ORDER BY seq ASC LIMIT 1",
-        rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
-        |r| r.get(0),
-    )
-    .optional()
-    .map_err(map_sql)
+    let seq: Option<i64> = conn
+        .query_row(
+            "SELECT seq FROM ydoc_updates \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+               AND update_blob_sha256 = ?4 ORDER BY seq ASC LIMIT 1",
+            rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    let Some(seq) = seq else { return Ok(None) };
+    let stored: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256 = ?1",
+            [sha],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(map_sql)?;
+    if stored.as_deref() != Some(bytes) {
+        return Err(CollabError::Corrupt {
+            reason: format!(
+                "dedup-matched Y.Doc blob {sha} is missing or failed integrity validation"
+            ),
+        });
+    }
+    Ok(Some(seq))
 }
 
 /// Insert one update row with `seq = head + 1` and advance the head, atomically
