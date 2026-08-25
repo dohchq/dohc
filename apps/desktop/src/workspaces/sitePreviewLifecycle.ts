@@ -48,7 +48,21 @@ type ExitedPreview = {
   logs: SiteLogEntry[];
 };
 
-type PreviewRecord = RunningPreview | ExitedPreview;
+type StoppingPreview = {
+  // A rejected stop is not proof that the process or server died. Keep the
+  // exact handle here so replacements cannot start over it. Concurrent calls
+  // share stopAttempt; a later call retries after a rejected attempt.
+  state: "stopping";
+  lastKnownState: "running" | "exited";
+  workspaceId: string;
+  siteRoot: string;
+  handle: SitePreviewHandle;
+  releaseOrigin: null;
+  logs: SiteLogEntry[];
+  stopAttempt: Promise<void> | null;
+};
+
+type PreviewRecord = RunningPreview | ExitedPreview | StoppingPreview;
 
 type PendingStart = {
   sequence: number;
@@ -88,6 +102,13 @@ export function createSitePreviewLifecycle(input: {
     if (!release) return;
     record.releaseOrigin = null;
     release();
+  };
+
+  const logsFor = (record: PreviewRecord): SiteLogEntry[] => {
+    if (record.state === "exited" || record.state === "stopping") {
+      return [...record.logs];
+    }
+    return "logs" in record.handle ? record.handle.logs() : [];
   };
 
   const removePending = (pending: PendingStart): void => {
@@ -173,8 +194,26 @@ export function createSitePreviewLifecycle(input: {
     });
   };
 
-  const stopHandle = async (handle: SitePreviewHandle): Promise<void> => {
-    await handle.stop();
+  const stopRetained = (
+    key: string,
+    record: StoppingPreview,
+  ): Promise<void> => {
+    if (record.stopAttempt) return record.stopAttempt;
+    const attempt = Promise.resolve()
+      .then(() => record.handle.stop())
+      .then(() => {
+        if (activePreviews.get(key) === record) activePreviews.delete(key);
+      })
+      .finally(() => {
+        if (
+          activePreviews.get(key) === record &&
+          record.stopAttempt === attempt
+        ) {
+          record.stopAttempt = null;
+        }
+      });
+    record.stopAttempt = attempt;
+    return attempt;
   };
 
   const stopCurrent = async (
@@ -184,12 +223,72 @@ export function createSitePreviewLifecycle(input: {
     const active = activePreviews.get(key);
     if (expected && active?.handle !== expected) return;
     if (!active) return;
-    activePreviews.delete(key);
-    try {
-      releaseOrigin(active);
-    } finally {
-      await stopHandle(active.handle);
+    if (active.state === "stopping") {
+      await stopRetained(key, active);
+      return;
     }
+    const release = active.releaseOrigin;
+    active.releaseOrigin = null;
+    const stopping: StoppingPreview = {
+      state: "stopping",
+      lastKnownState: active.state,
+      workspaceId: active.workspaceId,
+      siteRoot: active.siteRoot,
+      handle: active.handle,
+      releaseOrigin: null,
+      logs: logsFor(active),
+      stopAttempt: null,
+    };
+    activePreviews.set(key, stopping);
+    try {
+      release?.();
+    } finally {
+      await stopRetained(key, stopping);
+    }
+  };
+
+  const retainAndStop = async (
+    workspaceId: string,
+    siteRoot: string,
+    handle: SitePreviewHandle,
+  ): Promise<void> => {
+    const key = previewKey(workspaceId, siteRoot);
+    const active = activePreviews.get(key);
+    if (active) {
+      if (active.handle !== handle) {
+        throw new Error(
+          "A different site preview already owns this workspace and site.",
+        );
+      }
+      await stopCurrent(key, handle);
+      return;
+    }
+    const stopping: StoppingPreview = {
+      state: "stopping",
+      lastKnownState: "running",
+      workspaceId,
+      siteRoot,
+      handle,
+      releaseOrigin: null,
+      logs: "logs" in handle ? handle.logs() : [],
+      stopAttempt: null,
+    };
+    activePreviews.set(key, stopping);
+    await stopRetained(key, stopping);
+  };
+
+  const failAfterCleanup = async (
+    error: unknown,
+    cleanup: () => Promise<void>,
+  ): Promise<never> => {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      const message =
+        error instanceof Error ? error.message : "Site preview start failed.";
+      throw new AggregateError([error, cleanupError], message);
+    }
+    throw error;
   };
 
   const install = async (
@@ -198,11 +297,10 @@ export function createSitePreviewLifecycle(input: {
     handle: SitePreviewHandle,
   ): Promise<void> => {
     const key = previewKey(workspaceId, siteRoot);
-    let release: (() => void) | null = null;
     try {
       const releaseAllowedOrigin = input.allowOrigin(handle.url);
       let released = false;
-      release = () => {
+      const release = () => {
         if (released) return;
         released = true;
         releaseAllowedOrigin();
@@ -220,13 +318,11 @@ export function createSitePreviewLifecycle(input: {
       }
     } catch (error) {
       const current = activePreviews.get(key);
-      if (current?.handle === handle) activePreviews.delete(key);
-      try {
-        if (release) release();
-      } finally {
-        await stopHandle(handle).catch(() => undefined);
-      }
-      throw error;
+      await failAfterCleanup(error, () =>
+        current?.handle === handle
+          ? stopCurrent(key, handle)
+          : retainAndStop(workspaceId, siteRoot, handle),
+      );
     }
   };
 
@@ -261,17 +357,18 @@ export function createSitePreviewLifecycle(input: {
       return await runInKeyedLane(startLanes, key, async () => {
         requireCurrent();
         pending.phase = "executing";
-        try {
-          await stopCurrent(key);
-        } catch (error) {
-          console.warn("[desktop] failed to stop previous site preview", error);
-        }
+        await stopCurrent(key);
         requireCurrent();
 
         const execution = await execute(pending.controller.signal);
         if (!isCurrent()) {
-          await stopHandle(execution.handle).catch(() => undefined);
-          throw new Error(START_CANCELLED_MESSAGE);
+          await failAfterCleanup(new Error(START_CANCELLED_MESSAGE), () =>
+            retainAndStop(
+              startInput.workspaceId,
+              startInput.siteRoot,
+              execution.handle,
+            ),
+          );
         }
 
         await install(startInput.workspaceId, startInput.siteRoot, execution.handle);
@@ -281,8 +378,9 @@ export function createSitePreviewLifecycle(input: {
         // request before its result escapes the owner.
         await Promise.resolve();
         if (!isCurrent()) {
-          await stopCurrent(key, execution.handle).catch(() => undefined);
-          throw new Error(START_CANCELLED_MESSAGE);
+          await failAfterCleanup(new Error(START_CANCELLED_MESSAGE), () =>
+            stopCurrent(key, execution.handle),
+          );
         }
 
         const active = activePreviews.get(key);
@@ -315,6 +413,13 @@ export function createSitePreviewLifecycle(input: {
     if (!active) return { logs: [], running: false, exited: false };
     if (active.state === "exited") {
       return { logs: [...active.logs], running: false, exited: true };
+    }
+    if (active.state === "stopping") {
+      return {
+        logs: [...active.logs],
+        running: active.lastKnownState === "running",
+        exited: active.lastKnownState === "exited",
+      };
     }
     return {
       logs: "logs" in active.handle ? active.handle.logs() : [],
@@ -387,15 +492,29 @@ export function createSitePreviewLifecycle(input: {
       ...pending.map((start) => start.siteKey),
     ]);
     const drains = [...keys].map((key) =>
-      runInKeyedLane(startLanes, key, () => stopCurrent(key)).catch(
-        () => undefined,
-      ),
+      runInKeyedLane(startLanes, key, () => stopCurrent(key)),
     );
-    stopAllPromise = Promise.all([
+    const attempt = Promise.allSettled([
       ...drains,
       ...draining.map((start) => start.settled),
-    ]).then(() => undefined);
-    return stopAllPromise;
+    ]).then((results) => {
+      const errors = results
+        .filter((result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+        )
+        .map((result) => result.reason);
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(errors, "Some site previews did not stop.");
+      }
+    });
+    stopAllPromise = attempt;
+    void attempt.catch(() => {
+      // Successful retirement stays memoized. A failed attempt leaves exact
+      // stopping records behind, so the next call must get a fresh retry.
+      if (stopAllPromise === attempt) stopAllPromise = null;
+    });
+    return attempt;
   }
 
   return {

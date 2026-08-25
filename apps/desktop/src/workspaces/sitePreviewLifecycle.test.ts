@@ -546,6 +546,42 @@ describe("site preview lifecycle", () => {
     });
   });
 
+  it("retains a handle when setup and its first cleanup attempt both fail", async () => {
+    const releaseOrigin = vi.fn();
+    const lifecycle = createSitePreviewLifecycle({
+      allowOrigin: () => releaseOrigin,
+    });
+    const handle: SiteProcessHandle = {
+      url: "http://127.0.0.1:4173/",
+      command: "test-server",
+      args: [],
+      cwd: "/workspace/site",
+      logs: () => [],
+      onExit: () => {
+        throw new Error("listener failed");
+      },
+      stop: vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValueOnce(new Error("setup cleanup remained ambiguous"))
+        .mockResolvedValue(undefined),
+    };
+    const replacement = fakeStaticHandle("http://127.0.0.1:5173/");
+
+    await expect(startHandle(lifecycle, handle)).rejects.toThrow(
+      "listener failed",
+    );
+
+    expect(releaseOrigin).toHaveBeenCalledTimes(1);
+    expect(handle.stop).toHaveBeenCalledTimes(1);
+    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+
+    await startHandle(lifecycle, replacement, { senderId: 2 });
+
+    expect(handle.stop).toHaveBeenCalledTimes(2);
+    expect(replacement.stop).not.toHaveBeenCalled();
+    await lifecycle.stopAll();
+  });
+
   it("replaces a preview inside one site lane and releases each origin once", async () => {
     const { lifecycle, releases } = testLifecycle();
     const oldPreview = fakeStaticHandle("http://127.0.0.1:4173/");
@@ -562,6 +598,111 @@ describe("site preview lifecycle", () => {
     await lifecycle.stopAll();
     expect(replacement.stop).toHaveBeenCalledTimes(1);
     expect(releases.get(replacement.url)).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a failed stop and blocks replacement until a retry proves the old preview stopped", async () => {
+    const { lifecycle, releases } = testLifecycle();
+    const oldPreview = fakeStaticHandle("http://127.0.0.1:4173/");
+    const discardedReplacement = fakeStaticHandle("http://127.0.0.1:5173/");
+    const replacement = fakeStaticHandle("http://127.0.0.1:6173/");
+    oldPreview.stop = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("stop remained ambiguous"))
+      .mockResolvedValue(undefined);
+    await startHandle(lifecycle, oldPreview);
+
+    const discardedExecute = vi.fn(async () => execution(discardedReplacement));
+    await expect(
+      lifecycle.start({
+        senderId: 2,
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        isCurrent: () => true,
+        prepare: async () => discardedExecute,
+      }),
+    ).rejects.toThrow("stop remained ambiguous");
+
+    expect(discardedExecute).not.toHaveBeenCalled();
+    expect(oldPreview.stop).toHaveBeenCalledTimes(1);
+    expect(releases.get(oldPreview.url)).toHaveBeenCalledTimes(1);
+    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+
+    await startHandle(lifecycle, replacement, { senderId: 3 });
+
+    expect(oldPreview.stop).toHaveBeenCalledTimes(2);
+    expect(replacement.stop).not.toHaveBeenCalled();
+    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+    await lifecycle.stopAll();
+  });
+
+  it("serializes concurrent replacements behind the exact failed stop retry", async () => {
+    const { lifecycle } = testLifecycle();
+    const oldPreview = fakeStaticHandle("http://127.0.0.1:4173/");
+    const discardedReplacement = fakeStaticHandle("http://127.0.0.1:5173/");
+    const replacement = fakeStaticHandle("http://127.0.0.1:6173/");
+    let rejectFirstStop: (error: Error) => void = () => undefined;
+    const firstStopGate = new Promise<void>((_resolve, reject) => {
+      rejectFirstStop = reject;
+    });
+    let firstStopStarted: () => void = () => undefined;
+    const firstStopStartedGate = new Promise<void>((resolve) => {
+      firstStopStarted = resolve;
+    });
+    let finishRetry: () => void = () => undefined;
+    const retryGate = new Promise<void>((resolve) => {
+      finishRetry = resolve;
+    });
+    let retryStarted: () => void = () => undefined;
+    const retryStartedGate = new Promise<void>((resolve) => {
+      retryStarted = resolve;
+    });
+    oldPreview.stop = vi
+      .fn<() => Promise<void>>()
+      .mockImplementationOnce(() => {
+        firstStopStarted();
+        return firstStopGate;
+      })
+      .mockImplementationOnce(() => {
+        retryStarted();
+        return retryGate;
+      });
+    await startHandle(lifecycle, oldPreview);
+
+    const discardedExecute = vi.fn(async () => execution(discardedReplacement));
+    const firstReplacement = lifecycle
+      .start({
+        senderId: 2,
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        isCurrent: () => true,
+        prepare: async () => discardedExecute,
+      })
+      .catch((error: unknown) => error as Error);
+    await firstStopStartedGate;
+
+    const replacementExecute = vi.fn(async () => execution(replacement));
+    const secondReplacement = lifecycle.start({
+      senderId: 3,
+      workspaceId: "workspace-1",
+      siteRoot: "site",
+      isCurrent: () => true,
+      prepare: async () => replacementExecute,
+    });
+    await Promise.resolve();
+    expect(discardedExecute).not.toHaveBeenCalled();
+    expect(replacementExecute).not.toHaveBeenCalled();
+
+    rejectFirstStop(new Error("first stop failed"));
+    expect(await firstReplacement).toBeInstanceOf(Error);
+    await retryStartedGate;
+    expect(oldPreview.stop).toHaveBeenCalledTimes(2);
+    expect(replacementExecute).not.toHaveBeenCalled();
+
+    finishRetry();
+    await secondReplacement;
+    expect(discardedExecute).not.toHaveBeenCalled();
+    expect(replacementExecute).toHaveBeenCalledTimes(1);
+    await lifecycle.stopAll();
   });
 
   it("ignores an old exit after a same-origin replacement", async () => {
@@ -666,6 +807,49 @@ describe("site preview lifecycle", () => {
 
     expect(await starting).toBeInstanceOf(Error);
     expect(candidate.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains a late cancelled handle when its first stop fails", async () => {
+    const { lifecycle } = testLifecycle();
+    const candidate = fakeStaticHandle("http://127.0.0.1:4173/");
+    const replacement = fakeStaticHandle("http://127.0.0.1:5173/");
+    candidate.stop = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("late stop remained ambiguous"))
+      .mockResolvedValue(undefined);
+    let executionStarted: () => void = () => undefined;
+    const executionStartedGate = new Promise<void>((resolve) => {
+      executionStarted = resolve;
+    });
+    let finishExecution: () => void = () => undefined;
+    const executionGate = new Promise<void>((resolve) => {
+      finishExecution = resolve;
+    });
+    const starting = lifecycle
+      .start({
+        senderId: 7,
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        isCurrent: () => true,
+        prepare: async () => async () => {
+          executionStarted();
+          await executionGate;
+          return execution(candidate);
+        },
+      })
+      .catch((error: unknown) => error as Error);
+    await executionStartedGate;
+
+    lifecycle.cancelSender(7);
+    finishExecution();
+    expect(await starting).toBeInstanceOf(Error);
+    expect(candidate.stop).toHaveBeenCalledTimes(1);
+
+    await startHandle(lifecycle, replacement, { senderId: 8 });
+
+    expect(candidate.stop).toHaveBeenCalledTimes(2);
+    expect(replacement.stop).not.toHaveBeenCalled();
+    await lifecycle.stopAll();
   });
 
   it("stopWorkspace returns while cancelled preparation is still unresolved", async () => {
@@ -802,9 +986,10 @@ describe("site preview lifecycle", () => {
   it("stopAll retires the owner, waits for late handles, and memoizes teardown", async () => {
     const { lifecycle, allowOrigin } = testLifecycle();
     const lateHandle = fakeStaticHandle("http://127.0.0.1:4173/");
-    lateHandle.stop = vi.fn(async () => {
-      throw new Error("stop failed");
-    });
+    lateHandle.stop = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("stop failed"))
+      .mockResolvedValue(undefined);
     let observedSignal: AbortSignal | undefined;
     let executionStarted: () => void = () => undefined;
     const startedGate = new Promise<void>((resolve) => {
@@ -845,7 +1030,7 @@ describe("site preview lifecycle", () => {
     finishExecution();
     expect(await starting).toBeInstanceOf(Error);
     await expect(firstStop).resolves.toBeUndefined();
-    expect(lateHandle.stop).toHaveBeenCalledTimes(1);
+    expect(lateHandle.stop).toHaveBeenCalledTimes(2);
     expect(allowOrigin).not.toHaveBeenCalled();
 
     const prepareAfterRetirement = vi.fn();
@@ -861,22 +1046,53 @@ describe("site preview lifecycle", () => {
     expect(prepareAfterRetirement).not.toHaveBeenCalled();
   });
 
-  it("stopAll isolates handle failures and does not release an exited origin twice", async () => {
+  it("stopAll isolates failures, retains them for retry, and releases each origin once", async () => {
     const { lifecycle, releases } = testLifecycle();
     const running = fakeStaticHandle("http://127.0.0.1:4173/");
     const exited = fakeProcessHandle("http://127.0.0.1:5173/");
-    running.stop = vi.fn(async () => {
-      throw new Error("stop failed");
-    });
+    running.stop = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("stop failed"))
+      .mockResolvedValue(undefined);
     await startHandle(lifecycle, running, { siteRoot: "site-a" });
     await startHandle(lifecycle, exited.handle, { siteRoot: "site-b" });
     exited.exit();
 
-    await expect(lifecycle.stopAll()).resolves.toBeUndefined();
+    const firstStop = lifecycle.stopAll().catch((error: unknown) => error as Error);
+    expect(await firstStop).toBeInstanceOf(Error);
 
     expect(running.stop).toHaveBeenCalledTimes(1);
     expect(exited.handle.stop).toHaveBeenCalledTimes(1);
     expect(releases.get(running.url)).toHaveBeenCalledTimes(1);
     expect(releases.get(exited.handle.url)).toHaveBeenCalledTimes(1);
+
+    await expect(lifecycle.stopAll()).resolves.toBeUndefined();
+    expect(running.stop).toHaveBeenCalledTimes(2);
+    expect(exited.handle.stop).toHaveBeenCalledTimes(1);
+    expect(releases.get(running.url)).toHaveBeenCalledTimes(1);
+    expect(releases.get(exited.handle.url)).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains failed stopAll ownership and retries it on the next call", async () => {
+    const { lifecycle, releases } = testLifecycle();
+    const preview = fakeStaticHandle("http://127.0.0.1:4173/");
+    preview.stop = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error("quit stop remained ambiguous"))
+      .mockResolvedValue(undefined);
+    await startHandle(lifecycle, preview);
+
+    const firstStop = lifecycle.stopAll();
+    expect(lifecycle.stopAll()).toBe(firstStop);
+    await expect(firstStop).rejects.toThrow(/quit stop remained ambiguous/);
+    expect(preview.stop).toHaveBeenCalledTimes(1);
+    expect(releases.get(preview.url)).toHaveBeenCalledTimes(1);
+    expect(lifecycle.status("workspace-1", "site").running).toBe(true);
+
+    const retry = lifecycle.stopAll();
+    expect(retry).not.toBe(firstStop);
+    await expect(retry).resolves.toBeUndefined();
+    expect(preview.stop).toHaveBeenCalledTimes(2);
+    expect(lifecycle.status("workspace-1", "site").running).toBe(false);
   });
 });
