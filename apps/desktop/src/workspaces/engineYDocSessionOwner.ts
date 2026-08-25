@@ -283,7 +283,7 @@ export class EngineYDocSessionOwner<
       (record) =>
         record.state !== "releasing" &&
         record.workspaceId === input.workspaceId &&
-        record.path === input.path,
+        workspaceRelativePathsEqual(record.path, input.path),
     );
     if (documentInUse) {
       return Promise.resolve({ kind: "refused", reason: "session-in-use" });

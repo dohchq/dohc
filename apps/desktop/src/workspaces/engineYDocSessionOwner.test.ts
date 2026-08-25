@@ -149,6 +149,45 @@ describe("EngineYDocSessionOwner", () => {
     expect(competingOpen).not.toHaveBeenCalled();
   });
 
+  it.runIf(process.platform === "win32")(
+    "refuses a distinct session for a case alias of an owned document",
+    async () => {
+      const owner = createOwner();
+      const sender = { id: 7, label: "window-a" };
+      await expect(
+        owner.open(
+          openInput({
+            sender,
+            generation: 1,
+            sessionId: "first",
+            path: "Notes/A.md",
+            openSession: async () => ({
+              session: { close: async () => undefined },
+              value: "first",
+            }),
+          }),
+        ),
+      ).resolves.toMatchObject({ kind: "opened", value: "first" });
+      const caseAliasProvider = vi.fn(async () => ({
+        session: { close: async () => undefined },
+        value: "case alias",
+      }));
+
+      await expect(
+        owner.open(
+          openInput({
+            sender,
+            generation: 1,
+            sessionId: "second",
+            path: "notes/a.md",
+            openSession: caseAliasProvider,
+          }),
+        ),
+      ).resolves.toEqual({ kind: "refused", reason: "session-in-use" });
+      expect(caseAliasProvider).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not let a stale open clear the newer generation's winner", async () => {
     const owner = createOwner();
     const sender = { id: 7, label: "reused-web-contents" };
