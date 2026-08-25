@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
@@ -270,7 +271,7 @@ function relayHarness(
 } {
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
-  const sessions = new EngineWorkspaceSessions(source);
+  const sessions = createRealDaemonWorkspaceSessions(source);
   const live = new EngineRelayClient({
     sessions,
     routes,

@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
 const engine = requireEngineBinaryOrSkip();
@@ -34,7 +35,7 @@ describe("live linked chat store real daemon", () => {
       let sessions: EngineWorkspaceSessions | null = null;
       try {
         await lifecycle.start();
-        sessions = new EngineWorkspaceSessions(lifecycle);
+        sessions = createRealDaemonWorkspaceSessions(lifecycle);
         const store = createLiveLinkedChatStore(workspace, sessions);
         const channel = await store.createChannel({
           workspaceId: workspace.workspaceId,

@@ -7,7 +7,7 @@ import * as Y from "yjs";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import {
   VersionedLiveAdapter,
@@ -22,6 +22,7 @@ import {
 import { createWorkspaceActivity } from "./workspaceActivity";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 
@@ -82,7 +83,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-e2e",
       rootPath: root,
@@ -174,7 +175,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-drift",
       rootPath: root,
@@ -248,7 +249,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await firstLifecycle.start();
-    const firstSessions = new EngineWorkspaceSessions(firstLifecycle);
+    const firstSessions = createRealDaemonWorkspaceSessions(firstLifecycle);
     const openedState: {
       capture: ReturnType<typeof createWorkspaceEngineCapture> | null;
     } = { capture: null };
@@ -297,7 +298,7 @@ it.skipIf(engine.missing)(
         maxRestarts: 0,
       });
       await secondLifecycle.start();
-      const secondSessions = new EngineWorkspaceSessions(secondLifecycle);
+      const secondSessions = createRealDaemonWorkspaceSessions(secondLifecycle);
       const reopened = createWorkspaceEngineCapture({
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
@@ -341,7 +342,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-codes",
       rootPath: root,
@@ -385,7 +386,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const errors: string[] = [];
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-race",
@@ -519,7 +520,7 @@ it.skipIf(engine.missing || process.platform !== "win32")(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const errors: string[] = [];
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-lock",
@@ -631,7 +632,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const errors: string[] = [];
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-loud",
@@ -741,7 +742,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-absent-head",
       rootPath: root,
@@ -832,7 +833,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    const sessions = new EngineWorkspaceSessions(lifecycle);
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
     const capture = createWorkspaceEngineCapture({
       workspaceId: "capture-rust-815",
       rootPath: root,

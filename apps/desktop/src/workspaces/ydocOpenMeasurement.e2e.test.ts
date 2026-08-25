@@ -9,12 +9,10 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import {
-  EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
-} from "@dohc/workspace-engine-client/daemon";
+import { EngineDaemonLifecycle } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 
 // #616, AGENTS.md "measure limits that reject work". YDOC_OPEN_DEADLINE_MS
@@ -119,7 +117,7 @@ it.skipIf(engine.missing)(
       maxRestarts: 0,
     });
     await lifecycle.start();
-    let sessions = new EngineWorkspaceSessions(lifecycle);
+    let sessions = createRealDaemonWorkspaceSessions(lifecycle);
     let capture = createWorkspaceEngineCapture({
       workspaceId: WORKSPACE_ID,
       rootPath: root,
@@ -215,7 +213,7 @@ it.skipIf(engine.missing)(
         maxRestarts: 0,
       });
       await lifecycle.start();
-      sessions = new EngineWorkspaceSessions(lifecycle);
+      sessions = createRealDaemonWorkspaceSessions(lifecycle);
       capture = createWorkspaceEngineCapture({
         workspaceId: WORKSPACE_ID,
         rootPath: root,

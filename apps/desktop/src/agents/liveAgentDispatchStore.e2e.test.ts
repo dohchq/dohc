@@ -5,9 +5,10 @@ import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 
@@ -33,7 +34,7 @@ describe("live agent dispatch store real daemon", () => {
       let sessions: EngineWorkspaceSessions | null = null;
       try {
         await lifecycle.start();
-        sessions = new EngineWorkspaceSessions(lifecycle);
+        sessions = createRealDaemonWorkspaceSessions(lifecycle);
         let nextChatId = 0;
         const { agentChannel, started, secondTrigger } = await sessions.run(
           { workspaceId, rootPath: root },
