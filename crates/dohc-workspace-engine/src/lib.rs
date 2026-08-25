@@ -1646,7 +1646,7 @@ impl EngineService {
         let now_ms = now_ms()?;
         #[cfg(test)]
         let open_install_probe = self.open_install_probe.clone();
-        let (actor_open, open_guard) = tokio::task::spawn_blocking(move || {
+        let mut opening = tokio::task::spawn_blocking(move || {
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
                 WorkspaceOpenMode::ReadOnly => supervisor.open_read_only(&actor_path),
@@ -1672,9 +1672,19 @@ impl EngineService {
                 tokio::runtime::Handle::current().block_on(release.notified());
             }
             (opened, open_guard)
-        })
-        .await
-        .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?;
+        });
+        let (actor_open, open_guard) = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                // Dropping the join handle detaches the blocking task. Its
+                // OpenGuard output is then discarded when startup returns,
+                // which installs Closing before releasing open serialization.
+                return Err(cancellation.interruption("workspace open (actor startup)"));
+            }
+            opened = &mut opening => {
+                opened.map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
+            }
+        };
         let actor_open = actor_open.map_err(map_runtime)?;
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
@@ -13388,11 +13398,13 @@ mod tests {
             "captureMode": "none"
         });
 
+        let opening_context = RequestContext::unbounded();
+        let cancel_opening = opening_context.cancel.clone();
         let opening_service = Arc::clone(&service);
         let opening_params = params.clone();
         let opening = tokio::spawn(async move {
             opening_service
-                .workspace_open(&RequestContext::unbounded(), opening_params)
+                .workspace_open(&opening_context, opening_params)
                 .await
         });
         reached.notified().await;
@@ -13402,13 +13414,8 @@ mod tests {
             "the service handle is not installed yet"
         );
 
-        opening.abort();
-        assert!(
-            opening
-                .await
-                .expect_err("workspace.open was cancelled")
-                .is_cancelled()
-        );
+        cancel_opening.cancel();
+        let cancelled_open = tokio::time::timeout(Duration::from_millis(250), opening).await;
         let cleanup_retains_serialization = service.open_lock.try_lock().is_err();
         let reopening_service = Arc::clone(&service);
         let reopening = tokio::spawn(async move {
@@ -13417,6 +13424,11 @@ mod tests {
                 .await
         });
         service.open_install_probe.as_ref().unwrap().1.notify_one();
+        let cancelled_open = cancelled_open
+            .expect("cancelled workspace.open resolved promptly")
+            .expect("workspace.open task completed")
+            .expect_err("cancelled workspace.open must fail");
+        assert_eq!(cancelled_open.code, ErrorCode::Cancelled);
         assert!(
             cleanup_retains_serialization,
             "cancelled open must retain serialization until cleanup starts"
