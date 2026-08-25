@@ -37,8 +37,8 @@ use crate::search::{
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
-    LineageClaimStatus, Projection, Regime, SceneAsset, Ydoc, encode_scene_asset_record,
-    encode_scene_asset_records, import_portable_scene,
+    LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
+    encode_scene_asset_record, encode_scene_asset_records, import_portable_scene,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -6954,6 +6954,12 @@ fn worker_main(
     }
     drop(startup_tx);
 
+    // The writer thread's cache of live Y.Docs (PR1 of the doc-cache design):
+    // serves the replay-parity gate base on the LOCAL append path only. It
+    // lives and dies with this thread — exactly the single-writer scope its
+    // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
+    let mut doc_cache = WriterDocCache::new();
+
     // Blocking recv on the tokio channel keeps the SQLite work on THIS
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
@@ -7739,6 +7745,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_open_state_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &workspace_id,
                     now_ms,
                     drain_deferred,
@@ -7827,6 +7834,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_record_update_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &key,
                     &path,
                     content_kind,
@@ -7897,6 +7905,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_close_session_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &key,
                     materialization.as_ref(),
                     now_ms,
@@ -7921,6 +7930,9 @@ fn worker_main(
                     )
                     .map_err(RuntimeError::from)
                 };
+                // Recovery repair rewrites lineage state (probe-covered; reset
+                // hooks stay unconditional).
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::MaterializeReplayPending {
@@ -8055,6 +8067,10 @@ fn worker_main(
                     faults.as_ref(),
                     &token,
                 );
+                // Resolution can replace or archive a lineage; the tuple probe
+                // already misses on every such outcome (the claim id changes or
+                // the marker is deleted), but the reset hooks are unconditional.
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::ConflictApplyReplicated {
@@ -8081,6 +8097,9 @@ fn worker_main(
                         outcome => outcome.map_err(RuntimeError::from),
                     }
                 };
+                // A replicated conflict envelope can replace or archive a
+                // lineage (probe-covered; reset hooks stay unconditional).
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::ChatChannelCreate {
@@ -9174,6 +9193,9 @@ fn worker_main(
                 } else {
                     execute_relay_operation(&mut store, transport, operation, &leases)
                 };
+                // A pull can claim, replace, or advance lineages behind the
+                // local path (probe-covered; reset hooks stay unconditional).
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::Close => {
@@ -9533,8 +9555,10 @@ fn project_ydoc_on_store(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_scene_from_artifact_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     path: &str,
     artifact: &str,
@@ -9585,6 +9609,7 @@ fn seed_scene_from_artifact_on_store(
     let mut created_moment_ids: Vec<String> = Vec::new();
     let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
         store,
+        doc_cache,
         key,
         Some(path),
         ContentKind::Scene,
@@ -9677,6 +9702,7 @@ fn seed_scene_from_artifact_on_store(
 #[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     workspace_id: &str,
     now_ms: i64,
     drain_deferred: bool,
@@ -9771,6 +9797,10 @@ fn ydoc_open_state_on_store(
         if matches!(cleared, TxnOutcome::Crashed { .. }) {
             return Err(RuntimeError::OperationCrashed);
         }
+        // This clear is a head-rewind that keeps the claim fields — the one
+        // reset shape the cache's tuple probe cannot see. Unconditional
+        // removal is the reset hook the CACHE-VALID proof requires.
+        doc_cache.remove(&key);
     }
     // Re-converge BEFORE loading state: an envelope acked-but-deferred while
     // a previous session held the lease is only guaranteed to drain on that
@@ -9819,6 +9849,12 @@ fn ydoc_open_state_on_store(
         }
         .into());
     }
+    // A post-lease open starts a live session on this doc: prefer keeping its
+    // cache entry resident (eviction order only; a leaked pin never affects
+    // correctness).
+    if drain_deferred && expected_key_matches {
+        doc_cache.pin(&key);
+    }
     let mut persisted = dohc_engine_collab::load_persisted(store, &key)?;
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
@@ -9844,6 +9880,7 @@ fn ydoc_open_state_on_store(
     {
         seed_materialization_jobs = seed_scene_from_artifact_on_store(
             store,
+            doc_cache,
             &key,
             path,
             &artifact.text,
@@ -9977,6 +10014,7 @@ fn ydoc_open_state_on_store(
 #[allow(clippy::too_many_arguments)]
 fn ydoc_record_update_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     path: &str,
     content_kind: ContentKind,
@@ -10014,6 +10052,7 @@ fn ydoc_record_update_on_store(
     let journal_kind = content_kind;
     match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
         store,
+        doc_cache,
         key,
         Some(path),
         content_kind,
@@ -10734,6 +10773,7 @@ fn ydoc_resync_on_store(
 
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     materialization: Option<&YdocCloseMaterialization>,
     now_ms: i64,
@@ -10743,6 +10783,12 @@ fn ydoc_close_session_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    // Close is a lineage reset (the local-only branch prunes to the bare
+    // marker — a head-rewind the cache's tuple probe cannot see if the same
+    // head coordinates are later re-appended). Remove BEFORE any branch so
+    // every outcome, including a mid-close crash, leaves no entry behind.
+    doc_cache.remove(key);
+    doc_cache.unpin(key);
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);
     };
@@ -13212,6 +13258,7 @@ mod scene_seed_transaction_tests {
 
         let result = seed_scene_from_artifact_on_store(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             "drawing.excalidraw",
             &artifact,
@@ -13285,6 +13332,7 @@ mod scene_seed_transaction_tests {
         .to_string();
         let jobs = seed_scene_from_artifact_on_store(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             "drawing.excalidraw",
             &artifact,
@@ -13331,6 +13379,7 @@ mod scene_seed_transaction_tests {
         .to_string();
         let jobs = seed_scene_from_artifact_on_store(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             "drawing.excalidraw",
             &artifact,

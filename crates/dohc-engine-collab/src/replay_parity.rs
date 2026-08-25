@@ -93,8 +93,8 @@ use crate::{CollabError, Ydoc};
 /// that changes the KIND or the PAYLOAD at an already-known clock is rejected.
 /// No honest peer ever redefines a clock it (or its dependency) has already
 /// used, so a mismatch can only be hostile/corrupt input.
-#[derive(Clone, PartialEq, Eq)]
-enum ClockIdentity {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClockIdentity {
     /// A single UTF-16 code unit of a live `String` content block — the
     /// original surrogate/FFFD-adjacent risk class, kept as the string case of
     /// the general check.
@@ -107,8 +107,13 @@ enum ClockIdentity {
     Typed { kind: u8, payload: String },
 }
 
-#[derive(Default)]
-struct WireStructure {
+/// Derives `PartialEq`/`Debug` for the doc cache's differential check
+/// (`doc_cache.rs`): two byte-replay-equivalent documents must present the
+/// identical canonical structure — the exact thing the gate consumes — even
+/// though their raw re-encodes can differ (yrs `Any::Map` is HashMap-backed,
+/// so map-key ORDER in a re-encode is nondeterministic per doc instance).
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct WireStructure {
     unsafe_boundaries: BTreeSet<ID>,
     insertion_boundaries: Vec<ID>,
     deletion_boundaries: Vec<ID>,
@@ -798,7 +803,7 @@ fn safe_read_id(decoder: &mut DecoderV1<'_>) -> Result<ID, CollabError> {
 /// is a thin public wrapper around it, and every caller in this module that
 /// used to call `Update::decode_v1`/`Ydoc::validate_update` on untrusted bytes
 /// now calls this (or the wrapper) FIRST.
-fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
+pub(crate) fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
     let mut decoder = DecoderV1::from(bytes);
     let mut structure = WireStructure::default();
     let clients_len: u32 = decoder.read_var().map_err(parity_decode_error)?;

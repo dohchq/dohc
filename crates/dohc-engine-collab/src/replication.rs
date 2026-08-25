@@ -308,6 +308,7 @@ mod dedupe_hoist_tests {
         let first = committed(
             record_local_update_creating_marker(
                 &mut store,
+                &mut crate::WriterDocCache::new(),
                 &key,
                 None,
                 ContentKind::Plaintext,
@@ -321,9 +322,17 @@ mod dedupe_hoist_tests {
         );
         assert!(!first.deduped, "first append must land");
 
-        let again =
-            with_armed_gate(|| record_local_update(&mut store, &key, &update, &NoFaults, 1_100))
-                .expect("a duplicate local append must dedupe without invoking the gate");
+        let again = with_armed_gate(|| {
+            record_local_update(
+                &mut store,
+                &mut crate::WriterDocCache::new(),
+                &key,
+                &update,
+                &NoFaults,
+                1_100,
+            )
+        })
+        .expect("a duplicate local append must dedupe without invoking the gate");
         let again = committed(again);
         assert_eq!(
             again,
@@ -360,6 +369,7 @@ mod dedupe_hoist_tests {
         let first = committed(
             record_local_update_creating_marker(
                 &mut store,
+                &mut crate::WriterDocCache::new(),
                 &key,
                 None,
                 ContentKind::Plaintext,
@@ -374,8 +384,15 @@ mod dedupe_hoist_tests {
         assert!(!first.deduped, "first append must land");
         rot_stored_blob(&mut store, &update);
 
-        let refused = record_local_update(&mut store, &key, &update, &NoFaults, 1_100)
-            .expect_err("a duplicate append over a rotted blob must surface Corrupt");
+        let refused = record_local_update(
+            &mut store,
+            &mut crate::WriterDocCache::new(),
+            &key,
+            &update,
+            &NoFaults,
+            1_100,
+        )
+        .expect_err("a duplicate append over a rotted blob must surface Corrupt");
         assert!(
             matches!(refused, CollabError::Corrupt { .. }),
             "expected Corrupt: {refused:?}"

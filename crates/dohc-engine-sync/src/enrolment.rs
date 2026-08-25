@@ -557,6 +557,7 @@ mod tests {
             .expect("file object");
         match dohc_engine_collab::record_local_update_creating_marker_guarded(
             store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             key,
             path,
             ContentKind::Plaintext,
@@ -1071,6 +1072,7 @@ mod tests {
         let update = doc.plaintext_insert(0, "projected");
         dohc_engine_collab::record_local_update_creating_marker(
             &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             Some("ydoc-object.md"),
             ContentKind::Plaintext,
@@ -1328,6 +1330,7 @@ mod tests {
 
         let error = dohc_engine_collab::record_local_update_creating_marker_guarded(
             &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             Some("legacy-request.md"),
             ContentKind::Plaintext,
@@ -1367,6 +1370,7 @@ mod tests {
 
         let retry = match dohc_engine_collab::record_local_update_creating_marker_guarded(
             &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             Some("legacy-content.md"),
             ContentKind::Plaintext,
@@ -1434,6 +1438,7 @@ mod tests {
         let update = doc.plaintext_insert(0, "edited in the live session");
         dohc_engine_collab::record_local_update_creating_marker(
             &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             Some("live-object.md"),
             ContentKind::Plaintext,
@@ -1661,6 +1666,7 @@ mod tests {
         let update = doc.plaintext_insert(0, "base");
         dohc_engine_collab::record_local_update_creating_marker(
             &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             Some("forked.md"),
             ContentKind::Plaintext,
@@ -1723,6 +1729,7 @@ mod tests {
         let base_update = doc.plaintext_insert(0, "base");
         dohc_engine_collab::record_local_update_creating_marker(
             &mut source,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             Some("forked-history.md"),
             ContentKind::Plaintext,
@@ -1736,6 +1743,7 @@ mod tests {
         let post_fork_update = doc.plaintext_insert(4, " plus edit");
         dohc_engine_collab::record_local_update(
             &mut source,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &post_fork_update,
             &NoFaults,

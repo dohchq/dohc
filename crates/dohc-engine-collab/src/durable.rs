@@ -21,6 +21,7 @@ use dohc_engine_storage::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::doc_cache::{GateBaseProbe, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
@@ -429,12 +430,13 @@ pub fn rewrite_bare_marker_content_kind(
 /// still keeps a finite log (the "everything bounded" invariant).
 pub fn record_local_update(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     update: &[u8],
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
-    record_local_update_with_origin(store, key, update, None, faults, now_ms)
+    record_local_update_with_origin(store, cache, key, update, None, faults, now_ms)
 }
 
 /// [`record_local_update`] with the requesting client's actor origin id
@@ -443,6 +445,7 @@ pub fn record_local_update(
 /// caller-supplied origin rather than dropping it.
 pub fn record_local_update_with_origin(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     update: &[u8],
     actor_origin_id: Option<&str>,
@@ -452,11 +455,23 @@ pub fn record_local_update_with_origin(
     validate_update_bytes(update)?;
     let sha = crate::hex_sha256(update);
 
+    let mut probe = GateBaseProbe::default();
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
+        append_local_update_cached(
+            tx,
+            key,
+            &marker,
+            update,
+            &sha,
+            actor_origin_id,
+            now_ms,
+            cache,
+            &mut probe,
+        )
     })?;
-    self_bound_log(store, key, &outcome, faults, now_ms)?;
+    cache.finish_local_append(store, key, &outcome, update, &sha, probe);
+    self_bound_log(store, cache, key, &outcome, faults, now_ms)?;
     Ok(outcome)
 }
 
@@ -466,6 +481,7 @@ pub fn record_local_update_with_origin(
 #[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     path: Option<&str>,
     content_kind: ContentKind,
@@ -477,6 +493,7 @@ pub fn record_local_update_creating_marker(
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
     record_local_update_creating_marker_guarded(
         store,
+        cache,
         key,
         path,
         content_kind,
@@ -500,6 +517,7 @@ pub fn record_local_update_creating_marker(
 #[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker_guarded<F>(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     path: Option<&str>,
     content_kind: ContentKind,
@@ -518,6 +536,7 @@ where
 {
     record_local_update_creating_marker_guarded_inner(
         store,
+        cache,
         key,
         path,
         content_kind,
@@ -551,6 +570,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker_guarded_for_lineage<F>(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     path: Option<&str>,
     content_kind: ContentKind,
@@ -571,6 +591,7 @@ where
 {
     record_local_update_creating_marker_guarded_inner(
         store,
+        cache,
         key,
         path,
         content_kind,
@@ -591,6 +612,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn record_local_update_creating_marker_guarded_inner<F>(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     path: Option<&str>,
     content_kind: ContentKind,
@@ -640,6 +662,7 @@ where
             .as_bytes(),
         )
     });
+    let mut probe = GateBaseProbe::default();
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
             let recorded: Option<(String, i64)> = tx
@@ -748,7 +771,7 @@ where
             }
         };
         {
-            let outcome = append_local_update(
+            let outcome = append_local_update_cached(
                 tx,
                 key,
                 &marker,
@@ -756,6 +779,8 @@ where
                 &update_sha,
                 actor_origin_id,
                 now_ms,
+                cache,
+                &mut probe,
             )?;
             if !outcome.deduped {
                 // The seed's provenance commits WITH the seed append: the
@@ -796,7 +821,8 @@ where
             Ok(outcome)
         }
     })?;
-    self_bound_log(store, key, &outcome, faults, now_ms)?;
+    cache.finish_local_append(store, key, &outcome, update, &update_sha, probe);
+    self_bound_log(store, cache, key, &outcome, faults, now_ms)?;
     Ok(outcome)
 }
 
@@ -829,6 +855,62 @@ fn append_local_update(
     })
 }
 
+/// [`append_local_update`] with the writer's doc cache serving the gate base.
+/// A cache hit gates against the cached doc (validated against the in-tx
+/// tuple, see [`WriterDocCache::base_for_gate`]); a miss reconstructs exactly
+/// as before and hands the rebuilt PRE-APPEND base out through `probe` so the
+/// caller can warm the cache after the transaction commits. The cache is only
+/// READ here — it is never mutated inside a transaction.
+#[allow(clippy::too_many_arguments)]
+fn append_local_update_cached(
+    conn: &Connection,
+    key: &DocKey,
+    marker: &Marker,
+    update: &[u8],
+    sha: &str,
+    actor_origin_id: Option<&str>,
+    now_ms: i64,
+    cache: &WriterDocCache,
+    probe: &mut GateBaseProbe,
+) -> Result<AppendOutcome, CollabError> {
+    // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order. A
+    // dedupe changes no durable state, so it never touches the cache.
+    if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
+        return Ok(AppendOutcome {
+            seq: existing,
+            deduped: true,
+            emit_outbound: false,
+        });
+    }
+    match cache.base_for_gate(conn, key, marker)? {
+        Some(base) => {
+            crate::validate_replay_parity(base, update)?;
+            probe.served = Some(ServedGateBase {
+                hit: true,
+                rebuilt: None,
+                observed: marker.clone(),
+            });
+        }
+        None => {
+            let base = load_for_replay_gate(conn, key)?;
+            crate::validate_replay_parity(&base, update)?;
+            probe.served = Some(ServedGateBase {
+                hit: false,
+                rebuilt: Some(base),
+                observed: marker.clone(),
+            });
+        }
+    }
+    put_binary_blob_with_sha(conn, update, sha)?;
+    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
+    Ok(AppendOutcome {
+        seq,
+        deduped: false,
+        emit_outbound: marker.regime == Regime::Replicated
+            && marker.lineage_claim_status == LineageClaimStatus::Exact,
+    })
+}
+
 /// After a genuinely-new append, fold the log if it has grown past the default
 /// threshold (self-bounding). A dedup or a crash does nothing. Compaction is
 /// convergence-neutral for BOTH regimes (it keeps a full-state snapshot; only a
@@ -836,6 +918,7 @@ fn append_local_update(
 /// regardless of regime.
 pub(crate) fn self_bound_log(
     store: &mut EngineStore,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     outcome: &TxnOutcome<AppendOutcome>,
     faults: &dyn FaultInjector,
@@ -846,7 +929,17 @@ pub(crate) fn self_bound_log(
             // Best-effort fold; a fault-injected compaction crash is harmless
             // (the append is already durable) and leaves the log for the next
             // fold. `maybe_compact` no-ops below threshold.
-            let _ = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+            match maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)? {
+                TxnOutcome::Committed(CompactOutcome::Compacted {
+                    up_to_seq,
+                    snapshot_sha,
+                    ..
+                }) => cache.note_compacted(store, key, up_to_seq, &snapshot_sha),
+                TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
+                // The fold may or may not be durable; the cached entry's
+                // tuple can no longer be trusted to describe it. Fail safe.
+                TxnOutcome::Crashed { .. } => cache.remove(key),
+            }
         }
     }
     Ok(())
@@ -2202,7 +2295,7 @@ pub(crate) fn load_for_replay_gate(conn: &Connection, key: &DocKey) -> Result<Yd
     Ok(doc)
 }
 
-fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u8>, CollabError> {
+pub(crate) fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u8>, CollabError> {
     let bytes: Vec<u8> = conn
         .query_row(
             "SELECT bytes FROM binary_blobs WHERE sha256 = ?1",
@@ -2528,7 +2621,10 @@ pub(crate) fn append_row(
     Ok(seq)
 }
 
-fn latest_snapshot(conn: &Connection, key: &DocKey) -> Result<Option<(i64, String)>, CollabError> {
+pub(crate) fn latest_snapshot(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Option<(i64, String)>, CollabError> {
     conn.query_row(
         "SELECT up_to_seq, snapshot_blob_sha256 FROM ydoc_snapshots \
          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
@@ -2565,7 +2661,7 @@ fn updates_after(
     Ok(out)
 }
 
-fn map_sql(e: rusqlite::Error) -> CollabError {
+pub(crate) fn map_sql(e: rusqlite::Error) -> CollabError {
     CollabError::Corrupt {
         reason: e.to_string(),
     }
