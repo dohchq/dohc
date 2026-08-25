@@ -67,14 +67,16 @@ async function json(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
-async function newStorageWithPath(): Promise<{
+async function newStorageWithPath(
+  options?: Parameters<typeof openSyncRelayStorage>[1],
+): Promise<{
   storage: SyncRelayStorage;
   dbPath: string;
 }> {
   const root = await mkdtemp(join(tmpdir(), "dohc-link-grants-"));
   roots.push(root);
   const dbPath = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(dbPath);
+  const storage = openSyncRelayStorage(dbPath, options);
   storages.push(storage);
   return { storage, dbPath };
 }
@@ -1035,6 +1037,88 @@ describe("relay link grants", () => {
           )
         ).status,
       ).toBe(200);
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("bounds live sessions per link grant without touching another grant", async () => {
+    const limit = 3;
+    const { storage, dbPath } = await newStorageWithPath({
+      linkSessionsPerGrantLimit: limit,
+    });
+    const h = handler(storage);
+    await seedFileShare(h);
+    const cappedGrantId = String((await createLink(h, "view")).grantId);
+    const untouchedGrantId = String((await createLink(h, "view")).grantId);
+    const untouchedToken = "untouched-capability";
+    expect(
+      storage.mintLinkSession({
+        session: {
+          sessionId: "session-untouched",
+          capabilityHash: hmac(untouchedToken),
+          grantId: untouchedGrantId,
+          generation: 1,
+          mintedAtMs: 2_500,
+          expiresAtMs: 10_000,
+        },
+      }),
+    ).toBe(true);
+
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+    const countSessions = (grantId: string): number =>
+      Number(
+        inspection
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_link_sessions WHERE grant_id = ?",
+          )
+          .get(grantId)?.count ?? 0,
+      );
+
+    try {
+      for (let index = 0; index <= limit; index += 1) {
+        expect(
+          storage.mintLinkSession({
+            session: {
+              sessionId: `session-capped-${index}`,
+              capabilityHash: hmac(`capped-capability-${index}`),
+              grantId: cappedGrantId,
+              generation: 1,
+              mintedAtMs: 3_000 + index,
+              expiresAtMs: 10_000,
+            },
+          }),
+        ).toBe(true);
+        expect(countSessions(cappedGrantId)).toBe(
+          Math.min(index + 1, limit),
+        );
+      }
+
+      expect(
+        validateLinkCapability({
+          storage,
+          capabilityToken: "capped-capability-0",
+          linkKey: LINK_KEY,
+          nowMs: 4_000,
+        }),
+      ).toBeNull();
+      expect(
+        validateLinkCapability({
+          storage,
+          capabilityToken: `capped-capability-${limit}`,
+          linkKey: LINK_KEY,
+          nowMs: 4_000,
+        }),
+      ).toMatchObject({ grantId: cappedGrantId });
+      expect(countSessions(untouchedGrantId)).toBe(1);
+      expect(
+        validateLinkCapability({
+          storage,
+          capabilityToken: untouchedToken,
+          linkKey: LINK_KEY,
+          nowMs: 4_000,
+        }),
+      ).toMatchObject({ grantId: untouchedGrantId });
     } finally {
       inspection.close();
     }

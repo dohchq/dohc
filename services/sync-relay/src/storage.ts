@@ -9,6 +9,7 @@ import {
   type ConflictResolveEnvelopeContext,
 } from "./conflictResolve";
 import { RELAY_ERRORS } from "./errorCodes";
+import { LINK_SESSIONS_PER_GRANT_LIMIT } from "./linkSecurity";
 
 export interface SyncRelayLogInput {
   originSeq: number;
@@ -519,6 +520,7 @@ const RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT = 10;
 export interface OpenSyncRelayStorageOptions {
   workspaceQuotaBytes?: number;
   blobGraceMs?: number;
+  linkSessionsPerGrantLimit?: number;
 }
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -1130,13 +1132,28 @@ export function openSyncRelayStorage(
       `blobGraceMs must be a non-negative safe integer, got ${String(blobGraceMs)}`,
     );
   }
+  const linkSessionsPerGrantLimit =
+    options.linkSessionsPerGrantLimit ?? LINK_SESSIONS_PER_GRANT_LIMIT;
+  if (
+    !Number.isSafeInteger(linkSessionsPerGrantLimit) ||
+    linkSessionsPerGrantLimit <= 0
+  ) {
+    throw new Error(
+      `linkSessionsPerGrantLimit must be a positive safe integer, got ${String(linkSessionsPerGrantLimit)}`,
+    );
+  }
   const db = new DatabaseSync(resolved);
   try {
     db.exec(`PRAGMA busy_timeout = ${SYNC_RELAY_BUSY_TIMEOUT_MS}`);
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
     initializeSyncRelaySchema(db);
-    return new SqliteSyncRelayStorage(db, workspaceQuotaBytes, blobGraceMs);
+    return new SqliteSyncRelayStorage(
+      db,
+      workspaceQuotaBytes,
+      blobGraceMs,
+      linkSessionsPerGrantLimit,
+    );
   } catch (error) {
     try {
       db.close();
@@ -1150,6 +1167,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     private readonly db: SqliteDb,
     private readonly workspaceQuotaBytes: number,
     private readonly blobGraceMs: number,
+    private readonly linkSessionsPerGrantLimit: number,
   ) {}
 
   close(): void {
@@ -2436,6 +2454,29 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       this.db
         .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms <= ?")
         .run(Math.trunc(session.mintedAtMs));
+      const liveSessionCount = Number(
+        this.db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_link_sessions WHERE grant_id = ?",
+          )
+          .get(session.grantId)?.count ?? 0,
+      );
+      const sessionsToDelete =
+        liveSessionCount - this.linkSessionsPerGrantLimit + 1;
+      if (sessionsToDelete > 0) {
+        this.db
+          .prepare(
+            `DELETE FROM sync_relay_link_sessions
+             WHERE session_id IN (
+               SELECT session_id
+               FROM sync_relay_link_sessions
+               WHERE grant_id = ?
+               ORDER BY minted_at_ms ASC, session_id ASC
+               LIMIT ?
+             )`,
+          )
+          .run(session.grantId, sessionsToDelete);
+      }
       this.db
         .prepare(
           `INSERT INTO sync_relay_link_sessions (

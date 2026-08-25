@@ -13,6 +13,7 @@ import type {
 
 export const LINK_BEARER_BYTES = 32;
 export const LINK_SESSION_TTL_MS = 15 * 60 * 1_000;
+export const LINK_SESSIONS_PER_GRANT_LIMIT = 10_000;
 export const LINK_EXCHANGE_BUCKET_CAPACITY = 12;
 export const LINK_EXCHANGE_REFILL_PER_SECOND = 0.2;
 export const LINK_EXCHANGE_MAX_IPS = 10_000;
