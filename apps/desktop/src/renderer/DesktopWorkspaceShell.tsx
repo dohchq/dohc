@@ -675,6 +675,11 @@ const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
 // neither is urgent, and both cost a relay round trip per workspace.
 const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 
+// Trailing-edge window that coalesces a burst of workspace-activity events
+// into one files+history refresh. Short enough that a lone save still feels
+// immediate; long enough to cover main's per-batch event cadence.
+export const WORKSPACE_ACTIVITY_REFRESH_DELAY_MS = 200;
+
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
   let fired = false;
@@ -4134,6 +4139,43 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  // Stable identities for the memoized explorer and inspector (D2#2/#5).
+  // Inline arrows here handed every shell render a fresh prop set, which
+  // re-rendered every TreeRow and re-ran FileInspector for renders that
+  // changed nothing they show.
+  const onOpenEditorsHeightChange = useCallback(
+    (height: number) => mutateWb((state) => setOpenEditorsHeight(state, height)),
+    [mutateWb],
+  );
+  const onExplorerImportFiles = useCallback(
+    (droppedPaths?: string[], targetDir?: string) => {
+      void importFiles(droppedPaths, targetDir);
+    },
+    [importFiles],
+  );
+  const onExplorerRefreshShareMounts = useCallback(() => {
+    void refreshShareMounts(true);
+  }, [refreshShareMounts]);
+  const onExplorerUnmountShare = useCallback(
+    (path: string) => {
+      void unmountShare(path);
+    },
+    [unmountShare],
+  );
+  // One share entry point for both surfaces: the explorer row's "Share…" and
+  // the inspector header's share control open the same dialog.
+  const onSharePath = useCallback((path: string) => {
+    setShareTarget({ kind: "paths", paths: [path] });
+  }, []);
+  const onExplorerRefresh = useCallback(() => {
+    void refreshFiles().catch((error) =>
+      reportShellError("Could not refresh workspace files.", error),
+    );
+  }, [refreshFiles, reportShellError]);
+  const onNewUntitledTextFile = useCallback(() => {
+    void createUntitledTextFile();
+  }, [createUntitledTextFile]);
+  const openNewFileDialog = useCallback(() => setNewFileOpen(true), []);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
       ...setView(state, "history"),
@@ -4387,6 +4429,68 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, runWorkbenchMenuCommand, workspaceId],
   );
 
+  // Per-group tab-strip callbacks, cached like callbacksForEditor: EditorTabs'
+  // Tab rows are memoized on referentially stable callbacks, and the inline
+  // per-group arrows here re-rendered every tab on every shell render (D2#5).
+  // The wrappers read the CURRENT handlers through a render-synced ref, so a
+  // handler whose own identity moves (deps churn) never stales the wrapper.
+  const tabStripActionsRef = useRef({
+    activateEditorTab,
+    closeFileTab,
+    showWorkbenchMenu,
+    moveFileTab,
+    moveFileTabToGroup,
+    openEditorGroupRight,
+    closeGroupAfterFlush,
+  });
+  tabStripActionsRef.current = {
+    activateEditorTab,
+    closeFileTab,
+    showWorkbenchMenu,
+    moveFileTab,
+    moveFileTabToGroup,
+    openEditorGroupRight,
+    closeGroupAfterFlush,
+  };
+  const tabStripCallbacksCache = useRef(
+    new Map<
+      string,
+      {
+        onActivate: (path: string) => void;
+        onClose: (path: string) => void;
+        onContextMenu: (path: string) => void;
+        onMove: (path: string, toIndex: number) => void;
+        onMoveToGroup: (
+          path: string,
+          targetGroupId: string,
+          toIndex: number,
+        ) => void;
+        onCreateGroupRight: () => void;
+        onCloseGroup: () => void;
+      }
+    >(),
+  );
+  const tabStripCallbacksFor = (groupId: string) => {
+    const cached = tabStripCallbacksCache.current.get(groupId);
+    if (cached) return cached;
+    const actions = tabStripActionsRef;
+    const callbacks = {
+      onActivate: (path: string) =>
+        actions.current.activateEditorTab(groupId, path),
+      onClose: (path: string) => actions.current.closeFileTab(groupId, path),
+      onContextMenu: (path: string) =>
+        void actions.current.showWorkbenchMenu("tab", path, groupId),
+      onMove: (path: string, toIndex: number) =>
+        actions.current.moveFileTab(groupId, path, toIndex),
+      onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) =>
+        actions.current.moveFileTabToGroup(groupId, targetGroupId, path, toIndex),
+      onCreateGroupRight: () => actions.current.openEditorGroupRight(groupId),
+      onCloseGroup: () => void actions.current.closeGroupAfterFlush(groupId),
+    };
+    tabStripCallbacksCache.current.set(groupId, callbacks);
+    return callbacks;
+  };
+
   // Performance marks (post-commit, so the rendered surface is included):
   // file tree populated, and shell interactive once status/history landed.
   // These live in the workbench ROOT — a view may unmount, this must not.
@@ -4437,16 +4541,30 @@ export function DesktopWorkspaceShell(props: {
         if (!cancelled) reportShellError("Could not open this workspace.", error);
       }
     })();
+    // Trailing-edge coalescing (D2#8): main emits one activity event per
+    // settled batch, and a burst (an import, an agent writing many files)
+    // used to issue a listing + four history reads PER event. One refresh
+    // after the burst quiets answers them all — refreshFiles's committed-
+    // request watermark and refreshHistory's tokened lanes are latest-wins,
+    // so the coalesced (newest) refresh can never lose to a dropped one.
+    // A pending timer cleared by this effect's cleanup is not a lost refresh
+    // either: every re-run's body above refreshes both surfaces itself.
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const unsubscribe = bridge().onWorkspaceActivity(() => {
-      void refreshFiles().catch((error) =>
-        reportShellError("Could not refresh workspace files.", error),
-      );
-      void refreshHistory().catch((error) =>
-        reportShellError("Could not refresh history.", error),
-      );
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void refreshFiles().catch((error) =>
+          reportShellError("Could not refresh workspace files.", error),
+        );
+        void refreshHistory().catch((error) =>
+          reportShellError("Could not refresh history.", error),
+        );
+      }, WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
     });
     return () => {
       cancelled = true;
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
       unsubscribe();
     };
   }, [workspaceId, refreshFiles, refreshHistory, reportShellError, syncStatusLane]);
@@ -5163,46 +5281,52 @@ export function DesktopWorkspaceShell(props: {
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
-        onOpenEditorsHeightChange={(height) =>
-          mutateWb((state) => setOpenEditorsHeight(state, height))
-        }
+        onOpenEditorsHeightChange={onOpenEditorsHeightChange}
         createRequest={createRequest}
         onOpenFile={openFile}
         onActivateTab={activateEditorTab}
         onCloseTab={closeFileTab}
         onCloseAllTabs={closeAllTabs}
-        onNewUntitledTextFile={() => void createUntitledTextFile()}
+        onNewUntitledTextFile={onNewUntitledTextFile}
         onCollapseFolders={collapseExplorerFolders}
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
-        onImportFiles={(droppedPaths, targetDir) =>
-          void importFiles(droppedPaths, targetDir)
-        }
+        onImportFiles={onExplorerImportFiles}
         shareView={shareView}
-        onRefreshShareMounts={() => void refreshShareMounts(true)}
-        onUnmountShare={(path) => void unmountShare(path)}
-        onShare={(path) => setShareTarget({ kind: "paths", paths: [path] })}
-        onRefresh={() =>
-          void refreshFiles().catch((error) =>
-            reportShellError("Could not refresh workspace files.", error),
-          )
-        }
-        onNewFileDialog={() => setNewFileOpen(true)}
+        onRefreshShareMounts={onExplorerRefreshShareMounts}
+        onUnmountShare={onExplorerUnmountShare}
+        onShare={onSharePath}
+        onRefresh={onExplorerRefresh}
+        onNewFileDialog={openNewFileDialog}
       />
     </>
   );
 
   // The editor is the one live conversation surface. It owns presence,
   // drafts, and navigation state.
-  const dmWorkspaceOptions = props.workspaces
-    .filter((workspace) => !workspace.shareView)
-    .map((workspace) => ({
-      workspaceId: workspace.workspaceId,
-      label: workspaceName(workspace),
-    }));
+  const dmWorkspaceOptions = useMemo(
+    () =>
+      props.workspaces
+        .filter((workspace) => !workspace.shareView)
+        .map((workspace) => ({
+          workspaceId: workspace.workspaceId,
+          label: workspaceName(workspace),
+        })),
+    [props.workspaces],
+  );
+  // Stable per-field identities (D2#5): ChatsView keys real work off these —
+  // its refresh callbacks depend on onError, so a fresh arrow per shell render
+  // tore down and re-armed its polls and activity subscription every render.
+  const onChatsError = useCallback((message: string) => {
+    setShellError({ message, retry: null });
+  }, []);
+  const openAgentSettings = useCallback(
+    () => openSettings("agents"),
+    [openSettings],
+  );
   const chatsViewProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
@@ -5214,17 +5338,23 @@ export function DesktopWorkspaceShell(props: {
     onThreadRead: onChatsThreadRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: (message: string) => setShellError({ message, retry: null }),
+    onError: onChatsError,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
     collaboration: chatCollaboration,
     agentSetup,
-    onSetupAgent: () => openSettings("agents"),
+    onSetupAgent: openAgentSettings,
   } as const;
   // The panel intentionally stays on the overview and only selects editor
-  // destinations. While the Chats editor is active, disable its collaboration
-  // transport so the navigator cannot create a duplicate presence lease.
+  // destinations. While the Chats editor is active, the page instance owns the
+  // live surface: disable the navigator's collaboration transport so it cannot
+  // create a duplicate presence lease, and suspend its polls so one open
+  // conversation does not double every chat read (D2#6). The page's landed
+  // reads still reach the navigator through readRevision.
+  const chatsTabIsLive = wb.editorGroups.some((group) =>
+    isChatsTabPath(group.activeTab),
+  );
   const chatsNavigatorProps = {
     workspaceId,
     workspaces: dmWorkspaceOptions,
@@ -5233,15 +5363,14 @@ export function DesktopWorkspaceShell(props: {
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
-    onError: (message: string) => setShellError({ message, retry: null }),
+    onError: onChatsError,
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: wb.editorGroups.some((group) => isChatsTabPath(group.activeTab))
-      ? null
-      : chatCollaboration,
+    collaboration: chatsTabIsLive ? null : chatCollaboration,
+    suspendPolling: chatsTabIsLive,
     agentSetup,
-    onSetupAgent: () => openSettings("agents"),
+    onSetupAgent: openAgentSettings,
   } as const;
 
   return (
@@ -5728,6 +5857,7 @@ export function DesktopWorkspaceShell(props: {
                 searchScrollTarget.path === tabPath
                   ? searchScrollTarget
                   : undefined;
+              const tabStrip = tabStripCallbacksFor(editorGroup.id);
               return {
                 id: editorGroup.id,
                 size: editorGroup.size,
@@ -5741,25 +5871,14 @@ export function DesktopWorkspaceShell(props: {
                       tabLabels={tabLabels}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
-                      onActivate={(path) => activateEditorTab(editorGroup.id, path)}
-                      onClose={(path) => closeFileTab(editorGroup.id, path)}
-                      onContextMenu={(path) =>
-                        void showWorkbenchMenu("tab", path, editorGroup.id)
-                      }
-                      onMove={(path, toIndex) =>
-                        moveFileTab(editorGroup.id, path, toIndex)
-                      }
-                      onMoveToGroup={(path, targetGroupId, toIndex) =>
-                        moveFileTabToGroup(
-                          editorGroup.id,
-                          targetGroupId,
-                          path,
-                          toIndex,
-                        )
-                      }
-                      onCreateGroupRight={() => openEditorGroupRight(editorGroup.id)}
+                      onActivate={tabStrip.onActivate}
+                      onClose={tabStrip.onClose}
+                      onContextMenu={tabStrip.onContextMenu}
+                      onMove={tabStrip.onMove}
+                      onMoveToGroup={tabStrip.onMoveToGroup}
+                      onCreateGroupRight={tabStrip.onCreateGroupRight}
                       {...(wb.editorGroups.length > 1
-                        ? { onCloseGroup: () => closeGroupAfterFlush(editorGroup.id) }
+                        ? { onCloseGroup: tabStrip.onCloseGroup }
                         : {})}
                     />
                     <div
@@ -6084,7 +6203,7 @@ export function DesktopWorkspaceShell(props: {
                 }
                 {...(shareView || isMountedSharePath(tabPath)
                   ? {}
-                  : { onSharePath: (path: string) => setShareTarget({ kind: "paths", paths: [path] }) })}
+                  : { onSharePath })}
               />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
@@ -6203,7 +6322,7 @@ export function DesktopWorkspaceShell(props: {
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onThreadRead={onChatsThreadRead}
-                    onError={(message) => setShellError({ message, retry: null })}
+                    onError={onChatsError}
                   />
                 </Suspense>
               ) : (

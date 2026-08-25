@@ -13,6 +13,7 @@ import {
 import {
   Suspense,
   lazy,
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -4750,7 +4751,13 @@ function useRetainedLocalDocument(key: string): SharedLocalDocument {
   return buffer;
 }
 
-export function FileInspector(props: FileInspectorProps) {
+// Memoized: the workspace shell re-renders on every lane commit (status,
+// history, agent state), and this component's render alone re-runs classify,
+// engine-open, and markdown wiring for the open document. The shell keeps
+// every prop identity-stable, so an unrelated shell render bails here.
+export const FileInspector = memo(function FileInspector(
+  props: FileInspectorProps,
+) {
   const key = documentVersionKey(
     props.workspaceId,
     props.path,
@@ -5299,4 +5306,4 @@ export function FileInspector(props: FileInspectorProps) {
         </div>
       );
   }
-}
+});

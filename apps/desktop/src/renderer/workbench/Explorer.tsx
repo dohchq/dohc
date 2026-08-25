@@ -37,7 +37,7 @@ import {
   pendingTreeMoveSettled,
   type PendingTreeChange,
 } from "./file-tree-optimistic";
-import { buildTree, type TreeNode } from "./path-tree";
+import { buildTree, leafOf, type TreeNode } from "./path-tree";
 import {
   type EditorGroup,
   clampOpenEditorsHeight,
@@ -153,11 +153,6 @@ type RowDropPreview = {
   kind: DropPreview["kind"];
   role: "target" | "contained";
 };
-
-function leafOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? path : path.slice(slash + 1);
-}
 
 function ancestorsOf(path: string): string[] {
   const segments = path.split("/");
@@ -377,7 +372,10 @@ function nextChangeId(): string {
   return `pending-${editIdCounter}`;
 }
 
-export function Explorer(props: ExplorerProps) {
+// Memoized like TreeRow and for the same reason: the workspace shell re-renders
+// on every lane commit, and with a stabilized prop set (the shell's side of the
+// contract) the whole tree bails instead of reconciling per row.
+export const Explorer = memo(function Explorer(props: ExplorerProps) {
   const {
     workspaceId,
     onRefresh,
@@ -404,6 +402,15 @@ export function Explorer(props: ExplorerProps) {
   const [selection, setSelection] = useState<ReadonlySet<string>>(new Set());
   const [anchorPath, setAnchorPath] = useState<string | null>(null);
   const [focusedPath, setFocusedPath] = useState<string | null>(null);
+  // Row-callback mirrors, synced during render (idempotent, so a repeated
+  // render commits the same value). The row callbacks read these instead of
+  // depending on the state: a selection or anchor change re-renders only the
+  // rows whose flags changed, not every row via new callback identities —
+  // TreeRow's memo is only as good as the stability of what it is passed.
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const anchorPathRef = useRef(anchorPath);
+  anchorPathRef.current = anchorPath;
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
@@ -531,6 +538,11 @@ export function Explorer(props: ExplorerProps) {
     walk(tree, 0, null);
     return out;
   }, [tree, expandedSet]);
+  // Same mirror as selectionRef: rows already re-render when the tree changes
+  // (their row objects are rebuilt), so nothing is lost by keeping them out of
+  // the click callback's identity.
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
 
   const folderPathSet = useMemo(() => new Set(projected.folders), [projected]);
 
@@ -777,7 +789,9 @@ export function Explorer(props: ExplorerProps) {
 
   const onRowClick = useCallback(
     (path: string, event: MouseEvent) => {
-      const isFolder = rows.find((row) => row.fullPath === path)?.isFolder ?? false;
+      const rowList = rowsRef.current;
+      const isFolder =
+        rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
       if (event.ctrlKey || event.metaKey) {
         setSelection((current) => {
           const next = new Set(current);
@@ -789,9 +803,10 @@ export function Explorer(props: ExplorerProps) {
         setFocusedPath(path);
         return;
       }
-      if (event.shiftKey && anchorPath) {
-        const order = rows.map((row) => row.fullPath);
-        const from = order.indexOf(anchorPath);
+      const anchor = anchorPathRef.current;
+      if (event.shiftKey && anchor) {
+        const order = rowList.map((row) => row.fullPath);
+        const from = order.indexOf(anchor);
         const to = order.indexOf(path);
         if (from !== -1 && to !== -1) {
           const [lo, hi] = from < to ? [from, to] : [to, from];
@@ -804,7 +819,7 @@ export function Explorer(props: ExplorerProps) {
       if (isFolder) onToggleFolder(path);
       else onOpenFile(path);
     },
-    [rows, anchorPath, selectSingle, onToggleFolder, onOpenFile],
+    [selectSingle, onToggleFolder, onOpenFile],
   );
 
   // ---- context menu (native, main-owned over the closed tuple) ----
@@ -836,7 +851,8 @@ export function Explorer(props: ExplorerProps) {
           break;
         case "delete":
           if (path) {
-            setConfirmDelete(selection.has(path) ? [...selection] : [path]);
+            const selected = selectionRef.current;
+            setConfirmDelete(selected.has(path) ? [...selected] : [path]);
           }
           break;
         case "pin":
@@ -865,7 +881,6 @@ export function Explorer(props: ExplorerProps) {
     },
     [
       workspaceId,
-      selection,
       beginCreate,
       beginRename,
       onTogglePin,
@@ -881,11 +896,11 @@ export function Explorer(props: ExplorerProps) {
     (path: string, event: MouseEvent) => {
       event.preventDefault();
       event.stopPropagation();
-      if (!selection.has(path)) selectSingle(path);
+      if (!selectionRef.current.has(path)) selectSingle(path);
       const isFolder = isFolderPath(path);
       void dispatchMenu(isFolder ? "folder" : "file", path, props.pinned.includes(path));
     },
-    [selection, selectSingle, isFolderPath, dispatchMenu, props.pinned],
+    [selectSingle, isFolderPath, dispatchMenu, props.pinned],
   );
 
   const onContainerContextMenu = useCallback(
@@ -900,7 +915,8 @@ export function Explorer(props: ExplorerProps) {
 
   const onRowDragStart = useCallback(
     (path: string, event: DragEvent) => {
-      const paths = selection.has(path) ? [...selection] : [path];
+      const selected = selectionRef.current;
+      const paths = selected.has(path) ? [...selected] : [path];
       dragSources.current = paths.map((p) => ({
         path: p,
         kind: isFolderPath(p) ? "folder" : "file",
@@ -909,7 +925,7 @@ export function Explorer(props: ExplorerProps) {
       // Some platforms require data for a drag to start.
       event.dataTransfer.setData("text/plain", paths.join("\n"));
     },
-    [selection, isFolderPath],
+    [isFolderPath],
   );
 
   const clearDragPreview = useCallback(() => {
@@ -1653,4 +1669,4 @@ export function Explorer(props: ExplorerProps) {
       ) : null}
     </>
   );
-}
+});

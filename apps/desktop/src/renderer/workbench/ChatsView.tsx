@@ -1883,6 +1883,13 @@ export function ChatsView(props: {
   // the panel a bumped revision so its badges catch up.
   onThreadRead?: () => void;
   readRevision?: number;
+  // The persistent panel navigator sets this while a Chats editor tab is
+  // live: the page instance runs the same polls against the same store, so a
+  // second poller doubles every chat read for nothing. Suspends the DM list
+  // poll, the open-DM poll, and the activity subscription; mount loads and
+  // the readRevision badge catch-up stay on. On unsuspend, one catch-up pass
+  // refreshes what the missed activity events would have.
+  suspendPolling?: boolean;
 }) {
   const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
   const collaboration = props.collaboration ?? null;
@@ -2782,10 +2789,10 @@ export function ChatsView(props: {
   // so pause this outer poll then — otherwise viewing a DM doubles the
   // relay/sync cadence for no benefit.
   useEffect(() => {
-    if (nav.level === "dm") return;
+    if (props.suspendPolling || nav.level === "dm") return;
     const interval = setInterval(() => void refreshDms(), 5_000);
     return () => clearInterval(interval);
-  }, [refreshDms, nav.level]);
+  }, [refreshDms, nav.level, props.suspendPolling]);
 
   // The panel navigator hands every conversation to the page instance, so it
   // never reaches the mark-read above and its channel and file-thread badges
@@ -3141,8 +3148,7 @@ export function ChatsView(props: {
   // for every mounted Chats surface. Every response carries the follow request
   // sequence, the navigation token, or both the token and a per-surface
   // request sequence, so a slow refresh cannot repaint a newer one.
-  useEffect(() => {
-    return bridge().onWorkspaceActivity(() => {
+  const refreshForActivity = useCallback(() => {
       void refreshFollows();
       if (nav.level === "channels") {
         // The roll-up unread badge lives on this list, so a write to a chat
@@ -3237,7 +3243,6 @@ export function ChatsView(props: {
             }
           });
       }
-    });
   }, [
     applyChannelSnapshot,
     applyThreadSnapshot,
@@ -3252,6 +3257,24 @@ export function ChatsView(props: {
     refreshChannelBadges,
     refreshDms,
   ]);
+  useEffect(() => {
+    if (props.suspendPolling) return;
+    return bridge().onWorkspaceActivity(refreshForActivity);
+  }, [props.suspendPolling, refreshForActivity]);
+  // Resuming after a suspension owes one catch-up pass: the activity events
+  // that fired meanwhile reached only the page instance, and waiting for the
+  // next event would leave this surface stale for as long as the workspace
+  // stays quiet. The mount value is deliberately not a resumption.
+  const pollingWasSuspended = useRef(props.suspendPolling === true);
+  useEffect(() => {
+    if (props.suspendPolling) {
+      pollingWasSuspended.current = true;
+      return;
+    }
+    if (!pollingWasSuspended.current) return;
+    pollingWasSuspended.current = false;
+    refreshForActivity();
+  }, [props.suspendPolling, refreshForActivity]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
@@ -3768,7 +3791,7 @@ export function ChatsView(props: {
   // paused. Token and request guards prevent an older pass from repainting a
   // newer snapshot or a local send.
   useEffect(() => {
-    if (nav.level !== "dm") return;
+    if (props.suspendPolling || nav.level !== "dm") return;
     const dm = nav.dm;
     const token = liveToken.current;
     if (!dm.threadId) void refreshOpenDm(dm, token);
@@ -3777,7 +3800,7 @@ export function ChatsView(props: {
       4_000,
     );
     return () => clearInterval(interval);
-  }, [nav, refreshOpenDm]);
+  }, [nav, refreshOpenDm, props.suspendPolling]);
 
   // #742 P2-D belt: LeaveDmDialog owns Escape itself, but this clears
   // leavingDm on any navigation away from the DM it was opened for — leaving
