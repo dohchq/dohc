@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -158,9 +158,11 @@ describe("update toast", () => {
 
   it("keeps checking, downloading, and offline states silent", () => {
     renderBar();
-    for (const status of ["checking", "downloading", "offline"] as const) {
-      pushUpdate?.({ status, message: "noise" });
-    }
+    act(() => {
+      for (const status of ["checking", "downloading", "offline"] as const) {
+        pushUpdate?.({ status, message: "noise" });
+      }
+    });
     expect(screen.queryByTestId("update-toast")).toBeNull();
   });
 
