@@ -5,8 +5,17 @@ import {
   bridgeCaptureEventsToRenderer,
 } from "./captureActivityBridge";
 
-function captureEvent(name: string): Event {
-  return { seq: 1, sessionGeneration: 1, name, payload: null };
+function captureEvent(name: string, payload: Event["payload"] = null): Event {
+  return { seq: 1, sessionGeneration: 1, name, payload };
+}
+
+function momentPayload(workspaceId: string, paths: string[]): Event["payload"] {
+  return {
+    workspaceId,
+    appliedCount: paths.length,
+    notOwnedCount: 0,
+    paths,
+  };
 }
 
 function fakeDaemon(): {
@@ -40,32 +49,89 @@ describe("bridgeCaptureEventsToRenderer", () => {
     vi.useRealTimers();
   });
 
-  it("notifies the renderer when the daemon records a capture moment", () => {
+  it("forwards the daemon payload's workspaceId and paths", () => {
     const { daemon, emit } = fakeDaemon();
     const notify = vi.fn();
     bridgeCaptureEventsToRenderer(daemon, notify, 100);
 
-    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT));
+    emit(
+      captureEvent(
+        CAPTURE_MOMENT_RECORDED_EVENT,
+        momentPayload("ws-a", ["notes/a.md"]),
+      ),
+    );
     expect(notify).not.toHaveBeenCalled();
     vi.advanceTimersByTime(100);
-    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-a",
+      paths: ["notes/a.md"],
+    });
   });
 
-  it("coalesces a burst of capture events into one notification", () => {
+  it("coalesces a burst per workspace into one scoped notification each", () => {
     const { daemon, emit } = fakeDaemon();
     const notify = vi.fn();
     bridgeCaptureEventsToRenderer(daemon, notify, 100);
 
-    for (let i = 0; i < 5; i += 1) {
-      emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT));
+    for (let i = 0; i < 3; i += 1) {
+      emit(
+        captureEvent(
+          CAPTURE_MOMENT_RECORDED_EVENT,
+          momentPayload("ws-a", [`a-${i}.md`]),
+        ),
+      );
     }
-    vi.advanceTimersByTime(100);
-    expect(notify).toHaveBeenCalledTimes(1);
-
-    // A later batch notifies again — the debounce is a window, not a latch.
-    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT));
+    emit(
+      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-b", ["b.md"])),
+    );
     vi.advanceTimersByTime(100);
     expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenCalledWith({
+      workspaceId: "ws-a",
+      paths: ["a-0.md", "a-1.md", "a-2.md"],
+    });
+    expect(notify).toHaveBeenCalledWith({ workspaceId: "ws-b", paths: ["b.md"] });
+
+    // A later batch notifies again — the debounce is a window, not a latch.
+    emit(
+      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])),
+    );
+    vi.advanceTimersByTime(100);
+    expect(notify).toHaveBeenCalledTimes(3);
+  });
+
+  it("omits paths when the daemon truncated them", () => {
+    const { daemon, emit } = fakeDaemon();
+    const notify = vi.fn();
+    bridgeCaptureEventsToRenderer(daemon, notify, 100);
+
+    emit(
+      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, {
+        workspaceId: "ws-a",
+        // A baseline pass larger than the wire cap: the paths list is a
+        // partial sample, so forwarding it would hide the rest.
+        appliedCount: 100,
+        notOwnedCount: 0,
+        paths: ["only-some.md"],
+      }),
+    );
+    vi.advanceTimersByTime(100);
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
+  });
+
+  it("degrades a payload without a workspace to one global notification", () => {
+    const { daemon, emit } = fakeDaemon();
+    const notify = vi.fn();
+    bridgeCaptureEventsToRenderer(daemon, notify, 100);
+
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT));
+    emit(
+      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])),
+    );
+    vi.advanceTimersByTime(100);
+    // The global ping already reaches every window; a scoped send on top
+    // would only repeat the repaint.
+    expect(notify).toHaveBeenCalledExactlyOnceWith();
   });
 
   it("ignores unrelated daemon events", () => {
@@ -83,7 +149,9 @@ describe("bridgeCaptureEventsToRenderer", () => {
     const notify = vi.fn();
     const dispose = bridgeCaptureEventsToRenderer(daemon, notify, 100);
 
-    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT));
+    emit(
+      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])),
+    );
     dispose();
     expect(handlerCount()).toBe(0);
     vi.advanceTimersByTime(1_000);

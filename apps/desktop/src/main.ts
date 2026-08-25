@@ -603,6 +603,10 @@ import {
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
 import {
+  broadcastWorkspaceActivity,
+  type WorkspaceActivityScope,
+} from "./ipc/workspaceActivityBroadcast";
+import {
   EngineRelayClient,
   probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
@@ -1547,11 +1551,19 @@ function cloudLogin(): CloudLogin {
 
 // Live file-watch → history pipeline. Pushes a renderer notification whenever
 // a settled batch is recorded so the file tree, timeline, and sync status
-// refresh without polling.
-function notifyRenderer(): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(CHANNELS.workspaceActivity);
-  }
+// refresh without polling. A scoped push reaches only windows whose ACTIVE
+// workspace matches — the pluginStatusChanged rule — so a window on
+// workspace B never refetches its world for workspace A's activity. Only a
+// genuinely cross-workspace event (logout, registry change, daemon
+// relaunch) broadcasts scope-free.
+function notifyRenderer(scope?: WorkspaceActivityScope): void {
+  broadcastWorkspaceActivity({
+    windows: BrowserWindow.getAllWindows(),
+    activeWorkspaceIdOf: (webContentsId) =>
+      activeWorkspaceIdBySender.get(webContentsId),
+    channel: CHANNELS.workspaceActivity,
+    ...(scope ? { scope } : {}),
+  });
 }
 
 // A cloud session transition (login, logout, account switch, or a relay
@@ -2064,6 +2076,18 @@ let materializePendingChatBookmarksForWorkspace:
   | ((workspaceId: string) => Promise<void>)
   | null = null;
 
+// Workspaces that might hold pending chat-bookmark projections. The engine
+// marks a projection pending when a reply reaches a bookmarked target; every
+// path a reply can take through this process (agent dispatch, CLI/MCP write,
+// relay pull, renderer send) either projects immediately or flags its
+// workspace here. The slow background worker below only visits flagged
+// workspaces — plus each workspace once on open, for rows a previous
+// session left behind.
+const pendingChatBookmarkProjectionWorkspaceIds = new Set<string>();
+function queueChatBookmarkProjection(workspaceId: string): void {
+  pendingChatBookmarkProjectionWorkspaceIds.add(workspaceId);
+}
+
 async function projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void> {
   await projectChatBookmarksAfterPull({
     readOnly: Boolean(sharedViewOf(workspaceId)),
@@ -2072,6 +2096,9 @@ async function projectPendingChatBookmarksAfterPull(workspaceId: string): Promis
     },
     reportError: (error) => {
       console.error(`[desktop] post-pull chat bookmark projection (${workspaceId}):`, error);
+      // The pull marked projections pending and this pass failed to write
+      // them; the background worker retries.
+      queueChatBookmarkProjection(workspaceId);
     },
   });
 }
@@ -2232,7 +2259,7 @@ async function runSharedChannelSyncPass(
       );
     }
     if (result.changed || result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
-      notifyRenderer();
+      notifyRenderer({ workspaceId });
     }
     if (result.changed) await projectPendingChatBookmarksAfterPull(workspaceId);
     return unrefreshed;
@@ -2382,7 +2409,7 @@ function engineForWorkspace(
     },
     capture,
     onChange: () => {
-      notifyRenderer();
+      notifyRenderer({ workspaceId: workspace.workspaceId });
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
         console.error("[desktop] relay dispatch scan:", error);
       });
@@ -2530,7 +2557,7 @@ const tryInVersionSessions = createTryInVersionSessions({
     );
     return run;
   },
-  onStateChanged: () => notifyRenderer(),
+  onStateChanged: (workspaceId) => notifyRenderer({ workspaceId }),
 });
 /**
  * The workspace's own `agents.*` settings: which driver it prefers, and which
@@ -3145,14 +3172,16 @@ const chatDispatchService = createChatDispatchService({
     }
   },
   onMessagePosted: (workspaceId, threadId) => {
-    notifyRenderer();
+    notifyRenderer({ workspaceId });
+    // An agent reply can mark a live bookmark projection pending.
+    queueChatBookmarkProjection(workspaceId);
     activity.queueCloudSync(workspaceId);
     void syncSharedChannelsForChatTarget(workspaceId, { threadId });
     void chatDispatchService.scanWorkspace(workspaceId).catch((error) => {
       console.error("[desktop] chat dispatch scan:", error);
     });
   },
-  onRunUpdated: () => notifyRenderer(),
+  onRunUpdated: (workspaceId) => notifyRenderer({ workspaceId }),
   setRunAttribution: async (workspaceId, run) => {
     if (run) {
       if (!(await activity.claimAgentRun(workspaceId, run))) {
@@ -3226,6 +3255,10 @@ async function openWorkspaceActivityWith(
   void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
     console.error("[desktop] chat dispatch workspace-open scan:", error);
   });
+  // Rows a previous session marked pending and never wrote (quit or crash
+  // mid-projection) have no event of their own; one flagged visit per open
+  // covers them.
+  queueChatBookmarkProjection(workspace.workspaceId);
   return result;
 }
 
@@ -3719,7 +3752,9 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       };
     },
     onWrite: (workspace, target) => {
-      notifyRenderer();
+      notifyRenderer({ workspaceId: workspace.workspaceId });
+      // A CLI or MCP reply can mark a live bookmark projection pending.
+      queueChatBookmarkProjection(workspace.workspaceId);
       activity.queueCloudSync(workspace.workspaceId);
       void syncSharedChannelsForChatTarget(workspace.workspaceId, target);
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
@@ -4570,13 +4605,14 @@ async function syncStatusWithOwnedProjection(
 }
 
 function committedShareViewChangeValue(
+  workspaceId: string,
   outcome: ShareViewFileChangeOutcome,
 ): ShareViewFileChangeValue {
   if (outcome.status === "committed") {
-    if (outcome.projection === "pending") notifyRenderer();
+    if (outcome.projection === "pending") notifyRenderer({ workspaceId });
     return outcome.value;
   }
-  notifyRenderer();
+  notifyRenderer({ workspaceId });
   console.error("[desktop] shared file change did not finish cleanly", outcome);
   if (outcome.status === "partial") {
     throw new Error(
@@ -4589,10 +4625,11 @@ function committedShareViewChangeValue(
 }
 
 function shareViewImportResult(
+  workspaceId: string,
   outcome: ShareViewFileChangeOutcome,
 ): { imported: string[]; skipped: number; interrupted?: true } {
   if (outcome.status === "committed") {
-    if (outcome.projection === "pending") notifyRenderer();
+    if (outcome.projection === "pending") notifyRenderer({ workspaceId });
     if (
       typeof outcome.value !== "object" ||
       outcome.value === null ||
@@ -4603,7 +4640,7 @@ function shareViewImportResult(
     }
     return outcome.value as { imported: string[]; skipped: number };
   }
-  notifyRenderer();
+  notifyRenderer({ workspaceId });
   console.error("[desktop] shared file import did not finish cleanly", outcome);
   if (outcome.status === "partial") {
     const imported = outcome.effects
@@ -5094,6 +5131,7 @@ function registerIpcHandlers(
               input.initialText,
             )
           : committedShareViewChangeValue(
+              workspace.workspaceId,
               await shareViewFiles.change(
                 lease,
                 { kind: "standalone", workspaceId: workspace.workspaceId },
@@ -5177,6 +5215,7 @@ function registerIpcHandlers(
                   input.toPath,
                 )
               : committedShareViewChangeValue(
+                  workspace.workspaceId,
                   await shareViewFiles.change(
                     lease,
                     {
@@ -5240,6 +5279,7 @@ function registerIpcHandlers(
                   (path) => shell.trashItem(path),
                 )
               : committedShareViewChangeValue(
+                  workspace.workspaceId,
                   await shareViewFiles.change(
                     lease,
                     {
@@ -5571,6 +5611,7 @@ function registerIpcHandlers(
               );
         }
         return shareViewImportResult(
+          workspace.workspaceId,
           await shareViewFiles.change(
             lease,
             { kind: "standalone", workspaceId: workspace.workspaceId },
@@ -5651,6 +5692,7 @@ function registerIpcHandlers(
               input.expectedContentHash,
             )
           : committedShareViewChangeValue(
+              workspace.workspaceId,
               await shareViewFiles.change(
                 lease,
                 { kind: "standalone", workspaceId: workspace.workspaceId },
@@ -6020,6 +6062,7 @@ function registerIpcHandlers(
       logout: () => cloudLogin().logout(),
       stopEngines: () => activity.stopEngines(),
       closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces(),
+      // Scope-free: logout changes every workspace's sync state at once.
       notifyWorkspaceActivity: () => notifyRenderer(),
       // Logout is a one-event transition to a known state: signed out. The
       // key change is what makes every view clear and refresh.
@@ -6231,6 +6274,8 @@ function registerIpcHandlers(
       } catch {}
       await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
+      // Scope-free: the rollback removed a registry entry no window has
+      // active yet — every window's workspace list is what changed.
       notifyRenderer();
       if (
         error instanceof Error &&
@@ -6243,6 +6288,7 @@ function registerIpcHandlers(
       );
     }
     desktopMarks.measureSince("workspace-join", "workspace-join-start");
+    // Scope-free: the join added a registry entry no window has active yet.
     notifyRenderer();
     return CloudJoinWorkspaceResult.parse({ workspace: summary });
   });
@@ -6651,7 +6697,7 @@ function registerIpcHandlers(
       input.shareId,
       input.generation,
     );
-    notifyRenderer();
+    notifyRenderer({ workspaceId: workspace.workspaceId });
   });
 
   // ---- Share changes (#646 PR3a) ----
@@ -7111,6 +7157,8 @@ function registerIpcHandlers(
       } catch {}
       await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
+      // Scope-free: the rollback removed a registry entry no window has
+      // active yet — every window's workspace list is what changed.
       notifyRenderer();
       if (error instanceof ShareUnavailableError) {
         throw new Error(
@@ -7133,6 +7181,7 @@ function registerIpcHandlers(
     //
     // After the refresh, because a failed refresh rolls the whole open back.
     await openWorkspaceActivity(requireWorkspace(created.workspaceId));
+    // Scope-free: the open added a registry entry no window has active yet.
     notifyRenderer();
     // Through the PROJECTION, not a raw parse: the level lives under the
     // record's pinned grant, and a raw parse would strip it and hand the
@@ -7189,7 +7238,7 @@ function registerIpcHandlers(
     } catch (error) {
       // A pull that failed on a later page still persisted the refusals its
       // earlier pages recorded, so the renderer is told once here too.
-      notifyRenderer();
+      notifyRenderer({ workspaceId: workspace.workspaceId });
       // A damaged pin does not heal on the next try, and re-asking the relay
       // for one would let it restate a wider scope. Say so instead of
       // reporting "refreshed, nothing new" forever.
@@ -7202,11 +7251,11 @@ function registerIpcHandlers(
       throw error;
     }
     if ("ok" in outcome && !outcome.ok) {
-      notifyRenderer();
+      notifyRenderer({ workspaceId: workspace.workspaceId });
       return RefreshSharedViewResult.parse(outcome);
     }
     if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
-    notifyRenderer();
+    notifyRenderer({ workspaceId: workspace.workspaceId });
     return RefreshSharedViewResult.parse(outcome);
   });
 
@@ -8229,8 +8278,10 @@ function registerIpcHandlers(
       // A plugin-pipeline start failure must not fail the whole handler —
       // the workspace itself already opened. listPlugins and friends
       // separately convert a failed ensurePluginPipeline into a structured
-      // pluginIpcError; this is best-effort warmup.
-      await ensurePluginPipeline(workspace).catch((error: unknown) => {
+      // pluginIpcError; this is best-effort warmup, and the renderer's file
+      // tree must not wait on it (fire-and-forget, like the dispatch scan in
+      // openWorkspaceActivityWith).
+      void ensurePluginPipeline(workspace).catch((error: unknown) => {
         console.error(
           `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
           error,
@@ -8464,7 +8515,7 @@ function registerIpcHandlers(
     const input = CreateWorkspaceVersionPayload.parse(payload);
     const capture = await requireVersionOperations(input.workspaceId);
     const snapshot = await capture.createVersion(input.name);
-    notifyRenderer();
+    notifyRenderer({ workspaceId: input.workspaceId });
     return ListWorkspaceVersionsResult.parse({
       versions: snapshot.versions.map(workspaceVersionForIpc),
       activeVersionId: snapshot.activeVersionId,
@@ -8476,7 +8527,7 @@ function registerIpcHandlers(
     const input = SwitchWorkspaceVersionPayload.parse(payload);
     const capture = await requireVersionOperations(input.workspaceId);
     const result = await capture.switchVersion(input.versionId);
-    notifyRenderer();
+    notifyRenderer({ workspaceId: input.workspaceId });
     return SwitchWorkspaceVersionResult.parse(result);
   });
 
@@ -8495,7 +8546,7 @@ function registerIpcHandlers(
     const input = MergeWorkspaceVersionPayload.parse(payload);
     const capture = await requireVersionOperations(input.workspaceId);
     const result = await capture.mergeVersionIntoMain(input.versionId);
-    notifyRenderer();
+    notifyRenderer({ workspaceId: input.workspaceId });
     // The merge reports a count; the rows are open conflicts in the engine,
     // read back one page at a time like every other conflict reader (#562).
     const page =
@@ -8539,7 +8590,7 @@ function registerIpcHandlers(
       // without this nudge the other machine's mirrored conflict would stay
       // open until an unrelated edit happened to trigger a sync.
       activity.queueCloudSync(input.workspaceId);
-      notifyRenderer();
+      notifyRenderer({ workspaceId: input.workspaceId });
       return ResolveWorkspaceVersionConflictResult.parse({
         conflicts: outcome.remaining.conflicts.map(versionConflictForIpc),
         nextAfterConflictId: outcome.remaining.nextAfterConflictId,
@@ -8939,7 +8990,7 @@ function registerIpcHandlers(
       "Engine history",
     );
     const result = await capture.restoreFileToBeforeMoment(input.momentId);
-    notifyRenderer();
+    notifyRenderer({ workspaceId: input.workspaceId });
     return RestoreEngineMomentFileResult.parse(result);
   });
 
@@ -9082,7 +9133,7 @@ function registerIpcHandlers(
       destinationPath: chatBookmarkDestination(thread.title, targetId),
     });
     const bookmark = await materializeChatBookmark(workspace, capture, saved);
-    notifyRenderer();
+    notifyRenderer({ workspaceId: workspace.workspaceId });
     return SaveChatBookmarkResult.parse({ bookmark: chatBookmarkForIpc(bookmark) });
   });
 
@@ -9115,7 +9166,7 @@ function registerIpcHandlers(
       },
     );
     const projected = await materializeChatBookmark(workspace, capture, archived);
-    notifyRenderer();
+    notifyRenderer({ workspaceId: workspace.workspaceId });
     return ArchiveChatBookmarkResult.parse({
       bookmark: chatBookmarkForIpc(projected),
     });
@@ -9219,6 +9270,7 @@ function registerIpcHandlers(
     if (scope.kind === "workspace") {
       void materializePendingChatBookmarks(workspace, scope.capture).catch((error) => {
         console.error("[desktop] chat bookmark projection:", error);
+        queueChatBookmarkProjection(workspace.workspaceId);
       });
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
         console.error("[desktop] local chat dispatch scan:", error);
@@ -9528,7 +9580,7 @@ function registerIpcHandlers(
       state: input.state,
     });
     if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
-    notifyRenderer();
+    notifyRenderer({ workspaceId: workspace.workspaceId });
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
   });
 
@@ -9734,6 +9786,7 @@ function registerIpcHandlers(
     });
     void materializePendingChatBookmarks(workspace, capture).catch((error) => {
       console.error("[desktop] chat bookmark projection:", error);
+      queueChatBookmarkProjection(workspace.workspaceId);
     });
     void syncSharedChannelsForChatTarget(workspace.workspaceId, {
       channelId: input.channelId,
@@ -10535,7 +10588,7 @@ function registerIpcHandlers(
                   notifyRenderer: false,
                 });
               } catch (error) {
-                notifyRenderer();
+                notifyRenderer({ workspaceId: workspace.workspaceId });
                 throw error;
               }
             },
@@ -10557,7 +10610,7 @@ function registerIpcHandlers(
                     sessions.endRebuild(workspace.workspaceId),
                 });
               } finally {
-                notifyRenderer();
+                notifyRenderer({ workspaceId: workspace.workspaceId });
               }
             },
           }),
@@ -11728,23 +11781,31 @@ function registerIpcHandlers(
   // Live bookmark projections also follow replies arriving from the local
   // agent, CLI, or relay. The engine only marks those projections pending;
   // this small workspace-scoped worker performs the filesystem write through
-  // the canonical capture layer. A list/open still materializes immediately,
-  // so the interval is only the background consistency path.
+  // the canonical capture layer. A list/open still materializes immediately.
+  // Event-gated (see queueChatBookmarkProjection): every reply path flags
+  // its workspace, so the worker idles instead of querying every open
+  // workspace unconditionally. The slow cadence is the crash backstop — a
+  // failed pass re-flags and retries here.
   const bookmarkProjectionRuns = new Set<string>();
   const bookmarkProjectionTimer = setInterval(() => {
     for (const workspaceId of activity.listOpenWorkspaceIds()) {
+      if (!pendingChatBookmarkProjectionWorkspaceIds.has(workspaceId)) continue;
       if (bookmarkProjectionRuns.has(workspaceId)) continue;
       const workspace = findWorkspace(workspaceId);
       const capture = activity.engineCaptureFor(workspaceId);
       if (!workspace || !capture || sharedViewOf(workspaceId)) continue;
+      pendingChatBookmarkProjectionWorkspaceIds.delete(workspaceId);
       bookmarkProjectionRuns.add(workspaceId);
       void materializePendingChatBookmarks(workspace, capture)
         .catch((error) => {
           console.error("[desktop] live chat bookmark projection:", error);
+          // Whole-pass failure: keep the workspace flagged so the next tick
+          // retries instead of losing the pending rows until the next reply.
+          queueChatBookmarkProjection(workspaceId);
         })
         .finally(() => bookmarkProjectionRuns.delete(workspaceId));
     }
-  }, 3_000);
+  }, 30_000);
   bookmarkProjectionTimer.unref();
   app.once("will-quit", () => clearInterval(bookmarkProjectionTimer));
 }
@@ -11807,7 +11868,8 @@ async function startRustEngineDaemon(): Promise<boolean> {
       // A capture event can die with the previous daemon's transport after its
       // moment committed; the replacement never re-emits it (its baseline finds
       // disk and manifest agreeing). One repaint per healthy launch closes that
-      // staleness window.
+      // staleness window. Scope-free: the lost event could have belonged to
+      // any open workspace.
       onLaunch: () => notifyRenderer(),
     });
     await rustEngineDaemon.start();

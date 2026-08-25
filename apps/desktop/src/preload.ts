@@ -27,6 +27,7 @@ import type {
   StopPluginPanelPayload,
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
+  WorkspaceActivityEvent,
   WorkspaceSummary,
   WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
@@ -48,6 +49,7 @@ import {
   parsePluginPanelSdkEventForIpc,
   parsePluginStatusChangedEventForIpc,
   parsePluginWebAppFailedEventForIpc,
+  parseWorkspaceActivityEventForIpc,
 } from "./ipc/bridgeContract";
 import {
   CHANNELS,
@@ -465,8 +467,11 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
   setWorkspaceUiState: (payload) =>
     ipcRenderer.invoke(CHANNELS.setWorkspaceUiState, payload),
-  onWorkspaceActivity: (listener: () => void) => {
-    const handler = () => listener();
+  onWorkspaceActivity: (listener: (event: WorkspaceActivityEvent) => void) => {
+    // Degrades to the payload-free global ping on a malformed payload; an
+    // activity notification is never dropped (see the parser's contract).
+    const handler = (_event: unknown, raw: unknown) =>
+      listener(parseWorkspaceActivityEventForIpc(raw));
     ipcRenderer.on(CHANNELS.workspaceActivity, handler);
     return () => ipcRenderer.removeListener(CHANNELS.workspaceActivity, handler);
   },

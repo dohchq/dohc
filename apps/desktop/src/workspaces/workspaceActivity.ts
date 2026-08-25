@@ -139,7 +139,10 @@ export async function closeWorkspaceActivityAndRelay(options: {
 // desktop layer opens a workspace once; subsequent status reads are served
 // from here, and activity pushes notify the UI.
 export function createWorkspaceActivity(
-  notify: () => void,
+  // Scoped when the push concerns one workspace (main delivers it only to
+  // windows with that workspace active); scope-free for the two pushes below
+  // that change every synced workspace at once.
+  notify: (scope?: { workspaceId: string }) => void,
   options: WorkspaceActivityOptions = {},
 ) {
   const watched = new Map<string, WatchedWorkspace>();
@@ -235,7 +238,7 @@ export function createWorkspaceActivity(
                 // the same code on every pass.
                 if (entry.historyCaptureFailure === failure) return;
                 entry.historyCaptureFailure = failure;
-                notify();
+                notify({ workspaceId: workspace.workspaceId });
               },
             });
           // stopAll may have raced the capture build; stop the capture no
@@ -277,7 +280,7 @@ export function createWorkspaceActivity(
           entry.lastSyncedAtMs = Date.now();
           // Every settled local batch queues a (debounced) cloud push.
           entry.engine?.queueSync();
-          notify();
+          notify({ workspaceId: workspace.workspaceId });
           if (options.onRustEngineShadowActivity) {
             try {
               void Promise.resolve(
@@ -352,7 +355,7 @@ export function createWorkspaceActivity(
       entry.engine = null;
       throw error;
     }
-    notify();
+    notify({ workspaceId: workspace.workspaceId });
   }
 
   // Failed-join rollback (0P-C gate fix): stop and forget ONE workspace —
@@ -388,7 +391,7 @@ export function createWorkspaceActivity(
     const captureStopped = await Promise.allSettled([
       Promise.resolve().then(() => entry.capture?.stop()),
     ]);
-    if (closeOptions.notify !== false) notify();
+    if (closeOptions.notify !== false) notify({ workspaceId });
     const failed = [...stopped, ...liveSessionsRetired, ...captureStopped].find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
@@ -412,6 +415,8 @@ export function createWorkspaceActivity(
       entry.engine = engine;
       void engine.start();
     }
+    // Scope-free: the login just re-attached engines across workspaces, so
+    // every window's sync status may have changed.
     notify();
   }
 
@@ -426,6 +431,7 @@ export function createWorkspaceActivity(
       entry.engine = null;
     }
     await Promise.all(stops);
+    // Scope-free: logout detached every workspace's engine at once.
     notify();
   }
 
