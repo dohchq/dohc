@@ -109,6 +109,46 @@ describe("EngineYDocSessionOwner", () => {
     });
   });
 
+  it("admits only one writable session for a workspace path", async () => {
+    const owner = createOwner();
+    const sender = { id: 7, label: "window-a" };
+    const firstOpen = deferred<{ session: TestSession; value: string }>();
+    const competingOpen = vi.fn(async () => ({
+      session: { close: async () => undefined },
+      value: "competing",
+    }));
+
+    const first = owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "first-session",
+        openSession: () => firstOpen.promise,
+      }),
+    );
+
+    for (const sessionId of ["while-opening", "while-open"]) {
+      await expect(
+        owner.open(
+          openInput({
+            sender,
+            generation: 1,
+            sessionId,
+            openSession: competingOpen,
+          }),
+        ),
+      ).resolves.toEqual({ kind: "refused", reason: "session-in-use" });
+      if (sessionId === "while-opening") {
+        firstOpen.resolve({
+          session: { close: async () => undefined },
+          value: "first",
+        });
+        await expect(first).resolves.toMatchObject({ kind: "opened" });
+      }
+    }
+    expect(competingOpen).not.toHaveBeenCalled();
+  });
+
   it("does not let a stale open clear the newer generation's winner", async () => {
     const owner = createOwner();
     const sender = { id: 7, label: "reused-web-contents" };
@@ -385,6 +425,57 @@ describe("EngineYDocSessionOwner", () => {
     });
     expect(staleClose).toHaveBeenCalledOnce();
     expect(currentEngineOpen).toHaveBeenCalledOnce();
+  });
+
+  it("waits for a different session id to release the same workspace path", async () => {
+    const owner = createOwner();
+    const sender = { id: 7, label: "window-a" };
+    const closeGate = deferred<void>();
+    const closeStarted = deferred<void>();
+    const replacementOpen = vi.fn(async () => ({
+      session: { close: async () => undefined },
+      value: "replacement",
+    }));
+
+    await owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "first-session",
+        openSession: async () => ({
+          session: {
+            close: async () => {
+              closeStarted.resolve();
+              await closeGate.promise;
+            },
+          },
+          value: "first",
+        }),
+      }),
+    );
+    const release = owner.release({
+      sender,
+      generation: 1,
+      sessionId: "first-session",
+    });
+    await closeStarted.promise;
+    const replacement = owner.open(
+      openInput({
+        sender,
+        generation: 1,
+        sessionId: "replacement-session",
+        openSession: replacementOpen,
+      }),
+    );
+
+    expect(replacementOpen).not.toHaveBeenCalled();
+    closeGate.resolve();
+    await expect(release).resolves.toEqual({ kind: "released" });
+    await expect(replacement).resolves.toMatchObject({
+      kind: "opened",
+      value: "replacement",
+    });
+    expect(replacementOpen).toHaveBeenCalledOnce();
   });
 
   it("requires the exact sender object and renderer generation", async () => {

@@ -274,6 +274,15 @@ export class EngineYDocSessionOwner<
     if (occupied) {
       void this.#retire(occupied, "superseded", true);
     }
+    const documentInUse = [...this.#records].some(
+      (record) =>
+        record.state !== "releasing" &&
+        record.workspaceId === input.workspaceId &&
+        record.path === input.path,
+    );
+    if (documentInUse) {
+      return Promise.resolve({ kind: "refused", reason: "session-in-use" });
+    }
 
     const record: SessionRecord<TSender, TSession, TUpdate, TReplacement> = {
       key,

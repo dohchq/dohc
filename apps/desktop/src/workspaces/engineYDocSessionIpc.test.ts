@@ -442,7 +442,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.capture.openYDocSession).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps duplicate opens read-only while the exact session is reserved", async () => {
+  it("keeps duplicate document opens read-only until the owner releases them", async () => {
     const sender = new FakeSender(7);
     const openStarted = deferred<void>();
     const engineOpen = deferred<WorkspaceEngineYDocProviderSession>();
@@ -469,28 +469,34 @@ describe("engine Y.Doc IPC adapter", () => {
 
     const opening = ipc.open(sender, openPayload);
     await openStarted.promise;
-    await expect(ipc.open(sender, openPayload)).resolves.toEqual({
+    await expect(
+      ipc.open(sender, { ...openPayload, sessionId: "while-opening" }),
+    ).resolves.toEqual({
       available: false,
       engineMayHoldDocument: true,
     });
 
     engineOpen.resolve(providerSession({ close }));
     await expect(opening).resolves.toMatchObject({ available: true });
-    await expect(ipc.open(sender, openPayload)).resolves.toEqual({
+    await expect(
+      ipc.open(sender, { ...openPayload, sessionId: "while-open" }),
+    ).resolves.toEqual({
       available: false,
       engineMayHoldDocument: true,
     });
 
     const closing = ipc.close(sender, { sessionId: openPayload.sessionId });
     await closeStarted.promise;
-    await expect(ipc.open(sender, openPayload)).resolves.toEqual({
-      available: false,
-      engineMayHoldDocument: true,
+    const replacement = ipc.open(sender, {
+      ...openPayload,
+      sessionId: "after-release",
     });
     expect(capture.openYDocSession).toHaveBeenCalledTimes(1);
 
     closeGate.resolve();
     await closing;
+    await expect(replacement).resolves.toMatchObject({ available: true });
+    expect(capture.openYDocSession).toHaveBeenCalledTimes(2);
   });
 
   it("maps domain open refusals to the bridge contract", async () => {
