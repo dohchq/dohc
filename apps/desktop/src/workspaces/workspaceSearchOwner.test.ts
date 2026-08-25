@@ -816,6 +816,138 @@ describe("WorkspaceSearchOwner", () => {
     );
   });
 
+  it("settles the exact request when authority changes during terminal fallback", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    let holdAuthority = true;
+    let terminalChecks = 0;
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(21);
+
+    await owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => holdAuthority || ++terminalChecks <= 3,
+      ),
+      searchPayload("authority-flip"),
+    );
+
+    // Hold the transition between the current check before fallback and the
+    // fallback send. The owner must not mark the request settled until that
+    // send succeeds; exact-identity stale settlement still has authority.
+    holdAuthority = false;
+    registry.starts[0]?.onBatch({
+      searchId: "authority-flip",
+      entries: [
+        {
+          path: "notes.md",
+          line: 0,
+          column: 1,
+          preview: "needle",
+          matchStart: 0,
+          matchEnd: 6,
+        },
+      ],
+      done: true,
+      limitHit: false,
+    });
+
+    expect(registry.adapter.cancel).toHaveBeenCalledWith(
+      sender.id,
+      "authority-flip",
+    );
+    expect(sender.send).toHaveBeenCalledExactlyOnceWith(
+      CHANNELS.searchResults,
+      {
+        searchId: "authority-flip",
+        entries: [],
+        done: true,
+        limitHit: false,
+      },
+    );
+  });
+
+  it("never lets a ripgrep batch settle a different request identity", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    const logError = vi.fn();
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError,
+    });
+    const sender = createSender(22);
+
+    await owner.start(
+      sender,
+      authority({ workspaceId: "workspace-1", rootPath }),
+      searchPayload("owned-id"),
+    );
+    registry.starts[0]?.onBatch({
+      searchId: "different-id",
+      entries: [],
+      done: true,
+      limitHit: false,
+    });
+    registry.starts[0]?.onBatch({
+      searchId: "owned-id",
+      entries: [],
+      done: true,
+      limitHit: false,
+    });
+
+    expect(sender.send).toHaveBeenCalledExactlyOnceWith(
+      CHANNELS.searchResults,
+      {
+        searchId: "owned-id",
+        entries: [],
+        done: true,
+        limitHit: false,
+      },
+    );
+    expect(logError).toHaveBeenCalledWith(
+      "Workspace search dropped a ripgrep batch with the wrong request identity.",
+    );
+  });
+
+  it("rejects an engine terminal event the preload boundary would drop", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    const logError = vi.fn();
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => ({ flush: async () => undefined }),
+      queryEngine: async () => [engineResult("../escape.md")],
+      readEnginePolicy: async () => readablePolicy,
+      logError,
+    });
+    const sender = createSender(23);
+
+    await expect(
+      owner.start(
+        sender,
+        authority({ workspaceId: "workspace-1", rootPath }),
+        searchPayload("invalid-engine-result"),
+      ),
+    ).rejects.toThrow("Workspace search could not deliver engine result.");
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(logError).toHaveBeenCalledWith(
+      "Workspace search dropped an invalid engine result.",
+      expect.anything(),
+    );
+  });
+
   it("omits a file title that only duplicates a valid long path", async () => {
     const rootPath = await makeRoot();
     const registry = createFakeRegistry();

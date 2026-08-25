@@ -1,9 +1,10 @@
 import type { SearchResult } from "@dohc/workspace-engine-client";
+import type { WorkspaceSearchPayload } from "../ipc/bridgeContract";
 import {
-  SearchResultsEventSchema,
-  type WorkspaceSearchPayload,
-} from "../ipc/bridgeContract";
-import { CHANNELS, SEARCH_EVENT_MAX_ENTRIES } from "../ipc/channels";
+  CHANNELS,
+  parseSearchResultsEvent,
+  SEARCH_EVENT_MAX_ENTRIES,
+} from "../ipc/channels";
 import type { OwnedWorkspaceSearchView } from "./ownedWorkspaceSdkReadPort";
 import { usableShareMountRecord } from "./shareMounts";
 import { storedShareMounts } from "./shareViewFilesTarget";
@@ -331,7 +332,15 @@ export class WorkspaceSearchOwner<
       this.#settleStaleRipgrep(sender, identity, ownsSearch);
       return;
     }
-    const sent = this.#send(sender, batch, isCurrent, "ripgrep batch");
+    const matchesIdentity = batch.searchId === identity.searchId;
+    if (!matchesIdentity) {
+      this.#dependencies.logError(
+        "Workspace search dropped a ripgrep batch with the wrong request identity.",
+      );
+    }
+    const sent =
+      matchesIdentity &&
+      this.#send(sender, batch, isCurrent, "ripgrep batch");
     if (!batch.done) return;
     if (sent) {
       identity.settled = true;
@@ -345,8 +354,7 @@ export class WorkspaceSearchOwner<
     // A malformed terminal batch cannot be allowed to disappear: the invoke
     // already resolved when ripgrep started, so only an event can settle the
     // renderer now. The empty completion is closed and independently parsed.
-    identity.settled = true;
-    this.#send(
+    const fallbackSent = this.#send(
       sender,
       {
         searchId: identity.searchId,
@@ -357,6 +365,13 @@ export class WorkspaceSearchOwner<
       isCurrent,
       "ripgrep fallback completion",
     );
+    if (fallbackSent) {
+      identity.settled = true;
+      return;
+    }
+    if (!isCurrent()) {
+      this.#settleStaleRipgrep(sender, identity, ownsSearch);
+    }
   }
 
   #settleStaleRipgrep(
@@ -389,17 +404,17 @@ export class WorkspaceSearchOwner<
     source: string,
   ): boolean {
     if (!isCurrent()) return false;
-    const parsed = SearchResultsEventSchema.safeParse(event);
-    if (!parsed.success) {
+    const parsed = parseSearchResultsEvent(event);
+    if (!parsed) {
       this.#dependencies.logError(
         `Workspace search dropped an invalid ${source}.`,
-        parsed.error,
+        new Error("Search result event failed the preload boundary parser."),
       );
       return false;
     }
     if (!isCurrent()) return false;
     try {
-      sender.send(CHANNELS.searchResults, parsed.data);
+      sender.send(CHANNELS.searchResults, parsed);
       return true;
     } catch (error) {
       this.#dependencies.logError(
