@@ -181,14 +181,6 @@ export interface EngineYDocSessionOwnerOptions<
       TReplacement
     >,
   ) => void;
-  onOutboundFailed?: (
-    failure: EngineYDocSessionOutbound<
-      TSender,
-      TEvent,
-      TUpdate,
-      TReplacement
-    > & { error: unknown },
-  ) => void;
   onReleaseFailed?: (
     failure: EngineYDocSessionCaller<TSender> & {
       workspaceId: string;
@@ -212,14 +204,6 @@ export class EngineYDocSessionOwner<
     TUpdate,
     TReplacement
   >["onOutbound"];
-  readonly #onOutboundFailed: NonNullable<
-    EngineYDocSessionOwnerOptions<
-      TSender,
-      TEvent,
-      TUpdate,
-      TReplacement
-    >["onOutboundFailed"]
-  >;
   readonly #onReleaseFailed: NonNullable<
     EngineYDocSessionOwnerOptions<
       TSender,
@@ -247,7 +231,6 @@ export class EngineYDocSessionOwner<
     >,
   ) {
     this.#onOutbound = options.onOutbound;
-    this.#onOutboundFailed = options.onOutboundFailed ?? (() => undefined);
     this.#onReleaseFailed = options.onReleaseFailed ?? (() => undefined);
   }
 
@@ -592,8 +575,7 @@ export class EngineYDocSessionOwner<
     try {
       this.#onOutbound(outbound);
       return true;
-    } catch (error) {
-      this.#onOutboundFailed({ ...outbound, error });
+    } catch {
       return false;
     }
   }

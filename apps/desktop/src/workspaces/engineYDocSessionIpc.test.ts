@@ -13,6 +13,7 @@ import {
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
+import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -175,6 +176,16 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.onError).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining("remote-update delivery failed"),
       deliveryError,
+    );
+
+    sender.failSendsWith(null);
+    h.onError.mockClear();
+    h.capturedOpen()?.onRemoteUpdate(
+      new Uint8Array(ENGINE_YDOC_UPDATE_MAX_BYTES + 1),
+    );
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("remote-update delivery failed"),
+      expect.any(Error),
     );
 
     h.onError.mockClear();

@@ -98,8 +98,6 @@ interface OwnedSession {
   close: WorkspaceEngineYDocProviderSession["close"];
 }
 
-class StaleEngineYDocIpcSenderError extends Error {}
-
 type SessionOwner = EngineYDocSessionOwner<
   EngineYDocIpcSender,
   OwnedSession,
@@ -150,13 +148,6 @@ class EngineYDocSessionIpc {
     this.#onError = options.onError;
     this.#owner = new EngineYDocSessionOwner({
       onOutbound: (outbound) => this.#send(outbound),
-      onOutboundFailed: ({ path, message, error }) => {
-        if (error instanceof StaleEngineYDocIpcSenderError) return;
-        this.#onError(
-          `[desktop] engine Y.Doc ${message.kind} delivery failed for ${path}.`,
-          error,
-        );
-      },
       onReleaseFailed: ({ path, error }) => {
         this.#onError(
           `[desktop] engine Y.Doc session close failed for ${path}; ` +
@@ -486,40 +477,51 @@ class EngineYDocSessionIpc {
       outbound.sender.isDestroyed() ||
       this.#generationOf(outbound.sender.id) !== outbound.generation
     ) {
-      throw new StaleEngineYDocIpcSenderError(
-        "The renderer generation no longer owns this session.",
-      );
+      throw new Error("The renderer generation no longer owns this session.");
     }
     const { message } = outbound;
-    if (message.kind === "session-event") {
+    try {
+      if (message.kind === "session-event") {
+        outbound.sender.send(
+          CHANNELS.engineYDocSaveState,
+          EngineYDocSaveStateEventSchema.parse({
+            sessionId: outbound.sessionId,
+            ...message.event,
+          }),
+        );
+        return;
+      }
+      if (message.kind === "remote-update") {
+        outbound.sender.send(
+          CHANNELS.engineYDocRemoteUpdate,
+          EngineYDocRemoteUpdateEventSchema.parse({
+            sessionId: outbound.sessionId,
+            update: message.update,
+            lineageGeneration: message.lineageGeneration,
+          }),
+        );
+        return;
+      }
       outbound.sender.send(
-        CHANNELS.engineYDocSaveState,
-        EngineYDocSaveStateEventSchema.parse({
+        CHANNELS.engineYDocLineageReplacement,
+        EngineYDocLineageReplacementEventSchema.parse({
           sessionId: outbound.sessionId,
-          ...message.event,
-        }),
-      );
-      return;
-    }
-    if (message.kind === "remote-update") {
-      outbound.sender.send(
-        CHANNELS.engineYDocRemoteUpdate,
-        EngineYDocRemoteUpdateEventSchema.parse({
-          sessionId: outbound.sessionId,
-          update: message.update,
+          ...message.replacement,
           lineageGeneration: message.lineageGeneration,
         }),
       );
-      return;
+    } catch (error) {
+      if (
+        !outbound.sender.isDestroyed() &&
+        this.#generationOf(outbound.sender.id) === outbound.generation
+      ) {
+        this.#onError(
+          `[desktop] engine Y.Doc ${message.kind} delivery failed for ${outbound.path}.`,
+          error,
+        );
+      }
+      throw error;
     }
-    outbound.sender.send(
-      CHANNELS.engineYDocLineageReplacement,
-      EngineYDocLineageReplacementEventSchema.parse({
-        sessionId: outbound.sessionId,
-        ...message.replacement,
-        lineageGeneration: message.lineageGeneration,
-      }),
-    );
   }
 
   #openRefusal(error: unknown): OpenResult {
