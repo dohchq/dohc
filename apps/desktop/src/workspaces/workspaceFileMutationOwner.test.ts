@@ -826,6 +826,38 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(test.change).not.toHaveBeenCalled();
   });
 
+  it.runIf(process.platform === "win32")(
+    "refuses a received-share move into a case-alias descendant but keeps a case-only rename",
+    async () => {
+      const test = await harness({
+        shareView: { granterEmail: "owner@example.com" },
+      });
+      await mkdir(join(test.rootPath, "Plans"));
+
+      await expect(
+        test.owner.movePath(trustedEvent, {
+          workspaceId: test.workspace.workspaceId,
+          fromPath: "Plans",
+          toPath: "plans/archive",
+        }),
+      ).rejects.toThrow("Cannot move a path into itself: Plans");
+      expect(test.change).not.toHaveBeenCalled();
+
+      await expect(
+        test.owner.movePath(trustedEvent, {
+          workspaceId: test.workspace.workspaceId,
+          fromPath: "Plans",
+          toPath: "plans",
+        }),
+      ).resolves.toEqual({ path: "plans" });
+      expect(test.change).toHaveBeenCalledWith(
+        expect.anything(),
+        { kind: "standalone", workspaceId: test.workspace.workspaceId },
+        { kind: "move", fromPath: "Plans", toPath: "plans" },
+      );
+    },
+  );
+
   it("refuses a direct write when the Y.Doc mutation port owns the normalized path", async () => {
     const test = await harness();
     await mkdir(join(test.rootPath, "notes"));
@@ -1089,6 +1121,139 @@ describe("WorkspaceFileMutationOwner", () => {
       } else {
         await expect(result).rejects.toThrow();
       }
+    }
+  });
+
+  it("invalidates queued stale work after uncertain or malformed shared structural outcomes", async () => {
+    const cases: Array<{
+      operation: "move" | "delete";
+      outcome: ShareViewFileChangeOutcome;
+    }> = [
+      {
+        operation: "move",
+        outcome: {
+          status: "partial",
+          kind: "move",
+          effects: [
+            { path: "from.txt", before: "present", after: "absent" },
+          ],
+          projection: "pending",
+          message: "move stopped after changing canonical state",
+        },
+      },
+      {
+        operation: "delete",
+        outcome: {
+          status: "partial",
+          kind: "delete",
+          effects: [
+            { path: "delete.txt", before: "present", after: "absent" },
+          ],
+          projection: "pending",
+          message: "delete stopped after changing canonical state",
+        },
+      },
+      {
+        operation: "move",
+        outcome: {
+          status: "indeterminate",
+          kind: "move",
+          possibleEffects: [],
+          projection: "pending",
+          message: "move outcome is unknown",
+        },
+      },
+      {
+        operation: "delete",
+        outcome: {
+          status: "indeterminate",
+          kind: "delete",
+          possibleEffects: [],
+          projection: "pending",
+          message: "delete outcome is unknown",
+        },
+      },
+      {
+        operation: "move",
+        outcome: defaultShareChange("move", { trashed: false }),
+      },
+      {
+        operation: "delete",
+        outcome: defaultShareChange("delete", "not-a-delete-result"),
+      },
+    ];
+
+    for (const testCase of cases) {
+      const test = await harness({ shareView: {} });
+      const changeEntered = deferred();
+      const releaseChange = deferred();
+      test.change.mockImplementationOnce(async () => {
+        changeEntered.resolve();
+        await releaseChange.promise;
+        return testCase.outcome;
+      });
+
+      const structuralMutation =
+        testCase.operation === "move"
+          ? test.owner.movePath(trustedEvent, {
+              workspaceId: test.workspace.workspaceId,
+              fromPath: "from.txt",
+              toPath: "to.txt",
+            })
+          : test.owner.deletePath(trustedEvent, {
+              workspaceId: test.workspace.workspaceId,
+              relativePath: "delete.txt",
+            });
+      await changeEntered.promise;
+      const queuedCreate = test.owner.createFile(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "queued.txt",
+        initialText: "queued\n",
+      });
+
+      releaseChange.resolve();
+      await expect(structuralMutation).rejects.toThrow();
+      await expect(queuedCreate).rejects.toThrow(
+        "A file or folder changed before this write started. Try the action again.",
+      );
+      expect(test.change).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("keeps queued work current when a shared structural change proves no effect", async () => {
+    for (const operation of ["move", "delete"] as const) {
+      const test = await harness({ shareView: {} });
+      const changeEntered = deferred();
+      const releaseChange = deferred();
+      const refusal = new Error("The shared structural change was refused.");
+      test.change.mockImplementationOnce(async () => {
+        changeEntered.resolve();
+        await releaseChange.promise;
+        throw refusal;
+      });
+
+      const structuralMutation =
+        operation === "move"
+          ? test.owner.movePath(trustedEvent, {
+              workspaceId: test.workspace.workspaceId,
+              fromPath: "from.txt",
+              toPath: "to.txt",
+            })
+          : test.owner.deletePath(trustedEvent, {
+              workspaceId: test.workspace.workspaceId,
+              relativePath: "delete.txt",
+            });
+      await changeEntered.promise;
+      const queuedCreate = test.owner.createFile(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "queued.txt",
+        initialText: "queued\n",
+      });
+
+      releaseChange.resolve();
+      await expect(structuralMutation).rejects.toBe(refusal);
+      await expect(queuedCreate).resolves.toEqual({ path: "queued.txt" });
+      expect(test.change).toHaveBeenCalledTimes(2);
     }
   });
 

@@ -45,6 +45,10 @@ import {
   prepareWorkspaceDelete,
   prepareWorkspaceMove,
 } from "./workspaceFiles";
+import {
+  workspaceRelativePathIsAtOrUnder,
+  workspaceRelativePathsEqual,
+} from "./workspaceRelativePathIdentity";
 
 type WorkspaceFileMutationIpcHandler<Event, Result = void> = (
   event: Event,
@@ -148,6 +152,18 @@ export function createWorkspaceFileMutationOwner<
     );
   };
 
+  const structuralShareViewChangeValue = (
+    workspaceId: string,
+    outcome: ShareViewFileChangeOutcome,
+    markWorkspaceChanged: () => void,
+  ): ShareViewFileChangeValue => {
+    // ShareViewFiles throws when it proves that a refusal had no canonical
+    // effect. Every returned structural outcome either changed state or cannot
+    // rule that out, so record it before outcome or value validation can throw.
+    markWorkspaceChanged();
+    return committedShareViewChangeValue(workspaceId, outcome);
+  };
+
   const requireMutation = <Payload extends { workspaceId: string }>(
     event: IpcEvent,
     payload: unknown,
@@ -243,6 +259,13 @@ export function createWorkspaceFileMutationOwner<
                 input.fromPath,
                 input.toPath,
               );
+          if (
+            receivedShare &&
+            !workspaceRelativePathsEqual(paths.toPath, paths.fromPath) &&
+            workspaceRelativePathIsAtOrUnder(paths.toPath, paths.fromPath)
+          ) {
+            throw new Error(`Cannot move a path into itself: ${input.fromPath}`);
+          }
 
           const capture = dependencies.engineCaptureFor(workspace.workspaceId);
           const fromKind = liveDocumentKindForPath(paths.fromPath);
@@ -263,30 +286,35 @@ export function createWorkspaceFileMutationOwner<
             ? await capture.beginFileRename(paths.fromPath, paths.toPath)
             : null;
           try {
-            const path = receivedShare
-              ? committedShareViewChangeValue(
-                  workspace.workspaceId,
-                  await dependencies.shareViewFiles.change(
-                    lease,
-                    shareTarget(workspace),
-                    {
-                      kind: "move",
-                      fromPath: paths.fromPath,
-                      toPath: paths.toPath,
-                    },
-                  ),
-                )
-              : await movePath(
-                  workspace.rootPath,
-                  paths.fromPath,
-                  paths.toPath,
-                );
+            let path: ShareViewFileChangeValue;
+            if (receivedShare) {
+              const outcome = await dependencies.shareViewFiles.change(
+                lease,
+                shareTarget(workspace),
+                {
+                  kind: "move",
+                  fromPath: paths.fromPath,
+                  toPath: paths.toPath,
+                },
+              );
+              path = structuralShareViewChangeValue(
+                workspace.workspaceId,
+                outcome,
+                markWorkspaceChanged,
+              );
+            } else {
+              path = await movePath(
+                workspace.rootPath,
+                paths.fromPath,
+                paths.toPath,
+              );
+            }
             if (typeof path !== "string") {
               throw new Error("Shared file move returned an invalid result.");
             }
             // The path move has landed. Bump the generation before the engine
             // finisher so its failure cannot release queued stale writes.
-            markWorkspaceChanged();
+            if (!receivedShare) markWorkspaceChanged();
             await finishRename?.(true);
             return CreateWorkspaceFileResult.parse({ path });
           } catch (error) {
@@ -323,20 +351,25 @@ export function createWorkspaceFileMutationOwner<
           try {
             // Local deletion stays recoverable: deletePath tries the OS trash,
             // then moves the entry into .dohc/trash when the OS refuses it.
-            const result = receivedShare
-              ? committedShareViewChangeValue(
-                  workspace.workspaceId,
-                  await dependencies.shareViewFiles.change(
-                    lease,
-                    shareTarget(workspace),
-                    { kind: "delete", path: input.relativePath },
-                  ),
-                )
-              : await deletePath(
-                  workspace.rootPath,
-                  localPath!,
-                  dependencies.trashItem,
-                );
+            let result: ShareViewFileChangeValue;
+            if (receivedShare) {
+              const outcome = await dependencies.shareViewFiles.change(
+                lease,
+                shareTarget(workspace),
+                { kind: "delete", path: input.relativePath },
+              );
+              result = structuralShareViewChangeValue(
+                workspace.workspaceId,
+                outcome,
+                markWorkspaceChanged,
+              );
+            } else {
+              result = await deletePath(
+                workspace.rootPath,
+                localPath!,
+                dependencies.trashItem,
+              );
+            }
             if (
               typeof result !== "object" ||
               result === null ||
@@ -344,7 +377,7 @@ export function createWorkspaceFileMutationOwner<
             ) {
               throw new Error("Shared file delete returned an invalid result.");
             }
-            markWorkspaceChanged();
+            if (!receivedShare) markWorkspaceChanged();
             if (localPath !== null) {
               dependencies.yDocSessions.markDeletedUnderPath(
                 workspace.workspaceId,
