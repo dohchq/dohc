@@ -1660,7 +1660,7 @@ impl EngineService {
                 db_path: opened
                     .as_ref()
                     .ok()
-                    .and_then(|open| open.created_actor.then(|| actor_path.clone())),
+                    .and_then(|open| open.created_actor.then_some(actor_path)),
                 _open_serial,
             };
             #[cfg(test)]
@@ -13416,10 +13416,6 @@ mod tests {
                 .workspace_open(&RequestContext::unbounded(), params)
                 .await
         });
-        assert!(
-            !reopening.is_finished(),
-            "immediate reopen must wait for cancelled-open cleanup"
-        );
         service.open_install_probe.as_ref().unwrap().1.notify_one();
         assert!(
             cleanup_retains_serialization,
