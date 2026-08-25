@@ -18,7 +18,9 @@ describe("workspace-activity main-process wiring", () => {
     // that only main can get wrong: which windows and whose active workspace.
     expect(notify).toContain("broadcastWorkspaceActivity({");
     expect(notify).toContain("windows: BrowserWindow.getAllWindows(),");
-    expect(notify).toContain("activeWorkspaceIdBySender.get(webContentsId)");
+    expect(notify).toContain(
+      "rendererWorkspaceSessions.current(sender)?.workspaceId",
+    );
   });
 
   it("forwards the daemon's capture payload scope into the renderer notification", () => {

@@ -75,8 +75,16 @@ interface EngineYDocWorkspace {
   rootPath: string;
 }
 
+export interface EngineYDocRendererSession {
+  readonly workspaceId: string;
+  readonly generation: number;
+  isCurrent(): boolean;
+}
+
 interface EngineYDocSessionIpcOptions {
-  generationOf: (senderId: number) => number;
+  sessionFor: (
+    sender: EngineYDocIpcSender,
+  ) => EngineYDocRendererSession | undefined;
   requireWorkspace: (workspaceId: string) => EngineYDocWorkspace;
   captureFor: (workspaceId: string) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspaceId: string) => Promise<void>;
@@ -224,7 +232,7 @@ class DocumentMutationReservations {
 }
 
 class EngineYDocSessionIpc {
-  readonly #generationOf: EngineYDocSessionIpcOptions["generationOf"];
+  readonly #sessionFor: EngineYDocSessionIpcOptions["sessionFor"];
   readonly #requireWorkspace: EngineYDocSessionIpcOptions["requireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
@@ -236,11 +244,9 @@ class EngineYDocSessionIpc {
   readonly #owner: EngineYDocIpcSessionOwner;
   readonly #documentReservations: DocumentMutationReservations;
   readonly #fileMutationPort: WorkspaceFileMutationYDocPort;
-  readonly #cleanupHooked = new WeakSet<EngineYDocIpcSender>();
-  readonly #trackedGeneration = new WeakMap<EngineYDocIpcSender, number>();
 
   constructor(options: EngineYDocSessionIpcOptions) {
-    this.#generationOf = options.generationOf;
+    this.#sessionFor = options.sessionFor;
     this.#requireWorkspace = options.requireWorkspace;
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
@@ -284,12 +290,20 @@ class EngineYDocSessionIpc {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const workspace = this.#requireWorkspace(input.workspaceId);
     if (this.#isSharedView(workspace.workspaceId)) return unavailableOpen();
+    const rendererSession = this.#sessionFor(sender);
+    if (
+      !rendererSession ||
+      rendererSession.workspaceId !== workspace.workspaceId ||
+      !rendererSession.isCurrent()
+    ) {
+      return unavailableOpen();
+    }
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
     const requestedSpellingKind = liveDocumentKindForPath(
       validatedPath.normalized,
     );
-    const generation = this.#generationOf(sender.id);
+    const generation = rendererSession.generation;
     let canonicalPath: string | null;
     try {
       canonicalPath = await this.#resolveDocumentPath(
@@ -306,8 +320,7 @@ class EngineYDocSessionIpc {
         : unavailableOpen({ documentUnavailable: true });
     }
     if (
-      sender.isDestroyed() ||
-      this.#generationOf(sender.id) !== generation ||
+      !rendererSession.isCurrent() ||
       this.#isSharedView(workspace.workspaceId)
     ) {
       return unavailableOpen();
@@ -334,6 +347,7 @@ class EngineYDocSessionIpc {
         canonicalPath,
         validatedPath.normalized,
         canonicalKind,
+        rendererSession,
         generation,
       );
     } finally {
@@ -348,6 +362,7 @@ class EngineYDocSessionIpc {
     canonicalPath: string,
     requestedPath: string,
     documentKind: NonNullable<ReturnType<typeof liveDocumentKindForPath>>,
+    rendererSession: EngineYDocRendererSession,
     generation: number,
   ): Promise<OpenResult> {
     let capture = this.#captureFor(workspace.workspaceId);
@@ -362,7 +377,7 @@ class EngineYDocSessionIpc {
       }
       // Window loading now overlaps the daemon handshake. The await above can
       // span a reload, and a retired renderer must never acquire its session.
-      if (sender.isDestroyed() || this.#generationOf(sender.id) !== generation) {
+      if (!rendererSession.isCurrent()) {
         return unavailableOpen();
       }
       capture = this.#captureFor(workspace.workspaceId);
@@ -386,13 +401,11 @@ class EngineYDocSessionIpc {
       return unavailableOpen({ documentUnavailable: true });
     }
     if (
-      sender.isDestroyed() ||
-      this.#generationOf(sender.id) !== generation ||
+      !rendererSession.isCurrent() ||
       this.#isSharedView(workspace.workspaceId)
     ) {
       return unavailableOpen();
     }
-    this.#trackSender(sender, generation);
     const opened = await this.#owner.open({
       sender,
       generation,
@@ -642,30 +655,20 @@ class EngineYDocSessionIpc {
     return this.#fileMutationPort;
   }
 
-  #trackSender(sender: EngineYDocIpcSender, generation: number): void {
-    this.#trackedGeneration.set(sender, generation);
-    if (this.#cleanupHooked.has(sender)) return;
-    this.#cleanupHooked.add(sender);
-    sender.once("destroyed", () => {
-      const tracked = this.#trackedGeneration.get(sender);
-      if (tracked !== undefined) {
-        void this.#owner.retireSender({ sender, generation: tracked });
-      }
-    });
-  }
-
   #caller(sender: EngineYDocIpcSender, sessionId: string) {
     return {
       sender,
-      generation: this.#generationOf(sender.id),
+      generation: this.#sessionFor(sender)?.generation ?? -1,
       sessionId,
     };
   }
 
   #send(outbound: SessionOutbound): void {
+    const rendererSession = this.#sessionFor(outbound.sender);
     if (
-      outbound.sender.isDestroyed() ||
-      this.#generationOf(outbound.sender.id) !== outbound.generation
+      !rendererSession ||
+      !rendererSession.isCurrent() ||
+      rendererSession.generation !== outbound.generation
     ) {
       throw new Error("The renderer generation no longer owns this session.");
     }
@@ -702,8 +705,8 @@ class EngineYDocSessionIpc {
       );
     } catch (error) {
       if (
-        !outbound.sender.isDestroyed() &&
-        this.#generationOf(outbound.sender.id) === outbound.generation
+        rendererSession.isCurrent() &&
+        rendererSession.generation === outbound.generation
       ) {
         this.#onError(
           `[desktop] engine Y.Doc ${message.kind} delivery failed for ${outbound.path}.`,

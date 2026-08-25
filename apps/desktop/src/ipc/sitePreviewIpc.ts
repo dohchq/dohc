@@ -29,9 +29,13 @@ export type SitePreviewExecutionInput = {
   sharedView: boolean;
 };
 
+export interface SitePreviewRendererSession {
+  isCurrent(): boolean;
+}
+
 export interface StartSitePreviewDependencies<
   Event,
-  Sender extends { id: number; isDestroyed(): boolean },
+  Sender extends { id: number },
   Workspace extends { workspaceId: string; rootPath: string },
 > {
   authority: {
@@ -41,11 +45,10 @@ export interface StartSitePreviewDependencies<
       workspaceId: string,
       subject: string,
       action: string,
-    ): Workspace;
+    ): { workspace: Workspace; session: SitePreviewRendererSession };
   };
   catalog: OwnedSiteCatalog<Workspace>;
   lifecycle: Pick<ReturnType<typeof createSitePreviewLifecycle>, "start">;
-  rendererGeneration(senderId: number): number;
   isSharedView(workspaceId: string): boolean;
   execute(
     input: SitePreviewExecutionInput,
@@ -71,7 +74,7 @@ function assertPreviewModeAllowed(
 
 export function createStartSitePreviewHandler<
   Event,
-  Sender extends { id: number; isDestroyed(): boolean },
+  Sender extends { id: number },
   Workspace extends { workspaceId: string; rootPath: string },
 >(
   dependencies: StartSitePreviewDependencies<Event, Sender, Workspace>,
@@ -79,10 +82,14 @@ export function createStartSitePreviewHandler<
   return async (event, rawPayload) => {
     const sender = dependencies.authority.requireTrustedSender(event);
     const payload = StartSitePreviewPayload.parse(rawPayload);
-    const generation = dependencies.rendererGeneration(sender.id);
-    const isCurrent = () =>
-      !sender.isDestroyed() &&
-      dependencies.rendererGeneration(sender.id) === generation;
+    const { workspace, session } =
+      dependencies.authority.requireActiveWorkspace(
+        sender,
+        payload.workspaceId,
+        "Site preview request",
+        "start the preview again",
+      );
+    const isCurrent = () => session.isCurrent();
 
     return StartSitePreviewResult.parse(
       await dependencies.lifecycle.start<SitePreviewResultBody>({
@@ -91,12 +98,6 @@ export function createStartSitePreviewHandler<
         siteRoot: payload.siteRoot,
         isCurrent,
         prepare: async () => {
-          const workspace = dependencies.authority.requireActiveWorkspace(
-            sender,
-            payload.workspaceId,
-            "Site preview request",
-            "start the preview again",
-          );
           const sharedView = dependencies.isSharedView(workspace.workspaceId);
           assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
           const site = requireExactSiteRoot(

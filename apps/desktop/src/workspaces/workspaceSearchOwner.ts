@@ -30,7 +30,6 @@ export interface WorkspaceSearchSender {
   id: number;
   isDestroyed(): boolean;
   send(channel: string, payload: unknown): void;
-  once(event: "destroyed", listener: () => void): unknown;
 }
 
 export interface WorkspaceSearchEngineInput {
@@ -86,7 +85,6 @@ export class WorkspaceSearchOwner<
 > {
   readonly #dependencies: WorkspaceSearchOwnerDependencies<Workspace>;
   readonly #latest = new Map<number, SearchIdentity>();
-  readonly #cleanupHooked = new WeakSet<object>();
   #disposed = false;
 
   constructor(dependencies: WorkspaceSearchOwnerDependencies<Workspace>) {
@@ -111,7 +109,6 @@ export class WorkspaceSearchOwner<
     if (previous) {
       this.#dependencies.searchRegistry.cancel(sender.id, previous.searchId);
     }
-    this.#hookDestroyed(sender);
 
     const ownsSearch = () =>
       !this.#disposed && this.#latest.get(sender.id) === identity;
@@ -257,12 +254,6 @@ export class WorkspaceSearchOwner<
     this.#disposed = true;
     this.#latest.clear();
     this.#dependencies.searchRegistry.killAll();
-  }
-
-  #hookDestroyed(sender: WorkspaceSearchSender): void {
-    if (this.#cleanupHooked.has(sender)) return;
-    this.#cleanupHooked.add(sender);
-    sender.once("destroyed", () => this.disposeSender(sender.id));
   }
 
   async #startRipgrep(input: {

@@ -263,6 +263,8 @@ import {
   type PresenceScope as RelayPresenceScope,
 } from "./renderer/collab/presenceChannel";
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
+import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
+import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { desktopMarks } from "./performance/desktopMarks";
 import { launchMarks, logLaunchMarksOnce } from "./performance/launchMarks";
 import {
@@ -808,7 +810,8 @@ const sitePreviews = createSitePreviewLifecycle({
 });
 const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({
   assertWritable: assertWritableWorkspace,
-  isOpen: isWorkspaceOpenInAnyWindow,
+  isOpen: (workspaceId): boolean =>
+    rendererWorkspaceSessions.isWorkspaceOpen(workspaceId),
   create: createPluginWorkspaceRuntimeParts,
   onPipelineStatus: notifyPluginStatusChanged,
   onCleanupError: (workspaceId, error) => {
@@ -866,7 +869,12 @@ function notifyPluginStatusChanged(
     return;
   }
   for (const win of BrowserWindow.getAllWindows()) {
-    if (activeWorkspaceIdBySender.get(win.webContents.id) !== workspaceId) continue;
+    if (
+      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
+      workspaceId
+    ) {
+      continue;
+    }
     win.webContents.send(CHANNELS.pluginStatusChanged, payload.data);
   }
 }
@@ -882,7 +890,7 @@ function notifyPluginPanelSdkEvent(event: unknown): void {
   }
   for (const win of BrowserWindow.getAllWindows()) {
     if (
-      activeWorkspaceIdBySender.get(win.webContents.id) !==
+      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
       payload.data.workspaceId
     ) {
       continue;
@@ -1047,16 +1055,6 @@ function createPluginWorkspaceRuntimeParts(
       activity.engineCaptureFor(workspace.workspaceId) !== null,
   });
   return { pipeline, agentDrivers: pluginDrivers, workspaceEvents };
-}
-
-const rendererGenerationBySender = new Map<number, number>();
-
-function rendererGeneration(senderId: number): number {
-  return rendererGenerationBySender.get(senderId) ?? 0;
-}
-
-function advanceRendererGeneration(senderId: number): void {
-  rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
 }
 
 async function relativeWorkspacePath(
@@ -1289,8 +1287,12 @@ function cloudLogin(): CloudLogin {
 function notifyRenderer(scope?: WorkspaceActivityScope): void {
   broadcastWorkspaceActivity({
     windows: BrowserWindow.getAllWindows(),
-    activeWorkspaceIdOf: (webContentsId) =>
-      activeWorkspaceIdBySender.get(webContentsId),
+    activeWorkspaceIdOf: (webContentsId) => {
+      const sender = webContents.fromId(webContentsId);
+      return sender
+        ? rendererWorkspaceSessions.current(sender)?.workspaceId
+        : undefined;
+    },
     scope,
   });
 }
@@ -1332,32 +1334,6 @@ function nativeWorkspaceSummaries(): WorkspaceSummary[] {
 }
 
 let preferredWorkspaceId: string | null = null;
-const activeWorkspaceIdBySender = new Map<number, string>();
-const activeWorkspaceCleanupHooked = new WeakSet<Electron.WebContents>();
-// Bumped once per openWorkspace call for a sender, before its own await —
-// a rapid A→B then A→C both read the same previousWorkspaceId and race to
-// finish, so only the call whose token is still current when it resumes
-// may write activeWorkspaceIdBySender/preferredWorkspaceId (#779 round 23
-// finding 2).
-const workspaceSwitchTokenBySender = new Map<number, number>();
-
-// True while some OTHER window still has this workspace open — the one
-// answer pipeline creation (createOnlyWhile) and every pipeline teardown
-// below share, so a switch, close, or reload in one window can never act
-// on a workspace another window still has open (#779 round 18 finding 2,
-// round 19 finding 2, round 20 finding 2). excludeSenderId names the
-// caller's own entry, which a reload has not cleared yet and so would
-// otherwise always count as "another window."
-function isWorkspaceOpenInAnyWindow(
-  workspaceId: string,
-  excludeSenderId?: number,
-): boolean {
-  for (const [senderId, activeId] of activeWorkspaceIdBySender) {
-    if (senderId === excludeSenderId) continue;
-    if (activeId === workspaceId) return true;
-  }
-  return false;
-}
 
 function prioritizePreferredWorkspace(
   workspaces: WorkspaceSummary[],
@@ -1738,8 +1714,6 @@ const PRESENCE_POLL_SAFETY_MS = 35_000;
 // be cancelled/superseded by its own window, and bounded so a renderer can't
 // open unbounded relay long-polls / controllers / timers.
 const presencePollRegistry = createPresencePollRegistry();
-// Senders whose presence-poll 'destroyed' cleanup hook is already attached.
-const presencePollCleanupHooked = new WeakSet<Electron.WebContents>();
 // A stable ownership key so one window holds at most ONE poll per (scope, topic):
 // a new poll for the same key supersedes (aborts) the prior long-poll.
 function presenceScopeTopicKey(scope: PresenceScopeInput, topic: string): string {
@@ -1749,13 +1723,6 @@ function presenceScopeTopicKey(scope: PresenceScopeInput, topic: string): string
       : ["s", scope.shareId, topic],
   );
 }
-function hookPresencePollCleanup(sender: Electron.WebContents): void {
-  if (presencePollCleanupHooked.has(sender)) return;
-  presencePollCleanupHooked.add(sender);
-  // Window closed / renderer gone: abort every long-poll this window still owns.
-  sender.once("destroyed", () => presencePollRegistry.disposeSender(sender.id));
-}
-
 async function presenceRelayTransportForScope(
   scope: PresenceScopeInput,
 ): Promise<ReturnType<typeof createRelayPresenceTransport> | null> {
@@ -3136,7 +3103,12 @@ function notifyPluginWebAppFailed(
   generation: number,
   event: PluginWebAppFailedEvent,
 ): void {
-  if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) return;
+  if (
+    sender.isDestroyed() ||
+    rendererWorkspaceSessions.current(sender)?.generation !== generation
+  ) {
+    return;
+  }
   sender.send(CHANNELS.pluginWebAppFailed, PluginWebAppFailedEvent.parse(event));
 }
 
@@ -3145,7 +3117,12 @@ function notifyPluginPanelInvalidated(
   generation: number,
   event: PluginPanelInvalidatedEvent,
 ): void {
-  if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) return;
+  if (
+    sender.isDestroyed() ||
+    rendererWorkspaceSessions.current(sender)?.generation !== generation
+  ) {
+    return;
+  }
   sender.send(
     CHANNELS.pluginPanelInvalidated,
     PluginPanelInvalidatedEvent.parse(event),
@@ -3340,13 +3317,6 @@ async function startPluginPanelPreview(input: {
     entryLabel: "plugin panel entry",
   });
   return { url: handle.url, stop: () => handle.stop() };
-}
-
-async function stopPluginWorkspace(workspaceId: string): Promise<void> {
-  await pluginWorkspaceRuntimes.stop(
-    workspaceId,
-    () => pluginSurfaces.stop({ kind: "workspace", workspaceId }),
-  );
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
@@ -3563,7 +3533,8 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
 }
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
-  generationOf: rendererGeneration,
+  sessionFor: (sender) =>
+    rendererWorkspaceSessions.current(sender as WebContents),
   requireWorkspace,
   captureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
   ensureCaptureFor: async (workspaceId) => {
@@ -3587,43 +3558,17 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
 });
 
 async function prepareForRendererReload(sender: WebContents): Promise<void> {
-  const senderId = sender.id;
   // `openWorkspace` records the active workspace before awaiting watcher
   // startup. Re-prioritize that sender's workspace so its replacement renderer
   // boots back into the same place, while closing every main-owned resource
   // the crashed renderer cannot clean up itself.
   const activeWorkspaceId =
-    activeWorkspaceIdBySender.get(senderId) ?? preferredWorkspaceId;
+    rendererWorkspaceSessions.current(sender)?.workspaceId ??
+    preferredWorkspaceId;
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
-  const engineYDocStop = engineYDocSessionIpc.retireSender(
-    sender,
-    rendererGeneration(senderId),
-  );
-  advanceRendererGeneration(senderId);
-  const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
-  sitePreviews.cancelSender(senderId);
-  workspaceSearchOwner.disposeSender(senderId);
-  await Promise.all([
-    // Same exclusion as stopPluginWorkspace below, for the same reason: this
-    // sender's own entry has not been cleared yet, so without excluding it
-    // here a reload of window A would count window A itself as "another
-    // window" still showing the workspace — stopping window B's still-live
-    // site preview of that same workspace out from under it.
-    activeWorkspaceId &&
-      !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
-      ? sitePreviews.stopWorkspace(activeWorkspaceId)
-      : Promise.resolve(),
-    engineYDocStop,
-    pluginSurfaceStop,
-    // This sender's own entry has not been cleared yet, so it would
-    // otherwise always count as "another window" — excluded here so full
-    // teardown still runs when this reload was the last window on the
-    // workspace (#779 round 20 finding 2).
-    activeWorkspaceId &&
-      !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
-      ? stopPluginWorkspace(activeWorkspaceId)
-      : Promise.resolve(),
-  ]);
+  // retireForReload invalidates the lease before returning its promise. The
+  // outgoing document cannot admit fresh work while these owners drain.
+  await rendererWorkspaceSessions.retireForReload(sender);
 }
 
 // Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
@@ -4091,6 +4036,35 @@ const workspaceSearchOwner = new WorkspaceSearchOwner<
   logError: (message, error) => console.error(`[desktop] ${message}`, error),
 });
 
+const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
+  new RendererWorkspaceSessionOwner<WebContents>({
+    retirement: createDesktopRendererWorkspaceRetirement<WebContents>({
+      engineYDoc: engineYDocSessionIpc,
+      sitePreviews,
+      pluginSurfaces,
+      pluginRuntimes: pluginWorkspaceRuntimes,
+      workspaceSearch: workspaceSearchOwner,
+      presencePolls: presencePollRegistry,
+      onCleanupError: (owner, scope, error) => {
+        const identity =
+          scope.kind === "sender"
+            ? `sender ${scope.senderId}`
+            : `workspace "${scope.workspaceId}"`;
+        console.warn(
+          `[desktop] failed to retire ${owner} for ${identity}`,
+          error,
+        );
+      },
+    }),
+    onCleanupError: (scope, error) => {
+      console.warn(
+        "[desktop] renderer workspace retirement failed",
+        scope,
+        error,
+      );
+    },
+  });
+
 const ownedSiteCatalog = createOwnedSiteCatalog({
   reads: ownedWorkspaceReads,
 });
@@ -4514,13 +4488,34 @@ const senderWorkspaceAuthority = {
     action = "try again",
   ) {
     const workspace = requireWorkspace(workspaceId);
+    const session = rendererWorkspaceSessions.current(sender);
     assertActiveWorkspaceForSite(
-      activeWorkspaceIdBySender.get(sender.id),
+      session?.workspaceId,
       workspace.workspaceId,
       subject,
       action,
     );
     return workspace;
+  },
+};
+
+const sitePreviewSenderWorkspaceAuthority = {
+  requireTrustedSender: senderWorkspaceAuthority.requireTrustedSender,
+  requireActiveWorkspace(
+    sender: WebContents,
+    workspaceId: string,
+    subject: string,
+    action: string,
+  ) {
+    const workspace = senderWorkspaceAuthority.requireActiveWorkspace(
+      sender,
+      workspaceId,
+      subject,
+      action,
+    );
+    const session = rendererWorkspaceSessions.current(sender);
+    if (!session) throw new Error(`${subject} has no active renderer session.`);
+    return { workspace, session };
   },
 };
 
@@ -6680,10 +6675,9 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
 
   const startSitePreview = createStartSitePreviewHandler({
-    authority: senderWorkspaceAuthority,
+    authority: sitePreviewSenderWorkspaceAuthority,
     catalog: ownedSiteCatalog,
     lifecycle: sitePreviews,
-    rendererGeneration,
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
     execute: executePreviewForSite,
   });
@@ -6694,7 +6688,8 @@ function registerIpcHandlers(
     const input = GetSitePreviewLogsPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     if (
-      activeWorkspaceIdBySender.get(event.sender.id) !== workspace.workspaceId
+      rendererWorkspaceSessions.current(event.sender)?.workspaceId !==
+      workspace.workspaceId
     ) {
       throw new Error(
         "The Site preview logs request does not target the active workspace. Open the workspace and try again.",
@@ -6708,9 +6703,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = StopSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    const senderId = event.sender.id;
     await sitePreviews.stop({
-      getActiveWorkspaceId: () => activeWorkspaceIdBySender.get(senderId),
+      getActiveWorkspaceId: () =>
+        rendererWorkspaceSessions.current(event.sender)?.workspaceId,
       workspaceId: workspace.workspaceId,
       siteRoot: input.siteRoot,
     });
@@ -6729,11 +6724,17 @@ function registerIpcHandlers(
     },
     assertTrustedSender,
     workspaces: {
-      activeWorkspaceIdBySender,
       assertWritable: assertWritableWorkspace,
-      require: requireWorkspace,
+      currentSession: (sender) => rendererWorkspaceSessions.current(sender),
+      requireActive: (sender, workspaceId, inactiveMessage) => {
+        const workspace = requireWorkspace(workspaceId);
+        const session = rendererWorkspaceSessions.current(sender);
+        if (!session || session.workspaceId !== workspace.workspaceId) {
+          throw new Error(inactiveMessage);
+        }
+        return { workspace, session };
+      },
     },
-    rendererGeneration,
     runtimes: pluginWorkspaceRuntimes,
     surfaces: pluginSurfaces,
     platform: {
@@ -6750,110 +6751,11 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = OpenWorkspacePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    const senderId = event.sender.id;
-    const previousWorkspaceId = activeWorkspaceIdBySender.get(senderId);
-    // Claimed before the await below: a second rapid switch from this same
-    // sender bumps this past whatever call is already in flight, so this
-    // call can tell after its own await whether it is still the latest
-    // (#779 round 23 finding 2).
-    const switchToken = (workspaceSwitchTokenBySender.get(senderId) ?? 0) + 1;
-    workspaceSwitchTokenBySender.set(senderId, switchToken);
-    // Before the set below flips this sender's own entry: this window's
-    // own panels and web apps on the workspace it's leaving are gone
-    // regardless of whether that workspace survives the switch (#779
-    // round 21 finding 4). The generation bumps first — startPluginPanel
-    // and startPluginWebApp both re-check it right before they register,
-    // so an in-flight start from before the switch discards itself instead
-    // of registering into this sweep's blind spot after it already ran
-    // (#779 round 22 finding 3).
-    if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {
-      const engineYDocStop = engineYDocSessionIpc.retireSender(
-        event.sender,
-        rendererGeneration(senderId),
-      );
-      advanceRendererGeneration(senderId);
-      workspaceSearchOwner.disposeSender(senderId);
-      // Per-sender, not per-workspace: this window's own in-flight site
-      // preview start is tied to ITS request, so aborting it on switch-away
-      // is correct regardless of whether another window still has
-      // previousWorkspaceId open — unlike stopping the workspace's actual
-      // previews below, which must not stop a preview another window is
-      // still showing.
-      sitePreviews.cancelSender(senderId);
-      await Promise.all([
-        engineYDocStop,
-        pluginSurfaces.stop({ kind: "sender", senderId }),
-      ]);
-    }
-    // A→B then A→C both read previousWorkspaceId=A above and raced through
-    // the await — if B's call resumes after C's already assigned C, B's
-    // own assignment here must not overwrite it back (#779 round 23
-    // finding 2).
-    if (workspaceSwitchTokenBySender.get(senderId) === switchToken) {
-      // A search can start for the old active workspace while the sender's
-      // plugin surfaces are stopping above. Retire that second generation
-      // before publishing the new active workspace.
-      if (
-        previousWorkspaceId &&
-        previousWorkspaceId !== workspace.workspaceId
-      ) {
-        workspaceSearchOwner.disposeSender(senderId);
-      }
-      preferredWorkspaceId = workspace.workspaceId;
-      activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
-    }
-    if (!activeWorkspaceCleanupHooked.has(event.sender)) {
-      activeWorkspaceCleanupHooked.add(event.sender);
-      event.sender.once("destroyed", () => {
-        const activeWorkspaceId = activeWorkspaceIdBySender.get(senderId);
-        sitePreviews.cancelSender(senderId);
-        const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
-        activeWorkspaceIdBySender.delete(senderId);
-        rendererGenerationBySender.delete(senderId);
-        workspaceSwitchTokenBySender.delete(senderId);
-        void (async () => {
-          try {
-            await pluginSurfaceStop;
-          } catch (error) {
-            console.warn(
-              `[desktop] failed to clean up plugin surfaces for a destroyed window (sender ${senderId})`,
-              error,
-            );
-          } finally {
-            // Run whether or not the stop above succeeded: a rejection
-            // there must not also skip deciding whether this was the
-            // workspace's last open window, or the whole workspace leaks
-            // instead of just this sender's own claims (#779 round 23
-            // finding 3). This sender's own entry is already gone above,
-            // so a true result here means another window, not a stale
-            // read of this one. The same guard covers site previews too —
-            // stopping them just because THIS window closed would end a
-            // preview another window showing the same workspace still needs.
-            if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
-              void sitePreviews.stopWorkspace(activeWorkspaceId);
-              await stopPluginWorkspace(activeWorkspaceId).catch((error: unknown) => {
-                console.warn(
-                  `[desktop] failed to stop an orphaned plugin workspace after a destroyed window (sender ${senderId})`,
-                  error,
-                );
-              });
-            }
-          }
-        })();
-      });
-    }
-    // Set above, before this read: a true result here means another window
-    // has it, not a stale read of this sender's own now-superseded entry
-    // (#779 round 19 finding 2). Guards the site-preview stop too, for the
-    // same reason as the destroyed-sender cleanup above.
-    if (
-      previousWorkspaceId &&
-      previousWorkspaceId !== workspace.workspaceId &&
-      !isWorkspaceOpenInAnyWindow(previousWorkspaceId)
-    ) {
-      await sitePreviews.stopWorkspace(previousWorkspaceId);
-      await stopPluginWorkspace(previousWorkspaceId);
-    }
+    const rendererSession = await rendererWorkspaceSessions.open(
+      event.sender,
+      workspace.workspaceId,
+    );
+    preferredWorkspaceId = workspace.workspaceId;
     refreshNativeWorkspaceSurfaces();
     const status = SyncStatusResult.parse(
       await syncStatusWithOwnedProjection(
@@ -6861,14 +6763,10 @@ function registerIpcHandlers(
         await openWorkspaceActivity(workspace),
       ),
     );
-    // A later openWorkspace call from this same sender can have switched to
-    // a different workspace while the await above was pending — its own
-    // handler already started stopping this workspace's plugins (the
-    // previousWorkspaceId branch above). Warming this workspace's pipeline
-    // anyway would start it right back up for a workspace this sender no
-    // longer has open.
-    const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;
-    if (stillActive && !sharedViewOf(workspace.workspaceId)) {
+    // A later openWorkspace call can retire this lease while workspace
+    // activity opens. Do not warm a pipeline for a workspace this renderer no
+    // longer owns.
+    if (rendererSession.isCurrent() && !sharedViewOf(workspace.workspaceId)) {
       // A plugin-pipeline start failure must not fail the whole handler —
       // the workspace itself already opened. listPlugins and friends
       // separately convert a failed plugin runtime warmup into a structured
@@ -9069,14 +8967,28 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.presencePublish, async (event, payload) => {
     assertTrustedSender(event);
     const input = PresencePublishPayload.parse(payload);
+    const rendererSession = rendererWorkspaceSessions.current(event.sender);
+    if (
+      !rendererSession ||
+      (input.scope.kind === "workspace" &&
+        input.scope.workspaceId !== rendererSession.workspaceId)
+    ) {
+      return PresenceResult.parse({ ok: false, reason: "unavailable" });
+    }
     try {
       // Scope resolution (warms the credential cache) runs INSIDE the try so a
       // throw degrades to the dormant "unavailable" result, never a rejected
       // IPC promise — presence is best-effort.
       const transport = await presenceRelayTransportForScope(input.scope);
       if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      if (!rendererSession.isCurrent()) {
+        return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      }
       if (input.leave === true) {
         await transport.leave({ topic: input.topic, clientId: input.clientId });
+        if (!rendererSession.isCurrent()) {
+          return PresenceResult.parse({ ok: false, reason: "unavailable" });
+        }
         // A leave has no snapshot to echo; report an empty one so the renderer
         // clears without treating it as a failure.
         return PresenceResult.parse({ ok: true, snapshot: { version: 0, peers: [] } });
@@ -9086,6 +8998,9 @@ function registerIpcHandlers(
         clientId: input.clientId,
         state: input.state ?? null,
       });
+      if (!rendererSession.isCurrent()) {
+        return PresenceResult.parse({ ok: false, reason: "unavailable" });
+      }
       return PresenceResult.parse({ ok: true, snapshot });
     } catch {
       // Presence is best-effort: a transient relay failure is "unavailable",
@@ -9097,12 +9012,19 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.presencePoll, async (event, payload) => {
     assertTrustedSender(event);
     const input = PresencePollPayload.parse(payload);
+    const rendererSession = rendererWorkspaceSessions.current(event.sender);
+    if (
+      !rendererSession ||
+      (input.scope.kind === "workspace" &&
+        input.scope.workspaceId !== rendererSession.workspaceId)
+    ) {
+      return PresenceResult.parse({ ok: false, reason: "aborted" });
+    }
     // Register the controller BEFORE any await: scope resolution warms the
     // credential cache, and a presenceCancel arriving during that window must
     // abort THIS poll promptly (workspace-switch repaint), not wait out the 35s
     // safety cap. Ownership keys on (senderId + pollId) so only this window can
     // cancel it, and at most one poll runs per (sender, scope, topic).
-    hookPresencePollCleanup(event.sender);
     const handle = presencePollRegistry.begin(
       event.sender.id,
       input.pollId,
@@ -9115,12 +9037,17 @@ function registerIpcHandlers(
       const transport = await presenceRelayTransportForScope(input.scope);
       if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
       // A cancel could have landed while scope was resolving.
-      if (handle.signal.aborted) return PresenceResult.parse({ ok: false, reason: "aborted" });
+      if (handle.signal.aborted || !rendererSession.isCurrent()) {
+        return PresenceResult.parse({ ok: false, reason: "aborted" });
+      }
       const snapshot = await transport.poll({
         topic: input.topic,
         since: input.since,
         signal: handle.signal,
       });
+      if (!rendererSession.isCurrent()) {
+        return PresenceResult.parse({ ok: false, reason: "aborted" });
+      }
       return PresenceResult.parse({ ok: true, snapshot });
     } catch {
       // Aborted (cancel/switch/timeout) vs a relay error: both degrade to
@@ -9482,9 +9409,10 @@ function registerIpcHandlers(
     assertTrustedSender,
     authorizeWorkspace: (event, workspaceId) => {
       const workspace = requireWorkspace(workspaceId);
-      const senderId = event.sender.id;
+      const rendererSession = rendererWorkspaceSessions.current(event.sender);
       const isCurrent = () =>
-        activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId &&
+        rendererSession?.workspaceId === workspace.workspaceId &&
+        rendererSession.isCurrent() &&
         findWorkspace(workspace.workspaceId) === workspace;
       if (!isCurrent()) {
         throw new Error(

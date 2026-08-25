@@ -63,7 +63,7 @@ function harness(input: {
       return this.destroyed;
     },
   };
-  let generation = 3;
+  let sessionCurrent = true;
   const subjects: Array<{ subject: string; action: string }> = [];
   const get = vi.fn(async () =>
     input.catalogSite === undefined ? site() : input.catalogSite,
@@ -106,12 +106,19 @@ function harness(input: {
             `The ${subject} does not target the active workspace. Open the workspace and ${action}.`,
           );
         }
-        return workspace;
+        if (!sessionCurrent) {
+          throw new Error(
+            `The ${subject} does not target the active workspace. Open the workspace and ${action}.`,
+          );
+        }
+        return {
+          workspace,
+          session: { isCurrent: () => sessionCurrent },
+        };
       },
     },
     catalog: { list: async () => [], get },
     lifecycle,
-    rendererGeneration: () => generation,
     isSharedView: () => input.sharedView ?? false,
     execute,
   };
@@ -124,8 +131,8 @@ function harness(input: {
     handle,
     lifecycle,
     handler: createStartSitePreviewHandler(dependencies),
-    advanceGeneration() {
-      generation += 1;
+    retireSession() {
+      sessionCurrent = false;
     },
   };
 }
@@ -268,7 +275,7 @@ describe("start site preview IPC", () => {
     expect(test.execute).not.toHaveBeenCalled();
   });
 
-  it("stops a late handle when the renderer generation changes", async () => {
+  it("stops a late handle when the renderer session retires", async () => {
     const test = harness();
     let finishExecution: () => void = () => undefined;
     const executionGate = new Promise<void>((resolve) => {
@@ -292,10 +299,26 @@ describe("start site preview IPC", () => {
     });
     await vi.waitFor(() => expect(test.execute).toHaveBeenCalledTimes(1));
 
-    test.advanceGeneration();
+    test.retireSession();
     finishExecution();
 
     await expect(starting).rejects.toThrow(/renderer restarted/i);
     expect(test.handle.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("denies a fresh start synchronously after reload retirement begins", async () => {
+    const test = harness();
+    test.retireSession();
+
+    await expect(
+      test.handler(test.event, {
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        mode: "static",
+      }),
+    ).rejects.toThrow(/active workspace/i);
+
+    expect(test.get).not.toHaveBeenCalled();
+    expect(test.execute).not.toHaveBeenCalled();
   });
 });

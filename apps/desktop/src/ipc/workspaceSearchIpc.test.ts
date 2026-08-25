@@ -15,6 +15,7 @@ interface TestEvent {
 function harness() {
   const trace: string[] = [];
   let activeWorkspaceId = "workspace-1";
+  let rendererSessionCurrent = true;
   const handlers = new Map<
     string,
     (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
@@ -38,12 +39,14 @@ function harness() {
       if (workspaceId !== workspace.workspaceId) {
         throw new Error("Renderer has no authority for this workspace.");
       }
-      if (activeWorkspaceId !== workspaceId) {
+      if (!rendererSessionCurrent || activeWorkspaceId !== workspaceId) {
         throw new Error("Search does not target the open workspace.");
       }
       return {
         workspace,
-        isCurrent: () => activeWorkspaceId === workspace.workspaceId,
+        isCurrent: () =>
+          rendererSessionCurrent &&
+          activeWorkspaceId === workspace.workspaceId,
       };
     },
     owner,
@@ -63,6 +66,9 @@ function harness() {
     event,
     setActiveWorkspaceId(workspaceId: string) {
       activeWorkspaceId = workspaceId;
+    },
+    retireRendererSession() {
+      rendererSessionCurrent = false;
     },
     channels: [...handlers.keys()],
     invoke: async (channel: string, payload: unknown, invokedEvent = event) =>
@@ -164,6 +170,21 @@ describe("workspace search IPC registration", () => {
     ).rejects.toThrow(
       "Workspace search stopped because it is no longer current.",
     );
+  });
+
+  it("denies a fresh search as soon as reload retirement invalidates the lease", async () => {
+    const test = harness();
+    test.retireRendererSession();
+
+    await expect(
+      test.invoke(CHANNELS.searchWorkspace, {
+        workspaceId: "workspace-1",
+        searchId: "search-after-reload",
+        query: "needle",
+      }),
+    ).rejects.toThrow("does not target the open workspace");
+
+    expect(test.owner.start).not.toHaveBeenCalled();
   });
 
   it("cancels only the caller's named search", async () => {

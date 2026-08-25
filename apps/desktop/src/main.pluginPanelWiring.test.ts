@@ -32,7 +32,10 @@ describe("plugin panel main-process wiring", () => {
   it("validates panel SDK events and sends them only to the active workspace", () => {
     const notify = functionSource("function notifyPluginPanelSdkEvent(");
     const parseAt = notify.indexOf("PluginPanelSdkEvent.safeParse(event)");
-    const filterAt = notify.indexOf("activeWorkspaceIdBySender.get(", parseAt);
+    const filterAt = notify.indexOf(
+      "rendererWorkspaceSessions.current(win.webContents)?.workspaceId",
+      parseAt,
+    );
     const sendAt = notify.indexOf(
       "win.webContents.send(CHANNELS.pluginPanelSdkEvent, payload.data)",
       filterAt,
@@ -72,7 +75,7 @@ describe("plugin panel main-process wiring", () => {
     const notify = functionSource("function notifyPluginPanelInvalidated(");
     const destroyedAt = notify.indexOf("sender.isDestroyed()");
     const generationAt = notify.indexOf(
-      "rendererGeneration(sender.id) !== generation",
+      "rendererWorkspaceSessions.current(sender)?.generation !== generation",
       destroyedAt,
     );
     const parseAt = notify.indexOf(
@@ -117,7 +120,7 @@ describe("plugin panel main-process wiring", () => {
 
   it("routes runtime status through the validated main-process notifier", () => {
     const owner = sourceBlock(
-      "const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
+      "new PluginWorkspaceRuntimes<CreatedWorkspace>({",
       "\n});",
     );
     expect(owner).toContain("onPipelineStatus: notifyPluginStatusChanged,");
@@ -277,17 +280,19 @@ describe("plugin panel main-process wiring", () => {
 
   it("refuses pipeline creation after the last workspace window closes", () => {
     const owner = sourceBlock(
-      "const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
+      "new PluginWorkspaceRuntimes<CreatedWorkspace>({",
       "\n});",
     );
-    expect(owner).toContain("isOpen: isWorkspaceOpenInAnyWindow,");
+    expect(owner).toContain(
+      "rendererWorkspaceSessions.isWorkspaceOpen(workspaceId)",
+    );
   });
 
   it("does not warm a pipeline after a later workspace switch wins", () => {
     const open = handler("openWorkspace");
     const awaitAt = open.indexOf("await openWorkspaceActivity(workspace)");
     const recheckAt = open.indexOf(
-      "const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;",
+      "rendererSession.isCurrent()",
       awaitAt,
     );
     const warmAt = open.indexOf(
@@ -297,71 +302,9 @@ describe("plugin panel main-process wiring", () => {
     expect(awaitAt).toBeGreaterThan(-1);
     expect(recheckAt).toBeGreaterThan(awaitAt);
     expect(warmAt).toBeGreaterThan(recheckAt);
-    expect(open).toContain("stillActive && !sharedViewOf(workspace.workspaceId)");
-  });
-
-  it("keeps last-window policy around destroyed and switched senders", () => {
-    const open = handler("openWorkspace");
-    const switchedGateAt = open.indexOf(
-      "!isWorkspaceOpenInAnyWindow(previousWorkspaceId)",
+    expect(open).toContain(
+      "rendererSession.isCurrent() && !sharedViewOf(workspace.workspaceId)",
     );
-    const switchedStopAt = open.indexOf(
-      "await stopPluginWorkspace(previousWorkspaceId);",
-      switchedGateAt,
-    );
-    const destroyedAt = open.indexOf('event.sender.once("destroyed"');
-    const surfaceAt = open.indexOf(
-      'const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });',
-      destroyedAt,
-    );
-    const deleteAt = open.indexOf("activeWorkspaceIdBySender.delete(senderId);", surfaceAt);
-    const awaitAt = open.indexOf("await pluginSurfaceStop;", deleteAt);
-    const finallyAt = open.indexOf("} finally {", awaitAt);
-    const lastWindowAt = open.indexOf(
-      "if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {",
-      finallyAt,
-    );
-    expect(switchedGateAt).toBeGreaterThan(-1);
-    expect(switchedStopAt).toBeGreaterThan(switchedGateAt);
-    expect(surfaceAt).toBeGreaterThan(destroyedAt);
-    expect(deleteAt).toBeGreaterThan(surfaceAt);
-    expect(awaitAt).toBeGreaterThan(deleteAt);
-    expect(finallyAt).toBeGreaterThan(awaitAt);
-    expect(lastWindowAt).toBeGreaterThan(finallyAt);
-  });
-
-  it("bumps generation before stopping a switching or reloading sender", () => {
-    const open = handler("openWorkspace");
-    const switchAt = open.indexOf(
-      "if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {",
-    );
-    const bumpAt = open.indexOf("advanceRendererGeneration(senderId);", switchAt);
-    const stopAt = open.indexOf(
-      'pluginSurfaces.stop({ kind: "sender", senderId })',
-      bumpAt,
-    );
-    const setAt = open.indexOf(
-      "activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);",
-      stopAt,
-    );
-    expect(switchAt).toBeGreaterThan(-1);
-    expect(bumpAt).toBeGreaterThan(switchAt);
-    expect(stopAt).toBeGreaterThan(bumpAt);
-    expect(setAt).toBeGreaterThan(stopAt);
-
-    const reload = functionSource("async function prepareForRendererReload(");
-    const reloadBumpAt = reload.indexOf("advanceRendererGeneration(senderId);");
-    const reloadStopAt = reload.indexOf(
-      'pluginSurfaces.stop({ kind: "sender", senderId })',
-      reloadBumpAt,
-    );
-    const exclusionAt = reload.indexOf(
-      "isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)",
-      reloadStopAt,
-    );
-    expect(reloadBumpAt).toBeGreaterThan(-1);
-    expect(reloadStopAt).toBeGreaterThan(reloadBumpAt);
-    expect(exclusionAt).toBeGreaterThan(reloadStopAt);
   });
 
 });
