@@ -2572,6 +2572,7 @@ describe("ShareViewFiles", () => {
           toPath: "docs/Plans/a.md",
         }),
       );
+      await expect(readdir(join(rootPath, "docs"))).resolves.toEqual(["Plans"]);
       await expect(readFile(join(renamedPlans, "a.md"), "utf8")).resolves.toBe(
         "a\n",
       );
