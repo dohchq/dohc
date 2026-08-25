@@ -98,6 +98,8 @@ interface OwnedSession {
   close: WorkspaceEngineYDocProviderSession["close"];
 }
 
+class StaleEngineYDocIpcSenderError extends Error {}
+
 type SessionOwner = EngineYDocSessionOwner<
   EngineYDocIpcSender,
   OwnedSession,
@@ -148,6 +150,13 @@ class EngineYDocSessionIpc {
     this.#onError = options.onError;
     this.#owner = new EngineYDocSessionOwner({
       onOutbound: (outbound) => this.#send(outbound),
+      onOutboundFailed: ({ path, message, error }) => {
+        if (error instanceof StaleEngineYDocIpcSenderError) return;
+        this.#onError(
+          `[desktop] engine Y.Doc ${message.kind} delivery failed for ${path}.`,
+          error,
+        );
+      },
       onReleaseFailed: ({ path, error }) => {
         this.#onError(
           `[desktop] engine Y.Doc session close failed for ${path}; ` +
@@ -477,7 +486,9 @@ class EngineYDocSessionIpc {
       outbound.sender.isDestroyed() ||
       this.#generationOf(outbound.sender.id) !== outbound.generation
     ) {
-      throw new Error("The renderer generation no longer owns this session.");
+      throw new StaleEngineYDocIpcSenderError(
+        "The renderer generation no longer owns this session.",
+      );
     }
     const { message } = outbound;
     if (message.kind === "session-event") {

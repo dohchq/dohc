@@ -30,7 +30,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function createOwner(outbound: TestOutbound[] = []) {
+function createOwner(
+  outbound: TestOutbound[] = [],
+  onReleaseFailed?: (failure: {
+    path: string;
+    sessionId: string;
+    error: unknown;
+  }) => void,
+) {
   return new EngineYDocSessionOwner<
     TestSender,
     TestSession,
@@ -39,6 +46,7 @@ function createOwner(outbound: TestOutbound[] = []) {
     string
   >({
     onOutbound: (message) => outbound.push(message),
+    onReleaseFailed,
   });
 }
 
@@ -788,7 +796,8 @@ describe("EngineYDocSessionOwner", () => {
 
   it("retains a failed release for an exact-owner retry and stays silent", async () => {
     const outbound: TestOutbound[] = [];
-    const owner = createOwner(outbound);
+    const onReleaseFailed = vi.fn();
+    const owner = createOwner(outbound, onReleaseFailed);
     const sender = { id: 7, label: "window-a" };
     const releaseError = new Error("daemon retained the session");
     let refuseRelease = true;
@@ -816,6 +825,13 @@ describe("EngineYDocSessionOwner", () => {
     await expect(
       owner.release({ sender, generation: 1, sessionId: "renderer-session-1" }),
     ).resolves.toEqual({ kind: "failed", error: releaseError });
+    expect(onReleaseFailed).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        path: "notes/a.md",
+        sessionId: "renderer-session-1",
+        error: releaseError,
+      }),
+    );
     signals.emit("after failed close");
     expect(outbound).toEqual([]);
 
@@ -895,7 +911,8 @@ describe("EngineYDocSessionOwner", () => {
   });
 
   it("refuses a second bind until a failed release of that workspace path succeeds", async () => {
-    const owner = createOwner();
+    const onReleaseFailed = vi.fn();
+    const owner = createOwner([], onReleaseFailed);
     const sender = { id: 7, label: "window-a" };
     const releaseError = new Error("daemon retained the document");
     const close = vi.fn(async () => {
@@ -915,6 +932,13 @@ describe("EngineYDocSessionOwner", () => {
       }),
     );
     await owner.release({ sender, generation: 1, sessionId: "first" });
+    expect(onReleaseFailed).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        path: "notes/a.md",
+        sessionId: "first",
+        error: releaseError,
+      }),
+    );
 
     await expect(
       owner.open(

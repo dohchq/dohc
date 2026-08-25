@@ -26,6 +26,7 @@ class FakeSender implements EngineYDocIpcSender {
   readonly sent: Array<{ channel: string; payload: unknown }> = [];
   readonly #destroyedListeners: Array<() => void> = [];
   #destroyed = false;
+  #sendError: Error | null = null;
 
   constructor(readonly id: number) {}
 
@@ -35,6 +36,7 @@ class FakeSender implements EngineYDocIpcSender {
 
   send(channel: string, payload: unknown): void {
     if (this.#destroyed) throw new Error("sender destroyed");
+    if (this.#sendError) throw this.#sendError;
     this.sent.push({ channel, payload });
   }
 
@@ -46,6 +48,10 @@ class FakeSender implements EngineYDocIpcSender {
   destroy(): void {
     this.#destroyed = true;
     for (const listener of this.#destroyedListeners) listener();
+  }
+
+  failSendsWith(error: Error | null): void {
+    this.#sendError = error;
   }
 }
 
@@ -62,9 +68,14 @@ function asset(id: string, ref = `assets/${id}.png`): ArtifactAssetDescriptor {
 function providerSession(
   input: Partial<WorkspaceEngineYDocProviderSession> = {},
 ): WorkspaceEngineYDocProviderSession {
-  return {
+  const base = {
     doc: new Y.Doc(),
+    initialUpdate: new Uint8Array(),
+    path: "notes/a.md",
     contentKind: "richdoc",
+    settleNow: vi.fn(async () => {
+      throw new Error("settleNow is not used by this IPC adapter fixture");
+    }),
     applyLocalUpdate: vi.fn((_update, onArmed) => onArmed?.()),
     applyExternalMarkdownEdit: vi.fn(async () => ({ supported: true })),
     readArtifactAsset: vi.fn(async (descriptor) => ({
@@ -72,8 +83,8 @@ function providerSession(
       bytes: new Uint8Array([1, 2, 3]),
     })),
     close: vi.fn(async () => undefined),
-    ...input,
-  } as WorkspaceEngineYDocProviderSession;
+  } satisfies WorkspaceEngineYDocProviderSession;
+  return Object.assign(base, input);
 }
 
 function harness(session = providerSession()) {
@@ -88,17 +99,19 @@ function harness(session = providerSession()) {
       return session;
     }),
   };
+  const onError = vi.fn();
   const ipc = createEngineYDocSessionIpc({
     generationOf: () => generation,
     requireWorkspace: (workspaceId) => ({ workspaceId }),
     captureFor: () => capture,
     ensureCaptureFor: vi.fn(async () => undefined),
     isSharedView: () => readOnly,
-    onError: vi.fn(),
+    onError,
   });
   return {
     ipc,
     capture,
+    onError,
     session,
     capturedOpen: () => capturedOpen,
     setGeneration: (next: number) => {
@@ -151,6 +164,25 @@ describe("engine Y.Doc IPC adapter", () => {
     ]);
   });
 
+  it("reports current remote-update delivery failures but ignores stale senders", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.open(sender, openPayload);
+    const deliveryError = new Error("renderer send failed");
+
+    sender.failSendsWith(deliveryError);
+    h.capturedOpen()?.onRemoteUpdate(new Uint8Array([1]));
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("remote-update delivery failed"),
+      deliveryError,
+    );
+
+    h.onError.mockClear();
+    h.setGeneration(2);
+    h.capturedOpen()?.onRemoteUpdate(new Uint8Array([2]));
+    expect(h.onError).not.toHaveBeenCalled();
+  });
+
   it("opens the workspace activity when the renderer outruns daemon startup", async () => {
     const sender = new FakeSender(7);
     let captureAvailable = false;
@@ -174,6 +206,47 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     expect(ensureCaptureFor).toHaveBeenCalledWith("workspace-1");
     expect(capture.openYDocSession).toHaveBeenCalledOnce();
+  });
+
+  it("releases a provider whose document kind does not match the request", async () => {
+    const session = providerSession({ contentKind: "scene" });
+    const sender = new FakeSender(7);
+    const h = harness(session);
+
+    await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+      available: false,
+    });
+    expect(session.close).toHaveBeenCalledOnce();
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("kind-mismatched lineage"),
+    );
+  });
+
+  it("reports when a kind-mismatched provider may still hold the document", async () => {
+    const releaseError = new Error("provider close failed");
+    const session = providerSession({
+      contentKind: "scene",
+      close: vi.fn(async () => {
+        throw releaseError;
+      }),
+    });
+    const sender = new FakeSender(7);
+    const h = harness(session);
+
+    await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+      available: false,
+      engineMayHoldDocument: true,
+    });
+    expect(session.close).toHaveBeenCalledOnce();
+    expect(h.onError).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("kind-mismatched lineage"),
+    );
+    expect(h.onError).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("session close failed"),
+      releaseError,
+    );
   });
 
   it("refuses a capture resolved for a retired renderer generation", async () => {
