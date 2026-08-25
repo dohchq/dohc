@@ -6680,13 +6680,15 @@ describe("engine markdown source view", () => {
   });
 
   it("does not recreate a live file that disappeared after the renderer read it", async () => {
+    const user = userEvent.setup();
     const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    const openEngineYDocSession = vi.fn(async () => ({
+      available: false,
+      documentUnavailable: true,
+    }));
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
-      openEngineYDocSession: vi.fn(async () => ({
-        available: false,
-        documentUnavailable: true,
-      })),
+      openEngineYDocSession,
     });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -6699,7 +6701,8 @@ describe("engine markdown source view", () => {
     expect(notice.textContent).toContain(
       "This file is no longer available at this path.",
     );
-    expect(notice.textContent).toContain("Close this tab.");
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("markdown-editor")).toBeNull();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });

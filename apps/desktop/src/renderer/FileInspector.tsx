@@ -62,7 +62,7 @@ import {
 import { DismissDraftControls } from "./RecoveryList";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { IconButton, SectionLabel } from "./ui/controls";
+import { IconButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 import {
@@ -5038,10 +5038,12 @@ export function FileInspector(props: FileInspectorProps) {
         {recoveryNotices}
         <div
           data-testid="file-unavailable"
-          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
+          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-muted"
         >
           <span>This file is no longer available at this path.</span>
-          <span>Close this tab.</span>
+          <SecondaryButton className="mt-1" onClick={retryEngineOpen}>
+            Try again
+          </SecondaryButton>
         </div>
       </div>
     );
