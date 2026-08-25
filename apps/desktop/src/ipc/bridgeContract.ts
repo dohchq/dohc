@@ -4685,6 +4685,9 @@ export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
 
 export const LaunchMarksResult = z.object({
   appReadyMs: z.number().positive(),
+  // The daemon handshake and the renderer's first paint race each other, so a
+  // snapshot taken after paint may not have the daemon mark yet.
+  daemonReadyMs: z.number().positive().optional(),
   firstWindowMs: z.number().positive(),
   firstPaintMs: z.number().positive(),
   shellVisibleMs: z.number().positive().optional(),

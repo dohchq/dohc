@@ -335,7 +335,7 @@ import {
 } from "./renderer/collab/presenceChannel";
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import { desktopMarks } from "./performance/desktopMarks";
-import { launchMarks } from "./performance/launchMarks";
+import { launchMarks, logLaunchMarksOnce } from "./performance/launchMarks";
 import {
   publicUpdateState,
   resolveUpdateChannel,
@@ -1641,20 +1641,20 @@ const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
   (window) => window.isDestroyed(),
 );
 // The last zoom level any path applied (mutation, settings save, or the
-// persisted read below). Lets a window created later — the tray/dock
-// recreation path shows synchronously — start at the right scale before
-// any show(). Null only before the first read of a launch resolves.
+// persisted read). The bootstrap seeds it from the cached settings read
+// BEFORE the first window exists, so every window — including the first of
+// a launch — starts at the right scale before any show(). Null only until
+// that seed lands, which precedes every window creation.
 let knownZoomLevel: number | null = null;
 
 function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
   workspaceWindows.track(window);
   window.on("closed", () => workspaceWindows.forget(window));
-  // The persisted zoom level is a window property main owns. A level any
-  // window already applied is set SYNCHRONOUSLY at creation — before any
-  // show() on either creation path — so no visible frame paints at 100%
-  // and then jumps. The async read covers the first window of a launch and
-  // reconciles on did-finish-load; best-effort — a fresh install has only
-  // the default.
+  // The persisted zoom level is a window property main owns, set
+  // SYNCHRONOUSLY at creation — before any show() on either creation path —
+  // so no visible frame paints at 100% and then jumps. The async read below
+  // is the reconcile backstop (a settings save can land mid-launch);
+  // best-effort — a fresh install has only the default.
   if (knownZoomLevel !== null) {
     window.webContents.setZoomLevel(knownZoomLevel);
   }
@@ -3213,6 +3213,10 @@ async function openWorkspaceActivityWith(
     options: WorkspaceActivityOpenOptions,
   ) => Promise<SyncStatusResult>,
 ): Promise<SyncStatusResult> {
+  // A fast renderer can ask to open a workspace while the daemon is still
+  // handshaking (the window loads during it). Wait for the handshake instead
+  // of building a capture over null engine sessions.
+  await engineDaemonStartup;
   retainedWorkspaceActivities.add(workspace.workspaceId);
   const result = await workspaceChatLifecycle.open(
     workspace,
@@ -4166,15 +4170,23 @@ let quitting = false;
 let rustEngineDaemon: EngineDaemonLifecycle | null = null;
 let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 let rustEngineRelayClient: EngineRelayClient | null = null;
+// Settles with the daemon handshake (false = startup failed and the app is
+// quitting). The whenReady continuation creates the window WHILE the daemon
+// starts, so a fast renderer can ask for the engine before the handshake
+// settles; boot-time paths that need engine sessions await this first instead
+// of throwing the broken-invariant error at it.
+let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
 const relayTransportRoutes = new RelayTransportRouteGuard();
 
 // Narrowing for the capture gate, matching what `linkedChatStoreFor` and
 // `sharedViewStoreFor` already do (same error text). The invariant is real:
-// startRustEngineDaemon quits the app when the daemon handshake fails, before
-// any window exists, and this handle is nulled only on that failure path. A
-// later startup-smoke failure restarts the daemon without nulling it. A throw
-// here would mean that invariant broke, which must be loud, not a silent drop
-// to the legacy engine.
+// every boot-time path that can reach the engine awaits engineDaemonStartup
+// first (openWorkspaceActivityWith, cloudStatus, the share-view file and
+// mount lanes), and startRustEngineDaemon
+// quits the app when the handshake fails; this handle is nulled only on that
+// failure path. A later startup-smoke failure restarts the daemon without
+// nulling it. A throw here would mean that invariant broke, which must be
+// loud, not a silent drop to the legacy engine.
 function requireEngineSessions(): EngineWorkspaceSessions {
   if (!rustEngineWorkspaceSessions) {
     throw new Error("Rust engine workspace sessions are unavailable.");
@@ -4342,13 +4354,26 @@ async function shareViewFilesTargetForPath(
   }).resolveShare(relativePath);
 }
 
+// Share-backed reads answer from the engine share store, and a restored
+// share tab's first read can precede the daemon handshake (the window loads
+// during it). Ungated, that read errors once and nothing retries it: a
+// current share reports zero changed paths, so no refresh-key bump ever
+// re-reads the tab. Only the share branch calls `read`, so local disk reads
+// stay concurrent with the handshake.
+const gatedShareViewFileReads: Pick<ShareViewFiles, "read"> = {
+  read: async (target, request) => {
+    await engineDaemonStartup;
+    return shareViewFiles.read(target, request);
+  },
+};
+
 async function readOwnedWorkspaceText(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
   relativePath: string,
 ) {
   return createOwnedWorkspaceFileReader({
     workspace,
-    files: shareViewFiles,
+    files: gatedShareViewFileReads,
   }).readText(relativePath);
 }
 
@@ -4358,7 +4383,7 @@ async function readOwnedWorkspaceAsset(
 ) {
   return createOwnedWorkspaceFileReader({
     workspace,
-    files: shareViewFiles,
+    files: gatedShareViewFileReads,
   }).readAsset(relativePath);
 }
 
@@ -4366,6 +4391,10 @@ async function listOwnedWorkspaceFiles(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
 ) {
   if (shareViewIsPresent(workspace.shareView)) {
+    // The shell lists at mount, which can precede the daemon handshake now
+    // that the window loads during it; the share store needs sessions. A
+    // plain workspace's disk listing below stays ungated on purpose.
+    await engineDaemonStartup;
     return shareViewFiles.list({
       kind: "standalone",
       workspaceId: workspace.workspaceId,
@@ -4374,6 +4403,7 @@ async function listOwnedWorkspaceFiles(
   const mounts = storedShareMounts(workspace);
   const disk = await listFiles(workspace.rootPath);
   if (!shareMountRegistryIsPresent(workspace)) return disk;
+  await engineDaemonStartup;
   return overlayCanonicalShareMountFiles({
     disk,
     mounts,
@@ -5956,10 +5986,10 @@ function registerIpcHandlers(
     const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
     let workspaceSecretState: WorkspaceSecretState | undefined;
     if (workspace) {
-      const sessions = rustEngineWorkspaceSessions;
-      if (!sessions) {
-        throw new Error("Rust engine workspace sessions are unavailable.");
-      }
+      // The shell asks at mount, which can precede the daemon handshake now
+      // that the window loads during it.
+      await engineDaemonStartup;
+      const sessions = requireEngineSessions();
       workspaceSecretState = await readWorkspaceSecretState(
         workspace.rootPath,
         workspace.workspaceId,
@@ -7113,6 +7143,9 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.refreshSharedView, async (event, payload) => {
     assertTrustedSender(event);
+    // The shell's on-open auto-refresh can run during the daemon handshake
+    // now that the window loads during it; the reconcile needs sessions.
+    await engineDaemonStartup;
     const input = RefreshSharedViewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     if (!shareViewIsPresent(workspace.shareView)) {
@@ -7187,7 +7220,15 @@ function registerIpcHandlers(
   // host's history or its synced copy.
 
   registerShareMountIpcHandlers({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    // Every mount lane reaches the engine store, and the shell's on-open
+    // refresh can run during the daemon handshake — without this gate the
+    // reconcile throw is classified "unchanged" and the pull silently waits
+    // for the next poll.
+    registerHandler: (channel, handler) =>
+      ipcMain.handle(channel, async (event, payload) => {
+        await engineDaemonStartup;
+        return handler(event, payload);
+      }),
     assertTrustedSender,
     requireWorkspace,
     assertWritableWorkspace,
@@ -11022,19 +11063,51 @@ function registerIpcHandlers(
     }
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
     const path = validatedPath.normalized;
     const requestedKind = liveDocumentKindForPath(path);
-    // Only engine-flagged workspaces have a capture. The shared classifier is
-    // the main-side authority for which paths bind to a Y.Doc.
-    if (!capture || requestedKind === null) {
+    // The shared classifier is the main-side authority for which paths bind
+    // to a Y.Doc.
+    if (requestedKind === null) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
-    // PENDING FROM THE FIRST AWAIT, not from the open. A renderer reload waits
+    // Only engine-flagged workspaces have a capture — but the capture is
+    // DECIDED by the workspace-activity open, and a restored tab's open can
+    // land while the shell's own openWorkspace still awaits the daemon
+    // handshake (the window loads during it). Answering from that undecided
+    // state reads as "not engine-backed", which the renderer never retries:
+    // the tab falls to the plain autosave editor for its whole session and
+    // its edits take the disk path the engine owns. Open the activity
+    // instead — idempotent, and a concurrent open is handed the first one's
+    // promise (ensureWorkspaceActivityOpen) — and answer from the decision.
+    let capture = activity.engineCaptureFor(workspace.workspaceId);
+    if (!capture) {
+      try {
+        await openWorkspaceActivity(workspace);
+      } catch (error) {
+        // A failed open leaves no capture; the re-read below answers it the
+        // same way the shell's own failed open does (no recorder).
+        console.error(
+          `[desktop] engine Y.Doc open could not open the workspace activity for ${path}:`,
+          error,
+        );
+      }
+      // The await can span the daemon handshake. The renderer that asked may
+      // be gone or reloaded by now, and a session must never be taken for a
+      // generation that no longer exists (#616).
+      if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) {
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
+      capture = activity.engineCaptureFor(workspace.workspaceId);
+      if (!capture) {
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
+    }
+    // PENDING FROM THE FIRST AWAIT that can hold a daemon session, not from
+    // the open. A renderer reload waits
     // on this registration (prepareForRendererReload), and the releases below
     // await the daemon: outside it, a reload could finish both its sweeps while
     // this handler sat in a release, and then this handler would take a daemon
@@ -11635,6 +11708,7 @@ function registerIpcHandlers(
     if (isTrustedFrame(event.senderFrame?.url ?? "")) {
       launchMarks.firstPaint();
       desktopMarks.markOnce("first-renderer-paint");
+      logLaunchMarksOnce();
     }
   });
 
@@ -11753,6 +11827,12 @@ async function startRustEngineDaemon(): Promise<boolean> {
     console.info(
       "[desktop] Rust engine daemon handshake complete; startup smoke running.",
     );
+    // Marked here, where the handshake actually completes — the bootstrap
+    // gate's await also covers the cached-settings read, which would inflate
+    // this mark.
+    launchMarks.daemonReady();
+    desktopMarks.markOnce("daemon-ready");
+    logLaunchMarksOnce();
     return true;
   } catch (error) {
     const message =
@@ -11762,10 +11842,25 @@ async function startRustEngineDaemon(): Promise<boolean> {
       "Rust engine failed to start",
       `${message}\n\nThe desktop cannot start without the Rust engine.`,
     );
-    await rustEngineDaemon?.stop();
+    // Contained: a stop() throw here would reject engineDaemonStartup itself,
+    // skip the quit below, and rethrow from every gated await instead of
+    // letting the quit land.
+    await rustEngineDaemon?.stop().catch((stopError: unknown) => {
+      console.error(
+        "[desktop] Rust engine daemon stop after failed start:",
+        stopError,
+      );
+    });
     rustEngineDaemon = null;
     rustEngineWorkspaceSessions = null;
     rustEngineRelayClient = null;
+    // The window may already be up — it loads while the daemon handshakes —
+    // and by the time the user dismisses the dialog above, a restored tab can
+    // hold edits (local reads and the plain editor never wait for the
+    // daemon). So this quit goes through the ordinary path: before-quit
+    // intercepts while a workspace window is live, and the quit guard's ask
+    // lets the renderer flush or warn about that work — a destroy() here
+    // would discard it with no beforeunload and no ask.
     app.quit();
     return false;
   }
@@ -11828,10 +11923,26 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(async () => {
+    // Electron is ready; marked before any startup work so the mark measures
+    // Electron itself (it used to land after the daemon await, which recorded
+    // daemon boot as "app ready").
+    launchMarks.appReady();
+    desktopMarks.markOnce("app-ready");
+
+    // The daemon spawn + handshake runs while the window is created and the
+    // renderer loads. The continuation below awaits it before anything that
+    // needs the engine; boot-time IPC awaits engineDaemonStartup on its own
+    // paths.
+    engineDaemonStartup = startRustEngineDaemon();
+    // Warms the promise cache the zoom read in trackWorkspaceWindow shares;
+    // awaited just before the window is created, so the persisted zoom is
+    // known by then and the read overlaps the daemon handshake meanwhile.
+    const cachedSettingsRead = readCachedUserSettingsFile(stateDir());
     if (app.isPackaged && process.platform === "linux" && isAppImageBoot()) {
       // A failed refresh must not block startup or discard an intact pair
       // from an earlier boot. With no usable pair, report the launcher
-      // unavailable instead of exposing the AppImage mount path.
+      // unavailable instead of exposing the AppImage mount path. The await
+      // overlaps the daemon handshake above.
       linuxStableCliBinDir = await refreshLinuxStableCliBin({
         resourcesCliBinDir: resolveDohcCliBinDirectory({
           appRoot: app.getAppPath(),
@@ -11842,36 +11953,14 @@ if (!app.requestSingleInstanceLock()) {
         onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
       });
     }
-    if (!(await startRustEngineDaemon())) return;
     // BrowserWindow and Dock APIs are only safe after Electron is ready.
     nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
-    launchMarks.appReady();
-    desktopMarks.markOnce("app-ready");
-    cachedPreferredName = (
-      await readCachedUserSettingsFile(stateDir())
-    ).settings.profile.preferredName;
+    // Handlers exist before the window: the renderer's first IPC call races
+    // the daemon handshake now, and an unregistered handler would reject it.
     registerIpcHandlers();
-    cliServerStartup = startDesktopCliServer()
-      .then(async (server) => {
-        if (quitting) {
-          await server.close();
-          return null;
-        }
-        cliServer = server;
-        return server;
-      })
-      .catch((error: unknown) => {
-        console.error("[desktop] CLI server failed to start:", error);
-        return null;
-      });
-    void cliServerStartup.then(() => {
-      if (!quitting) chatDispatchService.start();
-    });
-    void refreshDispatchTray().catch((error) => {
-      console.error("[desktop] dispatch tray:", error);
-    });
 
     // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
+    // Registered before the window so the first load can already fetch.
     protocol.handle(DOHC_FILE_SCHEME, async (request) => {
       try {
         const url = new URL(request.url);
@@ -11909,32 +11998,72 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    const launchWorkspace = await openWorkspacePaths(
-      collectOpenWorkspaceArgs(process.argv),
-    );
-    const pendingWorkspace = await flushPendingOpenPaths();
-    const initialActivatedWorkspace = pendingWorkspace ?? launchWorkspace;
-    refreshNativeWorkspaceSurfaces();
+    // The persisted zoom must be KNOWN before the first window exists:
+    // trackWorkspaceWindow applies a known level synchronously at creation,
+    // before any show(), while its async read lands only after
+    // createMainWindow's ready-to-show show() — a wrong-scale first frame
+    // that firstPaint then describes. The read is promise-cached local IO
+    // warmed above, so this await costs the read only; the renderer load
+    // stays concurrent with the daemon handshake.
+    const cachedSettings = (await cachedSettingsRead).settings;
+    cachedPreferredName = cachedSettings.profile.preferredName;
+    knownZoomLevel ??= cachedSettings.appearance.zoomLevel;
 
-    // A path the handlers queued during the bootstrap is a later intent than the
-    // launch arguments, so it wins. Drain before the window exists: creating it
-    // starts the load, so a listener registered after any further await can miss
-    // did-finish-load and never send at all.
-    const drainedWorkspace = await flushPendingOpenPaths();
-    const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
+    // The window exists and its renderer loads WHILE the daemon handshakes;
+    // everything below that needs the daemon still waits for it.
     const window = trackWorkspaceWindow(
       createMainWindow({ beforeRendererReload: prepareForRendererReload }),
     );
     // Same tick as the window, so the load cannot finish before this listener.
-    window.webContents.once("did-finish-load", () => {
-      if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
-      // A path that arrived while the drain above was awaiting is queued behind
-      // an open gate, so no later event is guaranteed to flush it. The renderer
-      // has subscribed by now, so this one lands — and being last, it wins.
-      void flushPendingOpenPaths(window);
+    // The activation send chains on it below, once the daemon is up and the
+    // launch workspaces are open.
+    const windowLoaded = new Promise<void>((resolve) => {
+      window.webContents.once("did-finish-load", resolve);
     });
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
+
+    if (!(await engineDaemonStartup)) return;
+
+    cliServerStartup = startDesktopCliServer()
+      .then(async (server) => {
+        if (quitting) {
+          await server.close();
+          return null;
+        }
+        cliServer = server;
+        return server;
+      })
+      .catch((error: unknown) => {
+        console.error("[desktop] CLI server failed to start:", error);
+        return null;
+      });
+    void cliServerStartup.then(() => {
+      if (!quitting) chatDispatchService.start();
+    });
+    void refreshDispatchTray().catch((error) => {
+      console.error("[desktop] dispatch tray:", error);
+    });
+
+    const launchWorkspace = await openWorkspacePaths(
+      collectOpenWorkspaceArgs(process.argv),
+    );
+    // A path the handlers queued during the bootstrap is a later intent than
+    // the launch arguments, so it wins.
+    const pendingWorkspace = await flushPendingOpenPaths();
+    const activatedWorkspace = pendingWorkspace ?? launchWorkspace;
+    refreshNativeWorkspaceSurfaces();
+    // The renderer has subscribed once the load finishes, so this send lands —
+    // and being last, it wins over any activation an open above sent into a
+    // still-loading window.
+    void windowLoaded.then(() => {
+      if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
+      // A path that arrived while the awaits above were pending is still
+      // queued when the gate opens below, and no later event is guaranteed to
+      // flush it. This one is the backstop, and its opens send their own
+      // activations after the send above, so the later intent still wins.
+      void flushPendingOpenPaths(window);
+    });
     // The daemon is up, IPC is registered, and a window exists, so the deferred
     // handlers can act directly.
     bootstrapComplete = true;
