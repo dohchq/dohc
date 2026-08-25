@@ -664,7 +664,7 @@ pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
-    open_lock: tokio::sync::Mutex<()>,
+    open_lock: Arc<tokio::sync::Mutex<()>>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
     leases: LeaseRegistry,
@@ -679,6 +679,12 @@ pub struct EngineService {
     events: EngineEvents,
     #[cfg(feature = "harness")]
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
+    #[cfg(test)]
+    open_install_probe: Option<(
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     /// PER-EngineService by design. Production runs exactly ONE EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -795,7 +801,7 @@ impl EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
             pending_cursors: Mutex::new(HashMap::new()),
-            open_lock: tokio::sync::Mutex::new(()),
+            open_lock: Arc::new(tokio::sync::Mutex::new(())),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             leases: {
@@ -833,6 +839,8 @@ impl EngineService {
             events: EngineEvents::default(),
             #[cfg(feature = "harness")]
             capture_apply_probe: None,
+            #[cfg(test)]
+            open_install_probe: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
@@ -1496,7 +1504,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("workspace open (queued)"));
             }
-            serial = self.open_lock.lock() => serial,
+            serial = Arc::clone(&self.open_lock).lock_owned() => serial,
         };
         let validated =
             shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
@@ -1636,13 +1644,48 @@ impl EngineService {
         let supervisor = self.supervisor;
         let actor_path = db_path.clone();
         let now_ms = now_ms()?;
-        let actor_open = tokio::task::spawn_blocking(move || match requested_mode {
-            WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
-            WorkspaceOpenMode::ReadOnly => supervisor.open_read_only(&actor_path),
-        })
-        .await
-        .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
-        .map_err(map_runtime)?;
+        #[cfg(test)]
+        let open_install_probe = self.open_install_probe.clone();
+        let mut opening = tokio::task::spawn_blocking(move || {
+            let opened = match requested_mode {
+                WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
+                WorkspaceOpenMode::ReadOnly => supervisor.open_read_only(&actor_path),
+            };
+            // Establish cleanup ownership inside the blocking task that creates
+            // the actor. If the awaiting request is cancelled, Tokio drops this
+            // task's unobserved output and the guard closes the actor. The guard
+            // also retains open serialization until cleanup installs Closing.
+            let open_guard = OpenGuard {
+                supervisor,
+                db_path: opened
+                    .as_ref()
+                    .ok()
+                    .and_then(|open| open.created_actor.then_some(actor_path)),
+                _open_serial,
+            };
+            #[cfg(test)]
+            if open_guard.db_path.is_some()
+                && let Some((reached, release, armed)) = open_install_probe
+                && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                reached.notify_one();
+                tokio::runtime::Handle::current().block_on(release.notified());
+            }
+            (opened, open_guard)
+        });
+        let (actor_open, open_guard) = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                // Dropping the join handle detaches the blocking task. Its
+                // OpenGuard output is then discarded when startup returns,
+                // which installs Closing before releasing open serialization.
+                return Err(cancellation.interruption("workspace open (actor startup)"));
+            }
+            opened = &mut opening => {
+                opened.map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
+            }
+        };
+        let actor_open = actor_open.map_err(map_runtime)?;
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
         // session registry, and version barriers) deliberately has one owner:
@@ -1666,22 +1709,12 @@ impl EngineService {
             Err(error) => Some(map_runtime(error)),
         };
         if let Some(error) = binding_error {
-            let supervisor = self.supervisor;
-            let rejected_path = db_path.clone();
-            let _ = tokio::task::spawn_blocking(move || supervisor.close(&rejected_path)).await;
             return Err(error);
         }
         let sequence = self
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
-        // The guard arms BEFORE any fallible await past the shadow binding:
-        // an error in the startup replay below must close the actor rather
-        // than leak an unowned, handle-less binding in the supervisor.
-        let open_guard = OpenGuard {
-            supervisor: self.supervisor,
-            db_path: Some(db_path.clone()),
-        };
         let capture_apply_gate = Arc::new(tokio::sync::Mutex::new(()));
         let capture = if requested_mode == WorkspaceOpenMode::ReadOnly {
             None
@@ -1755,7 +1788,6 @@ impl EngineService {
             }
             capture
         };
-        open_guard.disarm();
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -1773,6 +1805,7 @@ impl EngineService {
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
         );
+        open_guard.disarm();
         Ok(json!({ "workspace": handle }))
     }
 
@@ -8793,10 +8826,12 @@ impl OperationCancellation {
 
 /// Closes a just-opened store actor if `workspace_open` is dropped before the
 /// handle reaches `handles` (a cancelled/deadline-expired open). Disarmed on
-/// the success path, where the handle owns the actor.
+/// the success path, where the handle owns the actor. Open serialization stays
+/// held until either transfer or `begin_close` installs the Closing marker.
 struct OpenGuard {
     supervisor: &'static WorkspaceSupervisor,
     db_path: Option<PathBuf>,
+    _open_serial: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl OpenGuard {
@@ -8811,10 +8846,14 @@ impl Drop for OpenGuard {
             return;
         };
         let supervisor = self.supervisor;
+        let Ok(Some(closing)) = supervisor.begin_close(&db_path) else {
+            return;
+        };
         // Detached + blocking: never run the actor join on a runtime worker
-        // (the #201 cancellation-safety contract).
+        // (the #201 cancellation-safety contract). begin_close installed the
+        // Closing marker synchronously, so an immediate reopen waits here.
         tokio::task::spawn_blocking(move || {
-            let _ = supervisor.close(&db_path);
+            let _ = closing.finish();
         });
     }
 }
@@ -13327,6 +13366,85 @@ mod tests {
             .expect_err("cancelled queued open must fail");
         assert_eq!(result.code, ErrorCode::Cancelled);
         drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_workspace_open_releases_actor_before_immediate_reopen() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        assert!(
+            store
+                .bind_shadow_clone_token(SHADOW_TOKEN)
+                .expect("bind shadow token")
+        );
+        drop(store);
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut service = EngineService::with_supervisor(supervisor);
+        service.open_install_probe = Some((
+            Arc::clone(&reached),
+            release,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ));
+        let service = Arc::new(service);
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "cancelled-open-reopen",
+            "captureMode": "none"
+        });
+
+        let opening_context = RequestContext::unbounded();
+        let cancel_opening = opening_context.cancel.clone();
+        let opening_service = Arc::clone(&service);
+        let opening_params = params.clone();
+        let opening = tokio::spawn(async move {
+            opening_service
+                .workspace_open(&opening_context, opening_params)
+                .await
+        });
+        reached.notified().await;
+        assert_eq!(supervisor.actor_count(), 1, "the supervisor actor exists");
+        assert!(
+            lock(&service.handles).is_empty(),
+            "the service handle is not installed yet"
+        );
+
+        cancel_opening.cancel();
+        let cancelled_open = tokio::time::timeout(Duration::from_millis(250), opening).await;
+        let cleanup_retains_serialization = service.open_lock.try_lock().is_err();
+        let reopening_service = Arc::clone(&service);
+        let reopening = tokio::spawn(async move {
+            reopening_service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+        });
+        service.open_install_probe.as_ref().unwrap().1.notify_one();
+        let cancelled_open = cancelled_open
+            .expect("cancelled workspace.open resolved promptly")
+            .expect("workspace.open task completed")
+            .expect_err("cancelled workspace.open must fail");
+        assert_eq!(cancelled_open.code, ErrorCode::Cancelled);
+        assert!(
+            cleanup_retains_serialization,
+            "cancelled open must retain serialization until cleanup starts"
+        );
+
+        let reopened = reopening
+            .await
+            .expect("reopen task completed")
+            .expect("immediate workspace reopen");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("workspace handle");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        assert_eq!(supervisor.actor_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

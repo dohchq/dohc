@@ -3,10 +3,11 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
 import { mountRootFor } from "./shareMounts";
 import {
   createShareMountDirectoryThroughOwnerForTest,
@@ -42,7 +43,7 @@ describe("share mounts real daemon", () => {
         await writeFile(siblingSentinel, "sibling", "utf8");
 
         await lifecycle.start();
-        const activeSessions = new EngineWorkspaceSessions(lifecycle);
+        const activeSessions = createRealDaemonWorkspaceSessions(lifecycle);
         sessions = activeSessions;
         await expect(
           refreshShareMountThroughOwnerForTest({

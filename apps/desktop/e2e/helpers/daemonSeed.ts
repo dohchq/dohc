@@ -1,8 +1,9 @@
 import {
   EngineDaemonLifecycle,
-  EngineWorkspaceSessions,
+  type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
+import { createRealDaemonWorkspaceSessions } from "../../src/testing/realDaemonWorkspaceSessions";
 import {
   EngineRelayClient,
   RelayConfiguredDaemonClientSource,
@@ -49,7 +50,7 @@ export async function openLiveDaemonWorkspace(
   await lifecycle.start();
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
-  const sessions = new EngineWorkspaceSessions(source);
+  const sessions = createRealDaemonWorkspaceSessions(source);
   const relay = new EngineRelayClient({
     sessions,
     routes,
@@ -81,7 +82,7 @@ export async function seedThroughDaemon<T>(
   let sessions: EngineWorkspaceSessions | null = null;
   try {
     await lifecycle.start();
-    sessions = new EngineWorkspaceSessions(lifecycle);
+    sessions = createRealDaemonWorkspaceSessions(lifecycle);
     return await seed({
       chats: createLiveLinkedChatStore(workspace, sessions),
       files: createCaptureLiveStores(workspace, sessions).store,
