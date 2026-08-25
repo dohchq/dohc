@@ -6,6 +6,14 @@ import { describe, expect, it } from "vitest";
 // chat authorization — by reading the source it protects.
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
+function ipcHandlerSource(channel: string): string {
+  const marker = `ipcMain.handle(CHANNELS.${channel},`;
+  const start = mainSource.indexOf(marker);
+  if (start < 0) throw new Error(`Missing ${channel} IPC handler`);
+  const next = mainSource.indexOf("ipcMain.handle(", start + marker.length);
+  return mainSource.slice(start, next < 0 ? undefined : next);
+}
+
 function handlerSource(event: string): string {
   const marker = `app.on("${event}",`;
   const start = mainSource.indexOf(marker);
@@ -27,21 +35,13 @@ describe("bootstrap window gate", () => {
     expect(mainSource.split("bootstrapComplete = false").length - 1).toBe(1);
   });
 
-  it.each(WINDOW_CREATING_HANDLERS)(
-    "gates the %s handler on the bootstrap flag, never on app.isReady()",
-    (event) => {
-      const handler = handlerSource(event);
-      expect(handler).toContain("if (!bootstrapComplete)");
-      expect(handler).not.toContain("app.isReady()");
-    },
-  );
-
   // A gate that only precedes the window call is not a gate: control has to
   // leave the handler, so the guarded branch must return.
   it.each(WINDOW_CREATING_HANDLERS)(
-    "makes the %s handler return out of the closed gate, not fall through",
+    "gates the %s handler on the bootstrap flag and returns out of the closed gate",
     (event) => {
       const handler = handlerSource(event);
+      expect(handler).not.toContain("app.isReady()");
       const gateAt = handler.indexOf("if (!bootstrapComplete)");
       const createAt = handler.indexOf("showOrCreateMainWindow");
       expect(gateAt).toBeGreaterThanOrEqual(0);
@@ -108,12 +108,13 @@ describe("bootstrap window gate", () => {
     // the point — and the gate opens only after both.
     expect(daemonGateAt).toBeGreaterThan(createWindowAt);
     expect(openGateAt).toBeGreaterThan(daemonGateAt);
-    expect(openGateAt).toBeGreaterThan(createWindowAt);
   });
 
   // D1#9: appReady must measure Electron readiness, not daemon boot — it used
-  // to be marked after the daemon await. daemonReady lands at the gate.
-  it("marks app-ready before the daemon starts and daemon-ready at its gate", () => {
+  // to be marked after the daemon await. daemonReady lands where the handshake
+  // actually completes, inside startRustEngineDaemon: the bootstrap gate's
+  // await also covers the cached-settings read, which would inflate the mark.
+  it("marks app-ready before the daemon starts and daemon-ready at handshake completion", () => {
     const whenReadyAt = mainSource.indexOf("app.whenReady().then(");
     const appReadyMarkAt = mainSource.indexOf(
       "launchMarks.appReady();",
@@ -123,17 +124,22 @@ describe("bootstrap window gate", () => {
       "engineDaemonStartup = startRustEngineDaemon();",
       whenReadyAt,
     );
-    const daemonGateAt = mainSource.indexOf(
-      "if (!(await engineDaemonStartup)) return;",
-      whenReadyAt,
-    );
-    const daemonReadyMarkAt = mainSource.indexOf(
-      "launchMarks.daemonReady();",
-      whenReadyAt,
-    );
     expect(appReadyMarkAt).toBeGreaterThan(whenReadyAt);
     expect(appReadyMarkAt).toBeLessThan(daemonStartAt);
-    expect(daemonReadyMarkAt).toBeGreaterThan(daemonGateAt);
+
+    const startFnAt = mainSource.indexOf("async function startRustEngineDaemon(");
+    const daemonReadyMarkAt = mainSource.indexOf(
+      "launchMarks.daemonReady();",
+      startFnAt,
+    );
+    const successReturnAt = mainSource.indexOf("return true;", startFnAt);
+    const catchAt = mainSource.indexOf("\n  } catch (error) {", startFnAt);
+    expect(startFnAt).toBeGreaterThanOrEqual(0);
+    expect(daemonReadyMarkAt).toBeGreaterThan(startFnAt);
+    // Before the success return — so inside the try, on the handshake path,
+    // never on the failure path.
+    expect(daemonReadyMarkAt).toBeLessThan(successReturnAt);
+    expect(successReturnAt).toBeLessThan(catchAt);
   });
 
   // The window loads while the daemon handshakes, so a fast renderer can call
@@ -154,6 +160,60 @@ describe("bootstrap window gate", () => {
     );
   });
 
+  // The shell's mount-time cloudStatus and the share view's on-open
+  // auto-refresh both race the handshake; ungated, each surfaces the
+  // broken-invariant sessions error as a user-visible failure.
+  it("gates cloudStatus and refreshSharedView on the daemon startup promise", () => {
+    const cloudStatus = ipcHandlerSource("cloudStatus");
+    const gateAt = cloudStatus.indexOf("await engineDaemonStartup;");
+    expect(gateAt).toBeGreaterThanOrEqual(0);
+    expect(gateAt).toBeLessThan(cloudStatus.indexOf("requireEngineSessions()"));
+
+    expect(ipcHandlerSource("refreshSharedView")).toContain(
+      "await engineDaemonStartup;",
+    );
+  });
+
+  // Ungated, a mount refresh during the handshake throws inside the per-row
+  // reconcile, is classified "unchanged", and silently skips the on-open pull
+  // until the next poll. One gate at registration covers every mount lane.
+  it("gates the share mount handlers on the daemon startup promise", () => {
+    const registerAt = mainSource.indexOf("registerShareMountIpcHandlers({");
+    expect(registerAt).toBeGreaterThanOrEqual(0);
+    const wiring = mainSource.slice(
+      registerAt,
+      mainSource.indexOf("});", registerAt),
+    );
+    const gateAt = wiring.indexOf("await engineDaemonStartup;");
+    const forwardAt = wiring.indexOf("handler(event, payload)");
+    expect(gateAt).toBeGreaterThanOrEqual(0);
+    expect(forwardAt).toBeGreaterThan(gateAt);
+  });
+
+  // The engine-backed listing branches await the handshake; the plain disk
+  // listing must NOT, or every workspace's first file list would serialize
+  // behind the daemon and undo the concurrent boot.
+  it("gates only the share-backed file listing branches on the daemon startup", () => {
+    const listAt = mainSource.indexOf("async function listOwnedWorkspaceFiles(");
+    expect(listAt).toBeGreaterThanOrEqual(0);
+    const body = mainSource.slice(
+      listAt,
+      mainSource.indexOf("\nfunction ", listAt),
+    );
+    const standaloneAt = body.indexOf("shareViewFiles.list({");
+    const diskAt = body.indexOf("await listFiles(workspace.rootPath);");
+    const overlayAt = body.indexOf("overlayCanonicalShareMountFiles({");
+    const firstGateAt = body.indexOf("await engineDaemonStartup;");
+    const secondGateAt = body.indexOf("await engineDaemonStartup;", firstGateAt + 1);
+    expect(firstGateAt).toBeGreaterThanOrEqual(0);
+    expect(firstGateAt).toBeLessThan(standaloneAt);
+    // The disk listing sits between the two gates: after the share-view
+    // return, before the mount overlay's gate.
+    expect(diskAt).toBeGreaterThan(standaloneAt);
+    expect(secondGateAt).toBeGreaterThan(diskAt);
+    expect(secondGateAt).toBeLessThan(overlayAt);
+  });
+
   // Indentation is the cheap proof of nesting: four spaces is the continuation
   // body. A gate opened inside any `if` would sit deeper, and a launch that
   // missed that condition would never open the gate at all.
@@ -170,11 +230,11 @@ describe("bootstrap window gate", () => {
       whenReadyAt,
     );
     const drainAt = mainSource.indexOf(
-      "const drainedWorkspace = await flushPendingOpenPaths();",
+      "const pendingWorkspace = await flushPendingOpenPaths();",
       whenReadyAt,
     );
     const mergeAt = mainSource.indexOf(
-      "drainedWorkspace ?? initialActivatedWorkspace",
+      "pendingWorkspace ?? launchWorkspace",
       drainAt,
     );
     const chainAt = mainSource.indexOf("void windowLoaded.then(", mergeAt);
@@ -229,9 +289,11 @@ describe("bootstrap window gate", () => {
     expect(catchAt).toBeGreaterThan(resolveAt);
     // The daemon handle is now assigned inside the try, so a throw before that
     // assignment reaches a catch that must not dereference it.
-    const handler = mainSource.slice(catchAt, catchAt + 1200);
+    const handler = mainSource.slice(catchAt, catchAt + 1800);
     expect(handler).toContain('"Rust engine failed to start"');
-    expect(handler).toContain("await rustEngineDaemon?.stop();");
+    // Contained: a stop() rejection would otherwise reject engineDaemonStartup
+    // itself, skip the destroy below, and rethrow from every gated await.
+    expect(handler).toContain("await rustEngineDaemon?.stop().catch(");
     // The window can already be up — it loads during the handshake. The
     // failure path destroys it so the quit is immediate instead of the quit
     // guard interrogating a renderer about a boot that already failed.

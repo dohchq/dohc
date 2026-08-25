@@ -335,7 +335,7 @@ import {
 } from "./renderer/collab/presenceChannel";
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 import { desktopMarks } from "./performance/desktopMarks";
-import { launchMarks } from "./performance/launchMarks";
+import { launchMarks, logLaunchMarksOnce } from "./performance/launchMarks";
 import {
   publicUpdateState,
   resolveUpdateChannel,
@@ -4181,7 +4181,8 @@ const relayTransportRoutes = new RelayTransportRouteGuard();
 // Narrowing for the capture gate, matching what `linkedChatStoreFor` and
 // `sharedViewStoreFor` already do (same error text). The invariant is real:
 // every boot-time path that can reach the engine awaits engineDaemonStartup
-// first (openWorkspaceActivityWith, cloudStatus), and startRustEngineDaemon
+// first (openWorkspaceActivityWith, cloudStatus, the share-view file and
+// mount lanes), and startRustEngineDaemon
 // quits the app when the handshake fails; this handle is nulled only on that
 // failure path. A later startup-smoke failure restarts the daemon without
 // nulling it. A throw here would mean that invariant broke, which must be
@@ -4377,6 +4378,10 @@ async function listOwnedWorkspaceFiles(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
 ) {
   if (shareViewIsPresent(workspace.shareView)) {
+    // The shell lists at mount, which can precede the daemon handshake now
+    // that the window loads during it; the share store needs sessions. A
+    // plain workspace's disk listing below stays ungated on purpose.
+    await engineDaemonStartup;
     return shareViewFiles.list({
       kind: "standalone",
       workspaceId: workspace.workspaceId,
@@ -4385,6 +4390,7 @@ async function listOwnedWorkspaceFiles(
   const mounts = storedShareMounts(workspace);
   const disk = await listFiles(workspace.rootPath);
   if (!shareMountRegistryIsPresent(workspace)) return disk;
+  await engineDaemonStartup;
   return overlayCanonicalShareMountFiles({
     disk,
     mounts,
@@ -5970,10 +5976,7 @@ function registerIpcHandlers(
       // The shell asks at mount, which can precede the daemon handshake now
       // that the window loads during it.
       await engineDaemonStartup;
-      const sessions = rustEngineWorkspaceSessions;
-      if (!sessions) {
-        throw new Error("Rust engine workspace sessions are unavailable.");
-      }
+      const sessions = requireEngineSessions();
       workspaceSecretState = await readWorkspaceSecretState(
         workspace.rootPath,
         workspace.workspaceId,
@@ -7128,6 +7131,9 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.refreshSharedView, async (event, payload) => {
     assertTrustedSender(event);
+    // The shell's on-open auto-refresh can run during the daemon handshake
+    // now that the window loads during it; the reconcile needs sessions.
+    await engineDaemonStartup;
     const input = RefreshSharedViewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     if (!shareViewIsPresent(workspace.shareView)) {
@@ -7202,7 +7208,15 @@ function registerIpcHandlers(
   // host's history or its synced copy.
 
   registerShareMountIpcHandlers({
-    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    // Every mount lane reaches the engine store, and the shell's on-open
+    // refresh can run during the daemon handshake — without this gate the
+    // reconcile throw is classified "unchanged" and the pull silently waits
+    // for the next poll.
+    registerHandler: (channel, handler) =>
+      ipcMain.handle(channel, async (event, payload) => {
+        await engineDaemonStartup;
+        return handler(event, payload);
+      }),
     assertTrustedSender,
     requireWorkspace,
     assertWritableWorkspace,
@@ -11710,28 +11724,6 @@ function testEngineRestartOverrides(): {
   return { initialBackoffMs: backoff, maxBackoffMs: backoff };
 }
 
-// The one launch-speed log line. The daemon handshake and the renderer's
-// first paint race each other, so whichever lands last prints the snapshot.
-let launchMarksLogged = false;
-function logLaunchMarksOnce(): void {
-  if (launchMarksLogged) return;
-  const snapshot = launchMarks.snapshot();
-  if (
-    snapshot.appReadyMs === undefined ||
-    snapshot.daemonReadyMs === undefined ||
-    snapshot.firstWindowMs === undefined ||
-    snapshot.firstPaintMs === undefined
-  ) {
-    return;
-  }
-  launchMarksLogged = true;
-  console.info(
-    "[desktop] launch marks (ms since process start): " +
-      `app-ready ${snapshot.appReadyMs}, first-window ${snapshot.firstWindowMs}, ` +
-      `daemon-ready ${snapshot.daemonReadyMs}, first-paint ${snapshot.firstPaintMs}`,
-  );
-}
-
 async function startRustEngineDaemon(): Promise<boolean> {
   // Everything, including resolving the binary path, runs inside the try: a
   // throw while BUILDING the options would otherwise reject this whenReady
@@ -11791,6 +11783,12 @@ async function startRustEngineDaemon(): Promise<boolean> {
     console.info(
       "[desktop] Rust engine daemon handshake complete; startup smoke running.",
     );
+    // Marked here, where the handshake actually completes — the bootstrap
+    // gate's await also covers the cached-settings read, which would inflate
+    // this mark.
+    launchMarks.daemonReady();
+    desktopMarks.markOnce("daemon-ready");
+    logLaunchMarksOnce();
     return true;
   } catch (error) {
     const message =
@@ -11800,7 +11798,15 @@ async function startRustEngineDaemon(): Promise<boolean> {
       "Rust engine failed to start",
       `${message}\n\nThe desktop cannot start without the Rust engine.`,
     );
-    await rustEngineDaemon?.stop();
+    // Contained: a stop() throw here would reject engineDaemonStartup itself,
+    // skip the window destroy below, and rethrow from every gated await
+    // instead of letting the quit land.
+    await rustEngineDaemon?.stop().catch((stopError: unknown) => {
+      console.error(
+        "[desktop] Rust engine daemon stop after failed start:",
+        stopError,
+      );
+    });
     rustEngineDaemon = null;
     rustEngineWorkspaceSessions = null;
     rustEngineRelayClient = null;
@@ -11964,9 +11970,6 @@ if (!app.requestSingleInstanceLock()) {
     ).settings.profile.preferredName;
 
     if (!(await engineDaemonStartup)) return;
-    launchMarks.daemonReady();
-    desktopMarks.markOnce("daemon-ready");
-    logLaunchMarksOnce();
 
     cliServerStartup = startDesktopCliServer()
       .then(async (server) => {
@@ -11991,23 +11994,20 @@ if (!app.requestSingleInstanceLock()) {
     const launchWorkspace = await openWorkspacePaths(
       collectOpenWorkspaceArgs(process.argv),
     );
+    // A path the handlers queued during the bootstrap is a later intent than
+    // the launch arguments, so it wins.
     const pendingWorkspace = await flushPendingOpenPaths();
-    const initialActivatedWorkspace = pendingWorkspace ?? launchWorkspace;
+    const activatedWorkspace = pendingWorkspace ?? launchWorkspace;
     refreshNativeWorkspaceSurfaces();
-
-    // A path the handlers queued during the bootstrap is a later intent than the
-    // launch arguments, so it wins. Drain before the gate opens: afterwards the
-    // handlers flush their own paths.
-    const drainedWorkspace = await flushPendingOpenPaths();
-    const activatedWorkspace = drainedWorkspace ?? initialActivatedWorkspace;
     // The renderer has subscribed once the load finishes, so this send lands —
     // and being last, it wins over any activation an open above sent into a
     // still-loading window.
     void windowLoaded.then(() => {
       if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
-      // A path that arrived while the drain above was awaiting is queued behind
-      // an open gate, so no later event is guaranteed to flush it. This one is
-      // the backstop.
+      // A path that arrived while the awaits above were pending is still
+      // queued when the gate opens below, and no later event is guaranteed to
+      // flush it. This one is the backstop, and its opens send their own
+      // activations after the send above, so the later intent still wins.
       void flushPendingOpenPaths(window);
     });
     // The daemon is up, IPC is registered, and a window exists, so the deferred
