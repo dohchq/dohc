@@ -17,10 +17,14 @@ const excalidraw = vi.hoisted(() => {
     }
   });
   const addFiles = vi.fn();
+  const defaultApi = { updateScene, addFiles };
+  let currentApi = defaultApi;
   return {
     updateScene,
     addFiles,
-    api: { updateScene, addFiles },
+    get api() {
+      return currentApi;
+    },
     props: null as null | Record<string, unknown>,
     beginRender: () => {
       rendering = true;
@@ -45,7 +49,11 @@ const excalidraw = vi.hoisted(() => {
         callback(excalidraw.api);
       }
     },
+    replaceApi: (replacement: typeof defaultApi) => {
+      currentApi = replacement;
+    },
     resetApiDelivery: () => {
+      currentApi = defaultApi;
       apiHeld = false;
       pendingApiCallback = null;
     },
@@ -164,6 +172,125 @@ it("adopts an API whose ready microtask drains before commit", async () => {
     expect(excalidraw.props?.isCollaborating).toBe(true);
     expect(presence.activePolls()).toBe(1);
   });
+});
+
+it("keeps asset installation best-effort when Excalidraw rejects the files", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  const hydrateAssets = vi.fn(async () => [
+    { id: "image", dataURL: "data:image/png;base64,QQ==" },
+  ] as never);
+  excalidraw.addFiles.mockImplementationOnce(() => {
+    throw new Error("asset install failed");
+  });
+
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+    />,
+  );
+
+  await waitFor(() => expect(excalidraw.addFiles).toHaveBeenCalledOnce());
+  excalidraw.updateScene.mockClear();
+  act(() => insertElementRevision(doc, rectangle(1, 10, 20)));
+  expect(excalidraw.updateScene).toHaveBeenCalledWith(
+    expect.objectContaining({
+      elements: [expect.objectContaining({ id: "shape", x: 20 })],
+    }),
+  );
+  await act(async () => {});
+});
+
+it("rejects hydration once Excalidraw replaces its imperative API", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  let resolveRetired!: (files: never) => void;
+  const retired = new Promise<never>((resolve) => {
+    resolveRetired = resolve;
+  });
+  const hydrateAssets = vi
+    .fn()
+    .mockImplementationOnce(() => retired)
+    .mockImplementationOnce(() => new Promise<never>(() => {}));
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+    />,
+  );
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledOnce());
+
+  const replacementAddFiles = vi.fn();
+  const replacementApi = {
+    updateScene: excalidraw.updateScene,
+    addFiles: replacementAddFiles,
+  };
+  excalidraw.replaceApi(replacementApi);
+  const replaceApi = excalidraw.props?.excalidrawAPI as (
+    api: typeof replacementApi,
+  ) => void;
+  await act(async () => {
+    // Resolve first so its continuation is already queued when the callback
+    // replaces apiRef. The readyApi state update has not committed yet, so
+    // only the exact imperative-API identity check can reject these files.
+    resolveRetired([
+      { id: "retired", dataURL: "data:image/png;base64,QQ==" },
+    ] as never);
+    replaceApi(replacementApi);
+    await retired;
+  });
+
+  expect(excalidraw.addFiles).not.toHaveBeenCalled();
+  expect(replacementAddFiles).not.toHaveBeenCalled();
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledTimes(2));
+  expect(replacementAddFiles).not.toHaveBeenCalled();
+});
+
+it("ignores hydration failure from a replaced Excalidraw API", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  let rejectRetired!: (error: Error) => void;
+  const retired = new Promise<never>((_resolve, reject) => {
+    rejectRetired = reject;
+  });
+  const hydrateAssets = vi
+    .fn()
+    .mockImplementationOnce(() => retired)
+    .mockImplementationOnce(() => new Promise<never>(() => {}));
+  const onAssetRefusedChange = vi.fn();
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+      onAssetRefusedChange={onAssetRefusedChange}
+    />,
+  );
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledOnce());
+
+  const replacementApi = {
+    updateScene: excalidraw.updateScene,
+    addFiles: vi.fn(),
+  };
+  excalidraw.replaceApi(replacementApi);
+  const replaceApi = excalidraw.props?.excalidrawAPI as (
+    api: typeof replacementApi,
+  ) => void;
+  await act(async () => {
+    rejectRetired(new Error("retired hydration failed"));
+    replaceApi(replacementApi);
+    await retired.catch(() => undefined);
+  });
+
+  expect(onAssetRefusedChange).not.toHaveBeenCalled();
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledTimes(2));
+  expect(onAssetRefusedChange).not.toHaveBeenCalled();
 });
 
 it("binds the initial scene after a production-scheduled mount", async () => {
@@ -677,8 +804,57 @@ it("drops asset hydration that resolves after the scene changes", async () => {
     await first;
   });
 
+  // MUTATION: omit the response guard's cleanup invalidation. The retired
+  // scene's asset reaches the current Excalidraw API as a second addFiles.
   expect(excalidraw.addFiles).toHaveBeenCalledTimes(1);
   expect(excalidraw.addFiles).toHaveBeenCalledWith([
     expect.objectContaining({ id: "current" }),
   ]);
+});
+
+it("reports only the current asset hydration failure", async () => {
+  const firstDoc = new Y.Doc();
+  const secondDoc = new Y.Doc();
+  declareSceneRoots(firstDoc);
+  declareSceneRoots(secondDoc);
+  let rejectFirst!: (error: Error) => void;
+  let rejectSecond!: (error: Error) => void;
+  const first = new Promise<never>((_resolve, reject) => {
+    rejectFirst = reject;
+  });
+  const second = new Promise<never>((_resolve, reject) => {
+    rejectSecond = reject;
+  });
+  const onAssetRefusedChange = vi.fn();
+  const view = render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={firstDoc}
+      hydrateAssets={() => first}
+      onAssetRefusedChange={onAssetRefusedChange}
+    />,
+  );
+  view.rerender(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={secondDoc}
+      hydrateAssets={() => second}
+      onAssetRefusedChange={onAssetRefusedChange}
+    />,
+  );
+
+  await act(async () => {
+    rejectFirst(new Error("retired hydration failed"));
+    await first.catch(() => undefined);
+  });
+  expect(onAssetRefusedChange).not.toHaveBeenCalled();
+
+  await act(async () => {
+    rejectSecond(new Error("current hydration failed"));
+    await second.catch(() => undefined);
+  });
+  expect(onAssetRefusedChange).toHaveBeenCalledOnce();
+  expect(onAssetRefusedChange).toHaveBeenCalledWith(true);
 });

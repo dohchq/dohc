@@ -5,9 +5,10 @@ import {
   FileCode2,
   Globe2,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
 
 type SitesLoadState =
@@ -21,26 +22,24 @@ function useSites(
 ): SitesLoadState {
   const [state, setState] = useState<SitesLoadState>({ status: "loading" });
 
-  useEffect(() => {
-    let cancelled = false;
-    setState({ status: "loading" });
-    bridge()
-      .listSites({ workspaceId })
-      .then((result) => {
-        if (!cancelled) setState({ status: "ready", sites: result.sites });
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setState({
-            status: "error",
-            message: error instanceof Error ? error.message : "Could not load sites.",
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, filesSettledRevision]);
+  useAsyncResponseEffect(
+    () => {
+      setState({ status: "loading" });
+      return bridge().listSites({ workspaceId });
+    },
+    {
+      onSuccess: (result) => {
+        setState({ status: "ready", sites: result.sites });
+      },
+      onError: (error) => {
+        setState({
+          status: "error",
+          message: error instanceof Error ? error.message : "Could not load sites.",
+        });
+      },
+    },
+    [workspaceId, filesSettledRevision],
+  );
 
   return state;
 }
