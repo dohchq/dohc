@@ -6,6 +6,7 @@ const processStart = Date.now();
 
 interface LaunchMarks {
   appReadyMs: number;
+  daemonReadyMs: number;
   firstWindowMs: number;
   firstPaintMs: number;
 }
@@ -18,6 +19,7 @@ function markOnce(key: keyof LaunchMarks): void {
 
 export const launchMarks = {
   appReady: () => markOnce("appReadyMs"),
+  daemonReady: () => markOnce("daemonReadyMs"),
   firstWindow: () => markOnce("firstWindowMs"),
   firstPaint: () => markOnce("firstPaintMs"),
   snapshot: (): Partial<LaunchMarks> => ({ ...marks }),

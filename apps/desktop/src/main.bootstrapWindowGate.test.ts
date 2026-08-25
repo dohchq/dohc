@@ -82,22 +82,76 @@ describe("bootstrap window gate", () => {
     expect(queueAt).toBeLessThan(handler.indexOf("showOrCreateMainWindow"));
   });
 
-  it("opens the gate only after the daemon, IPC, and a window", () => {
+  it("opens the gate only after both the daemon and the window", () => {
     const whenReadyAt = mainSource.indexOf("app.whenReady().then(");
-    const daemonGateAt = mainSource.indexOf(
-      "if (!(await startRustEngineDaemon())) return;",
+    const daemonStartAt = mainSource.indexOf(
+      "engineDaemonStartup = startRustEngineDaemon();",
       whenReadyAt,
     );
-    const ipcAt = mainSource.indexOf("registerIpcHandlers();", daemonGateAt);
-    const createWindowAt = mainSource.indexOf("createMainWindow({", daemonGateAt);
+    const ipcAt = mainSource.indexOf("registerIpcHandlers();", whenReadyAt);
+    const createWindowAt = mainSource.indexOf("createMainWindow({", whenReadyAt);
+    const daemonGateAt = mainSource.indexOf(
+      "if (!(await engineDaemonStartup)) return;",
+      whenReadyAt,
+    );
     const openGateAt = mainSource.indexOf("bootstrapComplete = true", whenReadyAt);
 
     expect(whenReadyAt).toBeGreaterThanOrEqual(0);
-    expect(daemonGateAt).toBeGreaterThan(whenReadyAt);
-    expect(ipcAt).toBeGreaterThan(daemonGateAt);
-    expect(createWindowAt).toBeGreaterThan(daemonGateAt);
-    expect(openGateAt).toBeGreaterThan(ipcAt);
+    // The daemon starts first and handshakes concurrently with everything up
+    // to the gate that awaits it.
+    expect(daemonStartAt).toBeGreaterThan(whenReadyAt);
+    // The renderer's first IPC call races the daemon handshake, so the
+    // handlers must exist before the window starts loading.
+    expect(ipcAt).toBeGreaterThan(daemonStartAt);
+    expect(createWindowAt).toBeGreaterThan(ipcAt);
+    // The window is created BEFORE the daemon resolves — that concurrency is
+    // the point — and the gate opens only after both.
+    expect(daemonGateAt).toBeGreaterThan(createWindowAt);
+    expect(openGateAt).toBeGreaterThan(daemonGateAt);
     expect(openGateAt).toBeGreaterThan(createWindowAt);
+  });
+
+  // D1#9: appReady must measure Electron readiness, not daemon boot — it used
+  // to be marked after the daemon await. daemonReady lands at the gate.
+  it("marks app-ready before the daemon starts and daemon-ready at its gate", () => {
+    const whenReadyAt = mainSource.indexOf("app.whenReady().then(");
+    const appReadyMarkAt = mainSource.indexOf(
+      "launchMarks.appReady();",
+      whenReadyAt,
+    );
+    const daemonStartAt = mainSource.indexOf(
+      "engineDaemonStartup = startRustEngineDaemon();",
+      whenReadyAt,
+    );
+    const daemonGateAt = mainSource.indexOf(
+      "if (!(await engineDaemonStartup)) return;",
+      whenReadyAt,
+    );
+    const daemonReadyMarkAt = mainSource.indexOf(
+      "launchMarks.daemonReady();",
+      whenReadyAt,
+    );
+    expect(appReadyMarkAt).toBeGreaterThan(whenReadyAt);
+    expect(appReadyMarkAt).toBeLessThan(daemonStartAt);
+    expect(daemonReadyMarkAt).toBeGreaterThan(daemonGateAt);
+  });
+
+  // The window loads while the daemon handshakes, so a fast renderer can call
+  // engine-backed IPC before sessions exist. The boot-reachable entry awaits
+  // the handshake instead of throwing the broken-invariant sessions error.
+  it("gates workspace-activity opens on the daemon startup promise", () => {
+    const openActivityAt = mainSource.indexOf(
+      "async function openWorkspaceActivityWith(",
+    );
+    expect(openActivityAt).toBeGreaterThanOrEqual(0);
+    const retainAt = mainSource.indexOf(
+      "retainedWorkspaceActivities.add",
+      openActivityAt,
+    );
+    expect(retainAt).toBeGreaterThan(openActivityAt);
+    expect(mainSource.slice(openActivityAt, retainAt)).toContain(
+      "await engineDaemonStartup;",
+    );
   });
 
   // Indentation is the cheap proof of nesting: four spaces is the continuation
@@ -107,19 +161,26 @@ describe("bootstrap window gate", () => {
     expect(mainSource).toContain("\n    bootstrapComplete = true;\n");
   });
 
-  it("drains queued paths before the window's activation listener", () => {
+  it("drains queued paths after the daemon and sends activation on the load promise", () => {
+    const whenReadyAt = mainSource.indexOf("app.whenReady().then(");
+    const createWindowAt = mainSource.indexOf("createMainWindow({", whenReadyAt);
+    const listenerAt = mainSource.indexOf('once("did-finish-load"', createWindowAt);
+    const daemonGateAt = mainSource.indexOf(
+      "if (!(await engineDaemonStartup)) return;",
+      whenReadyAt,
+    );
     const drainAt = mainSource.indexOf(
       "const drainedWorkspace = await flushPendingOpenPaths();",
+      whenReadyAt,
     );
     const mergeAt = mainSource.indexOf(
       "drainedWorkspace ?? initialActivatedWorkspace",
       drainAt,
     );
-    const createWindowAt = mainSource.indexOf("createMainWindow({", mergeAt);
-    const listenerAt = mainSource.indexOf('once("did-finish-load"', createWindowAt);
+    const chainAt = mainSource.indexOf("void windowLoaded.then(", mergeAt);
     const sendAt = mainSource.indexOf(
       "sendWorkspaceActivated(window, activatedWorkspace)",
-      listenerAt,
+      chainAt,
     );
     const residualDrainAt = mainSource.indexOf(
       "void flushPendingOpenPaths(window);",
@@ -127,27 +188,30 @@ describe("bootstrap window gate", () => {
     );
     const openGateAt = mainSource.indexOf("bootstrapComplete = true", drainAt);
 
-    // The renderer subscribes when it loads, so the drained path has to reach
-    // the did-finish-load listener. Sending it earlier drops it, and the launch
-    // argument then overrides the path the user actually opened.
-    expect(drainAt).toBeGreaterThanOrEqual(0);
-    expect(mergeAt).toBeGreaterThan(drainAt);
-    expect(createWindowAt).toBeGreaterThan(mergeAt);
+    // Creating the window starts the load. The load promise must be armed in
+    // the same tick — an await in between lets did-finish-load fire first,
+    // and `once` then never resolves it.
+    expect(createWindowAt).toBeGreaterThan(whenReadyAt);
     expect(listenerAt).toBeGreaterThan(createWindowAt);
-    // Creating the window starts the load. An await between the window and its
-    // listener lets did-finish-load fire first, and `once` then never runs.
     expect(mainSource.slice(createWindowAt, listenerAt)).not.toContain("await");
-    expect(sendAt).toBeGreaterThan(listenerAt);
+    // Opening workspaces needs the daemon, so the drains follow its gate. The
+    // activation send chains on the armed load promise: the renderer has
+    // subscribed by load-finish, and being last this send wins over any
+    // activation an open above sent into a still-loading window.
+    expect(drainAt).toBeGreaterThan(daemonGateAt);
+    expect(mergeAt).toBeGreaterThan(drainAt);
+    expect(chainAt).toBeGreaterThan(mergeAt);
+    expect(sendAt).toBeGreaterThan(chainAt);
     // A path can arrive while the drain above awaits: it is queued behind an
-    // open gate, so the listener has to flush the remainder or it sits there.
+    // open gate, so the chain has to flush the remainder or it sits there.
     expect(residualDrainAt).toBeGreaterThan(sendAt);
     expect(openGateAt).toBeGreaterThan(drainAt);
   });
 
-  // The listener carries the residual drain, so a launch with no workspace to
-  // activate must still register it.
-  it("registers the activation listener unconditionally", () => {
-    expect(mainSource).toContain('\n    window.webContents.once("did-finish-load"');
+  // The load promise carries the activation send and the residual drain, so a
+  // launch with no workspace to activate must still arm it.
+  it("arms the window's load promise unconditionally", () => {
+    expect(mainSource).toContain("\n    const windowLoaded = new Promise<void>(");
   });
 
   // Resolving the binary path can throw (a packaged build with no resources
@@ -165,9 +229,18 @@ describe("bootstrap window gate", () => {
     expect(catchAt).toBeGreaterThan(resolveAt);
     // The daemon handle is now assigned inside the try, so a throw before that
     // assignment reaches a catch that must not dereference it.
-    const handler = mainSource.slice(catchAt, catchAt + 800);
+    const handler = mainSource.slice(catchAt, catchAt + 1200);
     expect(handler).toContain('"Rust engine failed to start"');
     expect(handler).toContain("await rustEngineDaemon?.stop();");
+    // The window can already be up — it loads during the handshake. The
+    // failure path destroys it so the quit is immediate instead of the quit
+    // guard interrogating a renderer about a boot that already failed.
+    const destroyAt = handler.indexOf(
+      "for (const window of workspaceWindows.allLive()) window.destroy();",
+    );
+    const quitAt = handler.indexOf("app.quit();");
+    expect(destroyAt).toBeGreaterThanOrEqual(0);
+    expect(quitAt).toBeGreaterThan(destroyAt);
   });
 
   it("quits with a visible error when the bootstrap continuation throws", () => {
