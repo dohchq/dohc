@@ -81,6 +81,10 @@ async function harness(options: {
   shareView?: unknown;
   shareMounts?: unknown;
   trashItem?: (path: string) => Promise<void>;
+  beforeDocumentMutation?: (
+    workspaceId: string,
+    path: string,
+  ) => Promise<void>;
 } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "dohc-file-mutations-"));
   roots.push(rootPath);
@@ -112,6 +116,7 @@ async function harness(options: {
       path: string,
       mutation: () => Promise<T>,
     ): Promise<T> => {
+      await options.beforeDocumentMutation?.(workspaceId, path);
       if (ownsDocument(workspaceId, path)) {
         throw new Error(
           "The engine owns this live document. Close its editor before writing the file directly.",
@@ -978,6 +983,38 @@ describe("WorkspaceFileMutationOwner", () => {
       "assets/target.png",
     );
     expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  it("refuses asset dedup when an alias changes while ownership is queued", async () => {
+    const ownershipEntered = deferred();
+    const releaseOwnership = deferred();
+    const test = await harness({
+      beforeDocumentMutation: async () => {
+        ownershipEntered.resolve();
+        await releaseOwnership.promise;
+      },
+    });
+    await mkdir(join(test.rootPath, "assets"));
+    const target = join(test.rootPath, "assets/target.png");
+    const alias = join(test.rootPath, "assets/pixel.png");
+    await writeFile(target, new Uint8Array([1, 2, 3]));
+    await symlink(target, alias);
+
+    const writing = test.owner.writeAsset(trustedEvent, {
+      workspaceId: test.workspace.workspaceId,
+      relativePath: "assets/pixel.png",
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    await ownershipEntered.promise;
+    await rm(alias);
+    await writeFile(alias, new Uint8Array([9]));
+    releaseOwnership.resolve();
+
+    await expect(writing).rejects.toThrow(
+      "An image attachment changed at assets/pixel.png before this write could finish. Try the action again.",
+    );
+    expect(await readFile(alias)).toEqual(Buffer.from([9]));
     expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
   });
 

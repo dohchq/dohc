@@ -1214,19 +1214,41 @@ export async function writeWorkspaceAssetInLease(
     if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
   }
 
-  const existingLeaf = await lstat(join(rootPath, requestedPath));
+  const changedCollision = () =>
+    new Error(
+      `An image attachment changed at ${requestedPath} before this write could finish. Try the action again.`,
+    );
+  const existingLeaf = await lstat(join(rootPath, requestedPath), {
+    bigint: true,
+  }).catch(() => {
+    throw changedCollision();
+  });
   if (!existingLeaf.isFile()) {
     throw new Error(
       `An image attachment already exists at ${requestedPath} and is not a regular file.`,
     );
   }
-  const resolvedTarget = await resolveWorkspaceFile(
+  const currentTarget = await resolveWorkspaceFile(
     rootPath,
-    resolvedPath,
+    requestedPath,
     "read",
-  );
-  const handle = await open(resolvedTarget.realTarget, "r");
+  ).catch(() => {
+    throw changedCollision();
+  });
+  if (currentTarget.resolvedPath !== resolvedPath) {
+    throw changedCollision();
+  }
+  const handle = await open(currentTarget.realTarget, "r").catch(() => {
+    throw changedCollision();
+  });
   try {
+    const openedFile = await handle.stat({ bigint: true });
+    if (
+      !openedFile.isFile() ||
+      sameFsEntry(existingLeaf, openedFile) !== "same"
+    ) {
+      throw changedCollision();
+    }
     const existing = await readFileHandleExact(handle, MAX_ASSET_WRITE_BYTES);
     if (Buffer.from(bytes).equals(existing.bytes)) return;
   } catch (error) {
