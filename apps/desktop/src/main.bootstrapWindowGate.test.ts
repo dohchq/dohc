@@ -214,6 +214,73 @@ describe("bootstrap window gate", () => {
     expect(secondGateAt).toBeLessThan(overlayAt);
   });
 
+  // Share-backed file reads answer from the engine share store, and a
+  // restored share tab's first read races the handshake. Ungated, it errors
+  // once and nothing retries it: a current share reports zero changed paths,
+  // so no refresh-key bump ever re-reads the tab. Only the share branch calls
+  // `read`, so local disk reads must stay ungated.
+  it("gates share-backed file reads on the daemon startup promise", () => {
+    const gateAt = mainSource.indexOf("const gatedShareViewFileReads");
+    expect(gateAt).toBeGreaterThanOrEqual(0);
+    const wrapper = mainSource.slice(gateAt, mainSource.indexOf("\n};", gateAt));
+    const wrapperGateAt = wrapper.indexOf("await engineDaemonStartup;");
+    const forwardAt = wrapper.indexOf("shareViewFiles.read(");
+    expect(wrapperGateAt).toBeGreaterThanOrEqual(0);
+    expect(forwardAt).toBeGreaterThan(wrapperGateAt);
+    // Both owned readers route their share branch through the gate.
+    for (const reader of [
+      "async function readOwnedWorkspaceText(",
+      "async function readOwnedWorkspaceAsset(",
+    ]) {
+      const readerAt = mainSource.indexOf(reader);
+      expect(readerAt).toBeGreaterThanOrEqual(0);
+      const body = mainSource.slice(readerAt, mainSource.indexOf("\n}", readerAt));
+      expect(body).toContain("files: gatedShareViewFileReads");
+    }
+  });
+
+  // A restored live-document tab's open can land while the shell's own
+  // openWorkspace still awaits the daemon handshake. Answering from the
+  // undecided capture reads as "not engine-backed", which the renderer never
+  // retries — the tab keeps the plain autosave editor for its whole session
+  // over a document the engine owns.
+  it("decides the capture before answering an engine Y.Doc open", () => {
+    const handler = ipcHandlerSource("engineYDocOpen");
+    const captureReadAt = handler.indexOf("activity.engineCaptureFor(");
+    const activityOpenAt = handler.indexOf(
+      "await openWorkspaceActivity(workspace);",
+    );
+    const sessionOpenAt = handler.indexOf("capture.openYDocSession({");
+    expect(captureReadAt).toBeGreaterThanOrEqual(0);
+    expect(activityOpenAt).toBeGreaterThan(captureReadAt);
+    expect(sessionOpenAt).toBeGreaterThan(activityOpenAt);
+    // The open awaited the handshake; a session must never be taken for a
+    // renderer generation that reloaded away during it (#616).
+    const guardAt = handler.indexOf(
+      "rendererGeneration(sender.id) !== generation",
+      activityOpenAt,
+    );
+    expect(guardAt).toBeGreaterThan(activityOpenAt);
+    expect(guardAt).toBeLessThan(sessionOpenAt);
+  });
+
+  // The persisted zoom must be KNOWN before the first window exists:
+  // trackWorkspaceWindow applies a known level synchronously at creation,
+  // before any show(), while its async read lands only after ready-to-show's
+  // show() — a wrong-scale first frame that firstPaint would then describe.
+  it("resolves the persisted zoom before creating the first window", () => {
+    const whenReadyAt = mainSource.indexOf("app.whenReady().then(");
+    const settingsAwaitAt = mainSource.indexOf(
+      "await cachedSettingsRead",
+      whenReadyAt,
+    );
+    const zoomSeedAt = mainSource.indexOf("knownZoomLevel ??=", whenReadyAt);
+    const createWindowAt = mainSource.indexOf("createMainWindow({", whenReadyAt);
+    expect(settingsAwaitAt).toBeGreaterThan(whenReadyAt);
+    expect(zoomSeedAt).toBeGreaterThan(settingsAwaitAt);
+    expect(zoomSeedAt).toBeLessThan(createWindowAt);
+  });
+
   // Indentation is the cheap proof of nesting: four spaces is the continuation
   // body. A gate opened inside any `if` would sit deeper, and a launch that
   // missed that condition would never open the gate at all.
@@ -294,15 +361,13 @@ describe("bootstrap window gate", () => {
     // Contained: a stop() rejection would otherwise reject engineDaemonStartup
     // itself, skip the destroy below, and rethrow from every gated await.
     expect(handler).toContain("await rustEngineDaemon?.stop().catch(");
-    // The window can already be up — it loads during the handshake. The
-    // failure path destroys it so the quit is immediate instead of the quit
-    // guard interrogating a renderer about a boot that already failed.
-    const destroyAt = handler.indexOf(
-      "for (const window of workspaceWindows.allLive()) window.destroy();",
-    );
-    const quitAt = handler.indexOf("app.quit();");
-    expect(destroyAt).toBeGreaterThanOrEqual(0);
-    expect(quitAt).toBeGreaterThan(destroyAt);
+    // The window can already be up — it loads during the handshake — and its
+    // renderer can hold edits by the time the failure dialog is dismissed.
+    // The teardown must go through app.quit() so before-quit and the quit
+    // guard's ask run; a destroy() here skips beforeunload and discards
+    // renderer-held work silently.
+    expect(handler).toContain("app.quit();");
+    expect(handler).not.toContain("window.destroy()");
   });
 
   it("quits with a visible error when the bootstrap continuation throws", () => {

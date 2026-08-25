@@ -1641,20 +1641,20 @@ const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
   (window) => window.isDestroyed(),
 );
 // The last zoom level any path applied (mutation, settings save, or the
-// persisted read below). Lets a window created later — the tray/dock
-// recreation path shows synchronously — start at the right scale before
-// any show(). Null only before the first read of a launch resolves.
+// persisted read). The bootstrap seeds it from the cached settings read
+// BEFORE the first window exists, so every window — including the first of
+// a launch — starts at the right scale before any show(). Null only until
+// that seed lands, which precedes every window creation.
 let knownZoomLevel: number | null = null;
 
 function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
   workspaceWindows.track(window);
   window.on("closed", () => workspaceWindows.forget(window));
-  // The persisted zoom level is a window property main owns. A level any
-  // window already applied is set SYNCHRONOUSLY at creation — before any
-  // show() on either creation path — so no visible frame paints at 100%
-  // and then jumps. The async read covers the first window of a launch and
-  // reconciles on did-finish-load; best-effort — a fresh install has only
-  // the default.
+  // The persisted zoom level is a window property main owns, set
+  // SYNCHRONOUSLY at creation — before any show() on either creation path —
+  // so no visible frame paints at 100% and then jumps. The async read below
+  // is the reconcile backstop (a settings save can land mid-launch);
+  // best-effort — a fresh install has only the default.
   if (knownZoomLevel !== null) {
     window.webContents.setZoomLevel(knownZoomLevel);
   }
@@ -4354,13 +4354,26 @@ async function shareViewFilesTargetForPath(
   }).resolveShare(relativePath);
 }
 
+// Share-backed reads answer from the engine share store, and a restored
+// share tab's first read can precede the daemon handshake (the window loads
+// during it). Ungated, that read errors once and nothing retries it: a
+// current share reports zero changed paths, so no refresh-key bump ever
+// re-reads the tab. Only the share branch calls `read`, so local disk reads
+// stay concurrent with the handshake.
+const gatedShareViewFileReads: Pick<ShareViewFiles, "read"> = {
+  read: async (target, request) => {
+    await engineDaemonStartup;
+    return shareViewFiles.read(target, request);
+  },
+};
+
 async function readOwnedWorkspaceText(
   workspace: NonNullable<ReturnType<typeof findWorkspace>>,
   relativePath: string,
 ) {
   return createOwnedWorkspaceFileReader({
     workspace,
-    files: shareViewFiles,
+    files: gatedShareViewFileReads,
   }).readText(relativePath);
 }
 
@@ -4370,7 +4383,7 @@ async function readOwnedWorkspaceAsset(
 ) {
   return createOwnedWorkspaceFileReader({
     workspace,
-    files: shareViewFiles,
+    files: gatedShareViewFileReads,
   }).readAsset(relativePath);
 }
 
@@ -11051,19 +11064,51 @@ function registerIpcHandlers(
     }
     const sender = event.sender;
     const generation = rendererGeneration(sender.id);
-    const capture = activity.engineCaptureFor(workspace.workspaceId);
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
     const path = validatedPath.normalized;
     const requestedKind = liveDocumentKindForPath(path);
-    // Only engine-flagged workspaces have a capture. The shared classifier is
-    // the main-side authority for which paths bind to a Y.Doc.
-    if (!capture || requestedKind === null) {
+    // The shared classifier is the main-side authority for which paths bind
+    // to a Y.Doc.
+    if (requestedKind === null) {
       return OpenEngineYDocSessionResult.parse({ available: false });
     }
-    // PENDING FROM THE FIRST AWAIT, not from the open. A renderer reload waits
+    // Only engine-flagged workspaces have a capture — but the capture is
+    // DECIDED by the workspace-activity open, and a restored tab's open can
+    // land while the shell's own openWorkspace still awaits the daemon
+    // handshake (the window loads during it). Answering from that undecided
+    // state reads as "not engine-backed", which the renderer never retries:
+    // the tab falls to the plain autosave editor for its whole session and
+    // its edits take the disk path the engine owns. Open the activity
+    // instead — idempotent, and a concurrent open is handed the first one's
+    // promise (ensureWorkspaceActivityOpen) — and answer from the decision.
+    let capture = activity.engineCaptureFor(workspace.workspaceId);
+    if (!capture) {
+      try {
+        await openWorkspaceActivity(workspace);
+      } catch (error) {
+        // A failed open leaves no capture; the re-read below answers it the
+        // same way the shell's own failed open does (no recorder).
+        console.error(
+          `[desktop] engine Y.Doc open could not open the workspace activity for ${path}:`,
+          error,
+        );
+      }
+      // The await can span the daemon handshake. The renderer that asked may
+      // be gone or reloaded by now, and a session must never be taken for a
+      // generation that no longer exists (#616).
+      if (sender.isDestroyed() || rendererGeneration(sender.id) !== generation) {
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
+      capture = activity.engineCaptureFor(workspace.workspaceId);
+      if (!capture) {
+        return OpenEngineYDocSessionResult.parse({ available: false });
+      }
+    }
+    // PENDING FROM THE FIRST AWAIT that can hold a daemon session, not from
+    // the open. A renderer reload waits
     // on this registration (prepareForRendererReload), and the releases below
     // await the daemon: outside it, a reload could finish both its sweeps while
     // this handler sat in a release, and then this handler would take a daemon
@@ -11799,8 +11844,8 @@ async function startRustEngineDaemon(): Promise<boolean> {
       `${message}\n\nThe desktop cannot start without the Rust engine.`,
     );
     // Contained: a stop() throw here would reject engineDaemonStartup itself,
-    // skip the window destroy below, and rethrow from every gated await
-    // instead of letting the quit land.
+    // skip the quit below, and rethrow from every gated await instead of
+    // letting the quit land.
     await rustEngineDaemon?.stop().catch((stopError: unknown) => {
       console.error(
         "[desktop] Rust engine daemon stop after failed start:",
@@ -11810,11 +11855,13 @@ async function startRustEngineDaemon(): Promise<boolean> {
     rustEngineDaemon = null;
     rustEngineWorkspaceSessions = null;
     rustEngineRelayClient = null;
-    // The window may already be up — it loads while the daemon handshakes. No
-    // renderer holds unsaved work this early, so destroy the windows rather
-    // than let the quit guard interrogate a renderer about a boot that
-    // already failed.
-    for (const window of workspaceWindows.allLive()) window.destroy();
+    // The window may already be up — it loads while the daemon handshakes —
+    // and by the time the user dismisses the dialog above, a restored tab can
+    // hold edits (local reads and the plain editor never wait for the
+    // daemon). So this quit goes through the ordinary path: before-quit
+    // intercepts while a workspace window is live, and the quit guard's ask
+    // lets the renderer flush or warn about that work — a destroy() here
+    // would discard it with no beforeunload and no ask.
     app.quit();
     return false;
   }
@@ -11889,7 +11936,8 @@ if (!app.requestSingleInstanceLock()) {
     // paths.
     engineDaemonStartup = startRustEngineDaemon();
     // Warms the promise cache the zoom read in trackWorkspaceWindow shares;
-    // awaited where its value is consumed, after the window exists.
+    // awaited just before the window is created, so the persisted zoom is
+    // known by then and the read overlaps the daemon handshake meanwhile.
     const cachedSettingsRead = readCachedUserSettingsFile(stateDir());
     if (app.isPackaged && process.platform === "linux" && isAppImageBoot()) {
       // A failed refresh must not block startup or discard an intact pair
@@ -11951,6 +11999,17 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
+    // The persisted zoom must be KNOWN before the first window exists:
+    // trackWorkspaceWindow applies a known level synchronously at creation,
+    // before any show(), while its async read lands only after
+    // createMainWindow's ready-to-show show() — a wrong-scale first frame
+    // that firstPaint then describes. The read is promise-cached local IO
+    // warmed above, so this await costs the read only; the renderer load
+    // stays concurrent with the daemon handshake.
+    const cachedSettings = (await cachedSettingsRead).settings;
+    cachedPreferredName = cachedSettings.profile.preferredName;
+    knownZoomLevel ??= cachedSettings.appearance.zoomLevel;
+
     // The window exists and its renderer loads WHILE the daemon handshakes;
     // everything below that needs the daemon still waits for it.
     const window = trackWorkspaceWindow(
@@ -11964,10 +12023,6 @@ if (!app.requestSingleInstanceLock()) {
     });
     launchMarks.firstWindow();
     desktopMarks.markOnce("first-window");
-
-    cachedPreferredName = (
-      await cachedSettingsRead
-    ).settings.profile.preferredName;
 
     if (!(await engineDaemonStartup)) return;
 
