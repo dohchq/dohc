@@ -114,6 +114,7 @@ async function harness(
     }).bind({
       workspaceId,
       rootPath,
+      shareMount: true,
       relay: { baseUrl: "http://127.0.0.1:9", token: "share-view-test-token" },
     });
     await client.recordShareViewIdentity({
@@ -1767,7 +1768,12 @@ describe("share-view file operations through the real store", () => {
         outcome.skipped,
         "MUTATION: a source the engine cannot own is counted as imported",
       ).toBe(1);
-      expect(await storePaths(view)).toEqual([
+      const paths = await storePaths(view);
+      expect(
+        paths,
+        "MUTATION: the received-share watcher journals a recipient-owned collision file",
+      ).not.toContain("docs/mine.md");
+      expect(paths).toEqual([
         "docs/added.md",
         "docs/mine (2).md",
         "docs/note (2).md",
