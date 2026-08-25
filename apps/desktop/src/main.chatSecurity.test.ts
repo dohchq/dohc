@@ -933,6 +933,7 @@ describe("main-process chat authorization", () => {
     const runtimeAt = mainSource.indexOf(
       "const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
     );
+    expect(runtimeAt).toBeGreaterThan(-1);
     const runtime = mainSource.slice(runtimeAt, runtimeAt + 700);
     expect(
       runtime,
