@@ -151,11 +151,14 @@ interface LiveRuntimeSlot {
 
 interface StoppingRuntimeSlot {
   readonly kind: "stopping";
-  readonly record: OwnedPluginWorkspaceRuntime;
+  readonly record: OwnedPluginWorkspaceRuntime | undefined;
   readonly stop: Promise<void>;
 }
 
 type RuntimeSlot = LiveRuntimeSlot | StoppingRuntimeSlot;
+type PluginWorkspaceCleanup = () => void | Promise<void>;
+
+const noCleanup = (): void => undefined;
 
 export class PluginWorkspaceRuntimes<
   TWorkspace extends PluginWorkspaceIdentity,
@@ -169,6 +172,7 @@ export class PluginWorkspaceRuntimes<
   ) {}
 
   current(workspaceId: string): PluginWorkspaceRuntime | undefined {
+    if (this.closed) return undefined;
     const slot = this.slots.get(workspaceId);
     return slot?.kind === "live" ? slot.record : undefined;
   }
@@ -182,11 +186,12 @@ export class PluginWorkspaceRuntimes<
       this.assertOpen();
       const slot = this.slots.get(workspace.workspaceId);
       if (slot) {
-        slot.record.assertSameRoot(workspaceRoot);
         if (slot.kind === "stopping") {
+          slot.record?.assertSameRoot(workspaceRoot);
           await slot.stop;
           continue;
         }
+        slot.record.assertSameRoot(workspaceRoot);
         const record = slot.record;
         try {
           await record.start();
@@ -238,25 +243,54 @@ export class PluginWorkspaceRuntimes<
     }
   }
 
-  stop(workspaceId: string): Promise<void> {
+  /** Hides the runtime before cleanup starts, then disposes it after cleanup. */
+  stop(
+    workspaceId: string,
+    beforeDispose: PluginWorkspaceCleanup = noCleanup,
+  ): Promise<void> {
     const slot = this.slots.get(workspaceId);
-    if (!slot) return Promise.resolve();
-    if (slot.kind === "stopping") return slot.stop;
-    return this.beginStop(workspaceId, slot.record);
+    if (slot?.kind === "stopping") return slot.stop;
+    return this.beginStop(workspaceId, slot?.record, beforeDispose);
   }
 
-  close(): Promise<void> {
+  /** Refuses new runtimes before cleanup starts, then drains every runtime. */
+  close(beforeDispose: PluginWorkspaceCleanup = noCleanup): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
-    const stops = [...this.slots.entries()].map(([workspaceId, slot]) =>
-      slot.kind === "stopping"
-        ? slot.stop
-        : this.beginStop(workspaceId, slot.record),
-    );
-    this.closePromise = Promise.allSettled(stops).then((outcomes) => {
-      const failures = outcomes.flatMap((outcome) =>
-        outcome.status === "rejected" ? [outcome.reason] : [],
-      );
+    const {
+      promise: cleanup,
+      resolve: resolveCleanup,
+      reject: rejectCleanup,
+    } = Promise.withResolvers<void>();
+    const stops = [...this.slots.entries()].map(([workspaceId, slot]) => {
+      if (slot.kind === "stopping") {
+        return { stop: slot.stop, waitsForCleanup: false };
+      }
+      return {
+        stop: this.beginStop(workspaceId, slot.record, () => cleanup),
+        waitsForCleanup: true,
+      };
+    });
+    try {
+      void Promise.resolve(beforeDispose()).then(resolveCleanup, rejectCleanup);
+    } catch (error) {
+      rejectCleanup(error);
+    }
+    this.closePromise = Promise.allSettled([
+      cleanup,
+      ...stops.map(({ stop }) => stop),
+    ]).then(([cleanupOutcome, ...stopOutcomes]) => {
+      const failures = cleanupOutcome.status === "rejected"
+        ? [cleanupOutcome.reason]
+        : [];
+      stopOutcomes.forEach((outcome, index) => {
+        if (
+          outcome.status === "rejected" &&
+          (cleanupOutcome.status === "fulfilled" || !stops[index]?.waitsForCleanup)
+        ) {
+          failures.push(outcome.reason);
+        }
+      });
       if (failures.length === 1) throw failures[0];
       if (failures.length > 1) {
         throw new AggregateError(failures, "Plugin workspace cleanup failed.");
@@ -282,12 +316,13 @@ export class PluginWorkspaceRuntimes<
 
   private beginStop(
     workspaceId: string,
-    record: OwnedPluginWorkspaceRuntime,
+    record: OwnedPluginWorkspaceRuntime | undefined,
+    beforeDispose: PluginWorkspaceCleanup = noCleanup,
   ): Promise<void> {
     const { promise: stop, resolve, reject } = Promise.withResolvers<void>();
     const slot: StoppingRuntimeSlot = { kind: "stopping", record, stop };
     this.slots.set(workspaceId, slot);
-    void this.disposeRecord(workspaceId, slot).then(resolve, reject);
+    void this.disposeRecord(workspaceId, slot, beforeDispose).then(resolve, reject);
     return stop;
   }
 
@@ -312,8 +347,11 @@ export class PluginWorkspaceRuntimes<
   private async disposeRecord(
     workspaceId: string,
     slot: StoppingRuntimeSlot,
+    beforeDispose: PluginWorkspaceCleanup,
   ): Promise<void> {
-    await slot.record.dispose();
+    const cleanup = beforeDispose();
+    if (cleanup) await cleanup;
+    await slot.record?.dispose();
     if (this.slots.get(workspaceId) === slot) {
       this.slots.delete(workspaceId);
     }

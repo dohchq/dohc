@@ -73,29 +73,26 @@ describe("plugin web app main-process wiring", () => {
 
   it("keeps surface teardown before pipeline disposal for one workspace and all workspaces", () => {
     const stopWorkspace = functionSource("async function stopPluginWorkspace(");
-    const surfacesAt = stopWorkspace.indexOf(
-      'await pluginSurfaces.stop({ kind: "workspace", workspaceId });',
-    );
     const runtimeAt = stopWorkspace.indexOf(
-      "await pluginWorkspaceRuntimes.stop(workspaceId);",
-      surfacesAt,
+      "await pluginWorkspaceRuntimes.stop(",
     );
-    expect(surfacesAt).toBeGreaterThan(-1);
-    expect(runtimeAt).toBeGreaterThan(surfacesAt);
+    const surfacesAt = stopWorkspace.indexOf(
+      'pluginSurfaces.stop({ kind: "workspace", workspaceId })',
+      runtimeAt,
+    );
+    expect(runtimeAt).toBeGreaterThan(-1);
+    expect(surfacesAt).toBeGreaterThan(runtimeAt);
 
     const stopAll = functionSource("async function stopAllPluginWorkspaces(");
-    const closeAt = stopAll.indexOf("const surfaceStop = pluginSurfaces.close();");
+    const closeAt = stopAll.indexOf("pluginWorkspaceRuntimes.close(");
+    const surfacesCloseAt = stopAll.indexOf("pluginSurfaces.close()", closeAt);
     const drainAt = stopAll.indexOf(
-      "await Promise.allSettled([sitePreviewStop, surfaceStop]);",
+      "await Promise.allSettled([sitePreviewStop, pluginStop]);",
       closeAt,
     );
-    const allRuntimesAt = stopAll.indexOf(
-      "pluginWorkspaceRuntimes.close()",
-      drainAt,
-    );
     expect(closeAt).toBeGreaterThan(-1);
-    expect(drainAt).toBeGreaterThan(closeAt);
-    expect(allRuntimesAt).toBeGreaterThan(drainAt);
+    expect(surfacesCloseAt).toBeGreaterThan(closeAt);
+    expect(drainAt).toBeGreaterThan(surfacesCloseAt);
   });
 
   it("generation-gates owner failure notification before sending", () => {

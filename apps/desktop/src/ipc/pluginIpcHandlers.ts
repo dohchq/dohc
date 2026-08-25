@@ -180,6 +180,8 @@ const DEFAULT_INACTIVE_MESSAGE =
   "The plugin request does not target the active workspace. Open the workspace and try again.";
 const CURRENT_RENDERER_MESSAGE =
   "The plugin panel request does not target the active workspace. Open the workspace and try again.";
+const PLUGIN_RUNTIME_CHANGED_MESSAGE =
+  "The workspace's plugins stopped while this was opening. Open it again.";
 
 function pluginIpcError(error: unknown) {
   return {
@@ -325,24 +327,40 @@ export function registerPluginIpcHandlers<
     };
   };
 
+  const ensureExactRuntime = async (
+    policy: WritableActiveWorkspacePolicy<TWorkspace>,
+    inactiveMessage: string,
+  ) => {
+    const runtime = await runtimes.ensure(policy.workspace);
+    const revalidate = (): void => {
+      policy.revalidate(inactiveMessage);
+      if (runtimes.current(policy.workspace.workspaceId) !== runtime) {
+        throw new Error(PLUGIN_RUNTIME_CHANGED_MESSAGE);
+      }
+    };
+    revalidate();
+    return { runtime, revalidate };
+  };
+
   registrar.handle(CHANNELS.openPluginPanel, async (event, payload) => {
     const input = OpenPluginPanelPayload.parse(payload);
     const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
       trackRenderer: true,
     });
+    const { runtime, revalidate } = await ensureExactRuntime(
+      policy,
+      CURRENT_RENDERER_MESSAGE,
+    );
+    const pipeline = runtime.pipeline;
     const registration = await loadPluginPanelRegistration({
       workspaceRoot: policy.workspace.rootPath,
       pluginRoot: input.pluginRoot,
       pluginId: input.pluginId,
       panelId: input.panelId,
-      pluginRegistration:
-        runtimes.current(policy.workspace.workspaceId)?.pipeline,
+      pluginRegistration: pipeline,
     });
-    policy.revalidate(CURRENT_RENDERER_MESSAGE);
-    const runtime = await runtimes.ensure(policy.workspace);
-    const pipeline = runtime.pipeline;
-    policy.revalidate(CURRENT_RENDERER_MESSAGE);
+    revalidate();
     runtime.rememberPlugin({
       ...registration,
       directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),
@@ -485,18 +503,19 @@ export function registerPluginIpcHandlers<
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
       trackRenderer: true,
     });
+    const { runtime, revalidate } = await ensureExactRuntime(
+      policy,
+      CURRENT_RENDERER_MESSAGE,
+    );
+    const pipeline = runtime.pipeline;
     const registration = await loadPluginWebAppRegistration({
       workspaceRoot: policy.workspace.rootPath,
       pluginRoot: input.pluginRoot,
       pluginId: input.pluginId,
       webAppId: input.webAppId,
-      pluginRegistration:
-        runtimes.current(policy.workspace.workspaceId)?.pipeline,
+      pluginRegistration: pipeline,
     });
-    policy.revalidate(CURRENT_RENDERER_MESSAGE);
-    const runtime = await runtimes.ensure(policy.workspace);
-    const pipeline = runtime.pipeline;
-    policy.revalidate(CURRENT_RENDERER_MESSAGE);
+    revalidate();
     const plugin = runtime.rememberPlugin({
       ...registration,
       directoryName: requireDiscoveredDirectoryName(pipeline, input.pluginId),

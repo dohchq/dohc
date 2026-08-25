@@ -3439,8 +3439,10 @@ async function startPluginPanelPreview(input: {
 }
 
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
-  await pluginSurfaces.stop({ kind: "workspace", workspaceId });
-  await pluginWorkspaceRuntimes.stop(workspaceId);
+  await pluginWorkspaceRuntimes.stop(
+    workspaceId,
+    () => pluginSurfaces.stop({ kind: "workspace", workspaceId }),
+  );
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
@@ -3449,9 +3451,8 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
   // hard-kill path.
   const sitePreviewStop = sitePreviews.stopAll();
-  const surfaceStop = pluginSurfaces.close();
-  await Promise.allSettled([sitePreviewStop, surfaceStop]);
-  await Promise.allSettled([pluginWorkspaceRuntimes.close()]);
+  const pluginStop = pluginWorkspaceRuntimes.close(() => pluginSurfaces.close());
+  await Promise.allSettled([sitePreviewStop, pluginStop]);
 }
 
 // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN

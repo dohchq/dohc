@@ -177,6 +177,78 @@ describe("plugin workspace runtimes", () => {
     expect(harness.created).toHaveLength(2);
   });
 
+  it("publishes stopping before surface cleanup and waits for both cleanup stages", async () => {
+    const surfaceCleanup = deferred();
+    const runtimeCleanup = deferred();
+    const harness = createHarness({
+      create: () => {
+        const isFirst = harness.created.length === 0;
+        return makeParts({
+          dispose: () =>
+            isFirst ? runtimeCleanup.promise : Promise.resolve(),
+        });
+      },
+    });
+    const first = await harness.owner.ensure(workspace());
+
+    const stopping = harness.owner.stop(
+      "workspace-1",
+      () => surfaceCleanup.promise,
+    );
+    expect(harness.owner.current("workspace-1")).toBeUndefined();
+    const reopening = harness.owner.ensure(workspace());
+    let reopeningSettled = false;
+    void reopening.then(
+      () => {
+        reopeningSettled = true;
+      },
+      () => {
+        reopeningSettled = true;
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(harness.created[0]?.pipeline.dispose).not.toHaveBeenCalled();
+    expect(harness.created).toHaveLength(1);
+    expect(reopeningSettled).toBe(false);
+
+    surfaceCleanup.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
+    expect(harness.created).toHaveLength(1);
+    expect(reopeningSettled).toBe(false);
+
+    runtimeCleanup.resolve();
+    await stopping;
+    const successor = await reopening;
+    expect(successor).not.toBe(first);
+    expect(harness.created).toHaveLength(2);
+  });
+
+  it("retains a failed surface cleanup and blocks replacement", async () => {
+    const cleanupFailure = new Error("plugin surfaces are still live");
+    const harness = createHarness();
+    await harness.owner.ensure(workspace());
+
+    const stopping = harness.owner.stop(
+      "workspace-1",
+      async () => {
+        throw cleanupFailure;
+      },
+    );
+    const reopening = harness.owner.ensure(workspace());
+
+    await Promise.all([
+      expect(stopping).rejects.toBe(cleanupFailure),
+      expect(reopening).rejects.toBe(cleanupFailure),
+    ]);
+    expect(harness.owner.current("workspace-1")).toBeUndefined();
+    expect(harness.created[0]?.pipeline.dispose).not.toHaveBeenCalled();
+    expect(harness.created).toHaveLength(1);
+    await expect(harness.owner.ensure(workspace())).rejects.toBe(cleanupFailure);
+    expect(harness.created).toHaveLength(1);
+  });
+
   it("keeps a stopped pending start until it settles before reopening", async () => {
     const opening = deferred();
     const harness = createHarness({
@@ -328,6 +400,75 @@ describe("plugin workspace runtimes", () => {
       undefined,
       undefined,
     ]);
+  });
+
+  it("closes to new ensures before global surface cleanup settles", async () => {
+    const surfaceCleanup = deferred();
+    const runtimeCleanup = deferred();
+    const harness = createHarness({
+      create: () => makeParts({ dispose: () => runtimeCleanup.promise }),
+    });
+    await harness.owner.ensure(workspace());
+    await harness.owner.ensure({
+      workspaceId: "workspace-2",
+      rootPath: "C:\\workspaces\\two",
+    });
+    const currentDuringCleanup: unknown[] = [];
+    const closeSurfaces = vi.fn(() => {
+      currentDuringCleanup.push(
+        harness.owner.current("workspace-1"),
+        harness.owner.current("workspace-2"),
+      );
+      return surfaceCleanup.promise;
+    });
+
+    const closing = harness.owner.close(closeSurfaces);
+    await expect(harness.owner.ensure(workspace())).rejects.toThrow(
+      "Plugins are closed. Reopen dohc and try again.",
+    );
+    expect(closeSurfaces).toHaveBeenCalledOnce();
+    expect(currentDuringCleanup).toEqual([undefined, undefined]);
+    expect(harness.owner.current("workspace-1")).toBeUndefined();
+    expect(harness.created[0]?.pipeline.dispose).not.toHaveBeenCalled();
+    expect(harness.created[1]?.pipeline.dispose).not.toHaveBeenCalled();
+
+    surfaceCleanup.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
+    expect(harness.created[1]?.pipeline.dispose).toHaveBeenCalledOnce();
+
+    runtimeCleanup.resolve();
+    await expect(closing).resolves.toBeUndefined();
+  });
+
+  it("aggregates global cleanup with a teardown that was already failing", async () => {
+    const sharedFailure = new Error("cleanup failed twice");
+    const harness = createHarness({
+      create: () => makeParts({
+        dispose: async () => {
+          throw sharedFailure;
+        },
+      }),
+    });
+    await harness.owner.ensure(workspace());
+    const stopping = harness.owner.stop("workspace-1");
+    stopping.catch(() => undefined);
+    const closeSurfaces = vi.fn(async () => {
+      throw sharedFailure;
+    });
+
+    try {
+      await harness.owner.close(closeSurfaces);
+      expect.unreachable("close should aggregate both failures");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([
+        sharedFailure,
+        sharedFailure,
+      ]);
+    }
+    await expect(stopping).rejects.toBe(sharedFailure);
+    expect(closeSurfaces).toHaveBeenCalledOnce();
   });
 
   it("drains every workspace when one teardown fails", async () => {

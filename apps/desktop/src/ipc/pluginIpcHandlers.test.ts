@@ -476,6 +476,7 @@ function createHarness() {
     registrations,
     requireWorkspace,
     runtime,
+    runtimes,
     sender,
     state,
     surfaces,
@@ -721,8 +722,77 @@ describe("plugin IPC handlers", () => {
     });
 
     await expect(opening).rejects.toThrow("does not target the active workspace");
-    expect(harness.ensurePipeline).not.toHaveBeenCalled();
+    expect(harness.ensurePipeline).toHaveBeenCalledOnce();
+    expect(harness.runtime.rememberPlugin).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [CHANNELS.openPluginPanel, directOperations.loadPanel],
+    [CHANNELS.openPluginWebApp, directOperations.loadWebApp],
+  ] as const)(
+    "validates %s with the exact runtime returned by ensure",
+    async (channel, loadRegistration) => {
+      const harness = createHarness();
+      const stalePipeline = { identity: "stale" } as unknown as PluginPipeline;
+      const staleRuntime = {
+        ...harness.runtime,
+        pipeline: stalePipeline,
+        rememberPlugin: vi.fn((remembered: RegisteredPlugin) => remembered),
+      };
+      let current = staleRuntime;
+      harness.runtimes.current.mockImplementation(() => current);
+      harness.ensurePipeline.mockImplementationOnce(async () => {
+        current = harness.runtime;
+        return harness.runtime;
+      });
+
+      await expect(harness.invoke(channel)).resolves.toBeDefined();
+
+      expect(loadRegistration).toHaveBeenCalledWith(
+        expect.objectContaining({ pluginRegistration: harness.pipeline }),
+      );
+      expect(harness.runtime.rememberPlugin).toHaveBeenCalledOnce();
+      expect(staleRuntime.rememberPlugin).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      CHANNELS.openPluginPanel,
+      directOperations.loadPanel,
+      {
+        pluginRoot: registration.pluginRoot,
+        manifest,
+        panel: manifest.panels[0],
+      },
+    ],
+    [
+      CHANNELS.openPluginWebApp,
+      directOperations.loadWebApp,
+      {
+        pluginRoot: registration.pluginRoot,
+        manifest,
+        webApp: manifest.webApps[0],
+      },
+    ],
+  ] as const)(
+    "does not carry %s registration across runtime replacement",
+    async (channel, loadRegistration, loadedRegistration) => {
+      const harness = createHarness();
+      const loaded = deferred<typeof loadedRegistration>();
+      loadRegistration.mockReturnValueOnce(loaded.promise as never);
+
+      const opening = harness.invoke(channel);
+      await vi.waitFor(() => expect(loadRegistration).toHaveBeenCalledOnce());
+      harness.runtimes.current.mockReturnValue(undefined);
+      loaded.resolve(loadedRegistration);
+
+      await expect(opening).rejects.toThrow(
+        "The workspace's plugins stopped while this was opening. Open it again.",
+      );
+      expect(harness.runtime.rememberPlugin).not.toHaveBeenCalled();
+    },
+  );
 
   it("loads and remembers panel and web app registrations from discovered identity", async () => {
     const harness = createHarness();
