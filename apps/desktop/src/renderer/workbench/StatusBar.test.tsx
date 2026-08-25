@@ -156,9 +156,9 @@ describe("update toast", () => {
     );
   });
 
-  it("ignores every non-ready state (checking/downloading/error stay silent)", () => {
+  it("keeps checking, downloading, and offline states silent", () => {
     renderBar();
-    for (const status of ["checking", "downloading", "offline", "error"] as const) {
+    for (const status of ["checking", "downloading", "offline"] as const) {
       pushUpdate?.({ status, message: "noise" });
     }
     expect(screen.queryByTestId("update-toast")).toBeNull();
@@ -859,6 +859,17 @@ describe("notice center", () => {
     expect(
       within(updateNotice).getByRole("button", { name: "Open Settings" }),
     ).toBeTruthy();
+
+    pushUpdate?.({
+      status: "checking",
+      message: "Checking for updates…",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: false,
+    });
+    await waitFor(() => expect(screen.queryByTestId("update-toast")).toBeNull());
+    expect(screen.queryByTestId("notice-update-error")).toBeNull();
   });
 
   it("does not show the restart action when the update is not installable", async () => {
