@@ -380,37 +380,33 @@ class EngineYDocSessionIpc {
   ): AcknowledgeResult {
     const input = AcknowledgeEngineYDocLineageReplacementPayload.parse(payload);
     const caller = this.#caller(sender, input.sessionId);
-    const acknowledged = this.#owner.acknowledgeLineageReplacement({
-      ...caller,
-      lineageGeneration: input.lineageGeneration,
-    });
+    const acknowledged = this.#owner.acknowledgeLineageReplacement(
+      {
+        ...caller,
+        lineageGeneration: input.lineageGeneration,
+      },
+      (owned, replacement) => {
+        for (const descriptor of owned.artifactAssetsById.values()) {
+          if (
+            !owned.retiredArtifactAssets.some((retired) =>
+              sameArtifactAsset(retired, descriptor),
+            )
+          ) {
+            owned.retiredArtifactAssets.push(descriptor);
+          }
+        }
+        owned.artifactAssetsById = new Map(
+          replacement.artifactAssets.map((descriptor) => [
+            descriptor.id,
+            descriptor,
+          ]),
+        );
+      },
+    );
     if (acknowledged.kind === "refused") {
       return AcknowledgeEngineYDocLineageReplacementResult.parse({
         accepted: false,
         reason: acknowledged.reason,
-      });
-    }
-    const access = this.#owner.accessSession(caller, (owned) => {
-      for (const descriptor of owned.artifactAssetsById.values()) {
-        if (
-          !owned.retiredArtifactAssets.some((retired) =>
-            sameArtifactAsset(retired, descriptor),
-          )
-        ) {
-          owned.retiredArtifactAssets.push(descriptor);
-        }
-      }
-      owned.artifactAssetsById = new Map(
-        acknowledged.replacement.artifactAssets.map((descriptor) => [
-          descriptor.id,
-          descriptor,
-        ]),
-      );
-    });
-    if (access.kind === "refused") {
-      return AcknowledgeEngineYDocLineageReplacementResult.parse({
-        accepted: false,
-        reason: "session-unavailable",
       });
     }
     return AcknowledgeEngineYDocLineageReplacementResult.parse({

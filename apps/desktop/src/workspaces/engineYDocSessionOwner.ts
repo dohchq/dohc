@@ -321,9 +321,10 @@ export class EngineYDocSessionOwner<
 
   acknowledgeLineageReplacement(
     input: EngineYDocSessionCaller<TSender> & { lineageGeneration: number },
+    commitReplacement?: (session: TSession, replacement: TReplacement) => void,
   ): EngineYDocSessionAcknowledgeResult<TUpdate, TReplacement> {
     const record = this.#current(input);
-    if (!record || record.state !== "open") {
+    if (!record || record.state !== "open" || record.session === null) {
       return { kind: "refused", reason: "session-unavailable" };
     }
     const handoff = record.handoff;
@@ -331,6 +332,7 @@ export class EngineYDocSessionOwner<
       return { kind: "refused", reason: "lineage-transition" };
     }
 
+    commitReplacement?.(record.session, handoff.replacement);
     record.lineageGeneration = handoff.lineageGeneration;
     record.handoff = null;
     const queued = record.queuedHandoff;
