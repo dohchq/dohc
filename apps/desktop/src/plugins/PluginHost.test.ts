@@ -993,6 +993,58 @@ describe("PluginHost", () => {
     }
   });
 
+  it("waits for crash-loop state persistence before stopAll settles when shutdown rejects", async () => {
+    const root = await workspaceRoot();
+    const localStateDir = await stateDir();
+    const mutationStarted = deferredVoid();
+    const releaseMutation = deferredVoid();
+    const mutationFinished = deferredVoid();
+    const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
+      request<T = unknown>(): Promise<T> {
+        return Promise.resolve({} as T);
+      },
+      notify: () => undefined,
+      dispose: () => Promise.reject(new Error("transport disposal failed")),
+    }));
+    const host = trackHost({
+      stateDir: localStateDir,
+      workspaceRoot: root,
+      spawnTransport,
+      routeSdkRequest: defaultRouter,
+      mutatePluginRecord: async (stateDir, workspaceRoot, pluginId, updater) => {
+        mutationStarted.resolve();
+        await releaseMutation.promise;
+        try {
+          await mutatePluginRecord(stateDir, workspaceRoot, pluginId, updater);
+        } finally {
+          mutationFinished.resolve();
+        }
+      },
+    });
+
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
+    await mutationStarted.promise;
+
+    let stopSettled = false;
+    const stop = host.stopAll().then(() => {
+      stopSettled = true;
+    });
+    await waitFor(
+      () => host.getStatus("hello-plugin") === undefined,
+      "Plugin shutdown did not cross the transport-disposal boundary.",
+    );
+    const settledBeforeMutation = stopSettled;
+
+    releaseMutation.resolve();
+    await mutationFinished.promise;
+    await stop;
+
+    expect(settledBeforeMutation).toBe(false);
+    expect(host.getStatus("hello-plugin")).toBeUndefined();
+    const state = await readPluginLocalState(localStateDir, root);
+    expect(state.ok && state.state.plugins["hello-plugin"]?.disabled).toBe(true);
+  });
+
   it("rejects duplicate command ids returned by activation", async () => {
     const root = await workspaceRoot();
     const statuses: PluginRuntimeStatus[] = [];
