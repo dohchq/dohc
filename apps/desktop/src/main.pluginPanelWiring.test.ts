@@ -45,84 +45,29 @@ describe("plugin panel main-process wiring", () => {
     expect(sendAt).toBeGreaterThan(filterAt);
   });
 
-  it("loads and remembers a contained panel only while its renderer stays current", () => {
-    const open = handler("openPluginPanel");
-    const firstCurrentAt = open.indexOf("requireCurrentRenderer(isCurrent);");
-    const loadAt = open.indexOf("await loadPluginPanelRegistration({");
-    const postLoadCurrentAt = open.indexOf(
-      "requireCurrentRenderer(isCurrent);",
-      loadAt,
-    );
-    const pipelineAt = open.indexOf(
-      "const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);",
-      postLoadCurrentAt,
-    );
-    const postPipelineCurrentAt = open.indexOf(
-      "requireCurrentRenderer(isCurrent);",
-      pipelineAt,
-    );
-    const rememberAt = open.indexOf("rememberPluginRegistration(", pipelineAt);
-    expect(firstCurrentAt).toBeGreaterThan(-1);
-    expect(loadAt).toBeGreaterThan(firstCurrentAt);
-    expect(postLoadCurrentAt).toBeGreaterThan(loadAt);
-    expect(pipelineAt).toBeGreaterThan(postLoadCurrentAt);
-    expect(postPipelineCurrentAt).toBeGreaterThan(pipelineAt);
-    expect(rememberAt).toBeGreaterThan(postPipelineCurrentAt);
-    expect(open).not.toContain("ensurePluginStarted(");
-    expect(open).not.toContain("acquirePluginSurfaceLease(");
-    expect(open).toContain(
-      "pluginRegistration: pluginPipelines.get(workspace.workspaceId),",
-    );
-  });
-
   it("starts panel previews from the exact active host declaration", () => {
-    const start = handler("startPluginPanel");
-    const ownerAt = start.indexOf("pluginSurfaces.startPanel(");
-    const leaseAt = start.indexOf(
-      "createPluginPanelSurfaceHostLease(pipeline, input.pluginId)",
-      ownerAt,
+    const start = functionSource("async function startPluginPanelPreview(");
+    const snapshotAt = start.indexOf(
+      "pluginSnapshotRoot(input.workspace, input.pluginId)",
     );
-    const declarationAt = start.indexOf("startPreview: async (panel) =>", leaseAt);
-    const snapshotAt = start.indexOf("pluginSnapshotRoot(workspace, input.pluginId)", ownerAt);
-    const previewAt = start.indexOf("startStaticDirectoryPreview(dirname(entryPath)", snapshotAt);
-    expect(ownerAt).toBeGreaterThan(-1);
-    expect(leaseAt).toBeGreaterThan(ownerAt);
-    expect(declarationAt).toBeGreaterThan(leaseAt);
-    expect(snapshotAt).toBeGreaterThan(declarationAt);
+    const previewAt = start.indexOf(
+      "startStaticDirectoryPreview(dirname(entryPath)",
+      snapshotAt,
+    );
     expect(previewAt).toBeGreaterThan(snapshotAt);
-    expect(start).toContain("assertAllowed: () => {");
-    expect(start).toContain("acquireHostLease: async () => {");
-    expect(start).toContain("placement: input.placement,");
-    expect(start).toContain("const entryPath = join(snapshotRoot, panel.entry);");
-    expect(start).toContain("title: started.title,");
-    expect(start).toContain("surfaceId: started.surfaceId,");
-    expect(start).not.toContain("plugin.manifest.panels");
+    expect(start).toContain(
+      "const entryPath = join(snapshotRoot, input.panel.entry);",
+    );
 
-    const lookup = functionSource("function registeredPlugin(");
-    expect(lookup).toContain("resolveRegisteredPlugin(");
-    expect(lookup).toContain("pluginPipelines.get(workspaceId)");
-    expect(lookup).toContain("pluginRegistrations.get(workspaceId)");
-  });
-
-  it("authorizes panel SDK calls through the surface owner before routing", () => {
-    const invoke = handler("invokePluginPanelSdk");
-    const authorizeAt = invoke.indexOf("pluginSurfaces.authorizePanelSdk({");
-    const routeAt = invoke.indexOf("invokeWorkspacePluginSdk({", authorizeAt);
-    expect(authorizeAt).toBeGreaterThan(-1);
-    expect(routeAt).toBeGreaterThan(authorizeAt);
-    expect(invoke).toContain(
-      "currentGeneration: () => rendererGeneration(sender.id),",
+    const registration = sourceBlock(
+      "registerPluginIpcHandlers<",
+      "\n  });",
     );
-    expect(invoke).toContain(
-      "activeWorkspaceId: () => activeWorkspaceIdBySender.get(sender.id),",
+    expect(registration).toContain(
+      "createPanelHostLease: createPluginPanelSurfaceHostLease,",
     );
-    expect(invoke).toContain("liveSpawnId: () =>");
-    expect(invoke).toContain("isPanelRunning: isPushLive,");
-    expect(invoke).toContain(
-      "workspaceEvents.subscribe({ owner, emitEvent }, watchParams)",
-    );
-    expect(invoke).toContain(
-      "workspaceEvents.unsubscribe({ owner }, watchParams)",
+    expect(registration).toContain(
+      "startPanelPreview: startPluginPanelPreview,",
     );
   });
 
@@ -156,22 +101,6 @@ describe("plugin panel main-process wiring", () => {
     );
   });
 
-  it("routes plugin commands through the declared-command guard and owner", () => {
-    const invoke = handler("invokePluginCommand");
-    const currentAt = invoke.indexOf("activeWorkspaceIdBySender.get(");
-    const pipelineAt = invoke.indexOf("const pipeline = await ensurePluginPipeline(workspace);");
-    const lookupAt = invoke.indexOf("registeredPlugin(", pipelineAt);
-    const routeAt = invoke.indexOf("invokeRegisteredPluginCommand({", lookupAt);
-    const ownerAt = invoke.indexOf("pipeline.hostOwnership.runCommand(", routeAt);
-    const startAt = invoke.indexOf("command.start(() =>", ownerAt);
-    expect(currentAt).toBeGreaterThan(-1);
-    expect(pipelineAt).toBeGreaterThan(currentAt);
-    expect(lookupAt).toBeGreaterThan(pipelineAt);
-    expect(routeAt).toBeGreaterThan(lookupAt);
-    expect(ownerAt).toBeGreaterThan(routeAt);
-    expect(startAt).toBeGreaterThan(ownerAt);
-    expect(invoke).toContain("assertWritableWorkspace(workspace);");
-  });
 
   it("wires authored text to this invocation's signal, capture, and pipeline", () => {
     const router = functionSource("function invokeWorkspacePluginSdk");
@@ -341,7 +270,7 @@ describe("plugin panel main-process wiring", () => {
   });
 
   it("derives panel writability from the current workspace on every invocation", () => {
-    const invoke = handler("invokePluginPanelSdk");
+    const invoke = functionSource("async function routePluginPanelSdk(");
     expect(invoke).toContain("isWritable: () => !sharedViewOf(authority.workspaceId)");
     expect(invoke).not.toContain("writable: authority.writable");
   });
@@ -355,99 +284,6 @@ describe("plugin panel main-process wiring", () => {
     );
     expect(gateAt).toBeGreaterThan(-1);
     expect(checkAt).toBeGreaterThan(gateAt);
-  });
-
-  it("tentatively suspends SDK grants for disable and restores failed actions", () => {
-    const disable = sourceBlock(
-      "pluginAction(CHANNELS.disablePlugin,",
-      "\n  });",
-    );
-    const ownerAt = disable.indexOf(
-      "pluginSurfaces.withPluginSdkGrantSuspensions(",
-    );
-    const callbackAt = disable.indexOf("(suspend) =>", ownerAt);
-    const disableCallAt = disable.indexOf(
-      "pipeline.disable(pluginId, {",
-      callbackAt,
-    );
-    const suspendHookAt = disable.indexOf(
-      "onWillStopRuntime: () =>",
-      disableCallAt,
-    );
-    const suspendAt = disable.indexOf(
-      "suspend({ workspaceId, pluginId })",
-      suspendHookAt,
-    );
-    const resultReturnAt = disable.indexOf(
-      "return result;",
-      suspendAt,
-    );
-
-    expect(ownerAt).toBeGreaterThan(-1);
-    expect(callbackAt).toBeGreaterThan(ownerAt);
-    expect(disableCallAt).toBeGreaterThan(callbackAt);
-    expect(suspendHookAt).toBeGreaterThan(disableCallAt);
-    expect(suspendAt).toBeGreaterThan(suspendHookAt);
-    expect(resultReturnAt).toBeGreaterThan(suspendAt);
-    expect(disable).not.toContain("onRuntimeStopped");
-    expect(disable).not.toContain("pluginSurfaces.stop");
-  });
-
-  it("tracks every uninstall suspension for failed-action restore before successful teardown", () => {
-    const uninstall = handler("uninstallPlugin");
-    const ownerAt = uninstall.indexOf(
-      "pluginSurfaces.withPluginSdkGrantSuspensions(",
-    );
-    const callbackAt = uninstall.indexOf("(suspend) =>", ownerAt);
-    const uninstallCallAt = uninstall.indexOf("pipeline.uninstall(", callbackAt);
-    const suspendHookAt = uninstall.indexOf(
-      "onWillStopRuntime: (pluginId) =>",
-      uninstallCallAt,
-    );
-    const suspendAt = uninstall.indexOf(
-      "suspend({",
-      suspendHookAt,
-    );
-    const suspendWorkspaceAt = uninstall.indexOf(
-      "workspaceId: input.workspaceId,",
-      suspendAt,
-    );
-    const suspendPluginAt = uninstall.indexOf("pluginId,", suspendWorkspaceAt);
-    const suspendEndAt = uninstall.indexOf("});", suspendPluginAt);
-    const removedAt = uninstall.indexOf(
-      "const removedLastClaimant =",
-      suspendEndAt,
-    );
-    const uninstallCleanupAt = uninstall.indexOf(
-      "pluginSurfaces.stop({",
-      removedAt,
-    );
-    expect(ownerAt).toBeGreaterThan(-1);
-    expect(callbackAt).toBeGreaterThan(ownerAt);
-    expect(uninstallCallAt).toBeGreaterThan(callbackAt);
-    expect(suspendHookAt).toBeGreaterThan(uninstallCallAt);
-    expect(suspendAt).toBeGreaterThan(suspendHookAt);
-    expect(suspendWorkspaceAt).toBeGreaterThan(suspendAt);
-    expect(suspendPluginAt).toBeGreaterThan(suspendWorkspaceAt);
-    expect(suspendEndAt).toBeGreaterThan(suspendPluginAt);
-    expect(removedAt).toBeGreaterThan(suspendEndAt);
-    expect(uninstallCleanupAt).toBeGreaterThan(removedAt);
-    expect(uninstall.slice(uninstallCallAt, removedAt)).not.toContain(
-      "onRuntimeStopped",
-    );
-    expect(uninstall).not.toContain("void pluginSurfaces.stop");
-  });
-
-  it("lets the normal host lifecycle own rebuild stop and successor readiness", () => {
-    const rebuild = sourceBlock(
-      "pluginAction(CHANNELS.rebuildPlugin,",
-      "\n\n  ipcMain.handle(CHANNELS.pluginUninstallPreflight",
-    );
-    expect(squeeze(rebuild)).toContain(
-      "pluginAction(CHANNELS.rebuildPlugin,(pipeline,pluginId)=>pipeline.rebuild(pluginId));",
-    );
-    expect(rebuild).not.toContain("onOldRuntimeStopped");
-    expect(rebuild).not.toContain("pluginSurfaces.");
   });
 
   it("does not warm a pipeline after a later workspace switch wins", () => {

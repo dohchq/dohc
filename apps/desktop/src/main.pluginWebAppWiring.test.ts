@@ -11,10 +11,6 @@ function sourceBlock(startMarker: string, endMarker: string): string {
   return mainSource.slice(start, end);
 }
 
-function handler(channel: string): string {
-  return sourceBlock(`ipcMain.handle(CHANNELS.${channel}`, "\n  });");
-}
-
 function functionSource(signature: string): string {
   return sourceBlock(signature, "\n}\n");
 }
@@ -22,66 +18,6 @@ function functionSource(signature: string): string {
 const squeeze = (source: string): string => source.replace(/\s+/g, "");
 
 describe("plugin web app main-process wiring", () => {
-  it("loads and remembers a declared web app only while its renderer stays current", () => {
-    const open = handler("openPluginWebApp");
-    const firstCurrentAt = open.indexOf("requireCurrentRenderer(isCurrent);");
-    const loadAt = open.indexOf("await loadPluginWebAppRegistration({");
-    const postLoadCurrentAt = open.indexOf(
-      "requireCurrentRenderer(isCurrent);",
-      loadAt,
-    );
-    const pipelineAt = open.indexOf(
-      "const { pipeline } = await activePluginPipelineFor(event, input.workspaceId);",
-      postLoadCurrentAt,
-    );
-    const postPipelineCurrentAt = open.indexOf(
-      "requireCurrentRenderer(isCurrent);",
-      pipelineAt,
-    );
-    const rememberAt = open.indexOf("rememberPluginRegistration(", pipelineAt);
-    const declaredAt = open.indexOf("requireDeclaredWebApp(", rememberAt);
-
-    expect(firstCurrentAt).toBeGreaterThan(-1);
-    expect(loadAt).toBeGreaterThan(firstCurrentAt);
-    expect(postLoadCurrentAt).toBeGreaterThan(loadAt);
-    expect(pipelineAt).toBeGreaterThan(postLoadCurrentAt);
-    expect(postPipelineCurrentAt).toBeGreaterThan(pipelineAt);
-    expect(rememberAt).toBeGreaterThan(postPipelineCurrentAt);
-    expect(declaredAt).toBeGreaterThan(rememberAt);
-    expect(open).not.toContain("ensurePluginStarted(");
-    expect(open).not.toContain("acquirePluginSurfaceLease(");
-  });
-
-  it("hands exact identity, policy, and captured host effects to the surface owner", () => {
-    const start = handler("startPluginWebApp");
-    const declaredAt = start.indexOf("const webApp = requireDeclaredWebApp(");
-    const ownerAt = start.indexOf("pluginSurfaces.startWebApp(", declaredAt);
-    const pipelineAt = start.indexOf("const pipeline = await ensurePluginPipeline(workspace);", ownerAt);
-    const currentAt = start.indexOf("requireCurrentRenderer(isCurrent);", pipelineAt);
-    const writableAt = start.indexOf("assertWritableWorkspace(workspace);", currentAt);
-    const leaseAt = start.indexOf(
-      "return createPluginWebAppHostLease(",
-      writableAt,
-    );
-
-    expect(declaredAt).toBeGreaterThan(-1);
-    expect(ownerAt).toBeGreaterThan(declaredAt);
-    expect(squeeze(start)).toContain(
-      "...identity,senderId:sender.id,generation,workspaceRoot:workspace.rootPath,container:createPluginWebAppContainer(sender),",
-    );
-    expect(start).toContain("assertInstanceBudget: (liveAndReservedOtherInstances) =>");
-    expect(start).toContain("assertAllowed: () => {");
-    expect(pipelineAt).toBeGreaterThan(ownerAt);
-    expect(currentAt).toBeGreaterThan(pipelineAt);
-    expect(writableAt).toBeGreaterThan(currentAt);
-    expect(leaseAt).toBeGreaterThan(writableAt);
-    expect(squeeze(start.slice(leaseAt, leaseAt + 180))).toContain(
-      "returncreatePluginWebAppHostLease(pipeline,input.pluginId,input.webAppId,input.instanceKey,);",
-    );
-    expect(start).toContain("title: started.title ?? webApp.title,");
-    expect(start).toContain("origin: started.origin,");
-  });
-
   it("unpairs only the failed attempt's captured live spawn in the same turn", () => {
     const lease = functionSource("function createPluginWebAppHostLease(");
     const captureAt = lease.indexOf("const host = pipeline.host;");
@@ -135,38 +71,6 @@ describe("plugin web app main-process wiring", () => {
     expect(track).toContain("applyZoomLevelToWindows(application.applyEverywhere);");
   });
 
-  it("passes exact owner identity and sender zoom to the bounds guard", () => {
-    const bounds = handler("setPluginWebAppBounds");
-    const ownerAt = bounds.indexOf("pluginSurfaces.applyWebAppBounds({");
-    const generationAt = bounds.indexOf(
-      "generation: rendererGeneration(event.sender.id),",
-      ownerAt,
-    );
-    const zoomAt = bounds.indexOf("zoomFactor: event.sender.getZoomFactor(),", generationAt);
-
-    expect(ownerAt).toBeGreaterThan(-1);
-    expect(generationAt).toBeGreaterThan(ownerAt);
-    expect(zoomAt).toBeGreaterThan(generationAt);
-    expect(squeeze(bounds)).toContain(
-      "workspaceId:input.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,",
-    );
-  });
-
-  it("carries the request instance through open, start, bounds, and exact stop", () => {
-    expect(squeeze(handler("openPluginWebApp"))).toContain(
-      "requireDeclaredWebApp(input.pluginId,plugin.manifest.webApps,input.webAppId,input.instanceKey,)",
-    );
-    expect(squeeze(handler("startPluginWebApp"))).toContain(
-      "constidentity={workspaceId:workspace.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,}",
-    );
-    expect(squeeze(handler("setPluginWebAppBounds"))).toContain(
-      "webAppId:input.webAppId,instanceKey:input.instanceKey,",
-    );
-    expect(squeeze(handler("stopPluginWebApp"))).toContain(
-      "kind:\"web-app\",workspaceId:workspace.workspaceId,pluginId:input.pluginId,webAppId:input.webAppId,instanceKey:input.instanceKey,owner:{senderId:event.sender.id,generation:rendererGeneration(event.sender.id),},",
-    );
-  });
-
   it("keeps surface teardown before pipeline disposal for one workspace and all workspaces", () => {
     const stopWorkspace = functionSource("async function stopPluginWorkspace(");
     const surfacesAt = stopWorkspace.indexOf(
@@ -211,90 +115,5 @@ describe("plugin web app main-process wiring", () => {
     expect(ownerAt).toBeGreaterThan(-1);
     expect(resolveAt).toBeGreaterThan(ownerAt);
     expect(sendAt).toBeGreaterThan(resolveAt);
-  });
-
-  it("protects only an installed claimant from a different directory", () => {
-    const predicateAt = mainSource.indexOf("const pluginIdHasOtherInstalledClaimant = (");
-    const predicateEnd = mainSource.indexOf("\n\n", predicateAt);
-    const predicate = mainSource.slice(predicateAt, predicateEnd);
-    expect(predicateAt).toBeGreaterThan(-1);
-    expect(squeeze(predicate)).toContain(
-      "entry.id===pluginId&&entry.directoryName!==directoryName&&entry.approvedHash!==null",
-    );
-  });
-
-  it("passes partition clearing to the owner only after the last claimant is removed", () => {
-    const uninstall = handler("uninstallPlugin");
-    const uninstallAt = uninstall.indexOf("pipeline.uninstall(");
-    const claimantAt = uninstall.indexOf(
-      "pluginIdHasOtherInstalledClaimant(",
-      uninstallAt,
-    );
-    const removedAt = uninstall.indexOf(
-      "const removedLastClaimant = result.ok && !pluginIdHasOtherInstalledClaimant(",
-      uninstallAt,
-    );
-    const guardAt = uninstall.indexOf("if (removedLastClaimant)", removedAt);
-    const stopAt = uninstall.indexOf("pluginSurfaces.stop({", guardAt);
-    const clearAt = uninstall.indexOf(
-      "clearPartition: { workspaceRoot: workspace.rootPath }",
-      stopAt,
-    );
-    expect(uninstallAt).toBeGreaterThan(-1);
-    expect(removedAt).toBeGreaterThan(uninstallAt);
-    expect(claimantAt).toBeGreaterThan(removedAt);
-    expect(guardAt).toBeGreaterThan(removedAt);
-    expect(stopAt).toBeGreaterThan(guardAt);
-    expect(clearAt).toBeGreaterThan(stopAt);
-  });
-
-  it("gates registration forgetting on the same last-claimant decision", () => {
-    const uninstall = handler("uninstallPlugin");
-    const removedAt = uninstall.indexOf(
-      "const removedLastClaimant = result.ok && !pluginIdHasOtherInstalledClaimant(",
-    );
-    const forgetAt = uninstall.indexOf("forgetUninstalledPlugin({", removedAt);
-    const forget = uninstall.slice(forgetAt, uninstall.indexOf("});", forgetAt));
-    expect(removedAt).toBeGreaterThan(-1);
-    expect(forgetAt).toBeGreaterThan(removedAt);
-    expect(squeeze(forget)).toContain("uninstalled:removedLastClaimant,");
-  });
-
-  it("keeps successful last-claimant partition cleanup idempotent", () => {
-    const uninstall = handler("uninstallPlugin");
-    const uninstallAt = uninstall.indexOf("pipeline.uninstall(");
-    const guardAt = uninstall.indexOf("if (removedLastClaimant)", uninstallAt);
-    const partitionStopAt = uninstall.indexOf("pluginSurfaces.stop({", guardAt);
-    expect(uninstallAt).toBeGreaterThan(-1);
-    expect(guardAt).toBeGreaterThan(uninstallAt);
-    expect(partitionStopAt).toBeGreaterThan(guardAt);
-    expect(uninstall.slice(uninstallAt, guardAt)).not.toContain(
-      "pluginSurfaces.stop({",
-    );
-    expect(uninstall.indexOf("pluginSurfaces.stop({", partitionStopAt + 1)).toBe(-1);
-  });
-
-  it("does not infer teardown from a failed result's status", () => {
-    const uninstall = handler("uninstallPlugin");
-    const removedAt = uninstall.indexOf(
-      "const removedLastClaimant = result.ok && !pluginIdHasOtherInstalledClaimant(",
-    );
-    const guardAt = uninstall.indexOf("if (removedLastClaimant)", removedAt);
-    expect(removedAt).toBeGreaterThan(-1);
-    expect(guardAt).toBeGreaterThan(removedAt);
-    expect(uninstall).not.toContain("claimantStoppedBySettledResult");
-    expect(uninstall).not.toContain("result.plugin.status");
-  });
-
-  it("never tears down a surviving installed collision claimant", () => {
-    const uninstall = handler("uninstallPlugin");
-    const claimantAt = uninstall.indexOf(
-      "const removedLastClaimant = result.ok && !pluginIdHasOtherInstalledClaimant(",
-    );
-    const directoryAt = uninstall.indexOf("input.directoryName,", claimantAt);
-    const guardAt = uninstall.indexOf("if (removedLastClaimant)", claimantAt);
-    expect(claimantAt).toBeGreaterThan(-1);
-    expect(directoryAt).toBeGreaterThan(claimantAt);
-    expect(guardAt).toBeGreaterThan(directoryAt);
   });
 });

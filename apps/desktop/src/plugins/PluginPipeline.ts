@@ -205,6 +205,21 @@ export type PluginPipelineActionResult =
     plugin: PluginPipelinePluginStatus | null;
   };
 
+type PluginPipelineActionSuccess = Extract<
+  PluginPipelineActionResult,
+  { ok: true }
+>;
+type PluginPipelineActionFailure = Extract<
+  PluginPipelineActionResult,
+  { ok: false }
+>;
+
+export type PluginPipelineUninstallResult =
+  | (PluginPipelineActionSuccess & {
+    identity: "released" | "retained";
+  })
+  | PluginPipelineActionFailure;
+
 export type PluginPipelineUninstallPreflightResult =
   | {
     ok: true;
@@ -1532,7 +1547,7 @@ export class PluginPipeline {
     directoryName: string,
     confirmationToken: string,
     hooks: PluginPipelineRuntimeStopHooks = {},
-  ): Promise<PluginPipelineActionResult> {
+  ): Promise<PluginPipelineUninstallResult> {
     if (this.disposed) {
       return Promise.resolve(this.pipelineClosedFailure(pluginId));
     }
@@ -1745,9 +1760,14 @@ export class PluginPipeline {
         this.discovery = this.discovery.filter((entry) =>
           resolve(entry.rootPath) !== resolve(candidate.rootPath)
         );
+        const identity = this.uninstallIdentityDecision(
+          pluginId,
+          candidate.directoryName,
+        );
         this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
         return existingHostResult({
           ok: true,
+          identity,
           plugin: {
             ...this.baseStatus(candidate),
             status: "disabled",
@@ -3511,7 +3531,7 @@ export class PluginPipeline {
     cleanupQueueClaims: ReadonlyArray<UninstallQueueClaim>,
     confirmed: UninstallTargetSnapshot,
     hooks: PluginPipelineRuntimeStopHooks,
-  ): Promise<PluginHostStartResult<PluginPipelineActionResult>> {
+  ): Promise<PluginHostStartResult<PluginPipelineUninstallResult>> {
     const status = this.statuses.get(pluginId);
     const candidate = this.sourcelessCandidate(pluginId);
     if (!status || !candidate) {
@@ -3565,9 +3585,14 @@ export class PluginPipeline {
         ),
       );
       this.clearUninstalledIdentityState(cleanupIds, confirmed.directoryName);
+      const identity = this.uninstallIdentityDecision(
+        pluginId,
+        candidate.directoryName,
+      );
       this.emit({ kind: "removed", pluginId, directoryName: candidate.directoryName });
       return existingHostResult({
         ok: true,
+        identity,
         plugin: {
           ...cloneStatus(status),
           status: "disabled",
@@ -3605,6 +3630,20 @@ export class PluginPipeline {
         uninstallConfirmationKey(pluginId, directoryName),
       );
     }
+  }
+
+  private uninstallIdentityDecision(
+    pluginId: string,
+    directoryName: string,
+  ): "released" | "retained" {
+    return this.list().some(
+      (entry) =>
+        entry.id === pluginId &&
+        entry.directoryName !== directoryName &&
+        entry.approvedHash !== null,
+    )
+      ? "retained"
+      : "released";
   }
 
   private async stopCleanupRuntimes(
@@ -4037,14 +4076,14 @@ export class PluginPipeline {
     return next;
   }
 
-  private success(plugin: PluginPipelinePluginStatus): PluginPipelineActionResult {
+  private success(plugin: PluginPipelinePluginStatus): PluginPipelineActionSuccess {
     return { ok: true, plugin: cloneStatus(plugin) };
   }
 
   private failure(
     pluginId: string,
     error: PluginPipelineError,
-  ): PluginPipelineActionResult {
+  ): PluginPipelineActionFailure {
     const current = this.statuses.get(pluginId);
     if (current && current.error !== error) {
       this.setStatus(
@@ -4117,13 +4156,13 @@ export class PluginPipeline {
         change.preserve(await run(change))));
   }
 
-  private enqueueAdoptedAction(
+  private enqueueAdoptedAction<TSuccess extends PluginPipelineActionSuccess>(
     pluginId: string,
     run: (
       change: PluginHostChangeAuthority,
-    ) => Promise<PluginHostStartResult<PluginPipelineActionResult>>,
+    ) => Promise<PluginHostStartResult<TSuccess | PluginPipelineActionFailure>>,
     reservation?: PluginHostChangeReservation,
-  ): Promise<PluginPipelineActionResult> {
+  ): Promise<TSuccess | PluginPipelineActionFailure> {
     let changeReservation: PluginHostChangeReservation;
     try {
       changeReservation = reservation ?? this.hostOwnership.reserveChange(pluginId);
@@ -4135,7 +4174,7 @@ export class PluginPipeline {
     }
     const action = this.enqueueActionValue(pluginId, () =>
       changeReservation.run(async (change) => {
-        let result: PluginHostStartResult<PluginPipelineActionResult>;
+        let result: PluginHostStartResult<TSuccess | PluginPipelineActionFailure>;
         try {
           result = await run(change);
         } catch (error) {
@@ -4182,7 +4221,7 @@ export class PluginPipeline {
     );
   }
 
-  private pipelineClosedFailure(pluginId: string): PluginPipelineActionResult {
+  private pipelineClosedFailure(pluginId: string): PluginPipelineActionFailure {
     return this.failure(
       pluginId,
       pipelineError("runtime", "pipeline-closed", "Plugin pipeline is closed."),
