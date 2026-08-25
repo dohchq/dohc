@@ -837,6 +837,33 @@ describe("EngineYDocSessionOwner", () => {
     );
   });
 
+  it.runIf(process.platform === "win32")(
+    "uses Windows path identity for ownership and subtree visits",
+    async () => {
+      const owner = createOwner();
+      const sender = { id: 7, label: "window-a" };
+      await owner.open(
+        openInput({
+          sender,
+          generation: 1,
+          sessionId: "mixed-case",
+          path: "Notes/Folder/A.md",
+          openSession: async () => ({
+            session: { close: async () => undefined },
+            value: "opened",
+          }),
+        }),
+      );
+
+      expect(owner.ownsDocument("workspace-1", "notes/folder/a.md")).toBe(
+        true,
+      );
+      const visit = vi.fn();
+      owner.forEachSessionUnderPath("workspace-1", "notes", visit);
+      expect(visit).toHaveBeenCalledOnce();
+    },
+  );
+
   it("shuts down open and pending sessions with the quit-specific close", async () => {
     const owner = createOwner();
     const sender = { id: 7, label: "window-a" };

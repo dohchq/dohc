@@ -159,6 +159,37 @@ it("retains a reconnect-failed generation when replacement open is refused", asy
   await capture.stop();
 });
 
+it.runIf(process.platform === "win32")(
+  "vacates case-alias Y.Doc paths for delete and move reservations",
+  async () => {
+    const { capture, state } = await reconnectFailureCapture(
+      "dohc-ydoc-windows-path-identity-",
+    );
+    await capture.openYDocSession({
+      path: "Notes/Folder/A.md",
+      onRemoteUpdate: () => undefined,
+    });
+
+    const finishDelete = await capture.settleAndCloseLiveSessionsForPath(
+      "notes/folder",
+    );
+    expect(state.releaseCalls).toHaveLength(1);
+    finishDelete(false);
+
+    await capture.openYDocSession({
+      path: "Notes/Folder/B.md",
+      onRemoteUpdate: () => undefined,
+    });
+    const finishMove = await capture.beginFileRename(
+      "notes/folder",
+      "Archive/Folder",
+    );
+    expect(state.releaseCalls).toHaveLength(2);
+    await finishMove(false);
+    await capture.stop();
+  },
+);
+
 it("publishes dead-session recovery without masking background capture health", async () => {
   const { capture, outcomes, rootPath, state } =
     await reconnectFailureCapture("dohc-ydoc-outcome-recovery-");

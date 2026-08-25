@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -104,22 +105,35 @@ async function harness(options: {
         session.workspaceId === workspaceId && session.path === path,
     ),
   );
-  const forEachSessionUnderPath = vi.fn<
-    WorkspaceFileMutationYDocPort["forEachSessionUnderPath"]
-  >((workspaceId, pathOrPrefix, visit) => {
+  const withDocumentUnowned: WorkspaceFileMutationYDocPort["withDocumentUnowned"] =
+    async <T>(
+      workspaceId: string,
+      path: string,
+      mutation: () => Promise<T>,
+    ): Promise<T> => {
+      if (ownsDocument(workspaceId, path)) {
+        throw new Error(
+          "The engine owns this live document. Close its editor before writing the file directly.",
+        );
+      }
+      return mutation();
+    };
+  const markDeletedUnderPath = vi.fn<
+    WorkspaceFileMutationYDocPort["markDeletedUnderPath"]
+  >((workspaceId, pathOrPrefix) => {
     for (const session of openYDocs) {
       if (
         session.workspaceId === workspaceId &&
         (session.path === pathOrPrefix ||
           session.path.startsWith(`${pathOrPrefix}/`))
       ) {
-        visit(session);
+        session.markDeleted();
       }
     }
   });
   const yDocSessions: WorkspaceFileMutationYDocPort = {
-    ownsDocument,
-    forEachSessionUnderPath,
+    withDocumentUnowned,
+    markDeletedUnderPath,
   };
   const changeImpl: ShareViewFiles["change"] = async (
     _lease,
@@ -179,7 +193,8 @@ async function harness(options: {
     logError,
     trashItem,
     ownsDocument,
-    forEachSessionUnderPath,
+    withDocumentUnowned,
+    markDeletedUnderPath,
     registerYDoc(path: string, markDeleted: () => void) {
       openYDocs.push({
         workspaceId: workspace.workspaceId,
@@ -258,7 +273,7 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(
       test.owner.writeAsset(trustedEvent, {
         workspaceId: test.workspace.workspaceId,
-        relativePath: "assets/pixel.bin",
+        relativePath: "assets/pixel.png",
         bytes: new Uint8Array([1, 2, 3]),
       }),
     ).resolves.toBeUndefined();
@@ -267,13 +282,13 @@ describe("WorkspaceFileMutationOwner", () => {
       "second\n",
     );
     await expect(access(join(test.rootPath, "empty/deep"))).resolves.toBeUndefined();
-    expect(await readFile(join(test.rootPath, "assets/pixel.bin"))).toEqual(
+    expect(await readFile(join(test.rootPath, "assets/pixel.png"))).toEqual(
       Buffer.from([1, 2, 3]),
     );
   });
 
-  it("rejects stale file, folder, and text writes queued behind a change", async () => {
-    for (const kind of ["file", "folder", "text"] as const) {
+  it("rejects stale file, folder, text, and asset writes queued behind a change", async () => {
+    for (const kind of ["file", "folder", "text", "asset"] as const) {
       const test = await harness();
       if (kind === "text") {
         await writeFile(join(test.rootPath, "existing.md"), "before\n");
@@ -301,12 +316,18 @@ describe("WorkspaceFileMutationOwner", () => {
                 workspaceId: test.workspace.workspaceId,
                 relativePath: "new-folder",
               })
-            : test.owner.writeText(trustedEvent, {
-                workspaceId: test.workspace.workspaceId,
-                relativePath: "existing.md",
-                text: "after\n",
-                expectedContentHash: hash("before\n"),
-              });
+            : kind === "text"
+              ? test.owner.writeText(trustedEvent, {
+                  workspaceId: test.workspace.workspaceId,
+                  relativePath: "existing.md",
+                  text: "after\n",
+                  expectedContentHash: hash("before\n"),
+                })
+              : test.owner.writeAsset(trustedEvent, {
+                  workspaceId: test.workspace.workspaceId,
+                  relativePath: "assets/pixel.png",
+                  bytes: new Uint8Array([1, 2, 3]),
+                });
       release.resolve();
       await blocker;
 
@@ -317,8 +338,51 @@ describe("WorkspaceFileMutationOwner", () => {
         expect(await readFile(join(test.rootPath, "existing.md"), "utf8")).toBe(
           "before\n",
         );
+      } else if (kind === "asset") {
+        await expect(
+          access(join(test.rootPath, "assets/pixel.png")),
+        ).rejects.toThrow();
       }
     }
+  });
+
+  it("finishes an admitted text write before a later exclusive operation", async () => {
+    const test = await harness();
+    await writeFile(join(test.rootPath, "note.md"), "before\n");
+    const firstEntered = deferred();
+    const releaseFirst = deferred();
+    const firstError = new Error("exclusive operation failed");
+    const firstExclusive = withExclusiveWorkspaceOperation(
+      test.rootPath,
+      async () => {
+        firstEntered.resolve();
+        await releaseFirst.promise;
+        throw firstError;
+      },
+    ).catch((error: unknown) => error);
+    await firstEntered.promise;
+
+    const writing = test.owner.writeText(trustedEvent, {
+      workspaceId: test.workspace.workspaceId,
+      relativePath: "note.md",
+      text: "after\n",
+      expectedContentHash: hash("before\n"),
+    });
+    const laterExclusive = withExclusiveWorkspaceOperation(
+      test.rootPath,
+      async () => undefined,
+    );
+
+    releaseFirst.resolve();
+    await expect(firstExclusive).resolves.toBe(firstError);
+    await expect(writing).resolves.toEqual({
+      status: "written",
+      contentHash: hash("after\n"),
+    });
+    await laterExclusive;
+    expect(await readFile(join(test.rootPath, "note.md"), "utf8")).toBe(
+      "after\n",
+    );
   });
 
   it("starts move and delete only after an earlier exclusive operation releases", async () => {
@@ -607,24 +671,102 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(
       test.owner.movePath(trustedEvent, {
         workspaceId: test.workspace.workspaceId,
-        fromPath: "from.md",
-        toPath: "to.md",
+        fromPath: "./from.md",
+        toPath: "archive/./to.md",
       }),
-    ).resolves.toEqual({ path: "to.md" });
+    ).resolves.toEqual({ path: "archive/to.md" });
 
-    expect(trace).toEqual(["begin:from.md:to.md", "finish:true"]);
-    expect(await readFile(join(test.rootPath, "to.md"), "utf8")).toBe(
+    expect(trace).toEqual([
+      "begin:from.md:archive/to.md",
+      "finish:true",
+    ]);
+    expect(await readFile(join(test.rootPath, "archive/to.md"), "utf8")).toBe(
       "text\n",
     );
   });
 
-  it("rolls back the engine rename when the disk move fails", async () => {
+  it("coordinates an in-workspace alias move by its physical paths", async () => {
+    const test = await harness();
+    const notesDir = process.platform === "win32" ? "Notes" : "notes";
+    await mkdir(join(test.rootPath, notesDir));
+    await writeFile(join(test.rootPath, notesDir, "from.md"), "text\n");
+    await symlink(
+      join(test.rootPath, notesDir),
+      join(test.rootPath, "alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const finishRename = vi.fn(async () => undefined);
+    const beginFileRename = vi.fn(async () => finishRename);
+    test.setCapture({
+      beginFileRename,
+      settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
+    });
+
+    await expect(
+      test.owner.movePath(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        fromPath:
+          process.platform === "win32" ? "alias/FROM.md" : "alias/from.md",
+        toPath: "archive/to.md",
+      }),
+    ).resolves.toEqual({ path: "archive/to.md" });
+
+    expect(beginFileRename).toHaveBeenCalledWith(
+      `${notesDir}/from.md`,
+      "archive/to.md",
+    );
+    await expect(
+      readFile(join(test.rootPath, "archive/to.md"), "utf8"),
+    ).resolves.toBe("text\n");
+  });
+
+  it("refuses symlinked move endpoints before the engine sees either path", async () => {
+    for (const escapedEndpoint of ["source", "destination"] as const) {
+      const test = await harness();
+      const outside = await mkdtemp(join(tmpdir(), "dohc-file-move-outside-"));
+      roots.push(outside);
+      await writeFile(join(test.rootPath, "inside.md"), "inside\n");
+      await writeFile(join(outside, "outside.md"), "outside\n");
+      await symlink(
+        outside,
+        join(test.rootPath, "escape"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const beginFileRename = vi.fn(async () => vi.fn(async () => undefined));
+      test.setCapture({
+        beginFileRename,
+        settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
+      });
+
+      await expect(
+        test.owner.movePath(trustedEvent, {
+          workspaceId: test.workspace.workspaceId,
+          fromPath:
+            escapedEndpoint === "source" ? "escape/outside.md" : "inside.md",
+          toPath:
+            escapedEndpoint === "destination"
+              ? "escape/moved.md"
+              : "moved.md",
+        }),
+      ).rejects.toThrow(/escapes (?:the )?workspace|reserved/);
+      expect(beginFileRename).not.toHaveBeenCalled();
+      expect(await readFile(join(test.rootPath, "inside.md"), "utf8")).toBe(
+        "inside\n",
+      );
+      expect(await readFile(join(outside, "outside.md"), "utf8")).toBe(
+        "outside\n",
+      );
+    }
+  });
+
+  it("refuses a conflicting disk move before starting the engine rename", async () => {
     const test = await harness();
     await writeFile(join(test.rootPath, "from.md"), "source\n");
     await writeFile(join(test.rootPath, "to.md"), "destination\n");
     const finishRename = vi.fn(async () => undefined);
+    const beginFileRename = vi.fn(async () => finishRename);
     test.setCapture({
-      beginFileRename: vi.fn(async () => finishRename),
+      beginFileRename,
       settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
     });
 
@@ -636,7 +778,8 @@ describe("WorkspaceFileMutationOwner", () => {
       }),
     ).rejects.toThrow("already exists");
 
-    expect(finishRename).toHaveBeenCalledWith(false);
+    expect(beginFileRename).not.toHaveBeenCalled();
+    expect(finishRename).not.toHaveBeenCalled();
     expect(await readFile(join(test.rootPath, "from.md"), "utf8")).toBe(
       "source\n",
     );
@@ -709,6 +852,73 @@ describe("WorkspaceFileMutationOwner", () => {
     );
   });
 
+  it("refuses a direct write through an alias to an engine-owned document", async () => {
+    const test = await harness();
+    await mkdir(join(test.rootPath, "notes"));
+    await writeFile(join(test.rootPath, "notes/a.md"), "before\n");
+    await symlink(
+      join(test.rootPath, "notes"),
+      join(test.rootPath, "alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await openYDoc(test, "notes/a.md");
+
+    await expect(
+      test.owner.writeText(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "alias/a.md",
+        text: "after\n",
+        expectedContentHash: hash("before\n"),
+      }),
+    ).rejects.toThrow("The engine owns this live document");
+
+    expect(test.ownsDocument).toHaveBeenCalledWith(
+      test.workspace.workspaceId,
+      "notes/a.md",
+    );
+    await expect(
+      readFile(join(test.rootPath, "notes/a.md"), "utf8"),
+    ).resolves.toBe("before\n");
+  });
+
+  it("refuses document paths and non-destructive image collisions for asset writes", async () => {
+    const test = await harness();
+    await mkdir(join(test.rootPath, "assets"));
+    await writeFile(join(test.rootPath, "assets/pixel.png"), new Uint8Array([1]));
+    await writeFile(join(test.rootPath, "note.md"), "document\n");
+
+    await expect(
+      test.owner.writeAsset(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "note.md",
+        bytes: new Uint8Array([2]),
+      }),
+    ).rejects.toThrow(
+      "The attachment path must end with a supported image extension.",
+    );
+    await expect(
+      test.owner.writeAsset(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "assets/pixel.png",
+        bytes: new Uint8Array([2]),
+      }),
+    ).rejects.toThrow("with different content");
+    await expect(
+      test.owner.writeAsset(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "assets/pixel.png",
+        bytes: new Uint8Array([1]),
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(await readFile(join(test.rootPath, "note.md"), "utf8")).toBe(
+      "document\n",
+    );
+    expect(await readFile(join(test.rootPath, "assets/pixel.png"))).toEqual(
+      Buffer.from([1]),
+    );
+  });
+
   it("settles Y.Doc work before a recoverable fallback delete, then marks it deleted", async () => {
     const trace: string[] = [];
     const test = await harness({
@@ -749,6 +959,45 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
     const trashEntries = await readdir(join(test.rootPath, ".dohc/trash"));
     expect(trashEntries).toHaveLength(1);
+  });
+
+  it("settles and marks an alias delete by its physical path", async () => {
+    const trace: string[] = [];
+    const test = await harness();
+    await mkdir(join(test.rootPath, "notes"));
+    await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
+    await symlink(
+      join(test.rootPath, "notes"),
+      join(test.rootPath, "alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const markDeleted = vi.fn(() => trace.push("marked"));
+    await openYDoc(test, "notes/a.md", markDeleted);
+    const finishDebts = vi.fn((removed: boolean) => {
+      trace.push(`finish:${removed}`);
+    });
+    const settleAndCloseLiveSessionsForPath = vi.fn(async (path: string) => {
+      trace.push(`settle:${path}`);
+      return finishDebts;
+    });
+    test.setCapture({
+      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
+      settleAndCloseLiveSessionsForPath,
+    });
+
+    await expect(
+      test.owner.deletePath(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "alias/a.md",
+      }),
+    ).resolves.toEqual({ trashed: true });
+
+    expect(trace).toEqual(["settle:notes/a.md", "marked", "finish:true"]);
+    expect(test.markDeletedUnderPath).toHaveBeenCalledWith(
+      test.workspace.workspaceId,
+      "notes/a.md",
+    );
+    await expect(access(join(test.rootPath, "notes/a.md"))).rejects.toThrow();
   });
 
   it("does not mark a Y.Doc deleted when both recovery paths fail", async () => {
@@ -883,6 +1132,9 @@ describe("WorkspaceFileMutationOwner", () => {
         }),
       ).rejects.toThrow(testCase.message);
       expect(test.notifyRenderer).toHaveBeenCalledOnce();
+      expect(test.notifyRenderer).toHaveBeenCalledWith(
+        test.workspace.workspaceId,
+      );
       expect(test.logError).toHaveBeenCalledWith(
         "[desktop] shared file change did not finish cleanly",
         testCase.outcome,
@@ -907,6 +1159,7 @@ describe("WorkspaceFileMutationOwner", () => {
       }),
     ).resolves.toEqual({ path: "new.txt" });
     expect(test.notifyRenderer).toHaveBeenCalledOnce();
+    expect(test.notifyRenderer).toHaveBeenCalledWith(test.workspace.workspaceId);
     expect(test.logError).not.toHaveBeenCalled();
   });
 });

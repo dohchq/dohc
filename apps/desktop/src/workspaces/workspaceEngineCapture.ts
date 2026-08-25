@@ -62,6 +62,7 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { workspaceRelativePathIsAtOrUnder } from "./workspaceRelativePathIdentity";
 import {
   type ActiveAgentRun,
 } from "./workspaceWatcher";
@@ -4934,7 +4935,7 @@ export function createWorkspaceEngineCapture(
       // a later payment would recreate it), `false` restores and re-arms
       // (the path is still there and still owes its write).
       const match = (p: string) =>
-        p === pathOrPrefix || p.startsWith(`${pathOrPrefix}/`);
+        workspaceRelativePathIsAtOrUnder(p, pathOrPrefix);
       return enqueueResult("close live session for destructive op", async () => {
         await settleAndCloseLiveYDocSessions(
           match,
@@ -6233,11 +6234,10 @@ export function createWorkspaceEngineCapture(
         // path. Both the vacate right below and the debt drain further down
         // share this one match.
         const isSourceSide = (candidate: string): boolean =>
-          candidate === fromPath || candidate.startsWith(`${fromPath}/`);
+          workspaceRelativePathIsAtOrUnder(candidate, fromPath);
         const endpointMatch = (candidate: string): boolean =>
           isSourceSide(candidate) ||
-          candidate === toPath ||
-          candidate.startsWith(`${toPath}/`);
+          workspaceRelativePathIsAtOrUnder(candidate, toPath);
         // A live Y.Doc session over either endpoint (or child) is vacated
         // FIRST, ahead of the detached-debt drain below (#681 round 2). A
         // session recovering a stood-down path (reopened, per every

@@ -1,4 +1,3 @@
-import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 import {
@@ -28,10 +27,13 @@ import {
   workspaceWriteRefusal,
 } from "./shareWriteGate";
 import {
+  normalizeWorkspaceImageAssetPath,
+  resolveWorkspaceFile,
+  resolveWorkspaceMaterializePath,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
-  writeWorkspaceAsset,
-  writeWorkspaceText,
+  writeWorkspaceAssetInLease,
+  writeWorkspaceTextInLease,
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
@@ -39,6 +41,9 @@ import {
   createFolder,
   deletePath,
   movePath,
+  normalizeWorkspaceMovePaths,
+  prepareWorkspaceDelete,
+  prepareWorkspaceMove,
 } from "./workspaceFiles";
 
 type WorkspaceFileMutationIpcHandler<Event, Result = void> = (
@@ -72,11 +77,14 @@ export interface WorkspaceFileMutationWorkspace {
 }
 
 export interface WorkspaceFileMutationYDocPort {
-  ownsDocument(workspaceId: string, path: string): boolean;
-  forEachSessionUnderPath(
+  withDocumentUnowned<T>(
+    workspaceId: string,
+    path: string,
+    mutation: () => Promise<T>,
+  ): Promise<T>;
+  markDeletedUnderPath(
     workspaceId: string,
     pathOrPrefix: string,
-    visit: (session: { markDeleted(): void }) => void,
   ): void;
 }
 
@@ -228,10 +236,17 @@ export function createWorkspaceFileMutationOwner<
               shareMountRegistryIsPresent(workspace),
             );
           }
+          const paths = receivedShare
+            ? normalizeWorkspaceMovePaths(input.fromPath, input.toPath)
+            : await prepareWorkspaceMove(
+                workspace.rootPath,
+                input.fromPath,
+                input.toPath,
+              );
 
           const capture = dependencies.engineCaptureFor(workspace.workspaceId);
-          const fromKind = liveDocumentKindForPath(input.fromPath);
-          const toKind = liveDocumentKindForPath(input.toPath);
+          const fromKind = liveDocumentKindForPath(paths.fromPath);
+          const toKind = liveDocumentKindForPath(paths.toPath);
           if (
             (capture !== null || receivedShare) &&
             fromKind !== null &&
@@ -245,7 +260,7 @@ export function createWorkspaceFileMutationOwner<
           }
 
           const finishRename = capture
-            ? await capture.beginFileRename(input.fromPath, input.toPath)
+            ? await capture.beginFileRename(paths.fromPath, paths.toPath)
             : null;
           try {
             const path = receivedShare
@@ -256,15 +271,15 @@ export function createWorkspaceFileMutationOwner<
                     shareTarget(workspace),
                     {
                       kind: "move",
-                      fromPath: input.fromPath,
-                      toPath: input.toPath,
+                      fromPath: paths.fromPath,
+                      toPath: paths.toPath,
                     },
                   ),
                 )
               : await movePath(
                   workspace.rootPath,
-                  input.fromPath,
-                  input.toPath,
+                  paths.fromPath,
+                  paths.toPath,
                 );
             if (typeof path !== "string") {
               throw new Error("Shared file move returned an invalid result.");
@@ -292,14 +307,19 @@ export function createWorkspaceFileMutationOwner<
       return withExclusiveWorkspaceOperation(
         workspace.rootPath,
         async (markWorkspaceChanged, lease) => {
-          const validatedPath = validateUserWritePath(input.relativePath);
+          const localPath = receivedShare
+            ? null
+            : await prepareWorkspaceDelete(
+                workspace.rootPath,
+                input.relativePath,
+              );
           // The Y.Doc is canonical while its session is live. Settle and
           // release it before moving the artifact out from under the engine.
-          const finishDebts = receivedShare || !validatedPath.ok
+          const finishDebts = localPath === null
             ? undefined
             : await dependencies
                 .engineCaptureFor(workspace.workspaceId)
-                ?.settleAndCloseLiveSessionsForPath(validatedPath.normalized);
+                ?.settleAndCloseLiveSessionsForPath(localPath);
           try {
             // Local deletion stays recoverable: deletePath tries the OS trash,
             // then moves the entry into .dohc/trash when the OS refuses it.
@@ -314,7 +334,7 @@ export function createWorkspaceFileMutationOwner<
                 )
               : await deletePath(
                   workspace.rootPath,
-                  input.relativePath,
+                  localPath!,
                   dependencies.trashItem,
                 );
             if (
@@ -325,11 +345,10 @@ export function createWorkspaceFileMutationOwner<
               throw new Error("Shared file delete returned an invalid result.");
             }
             markWorkspaceChanged();
-            if (validatedPath.ok) {
-              dependencies.yDocSessions.forEachSessionUnderPath(
+            if (localPath !== null) {
+              dependencies.yDocSessions.markDeletedUnderPath(
                 workspace.workspaceId,
-                validatedPath.normalized,
-                (session) => session.markDeleted(),
+                localPath,
               );
             }
             // The finisher cancels write debts only after removal succeeds.
@@ -351,41 +370,61 @@ export function createWorkspaceFileMutationOwner<
         WriteWorkspaceTextPayload.parse,
       );
       if (!receivedShare) assertWritableWorkspace(workspace);
-      const validatedPath = validateUserWritePath(input.relativePath);
-      if (
-        validatedPath.ok &&
-        dependencies.yDocSessions.ownsDocument(
-          workspace.workspaceId,
-          validatedPath.normalized,
-        )
-      ) {
-        throw new Error(
-          "The engine owns this live document. Close its editor before writing the file directly.",
+      if (receivedShare) {
+        const result = await withStaleSensitiveWorkspaceOperation(
+          workspace.rootPath,
+          async (lease) =>
+            committedShareViewChangeValue(
+              workspace.workspaceId,
+              await dependencies.shareViewFiles.change(
+                lease,
+                shareTarget(workspace),
+                {
+                  kind: "save",
+                  path: input.relativePath,
+                  text: input.text,
+                  expectedContentHash: input.expectedContentHash,
+                },
+              ),
+            ),
         );
+        return WriteWorkspaceTextResult.parse(result);
       }
       const result = await withStaleSensitiveWorkspaceOperation(
         workspace.rootPath,
-        async (lease) =>
-          receivedShare
-            ? committedShareViewChangeValue(
-                workspace.workspaceId,
-                await dependencies.shareViewFiles.change(
-                  lease,
-                  shareTarget(workspace),
-                  {
-                    kind: "save",
-                    path: input.relativePath,
-                    text: input.text,
-                    expectedContentHash: input.expectedContentHash,
-                  },
-                ),
-              )
-            : writeWorkspaceText(
+        async (lease) => {
+          let path: string;
+          try {
+            path = (
+              await resolveWorkspaceFile(
                 workspace.rootPath,
                 input.relativePath,
+                "write",
+              )
+            ).resolvedPath;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (code === "ENOENT" || code === "ENOTDIR") {
+              return {
+                status: "conflict" as const,
+                currentContentHash: null,
+              };
+            }
+            throw error;
+          }
+          return dependencies.yDocSessions.withDocumentUnowned(
+            workspace.workspaceId,
+            path,
+            () =>
+              writeWorkspaceTextInLease(
+                workspace.rootPath,
+                lease,
+                path,
                 input.text,
                 input.expectedContentHash,
               ),
+          );
+        },
       );
       return WriteWorkspaceTextResult.parse(result);
     },
@@ -397,10 +436,33 @@ export function createWorkspaceFileMutationOwner<
         WriteWorkspaceAssetPayload.parse,
       );
       assertWritableWorkspace(workspace);
-      await writeWorkspaceAsset(
+      await withStaleSensitiveWorkspaceOperation(
         workspace.rootPath,
-        input.relativePath,
-        input.bytes,
+        async (lease) => {
+          const requestedPath = normalizeWorkspaceImageAssetPath(
+            input.relativePath,
+          );
+          const path = await resolveWorkspaceMaterializePath(
+            workspace.rootPath,
+            requestedPath,
+          );
+          if (liveDocumentKindForPath(path) !== null) {
+            throw new Error(
+              "A live document cannot be replaced by an image attachment.",
+            );
+          }
+          await dependencies.yDocSessions.withDocumentUnowned(
+            workspace.workspaceId,
+            path,
+            () =>
+              writeWorkspaceAssetInLease(
+                workspace.rootPath,
+                lease,
+                path,
+                input.bytes,
+              ),
+          );
+        },
       );
     },
   };

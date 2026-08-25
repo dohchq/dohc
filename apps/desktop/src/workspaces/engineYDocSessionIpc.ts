@@ -43,6 +43,10 @@ import {
   type EngineYDocSessionOutbound,
   type EngineYDocSessionReleaseOutcome,
 } from "./engineYDocSessionOwner";
+import {
+  workspaceRelativePathIdentity,
+  workspaceRelativePathsEqual,
+} from "./workspaceRelativePathIdentity";
 import type {
   WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
@@ -68,6 +72,7 @@ export type EngineYDocSessionCapture = Pick<
 
 interface EngineYDocWorkspace {
   workspaceId: string;
+  rootPath: string;
 }
 
 interface EngineYDocSessionIpcOptions {
@@ -76,6 +81,10 @@ interface EngineYDocSessionIpcOptions {
   captureFor: (workspaceId: string) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspaceId: string) => Promise<void>;
   isSharedView: (workspaceId: string) => boolean;
+  resolveDocumentPath: (
+    workspace: EngineYDocWorkspace,
+    path: string,
+  ) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
 }
 
@@ -132,14 +141,101 @@ function sameArtifactAsset(
   );
 }
 
+interface DocumentReservationState {
+  openings: number;
+  mutations: number;
+  tail: Promise<void>;
+}
+
+function liveDocumentMutationRefusal(): Error {
+  return new Error(
+    "The engine owns this live document. Close its editor before writing the file directly.",
+  );
+}
+
+/** Atomic admission shared by canonical Y.Doc opens and direct mutations. */
+class DocumentMutationReservations {
+  readonly #states = new Map<string, DocumentReservationState>();
+
+  reserveOpen(workspaceId: string, path: string): (() => void) | null {
+    const key = this.#key(workspaceId, path);
+    const state = this.#state(key);
+    if (state.mutations > 0) {
+      this.#deleteIdle(key, state);
+      return null;
+    }
+    state.openings += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      state.openings -= 1;
+      this.#deleteIdle(key, state);
+    };
+  }
+
+  runMutation<T>(
+    workspaceId: string,
+    path: string,
+    ownsDocument: () => boolean,
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    const key = this.#key(workspaceId, path);
+    const state = this.#state(key);
+    if (state.openings > 0 || ownsDocument()) {
+      this.#deleteIdle(key, state);
+      return Promise.reject(liveDocumentMutationRefusal());
+    }
+    state.mutations += 1;
+    const previous = state.tail;
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    state.tail = previous.then(() => turn);
+    return previous
+      .then(async () => {
+        if (ownsDocument()) throw liveDocumentMutationRefusal();
+        return mutation();
+      })
+      .finally(() => {
+        releaseTurn();
+        state.mutations -= 1;
+        this.#deleteIdle(key, state);
+      });
+  }
+
+  #state(key: string): DocumentReservationState {
+    const state = this.#states.get(key) ?? {
+      openings: 0,
+      mutations: 0,
+      tail: Promise.resolve(),
+    };
+    this.#states.set(key, state);
+    return state;
+  }
+
+  #key(workspaceId: string, path: string): string {
+    return `${workspaceId}\0${workspaceRelativePathIdentity(path)}`;
+  }
+
+  #deleteIdle(key: string, state: DocumentReservationState): void {
+    if (state.openings === 0 && state.mutations === 0) this.#states.delete(key);
+  }
+}
+
 class EngineYDocSessionIpc {
   readonly #generationOf: EngineYDocSessionIpcOptions["generationOf"];
   readonly #requireWorkspace: EngineYDocSessionIpcOptions["requireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
+  readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
+    "resolveDocumentPath"
+  ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #owner: EngineYDocIpcSessionOwner;
+  readonly #documentReservations = new DocumentMutationReservations();
   readonly #fileMutationPort: WorkspaceFileMutationYDocPort;
   readonly #cleanupHooked = new WeakSet<EngineYDocIpcSender>();
   readonly #trackedGeneration = new WeakMap<EngineYDocIpcSender, number>();
@@ -150,6 +246,7 @@ class EngineYDocSessionIpc {
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
     this.#isSharedView = options.isSharedView;
+    this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#owner = new EngineYDocSessionOwner({
       onOutbound: (outbound) => this.#send(outbound),
@@ -162,13 +259,18 @@ class EngineYDocSessionIpc {
       },
     });
     const fileMutationPort: WorkspaceFileMutationYDocPort = {
-      ownsDocument: (workspaceId: string, path: string) =>
-        this.#owner.ownsDocument(workspaceId, path),
-      forEachSessionUnderPath: (workspaceId, pathOrPrefix, visit) => {
+      withDocumentUnowned: (workspaceId, path, mutation) =>
+        this.#documentReservations.runMutation(
+          workspaceId,
+          path,
+          () => this.#owner.ownsDocument(workspaceId, path),
+          mutation,
+        ),
+      markDeletedUnderPath: (workspaceId, pathOrPrefix) => {
         this.#owner.forEachSessionUnderPath(
           workspaceId,
           pathOrPrefix,
-          (session) => visit({ markDeleted: () => session.markDeleted() }),
+          (session) => session.markDeleted(),
         );
       },
     };
@@ -182,14 +284,59 @@ class EngineYDocSessionIpc {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const workspace = this.#requireWorkspace(input.workspaceId);
     if (this.#isSharedView(workspace.workspaceId)) return unavailableOpen();
-
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
-    const path = validatedPath.normalized;
-    const requestedKind = liveDocumentKindForPath(path);
     const generation = this.#generationOf(sender.id);
+    let path: string | null;
+    try {
+      path = await this.#resolveDocumentPath(
+        workspace,
+        validatedPath.normalized,
+      );
+    } catch (error) {
+      this.#onError(
+        `[desktop] engine Y.Doc open could not resolve ${validatedPath.normalized}:`,
+        error,
+      );
+      return unavailableOpen();
+    }
+    if (
+      path === null ||
+      sender.isDestroyed() ||
+      this.#generationOf(sender.id) !== generation ||
+      this.#isSharedView(workspace.workspaceId)
+    ) {
+      return unavailableOpen();
+    }
+    const requestedKind = liveDocumentKindForPath(path);
     if (requestedKind === null) return unavailableOpen();
+    const releaseOpening = this.#documentReservations.reserveOpen(
+      workspace.workspaceId,
+      path,
+    );
+    if (!releaseOpening) return unavailableOpen();
+    try {
+      return await this.#openReserved(
+        sender,
+        input,
+        workspace,
+        path,
+        requestedKind,
+        generation,
+      );
+    } finally {
+      releaseOpening();
+    }
+  }
 
+  async #openReserved(
+    sender: EngineYDocIpcSender,
+    input: OpenPayload,
+    workspace: EngineYDocWorkspace,
+    path: string,
+    requestedKind: NonNullable<ReturnType<typeof liveDocumentKindForPath>>,
+    generation: number,
+  ): Promise<OpenResult> {
     let capture = this.#captureFor(workspace.workspaceId);
     if (!capture) {
       try {
@@ -209,6 +356,25 @@ class EngineYDocSessionIpc {
       if (!capture) return unavailableOpen();
     }
 
+    let currentPath: string | null;
+    try {
+      currentPath = await this.#resolveDocumentPath(workspace, path);
+    } catch (error) {
+      this.#onError(
+        `[desktop] engine Y.Doc open could not recheck ${path}:`,
+        error,
+      );
+      return unavailableOpen();
+    }
+    if (
+      currentPath === null ||
+      !workspaceRelativePathsEqual(currentPath, path) ||
+      sender.isDestroyed() ||
+      this.#generationOf(sender.id) !== generation ||
+      this.#isSharedView(workspace.workspaceId)
+    ) {
+      return unavailableOpen();
+    }
     this.#trackSender(sender, generation);
     const opened = await this.#owner.open({
       sender,

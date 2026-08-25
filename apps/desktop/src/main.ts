@@ -3739,6 +3739,16 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await openWorkspaceActivity(requireWorkspace(workspaceId));
   },
   isSharedView: (workspaceId) => sharedViewOf(workspaceId) !== null,
+  resolveDocumentPath: async (workspace, path) => {
+    try {
+      return (await resolveWorkspaceFile(workspace.rootPath, path, "write"))
+        .resolvedPath;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return null;
+      throw error;
+    }
+  },
   onError: (message, error) => {
     if (error === undefined) console.error(message);
     else console.error(message, error);
@@ -4020,7 +4030,7 @@ const shareMountCommands = createShareMountCommands({
   workspaceSummary: (workspaceId) =>
     workspaceSummaryFor(requireWorkspace(workspaceId)),
   refreshNativeWorkspaceSurfaces,
-  notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  notifyRenderer,
   logError: (message, error) => console.error(`[desktop] ${message}`, error),
 });
 

@@ -1316,24 +1316,34 @@ describe("restoreWorkspaceText", () => {
     expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# Before\n");
   });
 
-  it("keeps same-millisecond contained writes to one target independent", async () => {
+  it("deduplicates an identical image attachment without replacing a collision", async () => {
     const root = await makeWorkspace();
-    vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const asset = writeWorkspaceAsset(
-      root,
-      "notes/a.md",
-      new Uint8Array(20 * 1024 * 1024),
-    );
-    const restored = restoreWorkspaceText(root, "notes/a.md", "restored");
+    await mkdir(join(root, "assets"), { recursive: true });
+    await writeFile(join(root, "assets/pixel.png"), new Uint8Array([1, 2, 3]));
 
-    await expect(Promise.all([restored, asset])).resolves.toEqual([
-      undefined,
-      undefined,
-    ]);
-    expect(["restored".length, 20 * 1024 * 1024]).toContain(
-      (await readFile(join(root, "notes", "a.md"))).byteLength,
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
+    ).resolves.toBeUndefined();
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([4, 5, 6])),
+    ).rejects.toThrow(
+      "An image attachment already exists at assets/pixel.png with different content.",
     );
-    expect(await readdir(join(root, "notes"))).toEqual(["a.md"]);
+    expect(await readFile(join(root, "assets/pixel.png"))).toEqual(
+      Buffer.from([1, 2, 3]),
+    );
+    expect(await readdir(join(root, "assets"))).toEqual(["pixel.png"]);
+  });
+
+  it("refuses the asset writer for a document path", async () => {
+    const root = await makeWorkspace();
+
+    await expect(
+      writeWorkspaceAsset(root, "notes/a.md", new Uint8Array([1, 2, 3])),
+    ).rejects.toThrow(
+      "The attachment path must end with a supported image extension.",
+    );
+    expect(await readFile(join(root, "notes/a.md"), "utf8")).toBe("# A\n");
   });
 
   it("restores a valid long filename without extending its basename for staging", async () => {
@@ -1397,6 +1407,8 @@ describe("restoreWorkspaceText", () => {
 describe("mediaTypeForExtension", () => {
   it("maps known media types and falls back to octet-stream (never executable)", () => {
     expect(mediaTypeForExtension("a/b.png")).toBe("image/png");
+    expect(mediaTypeForExtension("a/b.avif")).toBe("image/avif");
+    expect(mediaTypeForExtension("a/b.bmp")).toBe("image/bmp");
     expect(mediaTypeForExtension("x.PDF")).toBe("application/pdf");
     expect(mediaTypeForExtension("voice.m4a")).toBe("audio/mp4");
     expect(mediaTypeForExtension("app.html")).toBe("application/octet-stream");
