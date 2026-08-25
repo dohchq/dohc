@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
 import { registerPluginIpcHandlers } from "./pluginIpcHandlers";
+import type { PluginPipeline } from "../plugins/PluginPipeline";
+import type { RegisteredPlugin } from "../plugins/pluginPanelRegistration";
 
 const directOperations = vi.hoisted(() => ({
   addOffer: vi.fn(),
@@ -298,15 +300,16 @@ function createHarness() {
       error: actionFailure.error,
     })),
   };
-  const registrations = new Map<string, typeof registration>([
-    [pluginStatus.id, registration],
+  const pipelineForHandlers = pipeline as unknown as PluginPipeline;
+  const registrations = new Map<string, RegisteredPlugin>([
+    [pluginStatus.id, registration as RegisteredPlugin],
   ]);
   const runtime = {
-    pipeline,
+    pipeline: pipelineForHandlers,
     registeredPlugin: vi.fn((pluginId: string) =>
-      pipeline.pluginRegistration() ?? registrations.get(pluginId)
+      pipelineForHandlers.pluginRegistration(pluginId) ?? registrations.get(pluginId)
     ),
-    rememberPlugin: vi.fn((remembered: typeof registration) => {
+    rememberPlugin: vi.fn((remembered: RegisteredPlugin) => {
       registrations.set(remembered.manifest.name, remembered);
       return remembered;
     }),
@@ -600,13 +603,13 @@ describe("plugin IPC handlers", () => {
 
   it("revalidates active workspace after command pipeline startup", async () => {
     const harness = createHarness();
-    const pipelineReady = deferred<PluginPipeline>();
-    harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+    const runtimeReady = deferred<typeof harness.runtime>();
+    harness.ensurePipeline.mockReturnValueOnce(runtimeReady.promise);
 
     const request = harness.invoke(CHANNELS.invokePluginCommand);
     await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
     harness.activeWorkspaceIdBySender.set(41, "workspace-2");
-    pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
+    runtimeReady.resolve(harness.runtime);
 
     await expect(request).rejects.toThrow("does not target the active workspace");
     expect(harness.pipeline.hostOwnership.runCommand).not.toHaveBeenCalled();
