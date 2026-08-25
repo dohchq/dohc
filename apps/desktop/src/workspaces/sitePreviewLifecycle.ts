@@ -4,6 +4,7 @@ import {
   type SiteProcessHandle,
   type StaticSitePreview,
 } from "./siteRunner";
+import { runInKeyedLane } from "../keyedLane";
 
 export type SitePreviewHandle = StaticSitePreview | SiteProcessHandle;
 
@@ -90,33 +91,6 @@ export function createSitePreviewStartRegistry() {
       abort(startsBySite.get(previewKey(workspaceId, siteRoot)) ?? []);
     },
   };
-}
-
-// The queued-lock algorithm itself is app-wide — main.ts reuses the exact
-// same shape for plugin panel/web-app/host-lifecycle locks too, each with
-// its own Map — so it's exported from here as the ONE implementation
-// instead of main.ts keeping a second, independently-drifting copy just to
-// serve those other maps.
-export async function withKeyedStartLock<T>(
-  locks: Map<string, Promise<void>>,
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = locks.get(key) ?? Promise.resolve();
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.catch(() => undefined).then(() => current);
-  locks.set(key, queued);
-
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (locks.get(key) === queued) locks.delete(key);
-  }
 }
 
 export function createSitePreviewLifecycle(input: {
@@ -290,7 +264,7 @@ export function createSitePreviewLifecycle(input: {
       siteRoot: string,
       operation: () => Promise<T>,
     ): Promise<T> {
-      return withKeyedStartLock(startLocks, previewKey(workspaceId, siteRoot), operation);
+      return runInKeyedLane(startLocks, previewKey(workspaceId, siteRoot), operation);
     },
   };
 }

@@ -608,9 +608,9 @@ import {
   createSitePreviewLifecycle,
   createSitePreviewStartRegistry,
   stopSitePreviewForRequest,
-  withKeyedStartLock,
   type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
+import { runInKeyedLane } from "./keyedLane";
 import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import { PluginHostOwnership } from "./plugins/pluginHostOwnership";
@@ -9388,7 +9388,7 @@ function registerIpcHandlers(
     const input = RebuildEngineStorePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    return withKeyedStartLock(
+    return runInKeyedLane(
       engineStoreRebuildLocks,
       workspace.workspaceId,
       async () => {
