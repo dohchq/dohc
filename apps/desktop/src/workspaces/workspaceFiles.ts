@@ -755,11 +755,24 @@ export async function createFolder(
 //      clobbers, so step 5 is the only overwrite guard; the check→rename
 //      TOCTOU window is accepted — main is the single writer on this path
 //      and the watcher records whatever actually happened.
-export async function movePath(
-  rootPath: string,
+export interface WorkspaceMovePaths {
+  fromPath: string;
+  toPath: string;
+}
+
+export interface PreparedWorkspaceMove {
+  // Engine coordination and the filesystem commit use canonical physical
+  // spellings. The IPC result keeps the normalized spelling the user asked
+  // for, even when an alias led to a differently spelled source or parent.
+  physicalFromPath: string;
+  physicalToPath: string;
+  visibleResultPath: string;
+}
+
+export function normalizeWorkspaceMovePaths(
   fromPath: string,
   toPath: string,
-): Promise<string> {
+): WorkspaceMovePaths {
   const fromValidated = validateUserWritePath(fromPath);
   if (!fromValidated.ok) {
     throw new Error(`Invalid move source (${fromValidated.reason}): ${fromPath}`);
@@ -774,9 +787,28 @@ export async function movePath(
   ) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
+  return {
+    fromPath: fromValidated.normalized,
+    toPath: toValidated.normalized,
+  };
+}
+
+interface InspectedWorkspaceMove extends PreparedWorkspaceMove {
+  realRoot: string;
+  from: string;
+  to: string;
+  realFrom: string;
+}
+
+async function inspectWorkspaceMove(
+  rootPath: string,
+  fromPath: string,
+  toPath: string,
+): Promise<InspectedWorkspaceMove> {
+  const normalized = normalizeWorkspaceMovePaths(fromPath, toPath);
   const realRoot = await realpath(rootPath);
-  const absFrom = join(rootPath, fromValidated.normalized);
-  const absTo = join(rootPath, toValidated.normalized);
+  const absFrom = join(rootPath, normalized.fromPath);
+  const absTo = join(rootPath, normalized.toPath);
   // A move leaks BOTH ways through an alias: `meta/manifest.json -> leak.json`
   // (meta -> .dohc) lifts workspace state into the visible tree, and
   // `notes.md -> meta/notes.md` buries a user file in it.
@@ -788,8 +820,6 @@ export async function movePath(
   // which a rename needs: resolving the destination would answer with the
   // existing file's casing on a case-insensitive filesystem and turn a
   // case-only rename into a no-op.
-  //
-  // Every check and the rename itself then run on those two resolutions.
   const { resolvedAbsolute: from } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absFrom,
@@ -797,7 +827,10 @@ export async function movePath(
     label: "Move source",
     access: "entry",
   });
-  const { resolvedAbsolute: to } = await assertResolvedWorkspacePath({
+  const {
+    relative: resolvedToPath,
+    resolvedAbsolute: to,
+  } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absTo,
     spelled: toPath,
@@ -812,13 +845,91 @@ export async function movePath(
   if (sourceStat.isSymbolicLink()) {
     throw new Error(`Refusing to move a symlink: ${fromPath}`);
   }
-  // Canonical source — used both for the descendant guard below and the
-  // case-only-rename carve-out. The symlink refusal above means realpath here
-  // resolves only ancestor links, never the source itself.
+  // The source is not a symlink, so realpath resolves ancestor links only.
   const realFrom = await realpath(from);
-  if (!isInside(realRoot, await existingAncestor(dirname(to)))) {
+  const realDestAncestor = await existingAncestor(dirname(to));
+  if (!isInside(realRoot, realDestAncestor)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
+  if (isInside(realFrom, realDestAncestor)) {
+    throw new Error(`Cannot move a path into itself: ${fromPath}`);
+  }
+  const destExists = await lstat(to).then(
+    () => true,
+    () => false,
+  );
+  if (destExists && realFrom !== (await realpath(to))) {
+    throw new Error(`Destination already exists: ${toPath}`);
+  }
+  return {
+    // The source already exists, so give engine coordination its physical
+    // spelling. On Windows, an IPC case alias still reaches the same entry,
+    // but the engine keys stable objects by their canonical workspace path.
+    physicalFromPath: relative(realRoot, realFrom).replaceAll("\\", "/"),
+    physicalToPath: resolvedToPath.replaceAll("\\", "/"),
+    visibleResultPath: normalized.toPath,
+    realRoot,
+    from,
+    to,
+    realFrom,
+  };
+}
+
+/** Prove and canonicalize both endpoints before engine rename preparation. */
+export async function prepareWorkspaceMove(
+  rootPath: string,
+  fromPath: string,
+  toPath: string,
+): Promise<PreparedWorkspaceMove> {
+  const inspected = await inspectWorkspaceMove(rootPath, fromPath, toPath);
+  return {
+    physicalFromPath: inspected.physicalFromPath,
+    physicalToPath: inspected.physicalToPath,
+    visibleResultPath: inspected.visibleResultPath,
+  };
+}
+
+/** Prove and canonicalize a delete target before engine settlement. */
+export async function prepareWorkspaceDelete(
+  rootPath: string,
+  relativePath: string,
+): Promise<string> {
+  const validated = validateUserWritePath(relativePath);
+  if (!validated.ok) {
+    throw new Error(
+      `Invalid delete path (${validated.reason}): ${relativePath}`,
+    );
+  }
+  const { relative: resolvedPath, resolvedAbsolute } =
+    await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Delete path",
+    access: "entry",
+  });
+  // A symlink delete removes the alias itself, so its spelled leaf remains the
+  // engine boundary. Every other existing entry can be resolved to its
+  // physical spelling. On a case-insensitive directory that collapses case
+  // aliases; on a case-sensitive Windows directory distinct names stay
+  // distinct.
+  if ((await lstat(resolvedAbsolute)).isSymbolicLink()) {
+    return resolvedPath.replaceAll("\\", "/");
+  }
+  const realRoot = await realpath(rootPath);
+  const realEntry = await realpath(resolvedAbsolute);
+  return relative(realRoot, realEntry).replaceAll("\\", "/");
+}
+
+export async function movePath(
+  rootPath: string,
+  fromPath: string,
+  toPath: string,
+): Promise<string> {
+  // Repeat the inspection after engine preparation so its await cannot turn
+  // the earlier proof into a commit-time TOCTOU gap.
+  const { visibleResultPath, realRoot, from, to, realFrom } =
+    await inspectWorkspaceMove(rootPath, fromPath, toPath);
   await mkdir(dirname(to), { recursive: true });
   const realDestParent = await realpath(dirname(to));
   if (!isInside(realRoot, realDestParent)) {
@@ -853,7 +964,7 @@ export async function movePath(
   // main is the single writer on this path and Node exposes no renameat2
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
   await rename(from, to);
-  return toValidated.normalized;
+  return visibleResultPath;
 }
 
 // Deletes are always RECOVERABLE — never a hard delete:

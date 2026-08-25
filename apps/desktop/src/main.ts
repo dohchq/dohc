@@ -9,7 +9,6 @@ import {
 } from "@dohc/workspace-core";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { randomUUID } from "node:crypto";
-import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
   CHATS_METHOD,
   VersionedLiveAdapter,
@@ -44,12 +43,6 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
-  CreateWorkspaceFilePayload,
-  CreateWorkspaceFileResult,
-  CreateWorkspaceFolderPayload,
-  MoveWorkspacePathPayload,
-  DeleteWorkspacePathPayload,
-  DeleteWorkspacePathResult,
   ExportWorkspaceZipPayload,
   ExportWorkspaceZipResult,
   ExportDocumentFilePayload,
@@ -230,9 +223,6 @@ import {
   ReadWorkspaceDatabasePayload,
   ReadWorkspaceTextPayload,
   ReadWorkspaceTextResult,
-  WriteWorkspaceTextPayload,
-  WriteWorkspaceTextResult,
-  WriteWorkspaceAssetPayload,
   MAX_PICKED_IMAGES,
   PickImageFilesPayload,
   PickImageFilesResult,
@@ -267,6 +257,7 @@ import { createSitesIpcHandlers } from "./ipc/sitesIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
 // ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
@@ -350,7 +341,6 @@ import {
 } from "./workspaces/shareViewMarker";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaces/workspaceTextLimits";
 import {
-  SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
   shareViewTakesLocalWrites,
   workspaceWriteRefusal,
 } from "./workspaces/shareWriteGate";
@@ -464,7 +454,6 @@ import {
   assertRealMountRoot,
   overlayCanonicalShareMountFiles,
   refuseImportIntoShareProjection,
-  refuseMoveAcrossShareMount,
   resolveShareMountPath,
   shareViewFilesMountProjection,
   shareMountRecordsForId,
@@ -673,14 +662,11 @@ import {
   resolveWorkspaceFile,
   withExclusiveWorkspaceOperation,
   withStaleSensitiveWorkspaceOperation,
-  writeWorkspaceAsset,
-  writeWorkspaceText,
 } from "./workspaces/workspaceAssets";
 import {
   createShareViewFiles,
   shareViewFilesStore,
   type ShareViewFileChangeOutcome,
-  type ShareViewFileChangeValue,
   type ShareViewFiles,
   type ShareViewFilesTarget,
 } from "./workspaces/shareViewFiles";
@@ -716,14 +702,10 @@ import {
 } from "./workspaces/chatBookmarkProjectionWrite";
 import {
   copyIntoWorkspace,
-  createFile,
-  createFolder,
-  deletePath,
   importDroppedPaths,
   listFiles,
   MAX_ZIP_ENTRIES,
   MAX_ZIP_TOTAL_BYTES,
-  movePath,
   ZIP_TOO_LARGE_REFUSAL,
 } from "./workspaces/workspaceFiles";
 import { explorerMenuEntries } from "./workspaces/explorerMenu";
@@ -3757,6 +3739,16 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     await openWorkspaceActivity(requireWorkspace(workspaceId));
   },
   isSharedView: (workspaceId) => sharedViewOf(workspaceId) !== null,
+  resolveDocumentPath: async (workspace, path) => {
+    try {
+      return (await resolveWorkspaceFile(workspace.rootPath, path, "write"))
+        .resolvedPath;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return null;
+      throw error;
+    }
+  },
   onError: (message, error) => {
     if (error === undefined) console.error(message);
     else console.error(message, error);
@@ -4142,6 +4134,16 @@ shareViewFiles = createShareViewFiles({
   createMount: shareMountCommands.filesLifecycle.createMount,
   removeMount: shareMountCommands.filesLifecycle.removeMount,
 });
+const workspaceFileMutations = createWorkspaceFileMutationOwner({
+  assertTrustedSender,
+  requireWorkspace,
+  engineCaptureFor: (workspaceId) => activity.engineCaptureFor(workspaceId),
+  yDocSessions: engineYDocSessionIpc.fileMutationPort(),
+  shareViewFiles,
+  trashItem: (path) => shell.trashItem(path),
+  notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
+  logError: (message, error) => console.error(message, error),
+});
 const ensureOwnedProjectionTargetCurrent =
   createOwnedProjectionRepairer(shareViewFiles);
 
@@ -4368,26 +4370,6 @@ async function syncStatusWithOwnedProjection(
         ? { state: "current" }
         : projection,
   };
-}
-
-function committedShareViewChangeValue(
-  workspaceId: string,
-  outcome: ShareViewFileChangeOutcome,
-): ShareViewFileChangeValue {
-  if (outcome.status === "committed") {
-    if (outcome.projection === "pending") notifyRenderer({ workspaceId });
-    return outcome.value;
-  }
-  notifyRenderer({ workspaceId });
-  console.error("[desktop] shared file change did not finish cleanly", outcome);
-  if (outcome.status === "partial") {
-    throw new Error(
-      "Part of the shared file change completed before the operation stopped. Refresh the shared view before you continue.",
-    );
-  }
-  throw new Error(
-    "dohc could not confirm whether the shared file changed. Refresh the shared view before you continue.",
-  );
 }
 
 function shareViewImportResult(
@@ -4882,200 +4864,13 @@ function registerIpcHandlers(
     );
   });
 
-  ipcMain.handle(CHANNELS.createWorkspaceFile, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateWorkspaceFilePayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const shareView = sharedViewOf(workspace.workspaceId);
-    if (shareView === null) assertWritableWorkspace(workspace);
-    return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
-      const path =
-        shareView === null
-          ? await createFile(
-              workspace.rootPath,
-              input.relativePath,
-              input.initialText,
-            )
-          : committedShareViewChangeValue(
-              workspace.workspaceId,
-              await shareViewFiles.change(
-                lease,
-                { kind: "standalone", workspaceId: workspace.workspaceId },
-                {
-                  kind: "create",
-                  path: input.relativePath,
-                  initialText: input.initialText,
-                },
-              ),
-            );
-      if (typeof path !== "string") {
-        throw new Error("Shared file create returned an invalid result.");
-      }
-      return CreateWorkspaceFileResult.parse({ path });
-    });
-  });
-
-  ipcMain.handle(CHANNELS.createWorkspaceFolder, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateWorkspaceFolderPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    if (sharedViewOf(workspace.workspaceId) !== null) {
-      throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
-    }
-    assertWritableWorkspace(workspace);
-    return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async () => {
-      const path = await createFolder(workspace.rootPath, input.relativePath);
-      return CreateWorkspaceFileResult.parse({ path });
-    });
-  });
-
-  ipcMain.handle(CHANNELS.moveWorkspacePath, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = MoveWorkspacePathPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const shareView = sharedViewOf(workspace.workspaceId);
-    if (shareView === null) assertWritableWorkspace(workspace);
-    return withExclusiveWorkspaceOperation(
-      workspace.rootPath,
-      async (markWorkspaceChanged, lease) => {
-        if (shareView === null) {
-          await refuseMoveAcrossShareMount(
-            workspace.rootPath,
-            input.fromPath,
-            input.toPath,
-            storedShareMounts(workspace),
-            shareMountRegistryIsPresent(workspace),
-          );
-        }
-        // Flagged workspaces coordinate single-file renames through the engine
-        // FIRST so the file keeps its stable object id (linked Chats survive the
-        // rename). Anything the engine declines — folders, binary, untracked —
-        // returns a no-op finisher and is captured as delete+write as before.
-        const capture = activity.engineCaptureFor(workspace.workspaceId);
-        // An engine rename preserves the stable object and its Y.Doc kind,
-        // but the editor for the new path is chosen by suffix. A rename out
-        // of a live kind strands the document between them: a drawing
-        // renamed `.md` hands its portable JSON to a raw autosave editor
-        // beside the still-canonical scene, and a drawing renamed `.txt`
-        // keeps a scene lineage no text editor or Markdown fold can update.
-        // Kind changes go through a new file, not a rename.
-        const fromKind = liveDocumentKindForPath(input.fromPath);
-        const toKind = liveDocumentKindForPath(input.toPath);
-        // A share view's rename keeps the object too — it renames the engine
-        // record — so it takes the same refusal. Its files have no capture.
-        const keepsTheObject = capture !== null || shareView !== null;
-        if (keepsTheObject && fromKind !== null && fromKind !== toKind) {
-          throw new Error(
-            `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`,
-          );
-        }
-        const finishRename = capture
-          ? await capture.beginFileRename(input.fromPath, input.toPath)
-          : null;
-        try {
-          const path =
-            shareView === null
-              ? await movePath(
-                  workspace.rootPath,
-                  input.fromPath,
-                  input.toPath,
-                )
-              : committedShareViewChangeValue(
-                  workspace.workspaceId,
-                  await shareViewFiles.change(
-                    lease,
-                    {
-                      kind: "standalone",
-                      workspaceId: workspace.workspaceId,
-                    },
-                    {
-                      kind: "move",
-                      fromPath: input.fromPath,
-                      toPath: input.toPath,
-                    },
-                  ),
-                );
-          if (typeof path !== "string") {
-            throw new Error("Shared file move returned an invalid result.");
-          }
-          markWorkspaceChanged();
-          await finishRename?.(true);
-          return CreateWorkspaceFileResult.parse({ path });
-        } catch (error) {
-          await finishRename?.(false);
-          throw error;
-        }
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.deleteWorkspacePath, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = DeleteWorkspacePathPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const shareView = sharedViewOf(workspace.workspaceId);
-    if (shareView === null) assertWritableWorkspace(workspace);
-    return withExclusiveWorkspaceOperation(
-      workspace.rootPath,
-      async (markWorkspaceChanged, lease) => {
-        // WS-G2-C-2 (gate fix 3): a live Y.Doc session over the path being removed
-        // would, on a later settle, resurrect the file / orphan the object. Flush +
-        // release it (and any session under a deleted folder) BEFORE the disk delete
-        // so no stale settle can write the old path afterward.
-        const finishDebts =
-          shareView === null
-            ? await activity
-                .engineCaptureFor(workspace.workspaceId)
-                ?.settleAndCloseLiveSessionsForPath(input.relativePath)
-            : undefined;
-        // shell.trashItem first (recoverable on every platform); deletePath
-        // falls back to the workspace's .dohc/trash where the OS rejects
-        // (cross-filesystem mounts) — never a hard delete either way.
-        //
-        // The finisher takes the OUTCOME (#595): a pending locked write is
-        // cancelled only once the path is provably gone. The same no-share
-        // handle that blocks the write can block the trash and the fallback
-        // move, and a failed delete leaves a file that still owes its write.
-        try {
-          const result =
-            shareView === null
-              ? await deletePath(
-                  workspace.rootPath,
-                  input.relativePath,
-                  (path) => shell.trashItem(path),
-                )
-              : committedShareViewChangeValue(
-                  workspace.workspaceId,
-                  await shareViewFiles.change(
-                    lease,
-                    {
-                      kind: "standalone",
-                      workspaceId: workspace.workspaceId,
-                    },
-                    { kind: "delete", path: input.relativePath },
-                  ),
-                );
-          if (
-            typeof result !== "object" ||
-            result === null ||
-            !("trashed" in result)
-          ) {
-            throw new Error("Shared file delete returned an invalid result.");
-          }
-          markWorkspaceChanged();
-          engineYDocSessionIpc.notifyDeleted(
-            workspace.workspaceId,
-            input.relativePath,
-          );
-          finishDebts?.(true);
-          return DeleteWorkspacePathResult.parse(result);
-        } catch (error) {
-          finishDebts?.(false);
-          throw error;
-        }
-      },
-    );
-  });
+  ipcMain.handle(CHANNELS.createWorkspaceFile, workspaceFileMutations.createFile);
+  ipcMain.handle(
+    CHANNELS.createWorkspaceFolder,
+    workspaceFileMutations.createFolder,
+  );
+  ipcMain.handle(CHANNELS.moveWorkspacePath, workspaceFileMutations.movePath);
+  ipcMain.handle(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
 
   ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
     assertTrustedSender(event);
@@ -5421,60 +5216,8 @@ function registerIpcHandlers(
     );
   });
 
-  ipcMain.handle(CHANNELS.writeWorkspaceText, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WriteWorkspaceTextPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    const shareView = sharedViewOf(workspace.workspaceId);
-    if (shareView === null) assertWritableWorkspace(workspace);
-    if (
-      engineYDocSessionIpc.ownsDocument(
-        workspace.workspaceId,
-        input.relativePath,
-      )
-    ) {
-      throw new Error(
-        "The engine owns this live document. Close its editor before writing the file directly.",
-      );
-    }
-    const result = await withStaleSensitiveWorkspaceOperation(
-      workspace.rootPath,
-      async (lease) =>
-        shareView === null
-          ? writeWorkspaceText(
-              workspace.rootPath,
-              input.relativePath,
-              input.text,
-              input.expectedContentHash,
-            )
-          : committedShareViewChangeValue(
-              workspace.workspaceId,
-              await shareViewFiles.change(
-                lease,
-                { kind: "standalone", workspaceId: workspace.workspaceId },
-                {
-                  kind: "save",
-                  path: input.relativePath,
-                  text: input.text,
-                  expectedContentHash: input.expectedContentHash,
-                },
-              ),
-            ),
-    );
-    return WriteWorkspaceTextResult.parse(result);
-  });
-
-  ipcMain.handle(CHANNELS.writeWorkspaceAsset, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WriteWorkspaceAssetPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(workspace);
-    await writeWorkspaceAsset(
-      workspace.rootPath,
-      input.relativePath,
-      input.bytes,
-    );
-  });
+  ipcMain.handle(CHANNELS.writeWorkspaceText, workspaceFileMutations.writeText);
+  ipcMain.handle(CHANNELS.writeWorkspaceAsset, workspaceFileMutations.writeAsset);
 
   // `/image`: a native open dialog that STARTS AT THE WORKSPACE ROOT (a
   // renderer <input type="file"> cannot set a starting directory), then reads

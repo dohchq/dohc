@@ -44,6 +44,13 @@ import {
   type EngineYDocSessionReleaseOutcome,
 } from "./engineYDocSessionOwner";
 import {
+  workspaceRelativePathIdentity,
+  workspaceRelativePathsEqual,
+} from "./workspaceRelativePathIdentity";
+import type {
+  WorkspaceFileMutationYDocPort,
+} from "./workspaceFileMutationOwner";
+import {
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
@@ -65,6 +72,7 @@ export type EngineYDocSessionCapture = Pick<
 
 interface EngineYDocWorkspace {
   workspaceId: string;
+  rootPath: string;
 }
 
 interface EngineYDocSessionIpcOptions {
@@ -73,6 +81,10 @@ interface EngineYDocSessionIpcOptions {
   captureFor: (workspaceId: string) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspaceId: string) => Promise<void>;
   isSharedView: (workspaceId: string) => boolean;
+  resolveDocumentPath: (
+    workspace: EngineYDocWorkspace,
+    path: string,
+  ) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
 }
 
@@ -87,7 +99,7 @@ interface LineageReplacement {
   artifactAssets: readonly ArtifactAssetDescriptor[];
 }
 
-interface OwnedSession {
+interface EngineYDocIpcOwnedSession {
   workspaceId: string;
   provider: WorkspaceEngineYDocProviderSession;
   saveSeq: EngineYDocSaveSeqState;
@@ -95,12 +107,13 @@ interface OwnedSession {
   retiredArtifactAssets: ArtifactAssetDescriptor[];
   deleted: boolean;
   emit: (event: SessionEvent) => void;
+  markDeleted(): void;
   close: WorkspaceEngineYDocProviderSession["close"];
 }
 
-type SessionOwner = EngineYDocSessionOwner<
+type EngineYDocIpcSessionOwner = EngineYDocSessionOwner<
   EngineYDocIpcSender,
-  OwnedSession,
+  EngineYDocIpcOwnedSession,
   SessionEvent,
   Uint8Array,
   LineageReplacement
@@ -128,14 +141,101 @@ function sameArtifactAsset(
   );
 }
 
+interface DocumentReservationState {
+  openings: number;
+  mutations: number;
+  tail: Promise<void>;
+}
+
+function liveDocumentMutationRefusal(): Error {
+  return new Error(
+    "The engine owns this live document. Close its editor before writing the file directly.",
+  );
+}
+
+/** Atomic admission shared by canonical Y.Doc opens and direct mutations. */
+class DocumentMutationReservations {
+  readonly #states = new Map<string, DocumentReservationState>();
+
+  async reserveOpen(workspaceId: string, path: string): Promise<() => void> {
+    const key = this.#key(workspaceId, path);
+    const state = this.#state(key);
+    const admittedMutations = state.tail;
+    state.openings += 1;
+    await admittedMutations;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      state.openings -= 1;
+      this.#deleteIdle(key, state);
+    };
+  }
+
+  runMutation<T>(
+    workspaceId: string,
+    path: string,
+    ownsDocument: () => boolean,
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    const key = this.#key(workspaceId, path);
+    const state = this.#state(key);
+    if (state.openings > 0 || ownsDocument()) {
+      this.#deleteIdle(key, state);
+      return Promise.reject(liveDocumentMutationRefusal());
+    }
+    state.mutations += 1;
+    const previous = state.tail;
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    state.tail = previous.then(() => turn);
+    return previous
+      .then(async () => {
+        if (ownsDocument()) throw liveDocumentMutationRefusal();
+        return mutation();
+      })
+      .finally(() => {
+        releaseTurn();
+        state.mutations -= 1;
+        this.#deleteIdle(key, state);
+      });
+  }
+
+  #state(key: string): DocumentReservationState {
+    const state = this.#states.get(key) ?? {
+      openings: 0,
+      mutations: 0,
+      tail: Promise.resolve(),
+    };
+    this.#states.set(key, state);
+    return state;
+  }
+
+  #key(workspaceId: string, path: string): string {
+    const pathIdentity = workspaceRelativePathIdentity(path);
+    return `${workspaceId}\0${pathIdentity}`;
+  }
+
+  #deleteIdle(key: string, state: DocumentReservationState): void {
+    if (state.openings === 0 && state.mutations === 0) this.#states.delete(key);
+  }
+}
+
 class EngineYDocSessionIpc {
   readonly #generationOf: EngineYDocSessionIpcOptions["generationOf"];
   readonly #requireWorkspace: EngineYDocSessionIpcOptions["requireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
   readonly #ensureCaptureFor: EngineYDocSessionIpcOptions["ensureCaptureFor"];
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
+  readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
+    "resolveDocumentPath"
+  ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
-  readonly #owner: SessionOwner;
+  readonly #owner: EngineYDocIpcSessionOwner;
+  readonly #documentReservations: DocumentMutationReservations;
+  readonly #fileMutationPort: WorkspaceFileMutationYDocPort;
   readonly #cleanupHooked = new WeakSet<EngineYDocIpcSender>();
   readonly #trackedGeneration = new WeakMap<EngineYDocIpcSender, number>();
 
@@ -145,7 +245,9 @@ class EngineYDocSessionIpc {
     this.#captureFor = options.captureFor;
     this.#ensureCaptureFor = options.ensureCaptureFor;
     this.#isSharedView = options.isSharedView;
+    this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
+    this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
       onOutbound: (outbound) => this.#send(outbound),
       onReleaseFailed: ({ path, error }) => {
@@ -156,6 +258,23 @@ class EngineYDocSessionIpc {
         );
       },
     });
+    const fileMutationPort: WorkspaceFileMutationYDocPort = {
+      withDocumentUnowned: (workspaceId, path, mutation) =>
+        this.#documentReservations.runMutation(
+          workspaceId,
+          path,
+          () => this.#owner.ownsDocument(workspaceId, path),
+          mutation,
+        ),
+      markDeletedUnderPath: (workspaceId, pathOrPrefix) => {
+        this.#owner.forEachSessionUnderPath(
+          workspaceId,
+          pathOrPrefix,
+          (session) => session.markDeleted(),
+        );
+      },
+    };
+    this.#fileMutationPort = Object.freeze(fileMutationPort);
   }
 
   async open(
@@ -165,21 +284,79 @@ class EngineYDocSessionIpc {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const workspace = this.#requireWorkspace(input.workspaceId);
     if (this.#isSharedView(workspace.workspaceId)) return unavailableOpen();
-
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
-    const path = validatedPath.normalized;
-    const requestedKind = liveDocumentKindForPath(path);
+    const requestedSpellingKind = liveDocumentKindForPath(
+      validatedPath.normalized,
+    );
     const generation = this.#generationOf(sender.id);
-    if (requestedKind === null) return unavailableOpen();
+    let canonicalPath: string | null;
+    try {
+      canonicalPath = await this.#resolveDocumentPath(
+        workspace,
+        validatedPath.normalized,
+      );
+    } catch (error) {
+      this.#onError(
+        `[desktop] engine Y.Doc open could not resolve ${validatedPath.normalized}:`,
+        error,
+      );
+      return requestedSpellingKind === null
+        ? unavailableOpen()
+        : unavailableOpen({ documentUnavailable: true });
+    }
+    if (
+      sender.isDestroyed() ||
+      this.#generationOf(sender.id) !== generation ||
+      this.#isSharedView(workspace.workspaceId)
+    ) {
+      return unavailableOpen();
+    }
+    if (canonicalPath === null) {
+      return requestedSpellingKind === null
+        ? unavailableOpen()
+        : unavailableOpen({ documentUnavailable: true });
+    }
+    const canonicalKind = liveDocumentKindForPath(canonicalPath);
+    if (requestedSpellingKind !== canonicalKind) {
+      return unavailableOpen({ documentUnavailable: true });
+    }
+    if (canonicalKind === null) return unavailableOpen();
+    const releaseOpening = await this.#documentReservations.reserveOpen(
+      workspace.workspaceId,
+      canonicalPath,
+    );
+    try {
+      return await this.#openReserved(
+        sender,
+        input,
+        workspace,
+        canonicalPath,
+        validatedPath.normalized,
+        canonicalKind,
+        generation,
+      );
+    } finally {
+      releaseOpening();
+    }
+  }
 
+  async #openReserved(
+    sender: EngineYDocIpcSender,
+    input: OpenPayload,
+    workspace: EngineYDocWorkspace,
+    canonicalPath: string,
+    requestedPath: string,
+    documentKind: NonNullable<ReturnType<typeof liveDocumentKindForPath>>,
+    generation: number,
+  ): Promise<OpenResult> {
     let capture = this.#captureFor(workspace.workspaceId);
     if (!capture) {
       try {
         await this.#ensureCaptureFor(workspace.workspaceId);
       } catch (error) {
         this.#onError(
-          `[desktop] engine Y.Doc open could not open the workspace activity for ${path}:`,
+          `[desktop] engine Y.Doc open could not open the workspace activity for ${canonicalPath}:`,
           error,
         );
       }
@@ -192,13 +369,36 @@ class EngineYDocSessionIpc {
       if (!capture) return unavailableOpen();
     }
 
+    let currentPath: string | null;
+    try {
+      currentPath = await this.#resolveDocumentPath(workspace, requestedPath);
+    } catch (error) {
+      this.#onError(
+        `[desktop] engine Y.Doc open could not recheck ${canonicalPath}:`,
+        error,
+      );
+      return unavailableOpen({ documentUnavailable: true });
+    }
+    if (
+      currentPath === null ||
+      !workspaceRelativePathsEqual(currentPath, canonicalPath)
+    ) {
+      return unavailableOpen({ documentUnavailable: true });
+    }
+    if (
+      sender.isDestroyed() ||
+      this.#generationOf(sender.id) !== generation ||
+      this.#isSharedView(workspace.workspaceId)
+    ) {
+      return unavailableOpen();
+    }
     this.#trackSender(sender, generation);
     const opened = await this.#owner.open({
       sender,
       generation,
       sessionId: input.sessionId,
       workspaceId: workspace.workspaceId,
-      path,
+      path: canonicalPath,
       openSession: async (signals) => {
         const saveSeq = createEngineYDocSaveSeqState();
         let delivery: "pending" | "active" | "discarded" = "pending";
@@ -210,8 +410,8 @@ class EngineYDocSessionIpc {
         let provider: WorkspaceEngineYDocProviderSession;
         try {
           provider = await capture.openYDocSession({
-            path,
-            contentKind: requestedKind,
+            path: canonicalPath,
+            contentKind: documentKind,
             onSaveState: (state, token) => {
               const seq =
                 state === "settling"
@@ -238,7 +438,7 @@ class EngineYDocSessionIpc {
           throw error;
         }
 
-        const owned: OwnedSession = {
+        const owned: EngineYDocIpcOwnedSession = {
           workspaceId: workspace.workspaceId,
           provider,
           saveSeq,
@@ -251,9 +451,13 @@ class EngineYDocSessionIpc {
           retiredArtifactAssets: [],
           deleted: false,
           emit: signals.emit,
+          markDeleted() {
+            owned.deleted = true;
+            owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
+          },
           close: (options) => provider.close(options),
         };
-        if (provider.contentKind === requestedKind) {
+        if (provider.contentKind === documentKind) {
           delivery = "active";
           for (const send of pending.splice(0)) send();
         } else {
@@ -266,10 +470,10 @@ class EngineYDocSessionIpc {
 
     if (opened.kind === "opened") {
       const owned = opened.value;
-      if (owned.provider.contentKind !== requestedKind) {
+      if (owned.provider.contentKind !== documentKind) {
         this.#onError(
-          `[desktop] engine Y.Doc open for ${path} came back ${owned.provider.contentKind}; ` +
-            `the editor requested ${requestedKind} (kind-mismatched lineage).`,
+          `[desktop] engine Y.Doc open for ${canonicalPath} came back ${owned.provider.contentKind}; ` +
+            `the editor requested ${documentKind} (kind-mismatched lineage).`,
         );
         const release = await this.#owner.release({
           sender,
@@ -304,7 +508,10 @@ class EngineYDocSessionIpc {
     }
     if (opened.reason !== "open-refused") return unavailableOpen();
 
-    this.#onError(`[desktop] engine Y.Doc open refused for ${path}:`, opened.error);
+    this.#onError(
+      `[desktop] engine Y.Doc open refused for ${canonicalPath}:`,
+      opened.error,
+    );
     return this.#openRefusal(opened.error);
   }
 
@@ -431,25 +638,8 @@ class EngineYDocSessionIpc {
     return this.#owner.shutdown();
   }
 
-  ownsDocument(workspaceId: string, path: string): boolean {
-    const validatedPath = validateUserWritePath(path);
-    return (
-      validatedPath.ok &&
-      this.#owner.ownsDocument(workspaceId, validatedPath.normalized)
-    );
-  }
-
-  notifyDeleted(workspaceId: string, pathOrPrefix: string): void {
-    const validatedPath = validateUserWritePath(pathOrPrefix);
-    if (!validatedPath.ok) return;
-    this.#owner.forEachSessionUnderPath(
-      workspaceId,
-      validatedPath.normalized,
-      (owned) => {
-        owned.deleted = true;
-        owned.emit({ state: "deleted", seq: owned.saveSeq.dirtySeq });
-      },
-    );
+  fileMutationPort(): WorkspaceFileMutationYDocPort {
+    return this.#fileMutationPort;
   }
 
   #trackSender(sender: EngineYDocIpcSender, generation: number): void {

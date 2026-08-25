@@ -36,12 +36,9 @@ export interface EngineYDocTransport {
   // Declare format-owned top-level roots before the initial engine update is
   // applied. This prevents Yjs from inferring an incompatible shared type.
   initializeDoc?(doc: Y.Doc): void;
-  // Open the engine session in main. available:false => not an engine-backed
-  // doc (unflagged workspace, secret path, or already live) — the caller falls
-  // back to the plain local editor. notInVersion:true is the ONE available:false
-  // that must not fall back that way: the path is not in the version this
-  // workspace is on, and the plain editor's autosave would write it back as a
-  // phantom file (#534).
+  // Open the engine session in main. An unqualified available:false means the
+  // caller may use the plain local editor. The refusal fields below are named
+  // no-downgrade outcomes: the caller must not expose a writable plain editor.
   open(): Promise<{
     available: boolean;
     initialUpdate?: Uint8Array;
@@ -50,8 +47,10 @@ export interface EngineYDocTransport {
     artifactAssets?: readonly ArtifactAssetDescriptor[];
     lineageGeneration?: number;
     notInVersion?: boolean;
+    // Main could no longer resolve the live file at the path the renderer read.
+    documentUnavailable?: boolean;
     // A session for this document may still be the engine's (#564, #657) —
-    // the other available:false that must not fall back to the plain editor.
+    // This available:false must not fall back to the plain editor.
     engineMayHoldDocument?: boolean;
     // The canonical drawing has image records that conflict with storage.
     // This terminal state stays read-only and must not offer a retry.
@@ -219,6 +218,8 @@ export interface EngineYDocBinding {
   // The path is not in the version this workspace is on. The caller must stop
   // editing the document, not downgrade it to the writable plain editor.
   readonly notInVersion: boolean;
+  // Main could no longer resolve the live file at the path the renderer read.
+  readonly documentUnavailable: boolean;
   // A session for this document may still be the engine's (#564, #657). The
   // caller keeps the document read-only with the reason stated and a retry
   // offered — the same no-downgrade rule as notInVersion.
@@ -282,6 +283,7 @@ export async function bindEngineYDoc(
       objectId: null,
       versionId: null,
       notInVersion: opened.notInVersion === true,
+      documentUnavailable: opened.documentUnavailable === true,
       engineMayHoldDocument: opened.engineMayHoldDocument === true,
       artifactAssetsInvalid: opened.artifactAssetsInvalid === true,
       removalInProgress: opened.removalInProgress ?? null,
@@ -577,6 +579,7 @@ export async function bindEngineYDoc(
     objectId: opened.objectId ?? null,
     versionId: opened.versionId ?? null,
     notInVersion: false,
+    documentUnavailable: false,
     engineMayHoldDocument: false,
     artifactAssetsInvalid: false,
     removalInProgress: null,

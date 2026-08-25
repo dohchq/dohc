@@ -1,5 +1,6 @@
 import { rmSync, symlinkSync } from "node:fs";
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -1316,24 +1317,128 @@ describe("restoreWorkspaceText", () => {
     expect(await readFile(join(root, "notes", "a.md"), "utf8")).toBe("# Before\n");
   });
 
-  it("keeps same-millisecond contained writes to one target independent", async () => {
+  it("deduplicates an identical image attachment without replacing a collision", async () => {
     const root = await makeWorkspace();
-    vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const asset = writeWorkspaceAsset(
-      root,
-      "notes/a.md",
-      new Uint8Array(20 * 1024 * 1024),
-    );
-    const restored = restoreWorkspaceText(root, "notes/a.md", "restored");
+    await mkdir(join(root, "assets"), { recursive: true });
+    await writeFile(join(root, "assets/pixel.png"), new Uint8Array([1, 2, 3]));
 
-    await expect(Promise.all([restored, asset])).resolves.toEqual([
-      undefined,
-      undefined,
-    ]);
-    expect(["restored".length, 20 * 1024 * 1024]).toContain(
-      (await readFile(join(root, "notes", "a.md"))).byteLength,
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
+    ).resolves.toBeUndefined();
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([4, 5, 6])),
+    ).rejects.toThrow(
+      "An image attachment already exists at assets/pixel.png with different content.",
     );
-    expect(await readdir(join(root, "notes"))).toEqual(["a.md"]);
+    expect(await readFile(join(root, "assets/pixel.png"))).toEqual(
+      Buffer.from([1, 2, 3]),
+    );
+    expect(await readdir(join(root, "assets"))).toEqual(["pixel.png"]);
+  });
+
+  it("does not deduplicate an identical attachment through a symlink leaf", async () => {
+    const root = await makeWorkspace();
+    await mkdir(join(root, "assets"), { recursive: true });
+    const target = join(root, "assets", "target.png");
+    const alias = join(root, "assets", "pixel.png");
+    await writeFile(target, new Uint8Array([1, 2, 3]));
+    await symlink(target, alias);
+
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
+    ).rejects.toThrow(
+      "An image attachment already exists at assets/pixel.png and is not a regular file.",
+    );
+    expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  it.each(["changed", "unverifiable", "not-file"] as const)(
+    "maps a %s collision read to a retryable attachment error",
+    async (failureKind) => {
+      vi.doMock("./boundedFileRead", async (importOriginal) => {
+        const original =
+          await importOriginal<typeof import("./boundedFileRead")>();
+        const failure =
+          failureKind === "changed"
+            ? new original.BoundedFileReadChangedError()
+            : failureKind === "unverifiable"
+              ? new original.BoundedFileReadUnverifiableError()
+              : new original.BoundedFileReadNotFileError();
+        return {
+          ...original,
+          readFileHandleExact: vi.fn(async () => {
+            throw failure;
+          }),
+        };
+      });
+      vi.resetModules();
+      try {
+        const collisionWrites = await import("./workspaceAssets");
+        const root = await makeWorkspace();
+        await mkdir(join(root, "assets"), { recursive: true });
+        await writeFile(
+          join(root, "assets/pixel.png"),
+          new Uint8Array([1, 2, 3]),
+        );
+
+        await expect(
+          collisionWrites.writeWorkspaceAsset(
+            root,
+            "assets/pixel.png",
+            new Uint8Array([1, 2, 3]),
+          ),
+        ).rejects.toThrow(
+          "An image attachment changed at assets/pixel.png before this write could finish. Try the action again.",
+        );
+      } finally {
+        vi.doUnmock("./boundedFileRead");
+        vi.resetModules();
+      }
+    },
+  );
+
+  it("fails closed when the filesystem cannot publish without replacing a target", async () => {
+    const hardLinkUnsupported = Object.assign(new Error("hard links unsupported"), {
+      code: "ENOTSUP",
+    });
+    vi.doMock("node:fs/promises", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("node:fs/promises")>()),
+      link: vi.fn(async () => {
+        throw hardLinkUnsupported;
+      }),
+    }));
+    vi.resetModules();
+    try {
+      const fallbackWrites = await import("./workspaceAssets");
+      const root = await makeWorkspace();
+
+      await expect(
+        fallbackWrites.writeWorkspaceAsset(
+          root,
+          "assets/pixel.png",
+          new Uint8Array([1, 2, 3]),
+        ),
+      ).rejects.toBe(hardLinkUnsupported);
+      await expect(readFile(join(root, "assets", "pixel.png"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await readdir(join(root, "assets"))).toEqual([]);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("refuses the asset writer for a document path", async () => {
+    const root = await makeWorkspace();
+
+    await expect(
+      writeWorkspaceAsset(root, "notes/a.md", new Uint8Array([1, 2, 3])),
+    ).rejects.toThrow(
+      "The attachment path must end with a supported image extension.",
+    );
+    expect(await readFile(join(root, "notes/a.md"), "utf8")).toBe("# A\n");
   });
 
   it("restores a valid long filename without extending its basename for staging", async () => {
@@ -1397,6 +1502,8 @@ describe("restoreWorkspaceText", () => {
 describe("mediaTypeForExtension", () => {
   it("maps known media types and falls back to octet-stream (never executable)", () => {
     expect(mediaTypeForExtension("a/b.png")).toBe("image/png");
+    expect(mediaTypeForExtension("a/b.avif")).toBe("image/avif");
+    expect(mediaTypeForExtension("a/b.bmp")).toBe("image/bmp");
     expect(mediaTypeForExtension("x.PDF")).toBe("application/pdf");
     expect(mediaTypeForExtension("voice.m4a")).toBe("audio/mp4");
     expect(mediaTypeForExtension("app.html")).toBe("application/octet-stream");

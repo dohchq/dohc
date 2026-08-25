@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as fsPromises from "node:fs/promises";
 import {
   lstat,
   mkdir,
@@ -6,6 +7,7 @@ import {
   readdir,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -198,6 +200,7 @@ function mutableTextStore(input?: {
   afterWrite?: (path: string) => void;
   beforeDelete?: (path: string) => void;
   afterRename?: (fromPath: string, toPath: string) => void;
+  afterMetadataRead?: (read: number) => void | Promise<void>;
 }): ShareViewFilesStore {
   const rows = new Map<
     string,
@@ -208,6 +211,7 @@ function mutableTextStore(input?: {
     }
   >();
   let nextId = 1;
+  let metadataReads = 0;
   for (const initial of input?.initial ?? []) {
     const id = nextId++;
     rows.set(initial.path, {
@@ -232,9 +236,14 @@ function mutableTextStore(input?: {
   return {
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
     listTextFiles: vi.fn(async () => snapshots()),
-    listTextFileMetadata: vi.fn(async () =>
-      snapshots().map(({ text: _text, metadata: _metadata, ...row }) => row),
-    ),
+    listTextFileMetadata: vi.fn(async () => {
+      const rows = snapshots().map(
+        ({ text: _text, metadata: _metadata, ...row }) => row,
+      );
+      metadataReads += 1;
+      await input?.afterMetadataRead?.(metadataReads);
+      return rows;
+    }),
     getMoment: vi.fn(async () => ({ payload: { before: null } })),
     readTextFile: vi.fn(async ({ path }: { path: string }) => {
       return snapshots().find((row) => row.path === path) ?? null;
@@ -2406,6 +2415,170 @@ describe("ShareViewFiles", () => {
         { kind: "text", path: "docs/plans/b.md" },
       ),
     ).resolves.toMatchObject({ text: "b\n" });
+  });
+
+  it("refuses a move through a physical alias into its source before changing the store", async () => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "a\n", "utf8");
+    await symlink(plans, join(rootPath, "docs", "alias"), "junction");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/plans/a.md", text: "a\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "move",
+            fromPath: "docs/plans",
+            toPath: "docs/alias/archive",
+          },
+        ),
+      ),
+    ).rejects.toThrow("Cannot move a path into itself: docs/plans");
+
+    expect(store.renameTextFile).not.toHaveBeenCalled();
+    await expect(readFile(join(plans, "a.md"), "utf8")).resolves.toBe("a\n");
+    await expect(
+      readSharedViewProjectionDebt(rootPath, "share-a"),
+    ).resolves.toMatchObject({ pendingPaths: new Set() });
+  });
+
+  it("refuses when the physical source disappears before move identity preflight", async () => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "Plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "a\n", "utf8");
+    let metadataReads = 0;
+    const store = mutableTextStore({
+      initial: [{ path: "docs/Plans/a.md", text: "a\n" }],
+      afterMetadataRead: (read) => {
+        // Three reads finish capture, the before-snapshot, and the move seam's
+        // source set. Removal waits for that seam's exact physical probe below.
+        metadataReads = read;
+      },
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    const originalRealpath = fsPromises.realpath.bind(fsPromises);
+    let removedAtSourcePreflight = 0;
+    const realpath = vi
+      .spyOn(fsPromises, "realpath")
+      .mockImplementation(async (path) => {
+        if (
+          metadataReads >= 3 &&
+          removedAtSourcePreflight === 0 &&
+          String(path) === plans
+        ) {
+          removedAtSourcePreflight += 1;
+          await rm(plans, { recursive: true });
+        }
+        return originalRealpath(path);
+      });
+    try {
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "move",
+              fromPath: "docs/Plans",
+              toPath: "docs/plans/archive",
+            },
+          ),
+        ),
+      ).rejects.toThrow("missing from this shared view");
+
+      expect(removedAtSourcePreflight).toBe(1);
+      expect(store.renameTextFile).not.toHaveBeenCalled();
+      await expect(
+        readSharedViewProjectionDebt(rootPath, "share-a"),
+      ).resolves.toMatchObject({ pendingPaths: new Set() });
+    } finally {
+      realpath.mockRestore();
+    }
+  });
+
+  it("keeps a case-only folder rename", async () => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "plans");
+    const renamedPlans = join(rootPath, "docs", "Plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "a\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/plans/a.md", text: "a\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    const destinationAlreadyAliasesSource = await lstat(renamedPlans).then(
+      () => true,
+      () => false,
+    );
+    const originalRealpath = fsPromises.realpath.bind(fsPromises);
+    let forcedSameEntry = 0;
+    // Case-insensitive disks already resolve both spellings to `plans`. On a
+    // case-sensitive runner, make only the identity probe observe that fact;
+    // the store mutation and physical directory rename below stay real.
+    const realpath = vi
+      .spyOn(fsPromises, "realpath")
+      .mockImplementation(async (path) => {
+        if (
+          !destinationAlreadyAliasesSource &&
+          forcedSameEntry === 0 &&
+          String(path) === renamedPlans
+        ) {
+          forcedSameEntry += 1;
+          return originalRealpath(plans);
+        }
+        return originalRealpath(path);
+      });
+    try {
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "move",
+              fromPath: "docs/plans",
+              toPath: "docs/Plans",
+            },
+          ),
+        ),
+      ).resolves.toMatchObject({ status: "committed", value: "docs/Plans" });
+
+      expect(forcedSameEntry).toBe(destinationAlreadyAliasesSource ? 0 : 1);
+      expect(store.renameTextFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fromPath: "docs/plans/a.md",
+          toPath: "docs/Plans/a.md",
+        }),
+      );
+      await expect(readdir(join(rootPath, "docs"))).resolves.toEqual(["Plans"]);
+      await expect(readFile(join(renamedPlans, "a.md"), "utf8")).resolves.toBe(
+        "a\n",
+      );
+    } finally {
+      realpath.mockRestore();
+    }
   });
 
   it("does not compensate a rename after an indeterminate daemon response", async () => {

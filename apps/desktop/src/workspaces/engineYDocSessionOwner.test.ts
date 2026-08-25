@@ -30,13 +30,17 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function createOwner(
-  outbound: TestOutbound[] = [],
+interface TestOwnerOptions {
   onReleaseFailed?: (failure: {
     path: string;
     sessionId: string;
     error: unknown;
-  }) => void,
+  }) => void;
+}
+
+function createOwner(
+  outbound: TestOutbound[] = [],
+  options: TestOwnerOptions = {},
 ) {
   return new EngineYDocSessionOwner<
     TestSender,
@@ -45,8 +49,8 @@ function createOwner(
     string,
     string
   >({
+    ...options,
     onOutbound: (message) => outbound.push(message),
-    onReleaseFailed,
   });
 }
 
@@ -148,6 +152,45 @@ describe("EngineYDocSessionOwner", () => {
     }
     expect(competingOpen).not.toHaveBeenCalled();
   });
+
+  it(
+    "keeps distinct resolved case spellings independent",
+    async () => {
+      const owner = createOwner();
+      const sender = { id: 7, label: "window-a" };
+      await expect(
+        owner.open(
+          openInput({
+            sender,
+            generation: 1,
+            sessionId: "first",
+            path: "Notes/A.md",
+            openSession: async () => ({
+              session: { close: async () => undefined },
+              value: "first",
+            }),
+          }),
+        ),
+      ).resolves.toMatchObject({ kind: "opened", value: "first" });
+      const distinctProvider = vi.fn(async () => ({
+        session: { close: async () => undefined },
+        value: "case alias",
+      }));
+
+      await expect(
+        owner.open(
+          openInput({
+            sender,
+            generation: 1,
+            sessionId: "second",
+            path: "notes/a.md",
+            openSession: distinctProvider,
+          }),
+        ),
+      ).resolves.toMatchObject({ kind: "opened", value: "case alias" });
+      expect(distinctProvider).toHaveBeenCalledOnce();
+    },
+  );
 
   it("does not let a stale open clear the newer generation's winner", async () => {
     const owner = createOwner();
@@ -837,6 +880,34 @@ describe("EngineYDocSessionOwner", () => {
     );
   });
 
+  it(
+    "keeps ownership and subtree visits exact after path resolution",
+    async () => {
+      const owner = createOwner();
+      const sender = { id: 7, label: "window-a" };
+      await owner.open(
+        openInput({
+          sender,
+          generation: 1,
+          sessionId: "mixed-case",
+          path: "Notes/Folder/A.md",
+          openSession: async () => ({
+            session: { close: async () => undefined },
+            value: "opened",
+          }),
+        }),
+      );
+
+      expect(owner.ownsDocument("workspace-1", "notes/folder/a.md")).toBe(false);
+      expect(owner.ownsDocument("workspace-1", "Notes/Folder/A.md")).toBe(true);
+      const visit = vi.fn();
+      owner.forEachSessionUnderPath("workspace-1", "notes", visit);
+      expect(visit).not.toHaveBeenCalled();
+      owner.forEachSessionUnderPath("workspace-1", "Notes", visit);
+      expect(visit).toHaveBeenCalledOnce();
+    },
+  );
+
   it("shuts down open and pending sessions with the quit-specific close", async () => {
     const owner = createOwner();
     const sender = { id: 7, label: "window-a" };
@@ -886,7 +957,7 @@ describe("EngineYDocSessionOwner", () => {
   it("retains a failed release for an exact-owner retry and stays silent", async () => {
     const outbound: TestOutbound[] = [];
     const onReleaseFailed = vi.fn();
-    const owner = createOwner(outbound, onReleaseFailed);
+    const owner = createOwner(outbound, { onReleaseFailed });
     const sender = { id: 7, label: "window-a" };
     const releaseError = new Error("daemon retained the session");
     let refuseRelease = true;
@@ -1001,7 +1072,7 @@ describe("EngineYDocSessionOwner", () => {
 
   it("refuses a second bind until a failed release of that workspace path succeeds", async () => {
     const onReleaseFailed = vi.fn();
-    const owner = createOwner([], onReleaseFailed);
+    const owner = createOwner([], { onReleaseFailed });
     const sender = { id: 7, label: "window-a" };
     const releaseError = new Error("daemon retained the document");
     const close = vi.fn(async () => {

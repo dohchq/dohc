@@ -159,6 +159,48 @@ it("retains a reconnect-failed generation when replacement open is refused", asy
   await capture.stop();
 });
 
+it(
+  "keeps resolved Y.Doc paths exact for delete and move reservations",
+  async () => {
+    const { capture, state } = await reconnectFailureCapture(
+      "dohc-ydoc-resolved-path-identity-",
+    );
+    await capture.openYDocSession({
+      path: "Notes/Folder/A.md",
+      onRemoteUpdate: () => undefined,
+    });
+
+    const ignoredDelete = await capture.settleAndCloseLiveSessionsForPath(
+      "notes/folder",
+    );
+    expect(state.releaseCalls).toHaveLength(0);
+    ignoredDelete(false);
+    const finishDelete = await capture.settleAndCloseLiveSessionsForPath(
+      "Notes/Folder",
+    );
+    expect(state.releaseCalls).toHaveLength(1);
+    finishDelete(false);
+
+    await capture.openYDocSession({
+      path: "Notes/Folder/B.md",
+      onRemoteUpdate: () => undefined,
+    });
+    const ignoredMove = await capture.beginFileRename(
+      "notes/folder",
+      "archive/folder",
+    );
+    expect(state.releaseCalls).toHaveLength(1);
+    await ignoredMove(false);
+    const finishMove = await capture.beginFileRename(
+      "Notes/Folder",
+      "Archive/Folder",
+    );
+    expect(state.releaseCalls).toHaveLength(2);
+    await finishMove(false);
+    await capture.stop();
+  },
+);
+
 it("publishes dead-session recovery without masking background capture health", async () => {
   const { capture, outcomes, rootPath, state } =
     await reconnectFailureCapture("dohc-ydoc-outcome-recovery-");
