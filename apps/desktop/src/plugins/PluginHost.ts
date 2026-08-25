@@ -354,18 +354,12 @@ export class PluginHost {
       if (this.plugins.get(record.pluginId) === record) {
         this.plugins.delete(record.pluginId);
       }
-      if (spawn) await this.waitForSettlements(spawn);
-      return;
-    }
-    if (spawn.shutdown) {
+    } else {
+      spawn.shutdown ??= this.shutdown(record, spawn, spawn.transport);
       await spawn.shutdown;
-      await this.waitForSettlements(spawn);
-      return;
     }
 
-    spawn.shutdown = this.shutdown(record, spawn, spawn.transport);
-    await spawn.shutdown;
-    await this.waitForSettlements(spawn);
+    if (spawn) await this.waitForSettlements(spawn);
   }
 
   async stopAll(): Promise<void> {
