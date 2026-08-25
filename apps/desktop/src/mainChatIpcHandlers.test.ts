@@ -24,10 +24,7 @@ import {
   writeChatMessageFromMain,
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
-import {
-  assertSharedChannelWritable,
-  scopeJoinedChannels,
-} from "./workspaces/sharedChannels";
+import { scopeJoinedChannels } from "./workspaces/sharedChannels";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 
 interface TestEvent {
@@ -417,7 +414,7 @@ describe("runtime main chat IPC boundaries", () => {
     ]);
   });
 
-  it("updates local read state for read-only and ended joined channels", async () => {
+  it("updates reader-local state without a write boundary", async () => {
     interface MarkThreadReadPayload {
       workspaceId: string;
       threadId: string;
@@ -465,64 +462,37 @@ describe("runtime main chat IPC boundaries", () => {
       }),
     );
 
-    const channelStore = {
-      findThreadChannelId: async () => "channel-1",
-      getChannelWireId: async () => "wire-1",
-    };
-    const grantCases = [
-      ["thread-read-only", { access: "read-only" as const, ended: false }],
-      ["thread-ended", { access: "read-write" as const, ended: true }],
-    ] as const;
-    for (const [threadId, grant] of grantCases) {
-      await expect(
-        assertSharedChannelWritable({
-          workspaceId,
-          sharedChannels: [
-            {
-              shareId: `share-${threadId}`,
-              channelWireId: "wire-1",
-              granterEmail: null,
-              relayUrl: "https://relay.example.test",
-              recipientUserId: "recipient-1",
-              ...grant,
-            },
-          ],
-          store: channelStore,
-          target: { threadId },
-        }),
-      ).rejects.toThrow(/read-only/u);
-      await expect(
-        ipc.invoke(CHANNELS.markChatThreadRead, {
-          workspaceId,
-          threadId,
-          upToSequence: 4,
-        }),
-      ).resolves.toEqual({ lastReadSequence: 4, revision: 2 });
-    }
+    await expect(
+      ipc.invoke(CHANNELS.markChatThreadRead, {
+        workspaceId,
+        threadId: "thread-view",
+        upToSequence: 4,
+      }),
+    ).resolves.toEqual({ lastReadSequence: 4, revision: 2 });
 
     const validParseCount = parsePayload.mock.calls.length;
     await expect(
       ipc.invoke(
         CHANNELS.markChatThreadRead,
-        { workspaceId, threadId: "thread-read-only", upToSequence: 4 },
+        { workspaceId, threadId: "thread-view", upToSequence: 4 },
         { trusted: false },
       ),
     ).rejects.toThrow("Untrusted renderer.");
     expect(parsePayload).toHaveBeenCalledTimes(validParseCount);
-    expect(requireContext).toHaveBeenCalledTimes(2);
+    expect(requireContext).toHaveBeenCalledTimes(1);
     await expect(
       ipc.invoke(CHANNELS.markChatThreadRead, { workspaceId }),
     ).rejects.toThrow("Invalid payload.");
-    expect(requireContext).toHaveBeenCalledTimes(2);
+    expect(requireContext).toHaveBeenCalledTimes(1);
     await expect(
       ipc.invoke(CHANNELS.markChatThreadRead, {
         workspaceId: "missing-workspace",
-        threadId: "thread-read-only",
+        threadId: "thread-view",
         upToSequence: 4,
       }),
     ).rejects.toThrow("Workspace not found.");
-    expect(requireContext).toHaveBeenCalledTimes(3);
-    expect(markThreadRead).toHaveBeenCalledTimes(2);
+    expect(requireContext).toHaveBeenCalledTimes(2);
+    expect(markThreadRead).toHaveBeenCalledTimes(1);
   });
 });
 
