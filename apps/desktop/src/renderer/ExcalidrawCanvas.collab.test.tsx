@@ -251,6 +251,48 @@ it("rejects hydration once Excalidraw replaces its imperative API", async () => 
   expect(replacementAddFiles).not.toHaveBeenCalled();
 });
 
+it("ignores hydration failure from a replaced Excalidraw API", async () => {
+  const doc = new Y.Doc();
+  declareSceneRoots(doc);
+  let rejectRetired!: (error: Error) => void;
+  const retired = new Promise<never>((_resolve, reject) => {
+    rejectRetired = reject;
+  });
+  const hydrateAssets = vi
+    .fn()
+    .mockImplementationOnce(() => retired)
+    .mockImplementationOnce(() => new Promise<never>(() => {}));
+  const onAssetRefusedChange = vi.fn();
+  render(
+    <ExcalidrawCanvas
+      document={parseExcalidrawDocument(EMPTY_EXCALIDRAW_DOCUMENT)}
+      readOnly={false}
+      sceneDoc={doc}
+      hydrateAssets={hydrateAssets}
+      onAssetRefusedChange={onAssetRefusedChange}
+    />,
+  );
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledOnce());
+
+  const replacementApi = {
+    updateScene: excalidraw.updateScene,
+    addFiles: vi.fn(),
+  };
+  excalidraw.replaceApi(replacementApi);
+  const replaceApi = excalidraw.props?.excalidrawAPI as (
+    api: typeof replacementApi,
+  ) => void;
+  await act(async () => {
+    rejectRetired(new Error("retired hydration failed"));
+    replaceApi(replacementApi);
+    await retired.catch(() => undefined);
+  });
+
+  expect(onAssetRefusedChange).not.toHaveBeenCalled();
+  await waitFor(() => expect(hydrateAssets).toHaveBeenCalledTimes(2));
+  expect(onAssetRefusedChange).not.toHaveBeenCalled();
+});
+
 it("binds the initial scene after a production-scheduled mount", async () => {
   const doc = new Y.Doc();
   declareSceneRoots(doc);

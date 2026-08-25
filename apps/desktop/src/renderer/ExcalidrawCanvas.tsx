@@ -161,7 +161,10 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
           // Asset hydration is optional. A rejected file cannot break the scene.
         }
       },
-      onError: () => props.onAssetRefusedChange?.(true),
+      onError: () => {
+        if (!readyApi || apiRef.current !== readyApi) return;
+        props.onAssetRefusedChange?.(true);
+      },
     },
     [
       props.hydrateAssets,
