@@ -106,7 +106,6 @@ struct FxManifestEntry {
     path: String,
     sha256: String,
     size: u64,
-    mtime: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,10 +192,11 @@ fn reconcile_matches_kernel_golden() {
             ManifestEntry {
                 size: m.size,
                 sha256: m.sha256.clone(),
-                // The fixture's kernel-era mtimes can never match the scratch
-                // tree written moments ago, and the diff itself never compares
-                // mtime — the golden classifications are hash-decided.
-                mtime_ms: m.mtime as i64,
+                // The fixture carries no trustworthy mtime observation (its
+                // kernel-era stamps can never match the scratch tree written
+                // moments ago), and the golden classifications are
+                // hash-decided — so record none.
+                mtime_ms: 0,
             },
         )
     }));
