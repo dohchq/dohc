@@ -1,17 +1,20 @@
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
-import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import type {
+  EngineWorkspace,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import type {
   EngineRelayClient,
   EngineRelayWorkspaceClient,
 } from "./engineRelayClient";
-import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+import type { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
-interface ReceivedShareWorkspace {
-  workspaceId: string;
+interface ReceivedShareEngineLocation {
+  engineWorkspaceId: string;
   rootPath: string;
 }
 
-interface ReceivedShareRelayWorkspace extends ReceivedShareWorkspace {
+interface ReceivedShareRelayLocation extends ReceivedShareEngineLocation {
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }
 
@@ -20,23 +23,30 @@ type CaptureStores = ReturnType<typeof createCaptureLiveStores>;
 export function createReceivedShareEngineAccess(dependencies: {
   sessions(): EngineWorkspaceSessions;
   relayClient(): Pick<EngineRelayClient, "bind">;
-  createStores?: typeof createCaptureLiveStores;
+  createStores: typeof createCaptureLiveStores;
 }): {
-  storeFor(workspace: ReceivedShareWorkspace): CaptureStores["store"];
-  relayFor(workspace: ReceivedShareRelayWorkspace): EngineRelayWorkspaceClient;
+  workspaceFor(location: ReceivedShareEngineLocation): EngineWorkspace;
+  storeFor(location: ReceivedShareEngineLocation): CaptureStores["store"];
+  relayFor(location: ReceivedShareRelayLocation): EngineRelayWorkspaceClient;
 } {
-  const captureDisabledWorkspace = <Workspace extends ReceivedShareWorkspace>(
-    workspace: Workspace,
-  ) => ({ ...workspace, shareMount: true as const });
-  const createStores = dependencies.createStores ?? createCaptureLiveStores;
-
+  const workspaceFor = (
+    location: ReceivedShareEngineLocation,
+  ): EngineWorkspace => ({
+    workspaceId: location.engineWorkspaceId,
+    rootPath: location.rootPath,
+    shareMount: true,
+  });
   return {
-    storeFor: (workspace) =>
-      createStores(
-        captureDisabledWorkspace(workspace),
+    workspaceFor,
+    storeFor: (location) =>
+      dependencies.createStores(
+        workspaceFor(location),
         dependencies.sessions(),
       ).store,
-    relayFor: (workspace) =>
-      dependencies.relayClient().bind(captureDisabledWorkspace(workspace)),
+    relayFor: (location) =>
+      dependencies.relayClient().bind({
+        ...workspaceFor(location),
+        relay: location.relay,
+      }),
   };
 }

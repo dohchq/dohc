@@ -84,7 +84,7 @@ describe("main-process chat authorization", () => {
       expect(scopeAt, channel).toBeGreaterThan(-1);
       expect(gateAt, `${channel}: MUTATION: an ungated mutation writes at view level`)
         .toBeGreaterThan(scopeAt);
-      const storeAt = handler.indexOf("linkedChatStoreFor(");
+      const storeAt = handler.search(/\bstore\./u);
       expect(storeAt, channel).toBeGreaterThan(-1);
       expect(storeAt, `${channel}: the gate must precede the store`).toBeGreaterThan(gateAt);
     }
@@ -132,7 +132,7 @@ describe("main-process chat authorization", () => {
     const handler = handlerSource("setChatReaction");
     expect(handler).toContain("setChatReactionFromMain({");
     expect(handler).toContain("revalidateReplicationAuthorId:");
-    expect(handler).toContain("revalidateChatWrite(workspace, target, authorUserId)");
+    expect(handler).toContain("revalidateChatWrite(workspace, target, authorUserId");
     expect(handler).toContain("syncJoinedChannels:");
     expect(handler).toContain("syncWorkspaceSharedChannels(workspaceId)");
     expect(handler).toContain("queueCloudSync:");
@@ -145,7 +145,7 @@ describe("main-process chat authorization", () => {
       expect(handler, channel).toContain("writeChatMessageFromMain({");
       expect(handler, channel).toContain("revalidateAuthorUserId:");
       expect(handler, channel).toContain(
-        "revalidateChatWrite(workspace, target, authorUserId)",
+        "revalidateChatWrite(workspace, target, authorUserId",
       );
     }
   });
@@ -710,7 +710,7 @@ describe("main-process chat authorization", () => {
         .toBeGreaterThan(-1);
       // A factory-built handler resolves its context inside the factory, so
       // its seams sit in a `run` callback that always follows the dep object.
-      const seamAts = ["linkedChatStoreFor(", "syncWorkspaceSharedChannels("]
+      const seamAts = ["store.", "syncWorkspaceSharedChannels("]
         .map((seam) => handler.indexOf(seam))
         .filter((at) => at >= 0);
       expect(seamAts.length, channel).toBeGreaterThan(0);

@@ -23,6 +23,7 @@ import {
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
+import { createDesktopLinkedChatStore } from "./liveLinkedChatStore";
 import { readPendingMaterializationPaths } from "./sharedView";
 import {
   createCaptureLiveStores,
@@ -91,6 +92,7 @@ afterEach(async () => {
 async function harness(
   prefix: string,
   access?: "comment" | "edit",
+  options: { chatFirst?: boolean } = {},
 ): Promise<Harness> {
   const rootPath = await createTestScratch(prefix);
   roots.push(rootPath);
@@ -107,8 +109,10 @@ async function harness(
   );
   sessionSets.push(sessions);
   const workspace = { workspaceId, rootPath };
+  const receivedShareLocation = { engineWorkspaceId: workspaceId, rootPath };
   const receivedShareEngine = createReceivedShareEngineAccess({
     sessions: () => sessions,
+    createStores: createCaptureLiveStores,
     relayClient: () =>
       new EngineRelayClient({
         sessions,
@@ -117,9 +121,15 @@ async function harness(
         requestDeadlineMs: 10_000,
       }),
   });
+  if (options.chatFirst) {
+    await createDesktopLinkedChatStore(
+      receivedShareEngine.workspaceFor(receivedShareLocation),
+      { sessions },
+    ).ensureOpen();
+  }
   if (access) {
     const client = receivedShareEngine.relayFor({
-      ...workspace,
+      ...receivedShareLocation,
       relay: { baseUrl: "http://127.0.0.1:9", token: "share-view-test-token" },
     });
     await client.recordShareViewIdentity({
@@ -127,7 +137,7 @@ async function harness(
     });
   }
   const store = access
-    ? receivedShareEngine.storeFor(workspace)
+    ? receivedShareEngine.storeFor(receivedShareLocation)
     : createCaptureLiveStores(workspace, sessions).store;
   return { workspaceId, rootPath, store, sessions };
 }
@@ -1723,9 +1733,11 @@ describe("share-view file operations through the real store", () => {
   );
 
   it.skipIf(engine.missing)(
-    "imports text and binary sources as moments, renames a collision, and refuses what the engine cannot own",
+    "keeps capture disabled after chat opens first, imports sources, and renames a collision",
     async () => {
-      const view = await harness("dohc-share-import-", "edit");
+      const view = await harness("dohc-share-import-", "edit", {
+        chatFirst: true,
+      });
       await seedSharedFiles(view, [
         { path: "docs/note.md", text: "granter\n" },
       ]);

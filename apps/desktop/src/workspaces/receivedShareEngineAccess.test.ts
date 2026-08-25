@@ -20,25 +20,36 @@ describe("received share engine access", () => {
       createStores:
         createStores as unknown as typeof createCaptureLiveStores,
     });
-    const workspace = {
-      workspaceId: "received-share-1",
+    const location = {
+      engineWorkspaceId: "received-share-1",
       rootPath: "C:\\received-share",
     };
 
-    expect(access.storeFor(workspace)).toBe(store);
+    expect(access.workspaceFor(location)).toEqual({
+      workspaceId: location.engineWorkspaceId,
+      rootPath: location.rootPath,
+      shareMount: true,
+    });
+
+    expect(access.storeFor(location)).toBe(store);
     expect(createStores).toHaveBeenCalledWith(
-      { ...workspace, shareMount: true },
+      {
+        workspaceId: location.engineWorkspaceId,
+        rootPath: location.rootPath,
+        shareMount: true,
+      },
       sessions,
     );
 
     expect(
       access.relayFor({
-        ...workspace,
+        ...location,
         relay: { baseUrl: "https://relay.example", token: "secret" },
       }),
     ).toBe(relay);
     expect(bind).toHaveBeenCalledWith({
-      ...workspace,
+      workspaceId: location.engineWorkspaceId,
+      rootPath: location.rootPath,
       shareMount: true,
       relay: { baseUrl: "https://relay.example", token: "secret" },
     });

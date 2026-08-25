@@ -23,6 +23,7 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "../workspaces/engineRelayClient";
+import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import {
   createCaptureLiveStores,
   type CaptureVersionedTextStore,
@@ -567,9 +568,9 @@ export interface ShareViewDaemonHarness {
 
 /**
  * Wires the transport above into the production daemon path: the relay route
- * guard, the relay-configured client source, EngineWorkspaceSessions,
- * EngineRelayClient, and createCaptureLiveStores. Nothing here reimplements a
- * production behaviour — the test drives the same objects main.ts does.
+ * guard, the relay-configured client source, EngineWorkspaceSessions, and the
+ * received-share engine owner. Nothing here reimplements a production
+ * behaviour — the test drives the same objects main.ts does.
  *
  * Pass the share relay double's connection (baseUrl, token, fetch). The
  * baseUrl and token flow through `workspace.open`, so the double's
@@ -596,6 +597,11 @@ export function createShareViewDaemonHarness(
     baseUrl: relay.baseUrl,
     token: relay.token,
   };
+  const receivedShareEngine = createReceivedShareEngineAccess({
+    sessions: () => sessions,
+    createStores: createCaptureLiveStores,
+    relayClient: () => live,
+  });
   return {
     transport,
     sessions,
@@ -606,11 +612,19 @@ export function createShareViewDaemonHarness(
       // for a workspace whose route is already bound, and a mount's repair pass
       // opens the store before the first pull. Production does the same —
       // EngineRelayClient.bind runs before the refresh.
-      live.bind({ ...workspace, relay: bound });
-      return createCaptureLiveStores(workspace, sessions).store;
+      const location = {
+        engineWorkspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+      };
+      receivedShareEngine.relayFor({ ...location, relay: bound });
+      return receivedShareEngine.storeFor(location);
     },
     pullFor(target) {
-      const client = live.bind({ ...target, relay: bound });
+      const client = receivedShareEngine.relayFor({
+        engineWorkspaceId: target.workspaceId,
+        rootPath: target.rootPath,
+        relay: bound,
+      });
       return async ({
         shareId,
         grantedSelector,

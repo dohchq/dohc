@@ -2490,8 +2490,8 @@ describe("ShareViewFiles", () => {
     expect(main).not.toContain('from "./workspaces/shareViewFileChanges"');
     expect(main).not.toContain('from "./workspaces/shareViewTextChange"');
     expect(main).not.toMatch(/routeWorkspace(?:Text|File|Path)/);
-    expect(main).toContain(
-      '...(target.kind === "mount" ? { shareMount: true as const } : {})',
-    );
+    expect(main).toContain("receivedShareEngine.storeFor({");
+    expect(main).toContain("receivedShareEngine.relayFor({");
+    expect(main).not.toContain("shareMount: true");
   });
 });

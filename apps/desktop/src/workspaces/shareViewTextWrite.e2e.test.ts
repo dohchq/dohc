@@ -13,6 +13,7 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import {
   readWorkspaceText,
   withStaleSensitiveWorkspaceOperation,
@@ -101,28 +102,34 @@ async function harness(
     new RelayConfiguredDaemonClientSource(lifecycle, routes),
   );
   sessionSets.push(sessions);
+  const workspace = { workspaceId, rootPath };
+  const receivedShareLocation = { engineWorkspaceId: workspaceId, rootPath };
+  const receivedShareEngine = createReceivedShareEngineAccess({
+    sessions: () => sessions,
+    createStores: createCaptureLiveStores,
+    relayClient: () =>
+      new EngineRelayClient({
+        sessions,
+        routes,
+        allowInsecureLoopbackForTests: true,
+        requestDeadlineMs: 10_000,
+      }),
+  });
   if (access) {
     // The relay is never contacted: recording an identity writes local rows
     // only. The URL exists because the daemon refuses a relay operation on a
     // workspace opened without a relay configuration.
-    const client = new EngineRelayClient({
-      sessions,
-      routes,
-      allowInsecureLoopbackForTests: true,
-      requestDeadlineMs: 10_000,
-    }).bind({
-      workspaceId,
-      rootPath,
+    const client = receivedShareEngine.relayFor({
+      ...receivedShareLocation,
       relay: { baseUrl: "http://127.0.0.1:9", token: "share-view-test-token" },
     });
     await client.recordShareViewIdentity({
       grantedSelector: { paths: ["docs"], versionId: null, access },
     });
   }
-  const { store } = createCaptureLiveStores(
-    { workspaceId, rootPath },
-    sessions,
-  );
+  const store = access
+    ? receivedShareEngine.storeFor(receivedShareLocation)
+    : createCaptureLiveStores(workspace, sessions).store;
   return { workspaceId, rootPath, store, sessions };
 }
 
