@@ -162,6 +162,7 @@ interface PluginSpawn {
   transport?: PluginTransport;
   shutdown?: Promise<void>;
   resourceDisposal?: Promise<void>;
+  settlements: Set<Promise<void>>;
 }
 
 interface PluginRecord {
@@ -353,15 +354,18 @@ export class PluginHost {
       if (this.plugins.get(record.pluginId) === record) {
         this.plugins.delete(record.pluginId);
       }
+      if (spawn) await this.waitForSettlements(spawn);
       return;
     }
     if (spawn.shutdown) {
       await spawn.shutdown;
+      await this.waitForSettlements(spawn);
       return;
     }
 
     spawn.shutdown = this.shutdown(record, spawn, spawn.transport);
     await spawn.shutdown;
+    await this.waitForSettlements(spawn);
   }
 
   async stopAll(): Promise<void> {
@@ -712,6 +716,7 @@ export class PluginHost {
       resolveActivated,
       rejectActivated,
       abortController: new AbortController(),
+      settlements: new Set(),
     };
     record.current = spawn;
     record.commands = undefined;
@@ -747,39 +752,44 @@ export class PluginHost {
           } satisfies PluginActivateParams,
         );
       })();
-      void raceWithTimeout(
-        activation,
-        this.activationTimeoutMs,
-        `Plugin "${record.pluginId}" activation exceeded ${this.activationTimeoutMs} ms.`,
-      ).then(
-        (result) => this.handleActivationSuccess(record, spawn, result),
-        (error: unknown) => this.handleActivationFailure(record, spawn, error),
+      this.trackSettlement(
+        record,
+        spawn,
+        raceWithTimeout(
+          activation,
+          this.activationTimeoutMs,
+          `Plugin "${record.pluginId}" activation exceeded ${this.activationTimeoutMs} ms.`,
+        ).then(
+          (result) => this.handleActivationSuccess(record, spawn, result),
+          (error: unknown) => this.handleActivationFailure(record, spawn, error),
+        ),
       );
     } catch (error) {
-      void this.handleActivationFailure(record, spawn, error);
+      this.trackSettlement(
+        record,
+        spawn,
+        this.handleActivationFailure(record, spawn, error),
+      );
     }
   }
 
-  private handleActivationSuccess(
+  private async handleActivationSuccess(
     record: PluginRecord,
     spawn: PluginSpawn,
     result: unknown,
-  ): void {
+  ): Promise<void> {
     if (!this.isLive(record, spawn)) {
-      // .finally() re-throws the original rejection, so this needs its own
-      // .catch() too — see bumpGeneration's comment.
-      void this.endSpawn(record, spawn)
-        .finally(() => spawn.transport?.dispose().catch(() => undefined))
-        .catch((error: unknown) => {
-          console.error(
-            `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
-            error,
-          );
-        });
+      await this.endSpawn(record, spawn).catch((error: unknown) => {
+        console.error(
+          `[desktop] plugin "${record.pluginId}" spawn teardown failed:`,
+          error,
+        );
+      });
+      await spawn.transport?.dispose().catch(() => undefined);
       return;
     }
     if (!isPluginActivateResult(result)) {
-      void this.handleActivationFailure(
+      await this.handleActivationFailure(
         record,
         spawn,
         new Error(
@@ -790,7 +800,7 @@ export class PluginHost {
     }
     const duplicateCommandId = findDuplicateId(result.commands);
     if (duplicateCommandId !== undefined) {
-      void this.handleActivationFailure(
+      await this.handleActivationFailure(
         record,
         spawn,
         new Error(
@@ -801,7 +811,7 @@ export class PluginHost {
     }
     const duplicateDriverId = findDuplicateId(result.drivers);
     if (duplicateDriverId !== undefined) {
-      void this.handleActivationFailure(
+      await this.handleActivationFailure(
         record,
         spawn,
         new Error(
@@ -817,7 +827,7 @@ export class PluginHost {
       result.commands,
     );
     if (commandMismatch !== undefined) {
-      void this.handleActivationFailure(record, spawn, new Error(commandMismatch));
+      await this.handleActivationFailure(record, spawn, new Error(commandMismatch));
       return;
     }
     const declaredDrivers = record.manifest.drivers ?? [];
@@ -828,7 +838,7 @@ export class PluginHost {
       result.drivers,
     );
     if (mismatch !== undefined) {
-      void this.handleActivationFailure(record, spawn, new Error(mismatch));
+      await this.handleActivationFailure(record, spawn, new Error(mismatch));
       return;
     }
     try {
@@ -837,7 +847,7 @@ export class PluginHost {
       // starting, rather than after it is listed as ready.
       this.options.onDriversRegistered?.(record.pluginId, spawn.spawnId, declaredDrivers);
     } catch (error) {
-      void this.handleActivationFailure(record, spawn, error);
+      await this.handleActivationFailure(record, spawn, error);
       return;
     }
     record.commands = [...result.commands];
@@ -855,7 +865,7 @@ export class PluginHost {
       error instanceof Error ? error : new Error(this.errorMessage(error)),
     );
     if (!this.isLive(record, spawn)) {
-      void spawn.transport?.dispose().catch(() => undefined);
+      await spawn.transport?.dispose().catch(() => undefined);
       return;
     }
     spawn.failureHandled = true;
@@ -879,17 +889,43 @@ export class PluginHost {
     }
     spawn.failureHandled = true;
     const resourceDisposal = this.endSpawn(record, spawn);
-    void resourceDisposal.catch((error: unknown) => {
-      this.appendLog(
-        record,
-        `Spawn resource disposal failed: ${this.errorMessage(error)}`,
-      );
-    });
-    void resourceDisposal.then(
-      () => this.accountForFailure(record, spawn),
-      () => this.accountForFailure(record, spawn),
+    this.trackSettlement(
+      record,
+      spawn,
+      resourceDisposal.then(
+        () => this.accountForFailure(record, spawn),
+        (error: unknown) => {
+          this.appendLog(
+            record,
+            `Spawn resource disposal failed: ${this.errorMessage(error)}`,
+          );
+          return this.accountForFailure(record, spawn);
+        },
+      ),
     );
     this.setStatus(record, "crashed");
+  }
+
+  private trackSettlement(
+    record: PluginRecord,
+    spawn: PluginSpawn,
+    settlement: Promise<void>,
+  ): void {
+    const tracked = settlement
+      .catch((error: unknown) => {
+        this.appendLog(
+          record,
+          `Spawn settlement failed: ${this.errorMessage(error)}`,
+        );
+      })
+      .finally(() => spawn.settlements.delete(tracked));
+    spawn.settlements.add(tracked);
+  }
+
+  private async waitForSettlements(spawn: PluginSpawn): Promise<void> {
+    while (spawn.settlements.size > 0) {
+      await Promise.all(spawn.settlements);
+    }
   }
 
   private async accountForFailure(
