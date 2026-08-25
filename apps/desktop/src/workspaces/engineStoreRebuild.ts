@@ -17,7 +17,7 @@ import {
   type RebuildEngineStoreResult,
 } from "../ipc/bridgeContract";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { withKeyedStartLock } from "./sitePreviewLifecycle";
+import { runInKeyedLane } from "../keyedLane";
 
 const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
 const MOVE_IN_PROGRESS_TEMP = `${MOVE_IN_PROGRESS}.tmp`;
@@ -351,7 +351,7 @@ export async function withEngineStoreRecovered<T>(
     rootPath: string,
   ) => Promise<void> = completePendingEngineStoreMove,
 ): Promise<T> {
-  return withKeyedStartLock(locks, workspace.workspaceId, () =>
+  return runInKeyedLane(locks, workspace.workspaceId, () =>
     withEngineStoreRecoveredUnderEngineStoreLock(
       workspace,
       body,
