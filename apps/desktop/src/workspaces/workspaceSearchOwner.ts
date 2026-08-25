@@ -337,10 +337,9 @@ export class WorkspaceSearchOwner<
       this.#dependencies.logError(
         "Workspace search dropped a ripgrep batch with the wrong request identity.",
       );
+      return;
     }
-    const sent =
-      matchesIdentity &&
-      this.#send(sender, batch, isCurrent, "ripgrep batch");
+    const sent = this.#send(sender, batch, isCurrent, "ripgrep batch");
     if (!batch.done) return;
     if (sent) {
       identity.settled = true;

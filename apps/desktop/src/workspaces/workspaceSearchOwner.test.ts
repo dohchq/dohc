@@ -898,6 +898,12 @@ describe("WorkspaceSearchOwner", () => {
       done: true,
       limitHit: false,
     });
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(logError).toHaveBeenCalledWith(
+      "Workspace search dropped a ripgrep batch with the wrong request identity.",
+    );
+
     registry.starts[0]?.onBatch({
       searchId: "owned-id",
       entries: [],
@@ -913,9 +919,6 @@ describe("WorkspaceSearchOwner", () => {
         done: true,
         limitHit: false,
       },
-    );
-    expect(logError).toHaveBeenCalledWith(
-      "Workspace search dropped a ripgrep batch with the wrong request identity.",
     );
   });
 
