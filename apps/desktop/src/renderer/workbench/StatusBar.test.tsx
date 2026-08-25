@@ -156,15 +156,19 @@ describe("update toast", () => {
     );
   });
 
-  it("keeps checking, downloading, and offline states silent", () => {
-    renderBar();
-    act(() => {
-      for (const status of ["checking", "downloading", "offline"] as const) {
-        pushUpdate?.({ status, message: "noise" });
-      }
-    });
-    expect(screen.queryByTestId("update-toast")).toBeNull();
-  });
+  it.each(["checking", "downloading", "offline"] as const)(
+    "keeps the %s state silent",
+    (status) => {
+      renderBar();
+      const listener = pushUpdate;
+      expect(listener).toBeTypeOf("function");
+      if (!listener) throw new Error("The update listener was not installed.");
+
+      act(() => listener({ status, message: "noise" }));
+
+      expect(screen.queryByTestId("update-toast")).toBeNull();
+    },
+  );
 
   it("unsubscribes from the update channel on unmount", () => {
     renderBar().unmount();
