@@ -900,14 +900,25 @@ export async function prepareWorkspaceDelete(
       `Invalid delete path (${validated.reason}): ${relativePath}`,
     );
   }
-  const { relative: resolvedPath } = await assertResolvedWorkspacePath({
+  const { relative: resolvedPath, resolvedAbsolute } =
+    await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: join(rootPath, validated.normalized),
     spelled: relativePath,
     label: "Delete path",
     access: "entry",
   });
-  return resolvedPath.replaceAll("\\", "/");
+  // A symlink delete removes the alias itself, so its spelled leaf remains the
+  // engine boundary. Every other existing entry can be resolved to its
+  // physical spelling. On a case-insensitive directory that collapses case
+  // aliases; on a case-sensitive Windows directory distinct names stay
+  // distinct.
+  if ((await lstat(resolvedAbsolute)).isSymbolicLink()) {
+    return resolvedPath.replaceAll("\\", "/");
+  }
+  const realRoot = await realpath(rootPath);
+  const realEntry = await realpath(resolvedAbsolute);
+  return relative(realRoot, realEntry).replaceAll("\\", "/");
 }
 
 export async function movePath(

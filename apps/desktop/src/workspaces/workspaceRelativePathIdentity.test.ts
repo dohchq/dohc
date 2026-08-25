@@ -7,31 +7,19 @@ import {
 } from "./workspaceRelativePathIdentity";
 
 describe("workspace-relative path identity", () => {
-  it("folds case for Windows and preserves it on case-sensitive platforms", () => {
-    expect(workspaceRelativePathIdentity("Notes/A.md", "win32")).toBe(
-      "notes/a.md",
-    );
-    expect(workspaceRelativePathIdentity("Notes/A.md", "linux")).toBe(
-      "Notes/A.md",
-    );
+  it("preserves the exact spelling produced by filesystem resolution", () => {
+    expect(workspaceRelativePathIdentity("Notes/A.md")).toBe("Notes/A.md");
   });
 
   it("uses the same identity for equality and subtree matching", () => {
+    expect(workspaceRelativePathsEqual("Notes/A.md", "notes/a.md")).toBe(false);
     expect(
-      workspaceRelativePathsEqual("Notes/A.md", "notes/a.md", "win32"),
-    ).toBe(true);
-    expect(
-      workspaceRelativePathIsAtOrUnder(
-        "Notes/Folder/A.md",
-        "notes/folder",
-        "win32",
-      ),
+      workspaceRelativePathIsAtOrUnder("Notes/Folder/A.md", "Notes/Folder"),
     ).toBe(true);
     expect(
       workspaceRelativePathIsAtOrUnder(
         "Notes/Folderish/A.md",
-        "notes/folder",
-        "win32",
+        "Notes/Folder",
       ),
     ).toBe(false);
   });

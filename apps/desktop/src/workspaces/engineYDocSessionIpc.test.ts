@@ -89,7 +89,6 @@ function providerSession(
 }
 
 interface TestHarnessOptions {
-  pathIdentityPlatform?: NodeJS.Platform;
   resolveDocumentPath?: (
     workspace: { workspaceId: string; rootPath: string },
     path: string,
@@ -115,9 +114,6 @@ function harness(
   };
   const onError = vi.fn();
   const ipc = createEngineYDocSessionIpc({
-    ...(options.pathIdentityPlatform === undefined
-      ? {}
-      : { pathIdentityPlatform: options.pathIdentityPlatform }),
     generationOf: () => generation,
     requireWorkspace: (workspaceId) => ({
       workspaceId,
@@ -251,34 +247,96 @@ describe("engine Y.Doc IPC adapter", () => {
     ).rejects.toThrow("The engine owns this live document");
   });
 
-  it(
-    "refuses case-alias writes and marks case-alias deletions",
-    async () => {
+  it.each([
+    {
+      requestedPath: "alias/note.md",
+      canonicalPath: "drawings/scene.excalidraw",
+      canonicalKind: "scene" as const,
+    },
+    {
+      requestedPath: "alias/scene.excalidraw",
+      canonicalPath: "notes/note.md",
+      canonicalKind: "richdoc" as const,
+    },
+  ])(
+    "refuses a $requestedPath leaf alias to a cross-kind $canonicalPath target",
+    async ({ requestedPath, canonicalPath, canonicalKind }) => {
       const sender = new FakeSender(7);
-      const h = harness(providerSession(), { pathIdentityPlatform: "win32" });
-      await h.ipc.open(sender, {
-        ...openPayload,
-        path: "Notes/Folder/A.md",
+      const resolveDocumentPath = vi.fn(async () => canonicalPath);
+      const h = harness(
+        providerSession({ path: canonicalPath, contentKind: canonicalKind }),
+        { resolveDocumentPath },
+      );
+
+      await expect(
+        h.ipc.open(sender, { ...openPayload, path: requestedPath }),
+      ).resolves.toEqual({
+        available: false,
+        documentUnavailable: true,
       });
 
-      const mutation = vi.fn(async () => undefined);
-      await expect(
-        h.ipc
-          .fileMutationPort()
-          .withDocumentUnowned(
-            "workspace-1",
-            "notes/folder/a.md",
-            mutation,
-          ),
-      ).rejects.toThrow("The engine owns this live document");
-      expect(mutation).not.toHaveBeenCalled();
-
-      h.ipc
-        .fileMutationPort()
-        .markDeletedUnderPath("workspace-1", "notes/folder");
-      expect(sender.sent.at(-1)?.payload).toMatchObject({ state: "deleted" });
+      expect(resolveDocumentPath).toHaveBeenCalledOnce();
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    {
+      requestedPath: "alias/note.md",
+      canonicalPath: "notes/note.markdown",
+      documentKind: "richdoc" as const,
+    },
+    {
+      requestedPath: "alias/scene.excalidraw",
+      canonicalPath: "drawings/scene.excalidraw",
+      documentKind: "scene" as const,
+    },
+  ])(
+    "keeps a same-kind $requestedPath leaf alias eligible for its canonical session",
+    async ({ requestedPath, canonicalPath, documentKind }) => {
+      const sender = new FakeSender(7);
+      const resolveDocumentPath = vi.fn(async () => canonicalPath);
+      const h = harness(
+        providerSession({ path: canonicalPath, contentKind: documentKind }),
+        { resolveDocumentPath },
+      );
+
+      await expect(
+        h.ipc.open(sender, { ...openPayload, path: requestedPath }),
+      ).resolves.toMatchObject({ available: true });
+
+      expect(resolveDocumentPath).toHaveBeenCalledTimes(2);
+      expect(h.capturedOpen()).toMatchObject({
+        path: canonicalPath,
+        contentKind: documentKind,
+      });
+    },
+  );
+
+  it("coordinates case aliases through their resolved physical path", async () => {
+    const sender = new FakeSender(7);
+    const canonicalPath = "Notes/Folder/A.md";
+    const h = harness(providerSession({ path: canonicalPath }), {
+      resolveDocumentPath: async () => canonicalPath,
+    });
+    await h.ipc.open(sender, {
+      ...openPayload,
+      path: "notes/folder/a.md",
+    });
+
+    const mutation = vi.fn(async () => undefined);
+    await expect(
+      h.ipc
+        .fileMutationPort()
+        .withDocumentUnowned("workspace-1", canonicalPath, mutation),
+    ).rejects.toThrow("The engine owns this live document");
+    expect(mutation).not.toHaveBeenCalled();
+
+    h.ipc
+      .fileMutationPort()
+      .markDeletedUnderPath("workspace-1", "Notes/Folder");
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ state: "deleted" });
+  });
 
   it("opens the workspace activity when the renderer outruns daemon startup", async () => {
     const sender = new FakeSender(7);
@@ -392,24 +450,34 @@ describe("engine Y.Doc IPC adapter", () => {
   it("queues a canonical session open behind the direct mutation that owns the path", async () => {
     const sender = new FakeSender(7);
     const h = harness();
+    const trace: string[] = [];
     const mutationEntered = deferred<void>();
     const releaseMutation = deferred<void>();
+    const openingEntered = deferred<void>();
+    const providerReady = deferred<WorkspaceEngineYDocProviderSession>();
+    vi.mocked(h.capture.openYDocSession).mockImplementationOnce(async () => {
+      trace.push("open-entered");
+      openingEntered.resolve();
+      return providerReady.promise;
+    });
     const mutation = h.ipc
       .fileMutationPort()
       .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
         mutationEntered.resolve();
         await releaseMutation.promise;
+        trace.push("mutation-finished");
       });
     await mutationEntered.promise;
 
     const opening = h.ipc.open(sender, openPayload);
-    let opened = false;
     void opening.then(() => {
-      opened = true;
+      trace.push("opened");
     });
-    await Promise.resolve();
-    expect(opened).toBe(false);
-    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+
+    releaseMutation.resolve();
+    await mutation;
+    await openingEntered.promise;
+    expect(trace).toEqual(["mutation-finished", "open-entered"]);
     const laterMutation = vi.fn(async () => undefined);
     await expect(
       h.ipc
@@ -418,10 +486,10 @@ describe("engine Y.Doc IPC adapter", () => {
     ).rejects.toThrow("The engine owns this live document");
     expect(laterMutation).not.toHaveBeenCalled();
 
-    releaseMutation.resolve();
-    await mutation;
+    providerReady.resolve(providerSession());
     await expect(opening).resolves.toMatchObject({ available: true });
     expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+    expect(trace).toEqual(["mutation-finished", "open-entered", "opened"]);
   });
 
   it("releases a failed direct-mutation reservation", async () => {

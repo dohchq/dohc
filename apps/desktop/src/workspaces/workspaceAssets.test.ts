@@ -1,5 +1,6 @@
 import { rmSync, symlinkSync } from "node:fs";
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -1333,6 +1334,23 @@ describe("restoreWorkspaceText", () => {
       Buffer.from([1, 2, 3]),
     );
     expect(await readdir(join(root, "assets"))).toEqual(["pixel.png"]);
+  });
+
+  it("does not deduplicate an identical attachment through a symlink leaf", async () => {
+    const root = await makeWorkspace();
+    await mkdir(join(root, "assets"), { recursive: true });
+    const target = join(root, "assets", "target.png");
+    const alias = join(root, "assets", "pixel.png");
+    await writeFile(target, new Uint8Array([1, 2, 3]));
+    await symlink(target, alias);
+
+    await expect(
+      writeWorkspaceAsset(root, "assets/pixel.png", new Uint8Array([1, 2, 3])),
+    ).rejects.toThrow(
+      "An image attachment already exists at assets/pixel.png and is not a regular file.",
+    );
+    expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+    expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
   });
 
   it("fails closed when the filesystem cannot publish without replacing a target", async () => {

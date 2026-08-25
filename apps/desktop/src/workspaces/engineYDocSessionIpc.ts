@@ -76,7 +76,6 @@ interface EngineYDocWorkspace {
 }
 
 interface EngineYDocSessionIpcOptions {
-  pathIdentityPlatform?: NodeJS.Platform;
   generationOf: (senderId: number) => number;
   requireWorkspace: (workspaceId: string) => EngineYDocWorkspace;
   captureFor: (workspaceId: string) => EngineYDocSessionCapture | null;
@@ -157,11 +156,6 @@ function liveDocumentMutationRefusal(): Error {
 /** Atomic admission shared by canonical Y.Doc opens and direct mutations. */
 class DocumentMutationReservations {
   readonly #states = new Map<string, DocumentReservationState>();
-  readonly #pathIdentityPlatform: NodeJS.Platform;
-
-  constructor(pathIdentityPlatform: NodeJS.Platform) {
-    this.#pathIdentityPlatform = pathIdentityPlatform;
-  }
 
   async reserveOpen(workspaceId: string, path: string): Promise<() => void> {
     const key = this.#key(workspaceId, path);
@@ -220,10 +214,7 @@ class DocumentMutationReservations {
   }
 
   #key(workspaceId: string, path: string): string {
-    const pathIdentity = workspaceRelativePathIdentity(
-      path,
-      this.#pathIdentityPlatform,
-    );
+    const pathIdentity = workspaceRelativePathIdentity(path);
     return `${workspaceId}\0${pathIdentity}`;
   }
 
@@ -242,7 +233,6 @@ class EngineYDocSessionIpc {
     "resolveDocumentPath"
   ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
-  readonly #pathIdentityPlatform: NodeJS.Platform;
   readonly #owner: EngineYDocIpcSessionOwner;
   readonly #documentReservations: DocumentMutationReservations;
   readonly #fileMutationPort: WorkspaceFileMutationYDocPort;
@@ -257,13 +247,8 @@ class EngineYDocSessionIpc {
     this.#isSharedView = options.isSharedView;
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
-    this.#pathIdentityPlatform =
-      options.pathIdentityPlatform ?? process.platform;
-    this.#documentReservations = new DocumentMutationReservations(
-      this.#pathIdentityPlatform,
-    );
+    this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
-      pathIdentityPlatform: this.#pathIdentityPlatform,
       onOutbound: (outbound) => this.#send(outbound),
       onReleaseFailed: ({ path, error }) => {
         this.#onError(
@@ -301,7 +286,9 @@ class EngineYDocSessionIpc {
     if (this.#isSharedView(workspace.workspaceId)) return unavailableOpen();
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
-    const requestedPathKind = liveDocumentKindForPath(validatedPath.normalized);
+    const requestedSpellingKind = liveDocumentKindForPath(
+      validatedPath.normalized,
+    );
     const generation = this.#generationOf(sender.id);
     let canonicalPath: string | null;
     try {
@@ -314,7 +301,7 @@ class EngineYDocSessionIpc {
         `[desktop] engine Y.Doc open could not resolve ${validatedPath.normalized}:`,
         error,
       );
-      return requestedPathKind === null
+      return requestedSpellingKind === null
         ? unavailableOpen()
         : unavailableOpen({ documentUnavailable: true });
     }
@@ -326,12 +313,15 @@ class EngineYDocSessionIpc {
       return unavailableOpen();
     }
     if (canonicalPath === null) {
-      return requestedPathKind === null
+      return requestedSpellingKind === null
         ? unavailableOpen()
         : unavailableOpen({ documentUnavailable: true });
     }
-    const requestedKind = liveDocumentKindForPath(canonicalPath);
-    if (requestedKind === null) return unavailableOpen();
+    const canonicalKind = liveDocumentKindForPath(canonicalPath);
+    if (requestedSpellingKind !== canonicalKind) {
+      return unavailableOpen({ documentUnavailable: true });
+    }
+    if (canonicalKind === null) return unavailableOpen();
     const releaseOpening = await this.#documentReservations.reserveOpen(
       workspace.workspaceId,
       canonicalPath,
@@ -343,7 +333,7 @@ class EngineYDocSessionIpc {
         workspace,
         canonicalPath,
         validatedPath.normalized,
-        requestedKind,
+        canonicalKind,
         generation,
       );
     } finally {
@@ -357,7 +347,7 @@ class EngineYDocSessionIpc {
     workspace: EngineYDocWorkspace,
     canonicalPath: string,
     requestedPath: string,
-    requestedKind: NonNullable<ReturnType<typeof liveDocumentKindForPath>>,
+    documentKind: NonNullable<ReturnType<typeof liveDocumentKindForPath>>,
     generation: number,
   ): Promise<OpenResult> {
     let capture = this.#captureFor(workspace.workspaceId);
@@ -391,11 +381,7 @@ class EngineYDocSessionIpc {
     }
     if (
       currentPath === null ||
-      !workspaceRelativePathsEqual(
-        currentPath,
-        canonicalPath,
-        this.#pathIdentityPlatform,
-      )
+      !workspaceRelativePathsEqual(currentPath, canonicalPath)
     ) {
       return unavailableOpen({ documentUnavailable: true });
     }
@@ -425,7 +411,7 @@ class EngineYDocSessionIpc {
         try {
           provider = await capture.openYDocSession({
             path: canonicalPath,
-            contentKind: requestedKind,
+            contentKind: documentKind,
             onSaveState: (state, token) => {
               const seq =
                 state === "settling"
@@ -471,7 +457,7 @@ class EngineYDocSessionIpc {
           },
           close: (options) => provider.close(options),
         };
-        if (provider.contentKind === requestedKind) {
+        if (provider.contentKind === documentKind) {
           delivery = "active";
           for (const send of pending.splice(0)) send();
         } else {
@@ -484,10 +470,10 @@ class EngineYDocSessionIpc {
 
     if (opened.kind === "opened") {
       const owned = opened.value;
-      if (owned.provider.contentKind !== requestedKind) {
+      if (owned.provider.contentKind !== documentKind) {
         this.#onError(
           `[desktop] engine Y.Doc open for ${canonicalPath} came back ${owned.provider.contentKind}; ` +
-            `the editor requested ${requestedKind} (kind-mismatched lineage).`,
+            `the editor requested ${documentKind} (kind-mismatched lineage).`,
         );
         const release = await this.#owner.release({
           sender,

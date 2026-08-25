@@ -609,7 +609,6 @@ export interface WorkspaceEngineCapture {
 export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
-  pathIdentityPlatform?: NodeJS.Platform;
   // Injectable for tests; production uses the required Rust workspace sessions.
   store?: VersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
@@ -1440,7 +1439,6 @@ export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
   const { workspaceId, rootPath } = options;
-  const pathIdentityPlatform = options.pathIdentityPlatform ?? process.platform;
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
   const reportError =
@@ -4937,11 +4935,7 @@ export function createWorkspaceEngineCapture(
       // a later payment would recreate it), `false` restores and re-arms
       // (the path is still there and still owes its write).
       const match = (p: string) =>
-        workspaceRelativePathIsAtOrUnder(
-          p,
-          pathOrPrefix,
-          pathIdentityPlatform,
-        );
+        workspaceRelativePathIsAtOrUnder(p, pathOrPrefix);
       return enqueueResult("close live session for destructive op", async () => {
         await settleAndCloseLiveYDocSessions(
           match,
@@ -6240,18 +6234,10 @@ export function createWorkspaceEngineCapture(
         // path. Both the vacate right below and the debt drain further down
         // share this one match.
         const isSourceSide = (candidate: string): boolean =>
-          workspaceRelativePathIsAtOrUnder(
-            candidate,
-            fromPath,
-            pathIdentityPlatform,
-          );
+          workspaceRelativePathIsAtOrUnder(candidate, fromPath);
         const endpointMatch = (candidate: string): boolean =>
           isSourceSide(candidate) ||
-          workspaceRelativePathIsAtOrUnder(
-            candidate,
-            toPath,
-            pathIdentityPlatform,
-          );
+          workspaceRelativePathIsAtOrUnder(candidate, toPath);
         // A live Y.Doc session over either endpoint (or child) is vacated
         // FIRST, ahead of the detached-debt drain below (#681 round 2). A
         // session recovering a stood-down path (reopened, per every

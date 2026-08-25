@@ -27,6 +27,7 @@ import {
   importDroppedPaths,
   listFiles,
   movePath,
+  prepareWorkspaceDelete,
 } from "./workspaceFiles";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
@@ -364,6 +365,32 @@ describe("movePath", () => {
       /escapes the workspace/,
     );
     expect(existsSync(join(outside, "mine.md"))).toBe(false);
+  });
+});
+
+describe("prepareWorkspaceDelete", () => {
+  it("returns the physical entry spelling without following a symlink leaf", async () => {
+    await mkdir(join(root, "Notes"), { recursive: true });
+    await writeFile(join(root, "Notes", "A.md"), "upper");
+
+    if (await caseInsensitiveFs()) {
+      await expect(prepareWorkspaceDelete(root, "notes/a.md")).resolves.toBe(
+        "Notes/A.md",
+      );
+    } else {
+      await writeFile(join(root, "Notes", "a.md"), "lower");
+      await expect(prepareWorkspaceDelete(root, "Notes/A.md")).resolves.toBe(
+        "Notes/A.md",
+      );
+      await expect(prepareWorkspaceDelete(root, "Notes/a.md")).resolves.toBe(
+        "Notes/a.md",
+      );
+    }
+
+    await symlink(join(root, "Notes", "A.md"), join(root, "alias.md"));
+    await expect(prepareWorkspaceDelete(root, "alias.md")).resolves.toBe(
+      "alias.md",
+    );
   });
 });
 

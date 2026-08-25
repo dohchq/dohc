@@ -32,10 +32,7 @@ import {
   noteSettleStart,
 } from "./engineYDocSaveSeq";
 
-async function reconnectFailureCapture(
-  prefix: string,
-  options: { pathIdentityPlatform?: NodeJS.Platform } = {},
-) {
+async function reconnectFailureCapture(prefix: string) {
   const rootPath = await createTestScratch(prefix);
   const workspaceId = prefix.replace(/-+$/, "");
   const loopback = new VersionedLoopbackEngine();
@@ -115,7 +112,6 @@ async function reconnectFailureCapture(
   };
   const outcomes: boolean[] = [];
   const capture = createWorkspaceEngineCapture({
-    ...options,
     workspaceId,
     rootPath,
     rustEngineSessions: sessions,
@@ -164,19 +160,23 @@ it("retains a reconnect-failed generation when replacement open is refused", asy
 });
 
 it(
-  "vacates case-alias Y.Doc paths for delete and move reservations",
+  "keeps resolved Y.Doc paths exact for delete and move reservations",
   async () => {
     const { capture, state } = await reconnectFailureCapture(
-      "dohc-ydoc-windows-path-identity-",
-      { pathIdentityPlatform: "win32" },
+      "dohc-ydoc-resolved-path-identity-",
     );
     await capture.openYDocSession({
       path: "Notes/Folder/A.md",
       onRemoteUpdate: () => undefined,
     });
 
-    const finishDelete = await capture.settleAndCloseLiveSessionsForPath(
+    const ignoredDelete = await capture.settleAndCloseLiveSessionsForPath(
       "notes/folder",
+    );
+    expect(state.releaseCalls).toHaveLength(0);
+    ignoredDelete(false);
+    const finishDelete = await capture.settleAndCloseLiveSessionsForPath(
+      "Notes/Folder",
     );
     expect(state.releaseCalls).toHaveLength(1);
     finishDelete(false);
@@ -185,8 +185,14 @@ it(
       path: "Notes/Folder/B.md",
       onRemoteUpdate: () => undefined,
     });
-    const finishMove = await capture.beginFileRename(
+    const ignoredMove = await capture.beginFileRename(
       "notes/folder",
+      "archive/folder",
+    );
+    expect(state.releaseCalls).toHaveLength(1);
+    await ignoredMove(false);
+    const finishMove = await capture.beginFileRename(
+      "Notes/Folder",
       "Archive/Folder",
     );
     expect(state.releaseCalls).toHaveLength(2);

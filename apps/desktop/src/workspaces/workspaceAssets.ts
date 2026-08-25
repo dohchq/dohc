@@ -9,6 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { FileHandle } from "node:fs/promises";
 import {
   link,
+  lstat,
   mkdir,
   open,
   realpath,
@@ -1202,6 +1203,12 @@ export async function writeWorkspaceAssetInLease(
     if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
   }
 
+  const existingLeaf = await lstat(join(rootPath, path));
+  if (!existingLeaf.isFile()) {
+    throw new Error(
+      `An image attachment already exists at ${path} and is not a regular file.`,
+    );
+  }
   const target = await resolveWorkspaceFile(rootPath, path, "read");
   const handle = await open(target.realTarget, "r");
   try {

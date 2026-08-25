@@ -31,7 +31,6 @@ function deferred<T>() {
 }
 
 interface TestOwnerOptions {
-  pathIdentityPlatform?: NodeJS.Platform;
   onReleaseFailed?: (failure: {
     path: string;
     sessionId: string;
@@ -155,9 +154,9 @@ describe("EngineYDocSessionOwner", () => {
   });
 
   it(
-    "refuses a distinct session for a case alias of an owned document",
+    "keeps distinct resolved case spellings independent",
     async () => {
-      const owner = createOwner([], { pathIdentityPlatform: "win32" });
+      const owner = createOwner();
       const sender = { id: 7, label: "window-a" };
       await expect(
         owner.open(
@@ -173,7 +172,7 @@ describe("EngineYDocSessionOwner", () => {
           }),
         ),
       ).resolves.toMatchObject({ kind: "opened", value: "first" });
-      const caseAliasProvider = vi.fn(async () => ({
+      const distinctProvider = vi.fn(async () => ({
         session: { close: async () => undefined },
         value: "case alias",
       }));
@@ -185,11 +184,11 @@ describe("EngineYDocSessionOwner", () => {
             generation: 1,
             sessionId: "second",
             path: "notes/a.md",
-            openSession: caseAliasProvider,
+            openSession: distinctProvider,
           }),
         ),
-      ).resolves.toEqual({ kind: "refused", reason: "session-in-use" });
-      expect(caseAliasProvider).not.toHaveBeenCalled();
+      ).resolves.toMatchObject({ kind: "opened", value: "case alias" });
+      expect(distinctProvider).toHaveBeenCalledOnce();
     },
   );
 
@@ -882,9 +881,9 @@ describe("EngineYDocSessionOwner", () => {
   });
 
   it(
-    "uses Windows path identity for ownership and subtree visits",
+    "keeps ownership and subtree visits exact after path resolution",
     async () => {
-      const owner = createOwner([], { pathIdentityPlatform: "win32" });
+      const owner = createOwner();
       const sender = { id: 7, label: "window-a" };
       await owner.open(
         openInput({
@@ -899,11 +898,12 @@ describe("EngineYDocSessionOwner", () => {
         }),
       );
 
-      expect(owner.ownsDocument("workspace-1", "notes/folder/a.md")).toBe(
-        true,
-      );
+      expect(owner.ownsDocument("workspace-1", "notes/folder/a.md")).toBe(false);
+      expect(owner.ownsDocument("workspace-1", "Notes/Folder/A.md")).toBe(true);
       const visit = vi.fn();
       owner.forEachSessionUnderPath("workspace-1", "notes", visit);
+      expect(visit).not.toHaveBeenCalled();
+      owner.forEachSessionUnderPath("workspace-1", "Notes", visit);
       expect(visit).toHaveBeenCalledOnce();
     },
   );
