@@ -198,9 +198,26 @@ fn normalized_ranges_cover(ranges: &[(u32, u32)], clock: u32) -> bool {
 thread_local! {
     /// Test-only seam: forces the gate's wrapped computation to unwind so the
     /// `catch_unwind` fail-closed containment can be exercised deterministically.
-    /// While armed, any gate invocation fails closed — the dedupe-hoist tests in
-    /// [`crate::replication`] use that to prove a path did NOT reach the gate.
-    pub(crate) static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Armed only through [`with_armed_gate`].
+    static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the replay gate armed: while armed, ANY gate invocation fails
+/// closed, so an outcome other than that failure proves the path never reached
+/// the gate (the dedupe-hoist tests in [`crate::replication`] rely on this).
+/// Disarms on return AND on unwind, so a panicking closure cannot leave the
+/// seam armed for later tests on the same thread.
+#[cfg(test)]
+pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) {
+            PANIC_INJECT.with(|cell| cell.set(false));
+        }
+    }
+    PANIC_INJECT.with(|cell| cell.set(true));
+    let _disarm = Disarm;
+    f()
 }
 
 /// Reject a valid v1 update whose structural edit boundaries cannot replay
@@ -1106,11 +1123,11 @@ mod tests {
         // Sanity: without injection the gate returns normally (accepts).
         assert!(validate_replay_parity(&base, &candidate).is_ok());
 
-        PANIC_INJECT.with(|cell| cell.set(true));
-        let escaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            validate_replay_parity(&base, &candidate)
-        }));
-        PANIC_INJECT.with(|cell| cell.set(false));
+        let escaped = with_armed_gate(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                validate_replay_parity(&base, &candidate)
+            }))
+        });
 
         let inner = escaped.expect("the gate must contain the unwind, not let it escape");
         assert!(

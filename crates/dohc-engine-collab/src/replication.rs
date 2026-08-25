@@ -142,14 +142,8 @@ pub fn apply_remote_update_in_transaction(
             reason: "remote update applied to a non-replicated lineage".to_owned(),
         });
     }
-    // Content-addressed dedup BEFORE the replay-parity gate: a sha hit means
-    // these exact bytes are already an admitted row of the un-folded log — they
-    // passed the gate against the base they extended, and re-applying them is a
-    // CRDT no-op. Re-gating a redelivery against today's NEWER base could only
-    // spuriously refuse bytes that remain durable. Folded bytes (row pruned by
-    // compaction) miss this probe and take the full gate below — the DEDUP SPAN
-    // in the module doc.
-    if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+    // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
+    if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }
     let base = load_for_replay_gate(tx, key)?;
@@ -162,12 +156,8 @@ pub fn apply_remote_update_in_transaction(
     })
 }
 
-// T5 (dedupe hoist): the content-addressed dedup runs BEFORE the replay-parity
-// gate on both admission paths, and folded bytes still take the full gate — the
-// DEDUP SPAN in the module doc. Unit tests, not integration tests, because the
-// proof rides the gate's `cfg(test)` panic seam: while armed, ANY gate
-// invocation fails closed, so an outcome other than that failure proves the
-// path never reached the gate.
+// Unit tests rather than integration tests because the proof rides the gate's
+// `cfg(test)` seam, `with_armed_gate`.
 #[cfg(test)]
 mod dedupe_hoist_tests {
     use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
@@ -177,16 +167,8 @@ mod dedupe_hoist_tests {
     use crate::durable::{
         claim_base, record_local_update, record_local_update_creating_marker, CompactOutcome,
     };
-    use crate::replay_parity::PANIC_INJECT;
+    use crate::replay_parity::with_armed_gate;
     use crate::ydoc::{ContentKind, Ydoc};
-
-    /// Run `f` with the replay gate armed to fail closed on invocation.
-    fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
-        PANIC_INJECT.with(|cell| cell.set(true));
-        let result = f();
-        PANIC_INJECT.with(|cell| cell.set(false));
-        result
-    }
 
     fn committed<T>(outcome: TxnOutcome<T>) -> T {
         match outcome {
@@ -241,6 +223,25 @@ mod dedupe_hoist_tests {
                 })
             })
             .expect("count update rows")
+    }
+
+    /// Rot the canonical stored blob for `bytes` out-of-band (bit-rot
+    /// simulation). Returns the blob's sha.
+    fn rot_stored_blob(store: &mut EngineStore, bytes: &[u8]) -> String {
+        let sha = crate::hex_sha256(bytes);
+        let outcome = store
+            .write_with(&NoFaults, |tx| -> Result<usize, CollabError> {
+                tx.execute(
+                    "UPDATE binary_blobs SET bytes = ?2, byte_length = ?3 WHERE sha256 = ?1",
+                    rusqlite::params![sha, b"rotted".as_slice(), 6_i64],
+                )
+                .map_err(|e| CollabError::Corrupt {
+                    reason: e.to_string(),
+                })
+            })
+            .expect("rot blob");
+        assert_eq!(committed(outcome), 1, "the canonical blob row must exist");
+        sha
     }
 
     /// A replicated lineage with one applied remote delta: (store guard, store,
@@ -334,6 +335,51 @@ mod dedupe_hoist_tests {
             "duplicate append outcome unchanged by the hoist"
         );
         assert_eq!(update_rows(&store, &key), 1, "no duplicate row");
+    }
+
+    #[test]
+    fn a_rotted_canonical_blob_fails_the_remote_dedup_as_corrupt() {
+        let (_dir, mut store, key, remote, _seq) =
+            replicated_with_applied_delta("dedupe-hoist-rot-remote");
+        let sha = rot_stored_blob(&mut store, &remote.bytes);
+
+        let refused = apply_remote_update(&mut store, &key, &remote, &NoFaults, 1_200)
+            .expect_err("a redelivery over a rotted blob must surface Corrupt, not a false ack");
+        assert!(
+            matches!(&refused, CollabError::Corrupt { reason } if reason.contains(&sha)),
+            "expected Corrupt naming the sha: {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_rotted_canonical_blob_fails_the_local_dedup_as_corrupt() {
+        let (_dir, mut store) = fresh_store("dedupe-hoist-rot-local");
+        let key = seeded_key(&mut store);
+        let doc = Ydoc::wire();
+        let update = doc.plaintext_insert(0, "hello ");
+        let first = committed(
+            record_local_update_creating_marker(
+                &mut store,
+                &key,
+                None,
+                ContentKind::Plaintext,
+                crate::durable::Regime::LocalOnly,
+                &update,
+                None,
+                &NoFaults,
+                1_000,
+            )
+            .expect("first append"),
+        );
+        assert!(!first.deduped, "first append must land");
+        rot_stored_blob(&mut store, &update);
+
+        let refused = record_local_update(&mut store, &key, &update, &NoFaults, 1_100)
+            .expect_err("a duplicate append over a rotted blob must surface Corrupt");
+        assert!(
+            matches!(refused, CollabError::Corrupt { .. }),
+            "expected Corrupt: {refused:?}"
+        );
     }
 
     #[test]
