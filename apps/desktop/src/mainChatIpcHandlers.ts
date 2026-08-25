@@ -54,6 +54,25 @@ export function createWritableChatIpcHandler<
   };
 }
 
+export function createMarkChatThreadReadIpcHandler<
+  Event,
+  Payload extends WorkspacePayload,
+  Context extends WorkspaceContext,
+  Result,
+>(input: {
+  assertTrustedSender: (event: Event) => void;
+  parsePayload: (payload: unknown) => Payload;
+  requireContext: (workspaceId: string) => Promise<Context>;
+  run: (context: Context, payload: Payload) => Promise<Result>;
+}): MainChatIpcHandler<Event, Result> {
+  return createWritableChatIpcHandler({
+    ...input,
+    // Read state belongs to this reader, stays local, and never replicates.
+    // Neither a share level nor a joined-channel grant gates this operation.
+    assertWritable: null,
+  });
+}
+
 // The joined lane's read, as a handler a test can drive without booting
 // Electron. It exists as a seam because the scoping is the whole contract of
 // #640: the registry array grows with every channel the workspace has ever
@@ -91,31 +110,6 @@ export function createChatChannelIpcHandler<
   return createWritableChatIpcHandler({
     ...input,
     afterWrite: [({ workspace }) => input.queueCloudSync(workspace.workspaceId)],
-  });
-}
-
-export function createSharedChannelWritableChatIpcHandler<
-  Event,
-  Payload extends WorkspacePayload,
-  Context extends WorkspaceContext,
-  Result,
->(input: {
-  assertTrustedSender: (event: Event) => void;
-  parsePayload: (payload: unknown) => Payload;
-  requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritable: ((context: Context) => void) | null;
-  assertSharedChannelWritable: (
-    context: Context,
-    payload: Payload,
-  ) => Promise<void>;
-  run: (context: Context, payload: Payload) => Promise<Result>;
-}): MainChatIpcHandler<Event, Result> {
-  return createWritableChatIpcHandler({
-    ...input,
-    run: async (context, payload) => {
-      await input.assertSharedChannelWritable(context, payload);
-      return input.run(context, payload);
-    },
   });
 }
 

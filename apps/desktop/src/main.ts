@@ -461,7 +461,7 @@ import {
   chatViewerAuthorId,
   createChatChannelIpcHandler,
   createListJoinedSharedChannelsIpcHandler,
-  createSharedChannelWritableChatIpcHandler,
+  createMarkChatThreadReadIpcHandler,
   chatShareSessionKey,
   createSetChatReactionIpcHandler,
   handleRelayUnauthorized,
@@ -9093,24 +9093,11 @@ function registerIpcHandlers(
 
   ipcMain.handle(
     CHANNELS.markChatThreadRead,
-    createSharedChannelWritableChatIpcHandler({
+    createMarkChatThreadReadIpcHandler({
       assertTrustedSender,
       parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
       // #646 PR2: reachable from a share view at EVERY level, view included.
       requireContext: requireChatScope,
-      // Deliberately ungated. Read state is this reader's own, written
-      // locally and never replicated, so there is no write here for a level
-      // to refuse — a view recipient who read the discussion must be able to
-      // stop it showing as unread.
-      assertWritable: null,
-      assertSharedChannelWritable: async ({ workspace }, input) => {
-        await assertSharedChannelWritable({
-          workspaceId: workspace.workspaceId,
-          sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-          store: linkedChatStoreFor(workspace),
-          target: { threadId: input.threadId },
-        });
-      },
       run: async ({ workspace }, input) => {
         const state = await linkedChatStoreFor(workspace).markThreadRead({
           workspaceId: workspace.workspaceId,

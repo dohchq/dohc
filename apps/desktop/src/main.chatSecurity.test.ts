@@ -63,12 +63,6 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("createChatChannel")).toContain(
       "assertWritable: ({ workspace }) => assertWritableWorkspace(workspace),",
     );
-    expect(handlerSource("markChatThreadRead")).toContain(
-      "createSharedChannelWritableChatIpcHandler({",
-    );
-    expect(handlerSource("markChatThreadRead")).toContain(
-      "await assertSharedChannelWritable({",
-    );
   });
 
   // #646 PR2. A file share carries the chat about the files it shares, so
@@ -104,10 +98,14 @@ describe("main-process chat authorization", () => {
     // markChatThreadRead is deliberately UNGATED and must stay that way: read
     // state is the reader's own, written locally and never replicated, so a
     // view recipient who read the discussion can stop it showing as unread.
-    // `null` is spelled at the call site so a new handler cannot arrive
-    // ungated by omission.
+    // The operation-specific factory has no durable-write gate dependency.
+    expect(handlerSource("markChatThreadRead")).toContain(
+      "createMarkChatThreadReadIpcHandler({",
+    );
     expect(handlerSource("markChatThreadRead")).toContain("requireContext: requireChatScope,");
-    expect(handlerSource("markChatThreadRead")).toContain("assertWritable: null,");
+    expect(handlerSource("markChatThreadRead")).not.toContain(
+      "assertSharedChannelWritable",
+    );
   });
 
   it("gates every chat dispatch IPC on the workspace engine capture", () => {
