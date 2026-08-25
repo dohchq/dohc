@@ -457,7 +457,7 @@ describe("plugin panel main-process wiring", () => {
       "const stillActive = activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId;",
       awaitAt,
     );
-    const warmAt = open.indexOf("await ensurePluginPipeline(workspace)", recheckAt);
+    const warmAt = open.indexOf("void ensurePluginPipeline(workspace)", recheckAt);
     expect(awaitAt).toBeGreaterThan(-1);
     expect(recheckAt).toBeGreaterThan(awaitAt);
     expect(warmAt).toBeGreaterThan(recheckAt);

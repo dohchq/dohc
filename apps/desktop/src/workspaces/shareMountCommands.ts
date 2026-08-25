@@ -63,7 +63,9 @@ export interface ShareMountCommandDependencies<WorkspaceSummary> {
   closeRelayWorkspace(workspaceId: string): Promise<void>;
   workspaceSummary(workspaceId: string): WorkspaceSummary;
   refreshNativeWorkspaceSurfaces(): void;
-  notifyRenderer(): void;
+  // Scoped to the HOST workspace the mount lives in: only its windows need
+  // to refetch after a mount change.
+  notifyRenderer(scope: { workspaceId: string }): void;
   logError(message: string, error: unknown): void;
 }
 
@@ -221,7 +223,7 @@ export function createShareMountCommands<WorkspaceSummary>(
     },
   };
 
-  function presentUnmount(shareId: string): void {
+  function presentUnmount(workspaceId: string, shareId: string): void {
     try {
       dependencies.refreshNativeWorkspaceSurfaces();
     } catch (surfaceError) {
@@ -231,7 +233,7 @@ export function createShareMountCommands<WorkspaceSummary>(
       );
     }
     try {
-      dependencies.notifyRenderer();
+      dependencies.notifyRenderer({ workspaceId });
     } catch (notifyError) {
       dependencies.logError(
         `could not notify renderer after unmount for ${shareId}:`,
@@ -328,7 +330,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               const outcome = await files.mount(lease, prepared);
               mounted = true;
               dependencies.refreshNativeWorkspaceSurfaces();
-              dependencies.notifyRenderer();
+              dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 mount: {
@@ -376,7 +378,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                 );
               }
               try {
-                dependencies.notifyRenderer();
+                dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
               } catch (notifyError) {
                 dependencies.logError(
                   `could not notify renderer after mount-share failure for ${mount.label}:`,
@@ -471,7 +473,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           }
           return { results };
         } finally {
-          dependencies.notifyRenderer();
+          dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
         }
       });
     },
@@ -508,7 +510,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                 workspace.workspaceId,
                 removal.remaining,
               );
-              presentUnmount(shareId);
+              presentUnmount(workspace.workspaceId, shareId);
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 folderLeft: true as const,
@@ -519,7 +521,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               workspaceId: workspace.workspaceId,
               shareId: removal.mount.shareId,
             });
-            presentUnmount(shareId);
+            presentUnmount(workspace.workspaceId, shareId);
             return {
               workspace: dependencies.workspaceSummary(workspace.workspaceId),
               ...(removed.folderLeft ? { folderLeft: true as const } : {}),

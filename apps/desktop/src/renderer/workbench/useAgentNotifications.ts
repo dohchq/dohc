@@ -113,9 +113,10 @@ export function useAgentNotifications(params: {
     // True while the armed timer is the slow idle delay — the only cadence an
     // activity ping needs to short-circuit.
     let idleArmed = false;
-    // Wake rate limit: main broadcasts workspace-activity to every window with
-    // no workspace scoping, so a busy sibling workspace pings this window on
-    // every settled batch. A wake-driven poll therefore never starts sooner
+    // Wake rate limit: workspace-activity is scoped to this window's active
+    // workspace, but a busy workspace (a multi-file reconcile, an agent
+    // writing in a loop) still pings on every settled batch, and global
+    // events reach every window. A wake-driven poll therefore never starts sooner
     // than pollIntervalMs after the previous poll STARTED — an activity storm
     // costs at worst the old fast cadence, while a quiet window still wakes
     // instantly on the first ping.

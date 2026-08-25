@@ -51,9 +51,13 @@ export function createWorkspaceChatLifecycle(options: {
     ): Promise<Result> {
       const result = await openActivity();
       // Join bootstrap hydrates the remote inside this seam. Maintenance must
-      // happen afterward so a local AGENTS.md write cannot precede first pull.
+      // START afterward so a local AGENTS.md write cannot precede first pull —
+      // that ordering is load-bearing and stays. The open's caller (the
+      // renderer's file tree, a dispatch run) does not wait for the
+      // read-modify-write itself: maintainOnce settles its own errors through
+      // onError and never rejects.
       await afterActivityOpen?.();
-      await maintainOnce(workspace);
+      void maintainOnce(workspace);
       return result;
     },
   };

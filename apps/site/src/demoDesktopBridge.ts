@@ -1,5 +1,8 @@
 import type { SearchResultsEvent, SearchResultsEventEntry } from "../../desktop/src/ipc/channels";
-import type { DohcDesktopBridge } from "../../desktop/src/ipc/bridgeContract";
+import type {
+  DohcDesktopBridge,
+  WorkspaceActivityEvent,
+} from "../../desktop/src/ipc/bridgeContract";
 import {
   collectWorkspacePaths,
   findFileAncestor,
@@ -33,7 +36,7 @@ let context: DemoBridgeContext = {
 };
 
 const searchListeners = new Set<(batch: SearchResultsEvent) => void>();
-const activityListeners = new Set<() => void>();
+const activityListeners = new Set<(event: WorkspaceActivityEvent) => void>();
 const assetUrls = new Map<string, string>();
 const ASSET_DB_NAME = "dohc-marketing-demo";
 const ASSET_STORE_NAME = "workspace-assets";
@@ -477,7 +480,8 @@ const demoBridge = {
       ...context.documents,
       { path: payload.relativePath, title: payload.relativePath, body: "" },
     ];
-    activityListeners.forEach((listener) => listener());
+    // The demo is single-workspace; the payload-free global ping suffices.
+    activityListeners.forEach((listener) => listener({}));
     return { path: payload.relativePath };
   },
   async createWorkspaceFolder(payload: { relativePath: string }) {
@@ -584,9 +588,11 @@ const demoBridge = {
       source: "default" as const,
     };
   },
-  onWorkspaceActivity(listener: () => void) {
+  onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void) {
     activityListeners.add(listener);
-    return () => activityListeners.delete(listener);
+    return () => {
+      activityListeners.delete(listener);
+    };
   },
   // The demo has no cloud session, so the signal never fires.
   onCloudSessionChanged() {

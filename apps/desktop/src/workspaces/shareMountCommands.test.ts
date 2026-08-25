@@ -212,7 +212,9 @@ function harness() {
       return { id: workspaceId };
     },
     refreshNativeWorkspaceSurfaces: () => events.push("native"),
-    notifyRenderer: () => events.push("notify"),
+    // The event name carries the scope so every pinned sequence also proves
+    // the notify named the HOST workspace, not another one or none.
+    notifyRenderer: ({ workspaceId }) => events.push(`notify:${workspaceId}`),
     logError: (_message, _error) => events.push("log"),
   };
   const commands = createShareMountCommands(dependencies);
@@ -264,7 +266,7 @@ describe("share mount commands", () => {
       "projection:create",
       "registry:1",
       "native",
-      "notify",
+      "notify:workspace-one",
       "summary",
       "lease:end",
     ]);
@@ -442,7 +444,7 @@ describe("share mount commands", () => {
     await expect(
       h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
     ).rejects.toThrow("cleanup did not finish");
-    expect(h.events.at(-1)).toBe("notify");
+    expect(h.events.at(-1)).toBe("notify:workspace-one");
   });
 
   it("does not unmount again when files.mount rejects", async () => {
@@ -607,7 +609,7 @@ describe("share mount commands", () => {
       "lease:start",
       "files:reconcile",
       "lease:end",
-      "notify",
+      "notify:workspace-one",
     ]);
   });
 
@@ -630,7 +632,7 @@ describe("share mount commands", () => {
     await expect(h.commands.refresh({ workspace: WORKSPACE })).rejects.toThrow(
       "session expired",
     );
-    expect(h.events.at(-1)).toBe("notify");
+    expect(h.events.at(-1)).toBe("notify:workspace-one");
   });
 
   it("keeps the empty registry tombstone when damaged mounts are removed", async () => {
@@ -655,7 +657,7 @@ describe("share mount commands", () => {
       "relay:close",
       "registry:0",
       "native",
-      "notify",
+      "notify:workspace-one",
       "summary",
       "lease:end",
     ]);
@@ -693,7 +695,7 @@ describe("share mount commands", () => {
       "projection:remove",
       "registry:0",
       "native",
-      "notify",
+      "notify:workspace-one",
       "summary",
       "lease:end",
     ]);

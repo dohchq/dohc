@@ -496,7 +496,11 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     await activity.close("activity-test", { preserveStatus: true });
     expect(retireLiveSessions).toHaveBeenCalledOnce();
     expect(activity.getStatus("activity-test").liveSessionsGeneration).toBe(1);
-    expect(notify).toHaveBeenCalledOnce();
+    // The close notifies with its own workspace as the scope — a wrong or
+    // missing workspaceId would repaint other workspaces' windows.
+    expect(notify).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "activity-test",
+    });
 
     expect((await activity.open(workspace())).liveSessionsGeneration).toBe(1);
     notify.mockClear();
@@ -630,6 +634,11 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     expect(otherFailure.historyCaptureFailed).toBe(true);
     expect(otherFailure.engineStoreRefused).toBeNull();
     expect(notify).toHaveBeenCalledTimes(3);
+    // Every transition names its workspace — a scope-free notify here would
+    // repaint every window.
+    for (const call of notify.mock.calls) {
+      expect(call).toEqual([{ workspaceId: "activity-test" }]);
+    }
     await activity.stopAll();
   });
 });

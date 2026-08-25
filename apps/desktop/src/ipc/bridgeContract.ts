@@ -3012,6 +3012,36 @@ export function parsePluginStatusChangedEventForIpc(
   return parsed.success ? parsed.data : null;
 }
 
+// The daemon caps its own capture event at this many paths; a merged or
+// oversized set stops being a useful hint and the payload omits it
+// ("refresh broadly"). One constant for the schema, the broadcaster, and
+// the capture aggregation.
+export const MAX_ACTIVITY_EVENT_PATHS = 32;
+
+// What one workspace-activity ping says happened. Main already filters the
+// send by each window's active workspace, so `workspaceId` is context for a
+// path-scoped refresh, not an authorization fact. Absent workspaceId = a
+// global event (logout, registry change, daemon relaunch) delivered to every
+// window. `paths` is a bounded hint from the daemon's capture payload; a
+// batch too large to enumerate omits it and means "refresh broadly".
+export const WorkspaceActivityEvent = z
+  .object({
+    workspaceId: z.string().min(1).optional(),
+    paths: z.array(z.string()).max(MAX_ACTIVITY_EVENT_PATHS).optional(),
+  })
+  .strict();
+export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;
+
+// Unlike plugin events, an activity ping must never be DROPPED on a schema
+// failure: under-notifying is the staleness bug the channel exists to
+// prevent. A malformed payload degrades to the global, payload-free ping.
+export function parseWorkspaceActivityEventForIpc(
+  value: unknown,
+): WorkspaceActivityEvent {
+  const parsed = WorkspaceActivityEvent.safeParse(value);
+  return parsed.success ? parsed.data : {};
+}
+
 export const PluginPanelSdkEvent = z
   .object({
     workspaceId: WORKSPACE_ID,
@@ -5043,9 +5073,11 @@ export interface DohcDesktopBridge {
   ): Promise<GetWorkspaceUiStateResult>;
   setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
   // Live push: main signals the renderer when the active workspace's files
-  // or history changed (settled filesystem batch recorded). Returns an
-  // unsubscribe function.
-  onWorkspaceActivity(listener: () => void): () => void;
+  // or history changed (settled filesystem batch recorded). Main filters by
+  // each window's active workspace, so a window only hears about its own
+  // workspace plus global events. The payload is additive context — a
+  // subscriber may ignore it. Returns an unsubscribe function.
+  onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
   onPluginStatusChanged(
     listener: (event: PluginStatusChangedEvent) => void,
   ): () => void;

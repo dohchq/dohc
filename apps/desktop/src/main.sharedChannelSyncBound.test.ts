@@ -258,7 +258,9 @@ describe("the shared-channel sync pass is bounded in production", () => {
     // another wired trigger cannot stand in for it.
     expect(mainSource).toContain(
       "onWrite: (workspace, target) => {\n" +
-        "      notifyRenderer();\n" +
+        "      notifyRenderer({ workspaceId: workspace.workspaceId });\n" +
+        "      // A CLI or MCP reply can mark a live bookmark projection pending.\n" +
+        "      queueChatBookmarkProjection(workspace.workspaceId);\n" +
         "      activity.queueCloudSync(workspace.workspaceId);\n" +
         "      void syncSharedChannelsForChatTarget(workspace.workspaceId, target);",
     );
