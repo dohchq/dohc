@@ -8,6 +8,7 @@ import {
   type WritePathValidation,
 } from "@dohc/workspace-core";
 import type { ShareViewChangedPath } from "@dohc/workspace-contracts/relay";
+import { isInside } from "../security/pathContainment";
 import { shareViewFilesProjection } from "./sharedView";
 import {
   assertActiveShareViewFilesOwner,
@@ -382,6 +383,9 @@ async function applyShareViewPathMove(
   // whether the destination holds anything the store does not. Skipped when the
   // two are the same entry, which is what a case-only rename is.
   const renamesInPlace = await sameProjectionEntry(input.rootPath, from, to);
+  if (!renamesInPlace) {
+    await refuseProjectionDescendantMove(input, from, to);
+  }
   if (!renamesInPlace) await refuseUntrackedUnder(input.rootPath, to, held);
   if (!renamesInPlace && pathsUnder(held, to).length > 0) {
     throw new Error(`Destination already exists: ${to}`);
@@ -968,6 +972,51 @@ async function sameProjectionEntry(
     realpath(join(rootPath, right)).catch(() => null),
   ]);
   return leftReal !== null && rightReal !== null && leftReal === rightReal;
+}
+
+/**
+ * Refuse when the destination physically resolves inside the source.
+ *
+ * Relative path spelling cannot answer this on a case-insensitive filesystem
+ * or through an in-workspace alias. Resolve both entries through the same
+ * projection boundary materialization uses, then compare canonical paths. A
+ * case-only rename is excluded by sameProjectionEntry before this runs.
+ */
+async function refuseProjectionDescendantMove(
+  input: ShareViewFileChangeScope,
+  from: string,
+  to: string,
+): Promise<void> {
+  const sourceTarget = await input.projection.resolvedTarget(
+    input.rootPath,
+    from,
+  );
+  let source: string;
+  try {
+    source = await realpath(sourceTarget);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return;
+    throw error;
+  }
+
+  const destinationTarget = await input.projection.resolvedTarget(
+    input.rootPath,
+    to,
+  );
+  let destination: string;
+  try {
+    destination = await realpath(destinationTarget);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    // resolvedTarget already canonicalized every existing ancestor. The
+    // unresolved tail can therefore participate directly in containment.
+    destination = destinationTarget;
+  }
+  if (isInside(source, destination)) {
+    throw new Error(`Cannot move a path into itself: ${from}`);
+  }
 }
 
 /**

@@ -760,8 +760,13 @@ export interface WorkspaceMovePaths {
   toPath: string;
 }
 
-export interface PreparedWorkspaceMove extends WorkspaceMovePaths {
-  resultPath: string;
+export interface PreparedWorkspaceMove {
+  // Engine coordination and the filesystem commit use canonical physical
+  // spellings. The IPC result keeps the normalized spelling the user asked
+  // for, even when an alias led to a differently spelled source or parent.
+  physicalFromPath: string;
+  physicalToPath: string;
+  visibleResultPath: string;
 }
 
 export function normalizeWorkspaceMovePaths(
@@ -860,9 +865,9 @@ async function inspectWorkspaceMove(
     // The source already exists, so give engine coordination its physical
     // spelling. On Windows, an IPC case alias still reaches the same entry,
     // but the engine keys stable objects by their canonical workspace path.
-    fromPath: relative(realRoot, realFrom).replaceAll("\\", "/"),
-    toPath: resolvedToPath.replaceAll("\\", "/"),
-    resultPath: normalized.toPath,
+    physicalFromPath: relative(realRoot, realFrom).replaceAll("\\", "/"),
+    physicalToPath: resolvedToPath.replaceAll("\\", "/"),
+    visibleResultPath: normalized.toPath,
     realRoot,
     from,
     to,
@@ -878,9 +883,9 @@ export async function prepareWorkspaceMove(
 ): Promise<PreparedWorkspaceMove> {
   const inspected = await inspectWorkspaceMove(rootPath, fromPath, toPath);
   return {
-    fromPath: inspected.fromPath,
-    toPath: inspected.toPath,
-    resultPath: inspected.resultPath,
+    physicalFromPath: inspected.physicalFromPath,
+    physicalToPath: inspected.physicalToPath,
+    visibleResultPath: inspected.visibleResultPath,
   };
 }
 
@@ -912,7 +917,7 @@ export async function movePath(
 ): Promise<string> {
   // Repeat the inspection after engine preparation so its await cannot turn
   // the earlier proof into a commit-time TOCTOU gap.
-  const { resultPath, realRoot, from, to, realFrom } =
+  const { visibleResultPath, realRoot, from, to, realFrom } =
     await inspectWorkspaceMove(rootPath, fromPath, toPath);
   await mkdir(dirname(to), { recursive: true });
   const realDestParent = await realpath(dirname(to));
@@ -948,7 +953,7 @@ export async function movePath(
   // main is the single writer on this path and Node exposes no renameat2
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
   await rename(from, to);
-  return resultPath;
+  return visibleResultPath;
 }
 
 // Deletes are always RECOVERABLE — never a hard delete:

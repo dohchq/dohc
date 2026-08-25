@@ -861,38 +861,6 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(test.change).not.toHaveBeenCalled();
   });
 
-  it.runIf(process.platform === "win32")(
-    "refuses a received-share move into a case-alias descendant but keeps a case-only rename",
-    async () => {
-      const test = await harness({
-        shareView: { granterEmail: "owner@example.com" },
-      });
-      await mkdir(join(test.rootPath, "Plans"));
-
-      await expect(
-        test.owner.movePath(trustedEvent, {
-          workspaceId: test.workspace.workspaceId,
-          fromPath: "Plans",
-          toPath: "plans/archive",
-        }),
-      ).rejects.toThrow("Cannot move a path into itself: Plans");
-      expect(test.change).not.toHaveBeenCalled();
-
-      await expect(
-        test.owner.movePath(trustedEvent, {
-          workspaceId: test.workspace.workspaceId,
-          fromPath: "Plans",
-          toPath: "plans",
-        }),
-      ).resolves.toEqual({ path: "plans" });
-      expect(test.change).toHaveBeenCalledWith(
-        expect.anything(),
-        { kind: "standalone", workspaceId: test.workspace.workspaceId },
-        { kind: "move", fromPath: "Plans", toPath: "plans" },
-      );
-    },
-  );
-
   it("refuses a direct write when the Y.Doc mutation port owns the normalized path", async () => {
     const test = await harness();
     await mkdir(join(test.rootPath, "notes"));

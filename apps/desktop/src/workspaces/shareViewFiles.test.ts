@@ -6,6 +6,7 @@ import {
   readdir,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -2406,6 +2407,80 @@ describe("ShareViewFiles", () => {
         { kind: "text", path: "docs/plans/b.md" },
       ),
     ).resolves.toMatchObject({ text: "b\n" });
+  });
+
+  it("refuses a move through a physical alias into its source before changing the store", async () => {
+    const rootPath = await workspaceRoot();
+    const plans = join(rootPath, "docs", "plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "a\n", "utf8");
+    await symlink(plans, join(rootPath, "docs", "alias"), "junction");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/plans/a.md", text: "a\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "move",
+            fromPath: "docs/plans",
+            toPath: "docs/alias/archive",
+          },
+        ),
+      ),
+    ).rejects.toThrow("Cannot move a path into itself: docs/plans");
+
+    expect(store.renameTextFile).not.toHaveBeenCalled();
+    await expect(readFile(join(plans, "a.md"), "utf8")).resolves.toBe("a\n");
+    await expect(
+      readSharedViewProjectionDebt(rootPath, "share-a"),
+    ).resolves.toMatchObject({ pendingPaths: new Set() });
+  });
+
+  it("keeps a case-only folder rename", async () => {
+    const rootPath = await workspaceRoot();
+    await mkdir(join(rootPath, "docs", "plans"), { recursive: true });
+    await writeFile(join(rootPath, "docs", "plans", "a.md"), "a\n", "utf8");
+    const store = mutableTextStore({
+      initial: [{ path: "docs/plans/a.md", text: "a\n" }],
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
+
+    await expect(
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "move",
+            fromPath: "docs/plans",
+            toPath: "docs/Plans",
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({ status: "committed", value: "docs/Plans" });
+
+    expect(store.renameTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromPath: "docs/plans/a.md",
+        toPath: "docs/Plans/a.md",
+      }),
+    );
+    await expect(
+      readFile(join(rootPath, "docs", "Plans", "a.md"), "utf8"),
+    ).resolves.toBe("a\n");
   });
 
   it("does not compensate a rename after an indeterminate daemon response", async () => {

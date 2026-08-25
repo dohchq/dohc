@@ -45,10 +45,6 @@ import {
   prepareWorkspaceDelete,
   prepareWorkspaceMove,
 } from "./workspaceFiles";
-import {
-  workspaceRelativePathIsAtOrUnder,
-  workspaceRelativePathsEqual,
-} from "./workspaceRelativePathIdentity";
 
 type WorkspaceFileMutationIpcHandler<Event, Result = void> = (
   event: Event,
@@ -256,24 +252,22 @@ export function createWorkspaceFileMutationOwner<
             input.fromPath,
             input.toPath,
           );
-          const paths = receivedShare
-            ? { ...requestedPaths, resultPath: requestedPaths.toPath }
+          const preparedMove = receivedShare
+            ? null
             : await prepareWorkspaceMove(
                 workspace.rootPath,
                 input.fromPath,
                 input.toPath,
               );
-          if (
-            receivedShare &&
-            !workspaceRelativePathsEqual(paths.toPath, paths.fromPath) &&
-            workspaceRelativePathIsAtOrUnder(paths.toPath, paths.fromPath)
-          ) {
-            throw new Error(`Cannot move a path into itself: ${input.fromPath}`);
-          }
+          const fromPath =
+            preparedMove?.physicalFromPath ?? requestedPaths.fromPath;
+          const toPath = preparedMove?.physicalToPath ?? requestedPaths.toPath;
+          const visibleResultPath =
+            preparedMove?.visibleResultPath ?? requestedPaths.toPath;
 
           const capture = dependencies.engineCaptureFor(workspace.workspaceId);
-          const fromKind = liveDocumentKindForPath(paths.fromPath);
-          const toKind = liveDocumentKindForPath(paths.toPath);
+          const fromKind = liveDocumentKindForPath(fromPath);
+          const toKind = liveDocumentKindForPath(toPath);
           if (
             (capture !== null || receivedShare) &&
             fromKind !== null &&
@@ -287,7 +281,7 @@ export function createWorkspaceFileMutationOwner<
           }
 
           const finishRename = capture
-            ? await capture.beginFileRename(paths.fromPath, paths.toPath)
+            ? await capture.beginFileRename(fromPath, toPath)
             : null;
           try {
             let path: ShareViewFileChangeValue;
@@ -297,8 +291,8 @@ export function createWorkspaceFileMutationOwner<
                 shareTarget(workspace),
                 {
                   kind: "move",
-                  fromPath: paths.fromPath,
-                  toPath: paths.toPath,
+                  fromPath,
+                  toPath,
                 },
               );
               path = structuralShareViewChangeValue(
@@ -309,10 +303,10 @@ export function createWorkspaceFileMutationOwner<
             } else {
               await movePath(
                 workspace.rootPath,
-                paths.fromPath,
-                paths.toPath,
+                fromPath,
+                toPath,
               );
-              path = paths.resultPath;
+              path = visibleResultPath;
             }
             if (typeof path !== "string") {
               throw new Error("Shared file move returned an invalid result.");
