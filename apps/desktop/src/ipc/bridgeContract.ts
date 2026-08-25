@@ -3012,6 +3012,12 @@ export function parsePluginStatusChangedEventForIpc(
   return parsed.success ? parsed.data : null;
 }
 
+// The daemon caps its own capture event at this many paths; a merged or
+// oversized set stops being a useful hint and the payload omits it
+// ("refresh broadly"). One constant for the schema, the broadcaster, and
+// the capture aggregation.
+export const MAX_ACTIVITY_EVENT_PATHS = 32;
+
 // What one workspace-activity ping says happened. Main already filters the
 // send by each window's active workspace, so `workspaceId` is context for a
 // path-scoped refresh, not an authorization fact. Absent workspaceId = a
@@ -3021,7 +3027,7 @@ export function parsePluginStatusChangedEventForIpc(
 export const WorkspaceActivityEvent = z
   .object({
     workspaceId: z.string().min(1).optional(),
-    paths: z.array(z.string()).max(32).optional(),
+    paths: z.array(z.string()).max(MAX_ACTIVITY_EVENT_PATHS).optional(),
   })
   .strict();
 export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;

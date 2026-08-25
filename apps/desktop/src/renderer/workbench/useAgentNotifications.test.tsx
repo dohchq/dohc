@@ -284,10 +284,10 @@ describe("useAgentNotifications idle polling", () => {
   });
 
   it("caps wake-driven polls at one per pollIntervalMs under an activity storm", async () => {
-    // Main broadcasts workspace-activity to every window with no workspace
-    // scoping, so a busy sibling workspace pings this sessionless window on
-    // every settled batch. The wake rate limit pins the worst case at the old
-    // fast cadence: polls at 0, 1500, 3000, ... — never denser.
+    // A busy workspace (multi-file reconcile, an agent writing in a loop)
+    // pings its own windows on every settled batch. The wake rate limit pins
+    // the worst case at the old fast cadence: polls at 0, 1500, 3000, ... —
+    // never denser.
     renderHook(() =>
       useAgentNotifications({
         workspaceId: "ws-b",

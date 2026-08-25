@@ -1561,8 +1561,7 @@ function notifyRenderer(scope?: WorkspaceActivityScope): void {
     windows: BrowserWindow.getAllWindows(),
     activeWorkspaceIdOf: (webContentsId) =>
       activeWorkspaceIdBySender.get(webContentsId),
-    channel: CHANNELS.workspaceActivity,
-    ...(scope ? { scope } : {}),
+    scope,
   });
 }
 
@@ -8931,6 +8930,11 @@ function registerIpcHandlers(
     for (const bookmark of pending) {
       await materializeChatBookmark(workspace, capture, bookmark).catch((error) => {
         console.error("[desktop] chat bookmark projection:", error);
+        // Re-flag so the worker's next tick retries. If markBookmarkFailed
+        // itself failed, the row is still pending and this is the only retry
+        // path; if it succeeded, the row left listPendingBookmarks and the
+        // extra pass finds nothing — no permanent-failure loop.
+        queueChatBookmarkProjection(workspace.workspaceId);
       });
     }
   }

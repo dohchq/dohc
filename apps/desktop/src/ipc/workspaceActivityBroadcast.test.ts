@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  broadcastWorkspaceActivity,
-  workspaceActivityPayload,
-} from "./workspaceActivityBroadcast";
+import { broadcastWorkspaceActivity } from "./workspaceActivityBroadcast";
+import { CHANNELS } from "./channels";
 
 function fakeWindow(id: number) {
   return { webContents: { id, send: vi.fn() } };
@@ -21,12 +19,11 @@ describe("broadcastWorkspaceActivity", () => {
     broadcastWorkspaceActivity({
       windows: [onA, onB, onNone],
       activeWorkspaceIdOf: (id) => active.get(id),
-      channel: "desktop:workspace-activity",
       scope: { workspaceId: "ws-a", paths: ["notes/a.md"] },
     });
 
     expect(onA.webContents.send).toHaveBeenCalledExactlyOnceWith(
-      "desktop:workspace-activity",
+      CHANNELS.workspaceActivity,
       { workspaceId: "ws-a", paths: ["notes/a.md"] },
     );
     // The pin this change exists for: workspace B's window hears nothing
@@ -42,32 +39,43 @@ describe("broadcastWorkspaceActivity", () => {
     broadcastWorkspaceActivity({
       windows: [onA, onNone],
       activeWorkspaceIdOf: (id) => (id === 1 ? "ws-a" : undefined),
-      channel: "desktop:workspace-activity",
     });
 
     expect(onA.webContents.send).toHaveBeenCalledExactlyOnceWith(
-      "desktop:workspace-activity",
+      CHANNELS.workspaceActivity,
       {},
     );
     expect(onNone.webContents.send).toHaveBeenCalledExactlyOnceWith(
-      "desktop:workspace-activity",
+      CHANNELS.workspaceActivity,
       {},
     );
   });
-});
 
-describe("workspaceActivityPayload", () => {
-  it("omits paths when the hint is empty or exceeds the daemon's cap", () => {
-    expect(workspaceActivityPayload({ workspaceId: "ws", paths: [] })).toEqual({
-      workspaceId: "ws",
+  it("omits the paths hint when it is empty or exceeds the daemon's cap", () => {
+    const win = fakeWindow(1);
+    const activeWorkspaceIdOf = () => "ws";
+    broadcastWorkspaceActivity({
+      windows: [win],
+      activeWorkspaceIdOf,
+      scope: { workspaceId: "ws", paths: [] },
     });
     const oversized = Array.from({ length: 33 }, (_, index) => `file-${index}`);
-    expect(
-      workspaceActivityPayload({ workspaceId: "ws", paths: oversized }),
-    ).toEqual({ workspaceId: "ws" });
-  });
+    broadcastWorkspaceActivity({
+      windows: [win],
+      activeWorkspaceIdOf,
+      scope: { workspaceId: "ws", paths: oversized },
+    });
 
-  it("maps no scope to the empty global payload", () => {
-    expect(workspaceActivityPayload()).toEqual({});
+    expect(win.webContents.send).toHaveBeenCalledTimes(2);
+    expect(win.webContents.send).toHaveBeenNthCalledWith(
+      1,
+      CHANNELS.workspaceActivity,
+      { workspaceId: "ws" },
+    );
+    expect(win.webContents.send).toHaveBeenNthCalledWith(
+      2,
+      CHANNELS.workspaceActivity,
+      { workspaceId: "ws" },
+    );
   });
 });

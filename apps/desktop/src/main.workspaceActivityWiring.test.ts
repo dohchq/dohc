@@ -14,10 +14,11 @@ function sourceBlock(startMarker: string, endMarker: string): string {
 describe("workspace-activity main-process wiring", () => {
   it("sends workspace activity through the scoped broadcast, keyed by each window's active workspace", () => {
     const notify = sourceBlock("function notifyRenderer(", "\n}\n");
+    // The broadcaster itself owns the channel; this pin covers the wiring
+    // that only main can get wrong: which windows and whose active workspace.
     expect(notify).toContain("broadcastWorkspaceActivity({");
     expect(notify).toContain("windows: BrowserWindow.getAllWindows(),");
     expect(notify).toContain("activeWorkspaceIdBySender.get(webContentsId)");
-    expect(notify).toContain("channel: CHANNELS.workspaceActivity,");
   });
 
   it("forwards the daemon's capture payload scope into the renderer notification", () => {

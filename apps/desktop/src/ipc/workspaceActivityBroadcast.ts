@@ -1,4 +1,8 @@
-import type { WorkspaceActivityEvent } from "./bridgeContract";
+import {
+  MAX_ACTIVITY_EVENT_PATHS,
+  type WorkspaceActivityEvent,
+} from "./bridgeContract";
+import { CHANNELS } from "./channels";
 
 // What a call site knows about the activity it reports. `workspaceId` scopes
 // the send to windows with that workspace active — the pluginStatusChanged
@@ -16,11 +20,7 @@ interface ActivityWindow {
   };
 }
 
-// The daemon caps its own event at 32 paths; a merged or oversized set stops
-// being a useful hint and the payload omits it ("refresh broadly").
-export const MAX_ACTIVITY_EVENT_PATHS = 32;
-
-export function workspaceActivityPayload(
+function workspaceActivityPayload(
   scope?: WorkspaceActivityScope,
 ): WorkspaceActivityEvent {
   if (!scope) return {};
@@ -39,7 +39,6 @@ export function workspaceActivityPayload(
 export function broadcastWorkspaceActivity(options: {
   windows: Iterable<ActivityWindow>;
   activeWorkspaceIdOf: (webContentsId: number) => string | undefined;
-  channel: string;
   scope?: WorkspaceActivityScope;
 }): void {
   const payload = workspaceActivityPayload(options.scope);
@@ -50,6 +49,6 @@ export function broadcastWorkspaceActivity(options: {
     ) {
       continue;
     }
-    win.webContents.send(options.channel, payload);
+    win.webContents.send(CHANNELS.workspaceActivity, payload);
   }
 }

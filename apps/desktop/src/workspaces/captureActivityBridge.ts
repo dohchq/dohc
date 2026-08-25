@@ -1,8 +1,6 @@
 import type { Event } from "@dohc/workspace-engine-client";
-import {
-  MAX_ACTIVITY_EVENT_PATHS,
-  type WorkspaceActivityScope,
-} from "../ipc/workspaceActivityBroadcast";
+import { MAX_ACTIVITY_EVENT_PATHS } from "../ipc/bridgeContract";
+import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 
 /** Emitted by the daemon once per settled capture batch / reconcile pass. */
 export const CAPTURE_MOMENT_RECORDED_EVENT = "capture.momentRecorded";
