@@ -344,7 +344,10 @@ describe("desktop workspace-search owner wiring", () => {
       >({
         registerHandler: (channel, handler) => handlers.set(channel, handler),
         assertTrustedSender: () => undefined,
-        requireWorkspace: (_event, workspaceId) => ({ workspaceId, rootPath }),
+        authorizeWorkspace: (_event, workspaceId) => ({
+          workspace: { workspaceId, rootPath },
+          isCurrent: () => true,
+        }),
         owner,
       });
 

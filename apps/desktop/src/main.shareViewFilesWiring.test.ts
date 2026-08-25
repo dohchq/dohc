@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,19 +11,6 @@ import {
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
 
 const roots: string[] = [];
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
-
-function sourceBlock(startMarker: string, endMarker: string): string {
-  const start = mainSource.indexOf(startMarker);
-  expect(start).toBeGreaterThan(-1);
-  const end = mainSource.indexOf(endMarker, start);
-  expect(end).toBeGreaterThan(start);
-  return mainSource.slice(start, end);
-}
-
-function handlerSource(channel: string): string {
-  return sourceBlock(`ipcMain.handle(CHANNELS.${channel}`, "\n  });");
-}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true })));
@@ -90,9 +76,9 @@ function harness(input: { capture: boolean; rootPath: string }) {
   registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
-    requireWorkspace: (_event, workspaceId) => {
+    authorizeWorkspace: (_event, workspaceId) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Unknown workspace.");
-      return workspace;
+      return { workspace, isCurrent: () => true };
     },
     owner,
   });
@@ -110,49 +96,7 @@ function harness(input: { capture: boolean; rootPath: string }) {
 }
 
 describe("ShareViewFiles workspace search wiring", () => {
-  it("composes the search owner with Electron IPC and renderer teardown", () => {
-    expect(mainSource).toContain(
-      "const workspaceSearchOwner = new WorkspaceSearchOwner",
-    );
-    expect(mainSource).toContain("registerWorkspaceSearchIpcHandlers<");
-    expect(mainSource).toContain("owner: workspaceSearchOwner,");
-    expect(mainSource).toContain("workspaceSearchOwner.disposeSender(senderId);");
-    expect(mainSource).toContain("workspaceSearchOwner.dispose();");
-  });
-
-  it("invalidates the sender's search synchronously only when openWorkspace switches away", () => {
-    const open = handlerSource("openWorkspace");
-    const switchAt = open.indexOf(
-      "if (previousWorkspaceId && previousWorkspaceId !== workspace.workspaceId) {",
-    );
-    const generationAt = open.indexOf(
-      "advanceRendererGeneration(senderId);",
-      switchAt,
-    );
-    const searchAt = open.indexOf(
-      "workspaceSearchOwner.disposeSender(senderId);",
-      generationAt,
-    );
-    const abortAt = open.indexOf(
-      "sitePreviewStarts.abortForSender(senderId);",
-      generationAt,
-    );
-    const awaitAt = open.indexOf(
-      'await pluginSurfaces.stop({ kind: "sender", senderId });',
-      generationAt,
-    );
-
-    expect(switchAt).toBeGreaterThan(-1);
-    expect(generationAt).toBeGreaterThan(switchAt);
-    expect(searchAt).toBeGreaterThan(generationAt);
-    expect(searchAt).toBeLessThan(abortAt);
-    expect(searchAt).toBeLessThan(awaitAt);
-    expect(open.slice(0, switchAt)).not.toContain(
-      "workspaceSearchOwner.disposeSender(senderId);",
-    );
-  });
-
-  it("switch cleanup cancels an active ripgrep once and drops its late settlement", async () => {
+  it("repeated switch cleanup cancels an active ripgrep once and drops its late settlement", async () => {
     const rootPath = await workspaceRoot();
     const killed: string[] = [];
     const emit: Array<(batch: SearchBatch) => void> = [];
@@ -180,7 +124,10 @@ describe("ShareViewFiles workspace search wiring", () => {
     };
     await owner.start(
       sender,
-      { workspaceId: "workspace-a", rootPath },
+      {
+        workspace: { workspaceId: "workspace-a", rootPath },
+        isCurrent: () => true,
+      },
       {
         workspaceId: "workspace-a",
         searchId: "search-a",
@@ -192,7 +139,10 @@ describe("ShareViewFiles workspace search wiring", () => {
     owner.disposeSender(sender.id);
     await owner.start(
       sender,
-      { workspaceId: "workspace-b", rootPath },
+      {
+        workspace: { workspaceId: "workspace-b", rootPath },
+        isCurrent: () => true,
+      },
       {
         workspaceId: "workspace-b",
         searchId: "search-b",

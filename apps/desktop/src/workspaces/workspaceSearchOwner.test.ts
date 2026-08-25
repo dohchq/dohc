@@ -93,6 +93,16 @@ function searchPayload(searchId: string, query = searchId) {
   };
 }
 
+function authority<
+  Workspace extends {
+    workspaceId: string;
+    rootPath: string;
+    shareMounts?: unknown;
+  },
+>(workspace: Workspace, isCurrent: () => boolean = () => true) {
+  return { workspace, isCurrent };
+}
+
 function engineResult(path: string): SearchResult {
   return {
     surface: "file",
@@ -138,9 +148,13 @@ describe("WorkspaceSearchOwner", () => {
     };
     const sender = createSender(1);
 
-    const oldSearch = owner.start(sender, workspace, searchPayload("old"));
+    const oldSearch = owner.start(
+      sender,
+      authority(workspace),
+      searchPayload("old"),
+    );
     await oldQueryStarted.promise;
-    await owner.start(sender, workspace, searchPayload("new"));
+    await owner.start(sender, authority(workspace), searchPayload("new"));
     oldResult.resolve([engineResult("old.md")]);
     await oldSearch;
 
@@ -157,6 +171,77 @@ describe("WorkspaceSearchOwner", () => {
     );
   });
 
+  it("drops an engine result when the caller changes workspaces during the query", async () => {
+    const rootPath = await makeRoot();
+    const result = deferred<SearchResult[]>();
+    const queryStarted = deferred<void>();
+    const registry = createFakeRegistry();
+    let workspaceIsCurrent = true;
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => ({ flush: async () => undefined }),
+      queryEngine: async () => {
+        queryStarted.resolve();
+        return await result.promise;
+      },
+      logError: vi.fn(),
+    });
+    const sender = createSender(10);
+    const pending = owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("workspace-changed"),
+    );
+    await queryStarted.promise;
+
+    workspaceIsCurrent = false;
+    result.resolve([engineResult("late.md")]);
+    await pending;
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(registry.starts).toEqual([]);
+  });
+
+  it("drops ripgrep batches after the caller changes workspaces", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    let workspaceIsCurrent = true;
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(11);
+    await owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("workspace-changed"),
+    );
+
+    workspaceIsCurrent = false;
+    registry.starts[0]?.onBatch({
+      searchId: "workspace-changed",
+      entries: [],
+      done: false,
+      limitHit: false,
+    });
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(registry.adapter.cancel).toHaveBeenCalledWith(
+      sender.id,
+      "workspace-changed",
+    );
+  });
+
   it("cancels only the named sender's current search and drops late batches", async () => {
     const rootPath = await makeRoot();
     const registry = createFakeRegistry();
@@ -170,8 +255,8 @@ describe("WorkspaceSearchOwner", () => {
     const workspace = { workspaceId: "workspace-1", rootPath };
     const first = createSender(1);
     const second = createSender(2);
-    await owner.start(first, workspace, searchPayload("shared-id"));
-    await owner.start(second, workspace, searchPayload("shared-id"));
+    await owner.start(first, authority(workspace), searchPayload("shared-id"));
+    await owner.start(second, authority(workspace), searchPayload("shared-id"));
 
     owner.cancel(first.id, "shared-id");
     const batch: SearchBatch = {
@@ -200,8 +285,17 @@ describe("WorkspaceSearchOwner", () => {
     });
     const sender = createSender(8);
     const workspace = { workspaceId: "workspace-1", rootPath };
-    await owner.start(sender, workspace, searchPayload("reused", "first"));
-    await owner.start(sender, workspace, searchPayload("reused", "second"));
+    await owner.start(
+      sender,
+      authority(workspace),
+      searchPayload("reused", "first"),
+    );
+    await owner.start(
+      sender,
+      authority(workspace),
+      searchPayload("reused", "second"),
+    );
+    registry.adapter.cancel.mockClear();
     const batch: SearchBatch = {
       searchId: "reused",
       entries: [],
@@ -211,8 +305,47 @@ describe("WorkspaceSearchOwner", () => {
 
     registry.starts[0]?.onBatch(batch);
     expect(sender.send).not.toHaveBeenCalled();
+    expect(registry.adapter.cancel).not.toHaveBeenCalled();
     registry.starts[1]?.onBatch(batch);
     expect(sender.send).toHaveBeenCalledWith(CHANNELS.searchResults, batch);
+  });
+
+  it("retires a search that starts between workspace-switch disposals", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    const preparation = deferred<{ allowPath: () => boolean }>();
+    const preparationStarted = deferred<void>();
+    let preparationCount = 0;
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => {
+        preparationCount += 1;
+        if (preparationCount === 1) return { allowPath: () => true };
+        preparationStarted.resolve();
+        return await preparation.promise;
+      },
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(12);
+    const workspace = { workspaceId: "workspace-1", rootPath };
+    await owner.start(sender, authority(workspace), searchPayload("before"));
+
+    owner.disposeSender(sender.id);
+    const duringTeardown = owner.start(
+      sender,
+      authority(workspace),
+      searchPayload("during-teardown"),
+    );
+    await preparationStarted.promise;
+    owner.disposeSender(sender.id);
+    preparation.resolve({ allowPath: () => true });
+    await duringTeardown;
+
+    expect(registry.starts.map((start) => start.searchId)).toEqual(["before"]);
+    expect(registry.adapter.disposeOwner).toHaveBeenCalledTimes(2);
+    expect(sender.send).not.toHaveBeenCalled();
   });
 
   it("drops an engine result that resolves after cancellation", async () => {
@@ -233,7 +366,7 @@ describe("WorkspaceSearchOwner", () => {
     const sender = createSender(9);
     const pending = owner.start(
       sender,
-      { workspaceId: "workspace-1", rootPath },
+      authority({ workspaceId: "workspace-1", rootPath }),
       searchPayload("cancelled"),
     );
     await queryStarted.promise;
@@ -258,7 +391,11 @@ describe("WorkspaceSearchOwner", () => {
     });
     const workspace = { workspaceId: "workspace-1", rootPath };
     const destroyed = createSender(3);
-    await owner.start(destroyed, workspace, searchPayload("destroyed"));
+    await owner.start(
+      destroyed,
+      authority(workspace),
+      searchPayload("destroyed"),
+    );
     destroyed.destroy();
     registry.starts[0]?.onBatch({
       searchId: "destroyed",
@@ -271,7 +408,11 @@ describe("WorkspaceSearchOwner", () => {
     expect(destroyed.send).not.toHaveBeenCalled();
 
     const disposed = createSender(4);
-    await owner.start(disposed, workspace, searchPayload("disposed"));
+    await owner.start(
+      disposed,
+      authority(workspace),
+      searchPayload("disposed"),
+    );
     owner.dispose();
     registry.starts[1]?.onBatch({
       searchId: "disposed",
@@ -302,7 +443,7 @@ describe("WorkspaceSearchOwner", () => {
 
     await owner.start(
       sender,
-      { workspaceId: "workspace-1", rootPath },
+      authority({ workspaceId: "workspace-1", rootPath }),
       searchPayload("blocked"),
     );
 
@@ -335,7 +476,7 @@ describe("WorkspaceSearchOwner", () => {
     const sender = createSender(6);
     await owner.start(
       sender,
-      {
+      authority({
         workspaceId: "workspace-1",
         rootPath,
         shareMounts: [
@@ -348,7 +489,7 @@ describe("WorkspaceSearchOwner", () => {
             label: "duplicate",
           },
         ],
-      },
+      }),
       searchPayload("damaged"),
     );
 
@@ -362,7 +503,7 @@ describe("WorkspaceSearchOwner", () => {
     const ripgrepSender = createSender(7);
     await owner.start(
       ripgrepSender,
-      { workspaceId: "workspace-1", rootPath },
+      authority({ workspaceId: "workspace-1", rootPath }),
       searchPayload("invalid-batch"),
     );
     registry.starts[0]?.onBatch({

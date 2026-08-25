@@ -37,6 +37,13 @@ export interface WorkspaceSearchEngineInput {
   isCurrent: () => boolean;
 }
 
+export interface WorkspaceSearchAuthority<
+  Workspace extends WorkspaceSearchWorkspace,
+> {
+  workspace: Workspace;
+  isCurrent(): boolean;
+}
+
 export interface WorkspaceSearchOwnerDependencies<
   Workspace extends WorkspaceSearchWorkspace,
 > {
@@ -78,10 +85,12 @@ export class WorkspaceSearchOwner<
 
   async start(
     sender: WorkspaceSearchSender,
-    workspace: Workspace,
+    authority: WorkspaceSearchAuthority<Workspace>,
     input: WorkspaceSearchPayload,
   ): Promise<void> {
     if (this.#disposed) return;
+
+    const { workspace } = authority;
 
     const identity = {
       generation: this.#generation(sender.id),
@@ -94,11 +103,12 @@ export class WorkspaceSearchOwner<
     }
     this.#hookDestroyed(sender);
 
-    const isCurrent = () =>
+    const ownsSearch = () =>
       !this.#disposed &&
-      !sender.isDestroyed() &&
       this.#generation(sender.id) === identity.generation &&
       this.#latest.get(sender.id) === identity;
+    const isCurrent = () =>
+      ownsSearch() && !sender.isDestroyed() && authority.isCurrent();
 
     const ownedSearchView =
       await this.#dependencies.prepareOwnedSearch(workspace);
@@ -116,6 +126,7 @@ export class WorkspaceSearchOwner<
         input,
         includeGlob: input.includeGlob,
         allowPath: ownedSearchView.allowPath,
+        ownsSearch,
         isCurrent,
       });
       return;
@@ -204,6 +215,7 @@ export class WorkspaceSearchOwner<
       input,
       includeGlob: mountGlob,
       allowPath: ownedSearchView.allowPath,
+      ownsSearch,
       isCurrent,
     });
   }
@@ -243,6 +255,7 @@ export class WorkspaceSearchOwner<
     input: WorkspaceSearchPayload;
     includeGlob: string | undefined;
     allowPath: (path: string) => boolean;
+    ownsSearch: () => boolean;
     isCurrent: () => boolean;
   }): Promise<void> {
     if (!input.isCurrent()) return;
@@ -258,7 +271,13 @@ export class WorkspaceSearchOwner<
         includeGlob: input.includeGlob,
         excludeGlob: input.input.excludeGlob,
       },
-      (batch) => this.#sendRipgrepBatch(input.sender, batch, input.isCurrent),
+      (batch) =>
+        this.#sendRipgrepBatch(
+          input.sender,
+          batch,
+          input.ownsSearch,
+          input.isCurrent,
+        ),
       {
         isCurrent: input.isCurrent,
         allowPath: input.allowPath,
@@ -269,8 +288,19 @@ export class WorkspaceSearchOwner<
   #sendRipgrepBatch(
     sender: WorkspaceSearchSender,
     batch: SearchBatch,
+    ownsSearch: () => boolean,
     isCurrent: () => boolean,
   ): void {
+    if (!isCurrent()) {
+      // An authority change can make a running child stale without going
+      // through sender disposal. Cancel only while this exact owner identity
+      // remains latest, so a late batch with a reused searchId cannot kill its
+      // replacement.
+      if (ownsSearch()) {
+        this.#dependencies.searchRegistry.cancel(sender.id, batch.searchId);
+      }
+      return;
+    }
     this.#send(sender, batch, isCurrent, "ripgrep batch");
   }
 

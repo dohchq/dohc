@@ -14,6 +14,7 @@ interface TestEvent {
 
 function harness() {
   const trace: string[] = [];
+  let activeWorkspaceId = "workspace-1";
   const handlers = new Map<
     string,
     (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
@@ -32,12 +33,18 @@ function harness() {
       trace.push("trust");
       if (!event.trusted) throw new Error("Untrusted renderer.");
     },
-    requireWorkspace: (_event, workspaceId) => {
+    authorizeWorkspace: (_event, workspaceId) => {
       trace.push(`workspace:${workspaceId}`);
       if (workspaceId !== workspace.workspaceId) {
         throw new Error("Renderer has no authority for this workspace.");
       }
-      return workspace;
+      if (activeWorkspaceId !== workspaceId) {
+        throw new Error("Search does not target the open workspace.");
+      }
+      return {
+        workspace,
+        isCurrent: () => activeWorkspaceId === workspace.workspaceId,
+      };
     },
     owner,
   });
@@ -54,6 +61,9 @@ function harness() {
     trace,
     owner,
     event,
+    setActiveWorkspaceId(workspaceId: string) {
+      activeWorkspaceId = workspaceId;
+    },
     channels: [...handlers.keys()],
     invoke: async (channel: string, payload: unknown, invokedEvent = event) =>
       await handlers.get(channel)!(invokedEvent, payload),
@@ -82,7 +92,13 @@ describe("workspace search IPC registration", () => {
     expect(test.trace).toEqual(["trust", "workspace:workspace-1"]);
     expect(test.owner.start).toHaveBeenCalledWith(
       test.event.sender,
-      { workspaceId: "workspace-1", rootPath: "C:/workspace-1" },
+      {
+        workspace: {
+          workspaceId: "workspace-1",
+          rootPath: "C:/workspace-1",
+        },
+        isCurrent: expect.any(Function),
+      },
       payload,
     );
   });
@@ -116,6 +132,21 @@ describe("workspace search IPC registration", () => {
     expect(untrusted.owner.start).not.toHaveBeenCalled();
     expect(malformed.owner.start).not.toHaveBeenCalled();
     expect(unauthorized.owner.start).not.toHaveBeenCalled();
+  });
+
+  it("rejects a registered workspace that is not open in the caller", async () => {
+    const test = harness();
+    test.setActiveWorkspaceId("workspace-2");
+
+    await expect(
+      test.invoke(CHANNELS.searchWorkspace, {
+        workspaceId: "workspace-1",
+        searchId: "search-1",
+        query: "needle",
+      }),
+    ).rejects.toThrow("does not target the open workspace");
+
+    expect(test.owner.start).not.toHaveBeenCalled();
   });
 
   it("cancels only the caller's named search", async () => {

@@ -6790,6 +6790,15 @@ function registerIpcHandlers(
     // own assignment here must not overwrite it back (#779 round 23
     // finding 2).
     if (workspaceSwitchTokenBySender.get(senderId) === switchToken) {
+      // A search can start for the old active workspace while the sender's
+      // plugin surfaces are stopping above. Retire that second generation
+      // before publishing the new active workspace.
+      if (
+        previousWorkspaceId &&
+        previousWorkspaceId !== workspace.workspaceId
+      ) {
+        workspaceSearchOwner.disposeSender(senderId);
+      }
       preferredWorkspaceId = workspace.workspaceId;
       activeWorkspaceIdBySender.set(senderId, workspace.workspaceId);
     }
@@ -9471,8 +9480,19 @@ function registerIpcHandlers(
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
-    requireWorkspace: (event, workspaceId) =>
-      requireAuthorizedWorkspace(event, workspaceId),
+    authorizeWorkspace: (event, workspaceId) => {
+      const workspace = requireWorkspace(workspaceId);
+      const senderId = event.sender.id;
+      const isCurrent = () =>
+        activeWorkspaceIdBySender.get(senderId) === workspace.workspaceId &&
+        findWorkspace(workspace.workspaceId) === workspace;
+      if (!isCurrent()) {
+        throw new Error(
+          "Search stopped because this window changed workspaces. Search the open workspace instead.",
+        );
+      }
+      return { workspace, isCurrent };
+    },
     owner: workspaceSearchOwner,
   });
 

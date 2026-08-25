@@ -4,6 +4,7 @@ import {
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import type {
+  WorkspaceSearchAuthority,
   WorkspaceSearchOwner,
   WorkspaceSearchSender,
   WorkspaceSearchWorkspace,
@@ -27,7 +28,10 @@ export function registerWorkspaceSearchIpcHandlers<
     handler: WorkspaceSearchIpcHandler<Event>,
   ): void;
   assertTrustedSender(event: Event): void;
-  requireWorkspace(event: Event, workspaceId: string): Workspace;
+  authorizeWorkspace(
+    event: Event,
+    workspaceId: string,
+  ): WorkspaceSearchAuthority<Workspace>;
   owner: Pick<WorkspaceSearchOwner<Workspace>, "start" | "cancel">;
 }): void {
   dependencies.registerHandler(
@@ -35,8 +39,11 @@ export function registerWorkspaceSearchIpcHandlers<
     async (event, payload) => {
       dependencies.assertTrustedSender(event);
       const input = WorkspaceSearchPayload.parse(payload);
-      const workspace = dependencies.requireWorkspace(event, input.workspaceId);
-      await dependencies.owner.start(event.sender, workspace, input);
+      const authority = dependencies.authorizeWorkspace(
+        event,
+        input.workspaceId,
+      );
+      await dependencies.owner.start(event.sender, authority, input);
     },
   );
 
