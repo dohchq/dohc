@@ -1353,6 +1353,51 @@ describe("restoreWorkspaceText", () => {
     expect(await readFile(target)).toEqual(Buffer.from([1, 2, 3]));
   });
 
+  it.each(["changed", "unverifiable", "not-file"] as const)(
+    "maps a %s collision read to a retryable attachment error",
+    async (failureKind) => {
+      vi.doMock("./boundedFileRead", async (importOriginal) => {
+        const original =
+          await importOriginal<typeof import("./boundedFileRead")>();
+        const failure =
+          failureKind === "changed"
+            ? new original.BoundedFileReadChangedError()
+            : failureKind === "unverifiable"
+              ? new original.BoundedFileReadUnverifiableError()
+              : new original.BoundedFileReadNotFileError();
+        return {
+          ...original,
+          readFileHandleExact: vi.fn(async () => {
+            throw failure;
+          }),
+        };
+      });
+      vi.resetModules();
+      try {
+        const collisionWrites = await import("./workspaceAssets");
+        const root = await makeWorkspace();
+        await mkdir(join(root, "assets"), { recursive: true });
+        await writeFile(
+          join(root, "assets/pixel.png"),
+          new Uint8Array([1, 2, 3]),
+        );
+
+        await expect(
+          collisionWrites.writeWorkspaceAsset(
+            root,
+            "assets/pixel.png",
+            new Uint8Array([1, 2, 3]),
+          ),
+        ).rejects.toThrow(
+          "An image attachment changed at assets/pixel.png before this write could finish. Try the action again.",
+        );
+      } finally {
+        vi.doUnmock("./boundedFileRead");
+        vi.resetModules();
+      }
+    },
+  );
+
   it("fails closed when the filesystem cannot publish without replacing a target", async () => {
     const hardLinkUnsupported = Object.assign(new Error("hard links unsupported"), {
       code: "ENOTSUP",

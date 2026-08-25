@@ -1242,7 +1242,9 @@ export async function writeWorkspaceAssetInLease(
     throw changedCollision();
   });
   try {
-    const openedFile = await handle.stat({ bigint: true });
+    const openedFile = await handle.stat({ bigint: true }).catch(() => {
+      throw changedCollision();
+    });
     if (
       !openedFile.isFile() ||
       sameFsEntry(existingLeaf, openedFile) !== "same"
@@ -1253,8 +1255,14 @@ export async function writeWorkspaceAssetInLease(
     if (Buffer.from(bytes).equals(existing.bytes)) return;
   } catch (error) {
     if (
-      !(error instanceof BoundedFileReadTooLargeError) &&
-      !(error instanceof BoundedFileReadNotFileError)
+      error instanceof BoundedFileReadChangedError ||
+      error instanceof BoundedFileReadUnverifiableError ||
+      error instanceof BoundedFileReadNotFileError
+    ) {
+      throw changedCollision();
+    }
+    if (
+      !(error instanceof BoundedFileReadTooLargeError)
     ) {
       throw error;
     }
