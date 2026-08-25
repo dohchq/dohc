@@ -1821,11 +1821,9 @@ async fn manifest_seed(
             ManifestEntry {
                 size: entry.size,
                 sha256,
-                // The domain stores no mtime observation, so a rehydrated
-                // seed never authorizes the scanner's hash-reuse
-                // short-circuit: the first scan after open hashes every file,
-                // and the reconcile's refresh pass records real pairings for
-                // the scans after it.
+                // The domain stores no mtime observation; `0` never
+                // authorizes hash reuse, so the first scan after open hashes
+                // every file.
                 mtime_ms: 0,
             },
         )

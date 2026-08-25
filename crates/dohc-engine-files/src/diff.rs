@@ -3,10 +3,8 @@
 //!
 //! Classification is by content hash and size, never mtime — "hashes, not
 //! timestamps, are the source of truth" (the retired reference accelerator's own
-//! contract). The manifest's recorded mtime feeds only the SCANNER's hash-reuse
-//! short-circuit ([`crate::scan::Scanner::scan_with_prior`], the amended N8
-//! rule); by the time a listing reaches this diff, every entry carries a hash
-//! and the predicate below never looks at mtime. The classification
+//! contract). The manifest's recorded mtime feeds only the scanner's hash-reuse
+//! short-circuit (the amended N8 rule on [`crate::scan::FileEntry`]). The classification
 //! predicate is factored into [`diff_core`] behind a seam so the seeded-bug
 //! proof (a flipped hash comparison) exercises the real machinery with only the
 //! predicate mutated — the differential harness must be able to catch exactly
@@ -23,12 +21,10 @@ use std::collections::BTreeMap;
 pub struct ManifestEntry {
     pub size: u64,
     pub sha256: String,
-    /// The file's observed mtime (ms since epoch) from the scan whose real
-    /// hash of the file's bytes produced `sha256`, or `0` when no such
-    /// observation exists — a rehydrated seed (the domain stores no mtime), a
-    /// sink that persisted different bytes than the scan hashed, or a write
-    /// racing the scan's own millisecond. Only a non-zero value authorizes the
-    /// scanner's hash-reuse short-circuit; `0` always re-hashes.
+    /// The mtime (ms since epoch) observed by the scan that hashed `sha256`,
+    /// or `0` when no trustworthy observation exists. Only a non-zero value
+    /// authorizes the scanner's hash-reuse short-circuit (the amended N8 rule
+    /// on [`crate::scan::FileEntry`]); `0` always re-hashes.
     pub mtime_ms: i64,
 }
 

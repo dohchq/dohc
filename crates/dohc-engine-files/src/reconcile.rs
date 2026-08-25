@@ -346,31 +346,34 @@ impl ReconcileController {
             return Err(FilesError::StaleReconcilePlan);
         }
         let scan_started_ms = now_ms();
-        let listing = match scanner.scan_with_prior(root, &self.manifest, token)? {
+        let mut listing = match scanner.scan_with_prior(root, &self.manifest, token)? {
             // Cancelled mid-scan: commit nothing. Dirty and generation stay put
             // — the state is consistent and the work is resumable.
             ScanOutcome::Cancelled => return Ok(ReconcileRun::Cancelled),
             ScanOutcome::Completed(listing) => listing,
         };
 
-        // Refresh the mtime pairing of every hash-verified unchanged file, so
-        // the NEXT scan can reuse its hash: a rehydrated seed carries no
-        // mtimes, and a touch-without-change moves the mtime while the hash
-        // stays put. Content identity (size + hash) is never touched here, and
-        // this is deliberately not part of the capture receipt: the pairing is
-        // a true observation from a completed scan whether or not the plan
-        // below is ever applied. Changed/added files get their pairing at
-        // acknowledgement instead — recording it before the sink ran would let
-        // the next scan skip a path whose capture failed.
+        // Clamp every observed mtime to what the manifest may PAIR with this
+        // scan's hashes ([`recordable_mtime_ms`], the racy-write fence).
+        // Everything downstream — the refresh pass and the plan's ops — carries
+        // the clamped value, never the raw observation.
+        for file in &mut listing.files {
+            file.mtime_ms = recordable_mtime_ms(file.mtime_ms, scan_started_ms);
+        }
+
+        // Refresh the mtime pairing of every hash-verified unchanged file so
+        // the NEXT scan can reuse its hash (a rehydrated seed carries no
+        // mtimes; a touch-without-change moves the mtime while the hash stays
+        // put). Content identity (size + hash) is never touched. Changed/added
+        // files get their pairing at acknowledgement instead — recording it
+        // before the sink ran would let the next scan skip a path whose
+        // capture failed.
         for file in &listing.files {
             if let Some(entry) = self.manifest.entry_mut(&file.path)
                 && entry.size == file.size
                 && entry.sha256 == file.sha256
             {
-                let recordable = recordable_mtime_ms(file.mtime_ms, scan_started_ms);
-                if entry.mtime_ms != recordable {
-                    entry.mtime_ms = recordable;
-                }
+                entry.mtime_ms = file.mtime_ms;
             }
         }
 
@@ -405,13 +408,6 @@ impl ReconcileController {
         degraded_paths.sort();
         degraded_paths.dedup();
         let degraded = scan_degraded || !diff.unconfirmed_removed.is_empty();
-
-        // Clamp the diff's mtimes to what the manifest may PAIR at
-        // acknowledgement (the racy-write guard); the plan's ops carry the
-        // clamped value, never the raw observation.
-        for file in diff.added.iter_mut().chain(diff.changed.iter_mut()) {
-            file.mtime_ms = recordable_mtime_ms(file.mtime_ms, scan_started_ms);
-        }
 
         let from = self.generation;
         let to = from.next();

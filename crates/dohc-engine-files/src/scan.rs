@@ -198,28 +198,26 @@ impl Scanner {
         };
 
         // The hash-reuse short-circuit (amended N8): a candidate whose size
-        // AND mtime both match its prior entry keeps the recorded hash.
-        let mut reused: Vec<Option<String>> = candidates
-            .files
-            .iter()
-            .map(|c| {
-                prior.get(&c.rel).and_then(|entry| {
-                    (c.mtime_ms != 0 && entry.mtime_ms == c.mtime_ms && entry.size == c.size)
-                        .then(|| entry.sha256.clone())
-                })
-            })
-            .collect();
-
-        // Inputs stay in candidate order, so `outcomes` (indexed by input) can
-        // be consumed sequentially against the non-reused candidates below.
+        // AND mtime both match its prior entry keeps the recorded hash; every
+        // other candidate becomes a hash input. Inputs stay in candidate
+        // order, so `outcomes` (indexed by input) can be consumed sequentially
+        // against the non-reused candidates below.
+        let mut reused: Vec<Option<String>> = Vec::with_capacity(candidates.files.len());
         let mut inputs: Vec<HashInput> = Vec::new();
-        for (index, candidate) in candidates.files.iter().enumerate() {
-            if reused[index].is_none() {
+        for candidate in &candidates.files {
+            let hash = prior.get(&candidate.rel).and_then(|entry| {
+                (candidate.mtime_ms != 0
+                    && entry.mtime_ms == candidate.mtime_ms
+                    && entry.size == candidate.size)
+                    .then(|| entry.sha256.clone())
+            });
+            if hash.is_none() {
                 inputs.push(HashInput {
                     index: inputs.len(),
                     abs: candidate.abs.clone(),
                 });
             }
+            reused.push(hash);
         }
 
         let outcomes = match self.pool.hash_batched(&inputs, token)? {

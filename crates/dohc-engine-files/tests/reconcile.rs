@@ -567,7 +567,10 @@ fn retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained() {
 /// dirty, same as `new`), and (2) NOT re-report already-tracked, unchanged
 /// files as freshly `Added` -- only genuinely new/changed/removed paths
 /// should appear. An empty-manifest restart (the pre-R14 behavior) would
-/// mis-report every unchanged file as `Added`.
+/// mis-report every unchanged file as `Added`. Also the amended-N8 safety
+/// valve: a rehydration seed carries no mtime observation, so the first scan
+/// after open must hash every file rather than trust the seed — and the
+/// pairings that scan records make the rescans after it cheap.
 #[test]
 fn rehydrated_manifest_reconciles_only_real_changes() {
     let ws = Scratch::new();
@@ -575,6 +578,8 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     let stale_bytes: &[u8] = b"old content\n";
     ws.write("unchanged.md", unchanged_bytes);
     ws.write("about-to-change.md", stale_bytes);
+    ws.age_mtime("unchanged.md", 30);
+    ws.age_mtime("about-to-change.md", 30);
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let token = CancellationToken::new();
 
@@ -586,6 +591,7 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
         ["about-to-change.md", "unchanged.md"]
     );
     let recovered_generation = live.generation();
+    let baseline_hashed = scanner.pool().gauge().hashed();
 
     // Simulate a restart: a FRESH controller, but rehydrated from the prior
     // manifest instead of ReconcileController::new()'s empty baseline.
@@ -618,12 +624,9 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
 
     // Only one file actually changed while the process was "down".
     ws.write("about-to-change.md", b"new content\n");
+    ws.age_mtime("about-to-change.md", 10);
 
-    let plan = plan(
-        rehydrated
-            .reconcile(&scanner, ws.path(), &token)
-            .expect("post-restart reconcile"),
-    );
+    let plan = reconcile_and_apply(&mut rehydrated, &scanner, ws.path(), &token);
     assert!(
         ingest_paths(&plan, IngestReason::Added).is_empty(),
         "rehydrated manifest must not re-report unchanged tracked files as newly Added"
@@ -631,6 +634,22 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     assert_eq!(
         ingest_paths(&plan, IngestReason::Changed),
         ["about-to-change.md"]
+    );
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 2,
+        "a zero-mtime seed entry must be hashed, never reused"
+    );
+
+    // The pairings the post-restart scan recorded (refresh pass for the
+    // unchanged file, acknowledgement for the changed one) make the rescans
+    // after open cheap again.
+    rehydrated.mark_dirty();
+    let _ = reconcile_if_dirty_and_apply(&mut rehydrated, &scanner, ws.path(), &token);
+    assert_eq!(
+        scanner.pool().gauge().hashed(),
+        baseline_hashed + 2,
+        "post-open rescans reuse the pairings the first scan recorded"
     );
 }
 
@@ -753,68 +772,6 @@ fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
     assert!(
         scanner.pool().gauge().hashed() > baseline_hashed,
         "a size mismatch must force the hash even under a forged mtime"
-    );
-}
-
-/// Safety valve: a rehydrated manifest carries no mtime observation (the
-/// domain stores hashes, not mtimes), so the first scan after open must hash
-/// every file rather than trust the seed — even when every size matches.
-#[test]
-fn rehydrated_manifest_without_mtimes_never_authorizes_reuse() {
-    let ws = Scratch::new();
-    let bytes_a: &[u8] = b"alpha\n";
-    let bytes_b: &[u8] = b"beta\n";
-    ws.write("a.md", bytes_a);
-    ws.write("b.md", bytes_b);
-    ws.age_mtime("a.md", 30);
-    ws.age_mtime("b.md", 30);
-
-    let manifest = ScanManifest::from_entries([
-        (
-            "a.md".to_owned(),
-            ManifestEntry {
-                size: bytes_a.len() as u64,
-                sha256: dohc_engine_storage::hex_sha256(bytes_a),
-                mtime_ms: 0,
-            },
-        ),
-        (
-            "b.md".to_owned(),
-            ManifestEntry {
-                size: bytes_b.len() as u64,
-                sha256: dohc_engine_storage::hex_sha256(bytes_b),
-                mtime_ms: 0,
-            },
-        ),
-    ]);
-    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
-    let mut ctrl = ReconcileController::rehydrated(manifest, dohc_engine_files::ScanGeneration(1));
-    let token = CancellationToken::new();
-
-    let first = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
-    assert!(
-        first.is_empty(),
-        "disk matches the seed, so nothing is planned"
-    );
-    assert_eq!(
-        scanner.pool().gauge().hashed(),
-        2,
-        "a zero-mtime seed entry must be hashed, never reused"
-    );
-
-    // The refresh pass recorded real pairings from that first full hash, so
-    // the rescans after open are cheap.
-    ctrl.mark_dirty();
-    let _ = plan(reconcile_if_dirty_and_apply(
-        &mut ctrl,
-        &scanner,
-        ws.path(),
-        &token,
-    ));
-    assert_eq!(
-        scanner.pool().gauge().hashed(),
-        2,
-        "post-open rescans reuse the pairings the first scan recorded"
     );
 }
 
