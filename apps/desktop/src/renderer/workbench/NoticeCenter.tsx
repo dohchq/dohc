@@ -129,14 +129,22 @@ export function NoticeCenter(props: {
     string | null
   >(null);
   const [updateActionError, setUpdateActionError] = useState<string | null>(null);
+  const [failedInstallReadyState, setFailedInstallReadyState] =
+    useState<UpdateStateEvent | null>(null);
   const [installPending, setInstallPending] = useState(false);
   const clearReadyUpdateError = useCallback((update: UpdateStateEvent) => {
-    if (update.status === "ready") setUpdateActionError(null);
+    if (update.status !== "ready") return;
+    setUpdateActionError(null);
+    setFailedInstallReadyState(null);
   }, []);
   const { updateState: desktopUpdateState, acceptUpdateResult } =
     useDesktopUpdateStateFeed(clearReadyUpdateError);
   const updateState =
-    desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
+    desktopUpdateState?.status === "ready"
+      ? desktopUpdateState
+      : updateActionError && failedInstallReadyState?.status === "ready"
+        ? failedInstallReadyState
+        : null;
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
@@ -151,9 +159,9 @@ export function NoticeCenter(props: {
     readyUpdateKey !== dismissedUpdateToastKey;
   const installUpdate = useCallback(async () => {
     if (installPending) return;
+    const readyStateAtStart = updateState;
     try {
       setInstallPending(true);
-      setUpdateActionError(null);
       // Through the guard (#579 review, r8 + r10): with set-aside drafts
       // present the recovery dialog opens INSTEAD of the one-shot install,
       // and its confirm makes the only quitAndInstall call.
@@ -161,18 +169,25 @@ export function NoticeCenter(props: {
       if (result === null) return;
       acceptUpdateResult(result.state);
       if (!result.accepted || result.state.status === "error") {
+        if (result.state.status !== "ready") {
+          setFailedInstallReadyState(readyStateAtStart);
+        }
         setUpdateActionError(
           result.state.status === "error"
             ? result.state.message
             : "Could not restart into the update.",
         );
+      } else {
+        setUpdateActionError(null);
+        setFailedInstallReadyState(null);
       }
     } catch {
+      setFailedInstallReadyState(readyStateAtStart);
       setUpdateActionError("Could not restart into the update.");
     } finally {
       setInstallPending(false);
     }
-  }, [acceptUpdateResult, installPending]);
+  }, [acceptUpdateResult, installPending, updateState]);
 
   useEffect(() => {
     if (!open) return;

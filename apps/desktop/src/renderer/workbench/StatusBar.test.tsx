@@ -729,6 +729,49 @@ describe("notice center", () => {
     );
   });
 
+  it("keeps updater errors visible with a retry action", async () => {
+    installUpdate.mockResolvedValueOnce({
+      accepted: false,
+      completed: false,
+      state: {
+        status: "error",
+        message: "dohc could not install the update. Try again.",
+        currentVersion: "1.2.2",
+        channel: "latest",
+        canCheck: true,
+        canInstall: false,
+      },
+    });
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", {
+        name: "Restart",
+      }),
+    );
+
+    expect((await screen.findByTestId("update-toast")).textContent).toContain(
+      "dohc could not install the update. Try again.",
+    );
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const updateNotice = screen.getByTestId("notice-update-ready");
+    expect(updateNotice.textContent).toContain(
+      "dohc could not install the update. Try again.",
+    );
+    expect(within(updateNotice).getByRole("button", { name: "Restart" }))
+      .toBeTruthy();
+  });
+
   it("does not show the restart action when the update is not installable", async () => {
     renderBar();
     pushUpdate?.({
