@@ -301,10 +301,29 @@ function createHarness() {
     })),
   };
   const pipelineForHandlers = pipeline as unknown as PluginPipeline;
-  const pipelines = new Map([[workspace.workspaceId, pipelineForHandlers]]);
-  const registrations = new Map<string, Map<string, RegisteredPlugin>>([
-    [workspace.workspaceId, new Map([[pluginStatus.id, registration as RegisteredPlugin]])],
+  const registrations = new Map<string, RegisteredPlugin>([
+    [pluginStatus.id, registration as RegisteredPlugin],
   ]);
+  const runtime = {
+    pipeline: pipelineForHandlers,
+    registeredPlugin: vi.fn((pluginId: string) =>
+      pipelineForHandlers.pluginRegistration(pluginId) ?? registrations.get(pluginId)
+    ),
+    rememberPlugin: vi.fn((remembered: RegisteredPlugin) => {
+      registrations.set(remembered.manifest.name, remembered);
+      return remembered;
+    }),
+    forgetUninstalledPlugin: vi.fn((input: {
+      pluginId: string;
+      directoryName: string;
+      released: boolean;
+    }) => {
+      const remembered = registrations.get(input.pluginId);
+      if (input.released && remembered?.directoryName === input.directoryName) {
+        registrations.delete(input.pluginId);
+      }
+    }),
+  };
 
   let panelAdmission: { assertAllowed(): void; acquireHostLease(): Promise<unknown> } | null = null;
   let webAppAdmission: { assertAllowed(): void; acquireHostLease(): Promise<unknown> } | null = null;
@@ -401,8 +420,14 @@ function createHarness() {
   });
   const ensurePipeline = vi.fn(async () => {
     log.push("ensure-pipeline");
-    return pipelineForHandlers;
+    return runtime;
   });
+  const runtimes = {
+    current: vi.fn((workspaceId: string) =>
+      workspaceId === workspace.workspaceId ? runtime : undefined
+    ),
+    ensure: ensurePipeline,
+  };
 
   registerPluginIpcHandlers({
     registrar: {
@@ -427,9 +452,7 @@ function createHarness() {
       require: requireWorkspace,
     },
     rendererGeneration: () => state.generation,
-    pipelines,
-    ensurePipeline,
-    registrations,
+    runtimes,
     surfaces,
     platform: platform as never,
   });
@@ -452,6 +475,8 @@ function createHarness() {
     platform,
     registrations,
     requireWorkspace,
+    runtime,
+    runtimes,
     sender,
     state,
     surfaces,
@@ -548,13 +573,13 @@ describe("plugin IPC handlers", () => {
     "revalidates write authority after pipeline startup for %s",
     async (channel, effect) => {
       const harness = createHarness();
-      const pipelineReady = deferred<PluginPipeline>();
-      harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+      const runtimeReady = deferred<typeof harness.runtime>();
+      harness.ensurePipeline.mockReturnValueOnce(runtimeReady.promise);
 
       const request = harness.invoke(channel);
       await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
       harness.state.writable = false;
-      pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
+      runtimeReady.resolve(harness.runtime);
 
       await expect(request).resolves.toMatchObject({ ok: false });
       expect(harness.assertWritable).toHaveBeenCalledTimes(2);
@@ -564,13 +589,13 @@ describe("plugin IPC handlers", () => {
 
   it("revalidates write authority after command pipeline startup", async () => {
     const harness = createHarness();
-    const pipelineReady = deferred<PluginPipeline>();
-    harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+    const runtimeReady = deferred<typeof harness.runtime>();
+    harness.ensurePipeline.mockReturnValueOnce(runtimeReady.promise);
 
     const request = harness.invoke(CHANNELS.invokePluginCommand);
     await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
     harness.state.writable = false;
-    pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
+    runtimeReady.resolve(harness.runtime);
 
     await expect(request).rejects.toThrow("read-only");
     expect(harness.assertWritable).toHaveBeenCalledTimes(2);
@@ -579,13 +604,13 @@ describe("plugin IPC handlers", () => {
 
   it("revalidates active workspace after command pipeline startup", async () => {
     const harness = createHarness();
-    const pipelineReady = deferred<PluginPipeline>();
-    harness.ensurePipeline.mockReturnValueOnce(pipelineReady.promise);
+    const runtimeReady = deferred<typeof harness.runtime>();
+    harness.ensurePipeline.mockReturnValueOnce(runtimeReady.promise);
 
     const request = harness.invoke(CHANNELS.invokePluginCommand);
     await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
     harness.activeWorkspaceIdBySender.set(41, "workspace-2");
-    pipelineReady.resolve(harness.pipeline as unknown as PluginPipeline);
+    runtimeReady.resolve(harness.runtime);
 
     await expect(request).rejects.toThrow("does not target the active workspace");
     expect(harness.pipeline.hostOwnership.runCommand).not.toHaveBeenCalled();
@@ -697,8 +722,77 @@ describe("plugin IPC handlers", () => {
     });
 
     await expect(opening).rejects.toThrow("does not target the active workspace");
-    expect(harness.ensurePipeline).not.toHaveBeenCalled();
+    expect(harness.ensurePipeline).toHaveBeenCalledOnce();
+    expect(harness.runtime.rememberPlugin).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [CHANNELS.openPluginPanel, directOperations.loadPanel],
+    [CHANNELS.openPluginWebApp, directOperations.loadWebApp],
+  ] as const)(
+    "validates %s with the exact runtime returned by ensure",
+    async (channel, loadRegistration) => {
+      const harness = createHarness();
+      const stalePipeline = { identity: "stale" } as unknown as PluginPipeline;
+      const staleRuntime = {
+        ...harness.runtime,
+        pipeline: stalePipeline,
+        rememberPlugin: vi.fn((remembered: RegisteredPlugin) => remembered),
+      };
+      let current = staleRuntime;
+      harness.runtimes.current.mockImplementation(() => current);
+      harness.ensurePipeline.mockImplementationOnce(async () => {
+        current = harness.runtime;
+        return harness.runtime;
+      });
+
+      await expect(harness.invoke(channel)).resolves.toBeDefined();
+
+      expect(loadRegistration).toHaveBeenCalledWith(
+        expect.objectContaining({ pluginRegistration: harness.pipeline }),
+      );
+      expect(harness.runtime.rememberPlugin).toHaveBeenCalledOnce();
+      expect(staleRuntime.rememberPlugin).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      CHANNELS.openPluginPanel,
+      directOperations.loadPanel,
+      {
+        pluginRoot: registration.pluginRoot,
+        manifest,
+        panel: manifest.panels[0],
+      },
+    ],
+    [
+      CHANNELS.openPluginWebApp,
+      directOperations.loadWebApp,
+      {
+        pluginRoot: registration.pluginRoot,
+        manifest,
+        webApp: manifest.webApps[0],
+      },
+    ],
+  ] as const)(
+    "does not carry %s registration across runtime replacement",
+    async (channel, loadRegistration, loadedRegistration) => {
+      const harness = createHarness();
+      const loaded = deferred<typeof loadedRegistration>();
+      loadRegistration.mockReturnValueOnce(loaded.promise as never);
+
+      const opening = harness.invoke(channel);
+      await vi.waitFor(() => expect(loadRegistration).toHaveBeenCalledOnce());
+      harness.runtimes.current.mockReturnValue(undefined);
+      loaded.resolve(loadedRegistration);
+
+      await expect(opening).rejects.toThrow(
+        "The workspace's plugins stopped while this was opening. Open it again.",
+      );
+      expect(harness.runtime.rememberPlugin).not.toHaveBeenCalled();
+    },
+  );
 
   it("loads and remembers panel and web app registrations from discovered identity", async () => {
     const harness = createHarness();
@@ -715,7 +809,7 @@ describe("plugin IPC handlers", () => {
       panelId: "panel",
       pluginRegistration: harness.pipeline,
     });
-    expect(harness.registrations.get("workspace-1")?.get("example-plugin"))
+    expect(harness.registrations.get("example-plugin"))
       .toMatchObject({ directoryName: "example-plugin" });
 
     await expect(harness.invoke(CHANNELS.openPluginWebApp)).resolves.toEqual({
@@ -836,7 +930,7 @@ describe("plugin IPC handlers", () => {
       "commit-suspensions",
       "stop-partition",
     ]);
-    expect(harness.registrations.get("workspace-1")?.has("example-plugin"))
+    expect(harness.registrations.has("example-plugin"))
       .toBe(false);
   });
 
@@ -850,7 +944,7 @@ describe("plugin IPC handlers", () => {
 
     await retained.invoke(CHANNELS.uninstallPlugin);
     expect(retained.surfaces.stop).not.toHaveBeenCalled();
-    expect(retained.registrations.get("workspace-1")?.has("example-plugin"))
+    expect(retained.registrations.has("example-plugin"))
       .toBe(true);
 
     const failed = createHarness();
@@ -864,7 +958,7 @@ describe("plugin IPC handlers", () => {
     );
     expect(failed.log).toContain("restore-suspensions");
     expect(failed.surfaces.stop).not.toHaveBeenCalled();
-    expect(failed.registrations.get("workspace-1")?.has("example-plugin"))
+    expect(failed.registrations.has("example-plugin"))
       .toBe(true);
   });
 

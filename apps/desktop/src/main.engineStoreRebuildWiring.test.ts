@@ -87,7 +87,7 @@ describe("main-process engine store rebuild wiring", () => {
     );
     const helper = sourceBetween(
       "async function startAgentRunWithWorkspaceActivity(",
-      "const pluginRegistrations",
+      "const lastEngineStoreRebuildResult",
     );
     const tryInVersion = sourceBetween(
       "const tryInVersionSessions = createTryInVersionSessions({",

@@ -58,13 +58,10 @@ export function resolveRegisteredPlugin(
  * id while it is registered.
  */
 export function rememberPluginRegistration(
-  registrations: Map<string, Map<string, RegisteredPlugin>>,
-  workspaceId: string,
+  registrations: Map<string, RegisteredPlugin>,
   registration: { pluginRoot: string; manifest: DohcPluginManifest; directoryName: string },
 ): RegisteredPlugin {
-  const forWorkspace = registrations.get(workspaceId) ??
-    new Map<string, RegisteredPlugin>();
-  const existing = forWorkspace.get(registration.manifest.name);
+  const existing = registrations.get(registration.manifest.name);
   if (
     existing &&
     resolve(existing.pluginRoot) !== resolve(registration.pluginRoot)
@@ -78,8 +75,7 @@ export function rememberPluginRegistration(
     manifest: registration.manifest,
     directoryName: registration.directoryName,
   };
-  forWorkspace.set(registration.manifest.name, remembered);
-  registrations.set(workspaceId, forWorkspace);
+  registrations.set(registration.manifest.name, remembered);
   return remembered;
 }
 
@@ -88,15 +84,13 @@ export function rememberPluginRegistration(
  * A refused uninstall changes nothing, so the plugin keeps its registration.
  */
 export function forgetUninstalledPlugin(input: {
-  registrations: Map<string, Map<string, RegisteredPlugin>>;
-  workspaceId: string;
+  registrations: Map<string, RegisteredPlugin>;
   pluginId: string;
   directoryName: string;
-  uninstalled: boolean;
+  released: boolean;
 }): void {
-  if (!input.uninstalled) return;
-  const forWorkspace = input.registrations.get(input.workspaceId);
-  const registered = forWorkspace?.get(input.pluginId);
+  if (!input.released) return;
+  const registered = input.registrations.get(input.pluginId);
   // The standing trace-to-directory rule: this registration is only the
   // departed row's to forget when both name the same directory. Two rows can share an
   // id (a broken manifest's directory-derived fallback colliding with
@@ -105,7 +99,7 @@ export function forgetUninstalledPlugin(input: {
   // registration under that shared id. Nothing registered at all is
   // trivially nothing to forget either way.
   if (!registered || registered.directoryName !== input.directoryName) return;
-  forWorkspace?.delete(input.pluginId);
+  input.registrations.delete(input.pluginId);
 }
 
 /**
@@ -117,32 +111,18 @@ export function forgetUninstalledPlugin(input: {
  * registration causes.
  */
 export function forgetRemovedPlugin(input: {
-  registrations: Map<string, Map<string, RegisteredPlugin>>;
-  workspaceId: string;
+  registrations: Map<string, RegisteredPlugin>;
   event: PluginPipelineStatusEvent;
 }): void {
   if (input.event.kind !== "removed" && input.event.kind !== "renamed") return;
   forgetUninstalledPlugin({
     registrations: input.registrations,
-    workspaceId: input.workspaceId,
     pluginId: input.event.pluginId,
     directoryName: input.event.kind === "removed"
       ? input.event.directoryName
       : input.event.from,
-    uninstalled: true,
+    released: true,
   });
-}
-
-/**
- * Forgets the registrations of a workspace that is closing. They describe
- * manifests read from a workspace that is no longer open; reopening a panel
- * re-reads them. Every other workspace keeps its own.
- */
-export function forgetWorkspaceRegistrations(
-  registrations: Map<string, Map<string, RegisteredPlugin>>,
-  workspaceId: string,
-): void {
-  registrations.delete(workspaceId);
 }
 
 async function workspaceRelativePluginRoot(

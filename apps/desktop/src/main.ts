@@ -630,23 +630,12 @@ import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent";
 import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
-import {
-  createPluginAgentDrivers,
-  type PluginAgentDrivers,
-} from "./plugins/pluginAgentDrivers";
+import { createPluginAgentDrivers } from "./plugins/pluginAgentDrivers";
 import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
-import {
-  forgetRemovedPlugin,
-  forgetWorkspaceRegistrations,
-  resolveRegisteredPlugin,
-  type RegisteredPlugin,
-} from "./plugins/pluginPanelRegistration";
-import {
-  disposeWorkspacePipeline,
-  ensureWorkspacePipeline,
-} from "./plugins/pluginPipelineLifecycle";
+import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
+import { PluginWorkspaceRuntimes } from "./plugins/pluginWorkspaceRuntimes";
 import {
   PluginSurfaces,
   type PluginPanelHostLease,
@@ -847,13 +836,18 @@ function assertSitePreviewMode(
 const sitePreviews = createSitePreviewLifecycle({
   allowOrigin: allowLoopbackFrameOrigin,
 });
-const pluginPipelines = new Map<string, PluginPipeline>();
-const pluginPipelineDisposals = new Map<string, Promise<void>>();
-// One per workspace, alive for as long as that workspace's plugin pipeline is.
-const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
-// Also one per workspace, so one workspace's settled batch can only ever
-// reach the plugins running in that workspace.
-const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>();
+const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({
+  assertWritable: assertWritableWorkspace,
+  isOpen: isWorkspaceOpenInAnyWindow,
+  create: createPluginWorkspaceRuntimeParts,
+  onPipelineStatus: notifyPluginStatusChanged,
+  onCleanupError: (workspaceId, error) => {
+    console.warn(
+      `[desktop] failed to clean up plugins for workspace "${workspaceId}"`,
+      error,
+    );
+  },
+});
 const sitePreviewStarts = createSitePreviewStartRegistry();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
@@ -865,7 +859,7 @@ let applicationMenuCanInstallUpdate: boolean | null = null;
 // pointed pnpm resolution at dist/main/resources and broke every plugin
 // install (#777's e2e caught this). import.meta.dirname is the currently
 // executing module's own directory (dist/main at runtime, exactly like
-// createPluginPipeline's sibling plugin-host.js resolution below), so two
+// the plugin runtime factory's sibling plugin-host.js resolution below), so two
 // levels up reaches apps/desktop deterministically regardless of how
 // Electron was launched. Both dev-mode resolvers below walk from here, so
 // this one call site is the only place that encodes that layout.
@@ -891,14 +885,6 @@ function notifyPluginStatusChanged(
   workspaceId: string,
   event: PluginPipelineStatusEvent,
 ): void {
-  // A removed identity releases its panel registration and any panel claim
-  // on its host — before the schema guard below, which only protects the
-  // renderer send.
-  forgetRemovedPlugin({
-    registrations: pluginRegistrations,
-    workspaceId,
-    event,
-  });
   // Emitted from a queueMicrotask with no catch above it, so a payload that
   // fails the IPC schema is dropped and logged — it must never become an
   // uncaught main-process exception.
@@ -938,7 +924,10 @@ function notifyPluginPanelSdkEvent(event: unknown): void {
 
 let linuxStableCliBinDir: string | undefined;
 
-function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
+function createPluginWorkspaceRuntimeParts(
+  workspace: CreatedWorkspace,
+  hooks: { onPipelineStatus(event: PluginPipelineStatusEvent): void },
+) {
   let pipeline: PluginPipeline | null = null;
   let surfaceHostLifecycle: PluginSurfaceHostLifecycle | null = null;
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
@@ -961,11 +950,9 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     },
     reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
-  pluginAgentDriversByWorkspace.set(workspace.workspaceId, pluginDrivers);
   // This workspace's plugin file subscriptions, fed by the settled watcher
   // batch (see onWatcherBatch) — the same feed the pipeline reads.
   const workspaceEvents = new PluginWorkspaceEvents();
-  pluginWorkspaceEventsByWorkspace.set(workspace.workspaceId, workspaceEvents);
   const pluginHost = new PluginHost({
     stateDir: stateDir(),
     workspaceRoot: workspace.rootPath,
@@ -1047,10 +1034,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
       workspaceEvents.disposeSpawn(pluginId, spawnId);
       return childProcessBroker.disposeSpawn(pluginId, spawnId);
     },
-    onDispose: () => {
-      workspaceEvents.dispose();
-      return childProcessBroker.dispose();
-    },
+    onDispose: () => childProcessBroker.dispose(),
     onStatusChange: (pluginId, status) => {
       surfaceHostLifecycle?.statusChanged(pluginId, status);
     },
@@ -1083,8 +1067,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     hostOwnership,
     resourcesBasePath: pluginResourcesBasePath(),
     pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
-    onStatusChange: (event) =>
-      notifyPluginStatusChanged(workspace.workspaceId, event),
+    onStatusChange: hooks.onPipelineStatus,
     onRuntimeStopped: (pluginId) =>
       pluginSurfaces.stop({
         kind: "plugin",
@@ -1094,46 +1077,7 @@ function createPluginPipeline(workspace: CreatedWorkspace): PluginPipeline {
     isEngineCaptureAvailable: () =>
       activity.engineCaptureFor(workspace.workspaceId) !== null,
   });
-  return pipeline;
-}
-
-async function ensurePluginPipeline(
-  workspace: CreatedWorkspace,
-): Promise<PluginPipeline> {
-  assertWritableWorkspace(workspace);
-  return ensureWorkspacePipeline({
-    live: pluginPipelines,
-    disposals: pluginPipelineDisposals,
-    workspaceId: workspace.workspaceId,
-    create: () => createPluginPipeline(workspace),
-    start: (pipeline) => pipeline.start(),
-    dispose: (pipeline) => disposePluginPipeline(workspace.workspaceId, pipeline),
-    createOnlyWhile: () => isWorkspaceOpenInAnyWindow(workspace.workspaceId),
-  });
-}
-
-// Stopping the pipeline stops its plugins, which fails their driver sessions
-// through onSpawnEnd. This drops the registry the workspace no longer has.
-async function disposePluginPipeline(
-  workspaceId: string,
-  pipeline: PluginPipeline,
-): Promise<void> {
-  try {
-    await pipeline.dispose();
-  } finally {
-    pluginAgentDriversByWorkspace.delete(workspaceId);
-    pluginWorkspaceEventsByWorkspace.get(workspaceId)?.dispose();
-    pluginWorkspaceEventsByWorkspace.delete(workspaceId);
-  }
-}
-
-async function stopPluginPipelineForWorkspace(workspaceId: string): Promise<void> {
-  await disposeWorkspacePipeline({
-    live: pluginPipelines,
-    disposals: pluginPipelineDisposals,
-    workspaceId,
-    dispose: (pipeline) => disposePluginPipeline(workspaceId, pipeline),
-  });
+  return { pipeline, agentDrivers: pluginDrivers, workspaceEvents };
 }
 
 // Latest search per renderer: the engine-backed search path awaits (flush +
@@ -2340,9 +2284,7 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   // One settled batch, two readers: the approval pipeline, and the plugins
   // that subscribed to a prefix of it. Neither changes the batch.
   onWatcherBatch: (workspace, events) => {
-    pluginPipelines.get(workspace.workspaceId)?.handleWatcherEvents(events);
-    pluginWorkspaceEventsByWorkspace
-      .get(workspace.workspaceId)
+    pluginWorkspaceRuntimes.current(workspace.workspaceId)
       ?.handleWatcherEvents(events);
   },
 });
@@ -2468,7 +2410,7 @@ async function agentSessionManager(): Promise<AgentSessionManager> {
       registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
       // A workspace's plugin drivers join its registry beside the built-ins.
       pluginDriversFor: (workspaceId) =>
-        pluginAgentDriversByWorkspace.get(workspaceId)?.list() ?? [],
+        pluginWorkspaceRuntimes.current(workspaceId)?.agentDrivers.list() ?? [],
       agentDefaultsFor: workspaceAgentDefaults,
       integration: {
         ...agentIntegration,
@@ -3177,7 +3119,6 @@ async function startAgentRunWithWorkspaceActivity(
   return run;
 }
 
-const pluginRegistrations = new Map<string, Map<string, RegisteredPlugin>>();
 const lastEngineStoreRebuildResult = new Map<
   string,
   RebuildEngineStoreResult
@@ -3324,7 +3265,7 @@ const pluginSurfaces = new PluginSurfaces<WebContentsView>({
     if (sender) notifyPluginPanelInvalidated(sender, generation, event);
   },
   onPanelDisposed: ({ workspaceId, pluginId, panelId, surfaceId }) => {
-    pluginWorkspaceEventsByWorkspace.get(workspaceId)?.disposeOwner({
+    pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents.disposeOwner({
       kind: "panel",
       workspaceId,
       pluginId,
@@ -3401,7 +3342,8 @@ async function invokeWorkspacePluginSdk(input: {
           assertWritableWorkspace(workspaceForWrite);
           return { workspaceRoot: workspaceForWrite.rootPath, capture };
         },
-        pipeline: () => pluginPipelines.get(input.workspaceId),
+        pipeline: () =>
+          pluginWorkspaceRuntimes.current(input.workspaceId)?.pipeline,
       }),
     },
     input.method,
@@ -3415,9 +3357,9 @@ async function routePluginPanelSdk(input: {
   params?: unknown;
 }): Promise<unknown> {
   const { authority, surfaceId, isPushLive } = input.authorization;
-  const workspaceEvents = pluginWorkspaceEventsByWorkspace.get(
+  const workspaceEvents = pluginWorkspaceRuntimes.current(
     authority.workspaceId,
-  );
+  )?.workspaceEvents;
   const owner = {
     kind: "panel" as const,
     workspaceId: authority.workspaceId,
@@ -3463,11 +3405,8 @@ function registeredPlugin(
   workspaceId: string,
   pluginId: string,
 ): RegisteredPlugin | undefined {
-  return resolveRegisteredPlugin(
-    pluginId,
-    pluginPipelines.get(workspaceId),
-    pluginRegistrations.get(workspaceId),
-  );
+  return pluginWorkspaceRuntimes.current(workspaceId)
+    ?.registeredPlugin(pluginId);
 }
 
 // Panels serve from the approved, hash-verified snapshot — never from
@@ -3500,9 +3439,10 @@ async function startPluginPanelPreview(input: {
 }
 
 async function stopPluginWorkspace(workspaceId: string): Promise<void> {
-  await pluginSurfaces.stop({ kind: "workspace", workspaceId });
-  await stopPluginPipelineForWorkspace(workspaceId);
-  forgetWorkspaceRegistrations(pluginRegistrations, workspaceId);
+  await pluginWorkspaceRuntimes.stop(
+    workspaceId,
+    () => pluginSurfaces.stop({ kind: "workspace", workspaceId }),
+  );
 }
 
 async function stopAllPluginWorkspaces(): Promise<void> {
@@ -3511,14 +3451,8 @@ async function stopAllPluginWorkspaces(): Promise<void> {
   // WILL_QUIT_BUDGET_MS so quit cannot outrun a preview process's own
   // hard-kill path.
   const sitePreviewStop = sitePreviews.stopAll();
-  const surfaceStop = pluginSurfaces.close();
-  await Promise.allSettled([sitePreviewStop, surfaceStop]);
-  await Promise.allSettled([
-    ...[...pluginPipelines.keys()].map((workspaceId) =>
-      stopPluginPipelineForWorkspace(workspaceId),
-    ),
-  ]);
-  pluginRegistrations.clear();
+  const pluginStop = pluginWorkspaceRuntimes.close(() => pluginSurfaces.close());
+  await Promise.allSettled([sitePreviewStop, pluginStop]);
 }
 
 // Agent-facing `dohc chat`: the socket authenticates locally, then MAIN
@@ -6967,9 +6901,7 @@ function registerIpcHandlers(
       require: requireWorkspace,
     },
     rendererGeneration,
-    pipelines: pluginPipelines,
-    ensurePipeline: ensurePluginPipeline,
-    registrations: pluginRegistrations,
+    runtimes: pluginWorkspaceRuntimes,
     surfaces: pluginSurfaces,
     platform: {
       builtinPluginsRoot,
@@ -7096,11 +7028,11 @@ function registerIpcHandlers(
     if (stillActive && !sharedViewOf(workspace.workspaceId)) {
       // A plugin-pipeline start failure must not fail the whole handler —
       // the workspace itself already opened. listPlugins and friends
-      // separately convert a failed ensurePluginPipeline into a structured
+      // separately convert a failed plugin runtime warmup into a structured
       // pluginIpcError; this is best-effort warmup, and the renderer's file
       // tree must not wait on it (fire-and-forget, like the dispatch scan in
       // openWorkspaceActivityWith).
-      void ensurePluginPipeline(workspace).catch((error: unknown) => {
+      void pluginWorkspaceRuntimes.ensure(workspace).catch((error: unknown) => {
         console.error(
           `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
           error,

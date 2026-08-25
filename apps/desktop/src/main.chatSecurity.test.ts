@@ -928,14 +928,17 @@ describe("main-process chat authorization", () => {
       ).not.toContain("if (shareView === null) assertWritableWorkspace(workspace);");
     }
 
-    // The plugin pipeline installs and runs plugin code against the workspace
-    // root, so it takes the same gate before it is built.
-    const pipelineAt = mainSource.indexOf("async function ensurePluginPipeline(");
-    const pipeline = mainSource.slice(pipelineAt, pipelineAt + 900);
+    // The plugin runtime installs and runs plugin code against the workspace
+    // root, so its owner takes the same gate before it builds a record.
+    const runtimeAt = mainSource.indexOf(
+      "const pluginWorkspaceRuntimes = new PluginWorkspaceRuntimes<CreatedWorkspace>({",
+    );
+    expect(runtimeAt).toBeGreaterThan(-1);
+    const runtime = mainSource.slice(runtimeAt, runtimeAt + 700);
     expect(
-      pipeline,
+      runtime,
       "MUTATION: an ungated pipeline writes plugin state into someone else's workspace",
-    ).toContain("assertWritableWorkspace(workspace);");
+    ).toContain("assertWritable: assertWritableWorkspace,");
 
     // Import remains in main and routes received-share writes through the
     // same owner as before. WorkspaceFileMutationOwner behavior-tests the six
