@@ -401,7 +401,7 @@ describe("WorkspaceSearchOwner", () => {
     expect(sender.send).not.toHaveBeenCalled();
   });
 
-  it("drops ripgrep batches after the caller changes workspaces", async () => {
+  it("settles the exact ripgrep search once when authority changes after start", async () => {
     const rootPath = await makeRoot();
     const registry = createFakeRegistry();
     let workspaceIsCurrent = true;
@@ -423,17 +423,74 @@ describe("WorkspaceSearchOwner", () => {
     );
 
     workspaceIsCurrent = false;
-    registry.starts[0]?.onBatch({
+    const staleBatch: SearchBatch = {
       searchId: "workspace-changed",
+      entries: [
+        {
+          path: "stale.md",
+          line: 1,
+          column: 1,
+          preview: "stale",
+          matchStart: 0,
+          matchEnd: 5,
+        },
+      ],
+      done: false,
+      limitHit: false,
+    };
+    registry.starts[0]?.onBatch(staleBatch);
+    registry.starts[0]?.onBatch(staleBatch);
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    expect(sender.send).toHaveBeenCalledWith(CHANNELS.searchResults, {
+      searchId: "workspace-changed",
+      entries: [],
+      done: true,
+      limitHit: false,
+    });
+    expect(registry.adapter.cancel).toHaveBeenCalledWith(
+      sender.id,
+      "workspace-changed",
+    );
+    expect(registry.adapter.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cancel or settle a superseded ripgrep search", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(18);
+    const workspace = { workspaceId: "workspace-1", rootPath };
+    await owner.start(sender, authority(workspace), searchPayload("older"));
+    await owner.start(sender, authority(workspace), searchPayload("newer"));
+    registry.adapter.cancel.mockClear();
+
+    registry.starts[0]?.onBatch({
+      searchId: "older",
       entries: [],
       done: false,
       limitHit: false,
     });
 
+    expect(registry.adapter.cancel).not.toHaveBeenCalled();
     expect(sender.send).not.toHaveBeenCalled();
-    expect(registry.adapter.cancel).toHaveBeenCalledWith(
-      sender.id,
-      "workspace-changed",
+
+    const currentBatch: SearchBatch = {
+      searchId: "newer",
+      entries: [],
+      done: true,
+      limitHit: false,
+    };
+    registry.starts[1]?.onBatch(currentBatch);
+    expect(sender.send).toHaveBeenCalledWith(
+      CHANNELS.searchResults,
+      currentBatch,
     );
   });
 
@@ -618,6 +675,36 @@ describe("WorkspaceSearchOwner", () => {
 
     expect(registry.adapter.killAll).toHaveBeenCalledTimes(1);
     expect(disposed.send).not.toHaveBeenCalled();
+  });
+
+  it("does not settle a ripgrep search after sender disposal", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(19);
+    await owner.start(
+      sender,
+      authority({ workspaceId: "workspace-1", rootPath }),
+      searchPayload("disposed-sender"),
+    );
+
+    owner.disposeSender(sender.id);
+    registry.adapter.cancel.mockClear();
+    registry.starts[0]?.onBatch({
+      searchId: "disposed-sender",
+      entries: [],
+      done: false,
+      limitHit: false,
+    });
+
+    expect(registry.adapter.cancel).not.toHaveBeenCalled();
+    expect(sender.send).not.toHaveBeenCalled();
   });
 
   it("fails closed when a workspace policy file cannot be parsed", async () => {

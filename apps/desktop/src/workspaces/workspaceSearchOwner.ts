@@ -71,6 +71,7 @@ export interface WorkspaceSearchOwnerDependencies<
 interface SearchIdentity {
   generation: number;
   searchId: string;
+  settled: boolean;
 }
 
 function stoppedSearchError(): Error {
@@ -105,6 +106,7 @@ export class WorkspaceSearchOwner<
     const identity = {
       generation: this.#generation(sender.id),
       searchId: input.searchId,
+      settled: false,
     };
     const previous = this.#latest.get(sender.id);
     this.#latest.set(sender.id, identity);
@@ -139,6 +141,7 @@ export class WorkspaceSearchOwner<
         input,
         includeGlob: input.includeGlob,
         allowPath: ownedSearchView.allowPath,
+        identity,
         ownsSearch,
         isCurrent,
         assertCurrent,
@@ -232,6 +235,7 @@ export class WorkspaceSearchOwner<
       input,
       includeGlob: mountGlob,
       allowPath: ownedSearchView.allowPath,
+      identity,
       ownsSearch,
       isCurrent,
       assertCurrent,
@@ -273,6 +277,7 @@ export class WorkspaceSearchOwner<
     input: WorkspaceSearchPayload;
     includeGlob: string | undefined;
     allowPath: (path: string) => boolean;
+    identity: SearchIdentity;
     ownsSearch: () => boolean;
     isCurrent: () => boolean;
     assertCurrent: () => void;
@@ -294,6 +299,7 @@ export class WorkspaceSearchOwner<
         this.#sendRipgrepBatch(
           input.sender,
           batch,
+          input.identity,
           input.ownsSearch,
           input.isCurrent,
         ),
@@ -303,6 +309,10 @@ export class WorkspaceSearchOwner<
       },
     );
     if (!input.isCurrent()) {
+      // This invocation is still pending, so its rejection settles the
+      // renderer. Mark it first so cancellation cannot also emit a terminal
+      // batch through a synchronous or late child callback.
+      input.identity.settled = true;
       // Root validation can finish after this workspace loses authority. Kill
       // only this invocation's handle. A superseding search owns a different
       // identity and has already replaced or cancelled this handle.
@@ -319,20 +329,41 @@ export class WorkspaceSearchOwner<
   #sendRipgrepBatch(
     sender: WorkspaceSearchSender,
     batch: SearchBatch,
+    identity: SearchIdentity,
     ownsSearch: () => boolean,
     isCurrent: () => boolean,
   ): void {
+    if (identity.settled) return;
     if (!isCurrent()) {
-      // An authority change can make a running child stale without going
-      // through sender disposal. Cancel only while this exact owner identity
-      // remains latest, so a late batch with a reused searchId cannot kill its
-      // replacement.
-      if (ownsSearch()) {
-        this.#dependencies.searchRegistry.cancel(sender.id, batch.searchId);
-      }
+      this.#settleStaleRipgrep(sender, identity, ownsSearch);
       return;
     }
-    this.#send(sender, batch, isCurrent, "ripgrep batch");
+    if (this.#send(sender, batch, isCurrent, "ripgrep batch") && batch.done) {
+      identity.settled = true;
+    }
+  }
+
+  #settleStaleRipgrep(
+    sender: WorkspaceSearchSender,
+    identity: SearchIdentity,
+    ownsSearch: () => boolean,
+  ): void {
+    // The normal current check failed. Only the exact request identity and a
+    // live sender authorize an empty terminal event, never result data.
+    if (identity.settled || !ownsSearch() || sender.isDestroyed()) return;
+    identity.settled = true;
+    this.#dependencies.searchRegistry.cancel(sender.id, identity.searchId);
+    this.#send(
+      sender,
+      {
+        searchId: identity.searchId,
+        entries: [],
+        done: true,
+        limitHit: false,
+      },
+      () => ownsSearch() && !sender.isDestroyed(),
+      "stale ripgrep completion",
+    );
   }
 
   #send(
@@ -340,24 +371,26 @@ export class WorkspaceSearchOwner<
     event: unknown,
     isCurrent: () => boolean,
     source: string,
-  ): void {
-    if (!isCurrent()) return;
+  ): boolean {
+    if (!isCurrent()) return false;
     const parsed = SearchResultsEventSchema.safeParse(event);
     if (!parsed.success) {
       this.#dependencies.logError(
         `Workspace search dropped an invalid ${source}.`,
         parsed.error,
       );
-      return;
+      return false;
     }
-    if (!isCurrent()) return;
+    if (!isCurrent()) return false;
     try {
       sender.send(CHANNELS.searchResults, parsed.data);
+      return true;
     } catch (error) {
       this.#dependencies.logError(
         `Workspace search could not send a ${source}.`,
         error,
       );
+      return false;
     }
   }
 }
