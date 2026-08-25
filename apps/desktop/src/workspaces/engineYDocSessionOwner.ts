@@ -178,6 +178,7 @@ export interface EngineYDocSessionOwnerOptions<
   TUpdate,
   TReplacement,
 > {
+  pathIdentityPlatform?: NodeJS.Platform;
   onOutbound: (
     outbound: EngineYDocSessionOutbound<
       TSender,
@@ -217,6 +218,7 @@ export class EngineYDocSessionOwner<
       TReplacement
     >["onReleaseFailed"]
   >;
+  readonly #pathIdentityPlatform: NodeJS.Platform;
   readonly #slots = new Map<
     string,
     SessionRecord<TSender, TSession, TUpdate, TReplacement>
@@ -235,6 +237,8 @@ export class EngineYDocSessionOwner<
       TReplacement
     >,
   ) {
+    this.#pathIdentityPlatform =
+      options.pathIdentityPlatform ?? process.platform;
     this.#onOutbound = options.onOutbound;
     this.#onReleaseFailed = options.onReleaseFailed ?? (() => undefined);
   }
@@ -283,7 +287,11 @@ export class EngineYDocSessionOwner<
       (record) =>
         record.state !== "releasing" &&
         record.workspaceId === input.workspaceId &&
-        workspaceRelativePathsEqual(record.path, input.path),
+        workspaceRelativePathsEqual(
+          record.path,
+          input.path,
+          this.#pathIdentityPlatform,
+        ),
     );
     if (documentInUse) {
       return Promise.resolve({ kind: "refused", reason: "session-in-use" });
@@ -381,7 +389,11 @@ export class EngineYDocSessionOwner<
     return [...this.#records].some(
       (record) =>
         record.workspaceId === workspaceId &&
-        workspaceRelativePathsEqual(record.path, path),
+        workspaceRelativePathsEqual(
+          record.path,
+          path,
+          this.#pathIdentityPlatform,
+        ),
     );
   }
 
@@ -394,7 +406,11 @@ export class EngineYDocSessionOwner<
       if (
         record.session === null ||
         record.workspaceId !== workspaceId ||
-        !workspaceRelativePathIsAtOrUnder(record.path, pathOrPrefix)
+        !workspaceRelativePathIsAtOrUnder(
+          record.path,
+          pathOrPrefix,
+          this.#pathIdentityPlatform,
+        )
       ) {
         continue;
       }
@@ -502,7 +518,11 @@ export class EngineYDocSessionOwner<
         record !== opening &&
         record.state === "releasing" &&
         record.workspaceId === opening.workspaceId &&
-        workspaceRelativePathsEqual(record.path, opening.path),
+        workspaceRelativePathsEqual(
+          record.path,
+          opening.path,
+          this.#pathIdentityPlatform,
+        ),
     );
     for (const blocker of blockers) {
       const release = await this.#retire(

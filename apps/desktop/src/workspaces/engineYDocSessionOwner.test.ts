@@ -30,13 +30,18 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function createOwner(
-  outbound: TestOutbound[] = [],
+interface TestOwnerOptions {
+  pathIdentityPlatform?: NodeJS.Platform;
   onReleaseFailed?: (failure: {
     path: string;
     sessionId: string;
     error: unknown;
-  }) => void,
+  }) => void;
+}
+
+function createOwner(
+  outbound: TestOutbound[] = [],
+  options: TestOwnerOptions = {},
 ) {
   return new EngineYDocSessionOwner<
     TestSender,
@@ -45,8 +50,8 @@ function createOwner(
     string,
     string
   >({
+    ...options,
     onOutbound: (message) => outbound.push(message),
-    onReleaseFailed,
   });
 }
 
@@ -149,10 +154,10 @@ describe("EngineYDocSessionOwner", () => {
     expect(competingOpen).not.toHaveBeenCalled();
   });
 
-  it.runIf(process.platform === "win32")(
+  it(
     "refuses a distinct session for a case alias of an owned document",
     async () => {
-      const owner = createOwner();
+      const owner = createOwner([], { pathIdentityPlatform: "win32" });
       const sender = { id: 7, label: "window-a" };
       await expect(
         owner.open(
@@ -876,10 +881,10 @@ describe("EngineYDocSessionOwner", () => {
     );
   });
 
-  it.runIf(process.platform === "win32")(
+  it(
     "uses Windows path identity for ownership and subtree visits",
     async () => {
-      const owner = createOwner();
+      const owner = createOwner([], { pathIdentityPlatform: "win32" });
       const sender = { id: 7, label: "window-a" };
       await owner.open(
         openInput({
@@ -952,7 +957,7 @@ describe("EngineYDocSessionOwner", () => {
   it("retains a failed release for an exact-owner retry and stays silent", async () => {
     const outbound: TestOutbound[] = [];
     const onReleaseFailed = vi.fn();
-    const owner = createOwner(outbound, onReleaseFailed);
+    const owner = createOwner(outbound, { onReleaseFailed });
     const sender = { id: 7, label: "window-a" };
     const releaseError = new Error("daemon retained the session");
     let refuseRelease = true;
@@ -1067,7 +1072,7 @@ describe("EngineYDocSessionOwner", () => {
 
   it("refuses a second bind until a failed release of that workspace path succeeds", async () => {
     const onReleaseFailed = vi.fn();
-    const owner = createOwner([], onReleaseFailed);
+    const owner = createOwner([], { onReleaseFailed });
     const sender = { id: 7, label: "window-a" };
     const releaseError = new Error("daemon retained the document");
     const close = vi.fn(async () => {

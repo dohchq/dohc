@@ -88,13 +88,20 @@ function providerSession(
   return Object.assign(base, input);
 }
 
-function harness(
-  session = providerSession(),
-  resolveDocumentPath: (
+interface TestHarnessOptions {
+  pathIdentityPlatform?: NodeJS.Platform;
+  resolveDocumentPath?: (
     workspace: { workspaceId: string; rootPath: string },
     path: string,
-  ) => Promise<string | null> = async (_workspace, path) => path,
+  ) => Promise<string | null>;
+}
+
+function harness(
+  session = providerSession(),
+  options: TestHarnessOptions = {},
 ) {
+  const resolveDocumentPath =
+    options.resolveDocumentPath ?? (async (_workspace, path: string) => path);
   let generation = 1;
   let readOnly = false;
   let capturedOpen:
@@ -108,6 +115,9 @@ function harness(
   };
   const onError = vi.fn();
   const ipc = createEngineYDocSessionIpc({
+    ...(options.pathIdentityPlatform === undefined
+      ? {}
+      : { pathIdentityPlatform: options.pathIdentityPlatform }),
     generationOf: () => generation,
     requireWorkspace: (workspaceId) => ({
       workspaceId,
@@ -219,7 +229,7 @@ describe("engine Y.Doc IPC adapter", () => {
       ) =>
         "notes/a.md",
     );
-    const h = harness(providerSession(), resolveDocumentPath);
+    const h = harness(providerSession(), { resolveDocumentPath });
 
     await expect(
       h.ipc.open(sender, { ...openPayload, path: "alias/a.md" }),
@@ -241,11 +251,11 @@ describe("engine Y.Doc IPC adapter", () => {
     ).rejects.toThrow("The engine owns this live document");
   });
 
-  it.runIf(process.platform === "win32")(
+  it(
     "refuses case-alias writes and marks case-alias deletions",
     async () => {
       const sender = new FakeSender(7);
-      const h = harness();
+      const h = harness(providerSession(), { pathIdentityPlatform: "win32" });
       await h.ipc.open(sender, {
         ...openPayload,
         path: "Notes/Folder/A.md",
@@ -468,7 +478,7 @@ describe("engine Y.Doc IPC adapter", () => {
       }
       return requestedPath;
     });
-    const h = harness(providerSession(), resolveDocumentPath);
+    const h = harness(providerSession(), { resolveDocumentPath });
     const mutationEntered = deferred<void>();
     const releaseMutation = deferred<void>();
     const mutation = h.ipc
@@ -512,7 +522,7 @@ describe("engine Y.Doc IPC adapter", () => {
         firstResolution.resolve();
         return path;
       });
-      const h = harness(providerSession(), resolveDocumentPath);
+      const h = harness(providerSession(), { resolveDocumentPath });
       const mutationEntered = deferred<void>();
       const releaseMutation = deferred<void>();
       const mutation = h.ipc
@@ -552,7 +562,7 @@ describe("engine Y.Doc IPC adapter", () => {
       resolution += 1;
       return resolution === 1 ? "notes/a.md" : null;
     });
-    const h = harness(providerSession(), resolveDocumentPath);
+    const h = harness(providerSession(), { resolveDocumentPath });
 
     await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
       available: false,
@@ -565,7 +575,9 @@ describe("engine Y.Doc IPC adapter", () => {
 
   it("keeps a live document unavailable when it disappears before admission", async () => {
     const sender = new FakeSender(7);
-    const h = harness(providerSession(), async () => null);
+    const h = harness(providerSession(), {
+      resolveDocumentPath: async () => null,
+    });
 
     await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
       available: false,

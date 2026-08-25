@@ -32,7 +32,10 @@ import {
   noteSettleStart,
 } from "./engineYDocSaveSeq";
 
-async function reconnectFailureCapture(prefix: string) {
+async function reconnectFailureCapture(
+  prefix: string,
+  options: { pathIdentityPlatform?: NodeJS.Platform } = {},
+) {
   const rootPath = await createTestScratch(prefix);
   const workspaceId = prefix.replace(/-+$/, "");
   const loopback = new VersionedLoopbackEngine();
@@ -112,6 +115,7 @@ async function reconnectFailureCapture(prefix: string) {
   };
   const outcomes: boolean[] = [];
   const capture = createWorkspaceEngineCapture({
+    ...options,
     workspaceId,
     rootPath,
     rustEngineSessions: sessions,
@@ -159,11 +163,12 @@ it("retains a reconnect-failed generation when replacement open is refused", asy
   await capture.stop();
 });
 
-it.runIf(process.platform === "win32")(
+it(
   "vacates case-alias Y.Doc paths for delete and move reservations",
   async () => {
     const { capture, state } = await reconnectFailureCapture(
       "dohc-ydoc-windows-path-identity-",
+      { pathIdentityPlatform: "win32" },
     );
     await capture.openYDocSession({
       path: "Notes/Folder/A.md",

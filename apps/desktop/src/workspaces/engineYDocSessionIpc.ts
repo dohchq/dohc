@@ -76,6 +76,7 @@ interface EngineYDocWorkspace {
 }
 
 interface EngineYDocSessionIpcOptions {
+  pathIdentityPlatform?: NodeJS.Platform;
   generationOf: (senderId: number) => number;
   requireWorkspace: (workspaceId: string) => EngineYDocWorkspace;
   captureFor: (workspaceId: string) => EngineYDocSessionCapture | null;
@@ -156,6 +157,11 @@ function liveDocumentMutationRefusal(): Error {
 /** Atomic admission shared by canonical Y.Doc opens and direct mutations. */
 class DocumentMutationReservations {
   readonly #states = new Map<string, DocumentReservationState>();
+  readonly #pathIdentityPlatform: NodeJS.Platform;
+
+  constructor(pathIdentityPlatform: NodeJS.Platform) {
+    this.#pathIdentityPlatform = pathIdentityPlatform;
+  }
 
   async reserveOpen(workspaceId: string, path: string): Promise<() => void> {
     const key = this.#key(workspaceId, path);
@@ -214,7 +220,11 @@ class DocumentMutationReservations {
   }
 
   #key(workspaceId: string, path: string): string {
-    return `${workspaceId}\0${workspaceRelativePathIdentity(path)}`;
+    const pathIdentity = workspaceRelativePathIdentity(
+      path,
+      this.#pathIdentityPlatform,
+    );
+    return `${workspaceId}\0${pathIdentity}`;
   }
 
   #deleteIdle(key: string, state: DocumentReservationState): void {
@@ -232,8 +242,9 @@ class EngineYDocSessionIpc {
     "resolveDocumentPath"
   ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
+  readonly #pathIdentityPlatform: NodeJS.Platform;
   readonly #owner: EngineYDocIpcSessionOwner;
-  readonly #documentReservations = new DocumentMutationReservations();
+  readonly #documentReservations: DocumentMutationReservations;
   readonly #fileMutationPort: WorkspaceFileMutationYDocPort;
   readonly #cleanupHooked = new WeakSet<EngineYDocIpcSender>();
   readonly #trackedGeneration = new WeakMap<EngineYDocIpcSender, number>();
@@ -246,7 +257,13 @@ class EngineYDocSessionIpc {
     this.#isSharedView = options.isSharedView;
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
+    this.#pathIdentityPlatform =
+      options.pathIdentityPlatform ?? process.platform;
+    this.#documentReservations = new DocumentMutationReservations(
+      this.#pathIdentityPlatform,
+    );
     this.#owner = new EngineYDocSessionOwner({
+      pathIdentityPlatform: this.#pathIdentityPlatform,
       onOutbound: (outbound) => this.#send(outbound),
       onReleaseFailed: ({ path, error }) => {
         this.#onError(
@@ -374,7 +391,11 @@ class EngineYDocSessionIpc {
     }
     if (
       currentPath === null ||
-      !workspaceRelativePathsEqual(currentPath, canonicalPath)
+      !workspaceRelativePathsEqual(
+        currentPath,
+        canonicalPath,
+        this.#pathIdentityPlatform,
+      )
     ) {
       return unavailableOpen({ documentUnavailable: true });
     }
