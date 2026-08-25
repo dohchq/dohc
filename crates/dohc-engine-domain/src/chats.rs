@@ -4756,7 +4756,7 @@ impl<'a> LinkedChatStore<'a> {
                 active_reactions_for_messages(conn, workspace_id, &candidate_message_ids)?;
             let mut items = Vec::with_capacity(candidates.len());
             for candidate in candidates {
-                let message = require_message(conn, workspace_id, &candidate.message_id)?;
+                let message = require_message_row(conn, workspace_id, &candidate.message_id)?;
                 if message.thread_id != candidate.thread_id
                     || message.created_at_ms != candidate.created_at_ms
                 {
@@ -4850,6 +4850,15 @@ impl<'a> LinkedChatStore<'a> {
                     matched_by,
                 });
             }
+            hydrate_attachments_for_messages(
+                conn,
+                workspace_id,
+                items.iter_mut().flat_map(|item| {
+                    std::iter::once(&mut item.message)
+                        .chain(item.opening_message.as_mut())
+                        .chain(item.parent_message.as_mut())
+                }),
+            )?;
             let head = conn
                 .query_row(
                     PERSONAL_FEED_SQL,
@@ -6815,32 +6824,26 @@ fn active_reactions_for_messages(
     Ok(grouped)
 }
 
-fn hydrate_message_attachments(
+/// Batched [`attachments_for_message`]: one query for the whole batch instead
+/// of one per message. The `chat_messages` join pins each attachment to its
+/// own message's thread, so the result is exactly the union of the per-message
+/// lookups, and the global `(created_at_ms, attachment_id)` order preserves
+/// each message's per-message order. The batch may repeat a message (a feed
+/// page's shared opening or parent); every occurrence gets the full set.
+fn hydrate_attachments_for_messages<'a>(
     conn: &Connection,
     workspace_id: &str,
-    message: &mut ChatMessage,
+    messages: impl IntoIterator<Item = &'a mut ChatMessage>,
 ) -> Result<(), DomainError> {
-    message.attachments =
-        attachments_for_message(conn, workspace_id, &message.thread_id, &message.message_id)?;
-    Ok(())
-}
-
-/// Batched [`hydrate_message_attachments`]: one query for the whole slice
-/// instead of one per message. The `chat_messages` join pins each attachment to
-/// its own message's thread, so the result is exactly the union of the
-/// per-message lookups, and the global `(created_at_ms, attachment_id)` order
-/// preserves each message's per-message order.
-fn hydrate_attachments_for_messages(
-    conn: &Connection,
-    workspace_id: &str,
-    messages: &mut [ChatMessage],
-) -> Result<(), DomainError> {
+    let messages: Vec<&mut ChatMessage> = messages.into_iter().collect();
     if messages.is_empty() {
         return Ok(());
     }
+    let mut seen = HashSet::new();
     let message_ids: Vec<&str> = messages
         .iter()
         .map(|message| message.message_id.as_str())
+        .filter(|message_id| seen.insert(*message_id))
         .collect();
     let message_ids_json =
         serde_json::to_string(&message_ids).map_err(|_| DomainError::StateCorrupt {
@@ -6869,8 +6872,11 @@ fn hydrate_attachments_for_messages(
             .or_default()
             .push(attachment);
     }
-    for message in messages.iter_mut() {
-        message.attachments = grouped.remove(&message.message_id).unwrap_or_default();
+    for message in messages {
+        message.attachments = grouped
+            .get(&message.message_id)
+            .cloned()
+            .unwrap_or_default();
     }
     Ok(())
 }
@@ -8729,24 +8735,25 @@ fn require_bookmark(
     .ok_or_else(|| DomainError::chat("invalid-bookmark-target", "Bookmark was not found."))
 }
 
+/// [`require_message`] without attachments, for pages that batch-hydrate
+/// afterward ([`hydrate_attachments_for_messages`]).
+fn require_message_row(
+    conn: &Connection,
+    workspace_id: &str,
+    message_id: &str,
+) -> Result<ChatMessage, DomainError> {
+    message_by_id(conn, workspace_id, message_id)?
+        .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))
+}
+
 fn require_message(
     conn: &Connection,
     workspace_id: &str,
     message_id: &str,
 ) -> Result<ChatMessage, DomainError> {
-    let mut message = conn
-        .query_row(
-            "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
-         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
-         FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
-            params![workspace_id, message_id],
-            map_message_row,
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?
-        .transpose()?
-        .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))?;
-    hydrate_message_attachments(conn, workspace_id, &mut message)?;
+    let mut message = require_message_row(conn, workspace_id, message_id)?;
+    message.attachments =
+        attachments_for_message(conn, workspace_id, &message.thread_id, &message.message_id)?;
     Ok(message)
 }
 
@@ -8838,49 +8845,43 @@ fn agent_read_state_for_thread(
     })
 }
 
+/// The message row without attachments; callers batch-hydrate afterward
+/// ([`hydrate_attachments_for_messages`]).
 fn message_by_id(
     conn: &Connection,
     workspace_id: &str,
     message_id: &str,
 ) -> Result<Option<ChatMessage>, DomainError> {
-    let mut message = conn
-        .query_row(
-            "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+    conn.query_row(
+        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
-            params![workspace_id, message_id],
-            map_message_row,
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?
-        .transpose()?;
-    if let Some(message) = &mut message {
-        hydrate_message_attachments(conn, workspace_id, message)?;
-    }
-    Ok(message)
+        params![workspace_id, message_id],
+        map_message_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
 }
 
+/// The thread's opening-message row without attachments; callers batch-hydrate
+/// afterward ([`hydrate_attachments_for_messages`]).
 fn first_message_for_thread(
     conn: &Connection,
     workspace_id: &str,
     thread_id: &str,
 ) -> Result<Option<ChatMessage>, DomainError> {
-    let mut message = conn
-        .query_row(
-            "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+    conn.query_row(
+        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
-            params![workspace_id, thread_id],
-            map_message_row,
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?
-        .transpose()?;
-    if let Some(message) = &mut message {
-        hydrate_message_attachments(conn, workspace_id, message)?;
-    }
-    Ok(message)
+        params![workspace_id, thread_id],
+        map_message_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
 }
 
 fn active_follow_exists(
