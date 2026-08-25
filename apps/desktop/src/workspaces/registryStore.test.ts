@@ -1,6 +1,15 @@
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_RETAINED_SKIPPED_OPS,
   MAX_TRACKED_BATCH_COORDINATES,
@@ -15,6 +24,20 @@ import {
 import { hasUnacknowledgedShareSkips } from "../renderer/shareSkipNotice";
 import { createTestScratch } from "./testTemp";
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    closeSync: vi.fn(actual.closeSync),
+    fsyncSync: vi.fn(actual.fsyncSync),
+    openSync: vi.fn(actual.openSync),
+    readFileSync: vi.fn(actual.readFileSync),
+    renameSync: vi.fn(actual.renameSync),
+    unlinkSync: vi.fn(actual.unlinkSync),
+    writeFileSync: vi.fn(actual.writeFileSync),
+  };
+});
+
 let store: ReturnType<typeof createRegistryStore>;
 let registryPath: string;
 
@@ -26,10 +49,28 @@ const personal = {
 };
 
 beforeEach(async () => {
+  vi.mocked(closeSync).mockClear();
+  vi.mocked(fsyncSync).mockClear();
+  vi.mocked(openSync).mockClear();
+  vi.mocked(readFileSync).mockClear();
+  vi.mocked(renameSync).mockClear();
+  vi.mocked(unlinkSync).mockClear();
+  vi.mocked(writeFileSync).mockClear();
   const dir = await createTestScratch("dohc-registry-");
   registryPath = join(dir, "workspaces.json");
   store = createRegistryStore(registryPath);
 });
+
+function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  if (!descriptor) throw new Error("process.platform has no property descriptor");
+  Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", descriptor);
+  }
+}
 
 describe("share skip records", () => {
   const op = (originSeq: number) => ({
@@ -542,6 +583,38 @@ describe("registry store", () => {
     });
   });
 
+  it("keeps the remote identity truthful when its atomic rename fails", () => {
+    const original = {
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-original",
+      ownerUserId: "user-original",
+    };
+    const replacement = {
+      serverUrl: "https://other.dohc.example",
+      remoteWorkspaceId: "rw-replacement",
+      ownerUserId: "user-replacement",
+    };
+    store.register(personal);
+    store.setRemote(personal.workspaceId, original);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+
+    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(
+      renameFailure,
+    );
+
+    expect(
+      store.find(personal.workspaceId)?.remote,
+      "MUTATION: a failed write publishes the replacement to the live cache",
+    ).toEqual(original);
+    expect(
+      createRegistryStore(registryPath).find(personal.workspaceId)?.remote,
+      "the atomic rename failure must leave the durable registry unchanged",
+    ).toEqual(original);
+  });
+
   it("persists and clears the first-pull join maintenance gate", () => {
     store.register({ ...personal, joinBootstrapPending: true });
     const reopened = createRegistryStore(registryPath);
@@ -626,6 +699,68 @@ describe("registry store", () => {
     // Leaving the last shared channel removes the key entirely.
     store.setSharedChannels("ws-1", []);
     expect(store.find("ws-1")?.sharedChannels).toBeUndefined();
+    expect(
+      createRegistryStore(registryPath).find("ws-1")?.sharedChannels,
+    ).toBeUndefined();
+  });
+
+  it("leaves joined shared channels unchanged when the registry write fails", () => {
+    const secondWorkspace = {
+      ...personal,
+      workspaceId: "ws-2",
+      rootPath: "/home/ice/dohc/second",
+    };
+    const joined = {
+      shareId: "share-1",
+      channelWireId: "wire-team",
+      access: "read-write" as const,
+      granterEmail: "owner@example.com",
+      relayUrl: "http://relay.test",
+      recipientUserId: "member-1",
+    };
+    const secondJoined = {
+      ...joined,
+      shareId: "share-2",
+      channelWireId: "wire-second",
+    };
+    store.register(personal);
+    store.register(secondWorkspace);
+    store.setSharedChannels(personal.workspaceId, [joined]);
+    store.setSharedChannels(secondWorkspace.workspaceId, [secondJoined]);
+
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync)
+      .mockImplementationOnce(() => {
+        throw renameFailure;
+      })
+      .mockImplementationOnce(() => {
+        throw renameFailure;
+      });
+
+    expect(() =>
+      store.setSharedChannels(personal.workspaceId, [{ ...joined, ended: true }]),
+    ).toThrow();
+    expect(() =>
+      store.setSharedChannels(secondWorkspace.workspaceId, []),
+    ).toThrow();
+
+    expect.soft(
+      store.find(personal.workspaceId)?.sharedChannels,
+      "MUTATION: a failed replacement changes the cached channel set before it reaches disk",
+    ).toEqual([joined]);
+    expect.soft(
+      store.find(secondWorkspace.workspaceId)?.sharedChannels,
+      "MUTATION: a failed removal deletes the cached channel set before it reaches disk",
+    ).toEqual([secondJoined]);
+    const reopened = createRegistryStore(registryPath);
+    expect.soft(
+      reopened.find(personal.workspaceId)?.sharedChannels,
+      "the failed replacement must leave the durable channel set unchanged",
+    ).toEqual([joined]);
+    expect.soft(
+      reopened.find(secondWorkspace.workspaceId)?.sharedChannels,
+      "the failed removal must leave the durable channel set unchanged",
+    ).toEqual([secondJoined]);
   });
 
   it("records, marks ended, and keeps an empty ownership tombstone", () => {
@@ -722,6 +857,262 @@ describe("registry store", () => {
         grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
       }),
     ).toThrow(/Unknown workspace/);
+  });
+
+  it("keeps the shared-view identity truthful when its atomic rename fails", () => {
+    const original = {
+      shareId: "share-original",
+      granterEmail: "granter@dohc.test",
+      grantedSelector: {
+        paths: ["docs"],
+        versionId: null,
+        access: "view" as const,
+      },
+    };
+    const replacement = {
+      ...original,
+      shareId: "share-replacement",
+      ended: true,
+    };
+    store.register(personal);
+    store.setShareView(personal.workspaceId, original);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+
+    expect(() => store.setShareView(personal.workspaceId, replacement)).toThrow(
+      renameFailure,
+    );
+
+    expect(
+      store.find(personal.workspaceId)?.shareView,
+      "MUTATION: a failed write publishes the replacement to the live cache",
+    ).toEqual(original);
+    expect(
+      createRegistryStore(registryPath).find(personal.workspaceId)?.shareView,
+      "the atomic rename failure must leave the durable registry unchanged",
+    ).toEqual(original);
+  });
+
+  it("removes its process temp file after a failed atomic rename", async () => {
+    store.register(personal);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+
+    let thrown: unknown;
+    try {
+      store.setRemote(personal.workspaceId, {
+        serverUrl: "https://cloud.dohc.example",
+        remoteWorkspaceId: "rw-99",
+        ownerUserId: "user-99",
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBe(renameFailure);
+
+    const { readdirSync } = await import("node:fs");
+    const leftovers = readdirSync(join(registryPath, "..")).filter((file) =>
+      file.includes(".tmp-"),
+    );
+    expect(leftovers).toEqual([]);
+  });
+
+  it("does not let temp cleanup mask the persistence failure", () => {
+    store.register(personal);
+    const renameFailure = new Error("atomic rename refused");
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw renameFailure;
+    });
+    vi.mocked(unlinkSync).mockImplementationOnce(() => {
+      throw new Error("temp cleanup refused");
+    });
+
+    expect(() =>
+      store.setRemote(personal.workspaceId, {
+        serverUrl: "https://cloud.dohc.example",
+        remoteWorkspaceId: "rw-99",
+        ownerUserId: "user-99",
+      }),
+    ).toThrow(renameFailure);
+  });
+
+  it("does not let a temp close failure mask the write failure", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const writeFailure = new Error("temp write refused");
+    vi.mocked(writeFileSync).mockImplementationOnce(() => {
+      throw writeFailure;
+    });
+    vi.mocked(closeSync).mockImplementationOnce((fd) => {
+      actual.closeSync(fd);
+      throw new Error("temp close refused");
+    });
+
+    expect(() => store.register(personal)).toThrow(writeFailure);
+    expect(fsyncSync).not.toHaveBeenCalled();
+    expect(renameSync).not.toHaveBeenCalled();
+    const leftovers = (await import("node:fs")).readdirSync(
+      join(registryPath, ".."),
+    ).filter((file) => file.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+  });
+
+  it("flushes the temp file and parent directory before publishing the cache", async () => {
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    let registryDuringDirectorySync: ReturnType<typeof store.list> | undefined;
+    vi.mocked(fsyncSync)
+      .mockImplementationOnce((fd) => actual.fsyncSync(fd))
+      .mockImplementationOnce(() => {
+        registryDuringDirectorySync = store.list();
+      });
+
+    withPlatform("linux", () => store.register(personal));
+
+    expect(writeFileSync).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.any(Buffer),
+    );
+    expect(openSync).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining(".tmp-"),
+      "w",
+    );
+    expect(openSync).toHaveBeenNthCalledWith(2, join(registryPath, ".."), "r");
+    expect(fsyncSync).toHaveBeenCalledTimes(2);
+    expect(closeSync).toHaveBeenCalledTimes(2);
+    expect(registryDuringDirectorySync).toEqual([]);
+    expect(store.list()).toEqual([personal]);
+
+    const tempOpenOrder = vi.mocked(openSync).mock.invocationCallOrder[0];
+    const writeOrder = vi.mocked(writeFileSync).mock.invocationCallOrder[0];
+    const fileSyncOrder = vi.mocked(fsyncSync).mock.invocationCallOrder[0];
+    const fileCloseOrder = vi.mocked(closeSync).mock.invocationCallOrder[0];
+    const renameOrder = vi.mocked(renameSync).mock.invocationCallOrder[0];
+    const directoryOpenOrder = vi.mocked(openSync).mock.invocationCallOrder[1];
+    const directorySyncOrder = vi.mocked(fsyncSync).mock.invocationCallOrder[1];
+    expect(tempOpenOrder).toBeLessThan(writeOrder ?? 0);
+    expect(writeOrder).toBeLessThan(fileSyncOrder ?? 0);
+    expect(fileSyncOrder).toBeLessThan(fileCloseOrder ?? 0);
+    expect(fileCloseOrder).toBeLessThan(renameOrder ?? 0);
+    expect(renameOrder).toBeLessThan(directoryOpenOrder ?? 0);
+    expect(directoryOpenOrder).toBeLessThan(directorySyncOrder ?? 0);
+  });
+
+  it("keeps cache and disk unchanged when the temp-file sync fails", async () => {
+    const original = {
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-original",
+      ownerUserId: "user-original",
+    };
+    const replacement = {
+      serverUrl: "https://other.dohc.example",
+      remoteWorkspaceId: "rw-replacement",
+      ownerUserId: "user-replacement",
+    };
+    store.register(personal);
+    store.setRemote(personal.workspaceId, original);
+    vi.mocked(renameSync).mockClear();
+
+    const syncFailure = new Error("temp sync refused");
+    vi.mocked(fsyncSync).mockImplementationOnce(() => {
+      throw syncFailure;
+    });
+
+    expect(() => store.setRemote(personal.workspaceId, replacement)).toThrow(
+      syncFailure,
+    );
+
+    expect(renameSync).not.toHaveBeenCalled();
+    expect(store.find(personal.workspaceId)?.remote).toEqual(original);
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      original,
+    );
+    const leftovers = (await import("node:fs")).readdirSync(
+      join(registryPath, ".."),
+    ).filter((file) => file.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+
+    store.setRemote(personal.workspaceId, replacement);
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      replacement,
+    );
+  });
+
+  it("invalidates the cache when the parent-directory sync fails after rename", async () => {
+    const original = {
+      serverUrl: "https://cloud.dohc.example",
+      remoteWorkspaceId: "rw-original",
+      ownerUserId: "user-original",
+    };
+    const replacement = {
+      serverUrl: "https://other.dohc.example",
+      remoteWorkspaceId: "rw-replacement",
+      ownerUserId: "user-replacement",
+    };
+    const retried = { ...replacement, remoteWorkspaceId: "rw-retried" };
+    store.register(personal);
+    store.setRemote(personal.workspaceId, original);
+    vi.mocked(readFileSync).mockClear();
+    vi.mocked(renameSync).mockClear();
+    vi.mocked(fsyncSync).mockClear();
+    vi.mocked(closeSync).mockClear();
+
+    const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const syncFailure = new Error("directory sync refused");
+    const closeFailure = new Error("directory close refused");
+    vi.mocked(fsyncSync)
+      .mockImplementationOnce((fd) => actual.fsyncSync(fd))
+      .mockImplementationOnce(() => {
+        throw syncFailure;
+      });
+    vi.mocked(closeSync)
+      .mockImplementationOnce((fd) => actual.closeSync(fd))
+      .mockImplementationOnce((fd) => {
+        actual.closeSync(fd);
+        throw closeFailure;
+      });
+
+    expect(() =>
+      withPlatform("linux", () =>
+        store.setRemote(personal.workspaceId, replacement),
+      ),
+    ).toThrow(syncFailure);
+
+    expect(renameSync).toHaveBeenCalledOnce();
+    expect(closeSync).toHaveBeenCalledTimes(2);
+    expect(readFileSync).not.toHaveBeenCalled();
+    expect(store.find(personal.workspaceId)?.remote).toEqual(replacement);
+    expect(readFileSync).toHaveBeenCalledOnce();
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      replacement,
+    );
+    const leftovers = (await import("node:fs")).readdirSync(
+      join(registryPath, ".."),
+    ).filter((file) => file.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+
+    store.setRemote(personal.workspaceId, retried);
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)?.remote).toEqual(
+      retried,
+    );
+  });
+
+  it("skips unsupported directory fsync on Windows", () => {
+    withPlatform("win32", () => store.register(personal));
+
+    expect(fsyncSync).toHaveBeenCalledOnce();
+    expect(openSync).toHaveBeenCalledOnce();
+    expect(openSync).toHaveBeenCalledWith(
+      expect.stringContaining(".tmp-"),
+      "w",
+    );
+    expect(createRegistryStore(registryPath).find(personal.workspaceId)).toEqual(
+      personal,
+    );
   });
 
   it("persists the share's origin relay so refresh can reject a foreign relay (PR 18 gate fix)", () => {
