@@ -29,7 +29,7 @@ import {
   withEngineStoreRecovered,
   withEngineStoreRecoveredUnderEngineStoreLock,
 } from "./engineStoreRebuild";
-import { withKeyedStartLock } from "./sitePreviewLifecycle";
+import { runInKeyedLane } from "../keyedLane";
 import {
   closeWorkspaceActivityAndRelay,
   createWorkspaceActivity,
@@ -1259,7 +1259,7 @@ describe("moveEngineStoreAside", () => {
       await writeFile(join(engineDir, "engine.db"), "rebuilt-store");
     });
 
-    const rebuilding = withKeyedStartLock(
+    const rebuilding = runInKeyedLane(
       locks,
       workspace.workspaceId,
       () =>
@@ -1346,7 +1346,7 @@ describe("moveEngineStoreAside", () => {
       order.push("rebuild-close");
       await activity.close(workspace.workspaceId);
     });
-    const rebuild = withKeyedStartLock(locks, workspace.workspaceId, () =>
+    const rebuild = runInKeyedLane(locks, workspace.workspaceId, () =>
       rebuildEngineStore(root, {
         closeActivity,
         probeStoreRefusal: async () => "foreign-database",
@@ -1422,7 +1422,7 @@ describe("moveEngineStoreAside", () => {
     );
     await openFinished.promise;
 
-    const rebuilding = withKeyedStartLock(
+    const rebuilding = runInKeyedLane(
       locks,
       currentWorkspace.workspaceId,
       () =>
@@ -2027,7 +2027,7 @@ describe("rebuildEngineStore", () => {
       refused = false;
     });
     const request = () =>
-      withKeyedStartLock(locks, "workspace", () =>
+      runInKeyedLane(locks, "workspace", () =>
         rebuildEngineStoreRequest(root, {
           isStoreRefused: () => refused,
           hasActiveAgentRun: () => false,

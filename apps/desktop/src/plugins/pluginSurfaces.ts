@@ -11,7 +11,7 @@ import {
   createPluginPanelSdkAuthorityRegistry,
   type PluginPanelSdkGrant,
 } from "./pluginPanelSdkAuthority";
-import { withKeyedStartLock } from "../workspaces/sitePreviewLifecycle";
+import { runInKeyedLane } from "../keyedLane";
 import type {
   PluginHostPanelDeclaration,
   PluginHostRecordToken,
@@ -1471,14 +1471,14 @@ export class PluginSurfaces<V extends PluginWebAppViewLike> {
     identity: PluginPanelIdentity,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return withKeyedStartLock(this.#panelLanes, panelKey(identity), operation);
+    return runInKeyedLane(this.#panelLanes, panelKey(identity), operation);
   }
 
   #inWebAppLane<T>(
     identity: PluginWebAppIdentity,
     operation: () => Promise<T>,
   ): Promise<T> {
-    return withKeyedStartLock(this.#webAppLanes, webAppKey(identity), operation);
+    return runInKeyedLane(this.#webAppLanes, webAppKey(identity), operation);
   }
 
   #retirePanelAttempt(attempt: PanelAttempt): void {

@@ -69,7 +69,7 @@ describe("main-process engine store rebuild wiring", () => {
     expect(
       lockedOpen.indexOf("completePendingEngineStoreMoveForWorkspace("),
     ).toBeLessThan(lockedOpen.indexOf("options.afterReopenRecoverySettled?.()"));
-    expect(rebuild).toContain("withKeyedStartLock(");
+    expect(rebuild).toContain("runInKeyedLane(");
     expect(rebuild).toContain("openWorkspaceActivityUnderEngineStoreLock(");
     expect(rebuild).toContain("begin: () => sessions.beginRebuild(");
     expect(rebuild).toContain("end: () => sessions.endRebuild(");

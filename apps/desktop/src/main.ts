@@ -121,8 +121,6 @@ import {
   AddOfferedPluginResult,
   GetSitePreviewLogsPayload,
   GetSitePreviewLogsResult,
-  StartSitePreviewPayload,
-  StartSitePreviewResult,
   StopSitePreviewPayload,
   ListPluginsPayload,
   PluginSettingsResult,
@@ -312,6 +310,10 @@ import {
   type EngineYDocSaveStateName,
 } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
+import {
+  createStartSitePreviewHandler,
+  type SitePreviewExecutionInput,
+} from "./ipc/sitePreviewIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import {
   createEngineYDocSaveSeqState,
@@ -663,11 +665,7 @@ import {
   createLiveAgentDispatchStore,
   type LiveAgentDispatchStoreHandle,
 } from "./agents/liveAgentDispatchStore";
-import {
-  buildOutputSiteRoot,
-  requireExactSiteRoot,
-  type SitePackageInfo,
-} from "./workspaces/sitePackage";
+import { buildOutputSiteRoot } from "./workspaces/sitePackage";
 import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
 import {
   buildSite,
@@ -680,11 +678,8 @@ import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
   assertActiveWorkspaceForSite,
   createSitePreviewLifecycle,
-  createSitePreviewStartRegistry,
-  stopSitePreviewForRequest,
-  withKeyedStartLock,
-  type SitePreviewHandle,
 } from "./workspaces/sitePreviewLifecycle";
+import { runInKeyedLane } from "./keyedLane";
 import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import { invokeRegisteredPluginCommand } from "./plugins/pluginCommandInvocation";
@@ -929,19 +924,6 @@ function assertAgentRunnableWorkspace(workspaceId: string): void {
   }
 }
 
-// Dev and build preview modes execute the folder's own code. A shared view
-// holds someone else's code, so it can only serve an existing static artifact.
-function assertSitePreviewMode(
-  workspaceId: string,
-  mode: "static" | "dev" | "build",
-): void {
-  if (mode !== "static" && sharedViewOf(workspaceId)) {
-    throw new Error(
-      "Live and built site previews run the site's own code, so they're disabled in a shared view. Use the static preview.",
-    );
-  }
-}
-
 const sitePreviews = createSitePreviewLifecycle({
   allowOrigin: allowLoopbackFrameOrigin,
 });
@@ -952,7 +934,6 @@ const pluginAgentDriversByWorkspace = new Map<string, PluginAgentDrivers>();
 // Also one per workspace, so one workspace's settled batch can only ever
 // reach the plugins running in that workspace.
 const pluginWorkspaceEventsByWorkspace = new Map<string, PluginWorkspaceEvents>();
-const sitePreviewStarts = createSitePreviewStartRegistry();
 let autoUpdateController: AutoUpdateController | null = null;
 let applicationMenuCanInstallUpdate: boolean | null = null;
 
@@ -1270,18 +1251,6 @@ function advanceRendererGeneration(senderId: number): void {
   rendererGenerationBySender.set(senderId, rendererGeneration(senderId) + 1);
 }
 
-async function stopSitePreviewsForWorkspace(workspaceId: string): Promise<void> {
-  await Promise.all(
-    sitePreviews.previewsForWorkspace(workspaceId).map(({ siteRoot, handle }) =>
-      sitePreviews
-        .withStartLock(workspaceId, siteRoot, () => sitePreviews.stop(workspaceId, siteRoot, handle))
-        .catch((error) => {
-          console.warn("[desktop] failed to stop site preview during workspace switch", error);
-        }),
-    ),
-  );
-}
-
 async function relativeWorkspacePath(
   workspaceRoot: string,
   absolutePath: string,
@@ -1318,54 +1287,7 @@ function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
   return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
 }
 
-type SitePreviewStartInput = {
-  workspaceId: string;
-  workspaceRoot: string;
-  site: SitePackageInfo;
-  mode: "static" | "dev" | "build";
-  isCurrent: () => boolean;
-  signal: AbortSignal;
-  sharedView: boolean;
-};
-
-async function rememberCurrentSitePreviewHandle(
-  input: SitePreviewStartInput,
-  handle: SitePreviewHandle,
-): Promise<void> {
-  if (!input.isCurrent()) {
-    await handle.stop().catch(() => undefined);
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
-  }
-  sitePreviews.remember(input.workspaceId, input.site.root, handle);
-}
-
-type StartedSitePreview = Omit<StartSitePreviewResult, "exited"> & {
-  handle: SitePreviewHandle;
-};
-
-async function startPreviewForSite(
-  input: SitePreviewStartInput,
-): Promise<StartedSitePreview> {
-  return sitePreviews.withStartLock(input.workspaceId, input.site.root, () =>
-    startPreviewForSiteUnlocked(input),
-  );
-}
-
-async function startPreviewForSiteUnlocked(
-  input: SitePreviewStartInput,
-): Promise<StartedSitePreview> {
-  if (!input.isCurrent()) {
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
-  }
-  try {
-    await sitePreviews.stop(input.workspaceId, input.site.root);
-  } catch (error) {
-    console.warn("[desktop] failed to stop previous site preview", error);
-  }
-  if (!input.isCurrent()) {
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
-  }
-
+async function executePreviewForSite(input: SitePreviewExecutionInput) {
   if (input.mode === "static") {
     const target = await prepareOwnedStaticSitePreview({
       site: input.site,
@@ -1388,13 +1310,13 @@ async function startPreviewForSiteUnlocked(
       entry: target.entry,
       ...(target.fileSource ? { fileSource: target.fileSource } : {}),
     });
-    await rememberCurrentSitePreviewHandle(input, handle);
     return {
       handle,
-      siteRoot: input.site.root,
-      mode: input.mode,
-      url: handle.url,
-      logs: [],
+      result: {
+        siteRoot: input.site.root,
+        mode: input.mode,
+        logs: [],
+      },
     };
   }
 
@@ -1417,13 +1339,13 @@ async function startPreviewForSiteUnlocked(
       args: command.args,
       signal: input.signal,
     });
-    await rememberCurrentSitePreviewHandle(input, handle);
     return {
       handle,
-      siteRoot: input.site.root,
-      mode: input.mode,
-      url: handle.url,
-      logs: handle.logs(),
+      result: {
+        siteRoot: input.site.root,
+        mode: input.mode,
+        logs: handle.logs(),
+      },
     };
   }
 
@@ -1469,7 +1391,7 @@ async function startPreviewForSiteUnlocked(
       await relativeWorkspacePath(input.workspaceRoot, result.outputPath),
     );
   }
-  if (!input.isCurrent()) {
+  if (!input.isCurrent() || input.signal.aborted) {
     throw new Error("Site preview start was cancelled because the renderer restarted.");
   }
   if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
@@ -1478,14 +1400,14 @@ async function startPreviewForSiteUnlocked(
     buildOutputSiteRoot(input.site, outputRoot),
     { authority: input.site.authority },
   );
-  await rememberCurrentSitePreviewHandle(input, handle);
   return {
     handle,
-    siteRoot: input.site.root,
-    mode: input.mode,
-    url: handle.url,
-    logs,
-    ...(build ? { build } : {}),
+    result: {
+      siteRoot: input.site.root,
+      mode: input.mode,
+      logs,
+      ...(build ? { build } : {}),
+    },
   };
 }
 
@@ -3995,7 +3917,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   advanceRendererGeneration(senderId);
   const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
-  sitePreviewStarts.abortForSender(senderId);
+  sitePreviews.cancelSender(senderId);
   searchRegistry.disposeOwner(senderId);
   latestSearchIdBySender.delete(senderId);
   await Promise.all([
@@ -4006,7 +3928,7 @@ async function prepareForRendererReload(senderId: number): Promise<void> {
     // site preview of that same workspace out from under it.
     activeWorkspaceId &&
       !isWorkspaceOpenInAnyWindow(activeWorkspaceId, senderId)
-      ? stopSitePreviewsForWorkspace(activeWorkspaceId)
+      ? sitePreviews.stopWorkspace(activeWorkspaceId)
       : Promise.resolve(),
     closeEngineYDocSessionsForSender(senderId),
     waitForPendingEngineYDocOpens(senderId),
@@ -4910,21 +4832,23 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
 }
 
 const senderWorkspaceAuthority = {
-  requireTrustedSender(event: IpcMainInvokeEvent): number {
+  requireTrustedSender(event: IpcMainInvokeEvent): WebContents {
     assertTrustedSender(event);
-    return event.sender.id;
+    return event.sender;
   },
 
   requireActiveWorkspace(
-    senderId: number,
+    sender: WebContents,
     workspaceId: string,
     subject: string,
+    action = "try again",
   ) {
     const workspace = requireWorkspace(workspaceId);
     assertActiveWorkspaceForSite(
-      activeWorkspaceIdBySender.get(senderId),
+      activeWorkspaceIdBySender.get(sender.id),
       workspace.workspaceId,
       subject,
+      action,
     );
     return workspace;
   },
@@ -7332,89 +7256,15 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listSites, siteIpcHandlers.listSites);
   ipcMain.handle(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
 
-  ipcMain.handle(CHANNELS.startSitePreview, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StartSitePreviewPayload.parse(payload);
-    const sender = event.sender;
-    const generation = rendererGeneration(sender.id);
-    const pendingStart = sitePreviewStarts.begin(
-      sender.id,
-      input.workspaceId,
-      input.siteRoot,
-    );
-    const isCurrent = () =>
-      !pendingStart.controller.signal.aborted &&
-      !sender.isDestroyed() &&
-      rendererGeneration(sender.id) === generation;
-    try {
-      const workspace = requireWorkspace(input.workspaceId);
-      if (
-        activeWorkspaceIdBySender.get(sender.id) !== workspace.workspaceId
-      ) {
-        throw new Error(
-          "The Site preview request does not target the active workspace. Open the workspace and start the preview again.",
-        );
-      }
-      const sharedView = sharedViewOf(workspace.workspaceId);
-      assertSitePreviewMode(workspace.workspaceId, input.mode);
-      // A mounted share may provide a ready browser artifact, but must never
-      // cause package/configured commands from somebody else to execute.
-      if (isSharedWithMePath(input.siteRoot) && input.mode !== "static") {
-        throw new Error(
-          "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
-        );
-      }
-      const site = requireExactSiteRoot(
-        await ownedSiteCatalog.get(
-          workspace,
-          input.siteRoot,
-          input.mode,
-        ),
-        input.siteRoot,
-      );
-      const started = await startPreviewForSite({
-        workspaceId: input.workspaceId,
-        workspaceRoot: workspace.rootPath,
-        site,
-        mode: input.mode,
-        isCurrent,
-        signal: pendingStart.controller.signal,
-        sharedView: !!sharedView,
-      });
-      const result = StartSitePreviewResult.parse({
-        ...started,
-        exited: false,
-      });
-      if (!isCurrent()) {
-        await sitePreviews.stop(input.workspaceId, site.root, started.handle);
-        throw new Error("Site preview start was cancelled because the renderer restarted.");
-      }
-      if (!sitePreviews.isCurrent(input.workspaceId, site.root, started.handle)) {
-        if (
-          sitePreviews.exited(
-            input.workspaceId,
-            site.root,
-            started.handle,
-          )
-        ) {
-          return StartSitePreviewResult.parse({
-            ...result,
-            logs: sitePreviews.logs(input.workspaceId, site.root),
-            exited: true,
-          });
-        }
-        if (sitePreviews.isRunning(input.workspaceId, site.root)) {
-          throw new Error("A newer site preview replaced this start.");
-        }
-        throw new Error(
-          "The site preview stopped before it opened. Start the preview again.",
-        );
-      }
-      return result;
-    } finally {
-      pendingStart.finish();
-    }
+  const startSitePreview = createStartSitePreviewHandler({
+    authority: senderWorkspaceAuthority,
+    catalog: ownedSiteCatalog,
+    lifecycle: sitePreviews,
+    rendererGeneration,
+    isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
+    execute: executePreviewForSite,
   });
+  ipcMain.handle(CHANNELS.startSitePreview, startSitePreview);
 
   ipcMain.handle(CHANNELS.getSitePreviewLogs, async (event, payload) => {
     assertTrustedSender(event);
@@ -7427,10 +7277,8 @@ function registerIpcHandlers(
         "The Site preview logs request does not target the active workspace. Open the workspace and try again.",
       );
     }
-    return GetSitePreviewLogsResult.parse({
-      logs: sitePreviews.logs(workspace.workspaceId, input.siteRoot),
-      exited: sitePreviews.exited(workspace.workspaceId, input.siteRoot),
-    });
+    const status = sitePreviews.status(workspace.workspaceId, input.siteRoot);
+    return GetSitePreviewLogsResult.parse(status);
   });
 
   ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
@@ -7438,12 +7286,10 @@ function registerIpcHandlers(
     const input = StopSitePreviewPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const senderId = event.sender.id;
-    await stopSitePreviewForRequest({
+    await sitePreviews.stop({
       getActiveWorkspaceId: () => activeWorkspaceIdBySender.get(senderId),
       workspaceId: workspace.workspaceId,
       siteRoot: input.siteRoot,
-      starts: sitePreviewStarts,
-      previews: sitePreviews,
     });
   });
 
@@ -8196,7 +8042,7 @@ function registerIpcHandlers(
       // previousWorkspaceId open — unlike stopping the workspace's actual
       // previews below, which must not stop a preview another window is
       // still showing.
-      sitePreviewStarts.abortForSender(senderId);
+      sitePreviews.cancelSender(senderId);
       await pluginSurfaces.stop({ kind: "sender", senderId });
     }
     // A→B then A→C both read previousWorkspaceId=A above and raced through
@@ -8211,7 +8057,7 @@ function registerIpcHandlers(
       activeWorkspaceCleanupHooked.add(event.sender);
       event.sender.once("destroyed", () => {
         const activeWorkspaceId = activeWorkspaceIdBySender.get(senderId);
-        sitePreviewStarts.abortForSender(senderId);
+        sitePreviews.cancelSender(senderId);
         const pluginSurfaceStop = pluginSurfaces.stop({ kind: "sender", senderId });
         activeWorkspaceIdBySender.delete(senderId);
         rendererGenerationBySender.delete(senderId);
@@ -8235,7 +8081,7 @@ function registerIpcHandlers(
             // stopping them just because THIS window closed would end a
             // preview another window showing the same workspace still needs.
             if (activeWorkspaceId && !isWorkspaceOpenInAnyWindow(activeWorkspaceId)) {
-              void stopSitePreviewsForWorkspace(activeWorkspaceId);
+              void sitePreviews.stopWorkspace(activeWorkspaceId);
               await stopPluginWorkspace(activeWorkspaceId).catch((error: unknown) => {
                 console.warn(
                   `[desktop] failed to stop an orphaned plugin workspace after a destroyed window (sender ${senderId})`,
@@ -8256,7 +8102,7 @@ function registerIpcHandlers(
       previousWorkspaceId !== workspace.workspaceId &&
       !isWorkspaceOpenInAnyWindow(previousWorkspaceId)
     ) {
-      await stopSitePreviewsForWorkspace(previousWorkspaceId);
+      await sitePreviews.stopWorkspace(previousWorkspaceId);
       await stopPluginWorkspace(previousWorkspaceId);
     }
     refreshNativeWorkspaceSurfaces();
@@ -10569,7 +10415,7 @@ function registerIpcHandlers(
     const input = RebuildEngineStorePayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     assertWritableWorkspace(workspace);
-    return withKeyedStartLock(
+    return runInKeyedLane(
       engineStoreRebuildLocks,
       workspace.workspaceId,
       async () => {
