@@ -729,6 +729,53 @@ describe("notice center", () => {
     );
   });
 
+  it("shows a restart failure after the ready toast was dismissed", async () => {
+    installUpdate.mockResolvedValueOnce({
+      accepted: false,
+      completed: false,
+      state: {
+        status: "ready",
+        message: "Update 1.2.3 is ready — restart dohc to apply it.",
+        currentVersion: "1.2.2",
+        channel: "latest",
+        canCheck: false,
+        canInstall: true,
+        version: "1.2.3",
+      },
+    });
+    renderBar();
+    pushUpdate?.({
+      status: "ready",
+      message: "Update 1.2.3 is ready — restart dohc to apply it.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: false,
+      canInstall: true,
+      version: "1.2.3",
+    });
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Dismiss update notice" }),
+    );
+    expect(screen.queryByTestId("update-toast")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    await userEvent.click(
+      within(screen.getByTestId("notice-center")).getByRole("button", {
+        name: "Restart",
+      }),
+    );
+
+    expect((await screen.findByTestId("update-toast")).textContent).toContain(
+      "Could not restart into the update.",
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Dismiss update notice" }),
+    );
+    expect(screen.queryByTestId("update-toast")).toBeNull();
+  });
+
   it("keeps updater errors visible with a working next step", async () => {
     const onOpenSettings = vi.fn();
     installUpdate.mockResolvedValueOnce({

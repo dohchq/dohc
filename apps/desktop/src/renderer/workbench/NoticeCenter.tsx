@@ -147,10 +147,10 @@ export function NoticeCenter(props: {
       ? `${updateState.version ?? "unknown"}:${updateState.message}`
       : null;
   const updateToastVisible =
+    updateActionError !== null ||
     (updateState?.status === "ready" &&
       readyUpdateKey !== null &&
-      readyUpdateKey !== dismissedUpdateToastKey) ||
-    (updateState === null && updateActionError !== null);
+      readyUpdateKey !== dismissedUpdateToastKey);
   const installUpdate = useCallback(async () => {
     if (installPending) return;
     try {
@@ -475,10 +475,13 @@ export function NoticeCenter(props: {
             type="button"
             aria-label="Dismiss update notice"
             onClick={() => {
-              if (readyUpdateKey) {
-                setDismissedUpdateToastKey(readyUpdateKey);
-              } else {
+              if (updateActionError) {
                 setUpdateActionError(null);
+                if (readyUpdateKey) {
+                  setDismissedUpdateToastKey(readyUpdateKey);
+                }
+              } else if (readyUpdateKey) {
+                setDismissedUpdateToastKey(readyUpdateKey);
               }
             }}
             className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
