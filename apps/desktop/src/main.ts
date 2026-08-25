@@ -9067,6 +9067,9 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.presenceCancel, (event, payload) => {
     assertTrustedSender(event);
     const input = PresenceCancelPayload.parse(payload);
+    if (!rendererWorkspaceSessions.current(event.sender)) {
+      return undefined;
+    }
     // Only aborts a poll THIS sender owns; a cancel for another window's pollId
     // is a no-op.
     presencePollRegistry.cancel(event.sender.id, input.pollId);
@@ -9421,6 +9424,8 @@ function registerIpcHandlers(
       }
       return { workspace, isCurrent };
     },
+    authorizeCancel: (event) =>
+      rendererWorkspaceSessions.current(event.sender) !== undefined,
     owner: workspaceSearchOwner,
   });
 

@@ -80,6 +80,7 @@ function harness(input: { capture: boolean; rootPath: string }) {
       if (workspaceId !== workspace.workspaceId) throw new Error("Unknown workspace.");
       return { workspace, isCurrent: () => true };
     },
+    authorizeCancel: () => true,
     owner,
   });
   const sender: TestSender = {

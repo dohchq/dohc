@@ -25,7 +25,7 @@ function sender(id: number) {
 }
 
 describe("renderer reload admission", () => {
-  it("denies fresh site preview, Y.Doc, and search work before retirement drains", async () => {
+  it("denies fresh work and displaced search and presence cancels", async () => {
     const senderDrain = deferred();
     const workspaceDrain = deferred();
     const sessions = new RendererWorkspaceSessionOwner<ReturnType<typeof sender>>({
@@ -79,6 +79,7 @@ describe("renderer reload admission", () => {
       (event: { sender: typeof renderer }, payload: unknown) => unknown
     >();
     const searchStart = vi.fn(async () => undefined);
+    const searchCancel = vi.fn();
     registerWorkspaceSearchIpcHandlers<
       { sender: typeof renderer },
       typeof workspace
@@ -92,7 +93,10 @@ describe("renderer reload admission", () => {
         }
         return { workspace, isCurrent: () => session.isCurrent() };
       },
-      owner: { start: searchStart, cancel: vi.fn() },
+      authorizeCancel: (event) => {
+        return sessions.current(event.sender) !== undefined;
+      },
+      owner: { start: searchStart, cancel: searchCancel },
     });
 
     const reload = sessions.retireForReload(renderer);
@@ -128,5 +132,35 @@ describe("renderer reload admission", () => {
     senderDrain.resolve();
     workspaceDrain.resolve();
     await reload;
+
+    const replacement = sender(renderer.id);
+    await sessions.open(replacement, workspace.workspaceId);
+    await searchHandlers.get(CHANNELS.cancelWorkspaceSearch)!(
+      { sender: renderer },
+      { searchId: "reused-search-id" },
+    );
+    expect(searchCancel).not.toHaveBeenCalled();
+
+    await searchHandlers.get(CHANNELS.cancelWorkspaceSearch)!(
+      { sender: replacement },
+      { searchId: "reused-search-id" },
+    );
+    expect(searchCancel).toHaveBeenCalledWith(
+      replacement.id,
+      "reused-search-id",
+    );
+
+    const presenceCancel = vi.fn();
+    const cancelPresence = (requestSender: typeof renderer, pollId: string) => {
+      if (!sessions.current(requestSender)) return;
+      presenceCancel(requestSender.id, pollId);
+    };
+    cancelPresence(renderer, "reused-poll-id");
+    expect(presenceCancel).not.toHaveBeenCalled();
+    cancelPresence(replacement, "reused-poll-id");
+    expect(presenceCancel).toHaveBeenCalledWith(
+      replacement.id,
+      "reused-poll-id",
+    );
   });
 });

@@ -49,6 +49,9 @@ function harness() {
           activeWorkspaceId === workspace.workspaceId,
       };
     },
+    authorizeCancel: () => {
+      return rendererSessionCurrent;
+    },
     owner,
   });
   const event: TestEvent = {
@@ -194,5 +197,14 @@ describe("workspace search IPC registration", () => {
 
     expect(test.trace).toEqual(["trust"]);
     expect(test.owner.cancel).toHaveBeenCalledWith(19, "search-1");
+  });
+
+  it("ignores a cancel after the caller's renderer session retires", async () => {
+    const test = harness();
+    test.retireRendererSession();
+
+    await test.invoke(CHANNELS.cancelWorkspaceSearch, { searchId: "search-1" });
+
+    expect(test.owner.cancel).not.toHaveBeenCalled();
   });
 });
