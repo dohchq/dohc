@@ -131,7 +131,7 @@ export function NoticeCenter(props: {
   const [installPending, setInstallPending] = useState(false);
   const { updateState: desktopUpdateState, acceptUpdateResult } =
     useDesktopUpdateStateFeed((update) => {
-      if (update.status !== "error") setUpdateActionError(null);
+      setUpdateActionError(update.status === "error" ? update.message : null);
     });
   const updateState =
     desktopUpdateState?.status === "ready" ? desktopUpdateState : null;

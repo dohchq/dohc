@@ -829,6 +829,38 @@ describe("notice center", () => {
       .toBeTruthy();
   });
 
+  it("surfaces live updater errors in the toast and notice center", async () => {
+    const onOpenSettings = vi.fn();
+    renderBar({ onOpenSettings });
+
+    pushUpdate?.({
+      status: "error",
+      message: "dohc could not check for updates. Try again.",
+      currentVersion: "1.2.2",
+      channel: "latest",
+      canCheck: true,
+      canInstall: false,
+    });
+
+    const toast = await screen.findByTestId("update-toast");
+    expect(toast.textContent).toContain(
+      "dohc could not check for updates. Try again.",
+    );
+    await userEvent.click(
+      within(toast).getByRole("button", { name: "Open Settings" }),
+    );
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+
+    await userEvent.click(screen.getByTestId("notice-center-toggle"));
+    const updateNotice = screen.getByTestId("notice-update-error");
+    expect(updateNotice.textContent).toContain(
+      "dohc could not check for updates. Try again.",
+    );
+    expect(
+      within(updateNotice).getByRole("button", { name: "Open Settings" }),
+    ).toBeTruthy();
+  });
+
   it("does not show the restart action when the update is not installable", async () => {
     renderBar();
     pushUpdate?.({
