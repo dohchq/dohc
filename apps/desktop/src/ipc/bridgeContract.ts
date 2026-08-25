@@ -39,9 +39,7 @@ import {
   MENU_COMMANDS,
   ENGINE_YDOC_SESSION_ID_MAX_CHARS,
   ENGINE_YDOC_UPDATE_MAX_BYTES,
-  SEARCH_EVENT_MAX_ENTRIES,
   SEARCH_EVENT_MAX_ID_CHARS,
-  SEARCH_EVENT_MAX_PREVIEW_CHARS,
   BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES,
   PLUGIN_PIPELINE_ERROR_STAGES,
   PLUGIN_PIPELINE_STATUSES,
@@ -4466,9 +4464,8 @@ export type SetWorkspaceUiStatePayload = z.infer<typeof SetWorkspaceUiStatePaylo
 // Workspace content search (Phase E5.0). The renderer mints a bounded
 // searchId per search; main spawns ripgrep rooted at the real workspace root
 // and STREAMS batches back over the desktop:search-results event channel
-// (closed shape, validated in the dependency-free preload via
-// parseSearchResultsEvent — these zod schemas are the main-side mirror, with
-// the same bounds, used to validate batches BEFORE they are sent).
+// (closed shape, validated before send and again in the dependency-free
+// preload by the single parseSearchResultsEvent implementation).
 const SEARCH_ID = z.string().min(1).max(SEARCH_EVENT_MAX_ID_CHARS);
 
 export const WorkspaceSearchPayload = z.object({
@@ -4490,31 +4487,6 @@ export const CancelWorkspaceSearchPayload = z.object({
 export type CancelWorkspaceSearchPayload = z.infer<
   typeof CancelWorkspaceSearchPayload
 >;
-
-const SearchResultEntrySchema = z.object({
-  path: PATH_STRING,
-  line: z.number().int().min(1),
-  column: z.number().int().min(1),
-  preview: z.string().max(SEARCH_EVENT_MAX_PREVIEW_CHARS),
-  matchStart: z.number().int().min(0),
-  matchEnd: z.number().int().min(0),
-  surface: z.enum(["file", "chat"]).optional(),
-  threadId: z.string().min(1).max(200).optional(),
-  objectId: z.string().min(1).max(200).optional(),
-  title: z.string().min(1).max(500).optional(),
-});
-
-export const SearchResultsEventSchema = z.object({
-  searchId: SEARCH_ID,
-  entries: z.array(SearchResultEntrySchema).max(SEARCH_EVENT_MAX_ENTRIES),
-  done: z.boolean(),
-  limitHit: z.boolean(),
-  // A short, user-facing explanation when search is paused/degraded (e.g. a
-  // policy file failed to parse and file search fails closed). Optional so
-  // ordinary result batches omit it entirely.
-  notice: z.string().min(1).max(500).optional(),
-});
-export type SearchResultsEventSchema = z.infer<typeof SearchResultsEventSchema>;
 
 // WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
 // per open; main constructs the node-only live session (through the workspace's

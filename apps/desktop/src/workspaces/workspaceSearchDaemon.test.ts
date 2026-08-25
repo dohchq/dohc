@@ -1,6 +1,11 @@
-import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { CHANNELS } from "../ipc/channels";
+import { registerWorkspaceSearchIpcHandlers } from "../ipc/workspaceSearchIpc";
 import { queryWorkspaceSearchDaemon } from "./workspaceSearchDaemon";
+import { WorkspaceSearchOwner } from "./workspaceSearchOwner";
 
 describe("queryWorkspaceSearchDaemon", () => {
   it("reads bounded daemon pages and preserves the renderer result contract", async () => {
@@ -262,25 +267,118 @@ describe("queryWorkspaceSearchDaemon", () => {
   });
 });
 
-describe("desktop workspace-search handler wiring", () => {
-  const mainSource = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
-  const marker = "CHANNELS.searchWorkspace,";
-  const markerAt = mainSource.indexOf(marker);
-  const handlerStart = mainSource.lastIndexOf("ipcMain.handle(", markerAt);
-  const handlerEnd = mainSource.indexOf("ipcMain.handle(", markerAt + marker.length);
-  const handler = mainSource.slice(handlerStart, handlerEnd);
+describe("desktop workspace-search owner wiring", () => {
+  it("flushes capture and streams the paged daemon result through the registrar", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "dohc-search-daemon-"));
+    await mkdir(join(rootPath, ".dohc"));
+    try {
+      const trace: string[] = [];
+      const queryPage = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          trace.push("page:1");
+          return {
+            results: [],
+            nextCursor: "page-2",
+            versionId: "main",
+            restartRequired: false,
+          };
+        })
+        .mockImplementationOnce(async () => {
+          trace.push("page:2");
+          return {
+            results: [
+              {
+                surface: "file",
+                path: "notes/result.md",
+                title: "notes/result.md",
+                line: 3,
+                preview: "needle",
+                matchStart: 0,
+                matchEnd: 6,
+                threadId: null,
+                objectId: "result",
+              },
+            ],
+            nextCursor: null,
+            versionId: "main",
+            restartRequired: false,
+          };
+        });
+      const owner = new WorkspaceSearchOwner({
+        searchRegistry: {
+          startSearch: vi.fn(async () => undefined),
+          cancel: vi.fn(),
+          disposeOwner: vi.fn(),
+          killAll: vi.fn(),
+        },
+        prepareOwnedSearch: async () => ({ allowPath: () => true }),
+        engineCaptureFor: () => ({
+          flush: async () => {
+            trace.push("flush");
+          },
+        }),
+        queryEngine: async (_workspace, input) =>
+          await queryWorkspaceSearchDaemon({
+            daemon: { queryPage },
+            query: input.query,
+            limit: input.limit,
+            isCurrent: input.isCurrent,
+          }),
+        logError: vi.fn(),
+      });
+      const handlers = new Map<
+        string,
+        (event: TestEvent, payload: unknown) => Promise<unknown> | unknown
+      >();
+      const sender = {
+        id: 71,
+        isDestroyed: () => false,
+        send: vi.fn(),
+        once: vi.fn(),
+      };
+      type TestEvent = { sender: typeof sender };
+      registerWorkspaceSearchIpcHandlers<
+        TestEvent,
+        { workspaceId: string; rootPath: string }
+      >({
+        registerHandler: (channel, handler) => handlers.set(channel, handler),
+        assertTrustedSender: () => undefined,
+        authorizeWorkspace: (_event, workspaceId) => ({
+          workspace: { workspaceId, rootPath },
+          isCurrent: () => true,
+        }),
+        owner,
+      });
 
-  it("routes engine search only through the paged daemon read", () => {
-    expect(markerAt).toBeGreaterThanOrEqual(0);
-    expect(handlerStart).toBeGreaterThanOrEqual(0);
-    expect(handlerEnd).toBeGreaterThan(handlerStart + 100);
-    expect(handler.length).toBeGreaterThan(100);
-    expect(handler).toContain("queryWorkspaceSearchDaemon({");
-    expect(handler).toContain("rendererGeneration(sender.id) === generation");
-    expect(handler).toContain(
-      "latestSearchIdBySender.get(sender.id) === input.searchId",
-    );
-    expect(handler).not.toContain("searchWorkspaceEngine(");
-    expect(handler).not.toContain("engineSearchStoreFor(");
+      await handlers.get(CHANNELS.searchWorkspace)!({ sender }, {
+        workspaceId: "workspace-1",
+        searchId: "search-1",
+        query: "needle",
+      });
+
+      expect(trace).toEqual(["flush", "page:1", "page:2"]);
+      expect(queryPage).toHaveBeenNthCalledWith(2, {
+        query: "needle",
+        limit: 50,
+        cursor: "page-2",
+      });
+      expect(sender.send).toHaveBeenCalledWith(
+        CHANNELS.searchResults,
+        expect.objectContaining({
+          searchId: "search-1",
+          done: true,
+          entries: [
+            expect.objectContaining({
+              path: "notes/result.md",
+              column: 1,
+              objectId: "result",
+            }),
+          ],
+        }),
+      );
+    } finally {
+      await rm(rootPath, { recursive: true });
+    }
   });
 });
