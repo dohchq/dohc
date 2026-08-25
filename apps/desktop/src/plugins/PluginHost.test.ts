@@ -993,7 +993,7 @@ describe("PluginHost", () => {
     }
   });
 
-  it("waits for crash-loop state persistence before stopAll settles", async () => {
+  it("waits for crash-loop state persistence before stopAll settles when shutdown rejects", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
     const mutationStarted = deferredVoid();
@@ -1004,7 +1004,7 @@ describe("PluginHost", () => {
         return Promise.resolve({} as T);
       },
       notify: () => undefined,
-      dispose: () => Promise.resolve(),
+      dispose: () => Promise.reject(new Error("transport disposal failed")),
     }));
     const host = trackHost({
       stateDir: localStateDir,

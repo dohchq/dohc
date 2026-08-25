@@ -349,17 +349,19 @@ export class PluginHost {
 
   private async stopPluginRecord(record: PluginRecord): Promise<void> {
     const spawn = record.current;
-    if (!spawn?.transport) {
-      if (spawn) await this.endSpawn(record, spawn);
-      if (this.plugins.get(record.pluginId) === record) {
-        this.plugins.delete(record.pluginId);
+    try {
+      if (!spawn?.transport) {
+        if (spawn) await this.endSpawn(record, spawn);
+        if (this.plugins.get(record.pluginId) === record) {
+          this.plugins.delete(record.pluginId);
+        }
+      } else {
+        spawn.shutdown ??= this.shutdown(record, spawn, spawn.transport);
+        await spawn.shutdown;
       }
-    } else {
-      spawn.shutdown ??= this.shutdown(record, spawn, spawn.transport);
-      await spawn.shutdown;
+    } finally {
+      if (spawn) await this.waitForSettlements(spawn);
     }
-
-    if (spawn) await this.waitForSettlements(spawn);
   }
 
   async stopAll(): Promise<void> {
