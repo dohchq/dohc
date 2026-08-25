@@ -830,9 +830,12 @@ describe("settings IPC contract", () => {
   });
 
   it("keeps chat-run stop and resume controls workspace scoped", () => {
-    expect(StopAgentRunPayload.parse({ workspaceId: "ws-settings" })).toEqual({
-      workspaceId: "ws-settings",
-    });
+    expect(
+      StopAgentRunPayload.parse({
+        workspaceId: "ws-settings",
+        runId: "run-1",
+      }),
+    ).toEqual({ workspaceId: "ws-settings", runId: "run-1" });
     expect(
       StopAgentRunPayload.safeParse({
         workspaceId: "ws-settings",
@@ -860,14 +863,14 @@ describe("settings IPC contract", () => {
     ).toEqual({ workspaceId: "ws-settings", threadId: "thread-1" });
     expect(
       ChatDispatchStateForThreadResult.parse({
-        liveRun: true,
+        liveRunId: "run-1",
         pendingCount: 2,
         paused: false,
       }),
-    ).toEqual({ liveRun: true, pendingCount: 2, paused: false });
+    ).toEqual({ liveRunId: "run-1", pendingCount: 2, paused: false });
     expect(
       ChatDispatchStateForThreadResult.safeParse({
-        liveRun: false,
+        liveRunId: null,
         pendingCount: -1,
         paused: true,
       }).success,

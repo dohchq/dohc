@@ -360,7 +360,7 @@ beforeEach(() => {
     },
   });
   bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-    liveRun: false,
+    liveRunId: null,
     pendingCount: 0,
     paused: false,
   });
@@ -4046,8 +4046,12 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
-      .mockResolvedValueOnce({ liveRun: true, pendingCount: 2, paused: false })
-      .mockResolvedValue({ liveRun: false, pendingCount: 0, paused: false });
+      .mockResolvedValueOnce({
+        liveRunId: "run-1",
+        pendingCount: 2,
+        paused: false,
+      })
+      .mockResolvedValue({ liveRunId: null, pendingCount: 0, paused: false });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
@@ -4059,6 +4063,7 @@ describe("ChatsView dispatch state", () => {
     await user.click(screen.getByTestId("chats-stop-agent-run"));
     expect(bridgeMock.stopAgentRun).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
+      runId: "run-1",
     });
     await waitFor(() =>
       expect(screen.queryByTestId("chats-dispatch-status")).toBeNull(),
@@ -4071,12 +4076,12 @@ describe("ChatsView dispatch state", () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     bridgeMock.chatDispatchStateForThread
       .mockResolvedValueOnce({
-        liveRun: false,
+        liveRunId: null,
         pendingCount: 3,
         paused: true,
         pausedReason: "budget",
       })
-      .mockResolvedValue({ liveRun: false, pendingCount: 3, paused: false });
+      .mockResolvedValue({ liveRunId: null, pendingCount: 3, paused: false });
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));

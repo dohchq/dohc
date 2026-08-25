@@ -523,7 +523,7 @@ function buildThreadCommentTree(
 }
 
 const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
-  liveRun: false,
+  liveRunId: null,
   pendingCount: 0,
   paused: false,
 };
@@ -4543,7 +4543,7 @@ export function ChatsView(props: {
   const stopThreadRun = useCallback(async () => {
     if (
       nav.level !== "thread" ||
-      !dispatchState.liveRun ||
+      dispatchState.liveRunId === null ||
       dispatchActionBusy
     ) {
       return;
@@ -4553,7 +4553,10 @@ export function ChatsView(props: {
     const threadId = nav.thread.id;
     setDispatchActionBusy(true);
     try {
-      await bridge().stopAgentRun({ workspaceId });
+      await bridge().stopAgentRun({
+        workspaceId,
+        runId: dispatchState.liveRunId,
+      });
       const next = await bridge().chatDispatchStateForThread({
         workspaceId,
         threadId,
@@ -4576,7 +4579,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.liveRun, nav, props, workspaceId]);
+  }, [dispatchActionBusy, dispatchState.liveRunId, nav, props, workspaceId]);
 
   const resumeThreadDispatch = useCallback(async () => {
     if (nav.level !== "thread" || !dispatchState.paused || dispatchActionBusy) {
@@ -5058,7 +5061,7 @@ export function ChatsView(props: {
                 }
                 testId="chats-thread-bookmark"
               />
-              {!threadLocked && dispatchState.liveRun ? (
+              {!threadLocked && dispatchState.liveRunId !== null ? (
                 <button
                   type="button"
                   data-testid="chats-stop-agent-run"
@@ -5109,12 +5112,13 @@ export function ChatsView(props: {
               <span>read-only</span>
             )}
           </div>
-        ) : dispatchState.liveRun || dispatchState.pendingCount > 0 ? (
+        ) : dispatchState.liveRunId !== null ||
+          dispatchState.pendingCount > 0 ? (
           <div
             data-testid="chats-dispatch-status"
             className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
           >
-            {dispatchState.liveRun
+            {dispatchState.liveRunId !== null
               ? `agent working${
                   dispatchState.pendingCount > 0
                     ? ` · ${dispatchState.pendingCount} queued`

@@ -1214,7 +1214,7 @@ describe("chatDispatchService", () => {
       ),
     ).toEqual(["running", "done", "done"]);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toEqual({
-      liveRun: true,
+      liveRunId: expect.any(String),
       pendingCount: 0,
       paused: false,
     });
@@ -1230,7 +1230,7 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.runUpdatedWorkspaces.length).toBeGreaterThan(updatesBeforeFollowUpScan);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
-      liveRun: true,
+      liveRunId: expect.any(String),
       pendingCount: 1,
     });
 
@@ -1525,7 +1525,7 @@ describe("chatDispatchService", () => {
     );
     expect(pauseRow?.reason).toBe("re-dispatch budget exceeded");
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toEqual({
-      liveRun: false,
+      liveRunId: null,
       pendingCount: 1,
       paused: true,
       pausedReason: "re-dispatch budget exceeded",
@@ -1544,7 +1544,7 @@ describe("chatDispatchService", () => {
     expect(await fixture.dispatch.threadDispatchPaused(WORKSPACE_ID, pending.threadId)).toBe(false);
     expect(fixture.spawnCalls).toHaveLength(1);
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, pending.threadId)).toMatchObject({
-      liveRun: true,
+      liveRunId: expect.any(String),
       pendingCount: 0,
       paused: false,
     });
@@ -2494,7 +2494,9 @@ describe("chatDispatchService", () => {
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
     if (!claim) throw new Error("Expected a live run.");
 
-    await expect(fixture.service.stopAgentRun(WORKSPACE_ID)).resolves.toBe(true);
+    await expect(
+      fixture.service.stopAgentRun(WORKSPACE_ID, claim.run.runId),
+    ).resolves.toBe(true);
     expect(fixture.killCalls).toEqual([{ pid: -process.pid!, signal: "SIGTERM" }]);
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
@@ -2515,7 +2517,7 @@ describe("chatDispatchService", () => {
       false,
     );
     expect(await fixture.service.dispatchStateForThread(WORKSPACE_ID, trigger.threadId)).toMatchObject({
-      liveRun: false,
+      liveRunId: null,
     });
 
     const followUp = await createAgentThread(fixture, {
@@ -2534,6 +2536,42 @@ describe("chatDispatchService", () => {
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(followUp.threadId);
+  });
+
+  it("does not let a queued stop for an exited run stop its successor", async () => {
+    const fixture = await createFixture();
+    const first = await createAgentThread(fixture, {
+      body: "Finish this run before the stop is handled.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const firstClaim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
+    if (!firstClaim) throw new Error("Expected the first live run.");
+    await linkAgentReply(fixture, first.threadId, firstClaim.run.runId);
+
+    const successor = await createAgentThread(fixture, {
+      body: "Run after the first child exits.",
+      authorUserId: "user_local",
+    });
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.spawnCalls).toHaveLength(1);
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await expect(
+      fixture.service.stopAgentRun(WORKSPACE_ID, firstClaim.run.runId),
+    ).resolves.toBe(false);
+
+    expect(fixture.spawnCalls).toHaveLength(2);
+    expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(
+      successor.threadId,
+    );
+    expect(fixture.killCalls).toEqual([]);
+    expect(
+      await fixture.service.dispatchStateForThread(
+        WORKSPACE_ID,
+        successor.threadId,
+      ),
+    ).toMatchObject({ liveRunId: expect.any(String) });
   });
 
   it("deadlines and transport-retries the stopped-run failure-note fallback", async () => {
@@ -2558,7 +2596,7 @@ describe("chatDispatchService", () => {
     vi.spyOn(fixture.chat, "listMessages").mockRejectedValueOnce(noteError);
 
     await expect(
-      fixture.service.stopAgentRun(WORKSPACE_ID),
+      fixture.service.stopAgentRun(WORKSPACE_ID, claim.run.runId),
     ).resolves.toBe(true);
 
     const marks = fixture.dispatchRequests.filter(

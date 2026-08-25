@@ -4158,6 +4158,7 @@ export type RunnerSelfTestPayload = z.infer<typeof RunnerSelfTestPayload>;
 
 export const StopAgentRunPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  runId: z.string().min(1).max(200),
 }).strict();
 export type StopAgentRunPayload = z.infer<typeof StopAgentRunPayload>;
 
@@ -4178,7 +4179,7 @@ export type ChatDispatchStateForThreadPayload = z.infer<
 >;
 
 export const ChatDispatchStateForThreadResult = z.object({
-  liveRun: z.boolean(),
+  liveRunId: z.string().min(1).max(200).nullable(),
   pendingCount: z.number().int().nonnegative(),
   paused: z.boolean(),
   pausedReason: z.string().min(1).max(500).optional(),

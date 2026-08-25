@@ -9231,8 +9231,12 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.stopAgentRun, async (event, payload) => {
     assertTrustedSender(event);
     const input = StopAgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    await chatDispatchService.stopAgentRun(input.workspaceId);
+    senderWorkspaceAuthority.requireActiveWorkspace(
+      event.sender,
+      input.workspaceId,
+      "Agent run stop",
+    );
+    await chatDispatchService.stopAgentRun(input.workspaceId, input.runId);
   });
 
   ipcMain.handle(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
