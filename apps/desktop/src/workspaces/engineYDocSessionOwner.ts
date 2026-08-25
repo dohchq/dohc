@@ -181,6 +181,14 @@ export interface EngineYDocSessionOwnerOptions<
       TReplacement
     >,
   ) => void;
+  onOutboundFailed?: (
+    failure: EngineYDocSessionOutbound<
+      TSender,
+      TEvent,
+      TUpdate,
+      TReplacement
+    > & { error: unknown },
+  ) => void;
   onReleaseFailed?: (
     failure: EngineYDocSessionCaller<TSender> & {
       workspaceId: string;
@@ -204,6 +212,14 @@ export class EngineYDocSessionOwner<
     TUpdate,
     TReplacement
   >["onOutbound"];
+  readonly #onOutboundFailed: NonNullable<
+    EngineYDocSessionOwnerOptions<
+      TSender,
+      TEvent,
+      TUpdate,
+      TReplacement
+    >["onOutboundFailed"]
+  >;
   readonly #onReleaseFailed: NonNullable<
     EngineYDocSessionOwnerOptions<
       TSender,
@@ -231,6 +247,7 @@ export class EngineYDocSessionOwner<
     >,
   ) {
     this.#onOutbound = options.onOutbound;
+    this.#onOutboundFailed = options.onOutboundFailed ?? (() => undefined);
     this.#onReleaseFailed = options.onReleaseFailed ?? (() => undefined);
   }
 
@@ -338,10 +355,7 @@ export class EngineYDocSessionOwner<
     const queued = record.queuedHandoff;
     record.queuedHandoff = null;
     if (queued) {
-      this.#installHandoff(record, queued.replacement, [
-        ...handoff.updates,
-        ...queued.updates,
-      ]);
+      this.#installHandoff(record, queued.replacement, queued.updates);
       return {
         kind: "applied",
         replacement: handoff.replacement,
@@ -531,7 +545,7 @@ export class EngineYDocSessionOwner<
         if (record.handoff) {
           record.queuedHandoff = {
             replacement,
-            updates: record.queuedHandoff?.updates ?? [],
+            updates: [],
           };
           return;
         }
@@ -567,17 +581,19 @@ export class EngineYDocSessionOwner<
     message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>,
   ): boolean {
     if (!this.#maySend(record)) return false;
+    const outbound = {
+      sender: record.sender,
+      generation: record.generation,
+      sessionId: record.sessionId,
+      workspaceId: record.workspaceId,
+      path: record.path,
+      message,
+    };
     try {
-      this.#onOutbound({
-        sender: record.sender,
-        generation: record.generation,
-        sessionId: record.sessionId,
-        workspaceId: record.workspaceId,
-        path: record.path,
-        message,
-      });
+      this.#onOutbound(outbound);
       return true;
-    } catch {
+    } catch (error) {
+      this.#onOutboundFailed({ ...outbound, error });
       return false;
     }
   }

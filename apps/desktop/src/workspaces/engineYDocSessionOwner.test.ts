@@ -553,7 +553,7 @@ describe("EngineYDocSessionOwner", () => {
     });
   });
 
-  it("coalesces queued lineage replacements without losing buffered updates", async () => {
+  it("announces a queued lineage replacement after acknowledging the current one", async () => {
     const outbound: TestOutbound[] = [];
     const owner = createOwner(outbound);
     const sender = { id: 7, label: "window-a" };
@@ -577,8 +577,6 @@ describe("EngineYDocSessionOwner", () => {
     signals.remoteUpdate("update-1");
     signals.replaceLineage("winner-2");
     signals.remoteUpdate("update-2");
-    signals.replaceLineage("winner-3");
-    signals.remoteUpdate("update-3");
 
     expect(outbound.map(({ message }) => message)).toEqual([
       {
@@ -603,7 +601,7 @@ describe("EngineYDocSessionOwner", () => {
       },
       {
         kind: "lineage-replacement",
-        replacement: "winner-3",
+        replacement: "winner-2",
         lineageGeneration: 3,
       },
     ]);
@@ -616,8 +614,8 @@ describe("EngineYDocSessionOwner", () => {
       }),
     ).toEqual({
       kind: "applied",
-      replacement: "winner-3",
-      updates: ["update-1", "update-2", "update-3"],
+      replacement: "winner-2",
+      updates: ["update-2"],
     });
   });
 
