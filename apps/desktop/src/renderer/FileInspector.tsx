@@ -2184,6 +2184,7 @@ function MarkdownView(props: {
   const readOnly =
     !!props.forceReadOnly ||
     engine.notInVersion ||
+    engine.documentUnavailable ||
     engine.deletedWhileEditing ||
     engine.readOnlyWhileEditing ||
     engine.permanentFailureWhileEditing ||
@@ -4921,6 +4922,7 @@ export function FileInspector(props: FileInspectorProps) {
   const writesRefusedRef = useRef(false);
   writesRefusedRef.current =
     notInVersion ||
+    engine.documentUnavailable ||
     engine.opening ||
     engine.engineMayHoldDocument ||
     engine.artifactAssetsInvalid ||
@@ -5019,6 +5021,27 @@ export function FileInspector(props: FileInspectorProps) {
             </span>
           ) : null}
           <span>Switch to the version that has it.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (engine.documentUnavailable) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
+        <ViewHeader
+          icon={<FileText size={13} aria-hidden />}
+          path={props.path}
+          label="file"
+          onShare={onShareCurrentPath}
+        />
+        {recoveryNotices}
+        <div
+          data-testid="file-unavailable"
+          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
+        >
+          <span>This file is no longer available at this path.</span>
+          <span>Close this tab.</span>
         </div>
       </div>
     );

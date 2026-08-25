@@ -157,14 +157,12 @@ function liveDocumentMutationRefusal(): Error {
 class DocumentMutationReservations {
   readonly #states = new Map<string, DocumentReservationState>();
 
-  reserveOpen(workspaceId: string, path: string): (() => void) | null {
+  async reserveOpen(workspaceId: string, path: string): Promise<() => void> {
     const key = this.#key(workspaceId, path);
     const state = this.#state(key);
-    if (state.mutations > 0) {
-      this.#deleteIdle(key, state);
-      return null;
-    }
+    const admittedMutations = state.tail;
     state.openings += 1;
+    await admittedMutations;
     let released = false;
     return () => {
       if (released) return;
@@ -286,10 +284,11 @@ class EngineYDocSessionIpc {
     if (this.#isSharedView(workspace.workspaceId)) return unavailableOpen();
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
+    const requestedPathKind = liveDocumentKindForPath(validatedPath.normalized);
     const generation = this.#generationOf(sender.id);
-    let path: string | null;
+    let canonicalPath: string | null;
     try {
-      path = await this.#resolveDocumentPath(
+      canonicalPath = await this.#resolveDocumentPath(
         workspace,
         validatedPath.normalized,
       );
@@ -298,29 +297,35 @@ class EngineYDocSessionIpc {
         `[desktop] engine Y.Doc open could not resolve ${validatedPath.normalized}:`,
         error,
       );
-      return unavailableOpen();
+      return requestedPathKind === null
+        ? unavailableOpen()
+        : unavailableOpen({ documentUnavailable: true });
     }
     if (
-      path === null ||
       sender.isDestroyed() ||
       this.#generationOf(sender.id) !== generation ||
       this.#isSharedView(workspace.workspaceId)
     ) {
       return unavailableOpen();
     }
-    const requestedKind = liveDocumentKindForPath(path);
+    if (canonicalPath === null) {
+      return requestedPathKind === null
+        ? unavailableOpen()
+        : unavailableOpen({ documentUnavailable: true });
+    }
+    const requestedKind = liveDocumentKindForPath(canonicalPath);
     if (requestedKind === null) return unavailableOpen();
-    const releaseOpening = this.#documentReservations.reserveOpen(
+    const releaseOpening = await this.#documentReservations.reserveOpen(
       workspace.workspaceId,
-      path,
+      canonicalPath,
     );
-    if (!releaseOpening) return unavailableOpen();
     try {
       return await this.#openReserved(
         sender,
         input,
         workspace,
-        path,
+        canonicalPath,
+        validatedPath.normalized,
         requestedKind,
         generation,
       );
@@ -333,7 +338,8 @@ class EngineYDocSessionIpc {
     sender: EngineYDocIpcSender,
     input: OpenPayload,
     workspace: EngineYDocWorkspace,
-    path: string,
+    canonicalPath: string,
+    requestedPath: string,
     requestedKind: NonNullable<ReturnType<typeof liveDocumentKindForPath>>,
     generation: number,
   ): Promise<OpenResult> {
@@ -343,7 +349,7 @@ class EngineYDocSessionIpc {
         await this.#ensureCaptureFor(workspace.workspaceId);
       } catch (error) {
         this.#onError(
-          `[desktop] engine Y.Doc open could not open the workspace activity for ${path}:`,
+          `[desktop] engine Y.Doc open could not open the workspace activity for ${canonicalPath}:`,
           error,
         );
       }
@@ -358,17 +364,21 @@ class EngineYDocSessionIpc {
 
     let currentPath: string | null;
     try {
-      currentPath = await this.#resolveDocumentPath(workspace, path);
+      currentPath = await this.#resolveDocumentPath(workspace, requestedPath);
     } catch (error) {
       this.#onError(
-        `[desktop] engine Y.Doc open could not recheck ${path}:`,
+        `[desktop] engine Y.Doc open could not recheck ${canonicalPath}:`,
         error,
       );
-      return unavailableOpen();
+      return unavailableOpen({ documentUnavailable: true });
     }
     if (
       currentPath === null ||
-      !workspaceRelativePathsEqual(currentPath, path) ||
+      !workspaceRelativePathsEqual(currentPath, canonicalPath)
+    ) {
+      return unavailableOpen({ documentUnavailable: true });
+    }
+    if (
       sender.isDestroyed() ||
       this.#generationOf(sender.id) !== generation ||
       this.#isSharedView(workspace.workspaceId)
@@ -381,7 +391,7 @@ class EngineYDocSessionIpc {
       generation,
       sessionId: input.sessionId,
       workspaceId: workspace.workspaceId,
-      path,
+      path: canonicalPath,
       openSession: async (signals) => {
         const saveSeq = createEngineYDocSaveSeqState();
         let delivery: "pending" | "active" | "discarded" = "pending";
@@ -393,7 +403,7 @@ class EngineYDocSessionIpc {
         let provider: WorkspaceEngineYDocProviderSession;
         try {
           provider = await capture.openYDocSession({
-            path,
+            path: canonicalPath,
             contentKind: requestedKind,
             onSaveState: (state, token) => {
               const seq =
@@ -455,7 +465,7 @@ class EngineYDocSessionIpc {
       const owned = opened.value;
       if (owned.provider.contentKind !== requestedKind) {
         this.#onError(
-          `[desktop] engine Y.Doc open for ${path} came back ${owned.provider.contentKind}; ` +
+          `[desktop] engine Y.Doc open for ${canonicalPath} came back ${owned.provider.contentKind}; ` +
             `the editor requested ${requestedKind} (kind-mismatched lineage).`,
         );
         const release = await this.#owner.release({
@@ -491,7 +501,10 @@ class EngineYDocSessionIpc {
     }
     if (opened.reason !== "open-refused") return unavailableOpen();
 
-    this.#onError(`[desktop] engine Y.Doc open refused for ${path}:`, opened.error);
+    this.#onError(
+      `[desktop] engine Y.Doc open refused for ${canonicalPath}:`,
+      opened.error,
+    );
     return this.#openRefusal(opened.error);
   }
 

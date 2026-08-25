@@ -6679,6 +6679,31 @@ describe("engine markdown source view", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("does not recreate a live file that disappeared after the renderer read it", async () => {
+    const { bridgeMock } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", {
+      ...bridgeMock,
+      openEngineYDocSession: vi.fn(async () => ({
+        available: false,
+        documentUnavailable: true,
+      })),
+    });
+
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const notice = await screen.findByTestId(
+      "file-unavailable",
+      {},
+      { timeout: 5_000 },
+    );
+    expect(notice.textContent).toContain(
+      "This file is no longer available at this path.",
+    );
+    expect(notice.textContent).toContain("Close this tab.");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   // #564. The engine open hit its retry deadline. Like notInVersion, this
   // must NOT downgrade to the writable plain editor — the engine may still
   // bind the document, and a plain autosave meanwhile would take the disk

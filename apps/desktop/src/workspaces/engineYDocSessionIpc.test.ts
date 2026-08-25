@@ -213,7 +213,10 @@ describe("engine Y.Doc IPC adapter", () => {
   it("resolves the physical workspace path before reserving and opening it", async () => {
     const sender = new FakeSender(7);
     const resolveDocumentPath = vi.fn(
-      async (_workspace: { workspaceId: string; rootPath: string }) =>
+      async (
+        _workspace: { workspaceId: string; rootPath: string },
+        _path: string,
+      ) =>
         "notes/a.md",
     );
     const h = harness(providerSession(), resolveDocumentPath);
@@ -226,6 +229,10 @@ describe("engine Y.Doc IPC adapter", () => {
       { workspaceId: "workspace-1", rootPath: "C:/workspace" },
       "alias/a.md",
     );
+    expect(resolveDocumentPath.mock.calls.map(([, path]) => path)).toEqual([
+      "alias/a.md",
+      "alias/a.md",
+    ]);
     expect(h.capturedOpen()).toMatchObject({ path: "notes/a.md" });
     await expect(
       h.ipc
@@ -372,7 +379,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(opening).resolves.toMatchObject({ available: true });
   });
 
-  it("refuses a canonical session open while a direct mutation owns the path", async () => {
+  it("queues a canonical session open behind the direct mutation that owns the path", async () => {
     const sender = new FakeSender(7);
     const h = harness();
     const mutationEntered = deferred<void>();
@@ -385,13 +392,26 @@ describe("engine Y.Doc IPC adapter", () => {
       });
     await mutationEntered.promise;
 
-    await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
-      available: false,
+    const opening = h.ipc.open(sender, openPayload);
+    let opened = false;
+    void opening.then(() => {
+      opened = true;
     });
+    await Promise.resolve();
+    expect(opened).toBe(false);
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    const laterMutation = vi.fn(async () => undefined);
+    await expect(
+      h.ipc
+        .fileMutationPort()
+        .withDocumentUnowned("workspace-1", "notes/a.md", laterMutation),
+    ).rejects.toThrow("The engine owns this live document");
+    expect(laterMutation).not.toHaveBeenCalled();
 
     releaseMutation.resolve();
     await mutation;
+    await expect(opening).resolves.toMatchObject({ available: true });
+    expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
   });
 
   it("releases a failed direct-mutation reservation", async () => {
@@ -413,6 +433,118 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
   });
 
+  it("opens after the direct mutation ahead of it fails", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    const mutationEntered = deferred<void>();
+    const releaseMutation = deferred<void>();
+    const mutationError = new Error("write failed after admission");
+    const mutation = h.ipc
+      .fileMutationPort()
+      .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+        mutationEntered.resolve();
+        await releaseMutation.promise;
+        throw mutationError;
+      });
+    await mutationEntered.promise;
+
+    const opening = h.ipc.open(sender, openPayload);
+    releaseMutation.resolve();
+
+    await expect(mutation).rejects.toBe(mutationError);
+    await expect(opening).resolves.toMatchObject({ available: true });
+    expect(h.capture.openYDocSession).toHaveBeenCalledOnce();
+  });
+
+  it("refuses an alias that retargets while its canonical open is queued", async () => {
+    const sender = new FakeSender(7);
+    const firstResolution = deferred<void>();
+    let aliasTarget = "notes/a.md";
+    const resolveDocumentPath = vi.fn(async (_workspace, requestedPath: string) => {
+      if (requestedPath === "alias/a.md") {
+        const target = aliasTarget;
+        firstResolution.resolve();
+        return target;
+      }
+      return requestedPath;
+    });
+    const h = harness(providerSession(), resolveDocumentPath);
+    const mutationEntered = deferred<void>();
+    const releaseMutation = deferred<void>();
+    const mutation = h.ipc
+      .fileMutationPort()
+      .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+        mutationEntered.resolve();
+        await releaseMutation.promise;
+      });
+    await mutationEntered.promise;
+
+    const opening = h.ipc.open(sender, { ...openPayload, path: "alias/a.md" });
+    await firstResolution.promise;
+    aliasTarget = "notes/b.md";
+    releaseMutation.resolve();
+    await mutation;
+
+    await expect(opening).resolves.toEqual({
+      available: false,
+      documentUnavailable: true,
+    });
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+    expect(resolveDocumentPath.mock.calls.map(([, path]) => path)).toEqual([
+      "alias/a.md",
+      "alias/a.md",
+    ]);
+    const laterMutation = vi.fn(async () => undefined);
+    await expect(
+      h.ipc
+        .fileMutationPort()
+        .withDocumentUnowned("workspace-1", "notes/a.md", laterMutation),
+    ).resolves.toBeUndefined();
+    expect(laterMutation).toHaveBeenCalledOnce();
+  });
+
+  it.each(["renderer generation", "shared view"] as const)(
+    "releases a queued open when its %s changes",
+    async (transition) => {
+      const sender = new FakeSender(7);
+      const firstResolution = deferred<void>();
+      const resolveDocumentPath = vi.fn(async (_workspace, path: string) => {
+        firstResolution.resolve();
+        return path;
+      });
+      const h = harness(providerSession(), resolveDocumentPath);
+      const mutationEntered = deferred<void>();
+      const releaseMutation = deferred<void>();
+      const mutation = h.ipc
+        .fileMutationPort()
+        .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+          mutationEntered.resolve();
+          await releaseMutation.promise;
+        });
+      await mutationEntered.promise;
+
+      const opening = h.ipc.open(sender, openPayload);
+      await firstResolution.promise;
+      if (transition === "renderer generation") h.setGeneration(2);
+      else h.setReadOnly(true);
+      releaseMutation.resolve();
+      await mutation;
+
+      await expect(opening).resolves.toEqual({ available: false });
+      expect(resolveDocumentPath).toHaveBeenCalledTimes(2);
+      expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+      h.setGeneration(1);
+      h.setReadOnly(false);
+      const laterMutation = vi.fn(async () => undefined);
+      await expect(
+        h.ipc
+          .fileMutationPort()
+          .withDocumentUnowned("workspace-1", "notes/a.md", laterMutation),
+      ).resolves.toBeUndefined();
+      expect(laterMutation).toHaveBeenCalledOnce();
+    },
+  );
+
   it("refuses an open when the physical path changes before capture admission", async () => {
     const sender = new FakeSender(7);
     let resolution = 0;
@@ -424,9 +556,21 @@ describe("engine Y.Doc IPC adapter", () => {
 
     await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
       available: false,
+      documentUnavailable: true,
     });
 
     expect(resolveDocumentPath).toHaveBeenCalledTimes(2);
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps a live document unavailable when it disappears before admission", async () => {
+    const sender = new FakeSender(7);
+    const h = harness(providerSession(), async () => null);
+
+    await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+      available: false,
+      documentUnavailable: true,
+    });
     expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 

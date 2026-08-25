@@ -2398,6 +2398,18 @@ describe("engine Y.Doc update IPC contract", () => {
     });
   });
 
+  it("keeps an unresolved live path out of the writable fallback", () => {
+    expect(
+      OpenEngineYDocSessionResult.parse({
+        available: false,
+        documentUnavailable: true,
+      }),
+    ).toEqual({
+      available: false,
+      documentUnavailable: true,
+    });
+  });
+
   it("keeps a removal-window open refusal operation-aware in the renderer", () => {
     expect(
       OpenEngineYDocSessionResult.parse({
