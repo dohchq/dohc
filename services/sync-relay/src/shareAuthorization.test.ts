@@ -42,7 +42,8 @@ function storageFixture(options: {
   const storedGrant = options.grant === undefined ? grant : options.grant;
   return {
     getShare: () => storedShare,
-    getShareGrantForRecipient: () => storedGrant,
+    getShareGrant: () => storedGrant,
+    listActiveShareGrantsForRecipient: () => (storedGrant ? [storedGrant] : []),
     workspaceIsOwnedBy: () => options.ownerStanding ?? true,
     findChannelCreateKind: () => options.channelKind ?? "channel",
   };

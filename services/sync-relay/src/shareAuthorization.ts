@@ -1,3 +1,4 @@
+import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   effectiveShareSelector,
   isChatChannelSelector,
@@ -24,7 +25,8 @@ type ShareAuthorizationStorage = Pick<
   SyncRelayStorage,
   | "findChannelCreateKind"
   | "getShare"
-  | "getShareGrantForRecipient"
+  | "getShareGrant"
+  | "listActiveShareGrantsForRecipient"
   | "workspaceIsOwnedBy"
 >;
 
@@ -46,6 +48,14 @@ type ShareAuthorizationInput = {
   action: ShareAction;
 };
 
+type ShareGrantAuthorizationInput = {
+  storage: ShareAuthorizationStorage;
+  grantId: string;
+  action: ShareAction;
+  principalKind: "user" | "link";
+  principalUserId?: string;
+};
+
 export function selectorTargetsBlockedChannel(
   storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
   workspaceId: string,
@@ -61,24 +71,79 @@ export function authorizeShareAction(
 ): ShareAuthorizationResult<ShareSelector>;
 export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult;
 export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult {
-  const share = input.storage.getShare(input.shareId);
-  if (!share) return { ok: false, reason: "gauntlet" };
-  const grant = input.storage.getShareGrantForRecipient(input.shareId, input.actorUserId);
+  const grants = input.storage.listActiveShareGrantsForRecipient(
+    input.shareId,
+    input.actorUserId,
+  );
+  let authorized: AuthorizedShareAction | null = null;
+  let denied = false;
+  for (const grant of grants) {
+    if (grant.shareId !== input.shareId) continue;
+    const result = authorizeShareGrantAction({
+      storage: input.storage,
+      grantId: grant.grantId,
+      action: input.action,
+      principalKind: "user",
+      principalUserId: input.actorUserId,
+    });
+    if (!result.ok) {
+      denied ||= result.reason === "denied";
+      continue;
+    }
+    if (
+      authorized === null ||
+      effectiveAccessRank(result.effectiveSelector) >
+        effectiveAccessRank(authorized.effectiveSelector)
+    ) {
+      authorized = result;
+    }
+  }
+  return authorized ?? { ok: false, reason: denied ? "denied" : "gauntlet" };
+}
+
+export function authorizeLinkShareAction(
+  input: Omit<ShareGrantAuthorizationInput, "principalKind" | "principalUserId">,
+): ShareAuthorizationResult<ShareSelector> {
+  const result = authorizeShareGrantAction({ ...input, principalKind: "link" });
+  if (!result.ok || isChatChannelSelector(result.effectiveSelector)) {
+    return { ok: false, reason: "gauntlet" };
+  }
+  return result as AuthorizedShareAction<ShareSelector>;
+}
+
+function authorizeShareGrantAction(
+  input: ShareGrantAuthorizationInput,
+): ShareAuthorizationResult {
+  const grant = input.storage.getShareGrant(input.grantId);
   if (
     !grant ||
-    grant.shareId !== share.shareId ||
-    grant.principalKind !== "user" ||
-    grant.principalUserId !== input.actorUserId ||
-    grant.principalEmail !== null ||
+    grant.principalKind !== input.principalKind ||
     grant.status !== "active" ||
     grant.revokedAtMs !== null ||
     !Number.isInteger(grant.generation) ||
-    grant.generation < 1
+    grant.generation < 1 ||
+    !validStoredPrincipal(grant) ||
+    (input.principalKind === "user" && grant.principalUserId !== input.principalUserId)
   ) {
     return { ok: false, reason: "gauntlet" };
   }
-  if (!input.storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) {
+  const share = input.storage.getShare(grant.shareId);
+  if (!share || !input.storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) {
     return { ok: false, reason: "gauntlet" };
+  }
+  if (grant.parentGrantId !== null) {
+    const parent = input.storage.getShareGrant(grant.parentGrantId);
+    if (
+      grant.principalKind !== "user" ||
+      !parent ||
+      parent.shareId !== share.shareId ||
+      parent.principalKind !== "link" ||
+      parent.status !== "active" ||
+      parent.revokedAtMs !== null ||
+      !accessAtMost(grant.access, parent.access)
+    ) {
+      return { ok: false, reason: "gauntlet" };
+    }
   }
 
   const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -116,4 +181,28 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
       }
       return { ok: false, reason: "denied" };
   }
+}
+
+function validStoredPrincipal(grant: SyncRelayShareGrantRow): boolean {
+  switch (grant.principalKind) {
+    case "user":
+      return grant.principalUserId !== null && grant.principalEmail === null;
+    case "email":
+      return grant.principalUserId === null && grant.principalEmail !== null;
+    case "link":
+      return grant.principalUserId === null && grant.principalEmail === null;
+  }
+}
+
+function accessAtMost(access: string, ceiling: string): boolean {
+  const accessIndex = shareAccessRank(access);
+  const ceilingIndex = shareAccessRank(ceiling);
+  return accessIndex >= 0 && ceilingIndex >= 0 && accessIndex <= ceilingIndex;
+}
+
+function effectiveAccessRank(selector: AnyShareSelector): number {
+  if (isChatChannelSelector(selector)) {
+    return selector.access === "read-write" ? 1 : 0;
+  }
+  return shareAccessRank(selector.access);
 }

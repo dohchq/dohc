@@ -45,6 +45,20 @@ export type GrantBinding = {
   access: ShareAccess;
 };
 
+export type LinkExchangeResult = {
+  shareId: string;
+  grantId: string;
+  generation: number;
+  access: ShareAccess;
+  effectiveSelector: {
+    paths: string[];
+    versionId: string | null;
+    access: ShareAccess;
+  };
+  capabilityToken: string;
+  capabilityExpiresAtMs: number;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -79,6 +79,7 @@ services:
       # workspace-api's desktop device flow validate at the relay too.
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
+      DOHC_RELAY_LINK_KEY: ${DOHC_RELAY_LINK_KEY:?Set DOHC_RELAY_LINK_KEY in .env.self-host}
       SYNC_RELAY_BIND: "0.0.0.0"
       SYNC_RELAY_PORT: "1788"
       SYNC_RELAY_DB_PATH: /data/sync-relay.sqlite

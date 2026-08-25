@@ -60,7 +60,10 @@ function packageRoot(): string {
   return fileURLToPath(new URL("../", import.meta.url));
 }
 
-async function spawnRelay(dbPath: string): Promise<string> {
+async function spawnRelay(
+  dbPath: string,
+  envOverrides: Record<string, string | undefined> = {},
+): Promise<string> {
   const child = spawn(process.execPath, ["--import", "tsx/esm", "src/main.ts"], {
     cwd: packageRoot(),
     env: {
@@ -70,6 +73,7 @@ async function spawnRelay(dbPath: string): Promise<string> {
       SYNC_RELAY_PORT: "0",
       SYNC_RELAY_DB_PATH: dbPath,
       FORCE_COLOR: "0",
+      ...envOverrides,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -357,6 +361,68 @@ describe("sync relay main process", () => {
     const anonymous = await fetch(`${baseUrl}/sync/${WORKSPACE_ID}/log?since=0`);
     expect(anonymous.status).toBe(401);
   });
+
+  it("caps link exchanges at 4096 bytes before buffering the route body", async (context) => {
+    const relayRoot = await tempRoot("link-exchange-cap");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const workspaceId = "workspace-link-exchange-cap";
+    expect((await postJson(baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
+    const shareResponse = await postJson(baseUrl, `/sync/${workspaceId}/shares`, {
+      recipientUserId: "link-recipient",
+      paths: ["docs"],
+      access: "view",
+    });
+    expect(shareResponse.status).toBe(200);
+    const share = (await shareResponse.json()) as { shareId: string };
+    const linkResponse = await postJson(
+      baseUrl,
+      `/sync/${workspaceId}/shares/${share.shareId}/links`,
+      { access: "view" },
+    );
+    expect(linkResponse.status).toBe(200);
+    const link = (await linkResponse.json()) as { secret: string };
+
+    const missing = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: "g".repeat(43) }),
+    });
+    expect(missing.status).toBe(404);
+    const missingBody = await missing.text();
+
+    const emptyPaddingBody = JSON.stringify({ secret: link.secret, padding: "" });
+    const oversizedBody = JSON.stringify({
+      secret: link.secret,
+      padding: "x".repeat(4097 - Buffer.byteLength(emptyPaddingBody)),
+    });
+    expect(Buffer.byteLength(oversizedBody)).toBe(4097);
+    const oversized = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversizedBody,
+    });
+    expect(oversized.status).toBe(404);
+    expect(await oversized.text()).toBe(missingBody);
+
+    const small = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: link.secret }),
+    });
+    expect(small.status).toBe(200);
+  });
 });
 
 // Spawn main.ts expecting it to refuse to start; resolves with the exit code
@@ -431,5 +497,21 @@ describe("sync relay startup guards", () => {
     });
     expect(code).toBe(1);
     expect(stderr).toContain("POSTGRES_URL must be set");
+  });
+
+  it("refuses to start in production when DOHC_RELAY_LINK_KEY is unset", async () => {
+    const dbPath = join(await tempRoot("no-link-key"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "production",
+      SYNC_RELAY_TEST_AUTH: undefined,
+      POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
+      DOHC_RELAY_LINK_KEY: undefined,
+      SYNC_RELAY_PORT: "0",
+      BETTER_AUTH_SECRET: "x".repeat(32),
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("DOHC_RELAY_LINK_KEY must be set");
   });
 });
