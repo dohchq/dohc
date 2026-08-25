@@ -729,7 +729,8 @@ describe("notice center", () => {
     );
   });
 
-  it("keeps updater errors visible with a retry action", async () => {
+  it("keeps updater errors visible with a working next step", async () => {
+    const onOpenSettings = vi.fn();
     installUpdate.mockResolvedValueOnce({
       accepted: false,
       completed: false,
@@ -742,7 +743,7 @@ describe("notice center", () => {
         canInstall: false,
       },
     });
-    renderBar();
+    renderBar({ onOpenSettings });
     pushUpdate?.({
       status: "ready",
       message: "Update 1.2.3 is ready — restart dohc to apply it.",
@@ -760,15 +761,24 @@ describe("notice center", () => {
       }),
     );
 
-    expect((await screen.findByTestId("update-toast")).textContent).toContain(
+    const toast = await screen.findByTestId("update-toast");
+    expect(toast.textContent).toContain(
       "dohc could not install the update. Try again.",
     );
+    expect(within(toast).queryByRole("button", { name: "Restart" })).toBeNull();
+    await userEvent.click(
+      within(toast).getByRole("button", { name: "Open Settings" }),
+    );
+    expect(onOpenSettings).toHaveBeenCalledOnce();
+
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const updateNotice = screen.getByTestId("notice-update-ready");
+    const updateNotice = screen.getByTestId("notice-update-error");
     expect(updateNotice.textContent).toContain(
       "dohc could not install the update. Try again.",
     );
-    expect(within(updateNotice).getByRole("button", { name: "Restart" }))
+    expect(within(updateNotice).queryByRole("button", { name: "Restart" }))
+      .toBeNull();
+    expect(within(updateNotice).getByRole("button", { name: "Open Settings" }))
       .toBeTruthy();
   });
 

@@ -129,22 +129,15 @@ export function NoticeCenter(props: {
     string | null
   >(null);
   const [updateActionError, setUpdateActionError] = useState<string | null>(null);
-  const [failedInstallReadyState, setFailedInstallReadyState] =
-    useState<UpdateStateEvent | null>(null);
   const [installPending, setInstallPending] = useState(false);
-  const clearReadyUpdateError = useCallback((update: UpdateStateEvent) => {
-    if (update.status !== "ready") return;
+  const clearFinishedUpdateAction = useCallback((update: UpdateStateEvent) => {
+    if (update.status === "error") return;
     setUpdateActionError(null);
-    setFailedInstallReadyState(null);
   }, []);
   const { updateState: desktopUpdateState, acceptUpdateResult } =
-    useDesktopUpdateStateFeed(clearReadyUpdateError);
+    useDesktopUpdateStateFeed(clearFinishedUpdateAction);
   const updateState =
-    desktopUpdateState?.status === "ready"
-      ? desktopUpdateState
-      : updateActionError && failedInstallReadyState?.status === "ready"
-        ? failedInstallReadyState
-        : null;
+    desktopUpdateState?.status === "ready" ? desktopUpdateState : null;
   const centerRef = useRef<HTMLDivElement | null>(null);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastRef = useRef<HTMLDivElement | null>(null);
@@ -154,12 +147,12 @@ export function NoticeCenter(props: {
       ? `${updateState.version ?? "unknown"}:${updateState.message}`
       : null;
   const updateToastVisible =
-    updateState?.status === "ready" &&
-    readyUpdateKey !== null &&
-    readyUpdateKey !== dismissedUpdateToastKey;
+    (updateState?.status === "ready" &&
+      readyUpdateKey !== null &&
+      readyUpdateKey !== dismissedUpdateToastKey) ||
+    (updateState === null && updateActionError !== null);
   const installUpdate = useCallback(async () => {
     if (installPending) return;
-    const readyStateAtStart = updateState;
     try {
       setInstallPending(true);
       // Through the guard (#579 review, r8 + r10): with set-aside drafts
@@ -169,9 +162,6 @@ export function NoticeCenter(props: {
       if (result === null) return;
       acceptUpdateResult(result.state);
       if (!result.accepted || result.state.status === "error") {
-        if (result.state.status !== "ready") {
-          setFailedInstallReadyState(readyStateAtStart);
-        }
         setUpdateActionError(
           result.state.status === "error"
             ? result.state.message
@@ -179,15 +169,13 @@ export function NoticeCenter(props: {
         );
       } else {
         setUpdateActionError(null);
-        setFailedInstallReadyState(null);
       }
     } catch {
-      setFailedInstallReadyState(readyStateAtStart);
       setUpdateActionError("Could not restart into the update.");
     } finally {
       setInstallPending(false);
     }
-  }, [acceptUpdateResult, installPending, updateState]);
+  }, [acceptUpdateResult, installPending]);
 
   useEffect(() => {
     if (!open) return;
@@ -411,6 +399,15 @@ export function NoticeCenter(props: {
           : undefined,
         Icon: Download,
       });
+    } else if (updateActionError) {
+      next.push({
+        id: "update-error",
+        tone: "danger",
+        title: "Update failed",
+        body: updateActionError,
+        action: { label: "Open Settings", onClick: props.onOpenSettings },
+        Icon: AlertTriangle,
+      });
     }
 
     return next;
@@ -448,15 +445,15 @@ export function NoticeCenter(props: {
 
   return (
     <>
-      {updateToastVisible && updateState?.status === "ready" ? (
+      {updateToastVisible ? (
         <div
           ref={toastRef}
           data-testid="update-toast"
           role="status"
           className="dohc-popover dohc-pop-in fixed bottom-9 right-3 z-30 flex max-w-md items-center gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
         >
-          <span>{updateActionError ?? updateState.message}</span>
-          {updateState.canInstall ? (
+          <span>{updateActionError ?? updateState?.message}</span>
+          {updateState?.canInstall ? (
             <button
               type="button"
               disabled={installPending}
@@ -465,11 +462,25 @@ export function NoticeCenter(props: {
             >
               {installPending ? "Restarting" : "Restart"}
             </button>
+          ) : updateActionError ? (
+            <button
+              type="button"
+              onClick={props.onOpenSettings}
+              className="shrink-0 rounded bg-accent px-2 py-1 text-[11px] font-semibold text-bg hover:opacity-90"
+            >
+              Open Settings
+            </button>
           ) : null}
           <button
             type="button"
             aria-label="Dismiss update notice"
-            onClick={() => setDismissedUpdateToastKey(readyUpdateKey)}
+            onClick={() => {
+              if (readyUpdateKey) {
+                setDismissedUpdateToastKey(readyUpdateKey);
+              } else {
+                setUpdateActionError(null);
+              }
+            }}
             className="grid size-5 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
           >
             <X size={12} aria-hidden />
