@@ -22,6 +22,7 @@ import {
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
+import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import { readPendingMaterializationPaths } from "./sharedView";
 import {
   createCaptureLiveStores,
@@ -105,26 +106,29 @@ async function harness(
     new RelayConfiguredDaemonClientSource(lifecycle, routes),
   );
   sessionSets.push(sessions);
+  const workspace = { workspaceId, rootPath };
+  const receivedShareEngine = createReceivedShareEngineAccess({
+    sessions: () => sessions,
+    relayClient: () =>
+      new EngineRelayClient({
+        sessions,
+        routes,
+        allowInsecureLoopbackForTests: true,
+        requestDeadlineMs: 10_000,
+      }),
+  });
   if (access) {
-    const client = new EngineRelayClient({
-      sessions,
-      routes,
-      allowInsecureLoopbackForTests: true,
-      requestDeadlineMs: 10_000,
-    }).bind({
-      workspaceId,
-      rootPath,
-      shareMount: true,
+    const client = receivedShareEngine.relayFor({
+      ...workspace,
       relay: { baseUrl: "http://127.0.0.1:9", token: "share-view-test-token" },
     });
     await client.recordShareViewIdentity({
       grantedSelector: { paths: ["docs"], versionId: null, access },
     });
   }
-  const { store } = createCaptureLiveStores(
-    { workspaceId, rootPath },
-    sessions,
-  );
+  const store = access
+    ? receivedShareEngine.storeFor(workspace)
+    : createCaptureLiveStores(workspace, sessions).store;
   return { workspaceId, rootPath, store, sessions };
 }
 

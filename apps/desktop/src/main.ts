@@ -562,7 +562,7 @@ import {
   isYDocSessionUnreleasedError,
   probeEngineStoreRefusal,
 } from "./workspaces/workspaceEngineCapture";
-import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
+import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
@@ -2298,7 +2298,6 @@ function testSyncTimingOverrides(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
-  shareMount?: true;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
   if (!rustEngineRelayClient) {
@@ -4179,8 +4178,7 @@ let rustEngineRelayClient: EngineRelayClient | null = null;
 let engineDaemonStartup: Promise<boolean> = Promise.resolve(false);
 const relayTransportRoutes = new RelayTransportRouteGuard();
 
-// Narrowing for the capture gate, matching what `linkedChatStoreFor` and
-// `sharedViewStoreFor` already do (same error text). The invariant is real:
+// Narrowing for the engine-access gates. The invariant is real:
 // every boot-time path that can reach the engine awaits engineDaemonStartup
 // first (openWorkspaceActivityWith, cloudStatus, the share-view file and
 // mount lanes), and startRustEngineDaemon
@@ -4195,16 +4193,15 @@ function requireEngineSessions(): EngineWorkspaceSessions {
   return rustEngineWorkspaceSessions;
 }
 
-function sharedViewStoreFor(workspace: {
-  workspaceId: string;
-  rootPath: string;
-  shareMount?: true;
-}) {
-  if (!rustEngineWorkspaceSessions) {
-    throw new Error("Rust engine workspace sessions are unavailable.");
-  }
-  return createCaptureLiveStores(workspace, rustEngineWorkspaceSessions).store;
-}
+const receivedShareEngine = createReceivedShareEngineAccess({
+  sessions: requireEngineSessions,
+  relayClient: () => {
+    if (!rustEngineRelayClient) {
+      throw new Error("Rust engine relay client is unavailable.");
+    }
+    return rustEngineRelayClient;
+  },
+});
 
 function resolveShareViewFilesTarget(
   target: ShareViewFilesTarget,
@@ -4244,10 +4241,9 @@ shareViewFiles = createShareViewFiles({
   resolveTarget: resolveShareViewFilesTarget,
   openStore: (target) =>
     shareViewFilesStore(
-      sharedViewStoreFor({
+      receivedShareEngine.storeFor({
         workspaceId: target.storeWorkspaceId,
         rootPath: target.rootPath,
-        ...(target.kind === "mount" ? { shareMount: true as const } : {}),
       }),
     ),
   resolveRelay: async (target) => {
@@ -4272,10 +4268,9 @@ shareViewFiles = createShareViewFiles({
     return { baseUrl: credentials.relayUrl, token: credentials.token };
   },
   pull: async (target, relay, input) =>
-    relayClientForWorkspace({
+    receivedShareEngine.relayFor({
       workspaceId: target.storeWorkspaceId,
       rootPath: target.rootPath,
-      ...(target.kind === "mount" ? { shareMount: true as const } : {}),
       relay,
     }).pullShareView({
       shareId: target.shareId,
@@ -6944,7 +6939,7 @@ function registerIpcHandlers(
     return resolveSubmitShareChangesResult(
       reconciled.capturedPaths + reconciled.repairedPaths,
       () =>
-        relayClientForWorkspace({
+        receivedShareEngine.relayFor({
           workspaceId: scope.workspace.workspaceId,
           rootPath: scope.workspace.rootPath,
           relay: scope.relay,
@@ -7692,7 +7687,7 @@ function registerIpcHandlers(
       relayUrlsMatch,
     });
     if (!grantedSelector || !credentials?.relayUrl) return;
-    await relayClientForWorkspace({
+    await receivedShareEngine.relayFor({
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
@@ -7721,7 +7716,7 @@ function registerIpcHandlers(
     if (shareView.relayUrl && !relayUrlsMatch(credentials.relayUrl, shareView.relayUrl)) {
       return;
     }
-    await relayClientForWorkspace({
+    await receivedShareEngine.relayFor({
       workspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
