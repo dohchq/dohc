@@ -720,6 +720,41 @@ describe("WorkspaceFileMutationOwner", () => {
     ).resolves.toBe("text\n");
   });
 
+  it("returns the workspace-visible spelling for a move through an alias", async () => {
+    const test = await harness();
+    const notesDir = process.platform === "win32" ? "Notes" : "notes";
+    await mkdir(join(test.rootPath, notesDir));
+    await writeFile(join(test.rootPath, notesDir, "from.md"), "text\n");
+    await symlink(
+      join(test.rootPath, notesDir),
+      join(test.rootPath, "alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const finishRename = vi.fn(async () => undefined);
+    const beginFileRename = vi.fn(async () => finishRename);
+    test.setCapture({
+      beginFileRename,
+      settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
+    });
+
+    await expect(
+      test.owner.movePath(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        fromPath:
+          process.platform === "win32" ? "alias/FROM.md" : "alias/from.md",
+        toPath: "alias/to.md",
+      }),
+    ).resolves.toEqual({ path: "alias/to.md" });
+
+    expect(beginFileRename).toHaveBeenCalledWith(
+      `${notesDir}/from.md`,
+      `${notesDir}/to.md`,
+    );
+    await expect(
+      readFile(join(test.rootPath, notesDir, "to.md"), "utf8"),
+    ).resolves.toBe("text\n");
+  });
+
   it("refuses symlinked move endpoints before the engine sees either path", async () => {
     for (const escapedEndpoint of ["source", "destination"] as const) {
       const test = await harness();

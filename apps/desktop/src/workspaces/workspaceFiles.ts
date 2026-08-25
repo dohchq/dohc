@@ -760,6 +760,10 @@ export interface WorkspaceMovePaths {
   toPath: string;
 }
 
+export interface PreparedWorkspaceMove extends WorkspaceMovePaths {
+  resultPath: string;
+}
+
 export function normalizeWorkspaceMovePaths(
   fromPath: string,
   toPath: string,
@@ -784,7 +788,7 @@ export function normalizeWorkspaceMovePaths(
   };
 }
 
-interface InspectedWorkspaceMove extends WorkspaceMovePaths {
+interface InspectedWorkspaceMove extends PreparedWorkspaceMove {
   realRoot: string;
   from: string;
   to: string;
@@ -858,6 +862,7 @@ async function inspectWorkspaceMove(
     // but the engine keys stable objects by their canonical workspace path.
     fromPath: relative(realRoot, realFrom).replaceAll("\\", "/"),
     toPath: resolvedToPath.replaceAll("\\", "/"),
+    resultPath: normalized.toPath,
     realRoot,
     from,
     to,
@@ -870,9 +875,13 @@ export async function prepareWorkspaceMove(
   rootPath: string,
   fromPath: string,
   toPath: string,
-): Promise<WorkspaceMovePaths> {
+): Promise<PreparedWorkspaceMove> {
   const inspected = await inspectWorkspaceMove(rootPath, fromPath, toPath);
-  return { fromPath: inspected.fromPath, toPath: inspected.toPath };
+  return {
+    fromPath: inspected.fromPath,
+    toPath: inspected.toPath,
+    resultPath: inspected.resultPath,
+  };
 }
 
 /** Prove and canonicalize a delete target before engine settlement. */
@@ -903,7 +912,7 @@ export async function movePath(
 ): Promise<string> {
   // Repeat the inspection after engine preparation so its await cannot turn
   // the earlier proof into a commit-time TOCTOU gap.
-  const { toPath: normalizedToPath, realRoot, from, to, realFrom } =
+  const { resultPath, realRoot, from, to, realFrom } =
     await inspectWorkspaceMove(rootPath, fromPath, toPath);
   await mkdir(dirname(to), { recursive: true });
   const realDestParent = await realpath(dirname(to));
@@ -939,7 +948,7 @@ export async function movePath(
   // main is the single writer on this path and Node exposes no renameat2
   // RENAME_NOREPLACE. The watcher records whatever actually landed.
   await rename(from, to);
-  return normalizedToPath;
+  return resultPath;
 }
 
 // Deletes are always RECOVERABLE — never a hard delete:

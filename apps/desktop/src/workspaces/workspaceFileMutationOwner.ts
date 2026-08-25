@@ -252,8 +252,12 @@ export function createWorkspaceFileMutationOwner<
               shareMountRegistryIsPresent(workspace),
             );
           }
+          const requestedPaths = normalizeWorkspaceMovePaths(
+            input.fromPath,
+            input.toPath,
+          );
           const paths = receivedShare
-            ? normalizeWorkspaceMovePaths(input.fromPath, input.toPath)
+            ? { ...requestedPaths, resultPath: requestedPaths.toPath }
             : await prepareWorkspaceMove(
                 workspace.rootPath,
                 input.fromPath,
@@ -303,11 +307,12 @@ export function createWorkspaceFileMutationOwner<
                 markWorkspaceChanged,
               );
             } else {
-              path = await movePath(
+              await movePath(
                 workspace.rootPath,
                 paths.fromPath,
                 paths.toPath,
               );
+              path = paths.resultPath;
             }
             if (typeof path !== "string") {
               throw new Error("Shared file move returned an invalid result.");
