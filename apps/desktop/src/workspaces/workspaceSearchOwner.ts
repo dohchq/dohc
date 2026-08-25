@@ -16,6 +16,7 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import {
   readWorkspaceEnginePolicy,
   resolveEngineSearchPolicy,
+  type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
 
 export interface WorkspaceSearchWorkspace {
@@ -61,12 +62,21 @@ export interface WorkspaceSearchOwnerDependencies<
     workspace: Workspace,
     input: WorkspaceSearchEngineInput,
   ): Promise<SearchResult[] | null>;
+  readEnginePolicy?(
+    rootPath: string,
+  ): Promise<WorkspaceEnginePolicySnapshot>;
   logError(message: string, error?: unknown): void;
 }
 
 interface SearchIdentity {
   generation: number;
   searchId: string;
+}
+
+function stoppedSearchError(): Error {
+  return new Error(
+    "Workspace search stopped because it is no longer current.",
+  );
 }
 
 /** Owns workspace-search policy and every renderer-scoped search lifetime. */
@@ -88,7 +98,7 @@ export class WorkspaceSearchOwner<
     authority: WorkspaceSearchAuthority<Workspace>,
     input: WorkspaceSearchPayload,
   ): Promise<void> {
-    if (this.#disposed) return;
+    if (this.#disposed) throw stoppedSearchError();
 
     const { workspace } = authority;
 
@@ -109,10 +119,13 @@ export class WorkspaceSearchOwner<
       this.#latest.get(sender.id) === identity;
     const isCurrent = () =>
       ownsSearch() && !sender.isDestroyed() && authority.isCurrent();
+    const assertCurrent = () => {
+      if (!isCurrent()) throw stoppedSearchError();
+    };
 
     const ownedSearchView =
       await this.#dependencies.prepareOwnedSearch(workspace);
-    if (!isCurrent()) return;
+    assertCurrent();
 
     const registeredMounts = storedShareMounts(workspace);
     const hasUsableMount = registeredMounts.some((mount) =>
@@ -128,17 +141,20 @@ export class WorkspaceSearchOwner<
         allowPath: ownedSearchView.allowPath,
         ownsSearch,
         isCurrent,
+        assertCurrent,
       });
       return;
     }
 
     await capture.flush();
-    if (!isCurrent()) return;
+    assertCurrent();
 
     const policy = resolveEngineSearchPolicy(
-      await readWorkspaceEnginePolicy(workspace.rootPath),
+      await (this.#dependencies.readEnginePolicy ?? readWorkspaceEnginePolicy)(
+        workspace.rootPath,
+      ),
     );
-    if (!isCurrent()) return;
+    assertCurrent();
     if (policy.kind === "blocked") {
       this.#dependencies.logError(
         `Workspace search blocked by policy validation for ${workspace.rootPath}.`,
@@ -167,7 +183,8 @@ export class WorkspaceSearchOwner<
       limit: SEARCH_EVENT_MAX_ENTRIES,
       isCurrent,
     });
-    if (results === null || !isCurrent()) return;
+    if (results === null) throw stoppedSearchError();
+    assertCurrent();
 
     this.#send(
       sender,
@@ -217,6 +234,7 @@ export class WorkspaceSearchOwner<
       allowPath: ownedSearchView.allowPath,
       ownsSearch,
       isCurrent,
+      assertCurrent,
     });
   }
 
@@ -257,8 +275,9 @@ export class WorkspaceSearchOwner<
     allowPath: (path: string) => boolean;
     ownsSearch: () => boolean;
     isCurrent: () => boolean;
+    assertCurrent: () => void;
   }): Promise<void> {
-    if (!input.isCurrent()) return;
+    input.assertCurrent();
     await this.#dependencies.searchRegistry.startSearch(
       input.sender.id,
       input.workspace.rootPath,
@@ -283,6 +302,18 @@ export class WorkspaceSearchOwner<
         allowPath: input.allowPath,
       },
     );
+    if (!input.isCurrent()) {
+      // Root validation can finish after this workspace loses authority. Kill
+      // only this invocation's handle. A superseding search owns a different
+      // identity and has already replaced or cancelled this handle.
+      if (input.ownsSearch()) {
+        this.#dependencies.searchRegistry.cancel(
+          input.sender.id,
+          input.input.searchId,
+        );
+      }
+      throw stoppedSearchError();
+    }
   }
 
   #sendRipgrepBatch(

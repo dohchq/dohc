@@ -43,7 +43,9 @@ interface FakeStart {
   allowPath?: (path: string) => boolean;
 }
 
-function createFakeRegistry() {
+function createFakeRegistry(
+  onStart?: (start: FakeStart) => Promise<void>,
+) {
   const starts: FakeStart[] = [];
   return {
     starts,
@@ -59,7 +61,9 @@ function createFakeRegistry() {
           allowPath?: (path: string) => boolean;
         },
       ) {
-        starts.push({ ownerId, searchId, request, onBatch, ...options });
+        const next = { ownerId, searchId, request, onBatch, ...options };
+        starts.push(next);
+        await onStart?.(next);
       },
       cancel: vi.fn(),
       disposeOwner: vi.fn(),
@@ -117,8 +121,20 @@ function engineResult(path: string): SearchResult {
   };
 }
 
+const readablePolicy = {
+  filesPolicy: null,
+  visibilityPolicy: null,
+  errors: [],
+};
+
+function expectStopped(search: Promise<void>): Promise<void> {
+  return expect(search).rejects.toThrow(
+    "Workspace search stopped because it is no longer current.",
+  );
+}
+
 describe("WorkspaceSearchOwner", () => {
-  it("prevents a replaced engine search from emitting or starting its late mount pass", async () => {
+  it("rejects a replaced engine search without emitting or starting its late mount pass", async () => {
     const rootPath = await makeRoot();
     const oldResult = deferred<SearchResult[]>();
     const oldQueryStarted = deferred<void>();
@@ -155,8 +171,9 @@ describe("WorkspaceSearchOwner", () => {
     );
     await oldQueryStarted.promise;
     await owner.start(sender, authority(workspace), searchPayload("new"));
+    const oldStopped = expectStopped(oldSearch);
     oldResult.resolve([engineResult("old.md")]);
-    await oldSearch;
+    await oldStopped;
 
     expect(registry.adapter.cancel).toHaveBeenCalledWith(1, "old");
     expect(registry.starts.map((start) => start.searchId)).toEqual(["new"]);
@@ -171,7 +188,7 @@ describe("WorkspaceSearchOwner", () => {
     );
   });
 
-  it("drops an engine result when the caller changes workspaces during the query", async () => {
+  it("rejects when workspace authority changes during the daemon query", async () => {
     const rootPath = await makeRoot();
     const result = deferred<SearchResult[]>();
     const queryStarted = deferred<void>();
@@ -200,10 +217,188 @@ describe("WorkspaceSearchOwner", () => {
 
     workspaceIsCurrent = false;
     result.resolve([engineResult("late.md")]);
-    await pending;
+    await expectStopped(pending);
 
     expect(sender.send).not.toHaveBeenCalled();
     expect(registry.starts).toEqual([]);
+  });
+
+  it("rejects when workspace authority changes during search preparation", async () => {
+    const rootPath = await makeRoot();
+    const preparation = deferred<{ allowPath: () => boolean }>();
+    const preparationStarted = deferred<void>();
+    let workspaceIsCurrent = true;
+    const registry = createFakeRegistry();
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => {
+        preparationStarted.resolve();
+        return await preparation.promise;
+      },
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(13);
+    const pending = owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("preparation-stale"),
+    );
+    await preparationStarted.promise;
+
+    workspaceIsCurrent = false;
+    preparation.resolve({ allowPath: () => true });
+    await expectStopped(pending);
+
+    expect(registry.starts).toEqual([]);
+    expect(sender.send).not.toHaveBeenCalled();
+  });
+
+  it("cancels its ripgrep handle when authority changes during root validation", async () => {
+    const rootPath = await makeRoot();
+    const validation = deferred<void>();
+    const validationStarted = deferred<void>();
+    let workspaceIsCurrent = true;
+    const registry = createFakeRegistry(async () => {
+      validationStarted.resolve();
+      await validation.promise;
+    });
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => null,
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(17);
+    const pending = owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("validation-stale"),
+    );
+    await validationStarted.promise;
+
+    workspaceIsCurrent = false;
+    validation.resolve();
+    await expectStopped(pending);
+
+    expect(registry.adapter.cancel).toHaveBeenCalledWith(
+      sender.id,
+      "validation-stale",
+    );
+    expect(sender.send).not.toHaveBeenCalled();
+  });
+
+  it("rejects when workspace authority changes during capture flush", async () => {
+    const rootPath = await makeRoot();
+    const flush = deferred<void>();
+    const flushStarted = deferred<void>();
+    let workspaceIsCurrent = true;
+    const registry = createFakeRegistry();
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => ({
+        flush: async () => {
+          flushStarted.resolve();
+          await flush.promise;
+        },
+      }),
+      queryEngine: vi.fn(async () => []),
+      logError: vi.fn(),
+    });
+    const sender = createSender(14);
+    const pending = owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("flush-stale"),
+    );
+    await flushStarted.promise;
+
+    workspaceIsCurrent = false;
+    flush.resolve();
+    await expectStopped(pending);
+
+    expect(registry.starts).toEqual([]);
+    expect(sender.send).not.toHaveBeenCalled();
+  });
+
+  it("rejects when workspace authority changes during the policy read", async () => {
+    const rootPath = await makeRoot();
+    const policy = deferred<typeof readablePolicy>();
+    const policyReadStarted = deferred<void>();
+    let workspaceIsCurrent = true;
+    const registry = createFakeRegistry();
+    const queryEngine = vi.fn(async () => []);
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => ({ flush: async () => undefined }),
+      readEnginePolicy: async () => {
+        policyReadStarted.resolve();
+        return await policy.promise;
+      },
+      queryEngine,
+      logError: vi.fn(),
+    });
+    const sender = createSender(15);
+    const pending = owner.start(
+      sender,
+      authority(
+        { workspaceId: "workspace-1", rootPath },
+        () => workspaceIsCurrent,
+      ),
+      searchPayload("policy-stale"),
+    );
+    await policyReadStarted.promise;
+
+    workspaceIsCurrent = false;
+    policy.resolve(readablePolicy);
+    await expectStopped(pending);
+
+    expect(queryEngine).not.toHaveBeenCalled();
+    expect(sender.send).not.toHaveBeenCalled();
+  });
+
+  it("rejects a null daemon result as a stale or cancelled invocation", async () => {
+    const rootPath = await makeRoot();
+    const result = deferred<SearchResult[] | null>();
+    const queryStarted = deferred<void>();
+    const registry = createFakeRegistry();
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => ({ flush: async () => undefined }),
+      readEnginePolicy: async () => readablePolicy,
+      queryEngine: async () => {
+        queryStarted.resolve();
+        return await result.promise;
+      },
+      logError: vi.fn(),
+    });
+    const sender = createSender(16);
+    const pending = owner.start(
+      sender,
+      authority({ workspaceId: "workspace-1", rootPath }),
+      searchPayload("daemon-null"),
+    );
+    await queryStarted.promise;
+
+    result.resolve(null);
+    await expectStopped(pending);
+
+    expect(registry.starts).toEqual([]);
+    expect(sender.send).not.toHaveBeenCalled();
   });
 
   it("drops ripgrep batches after the caller changes workspaces", async () => {
@@ -341,14 +536,14 @@ describe("WorkspaceSearchOwner", () => {
     await preparationStarted.promise;
     owner.disposeSender(sender.id);
     preparation.resolve({ allowPath: () => true });
-    await duringTeardown;
+    await expectStopped(duringTeardown);
 
     expect(registry.starts.map((start) => start.searchId)).toEqual(["before"]);
     expect(registry.adapter.disposeOwner).toHaveBeenCalledTimes(2);
     expect(sender.send).not.toHaveBeenCalled();
   });
 
-  it("drops an engine result that resolves after cancellation", async () => {
+  it("rejects an engine result that resolves after explicit cancellation", async () => {
     const rootPath = await makeRoot();
     const registry = createFakeRegistry();
     const result = deferred<SearchResult[]>();
@@ -373,7 +568,7 @@ describe("WorkspaceSearchOwner", () => {
 
     owner.cancel(sender.id, "cancelled");
     result.resolve([engineResult("late.md")]);
-    await pending;
+    await expectStopped(pending);
 
     expect(sender.send).not.toHaveBeenCalled();
     expect(registry.starts).toEqual([]);

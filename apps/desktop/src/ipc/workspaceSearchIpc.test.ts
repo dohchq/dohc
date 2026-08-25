@@ -149,6 +149,23 @@ describe("workspace search IPC registration", () => {
     expect(test.owner.start).not.toHaveBeenCalled();
   });
 
+  it("passes a stopped owner invocation back to the renderer", async () => {
+    const test = harness();
+    test.owner.start.mockRejectedValueOnce(
+      new Error("Workspace search stopped because it is no longer current."),
+    );
+
+    await expect(
+      test.invoke(CHANNELS.searchWorkspace, {
+        workspaceId: "workspace-1",
+        searchId: "search-1",
+        query: "needle",
+      }),
+    ).rejects.toThrow(
+      "Workspace search stopped because it is no longer current.",
+    );
+  });
+
   it("cancels only the caller's named search", async () => {
     const test = harness();
 
