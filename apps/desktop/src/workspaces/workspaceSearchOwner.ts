@@ -69,7 +69,6 @@ export interface WorkspaceSearchOwnerDependencies<
 }
 
 interface SearchIdentity {
-  generation: number;
   searchId: string;
   settled: boolean;
 }
@@ -85,7 +84,6 @@ export class WorkspaceSearchOwner<
   Workspace extends WorkspaceSearchWorkspace = WorkspaceSearchWorkspace,
 > {
   readonly #dependencies: WorkspaceSearchOwnerDependencies<Workspace>;
-  readonly #generations = new Map<number, number>();
   readonly #latest = new Map<number, SearchIdentity>();
   readonly #cleanupHooked = new WeakSet<object>();
   #disposed = false;
@@ -104,7 +102,6 @@ export class WorkspaceSearchOwner<
     const { workspace } = authority;
 
     const identity = {
-      generation: this.#generation(sender.id),
       searchId: input.searchId,
       settled: false,
     };
@@ -116,9 +113,7 @@ export class WorkspaceSearchOwner<
     this.#hookDestroyed(sender);
 
     const ownsSearch = () =>
-      !this.#disposed &&
-      this.#generation(sender.id) === identity.generation &&
-      this.#latest.get(sender.id) === identity;
+      !this.#disposed && this.#latest.get(sender.id) === identity;
     const isCurrent = () =>
       ownsSearch() && !sender.isDestroyed() && authority.isCurrent();
     const assertCurrent = () => {
@@ -163,7 +158,7 @@ export class WorkspaceSearchOwner<
         `Workspace search blocked by policy validation for ${workspace.rootPath}.`,
         policy.message,
       );
-      this.#send(
+      this.#sendRequired(
         sender,
         {
           searchId: input.searchId,
@@ -189,7 +184,7 @@ export class WorkspaceSearchOwner<
     if (results === null) throw stoppedSearchError();
     assertCurrent();
 
-    this.#send(
+    this.#sendRequired(
       sender,
       {
         searchId: input.searchId,
@@ -201,7 +196,10 @@ export class WorkspaceSearchOwner<
           matchStart: result.matchStart,
           matchEnd: result.matchEnd,
           surface: result.surface,
-          title: result.title,
+          // File groups already display their path. Omitting the duplicate
+          // title also keeps a valid long path from exceeding the separate
+          // human-title bound at the renderer seam.
+          ...(result.surface === "chat" ? { title: result.title } : {}),
           ...(result.threadId ? { threadId: result.threadId } : {}),
           ...(result.objectId ? { objectId: result.objectId } : {}),
         })),
@@ -215,7 +213,7 @@ export class WorkspaceSearchOwner<
 
     const mountGlob = mountScopedIncludeGlob(input.includeGlob);
     if (mountGlob === null) {
-      this.#send(
+      this.#sendRequired(
         sender,
         {
           searchId: input.searchId,
@@ -249,7 +247,6 @@ export class WorkspaceSearchOwner<
   }
 
   disposeSender(senderId: number): void {
-    this.#generations.set(senderId, this.#generation(senderId) + 1);
     this.#latest.delete(senderId);
     this.#dependencies.searchRegistry.disposeOwner(senderId);
   }
@@ -259,10 +256,6 @@ export class WorkspaceSearchOwner<
     this.#disposed = true;
     this.#latest.clear();
     this.#dependencies.searchRegistry.killAll();
-  }
-
-  #generation(senderId: number): number {
-    return this.#generations.get(senderId) ?? 0;
   }
 
   #hookDestroyed(sender: WorkspaceSearchSender): void {
@@ -338,9 +331,32 @@ export class WorkspaceSearchOwner<
       this.#settleStaleRipgrep(sender, identity, ownsSearch);
       return;
     }
-    if (this.#send(sender, batch, isCurrent, "ripgrep batch") && batch.done) {
+    const sent = this.#send(sender, batch, isCurrent, "ripgrep batch");
+    if (!batch.done) return;
+    if (sent) {
       identity.settled = true;
+      return;
     }
+    if (!isCurrent()) {
+      this.#settleStaleRipgrep(sender, identity, ownsSearch);
+      return;
+    }
+
+    // A malformed terminal batch cannot be allowed to disappear: the invoke
+    // already resolved when ripgrep started, so only an event can settle the
+    // renderer now. The empty completion is closed and independently parsed.
+    identity.settled = true;
+    this.#send(
+      sender,
+      {
+        searchId: identity.searchId,
+        entries: [],
+        done: true,
+        limitHit: false,
+      },
+      isCurrent,
+      "ripgrep fallback completion",
+    );
   }
 
   #settleStaleRipgrep(
@@ -392,5 +408,16 @@ export class WorkspaceSearchOwner<
       );
       return false;
     }
+  }
+
+  #sendRequired(
+    sender: WorkspaceSearchSender,
+    event: unknown,
+    isCurrent: () => boolean,
+    source: string,
+  ): void {
+    if (this.#send(sender, event, isCurrent, source)) return;
+    if (!isCurrent()) throw stoppedSearchError();
+    throw new Error(`Workspace search could not deliver ${source}.`);
   }
 }

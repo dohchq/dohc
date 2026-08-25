@@ -804,10 +804,60 @@ describe("WorkspaceSearchOwner", () => {
       limitHit: false,
     });
 
-    expect(ripgrepSender.send).not.toHaveBeenCalled();
+    expect(ripgrepSender.send).toHaveBeenCalledWith(CHANNELS.searchResults, {
+      searchId: "invalid-batch",
+      entries: [],
+      done: true,
+      limitHit: false,
+    });
     expect(logError).toHaveBeenCalledWith(
       "Workspace search dropped an invalid ripgrep batch.",
       expect.anything(),
+    );
+  });
+
+  it("omits a file title that only duplicates a valid long path", async () => {
+    const rootPath = await makeRoot();
+    const registry = createFakeRegistry();
+    const longPath = `${"nested/".repeat(80)}notes.md`;
+    const owner = new WorkspaceSearchOwner({
+      searchRegistry: registry.adapter,
+      prepareOwnedSearch: async () => ({ allowPath: () => true }),
+      engineCaptureFor: () => ({ flush: async () => undefined }),
+      queryEngine: async () => [
+        {
+          ...engineResult(longPath),
+          objectId: "object-1",
+        },
+      ],
+      readEnginePolicy: async () => readablePolicy,
+      logError: vi.fn(),
+    });
+    const sender = createSender(20);
+
+    await owner.start(
+      sender,
+      authority({ workspaceId: "workspace-1", rootPath }),
+      searchPayload("long-path"),
+    );
+
+    expect(sender.send).toHaveBeenCalledWith(
+      CHANNELS.searchResults,
+      expect.objectContaining({
+        searchId: "long-path",
+        entries: [
+          expect.objectContaining({
+            path: longPath,
+            objectId: "object-1",
+          }),
+        ],
+        done: true,
+      }),
+    );
+    expect(sender.send.mock.calls[0]?.[1]).not.toEqual(
+      expect.objectContaining({
+        entries: [expect.objectContaining({ title: expect.anything() })],
+      }),
     );
   });
 });
