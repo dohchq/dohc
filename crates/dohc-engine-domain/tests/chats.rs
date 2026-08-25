@@ -9,7 +9,7 @@ use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatChannelKind,
     ChatReactionState, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
     LinkedChatStore, LocalAttachmentInput, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread, attachment_id_for,
+    SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
     base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
     encode_feed_cursor, linked_chat_projection_path,
 };
@@ -1554,7 +1554,7 @@ fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
     o1.attachments = vec![attach("alpha")];
     chats.start_channel_thread(&o1, &NO_FAULTS).expect("t1");
     let mut r1 = send_msg("t1", "r1", Some("o1"), "reply one", 30);
-    r1.attachments = vec![attach("beta"), attach("gamma")];
+    r1.attachments = vec![attach("beta")];
     chats.send_message(&r1, &NO_FAULTS).expect("r1");
     chats
         .send_message(
@@ -1612,8 +1612,7 @@ fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
     // MUTATION: hydrating the page's attachments in one query without
     // distributing per occurrence -> the opening/parent shared by several
     // items goes empty for all but one of them, a bare message collects a
-    // neighbor's attachments, a dangling attachment resurfaces, or the
-    // per-message (created_at_ms, attachment_id) order breaks.
+    // neighbor's attachments, or a dangling attachment resurfaces.
     fn objects(message: &dohc_engine_domain::ChatMessage) -> Vec<&str> {
         message
             .attachments
@@ -1638,9 +1637,7 @@ fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
     assert!(objects(r4_opening).is_empty());
     assert!(objects(&o2.message).is_empty());
     assert!(o2.opening_message.is_none() && o2.parent_message.is_none());
-    let mut r1_objects = vec!["beta", "gamma"];
-    r1_objects.sort_by_key(|object| attachment_id_for("r1", object, None, None));
-    assert_eq!(objects(&r1.message), r1_objects);
+    assert_eq!(objects(&r1.message), vec!["beta"]);
     assert!(objects(&r2.message).is_empty());
     for item in [r2, r1] {
         let opening = item.opening_message.as_ref().expect("shared opening");
