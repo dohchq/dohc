@@ -336,7 +336,10 @@ export class EngineYDocSessionOwner<
     const queued = record.queuedHandoff;
     record.queuedHandoff = null;
     if (queued) {
-      this.#installHandoff(record, queued.replacement, queued.updates);
+      this.#installHandoff(record, queued.replacement, [
+        ...handoff.updates,
+        ...queued.updates,
+      ]);
       return {
         kind: "applied",
         replacement: handoff.replacement,
@@ -526,7 +529,7 @@ export class EngineYDocSessionOwner<
         if (record.handoff) {
           record.queuedHandoff = {
             replacement,
-            updates: [],
+            updates: record.queuedHandoff?.updates ?? [],
           };
           return;
         }
