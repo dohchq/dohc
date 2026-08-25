@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as fsPromises from "node:fs/promises";
 import {
   lstat,
   mkdir,
@@ -2457,13 +2458,13 @@ describe("ShareViewFiles", () => {
     const plans = join(rootPath, "docs", "Plans");
     await mkdir(plans, { recursive: true });
     await writeFile(join(plans, "a.md"), "a\n", "utf8");
+    let metadataReads = 0;
     const store = mutableTextStore({
       initial: [{ path: "docs/Plans/a.md", text: "a\n" }],
-      afterMetadataRead: async (read) => {
-        // Capture and the canonical before-snapshot have finished. Remove the
-        // source after the file-change seam reads its canonical paths but
-        // before its move-identity preflight touches the projection.
-        if (read === 3) await rm(plans, { recursive: true });
+      afterMetadataRead: (read) => {
+        // Three reads finish capture, the before-snapshot, and the move seam's
+        // source set. Removal waits for that seam's exact physical probe below.
+        metadataReads = read;
       },
     });
     const files = createShareViewFiles({
@@ -2472,30 +2473,52 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    await expect(
-      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          {
-            kind: "move",
-            fromPath: "docs/Plans",
-            toPath: "docs/plans/archive",
-          },
+    const originalRealpath = fsPromises.realpath.bind(fsPromises);
+    let removedAtSourcePreflight = 0;
+    const realpath = vi
+      .spyOn(fsPromises, "realpath")
+      .mockImplementation(async (path) => {
+        if (
+          metadataReads >= 3 &&
+          removedAtSourcePreflight === 0 &&
+          String(path) === plans
+        ) {
+          removedAtSourcePreflight += 1;
+          await rm(plans, { recursive: true });
+        }
+        return originalRealpath(path);
+      });
+    try {
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "move",
+              fromPath: "docs/Plans",
+              toPath: "docs/plans/archive",
+            },
+          ),
         ),
-      ),
-    ).rejects.toThrow("missing from this shared view");
+      ).rejects.toThrow("missing from this shared view");
 
-    expect(store.renameTextFile).not.toHaveBeenCalled();
-    await expect(
-      readSharedViewProjectionDebt(rootPath, "share-a"),
-    ).resolves.toMatchObject({ pendingPaths: new Set() });
+      expect(removedAtSourcePreflight).toBe(1);
+      expect(store.renameTextFile).not.toHaveBeenCalled();
+      await expect(
+        readSharedViewProjectionDebt(rootPath, "share-a"),
+      ).resolves.toMatchObject({ pendingPaths: new Set() });
+    } finally {
+      realpath.mockRestore();
+    }
   });
 
   it("keeps a case-only folder rename", async () => {
     const rootPath = await workspaceRoot();
-    await mkdir(join(rootPath, "docs", "plans"), { recursive: true });
-    await writeFile(join(rootPath, "docs", "plans", "a.md"), "a\n", "utf8");
+    const plans = join(rootPath, "docs", "plans");
+    const renamedPlans = join(rootPath, "docs", "Plans");
+    await mkdir(plans, { recursive: true });
+    await writeFile(join(plans, "a.md"), "a\n", "utf8");
     const store = mutableTextStore({
       initial: [{ path: "docs/plans/a.md", text: "a\n" }],
     });
@@ -2505,29 +2528,56 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    await expect(
-      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          {
-            kind: "move",
-            fromPath: "docs/plans",
-            toPath: "docs/Plans",
-          },
-        ),
-      ),
-    ).resolves.toMatchObject({ status: "committed", value: "docs/Plans" });
-
-    expect(store.renameTextFile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        fromPath: "docs/plans/a.md",
-        toPath: "docs/Plans/a.md",
-      }),
+    const destinationAlreadyAliasesSource = await lstat(renamedPlans).then(
+      () => true,
+      () => false,
     );
-    await expect(
-      readFile(join(rootPath, "docs", "Plans", "a.md"), "utf8"),
-    ).resolves.toBe("a\n");
+    const originalRealpath = fsPromises.realpath.bind(fsPromises);
+    let forcedSameEntry = 0;
+    // Case-insensitive disks already resolve both spellings to `plans`. On a
+    // case-sensitive runner, make only the identity probe observe that fact;
+    // the store mutation and physical directory rename below stay real.
+    const realpath = vi
+      .spyOn(fsPromises, "realpath")
+      .mockImplementation(async (path) => {
+        if (
+          !destinationAlreadyAliasesSource &&
+          forcedSameEntry === 0 &&
+          String(path) === renamedPlans
+        ) {
+          forcedSameEntry += 1;
+          return originalRealpath(plans);
+        }
+        return originalRealpath(path);
+      });
+    try {
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            {
+              kind: "move",
+              fromPath: "docs/plans",
+              toPath: "docs/Plans",
+            },
+          ),
+        ),
+      ).resolves.toMatchObject({ status: "committed", value: "docs/Plans" });
+
+      expect(forcedSameEntry).toBe(destinationAlreadyAliasesSource ? 0 : 1);
+      expect(store.renameTextFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fromPath: "docs/plans/a.md",
+          toPath: "docs/Plans/a.md",
+        }),
+      );
+      await expect(readFile(join(renamedPlans, "a.md"), "utf8")).resolves.toBe(
+        "a\n",
+      );
+    } finally {
+      realpath.mockRestore();
+    }
   });
 
   it("does not compensate a rename after an indeterminate daemon response", async () => {
