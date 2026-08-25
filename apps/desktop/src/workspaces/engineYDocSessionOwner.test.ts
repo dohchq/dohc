@@ -543,7 +543,7 @@ describe("EngineYDocSessionOwner", () => {
         sessionId: "renderer-session-1",
         lineageGeneration: 2,
       }),
-    ).toEqual({ kind: "applied", replacement: "winner", updates: [] });
+    ).toEqual({ kind: "applied", updates: [] });
 
     signals.replaceLineage("next winner");
     signals.remoteUpdate("buffered delta");
@@ -556,7 +556,6 @@ describe("EngineYDocSessionOwner", () => {
       }),
     ).toEqual({
       kind: "applied",
-      replacement: "next winner",
       updates: ["buffered delta"],
     });
   });
@@ -600,7 +599,7 @@ describe("EngineYDocSessionOwner", () => {
         sessionId: "renderer-session-1",
         lineageGeneration: 2,
       }),
-    ).toEqual({ kind: "applied", replacement: "winner-1", updates: [] });
+    ).toEqual({ kind: "applied", updates: [] });
     expect(outbound.map(({ message }) => message)).toEqual([
       {
         kind: "lineage-replacement",
@@ -622,7 +621,6 @@ describe("EngineYDocSessionOwner", () => {
       }),
     ).toEqual({
       kind: "applied",
-      replacement: "winner-2",
       updates: ["update-2"],
     });
   });

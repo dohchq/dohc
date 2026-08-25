@@ -84,8 +84,8 @@ export type EngineYDocSessionApplyResult<TValue> =
       reason: "session-unavailable" | "lineage-transition";
     };
 
-export type EngineYDocSessionAcknowledgeResult<TUpdate, TReplacement> =
-  | { kind: "applied"; replacement: TReplacement; updates: TUpdate[] }
+export type EngineYDocSessionAcknowledgeResult<TUpdate> =
+  | { kind: "applied"; updates: TUpdate[] }
   | {
       kind: "refused";
       reason: "session-unavailable" | "lineage-transition";
@@ -322,7 +322,7 @@ export class EngineYDocSessionOwner<
   acknowledgeLineageReplacement(
     input: EngineYDocSessionCaller<TSender> & { lineageGeneration: number },
     commitReplacement?: (session: TSession, replacement: TReplacement) => void,
-  ): EngineYDocSessionAcknowledgeResult<TUpdate, TReplacement> {
+  ): EngineYDocSessionAcknowledgeResult<TUpdate> {
     const record = this.#current(input);
     if (!record || record.state !== "open" || record.session === null) {
       return { kind: "refused", reason: "session-unavailable" };
@@ -341,13 +341,11 @@ export class EngineYDocSessionOwner<
       this.#installHandoff(record, queued.replacement, queued.updates);
       return {
         kind: "applied",
-        replacement: handoff.replacement,
         updates: [],
       };
     }
     return {
       kind: "applied",
-      replacement: handoff.replacement,
       updates: handoff.updates,
     };
   }
@@ -564,16 +562,15 @@ export class EngineYDocSessionOwner<
     message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>,
   ): boolean {
     if (!this.#maySend(record)) return false;
-    const outbound = {
-      sender: record.sender,
-      generation: record.generation,
-      sessionId: record.sessionId,
-      workspaceId: record.workspaceId,
-      path: record.path,
-      message,
-    };
     try {
-      this.#onOutbound(outbound);
+      this.#onOutbound({
+        sender: record.sender,
+        generation: record.generation,
+        sessionId: record.sessionId,
+        workspaceId: record.workspaceId,
+        path: record.path,
+        message,
+      });
       return true;
     } catch {
       return false;
