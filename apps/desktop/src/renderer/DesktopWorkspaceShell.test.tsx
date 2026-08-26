@@ -15148,6 +15148,113 @@ describe("workbench render cost", () => {
     expect(bridge.syncDms.mock.calls.length).toBe(paired + 1);
   });
 
+  it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {
+    const user = userEvent.setup();
+    const bridge = Object.assign(
+      makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+      {
+        listChatChannels: vi.fn(async () => ({
+          channels: [
+            {
+              id: "channel-team",
+              name: "team",
+              slug: "team",
+              kind: "channel" as const,
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              threadCount: 1,
+              unreadCount: 0,
+              wireId: "channel-team",
+            },
+          ],
+          fileThreads: [],
+        })),
+        listChatChannelShares: vi.fn(async () => ({
+          joined: [{ channelWireId: "channel-team", joined: null }],
+          sessionKey: "session-a",
+          relay: {
+            state: "answered" as const,
+            granted: [],
+            received: [],
+          },
+        })),
+        listChannelThreads: vi.fn(async () => ({
+          threads: [
+            {
+              id: "thread-team",
+              title: "Team update",
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              channelId: "channel-team",
+              messageCount: 1,
+              lastReadSequence: 1,
+              unreadCount: 0,
+              openingMessage: {
+                id: "message-team",
+                authorKind: "human" as const,
+                authorDisplayName: "Alice",
+                bodySnippet: "A settled update",
+                createdAtMs: 1,
+                reactions: [],
+              },
+            },
+          ],
+          viewerAuthorId: "you",
+        })),
+        listChatMessages: vi.fn(async () => ({
+          messages: [
+            {
+              id: "message-team",
+              threadId: "thread-team",
+              authorKind: "human" as const,
+              authorDisplayName: "Alice",
+              body: "A settled update",
+              createdAtMs: 1,
+            },
+          ],
+        })),
+        listChatReactions: vi.fn(async () => ({
+          reactions: [],
+          viewerAuthorId: "you",
+        })),
+        listChatThreadDecisions: vi.fn(async () => ({ decisions: [] })),
+        listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
+        chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
+        chatDispatchStateForThread: vi.fn(async () => ({
+          liveRun: false,
+          pendingCount: 0,
+          paused: false,
+        })),
+        markChatThreadRead: vi.fn(async () => ({
+          lastReadSequence: 1,
+          revision: 1,
+        })),
+      },
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    await user.click(await screen.findByTestId("chats-post-card"));
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+    bridge.markChatThreadRead.mockClear();
+    bridge.syncDms.mockClear();
+
+    for (let pass = 1; pass <= 3; pass += 1) {
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() =>
+        expect(bridge.markChatThreadRead).toHaveBeenCalledTimes(pass),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(bridge.syncDms).not.toHaveBeenCalled();
+    }
+  });
+
   it("clears the suspended navigator's DM unread pill when the page read lands", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

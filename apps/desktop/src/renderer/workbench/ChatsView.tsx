@@ -1879,19 +1879,22 @@ export function ChatsView(props: {
   onDraftsChange?: (drafts: ChatsDrafts) => void;
   // Unread badges are the one state the two instances disagree about: the
   // page performs every read, the panel navigator only projects counts it
-  // fetched at mount. The page reports each landed mark-read; the shell hands
-  // the panel a bumped revision so its badges catch up.
+  // fetched at mount. Keep local thread badges and relay-backed DM badges on
+  // separate revisions so a channel refresh cannot wake suspended DM sync.
   onThreadRead?: () => void;
   readRevision?: number;
+  onDmRead?: () => void;
+  dmReadRevision?: number;
   // The persistent panel navigator sets this while a Chats editor tab is
   // live: the page instance runs the same polls against the same store, so a
   // second poller doubles every chat read for nothing. Suspends the DM list
   // poll, the open-DM poll, and the activity subscription; mount loads and
-  // the readRevision badge catch-up stay on. On unsuspend, one catch-up pass
-  // refreshes what the missed activity events would have.
+  // the read-revision badge catch-ups stay on. On unsuspend, one catch-up
+  // pass refreshes what the missed activity events would have.
   suspendPolling?: boolean;
 }) {
-  const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
+  const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
+    props;
   const collaboration = props.collaboration ?? null;
   // A stable fallback: a fresh [] per render would defeat the message-list
   // memo boundaries below for every roster-less host.
@@ -2797,18 +2800,26 @@ export function ChatsView(props: {
   // The panel navigator hands every conversation to the page instance, so it
   // never reaches the mark-read above and its channel, file-thread, and DM
   // badges would keep the counts fetched at mount until it remounted. The
-  // shell bumps readRevision after each landed read; the mount value belongs
-  // to the load effect above, so only later ones refetch. DMs ride the same
-  // signal: a landed DM read moves the cursor syncDms counts from, and while
-  // polling is suspended nothing else can clear a DM pill.
+  // shell bumps readRevision after each landed local-thread read; the mount
+  // value belongs to the load effect above, so only later ones refetch.
   const seenReadRevision = useRef(props.readRevision);
   useEffect(() => {
     const revision = props.readRevision;
     if (revision === seenReadRevision.current) return;
     seenReadRevision.current = revision;
     void refreshOverview({ background: true });
+  }, [props.readRevision, refreshOverview]);
+
+  // A landed DM read moves the cursor syncDms reads from. While the navigator
+  // is suspended, this DM-specific signal is the only path that clears its
+  // pill; channel and file-thread reads must never pay for a relay sync.
+  const seenDmReadRevision = useRef(props.dmReadRevision);
+  useEffect(() => {
+    const revision = props.dmReadRevision;
+    if (revision === seenDmReadRevision.current) return;
+    seenDmReadRevision.current = revision;
     void refreshDms();
-  }, [props.readRevision, refreshDms, refreshOverview]);
+  }, [props.dmReadRevision, refreshDms]);
 
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
@@ -2943,10 +2954,10 @@ export function ChatsView(props: {
             // Only once the cursor write LANDED (the thread-view precedent),
             // and only when this load actually cleared something: the open-DM
             // poll re-marks on every pass, and reporting those would make the
-            // shell's readRevision re-poll the suspended navigator at the
+            // shell's DM revision re-poll the suspended navigator at the
             // very cadence the suspension exists to stop.
             () => {
-              if (clearedUnread) onThreadRead?.();
+              if (clearedUnread) onDmRead?.();
             },
             () => {
               // Best-effort, like the thread view.
@@ -2954,7 +2965,7 @@ export function ChatsView(props: {
           );
       }
     },
-    [onThreadRead, workspaceId],
+    [onDmRead, workspaceId],
   );
 
   const refreshOpenDm = useCallback(

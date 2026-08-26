@@ -3396,8 +3396,12 @@ export function DesktopWorkspaceShell(props: {
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
+  const [chatsDmReadRevision, setChatsDmReadRevision] = useState(0);
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
+  }, []);
+  const onChatsDmRead = useCallback(() => {
+    setChatsDmReadRevision((current) => current + 1);
   }, []);
   // THE one write of the chat destination: the ref the panel reads, the state
   // the navigator highlights, and the cancellation that choosing a different
@@ -5282,6 +5286,7 @@ export function DesktopWorkspaceShell(props: {
     onNavCommand: onChatsNavCommand,
     onDraftsChange: onChatsDrafts,
     onThreadRead: onChatsThreadRead,
+    onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
     onError: onChatsError,
@@ -5297,7 +5302,8 @@ export function DesktopWorkspaceShell(props: {
   // live surface: disable the navigator's collaboration transport so it cannot
   // create a duplicate presence lease, and suspend its polls so one open
   // conversation does not double every chat read (D2#6). The page's landed
-  // reads still reach the navigator through readRevision.
+  // reads still reach the navigator through their local-thread and DM
+  // revisions.
   const chatsTabIsLive = wb.editorGroups.some((group) =>
     isChatsTabPath(group.activeTab),
   );
@@ -5306,6 +5312,7 @@ export function DesktopWorkspaceShell(props: {
     workspaces: dmWorkspaceOptions,
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
+    dmReadRevision: chatsDmReadRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
