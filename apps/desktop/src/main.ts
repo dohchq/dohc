@@ -464,6 +464,7 @@ import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
   assertMountableSelector,
   assertRealMountRoot,
+  mountStoreWorkspaceIdFor,
   overlayCanonicalShareMountFiles,
   refuseImportIntoShareProjection,
   resolveShareMountPath,
@@ -1831,20 +1832,40 @@ function createDesktopWorkspaceAuthorityState(
 
 type PhysicalRelayWorkspace = Pick<
   RegistryEntry,
-  "workspaceId" | "rootPath" | "remote"
+  "workspaceId" | "rootPath" | "remote" | "shareMounts"
 > & { attachmentId: symbol };
 
-function relayCloseTargetForPhysicalWorkspace(
+function workspaceSessionTargetForPhysicalWorkspace(
+  targetWorkspaceId: string,
   workspace: PhysicalRelayWorkspace,
-): string | EngineWorkspace | null {
-  const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
-  if (!relayWorkspaceId) return null;
-  if (relayWorkspaceId !== workspace.workspaceId) return relayWorkspaceId;
+): string | EngineWorkspace {
+  if (targetWorkspaceId !== workspace.workspaceId) return targetWorkspaceId;
   return {
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
     attachmentId: workspace.attachmentId,
   };
+}
+
+function relayCloseTargetsForPhysicalWorkspace(
+  workspace: PhysicalRelayWorkspace,
+): Array<string | EngineWorkspace> {
+  const workspaceIds = new Set<string>([
+    ...(workspace.remote?.remoteWorkspaceId
+      ? [workspace.remote.remoteWorkspaceId]
+      : []),
+    ...storedShareMounts(workspace).map((mount) =>
+      mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
+    ),
+  ]);
+  workspaceIds.delete(workspace.workspaceId);
+  return [
+    workspaceSessionTargetForPhysicalWorkspace(
+      workspace.workspaceId,
+      workspace,
+    ),
+    ...workspaceIds,
+  ];
 }
 
 const workspaceAuthorities = createWorkspaceAuthorityOwner({
@@ -1857,8 +1878,8 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       rootPath: binding.canonicalRootPath,
       attachmentId: binding.attachmentId,
     };
-    const relayCloseTarget =
-      relayCloseTargetForPhysicalWorkspace(physicalWorkspace);
+    const relayCloseTargets =
+      relayCloseTargetsForPhysicalWorkspace(physicalWorkspace);
     const results = await Promise.allSettled([
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
@@ -1874,9 +1895,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       state.sitePreviews.stopWorkspace(binding.workspaceId),
       state.tryInVersionSessions.settled(),
       state.workspaceChatLifecycle.settled(),
-      relayCloseTarget
-        ? closeRelayTransportWorkspace(relayCloseTarget)
-        : Promise.resolve(),
+      ...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target)),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
       workspaceActivity.close(physicalWorkspace, state.activity, {
         expectedRootPath: binding.canonicalRootPath,
@@ -3573,8 +3592,13 @@ async function syncWorkspaceForDispatch(
               return true;
               } finally {
                 await engine.stop().catch(() => undefined);
-                const relayCloseTarget =
-                  relayCloseTargetForPhysicalWorkspace(workspace);
+                const relayWorkspaceId = workspace.remote?.remoteWorkspaceId;
+                const relayCloseTarget = relayWorkspaceId
+                  ? workspaceSessionTargetForPhysicalWorkspace(
+                      relayWorkspaceId,
+                      workspace,
+                    )
+                  : null;
                 if (relayCloseTarget) {
                   await closeRelayTransportWorkspace(relayCloseTarget).catch(
                     () => undefined,
@@ -3693,7 +3717,9 @@ async function closeDispatchRunActivity(
   if (existing) return await existing;
       const current = canonicalWorkspaceFor(lease);
   const relayWorkspaceId = current.remote?.remoteWorkspaceId;
-  const relayCloseTarget = relayCloseTargetForPhysicalWorkspace(current);
+  const relayCloseTarget = relayWorkspaceId
+    ? workspaceSessionTargetForPhysicalWorkspace(relayWorkspaceId, current)
+    : null;
   const closing = closeWorkspaceActivityAndRelay({
     closeActivity: async () => {
           await activity.close(current.workspaceId, {
@@ -5201,7 +5227,11 @@ function createShareViewFilesForOperation(
       );
     },
     retireTarget: async (target) => {
-      await closeRelayTransportWorkspace(target.storeWorkspaceId).catch(
+      const retireTarget = workspaceSessionTargetForPhysicalWorkspace(
+        target.storeWorkspaceId,
+        operation.workspace,
+      );
+      await closeRelayTransportWorkspace(retireTarget).catch(
         () => undefined,
       );
     },
@@ -8426,13 +8456,13 @@ function registerIpcHandlers(
       // SOFT, like the refresh site. Opening a share is a read, and a failure
       // here costs the recipient the ability to send changes, not the ability
       // to open what they were given. The next refresh records it.
-      await recordShareViewIdentity({
-        ...requireWorkspace(created.workspaceId),
-        rootPath: authorityBinding.canonicalRootPath,
-        attachmentId: authorityBinding.attachmentId,
-      }).catch((error) => {
-        console.error("[desktop] share view identity:", error);
-      });
+      await workspaceAuthorities
+        .withBinding(authorityBinding, (lease) =>
+          recordShareViewIdentity(canonicalWorkspaceFor(lease)),
+        )
+        .catch((error) => {
+          console.error("[desktop] share view identity:", error);
+        });
       const reconciled = await withStaleSensitiveWorkspaceOperation(
         created.rootPath,
         (lease) =>
@@ -9027,9 +9057,11 @@ function registerIpcHandlers(
   // shared channel, a share view pushes its own chat lane.
   function syncChatWriteFor(scope: ChatScope, target: { threadId: string }): void {
     if (scope.kind === "share") {
-      void pushShareViewChat(scope.workspace).catch((error) => {
-        console.error("[desktop] share view chat push:", error);
-      });
+      void scope
+        .withAuthority(() => pushShareViewChat(scope.workspace))
+        .catch((error) => {
+          console.error("[desktop] share view chat push:", error);
+        });
       return;
     }
     void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target);
@@ -11983,13 +12015,6 @@ async function startRustEngineDaemon(): Promise<boolean> {
       relayTransportRoutes,
     );
     rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource);
-    // Existing received shares can ask for cloud status as soon as the daemon
-    // startup promise resolves. Pin all of them before that happens, so even a
-    // sibling that later reconstructs a plain descriptor remains
-    // capture-disabled on its first workspace.open.
-    for (const workspace of listWorkspaces()) {
-      receivedShareEngine.workspaceForRegistered(workspace);
-    }
     rustEngineRelayClient = new EngineRelayClient({
       sessions: rustEngineWorkspaceSessions,
       routes: relayTransportRoutes,

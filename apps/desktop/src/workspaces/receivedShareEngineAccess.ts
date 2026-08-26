@@ -23,7 +23,7 @@ interface ReceivedShareRelayLocation extends ReceivedShareEngineLocation {
 interface RegisteredWorkspaceEngineLocation {
   workspaceId: string;
   rootPath: string;
-  attachmentId?: symbol;
+  attachmentId: symbol;
   shareView?: unknown;
 }
 
@@ -74,16 +74,12 @@ export function createReceivedShareEngineAccess(dependencies: {
       ? workspaceFor({
           engineWorkspaceId: location.workspaceId,
           rootPath: location.rootPath,
-          ...(location.attachmentId
-            ? { attachmentId: location.attachmentId }
-            : {}),
+          attachmentId: location.attachmentId,
         })
       : {
           workspaceId: location.workspaceId,
           rootPath: location.rootPath,
-          ...(location.attachmentId
-            ? { attachmentId: location.attachmentId }
-            : {}),
+          attachmentId: location.attachmentId,
         };
   const bind = (workspace: EngineWorkspace, relay: SyncRelayConnection) =>
     dependencies.relayClient().bind({

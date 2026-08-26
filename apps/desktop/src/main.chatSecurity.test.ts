@@ -908,6 +908,25 @@ describe("main-process chat authorization", () => {
     expect(indexEnd).toBeGreaterThan(indexAt);
     expect(index).toContain("withWorkspaceAttachmentAsync(workspace");
     expect(index).toContain("engineWorkspaceForAuthority(lease)");
+
+    const syncAt = mainSource.indexOf("function syncChatWriteFor(");
+    const sync = mainSource.slice(
+      syncAt,
+      mainSource.indexOf("\n  async function chatFileObjectId(", syncAt),
+    );
+    expect(sync).toMatch(
+      /void scope\s*\.withAuthority\(\(\) => pushShareViewChat\(scope\.workspace\)\)/,
+    );
+  });
+
+  it("holds the new shared view authority through identity recording", () => {
+    const handler = handlerSource("openSharedView");
+    expect(handler).toMatch(
+      /workspaceAuthorities\s*\.withBinding\(\s*authorityBinding,\s*\(lease\) =>\s*recordShareViewIdentity\(canonicalWorkspaceFor\(lease\)\),\s*\)/,
+    );
+    expect(handler).not.toContain(
+      "rootPath: authorityBinding.canonicalRootPath",
+    );
   });
 
   // #874: the rebuild moves a workspace's engine database aside. Main must

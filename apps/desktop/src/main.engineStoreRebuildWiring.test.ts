@@ -18,7 +18,11 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 describe("main-process engine store rebuild wiring", () => {
   it("keeps physical relay teardown on the attachment unless the relay id is an alias", () => {
     const target = sourceBetween(
-      "function relayCloseTargetForPhysicalWorkspace(",
+      "function workspaceSessionTargetForPhysicalWorkspace(",
+      "function relayCloseTargetsForPhysicalWorkspace(",
+    );
+    const targets = sourceBetween(
+      "function relayCloseTargetsForPhysicalWorkspace(",
       "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
     );
     const owner = sourceBetween(
@@ -31,22 +35,60 @@ describe("main-process engine store rebuild wiring", () => {
     );
 
     expect(target).toContain(
-      "if (relayWorkspaceId !== workspace.workspaceId) return relayWorkspaceId;",
+      "if (targetWorkspaceId !== workspace.workspaceId) return targetWorkspaceId;",
     );
     expect(target).toContain("workspaceId: workspace.workspaceId");
     expect(target).toContain("rootPath: workspace.rootPath");
     expect(target).toContain("attachmentId: workspace.attachmentId");
+    expect(targets).toContain(
+      "workspaceSessionTargetForPhysicalWorkspace(\n" +
+        "      workspace.workspaceId,\n" +
+        "      workspace,\n" +
+        "    )",
+    );
+    expect(targets).toContain(
+      "storedShareMounts(workspace).map((mount) =>\n" +
+        "      mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),",
+    );
+    expect(targets).toContain("const workspaceIds = new Set<string>([");
+    expect(targets).toContain("workspace.remote.remoteWorkspaceId");
+    expect(targets).toContain("workspaceIds.delete(workspace.workspaceId)");
     expect(owner).toContain("attachmentId: binding.attachmentId");
     expect(owner).toContain(
-      "relayCloseTargetForPhysicalWorkspace(physicalWorkspace)",
+      "relayCloseTargetsForPhysicalWorkspace(physicalWorkspace)",
     );
-    expect(owner).toContain("closeRelayTransportWorkspace(relayCloseTarget)");
+    expect(owner).toContain(
+      "...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target))",
+    );
     expect(transportClose).toContain("workspace: string | EngineWorkspace");
     expect(transportClose).toContain(
       "await rustEngineRelayClient.closeWorkspace(workspace)",
     );
     expect(transportClose).toContain(
       "await rustEngineWorkspaceSessions?.closeWorkspace(workspace)",
+    );
+  });
+
+  it("retires a standalone physical share by attachment and a mount child by id", () => {
+    const shareFiles = sourceBetween(
+      "function createShareViewFilesForOperation(",
+      "function withShareViewFilesOperation<Result>(",
+    );
+    expect(shareFiles).toMatch(
+      /workspaceSessionTargetForPhysicalWorkspace\(\s*target\.storeWorkspaceId,\s*operation\.workspace,\s*\)/,
+    );
+    expect(shareFiles).toContain(
+      "closeRelayTransportWorkspace(retireTarget)",
+    );
+  });
+
+  it("does not seed received-share session state under logical startup keys", () => {
+    const startup = sourceBetween(
+      "async function startRustEngineDaemon(",
+      "// Single-instance lock gates the entire bootstrap",
+    );
+    expect(startup).not.toContain(
+      "receivedShareEngine.workspaceForRegistered(workspace)",
     );
   });
 
@@ -60,8 +102,8 @@ describe("main-process engine store rebuild wiring", () => {
     expect(close).toMatch(
       /closeActivity: async \(\) => \{\s*await activity\.close\(current\.workspaceId, \{\s*expectedRootPath: current\.rootPath,\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
     );
-    expect(close).toContain(
-      "const relayCloseTarget = relayCloseTargetForPhysicalWorkspace(current)",
+    expect(close).toMatch(
+      /workspaceSessionTargetForPhysicalWorkspace\(\s*relayWorkspaceId,\s*current,?\s*\)/,
     );
     expect(close).toContain(
       "closeRelay: () => closeRelayTransportWorkspace(relayCloseTarget)",
@@ -100,7 +142,7 @@ describe("main-process engine store rebuild wiring", () => {
       /captureForFlaggedWorkspace\(\s*\{\s*\.\.\.workspace,[\s\S]*?shareView: false,/,
     );
     expect(dispatch).toMatch(
-      /const relayCloseTarget =\s*relayCloseTargetForPhysicalWorkspace\(workspace\)/,
+      /const relayWorkspaceId = workspace\.remote\?\.remoteWorkspaceId;[\s\S]*?workspaceSessionTargetForPhysicalWorkspace\(\s*relayWorkspaceId,\s*workspace,\s*\)/,
     );
     expect(dispatch).toContain(
       "await closeRelayTransportWorkspace(relayCloseTarget).catch(",
