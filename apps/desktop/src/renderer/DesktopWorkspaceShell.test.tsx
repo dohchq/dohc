@@ -65,6 +65,7 @@ import type {
   UpdateStateEvent,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
+  WorkspaceActivityEvent,
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
@@ -312,7 +313,7 @@ function deferred<T>() {
 }
 
 function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
-  const activityCallbacks = new Set<() => void>();
+  const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
   let pluginPanelOpenedCallback:
@@ -322,8 +323,8 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     | ((event: PluginWebAppOpenedEvent) => void)
     | null = null;
   return {
-    emitWorkspaceActivity: () => {
-      for (const callback of [...activityCallbacks]) callback();
+    emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
+      for (const callback of [...activityCallbacks]) callback(event);
     },
     emitSearchResults: (batch: SearchResultsEvent) => searchCallback?.(batch),
     emitPluginPanelOpened: (event: PluginPanelOpenedEvent) =>
@@ -579,12 +580,14 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         refusedDetail: null,
       }),
     ),
-    onWorkspaceActivity: vi.fn((callback: () => void) => {
-      activityCallbacks.add(callback);
-      return () => {
-        activityCallbacks.delete(callback);
-      };
-    }),
+    onWorkspaceActivity: vi.fn(
+      (callback: (event: WorkspaceActivityEvent) => void) => {
+        activityCallbacks.add(callback);
+        return () => {
+          activityCallbacks.delete(callback);
+        };
+      },
+    ),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
     onMenuCommand: vi.fn((callback: (command: MenuCommandId) => void) => {
       menuCallback = callback;
@@ -13692,6 +13695,10 @@ describe("open editors", () => {
     await waitFor(() =>
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBeGreaterThan(refreshCount),
     );
+    // MUTATION: an explicit refresh must not opt into the activity cache.
+    expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+    });
   });
 
   it("creates files and folders from the files title actions at the focused tree context", async () => {
@@ -15096,6 +15103,7 @@ describe("workbench render cost", () => {
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
     );
+    await screen.findAllByTestId("tree-row");
 
     vi.useFakeTimers();
     try {
@@ -15127,6 +15135,188 @@ describe("workbench render cost", () => {
       expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 4);
       expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 4);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips only an all-hidden file window and still refreshes every history lane", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findAllByTestId("tree-row");
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const moments = bridge.listEngineMoments.mock.calls.length;
+      const statuses = bridge.getSyncStatus.mock.calls.length;
+      const agents = bridge.getAgentRunStatus.mock.calls.length;
+      const tryStates = bridge.getTryInVersionState.mock.calls.length;
+
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".dohc/engine/index", "pkg/node_modules/cache.bin"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      // MUTATION: refreshing files for every path-rich event makes the hidden
+      // engine and dependency churn pay for a disk walk it cannot change.
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings);
+      // Path alone cannot prove history harmless. A deleted or retired path
+      // may be absent from the current tree and still change these surfaces.
+      expect(bridge.listEngineMoments).toHaveBeenCalledTimes(moments + 1);
+      expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statuses + 1);
+      expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents + 1);
+      expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces a mixed path-rich window through main's complete-listing cache", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const statusReads = bridge.getSyncStatus.mock.calls.length;
+      act(() => {
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".git/objects/ignored"],
+        });
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: ["notes/created.md"],
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
+      expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statusReads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("makes any pathless event in a mixed window force the full refresh", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const statusReads = bridge.getSyncStatus.mock.calls.length;
+      act(() => {
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: ["notes/changed.md"],
+        });
+        bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId });
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".dohc/engine/index"],
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      // MUTATION: once broad, a later scoped event must not downgrade the
+      // window to a cacheable request.
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+      });
+      expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statusReads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a mismatched workspace payload as a full refresh", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await screen.findAllByTestId("tree-row");
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: "ws-other",
+          paths: [".dohc/engine/index"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not skip an all-hidden window before the first listing commits", async () => {
+    const pending = deferred<{
+      files: { path: string; kind: "file" }[];
+      folders: string[];
+    }>();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(() => pending.promise);
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(1),
+    );
+
+    vi.useFakeTimers();
+    try {
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".dohc/engine/index"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
+    } finally {
+      await act(async () => {
+        pending.resolve({
+          files: [{ path: "a.md", kind: "file" }],
+          folders: [],
+        });
+        await pending.promise;
+      });
       vi.useRealTimers();
     }
   });

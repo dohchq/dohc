@@ -111,6 +111,7 @@ import {
   PluginWebAppFailedEvent,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
+  WorkspaceIdPayload,
   ListWorkspaceVersionsResult,
   CreateWorkspaceVersionPayload,
   SwitchWorkspaceVersionPayload,
@@ -527,8 +528,10 @@ import {
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
 import {
   broadcastWorkspaceActivity,
+  workspaceActivityPayload,
   type WorkspaceActivityScope,
 } from "./ipc/workspaceActivityBroadcast";
+import { WorkspaceFileListingCache } from "./workspaces/workspaceFileListingCache";
 import {
   EngineRelayClient,
   probeWorkspaceRelay,
@@ -1286,7 +1289,10 @@ function cloudLogin(): CloudLogin {
 // workspace B never refetches its world for workspace A's activity. Only a
 // genuinely cross-workspace event (logout, registry change, daemon
 // relaunch) broadcasts scope-free.
+const workspaceFileListings = new WorkspaceFileListingCache();
+
 function notifyRenderer(scope?: WorkspaceActivityScope): void {
+  workspaceFileListings.invalidate(workspaceActivityPayload(scope));
   broadcastWorkspaceActivity({
     windows: BrowserWindow.getAllWindows(),
     activeWorkspaceIdOf: (webContentsId) => {
@@ -4728,9 +4734,12 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const input = ListWorkspaceFilesPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
-    return ListWorkspaceFilesResult.parse(
-      await listOwnedWorkspaceFiles(workspace),
-    );
+    return workspaceFileListings.list({
+      workspaceId: input.workspaceId,
+      allowCached: input.allowCached === true,
+      load: async () =>
+        ListWorkspaceFilesResult.parse(await listOwnedWorkspaceFiles(workspace)),
+    });
   });
 
   ipcMain.handle(CHANNELS.createWorkspaceFile, workspaceFileMutations.createFile);
@@ -7037,7 +7046,7 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.listWorkspaceVersions, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
+    const input = WorkspaceIdPayload.parse(payload);
     const capture = await requireVersionOperations(input.workspaceId);
     const snapshot = await capture.listVersions();
     return ListWorkspaceVersionsResult.parse({
@@ -7155,7 +7164,7 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.getTryInVersionState, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
+    const input = WorkspaceIdPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     return TryInVersionStateResult.parse({
       state: tryInVersionSessions.snapshot(input.workspaceId),
@@ -7164,7 +7173,7 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.dismissTryInVersionReview, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
+    const input = WorkspaceIdPayload.parse(payload);
     requireWorkspace(input.workspaceId);
     tryInVersionSessions.dismiss(input.workspaceId);
   });
@@ -9132,7 +9141,7 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.getSyncStatus, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
+    const input = WorkspaceIdPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     return SyncStatusResult.parse(
       await syncStatusWithOwnedProjection(
@@ -9447,7 +9456,7 @@ function registerIpcHandlers(
   // ("no saved state"), never an error.
   ipcMain.handle(CHANNELS.getWorkspaceUiState, async (event, payload) => {
     assertTrustedSender(event);
-    const input = ListWorkspaceFilesPayload.parse(payload);
+    const input = WorkspaceIdPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const parsed = GetWorkspaceUiStateResult.safeParse(
       await readUiStateFile(workspace.rootPath),

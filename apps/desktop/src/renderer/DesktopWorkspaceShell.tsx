@@ -45,9 +45,11 @@ import type {
   WorkbenchMenuCommand,
   WorkspaceGraphResult,
   WorkspaceFileEntry,
+  WorkspaceActivityEvent,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
 import {
+  activityPathsAffectWorkspaceListing,
   ENGINE_STORE_BACKUP_DIR,
   engineStoreRefusalSentence,
 } from "../ipc/bridgeContract";
@@ -2310,26 +2312,34 @@ export function DesktopWorkspaceShell(props: {
   // purpose that cannot be undone. See the close below.
   const failedFilesRequest = useRef(0);
   const [listingsSettled, setListingsSettled] = useState(0);
-  const refreshFiles = useCallback(async () => {
-    const request = ++filesRequest.current;
-    pendingFilesRequests.current += 1;
-    try {
-      const result = await bridge().listWorkspaceFiles({ workspaceId });
-      if (request <= committedFilesRequest.current) return;
-      committedFilesRequest.current = request;
-      setFiles(result.files);
-      setFolders(result.folders ?? []);
-      setFilesLoaded(true);
-    } catch (error) {
-      if (request > failedFilesRequest.current) failedFilesRequest.current = request;
-      throw error;
-    } finally {
-      pendingFilesRequests.current -= 1;
-      if (pendingFilesRequests.current === 0) {
-        setListingsSettled((settled) => settled + 1);
+  const refreshFiles = useCallback(
+    async (options: { allowCached?: true } = {}) => {
+      const request = ++filesRequest.current;
+      pendingFilesRequests.current += 1;
+      try {
+        const result = await bridge().listWorkspaceFiles({
+          workspaceId,
+          ...options,
+        });
+        if (request <= committedFilesRequest.current) return;
+        committedFilesRequest.current = request;
+        setFiles(result.files);
+        setFolders(result.folders ?? []);
+        setFilesLoaded(true);
+      } catch (error) {
+        if (request > failedFilesRequest.current) {
+          failedFilesRequest.current = request;
+        }
+        throw error;
+      } finally {
+        pendingFilesRequests.current -= 1;
+        if (pendingFilesRequests.current === 0) {
+          setListingsSettled((settled) => settled + 1);
+        }
       }
-    }
-  }, [workspaceId]);
+    },
+    [workspaceId],
+  );
 
   // Keep a restored tab only while the workspace still lists its file. A
   // rollback, an external delete, or a share pull changes the tree without an
@@ -4488,30 +4498,57 @@ export function DesktopWorkspaceShell(props: {
     // so the coalesced (newest) refresh can never lose to a dropped one.
     // A pending timer cleared by this effect's cleanup is not a lost refresh
     // either: every re-run's body above refreshes both surfaces itself.
+    // Path detail scopes only the file listing. A complete listing also feeds
+    // empty folders, icons, wikilinks, and graph keys, so a named visible path
+    // still asks main for one complete result. Main can coalesce that walk
+    // across windows after it invalidates the workspace's cached listing.
+    // Paths hidden by the lister cannot change any of those structures, so an
+    // all-hidden window skips the file IPC once a listing has committed.
+    // History always refreshes: capture outcomes and deletes/retirements are
+    // not distinguishable from path strings alone.
+    //
     // The max-wait deadline keeps a burst that never quiets honest: the
     // trailing edge slides only until the deadline, then the refresh fires
     // and the next event starts a fresh window.
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     let refreshDeadline: number | null = null;
+    let filesRefreshMode: "skip" | "cached" | "full" = "skip";
     const runActivityRefresh = () => {
+      const mode = filesRefreshMode;
       refreshTimer = null;
       refreshDeadline = null;
-      void refreshFiles().catch((error) =>
-        reportShellError("Could not refresh workspace files.", error),
-      );
+      filesRefreshMode = "skip";
+      if (mode !== "skip" || committedFilesRequest.current === 0) {
+        void refreshFiles(mode === "full" ? {} : { allowCached: true }).catch(
+          (error) =>
+            reportShellError("Could not refresh workspace files.", error),
+        );
+      }
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
       );
     };
-    const unsubscribe = bridge().onWorkspaceActivity(() => {
-      const now = Date.now();
-      refreshDeadline ??= now + WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS;
-      if (refreshTimer !== null) clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(
-        runActivityRefresh,
-        Math.min(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, refreshDeadline - now),
-      );
-    });
+    const unsubscribe = bridge().onWorkspaceActivity(
+      (event: WorkspaceActivityEvent) => {
+        const paths =
+          event.workspaceId === workspaceId ? event.paths : undefined;
+        if (!paths?.length) {
+          filesRefreshMode = "full";
+        } else if (
+          filesRefreshMode !== "full" &&
+          activityPathsAffectWorkspaceListing(paths)
+        ) {
+          filesRefreshMode = "cached";
+        }
+        const now = Date.now();
+        refreshDeadline ??= now + WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS;
+        if (refreshTimer !== null) clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(
+          runActivityRefresh,
+          Math.min(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, refreshDeadline - now),
+        );
+      },
+    );
     return () => {
       cancelled = true;
       if (refreshTimer !== null) clearTimeout(refreshTimer);

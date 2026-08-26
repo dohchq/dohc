@@ -7,6 +7,7 @@ import {
   nameUnitFor,
   sameFsEntry,
   entryCharBudget,
+  hasIgnoredSegment,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
@@ -64,8 +65,6 @@ import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 // `shared-with-me` is intentionally visible: accepted shares materialize there
 // for read/preview by local sites. Publishing or re-sharing those files remains
 // gated by the explicit publish/share flow, not by local file preview.
-const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
-
 // Head bytes read to find a markdown page's `icon` frontmatter. The icon is a
 // short scalar near the top (id, title, icon priority order), so a small
 // bounded read covers it without ever loading a whole document.
@@ -182,12 +181,10 @@ export async function listFiles(
       const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
       // Never follow symlinks: a dir/file symlink could point outside the
       // workspace and leak names or recurse into foreign trees.
-      if (dirent.isSymbolicLink()) continue;
+      if (hasIgnoredSegment(rel) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIRS.has(dirent.name)) {
-          folders.push(rel);
-          await walk(join(dir, dirent.name), rel);
-        }
+        folders.push(rel);
+        await walk(join(dir, dirent.name), rel);
       } else if (dirent.isFile()) {
         const kind = classifyPath(rel).kind;
         const entry: WorkspaceFileEntry = { path: rel, kind };
@@ -1242,11 +1239,10 @@ export async function collectZipEntries(
       if (dirent.isSymbolicLink()) continue;
       const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
       const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
+      if (hasIgnoredSegment(relPath)) continue;
       if (options?.includeArchivePath?.(archivePath) === false) continue;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIRS.has(dirent.name)) {
-          await walk(join(dir, dirent.name), relPath, archivePath);
-        }
+        await walk(join(dir, dirent.name), relPath, archivePath);
       } else if (dirent.isFile()) {
         // Secret-classified files (.env family) stay out of archives —
         // including inside mounted shares (read-aware classification).

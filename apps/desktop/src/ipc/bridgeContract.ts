@@ -1,6 +1,7 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
+  hasIgnoredSegment,
   WORKSPACE_KINDS,
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
@@ -304,8 +305,16 @@ export type AttachWorkspaceFolderPayload = z.infer<
   typeof AttachWorkspaceFolderPayload
 >;
 
-export const ListWorkspaceFilesPayload = z.object({
+export const WorkspaceIdPayload = z.object({
   workspaceId: WORKSPACE_ID,
+});
+export type WorkspaceIdPayload = z.infer<typeof WorkspaceIdPayload>;
+
+export const ListWorkspaceFilesPayload = WorkspaceIdPayload.extend({
+  // Activity refreshes may reuse main's last complete listing. Every other
+  // caller omits this and forces a disk/share walk, so direct mutations and
+  // the Explorer's explicit refresh cannot observe a pre-watcher cache.
+  allowCached: z.literal(true).optional(),
 });
 export type ListWorkspaceFilesPayload = z.infer<
   typeof ListWorkspaceFilesPayload
@@ -3049,6 +3058,15 @@ export const WorkspaceActivityEvent = z
   .strict();
 export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;
 
+// Shared by main's complete-listing cache and the renderer's activity
+// debounce. Keeping this decision beside the event prevents either side from
+// broadening its idea of a visible path without the other.
+export function activityPathsAffectWorkspaceListing(
+  paths: readonly string[],
+): boolean {
+  return paths.some((path) => !hasIgnoredSegment(path));
+}
+
 // Unlike plugin events, an activity ping must never be DROPPED on a schema
 // failure: under-notifying is the staleness bug the channel exists to
 // prevent. A malformed payload degrades to the global, payload-free ping.
@@ -4928,7 +4946,7 @@ export interface DohcDesktopBridge {
   // Named versions (PR 0M-4). Gated in main on the workspace-engine alpha
   // flag: for unflagged workspaces every call rejects.
   listWorkspaceVersions(
-    payload: ListWorkspaceFilesPayload,
+    payload: WorkspaceIdPayload,
   ): Promise<ListWorkspaceVersionsResult>;
   createWorkspaceVersion(
     payload: CreateWorkspaceVersionPayload,
@@ -4954,9 +4972,9 @@ export interface DohcDesktopBridge {
     payload: TryInWorkspaceVersionPayload,
   ): Promise<TryInWorkspaceVersionResult>;
   getTryInVersionState(
-    payload: ListWorkspaceFilesPayload,
+    payload: WorkspaceIdPayload,
   ): Promise<TryInVersionStateResult>;
-  dismissTryInVersionReview(payload: ListWorkspaceFilesPayload): Promise<void>;
+  dismissTryInVersionReview(payload: WorkspaceIdPayload): Promise<void>;
   // Engine history + linked Chats (PR 0M-5). Gated in main on the
   // workspace-engine alpha flag: for unflagged workspaces every call rejects.
   listEngineMoments(
@@ -5030,7 +5048,7 @@ export interface DohcDesktopBridge {
   presencePublish(payload: PresencePublishPayload): Promise<PresenceResult>;
   presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
-  getSyncStatus(payload: ListWorkspaceFilesPayload): Promise<SyncStatusResult>;
+  getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
   rebuildEngineStore(
     payload: RebuildEngineStorePayload,
   ): Promise<RebuildEngineStoreResult>;
@@ -5071,7 +5089,7 @@ export interface DohcDesktopBridge {
   ): Promise<DesktopUserSettingsResult>;
   // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
   getWorkspaceUiState(
-    payload: ListWorkspaceFilesPayload,
+    payload: WorkspaceIdPayload,
   ): Promise<GetWorkspaceUiStateResult>;
   setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
   // Live push: main signals the renderer when the active workspace's files

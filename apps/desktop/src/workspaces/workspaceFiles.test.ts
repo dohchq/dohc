@@ -114,6 +114,11 @@ describe("listFiles", () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await writeFile(join(root, ".dohc", "manifest.json"), "{}");
     await mkdir(join(root, "notes"), { recursive: true });
+    await mkdir(join(root, "notes", ".GIT"), { recursive: true });
+    await writeFile(join(root, "notes", ".GIT", "index"), "internal");
+    await mkdir(join(root, "notes", "NODE_MODULES"), { recursive: true });
+    await writeFile(join(root, "notes", "NODE_MODULES", "cache.js"), "internal");
+    await writeFile(join(root, ".dohc-write-listing.tmp"), "internal");
     await writeFile(join(root, "notes", "a.md"), "");
     await writeFile(join(root, "wallet.sqlite"), "");
     const result = await listFiles(root);
