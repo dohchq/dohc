@@ -57,6 +57,10 @@ class TimingTransport implements EngineTransport {
 
   constructor(private readonly inner: EngineTransport) {}
 
+  get helloAck(): EngineTransport["helloAck"] {
+    return this.inner.helloAck;
+  }
+
   async sendRequest(request: Request): Promise<Response> {
     const startedAt = performance.now();
     try {
@@ -70,6 +74,15 @@ class TimingTransport implements EngineTransport {
 
   onEvent(handler: Parameters<EngineTransport["onEvent"]>[0]): () => void {
     return this.inner.onEvent(handler);
+  }
+
+  onBlob(
+    handler: Parameters<NonNullable<EngineTransport["onBlob"]>>[0],
+  ): () => void {
+    if (this.inner.onBlob === undefined) {
+      throw new Error("The measured transport does not expose blob delivery.");
+    }
+    return this.inner.onBlob(handler);
   }
 
   requireOpenMs(): number {

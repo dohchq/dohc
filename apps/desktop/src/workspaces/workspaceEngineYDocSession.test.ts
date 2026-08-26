@@ -64,6 +64,12 @@ let capture: ReturnType<typeof createWorkspaceEngineCapture>;
 function daemonSessions(): EngineWorkspaceSessions {
   const client: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
+    get helloAck() {
+      return ydoc.helloAck;
+    },
+    onBlob(handler) {
+      return ydoc.onBlob(handler);
+    },
     onEvent(handler: (event: Event) => void) {
       return ydoc.onEvent(handler);
     },

@@ -7,10 +7,11 @@
 //! durable yrs reconstruction → `ydoc.resync` path and compares the resulting
 //! typed-root state against the yjs oracle.
 
-use base64::Engine as _;
 use dohc_engine_collab::{CacheStats, Ydoc};
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{
+        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
+    },
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_testkit::ScratchDir;
@@ -103,6 +104,38 @@ async fn call(
         .await
         .unwrap_or_else(|error| panic!("{failure_context}: {method} failed: {error:?}"))
         .result
+}
+
+async fn call_ydoc_with_blob(
+    service: &EngineService,
+    handle: &WorkspaceHandle,
+    id: u64,
+    method: &str,
+    params: Value,
+    failure_context: &str,
+) -> (Value, Vec<u8>) {
+    let output = ProtocolEngineService::call(
+        service,
+        RequestContext::unbounded().with_capability("blobs"),
+        request(id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{failure_context}: {method} failed: {error:?}"));
+    assert_eq!(output.response.id, id);
+    assert!(
+        output.response.result.get("initialUpdateBase64").is_none(),
+        "{failure_context}: {method} must not duplicate the Y.Doc state in JSON"
+    );
+    let egress = output
+        .blob_egress
+        .unwrap_or_else(|| panic!("{failure_context}: {method} did not return blob egress"));
+    assert_eq!(egress.stream_id, id);
+    assert_eq!(
+        egress.sha256,
+        dohc_engine_storage::hex_sha256(&egress.bytes),
+        "{failure_context}: {method} blob digest"
+    );
+    (output.response.result, egress.bytes)
 }
 
 struct ReplayRun {
@@ -243,8 +276,8 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: 
             .expect("clear actor cache for cold pair");
     }
 
-    let resynced = call(
-        &transport,
+    let (_resynced, state) = call_ydoc_with_blob(
+        service.as_ref(),
         &handle,
         request_id,
         "ydoc.resync",
@@ -252,13 +285,6 @@ async fn replay_through_engine(scenario: &Scenario, ordinal: usize, force_cold: 
         &scenario.name,
     )
     .await;
-    let state = base64::engine::general_purpose::STANDARD
-        .decode(
-            resynced["initialUpdateBase64"]
-                .as_str()
-                .expect("resync full-state update"),
-        )
-        .expect("resync base64");
     let replayed = Ydoc::wire();
     replayed
         .apply(&state)

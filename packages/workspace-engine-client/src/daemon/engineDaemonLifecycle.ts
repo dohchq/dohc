@@ -17,7 +17,7 @@ import {
 
 const ENGINE_BINARY_RESOURCE_DIR = "workspace-engine";
 const ENGINE_BINARY_BASENAME = "dohc-workspace-engine";
-const ENGINE_PROTOCOL_VERSION = 1;
+const ENGINE_PROTOCOL_VERSION = 2;
 const DEFAULT_MAX_RESTARTS = 3;
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 2_000;
@@ -53,8 +53,8 @@ const DEFAULT_PING_INTERVAL_MS = 30_000;
 // control frame may reach `max_frame_bytes` = 8 MiB — so up to 512 MiB can sit
 // ahead of a reply. `BlobEgressBudget` does not bound this: it reserves blob
 // bytes only. Most responses are far smaller (`SINGLE_ROW_HARD_CAP_BYTES` is
-// 700 KiB, page budgets 256 KiB), but `ydoc.open` and `ydoc.resync` carry a
-// base64 state sized to fill a frame, so 64 of those reach the ceiling.
+// 700 KiB and page budgets are 256 KiB), but a control response may still fill
+// its frame, so 64 maximum-sized responses reach the ceiling.
 //
 // That is why the expiry alone cannot be the test, and why raising it would
 // not help: no timeout both survives 512 MiB of egress and still catches a
@@ -107,6 +107,9 @@ const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
 export interface EngineDaemonClient {
   sendRequest(request: Request): Promise<Response>;
+  readonly helloAck?: {
+    readonly capabilities: readonly string[];
+  };
   cancelRequest?(requestId: number): Promise<void>;
   onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
   onEvent?(handler: (event: Event) => void): () => void;

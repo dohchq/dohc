@@ -263,6 +263,131 @@
           "const": "WORKSPACE_UNAVAILABLE"
         },
         {
+          "description": "A relay compare-and-swap precondition failed.",
+          "type": "string",
+          "const": "CONFLICT"
+        },
+        {
+          "description": "The relay has a different operation at a locally-owned coordinate.",
+          "type": "string",
+          "const": "ORIGIN_DIVERGED"
+        },
+        {
+          "description": "The requested share no longer exists or is no longer available.",
+          "type": "string",
+          "const": "SHARE_UNAVAILABLE"
+        },
+        {
+          "description": "The workspace has no enrolled key envelope.",
+          "type": "string",
+          "const": "KEY_ENVELOPE_MISSING"
+        },
+        {
+          "description": "A newer replication epoch replaced the caller's epoch.",
+          "type": "string",
+          "const": "EPOCH_SUPERSEDED"
+        },
+        {
+          "description": "The relay does not recognize the caller's replication identity.",
+          "type": "string",
+          "const": "IDENTITY_NOT_RECOGNIZED"
+        },
+        {
+          "description": "The relay refused an authenticated caller's operation.",
+          "type": "string",
+          "const": "FORBIDDEN"
+        },
+        {
+          "description": "The share does not permit writes.",
+          "type": "string",
+          "const": "SHARE_READ_ONLY"
+        },
+        {
+          "description": "The operation falls outside the granted share selector.",
+          "type": "string",
+          "const": "SHARE_OPERATION_REJECTED"
+        },
+        {
+          "description": "The request exceeded the relay's payload limit.",
+          "type": "string",
+          "const": "PAYLOAD_TOO_LARGE"
+        },
+        {
+          "description": "The request exceeded the relay's storage or usage quota.",
+          "type": "string",
+          "const": "QUOTA_EXCEEDED"
+        },
+        {
+          "description": "Relay pagination claimed more data without advancing.",
+          "type": "string",
+          "const": "RELAY_NO_PROGRESS"
+        },
+        {
+          "description": "A referenced relay blob does not exist.",
+          "type": "string",
+          "const": "BLOB_MISSING"
+        },
+        {
+          "description": "A relay log row references a blob that is unavailable.",
+          "type": "string",
+          "const": "BLOB_REFERENCE_MISSING"
+        },
+        {
+          "description": "Relay blob bytes failed integrity validation.",
+          "type": "string",
+          "const": "BLOB_INVALID"
+        },
+        {
+          "description": "The operation requires a replication identity.",
+          "type": "string",
+          "const": "IDENTITY_REQUIRED"
+        },
+        {
+          "description": "The caller's stream identity does not match the workspace.",
+          "type": "string",
+          "const": "STREAM_IDENTITY_MISMATCH"
+        },
+        {
+          "description": "The relay rejected the claimed operation author.",
+          "type": "string",
+          "const": "AUTHORSHIP_MISMATCH"
+        },
+        {
+          "description": "The relay cannot safely classify the chat operation.",
+          "type": "string",
+          "const": "UNKNOWN_CHAT_OPERATION"
+        },
+        {
+          "description": "Relay presence capacity is exhausted.",
+          "type": "string",
+          "const": "PRESENCE_CAPACITY"
+        },
+        {
+          "description": "A user attempted to share a workspace with themselves.",
+          "type": "string",
+          "const": "SELF_SHARE"
+        },
+        {
+          "description": "A share selector resolves ambiguously.",
+          "type": "string",
+          "const": "AMBIGUOUS_SELECTOR"
+        },
+        {
+          "description": "A shared channel selector is invalid.",
+          "type": "string",
+          "const": "INVALID_CHANNEL"
+        },
+        {
+          "description": "The relay endpoint does not permit this HTTP method.",
+          "type": "string",
+          "const": "RELAY_METHOD_NOT_ALLOWED"
+        },
+        {
+          "description": "The relay returned a response that violated its wire contract.",
+          "type": "string",
+          "const": "RELAY_INVALID_RESPONSE"
+        },
+        {
           "description": "Internal engine failure; details in redacted diagnostics only.",
           "type": "string",
           "const": "INTERNAL"

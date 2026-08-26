@@ -49,7 +49,6 @@ export type YdocOpenResult = JsonObject & {
   objectId: string;
   path: string;
   contentKind: YdocContentKind;
-  initialUpdateBase64: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
   // "absent" means the version does not contain the path. See
   // EngineYdocProviderSession.head.
@@ -84,7 +83,6 @@ export type YdocRecordUpdateResult = JsonObject & {
 };
 
 export type YdocResyncResult = JsonObject & {
-  initialUpdateBase64: string;
   lineageClaimId: string | null;
   recoveredPaths: string[];
   artifactAssets: ArtifactAssetDescriptor[];
@@ -194,7 +192,6 @@ const OpenResultSchema = mutableStruct({
   objectId: Schema.String,
   path: Schema.String,
   contentKind: YdocContentKindSchema,
-  initialUpdateBase64: Schema.String,
   head: Schema.Literals(["present", "absent"]),
   lineage: Schema.Literals(["existing", "absent"]),
   artifactAssets: Schema.optionalKey(Schema.Array(ArtifactAssetDescriptorSchema)),
@@ -206,7 +203,6 @@ const RecordUpdateResultSchema = mutableStruct({
   lineageClaimId: Schema.NullOr(Schema.String),
 });
 const ResyncResultSchema = mutableStruct({
-  initialUpdateBase64: Schema.String,
   lineageClaimId: Schema.NullOr(Schema.String),
   recoveredPaths: Schema.mutable(Schema.Array(Schema.String)),
   artifactAssets: Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema)),

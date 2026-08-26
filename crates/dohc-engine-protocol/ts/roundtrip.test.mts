@@ -142,7 +142,7 @@ test("the validator is not vacuous: corrupted envelopes fail", () => {
     { type: "nope" },
     { type: "cancel" }, // missing id
     { type: "cancel", id: "42" }, // wrong primitive
-    { type: "hello", protocolVersion: 1, capabilities: [], lastSessionGeneration: null }, // missing authToken
+    { type: "hello", protocolVersion: 2, capabilities: [], lastSessionGeneration: null }, // missing authToken
     { type: "event", seq: -1.5, sessionGeneration: 7, name: "x", payload: null }, // non-integer seq
     null,
     [],

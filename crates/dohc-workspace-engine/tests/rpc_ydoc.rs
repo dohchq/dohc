@@ -8,7 +8,9 @@ use dohc_engine_collab::{
 use dohc_engine_files::MAX_CAPTURE_TEXT_BYTES;
 use dohc_engine_protocol::{
     error::ErrorCode,
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{
+        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
+    },
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
@@ -46,6 +48,37 @@ async fn call(
         .await
         .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
         .result
+}
+
+async fn call_ydoc_with_blob(
+    service: &EngineService,
+    handle: &WorkspaceHandle,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> (Value, Vec<u8>) {
+    let output = ProtocolEngineService::call(
+        service,
+        RequestContext::unbounded().with_capability("blobs"),
+        request(id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"));
+    assert_eq!(output.response.id, id);
+    assert!(
+        output.response.result.get("initialUpdateBase64").is_none(),
+        "{method} must not duplicate the Y.Doc state in JSON"
+    );
+    let egress = output
+        .blob_egress
+        .unwrap_or_else(|| panic!("{method} did not return blob egress"));
+    assert_eq!(egress.stream_id, id);
+    assert_eq!(
+        egress.sha256,
+        dohc_engine_storage::hex_sha256(&egress.bytes),
+        "{method} blob digest"
+    );
+    (output.response.result, egress.bytes)
 }
 
 async fn open_workspace(
@@ -252,10 +285,10 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
     );
 
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-seed", 1).await;
-    let opened = call(
-        &transport,
+    let (opened, initial) = call_ydoc_with_blob(
+        service.as_ref(),
         &handle,
         2,
         "ydoc.open",
@@ -271,13 +304,6 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
     assert_eq!(opened["head"], json!("present"));
     assert_eq!(opened["lineage"], json!("existing"));
     assert!(opened.get("seedContent").is_none());
-    let initial = base64::engine::general_purpose::STANDARD
-        .decode(
-            opened["initialUpdateBase64"]
-                .as_str()
-                .expect("initial update"),
-        )
-        .expect("base64 update");
     assert!(
         !initial
             .windows(image_base64.len())
@@ -384,7 +410,7 @@ async fn scene_open_claims_a_whitespace_only_artifact_after_capture_wins() {
     write_file(scratch.path(), PATH, b" \n\t");
 
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-empty-scene", 31).await;
     let captured = call(
         &transport,
@@ -400,8 +426,8 @@ async fn scene_open_claims_a_whitespace_only_artifact_after_capture_wins() {
         "capture must win before open"
     );
 
-    let opened = call(
-        &transport,
+    let (opened, initial) = call_ydoc_with_blob(
+        service.as_ref(),
         &handle,
         33,
         "ydoc.open",
@@ -416,13 +442,6 @@ async fn scene_open_claims_a_whitespace_only_artifact_after_capture_wins() {
     assert_eq!(opened["head"], json!("present"));
     assert_eq!(opened["lineage"], json!("existing"));
     assert_eq!(opened["contentKind"], json!("scene"));
-    let initial = base64::engine::general_purpose::STANDARD
-        .decode(
-            opened["initialUpdateBase64"]
-                .as_str()
-                .expect("initial update"),
-        )
-        .expect("base64 update");
     let doc = Ydoc::wire();
     doc.apply(&initial).expect("empty scene applies");
     assert!(doc.fold_scene().elements.is_empty());
@@ -528,10 +547,10 @@ async fn scene_open_seeds_legacy_elements_and_repairs_a_dangling_image() {
     );
 
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-legacy-scene", 1).await;
-    let opened = call(
-        &transport,
+    let (opened, initial) = call_ydoc_with_blob(
+        service.as_ref(),
         &handle,
         2,
         "ydoc.open",
@@ -548,13 +567,6 @@ async fn scene_open_seeds_legacy_elements_and_repairs_a_dangling_image() {
     assert_eq!(opened["head"], json!("present"));
     assert_eq!(opened["lineage"], json!("existing"));
     assert!(opened.get("artifactAssets").is_none());
-    let initial = base64::engine::general_purpose::STANDARD
-        .decode(
-            opened["initialUpdateBase64"]
-                .as_str()
-                .expect("initial update"),
-        )
-        .expect("base64 update");
     let doc = Ydoc::wire();
     doc.apply(&initial).expect("seeded state applies");
     let by_id = doc
@@ -1399,11 +1411,11 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
     );
 
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-order", 77).await;
     let open = |id: u64| {
-        call(
-            &transport,
+        call_ydoc_with_blob(
+            service.as_ref(),
             &handle,
             id,
             "ydoc.open",
@@ -1415,20 +1427,13 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
             }),
         )
     };
-    let opened = open(78).await;
-    let fold_opened = |value: &Value| {
-        let update = base64::engine::general_purpose::STANDARD
-            .decode(
-                value["initialUpdateBase64"]
-                    .as_str()
-                    .expect("initial update"),
-            )
-            .expect("base64 update");
+    let (opened, initial) = open(78).await;
+    let fold_opened = |update: &[u8]| {
         let doc = Ydoc::wire();
-        doc.apply(&update).expect("scene update applies");
+        doc.apply(update).expect("scene update applies");
         doc.fold_scene()
     };
-    let seeded = fold_opened(&opened);
+    let seeded = fold_opened(&initial);
     assert_eq!(
         seeded
             .elements
@@ -1472,9 +1477,9 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
         "repaired indices must encode source order: {settled_indices:?}"
     );
 
-    let reopened = open(80).await;
+    let (reopened, reopened_initial) = open(80).await;
     assert_eq!(
-        fold_opened(&reopened)
+        fold_opened(&reopened_initial)
             .elements
             .iter()
             .filter_map(|element| element["id"].as_str())
@@ -1519,12 +1524,12 @@ async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact(
         artifact.as_bytes(),
     );
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-no-reseed", 81).await;
 
     for request_id in [82, 84] {
-        let opened = call(
-            &transport,
+        let (opened, update) = call_ydoc_with_blob(
+            service.as_ref(),
             &handle,
             request_id,
             "ydoc.open",
@@ -1538,13 +1543,6 @@ async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact(
         .await;
         assert_eq!(opened["lineage"], "absent");
         assert!(opened.get("artifactAssets").is_none());
-        let update = base64::engine::general_purpose::STANDARD
-            .decode(
-                opened["initialUpdateBase64"]
-                    .as_str()
-                    .expect("initial update"),
-            )
-            .expect("base64 update");
         let doc = Ydoc::wire();
         doc.apply(&update).expect("empty state applies");
         let folded = doc.fold_scene();
@@ -1816,7 +1814,7 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
     .expect("portable scene");
     write_file(scratch.path(), "undo.excalidraw", artifact.as_bytes());
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-scene-undo", 201).await;
     let first = call(
         &transport,
@@ -1875,8 +1873,8 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
     )
     .await;
 
-    let joined = call(
-        &transport,
+    let (joined, initial) = call_ydoc_with_blob(
+        service.as_ref(),
         &handle,
         206,
         "ydoc.open",
@@ -1888,13 +1886,6 @@ async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
     .await;
     assert_eq!(joined["artifactAssets"], json!([descriptor]));
     let joined_doc = Ydoc::wire();
-    let initial = base64::engine::general_purpose::STANDARD
-        .decode(
-            joined["initialUpdateBase64"]
-                .as_str()
-                .expect("initial update"),
-        )
-        .expect("initial update base64");
     joined_doc.apply(&initial).expect("joined scene applies");
     assert!(joined_doc.fold_scene().elements.is_empty());
     assert_eq!(
@@ -2444,6 +2435,138 @@ async fn ydoc_open_rejects_secret_paths() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
+    const MIB: usize = 1024 * 1024;
+    const DELTA_TEXT_BYTES: usize = 4 * MIB;
+    const OLD_UPDATE_CAP: usize = 5 * MIB;
+    const OLD_STATE_WIRE_CAP: usize = 6 * MIB;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-large-egress", 1).await;
+
+    let (opened, _initial_state) = call_ydoc_with_blob(
+        service.as_ref(),
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/large.md",
+            "contentKind": "plaintext",
+            "seedFromArtifact": false
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+
+    let authored = Ydoc::wire();
+    let first_text = "a".repeat(DELTA_TEXT_BYTES);
+    let first_update = authored.plaintext_insert(0, &first_text);
+    let second_text = "b".repeat(DELTA_TEXT_BYTES);
+    let second_update = authored.plaintext_insert(
+        u32::try_from(first_text.len()).expect("second insertion index"),
+        &second_text,
+    );
+    assert!(
+        first_update.len() < OLD_UPDATE_CAP,
+        "first ingress is {} bytes, above the old {OLD_UPDATE_CAP}-byte update cap",
+        first_update.len()
+    );
+    assert!(
+        second_update.len() < OLD_UPDATE_CAP,
+        "second ingress is {} bytes, above the old {OLD_UPDATE_CAP}-byte update cap",
+        second_update.len()
+    );
+
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(&first_update)
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": base64::engine::general_purpose::STANDARD.encode(&second_update)
+        }),
+    )
+    .await;
+
+    let (_resynced, resync_state) = call_ydoc_with_blob(
+        service.as_ref(),
+        &handle,
+        5,
+        "ydoc.resync",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    let state_bytes = resync_state.len();
+    assert!(
+        state_bytes > OLD_STATE_WIRE_CAP,
+        "resync returned {state_bytes} bytes, which must exceed the old {OLD_STATE_WIRE_CAP}-byte raw state cap"
+    );
+    let expected_text = format!("{first_text}{second_text}");
+    let resynced_doc = Ydoc::wire();
+    resynced_doc
+        .apply(&resync_state)
+        .expect("large resync state applies");
+    assert_eq!(resynced_doc.plaintext_string(), expected_text);
+
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.evict",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    let (reopened, reopen_state) = call_ydoc_with_blob(
+        service.as_ref(),
+        &handle,
+        7,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/large.md",
+            "contentKind": "plaintext",
+            "seedFromArtifact": false
+        }),
+    )
+    .await;
+    assert_eq!(
+        reopen_state, resync_state,
+        "reopen must return the exact {state_bytes}-byte durable state"
+    );
+    let reopened_doc = Ydoc::wire();
+    reopened_doc
+        .apply(&reopen_state)
+        .expect("large reopen state applies");
+    assert_eq!(reopened_doc.plaintext_string(), expected_text);
+    eprintln!("large Y.Doc blob egress round trip covered {state_bytes} raw bytes");
+
+    call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.evict",
+        json!({ "sessionId": reopened["sessionId"] }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
@@ -2456,7 +2579,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     );
 
     let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
+    let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc", 1).await;
 
     let opened = call(
@@ -2630,23 +2753,16 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     assert_eq!(reseeded["seq"], json!(1));
-    let resync = call(
-        &transport,
+    let (_resync, resync_state) = call_ydoc_with_blob(
+        service.as_ref(),
         &handle,
         32,
         "ydoc.resync",
         json!({ "sessionId": reopened_session }),
     )
     .await;
-    // Decode the resync state and prove the durable lineage now carries the
-    // re-seeded settled content — equality with an empty state can't pass.
-    let resync_state = base64::engine::general_purpose::STANDARD
-        .decode(
-            resync["initialUpdateBase64"]
-                .as_str()
-                .expect("resync state"),
-        )
-        .expect("resync state decodes");
+    // Apply the resync state to prove the durable lineage now carries the
+    // re-seeded settled content. Equality with an empty state cannot pass.
     let resynced_doc = Ydoc::wire();
     resynced_doc
         .apply(&resync_state)

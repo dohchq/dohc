@@ -231,6 +231,10 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
   readonly inboundActivity?: EngineDaemonClient["inboundActivity"];
   readonly waitForExit?: EngineDaemonClient["waitForExit"];
 
+  get helloAck(): EngineDaemonClient["helloAck"] {
+    return this.client.helloAck;
+  }
+
   constructor(
     private readonly client: EngineDaemonClient,
     private readonly routes: RelayTransportRouteGuard,

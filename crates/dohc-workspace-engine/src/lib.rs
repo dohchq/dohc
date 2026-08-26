@@ -142,14 +142,6 @@ const MAX_METADATA_FIELD_BYTES: usize = dohc_engine_domain::MAX_METADATA_FIELD_B
 /// same fixed resident-memory ceiling.
 const BLOB_EGRESS_BYTE_BUDGET: usize = dohc_engine_storage::MAX_BLOB_BYTES;
 
-/// Largest raw Y.Doc full-state that still fits one wire string once
-/// base64-expanded (4/3): DOP1's `max_string_bytes` divided by 4,
-/// times 3. Refusing here surfaces a clean error instead of the framer
-/// rejecting the whole response (which InProcessTransport would not even
-/// catch). Docs beyond this belong to the blob-chunk streaming path.
-const MAX_YDOC_STATE_WIRE_BYTES: usize =
-    (dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_string_bytes as usize / 4) * 3;
-
 /// How many bytes a string occupies once JSON-encoded, quotes included.
 ///
 /// `check_string` bounds the DECODED length, so only the frame limit catches
@@ -240,13 +232,6 @@ fn resolve_answer_beside_conflict_bytes(local: &LocalResolveDto) -> usize {
         + 2 * optional(&local.author_json)
 }
 
-fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
-    if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
-        return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
-    }
-    Ok(base64::engine::general_purpose::STANDARD.encode(full_state))
-}
-
 /// Approximate serialized-bytes budget for one moments.list page: a row
 /// can legitimately carry 64 KiB strings (authorJson), so a row COUNT can
 /// never bound the frame — the page cuts when the running estimate would
@@ -303,6 +288,7 @@ impl BlobEgressBudget {
         &self,
         byte_length: i64,
         cancellation: &OperationCancellation,
+        operation: &str,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
         let bytes = usize::try_from(byte_length)
             .ok()
@@ -312,7 +298,7 @@ impl BlobEgressBudget {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption("versionedBinary.readBlob (egress budget)"))
+                Err(cancellation.interruption(&format!("{operation} (egress budget)")))
             }
             permit = Arc::clone(&self.permits).acquire_many_owned(bytes) => {
                 permit.map_err(|_| wire(ErrorCode::Internal, "blob egress budget unavailable"))
@@ -886,6 +872,24 @@ impl EngineService {
                 blob_egress,
             });
         }
+        if request.method == "ydoc.open" {
+            let (result, blob_egress) = self
+                .ydoc_open(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress: Some(blob_egress),
+            });
+        }
+        if request.method == "ydoc.resync" {
+            let (result, blob_egress) = self
+                .ydoc_resync(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress: Some(blob_egress),
+            });
+        }
         let result = match request.method.as_str() {
             "engine.ping" => engine_ping(),
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
@@ -982,10 +986,6 @@ impl EngineService {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
             }
-            "ydoc.open" => {
-                self.ydoc_open(&ctx, request.workspace, request.params)
-                    .await?
-            }
             "ydoc.recordUpdate" => {
                 self.ydoc_record_update(
                     &ctx,
@@ -1009,10 +1009,6 @@ impl EngineService {
             }
             "ydoc.evict" => {
                 self.ydoc_evict(&ctx, request.workspace, request.params)
-                    .await?
-            }
-            "ydoc.resync" => {
-                self.ydoc_resync(&ctx, request.workspace, request.params)
                     .await?
             }
             "conflicts.list" => {
@@ -4172,7 +4168,7 @@ impl EngineService {
             }
             let byte_permit = self
                 .blob_egress_budget
-                .reserve(read.byte_length, &cancellation)
+                .reserve(read.byte_length, &cancellation, "versionedBinary.readBlob")
                 .await?;
             let hydrated = Self::read_under_ctx(
                 &cancellation,
@@ -4249,7 +4245,7 @@ impl EngineService {
             }
             let byte_permit = self
                 .blob_egress_budget
-                .reserve(read.byte_length, &cancellation)
+                .reserve(read.byte_length, &cancellation, "versionedText.readBlob")
                 .await?;
             let hydrated = Self::read_under_ctx(
                 &cancellation,
@@ -7287,7 +7283,8 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
+        request_id: u64,
+    ) -> Result<(Value, BlobEgress), WireError> {
         let params: YdocOpenParams = parse(params)?;
         validate_ydoc_path(&params.path)?;
         let handle = handle.ok_or_else(workspace_unavailable)?;
@@ -7393,12 +7390,22 @@ impl EngineService {
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = format!("ydoc-{}-{sequence:016x}", self.session_epoch);
+        let initial_update = state.initial_update;
+        let byte_permit = self
+            .blob_egress_budget
+            .reserve(
+                i64::try_from(initial_update.len())
+                    .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?,
+                &cancellation,
+                "ydoc.open",
+            )
+            .await?;
+        let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
         let result = YdocOpenResult {
             session_id: session_id.clone(),
             object_id: state.key.object_id.clone(),
             path: params.path.clone(),
             content_kind: ydoc_content_kind_name(state.content_kind),
-            initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
             lineage: if state.lineage_existing {
                 "existing"
             } else {
@@ -7459,8 +7466,19 @@ impl EngineService {
             },
         );
         drop(serial);
-        serde_json::to_value(result)
-            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+        let result = serde_json::to_value(result)
+            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))?;
+        Ok((
+            result,
+            BlobEgress {
+                stream_id: request_id,
+                sha256: initial_update_sha256,
+                bytes: initial_update,
+                cancel: ctx.cancel.clone(),
+                deadline: ctx.deadline,
+                byte_permit: Some(byte_permit),
+            },
+        ))
     }
 
     async fn ydoc_record_update(
@@ -7859,7 +7877,8 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
+        request_id: u64,
+    ) -> Result<(Value, BlobEgress), WireError> {
         let params: YdocResyncParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
@@ -7879,8 +7898,18 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session.lineage_claim_id = state.lineage_claim_id.clone();
         }
-        serde_json::to_value(YdocResyncResult {
-            initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
+        let initial_update = state.initial_update;
+        let byte_permit = self
+            .blob_egress_budget
+            .reserve(
+                i64::try_from(initial_update.len())
+                    .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?,
+                &cancellation,
+                "ydoc.resync",
+            )
+            .await?;
+        let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
+        let result = serde_json::to_value(YdocResyncResult {
             lineage_claim_id: state.lineage_claim_id,
             recovered_paths: state.recovered_paths,
             artifact_assets: state
@@ -7897,7 +7926,18 @@ impl EngineService {
                 })
                 .collect(),
         })
-        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))?;
+        Ok((
+            result,
+            BlobEgress {
+                stream_id: request_id,
+                sha256: initial_update_sha256,
+                bytes: initial_update,
+                cancel: ctx.cancel.clone(),
+                deadline: ctx.deadline,
+                byte_permit: Some(byte_permit),
+            },
+        ))
     }
 
     fn ydoc_session(
@@ -9484,7 +9524,6 @@ struct YdocOpenResult {
     object_id: String,
     path: String,
     content_kind: &'static str,
-    initial_update_base64: String,
     lineage: &'static str,
     lineage_claim_id: Option<String>,
     /// Whether the ENTERED VERSION has a committed snapshot for this path.
@@ -9629,7 +9668,6 @@ struct YdocResyncParams {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct YdocResyncResult {
-    initial_update_base64: String,
     lineage_claim_id: Option<String>,
     recovered_paths: Vec<String>,
     artifact_assets: Vec<ArtifactAssetDescriptorResult>,
@@ -12844,7 +12882,7 @@ mod tests {
         let first_ctx = RequestContext::unbounded();
         let first_cancellation = OperationCancellation::new(&first_ctx);
         let first = budget
-            .reserve(5, &first_cancellation)
+            .reserve(5, &first_cancellation, "test.first")
             .await
             .expect("reserve first five bytes");
         assert_eq!(budget.permits.available_permits(), 3);
@@ -12853,7 +12891,9 @@ mod tests {
         let mut waiting = tokio::spawn(async move {
             let ctx = RequestContext::unbounded();
             let cancellation = OperationCancellation::new(&ctx);
-            waiting_budget.reserve(5, &cancellation).await
+            waiting_budget
+                .reserve(5, &cancellation, "test.waiting")
+                .await
         });
         assert!(
             tokio::time::timeout(Duration::from_millis(100), &mut waiting)

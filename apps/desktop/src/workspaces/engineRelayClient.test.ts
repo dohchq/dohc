@@ -2412,6 +2412,7 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     const inner: EngineDaemonClient = {
       sendRequest: () => Promise.reject(new Error("unused")),
       close: () => undefined,
+      helloAck: { capabilities: ["blobs"] },
       cancelRequest: async (requestId) => {
         seen.push(`cancel:${requestId}`);
       },
@@ -2437,6 +2438,7 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
     // a wrapper that drops it silently downgrades every rich doc to the plain
     // editor.
     expect(typeof wrapped.onEvent).toBe("function");
+    expect(wrapped.helloAck).toEqual({ capabilities: ["blobs"] });
     expect(wrapped.onEvent?.(() => undefined)).toBe(unsubscribe);
     expect(wrapped.onBlob?.(() => undefined)).toBe(unsubscribe);
     void wrapped.cancelRequest?.(7);
@@ -2454,6 +2456,7 @@ describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
       new RelayTransportRouteGuard(),
     );
     const wrapped = source.currentClient();
+    expect(wrapped.helloAck).toBeUndefined();
     expect(wrapped.onEvent).toBeUndefined();
     expect(wrapped.onBlob).toBeUndefined();
     expect(wrapped.cancelRequest).toBeUndefined();
