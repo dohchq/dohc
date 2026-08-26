@@ -368,6 +368,7 @@ describe("sync relay main process", () => {
     try {
       baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
         DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+        DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key",
       });
     } catch (error) {
       if (error instanceof ListenPermissionError) {
@@ -402,6 +403,14 @@ describe("sync relay main process", () => {
     expect(missing.status).toBe(404);
     const missingBody = await missing.text();
 
+    const missingWorkloadIdentity = await fetch(`${baseUrl}/sync/link-exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret: link.secret }),
+    });
+    expect(missingWorkloadIdentity.status).toBe(404);
+    expect(await missingWorkloadIdentity.text()).toBe(missingBody);
+
     const emptyPaddingBody = JSON.stringify({ secret: link.secret, padding: "" });
     const oversizedBody = JSON.stringify({
       secret: link.secret,
@@ -418,7 +427,10 @@ describe("sync relay main process", () => {
 
     const small = await fetch(`${baseUrl}/sync/link-exchange`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-dohc-relay-exchange-key": "integration-relay-exchange-key",
+      },
       body: JSON.stringify({ secret: link.secret }),
     });
     expect(small.status).toBe(200);
@@ -506,6 +518,7 @@ describe("sync relay startup guards", () => {
       SYNC_RELAY_TEST_AUTH: undefined,
       POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
       DOHC_RELAY_LINK_KEY: undefined,
+      DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key",
       SYNC_RELAY_PORT: "0",
       BETTER_AUTH_SECRET: "x".repeat(32),
       SYNC_RELAY_DB_PATH: dbPath,
@@ -513,5 +526,22 @@ describe("sync relay startup guards", () => {
     });
     expect(code).toBe(1);
     expect(stderr).toContain("DOHC_RELAY_LINK_KEY must be set");
+  });
+
+  it("refuses to start in production when DOHC_RELAY_EXCHANGE_KEY is unset", async () => {
+    const dbPath = join(await tempRoot("no-relay-exchange-key"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "production",
+      SYNC_RELAY_TEST_AUTH: undefined,
+      POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: undefined,
+      SYNC_RELAY_PORT: "0",
+      BETTER_AUTH_SECRET: "x".repeat(32),
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("DOHC_RELAY_EXCHANGE_KEY must be set");
   });
 });

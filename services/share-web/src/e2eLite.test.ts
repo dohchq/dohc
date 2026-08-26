@@ -8,9 +8,10 @@ import {
   openSyncRelayStorage,
   type SyncRelayStorage,
 } from "@dohc/sync-relay/storage";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createShareWebHandler } from "./server";
 
+const RELAY_EXCHANGE_KEY = "e2e-share-web-relay-exchange-key";
 const servers: Server[] = [];
 const roots: string[] = [];
 const storages: SyncRelayStorage[] = [];
@@ -23,6 +24,7 @@ afterEach(async () => {
   );
   for (const storage of storages.splice(0)) storage.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  vi.unstubAllEnvs();
 });
 
 async function listen(handler: (request: Request) => Promise<Response>): Promise<string> {
@@ -64,6 +66,7 @@ async function body(response: Response): Promise<Record<string, unknown>> {
 
 describe("share-web e2e-lite", () => {
   it("exchanges a real link and reads a real relay Markdown blob", async () => {
+    vi.stubEnv("DOHC_RELAY_EXCHANGE_KEY", RELAY_EXCHANGE_KEY);
     const root = await mkdtemp(join(tmpdir(), "dohc-share-web-e2e-"));
     roots.push(root);
     const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
@@ -81,6 +84,7 @@ describe("share-web e2e-lite", () => {
       newGrantId: () => `grant-${id++}`,
       newId: () => `id-${id++}`,
       linkKey: "e2e-link-key-with-at-least-thirty-two-bytes",
+      relayExchangeKey: process.env.DOHC_RELAY_EXCHANGE_KEY,
     });
     const relayUrl = await listen(relayHandler);
 
@@ -160,7 +164,11 @@ describe("share-web e2e-lite", () => {
     );
 
     const publicHosts = new Set<string>();
-    const shareWebHandler = createShareWebHandler({ relayUrl, publicHosts });
+    const shareWebHandler = createShareWebHandler({
+      relayUrl,
+      relayExchangeKey: RELAY_EXCHANGE_KEY,
+      publicHosts,
+    });
     const shareWebUrl = await listen(shareWebHandler);
     publicHosts.add(new URL(shareWebUrl).host);
 

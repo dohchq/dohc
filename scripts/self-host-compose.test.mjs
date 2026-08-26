@@ -37,3 +37,22 @@ test('self-host sync relay requires the link grant key', () => {
     '${DOHC_RELAY_LINK_KEY:?Set DOHC_RELAY_LINK_KEY in .env.self-host}',
   )
 })
+
+test('self-host sync relay requires and documents the relay exchange key', () => {
+  const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
+  const envExample = readFileSync('.env.self-host.example', 'utf8')
+
+  assert.equal(
+    mappingValueAtPath(compose, [
+      'services',
+      'sync-relay',
+      'environment',
+      'DOHC_RELAY_EXCHANGE_KEY',
+    ]),
+    '${DOHC_RELAY_EXCHANGE_KEY:?Set DOHC_RELAY_EXCHANGE_KEY in .env.self-host}',
+  )
+  assert.match(
+    envExample,
+    /^DOHC_RELAY_EXCHANGE_KEY=change-me-with-at-least-32-random-bytes$/m,
+  )
+})

@@ -99,6 +99,25 @@ export function isSvg(path: string): boolean {
   return /\.svg$/iu.test(path);
 }
 
+export function resolveSharedFile(
+  href: string,
+  currentPath: string,
+  files: ReadonlyMap<string, SharedFile>,
+): SharedFile | null {
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/iu.test(href)) return null;
+  try {
+    const base = new URL(currentPath, "https://share.invalid/");
+    const resolved = new URL(href, base);
+    if (resolved.origin !== "https://share.invalid" || resolved.search || resolved.hash) {
+      return null;
+    }
+    const path = decodeURIComponent(resolved.pathname).replace(/^\/+/, "");
+    return files.get(path) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveSharedImage(
   href: string,
   currentPath: string,
@@ -110,17 +129,8 @@ export function resolveSharedImage(
   ) {
     return href;
   }
-  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/iu.test(href)) return null;
-  try {
-    const base = new URL(currentPath, "https://share.invalid/");
-    const resolved = new URL(href, base);
-    if (resolved.origin !== "https://share.invalid" || resolved.search || resolved.hash) return null;
-    const path = decodeURIComponent(resolved.pathname).replace(/^\/+/, "");
-    const file = files.get(path);
-    return file && isRasterImage(file.path)
-      ? `/api/view/blob/${file.blobSha256}${session ? `?session=${session}` : ""}`
-      : null;
-  } catch {
-    return null;
-  }
+  const file = resolveSharedFile(href, currentPath, files);
+  return file && isRasterImage(file.path)
+    ? `/api/view/blob/${file.blobSha256}${session ? `?session=${session}` : ""}`
+    : null;
 }

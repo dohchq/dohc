@@ -89,6 +89,7 @@ function handler(
   storage: SyncRelayStorage,
   overrides: {
     linkKey?: string | Uint8Array;
+    relayExchangeKey?: string;
     linkExchangeRateLimiter?: LinkExchangeRateLimiter;
   } = {},
 ): SyncRelayHandler {
@@ -106,6 +107,7 @@ function handler(
     newId: () => `id-${id++}`,
     resolveUserIdByEmail: () => null,
     linkKey: Object.hasOwn(overrides, "linkKey") ? overrides.linkKey : LINK_KEY,
+    relayExchangeKey: overrides.relayExchangeKey,
     linkExchangeRateLimiter: overrides.linkExchangeRateLimiter,
   };
   return createSyncRelayHandler(options);
@@ -1202,6 +1204,63 @@ describe("relay link grants", () => {
     const compare = vi.fn(timingSafeEqual);
     expect(constantTimeHashEqual(hmac(secret), hmac(secret), compare)).toBe(true);
     expect(compare).toHaveBeenCalledOnce();
+  });
+
+  it("requires the configured relay exchange key before rate limiting", async () => {
+    const target = await newStorage();
+    let credentialLookups = 0;
+    const counted = new Proxy(target, {
+      get(storage, property, receiver) {
+        if (property === "findLinkGrantByCredentialHash") {
+          return (secretHash: string) => {
+            credentialLookups += 1;
+            return storage.findLinkGrantByCredentialHash(secretHash);
+          };
+        }
+        const value = Reflect.get(storage, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(storage) : value;
+      },
+    });
+    const relayExchangeKey = "share-web-relay-exchange-key";
+    const h = handler(counted, {
+      relayExchangeKey,
+      linkExchangeRateLimiter: new LinkExchangeRateLimiter(1, 0.000_001, 10),
+    });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const generic = await denialBytes(await h(request(null, "/missing")));
+
+    const missing = await denialBytes(
+      await h(
+        request(null, "/sync/link-exchange", jsonBody({ secret: created.secret })),
+      ),
+    );
+    expect(missing).toBe(generic);
+    const wrong = await denialBytes(
+      await h(
+        request(null, "/sync/link-exchange", {
+          ...jsonBody({ secret: created.secret }),
+          headers: {
+            "content-type": "application/json",
+            "x-dohc-relay-exchange-key": "wrong-key",
+          },
+        }),
+      ),
+    );
+    expect(wrong).toBe(generic);
+    expect(credentialLookups).toBe(0);
+
+    const admitted = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: created.secret }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(admitted.status).toBe(200);
+    expect(credentialLookups).toBeGreaterThan(0);
   });
 
   it("makes every exchange refusal byte-identical", async () => {

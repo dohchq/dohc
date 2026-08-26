@@ -4,9 +4,12 @@ import { Marked } from "marked";
 const BLOB_IMAGE =
   /^\/api\/view\/blob\/[a-f0-9]{64}(?:\?session=[A-Za-z0-9_-]{12})?$/u;
 const SAFE_LINK = /^(?:https?:\/\/|mailto:|\/[^/]|#|\.\.?\/)/iu;
+const EXTERNAL_LINK = /^(?:https?:\/\/|mailto:)/iu;
+const NON_FILE_LINK = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/iu;
 
 export const MARKDOWN_SANITIZE_CONFIG: Config = {
   ALLOWED_TAGS: [
+    "#text",
     "a",
     "blockquote",
     "br",
@@ -85,6 +88,7 @@ export function renderSafeMarkdown(
   markdown: string,
   resolveImage: (href: string) => string | null = (href) =>
     BLOB_IMAGE.test(href) ? href : null,
+  resolveLink: (href: string) => string | null = () => null,
 ): string {
   const parser = new Marked({
     async: false,
@@ -97,6 +101,19 @@ export function renderSafeMarkdown(
           `<img src="${safeHref}" alt="${escapeHtml(text)}"` +
           (title ? ` title="${escapeHtml(title)}"` : "") +
           ">"
+        );
+      },
+      link({ href, title, tokens }) {
+        if (EXTERNAL_LINK.test(href) || href.startsWith("#")) return false;
+        const text = this.parser.parseInline(tokens);
+        if (NON_FILE_LINK.test(href)) return text;
+        const sharedPath = resolveLink(href);
+        if (!sharedPath) return text;
+        const safeHref = `/${sharedPath.split("/").map(encodeURIComponent).join("/")}`;
+        return (
+          `<a href="${escapeHtml(safeHref)}"` +
+          (title ? ` title="${escapeHtml(title)}"` : "") +
+          `>${text}</a>`
         );
       },
     },

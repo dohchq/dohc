@@ -277,6 +277,11 @@ export interface SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult;
+  fetchLogPageDescending(input: {
+    workspaceId: string;
+    beforeRelaySeq: number | null;
+    limit: number;
+  }): SyncRelayLogRow[];
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
@@ -3130,6 +3135,34 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       nextCursor: last?.relaySeq ?? input.sinceRelaySeq,
       hasMore: rows.length > input.limit,
     };
+  }
+
+  fetchLogPageDescending(input: {
+    workspaceId: string;
+    beforeRelaySeq: number | null;
+    limit: number;
+  }): SyncRelayLogRow[] {
+    const rows =
+      input.beforeRelaySeq === null
+        ? this.db
+            .prepare(
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+               FROM sync_relay_log
+               WHERE workspace_id = ?
+               ORDER BY relay_seq DESC
+               LIMIT ?`,
+            )
+            .all(input.workspaceId, input.limit)
+        : this.db
+            .prepare(
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+               FROM sync_relay_log
+               WHERE workspace_id = ? AND relay_seq < ?
+               ORDER BY relay_seq DESC
+               LIMIT ?`,
+            )
+            .all(input.workspaceId, input.beforeRelaySeq, input.limit);
+    return rows.map(rowToLogRow);
   }
 
   fetchLogCoordinate(input: {

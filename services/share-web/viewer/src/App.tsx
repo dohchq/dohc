@@ -5,6 +5,7 @@ import {
   isMarkdown,
   isRasterImage,
   isSvg,
+  resolveSharedFile,
   resolveSharedImage,
   type RelayOp,
   type SharedFile,
@@ -14,6 +15,9 @@ import {
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
 const MAX_LOG_PAGES = 10_000;
+const LOG_RETRY_INITIAL_MS = 1_000;
+const LOG_RETRY_MAX_MS = 15_000;
+const LOG_RETRY_BUDGET_MS = 120_000;
 
 type ViewerState =
   | { status: "loading" }
@@ -31,7 +35,19 @@ async function loadLog(session: string): Promise<RelayOp[]> {
   let cursor = 0;
   const ops: RelayOp[] = [];
   for (let pageNumber = 0; pageNumber < MAX_LOG_PAGES; pageNumber += 1) {
-    const response = await api(session, `/api/view/log?since=${cursor}&limit=500`);
+    let retryDelayMs = LOG_RETRY_INITIAL_MS;
+    let retryWaitedMs = 0;
+    let response: Response;
+    while (true) {
+      response = await api(session, `/api/view/log?since=${cursor}&limit=500`);
+      if (response.status !== 429) break;
+      if (retryWaitedMs + retryDelayMs > LOG_RETRY_BUDGET_MS) {
+        throw new Error("refused");
+      }
+      await new Promise<void>((resolve) => window.setTimeout(resolve, retryDelayMs));
+      retryWaitedMs += retryDelayMs;
+      retryDelayMs = Math.min(retryDelayMs * 2, LOG_RETRY_MAX_MS);
+    }
     if (!response.ok) throw new Error("refused");
     const page = (await response.json()) as {
       ops?: unknown;
@@ -76,8 +92,8 @@ async function establishSession(): Promise<string> {
   return pathSession;
 }
 
-function relativeTime(timestamp: number): string {
-  const seconds = Math.round((timestamp - Date.now()) / 1_000);
+function relativeTime(timestamp: number, now: number): string {
+  const seconds = Math.round((timestamp - now) / 1_000);
   const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
   if (Math.abs(seconds) < 60) return formatter.format(seconds, "second");
   const minutes = Math.round(seconds / 60);
@@ -85,6 +101,22 @@ function relativeTime(timestamp: number): string {
   const hours = Math.round(minutes / 60);
   if (Math.abs(hours) < 24) return formatter.format(hours, "hour");
   return formatter.format(Math.round(hours / 24), "day");
+}
+
+function Freshness(props: { lastSettledAtMs: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (props.lastSettledAtMs === null) return;
+    const interval = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(interval);
+  }, [props.lastSettledAtMs]);
+  return (
+    <div className="freshness">
+      {props.lastSettledAtMs === null
+        ? "No settled changes"
+        : `Last settled ${relativeTime(props.lastSettledAtMs, now)}`}
+    </div>
+  );
 }
 
 function displayAccess(access: ViewMeta["access"]): string {
@@ -165,9 +197,11 @@ function FileView(props: {
   session: string;
   file: SharedFile;
   files: SharedFile[];
+  onSelect: (path: string) => void;
 }) {
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const rendersMarkdown = props.file.contentKind === "text" && isMarkdown(props.file.path);
   const fileMap = useMemo(
     () => new Map(props.files.map((file) => [file.path, file])),
     [props.files],
@@ -176,7 +210,7 @@ function FileView(props: {
     let current = true;
     setMarkdown(null);
     setFailed(false);
-    if (!isMarkdown(props.file.path)) return () => { current = false; };
+    if (!rendersMarkdown) return () => { current = false; };
     void api(props.session, `/api/view/blob/${props.file.blobSha256}`)
       .then(async (response) => {
         if (!response.ok) throw new Error("refused");
@@ -187,10 +221,10 @@ function FileView(props: {
         if (current) setFailed(true);
       });
     return () => { current = false; };
-  }, [props.file, props.session]);
+  }, [props.file, props.session, rendersMarkdown]);
 
   if (failed) return <Unavailable />;
-  if (isMarkdown(props.file.path)) {
+  if (rendersMarkdown) {
     if (markdown === null) return <p className="muted">Loading file</p>;
     return (
       <MarkdownContent
@@ -198,6 +232,10 @@ function FileView(props: {
         resolveImage={(href) =>
           resolveSharedImage(href, props.file.path, fileMap, props.session)
         }
+        resolveLink={(href) =>
+          resolveSharedFile(href, props.file.path, fileMap)?.path ?? null
+        }
+        onNavigate={props.onSelect}
       />
     );
   }
@@ -243,9 +281,8 @@ export function App() {
         const meta = (await metaResponse.json()) as ViewMeta;
         if (!["view", "comment", "edit"].includes(meta.access)) throw new Error("refused");
         const files = filesFromLog(ops);
-        if (files.length === 0) throw new Error("refused");
         if (current) {
-          setSelectedPath(files[0]!.path);
+          setSelectedPath(files[0]?.path ?? "");
           setState({ status: "ready", session, meta, files });
         }
       } catch {
@@ -257,22 +294,18 @@ export function App() {
 
   if (state.status === "refused") return <Unavailable />;
   if (state.status === "loading") return <main className="state"><p>Opening shared files</p></main>;
-  const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0]!;
+  const selected = state.files.find((file) => file.path === selectedPath) ?? state.files[0];
   const tree = fileTree(state.files);
   return (
     <div className="viewer">
       <header>
         <div>
           <p className="eyebrow">Shared by {state.meta.granterEmail ?? "a dohc user"}</p>
-          <h1>{selected.path}</h1>
+          <h1>{selected?.path ?? "Shared files"}</h1>
         </div>
         <span className="badge">{displayAccess(state.meta.access)}</span>
       </header>
-      <div className="freshness">
-        {state.meta.lastSettledAtMs === null
-          ? "No settled changes"
-          : `Last settled ${relativeTime(state.meta.lastSettledAtMs)}`}
-      </div>
+      <Freshness lastSettledAtMs={state.meta.lastSettledAtMs} />
       <div className="layout">
         <nav aria-label="Shared files">
           <p className="section-label">Files</p>
@@ -281,14 +314,14 @@ export function App() {
               <Folder
                 key={folder.path}
                 node={folder}
-                selected={selected.path}
+                selected={selected?.path ?? ""}
                 onSelect={(file) => setSelectedPath(file.path)}
               />
             ))}
             {tree.files.map((file) => (
               <li key={file.path}>
                 <button
-                  className={selected.path === file.path ? "file selected" : "file"}
+                  className={selected?.path === file.path ? "file selected" : "file"}
                   type="button"
                   onClick={() => setSelectedPath(file.path)}
                 >
@@ -299,7 +332,16 @@ export function App() {
           </ul>
         </nav>
         <main className="content">
-          <FileView session={state.session} file={selected} files={state.files} />
+          {selected ? (
+            <FileView
+              session={state.session}
+              file={selected}
+              files={state.files}
+              onSelect={setSelectedPath}
+            />
+          ) : (
+            <p>No files in this share yet.</p>
+          )}
         </main>
       </div>
     </div>

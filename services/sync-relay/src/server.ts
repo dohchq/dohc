@@ -13,6 +13,8 @@ import {
   hashLinkBearer,
   LinkExchangeRateLimiter,
   LinkReadRateLimiter,
+  LINK_LOG_READ_BUCKET_CAPACITY,
+  LINK_LOG_READ_REFILL_PER_SECOND,
   LINK_SESSION_TTL_MS,
   mintLinkBearer,
   validateLinkCapability,
@@ -95,8 +97,10 @@ export interface CreateSyncRelayHandlerOptions {
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
+  relayExchangeKey?: string;
   linkExchangeRateLimiter?: LinkExchangeRateLimiter;
   linkReadRateLimiter?: LinkReadRateLimiter;
+  linkLogReadRateLimiter?: LinkReadRateLimiter;
   newLinkBearer?: () => string;
 }
 
@@ -232,10 +236,18 @@ export function createSyncRelayHandler({
   newId = () => randomUUID(),
   presence = new PresenceHub(),
   linkKey,
+  relayExchangeKey,
   linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
   linkReadRateLimiter = new LinkReadRateLimiter(),
+  linkLogReadRateLimiter = new LinkReadRateLimiter(
+    LINK_LOG_READ_BUCKET_CAPACITY,
+    LINK_LOG_READ_REFILL_PER_SECOND,
+  ),
   newLinkBearer = () => mintLinkBearer(),
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
+  const relayExchangeKeyHash =
+    relayExchangeKey === undefined ? undefined : sha256Base64Url(relayExchangeKey);
+
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
   // presence scope. The actor's user id is the SERVER-DERIVED attribution;
   // the client-supplied `state` is opaque display data only. `reauthorize`
@@ -600,18 +612,21 @@ export function createSyncRelayHandler({
     workspaceId: string,
     selector: AnyShareSelector,
   ): number | null => {
-    let cursor = 0;
-    let newest: number | null = null;
+    let beforeRelaySeq: number | null = null;
+    const chatResolver = chatResolverFor(workspaceId);
     while (true) {
-      const page = filteredLogPage(workspaceId, selector, cursor, MAX_LOG_PAGE_SIZE);
-      for (const op of page.ops) {
-        const recordedAtMs = op.recordedAtMs;
-        if (typeof recordedAtMs === "number") {
-          newest = newest === null ? recordedAtMs : Math.max(newest, recordedAtMs);
+      const rows = storage.fetchLogPageDescending({
+        workspaceId,
+        beforeRelaySeq,
+        limit: MAX_LOG_PAGE_SIZE,
+      });
+      for (const row of rows) {
+        if (filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver).allowed) {
+          return row.recordedAtMs;
         }
       }
-      if (!page.hasMore || page.nextCursor === cursor) return newest;
-      cursor = page.nextCursor;
+      if (rows.length < MAX_LOG_PAGE_SIZE) return null;
+      beforeRelaySeq = rows[rows.length - 1]!.relaySeq;
     }
   };
 
@@ -629,7 +644,10 @@ export function createSyncRelayHandler({
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };
 
-  const requireLinkRead = (request: Request) => {
+  const requireLinkRead = (
+    request: Request,
+    rateLimiter: LinkReadRateLimiter,
+  ) => {
     if (!linkKey) throw notFound();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
       request.headers.get("authorization") ?? "",
@@ -643,7 +661,7 @@ export function createSyncRelayHandler({
       nowMs: nowMs(),
     });
     if (!capability) throw notFound();
-    if (!linkReadRateLimiter.allow(capability.session.capabilityHash, nowMs())) {
+    if (!rateLimiter.allow(capability.session.capabilityHash, nowMs())) {
       throw linkReadRateLimited();
     }
     return { capabilityToken, capability };
@@ -674,6 +692,14 @@ export function createSyncRelayHandler({
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
     const refused = (): Response => errorResponse(notFound());
     if (!linkKey) return refused();
+    const presentedRelayExchangeKey = request.headers.get(
+      "x-dohc-relay-exchange-key",
+    );
+    if (relayExchangeKeyHash !== undefined) {
+      const presentedHash = sha256Base64Url(presentedRelayExchangeKey ?? "");
+      const keyMatches = constantTimeHashEqual(presentedHash, relayExchangeKeyHash);
+      if (presentedRelayExchangeKey === null || !keyMatches) return refused();
+    }
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
     if (!linkExchangeRateLimiter.allow(ip, nowMs())) return refused();
 
@@ -784,7 +810,9 @@ export function createSyncRelayHandler({
         route.route === "link-log" ||
         route.route === "link-blob"
       ) {
-        const { capabilityToken, capability } = requireLinkRead(request);
+        const rateLimiter =
+          route.route === "link-log" ? linkLogReadRateLimiter : linkReadRateLimiter;
+        const { capabilityToken, capability } = requireLinkRead(request, rateLimiter);
         if (request.method !== "GET") throw methodNotAllowed();
         const share = storage.getShare(capability.shareId);
         if (!share) throw notFound();
@@ -2645,6 +2673,10 @@ function parseIfMatchSha256(header: string | null): string | null {
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+function sha256Base64Url(value: string): string {
+  return createHash("sha256").update(value).digest("base64url");
 }
 
 function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {

@@ -20,6 +20,8 @@ export const LINK_EXCHANGE_MAX_IPS = 10_000;
 export const LINK_READ_BUCKET_CAPACITY = 240;
 export const LINK_READ_REFILL_PER_SECOND = 4;
 export const LINK_READ_MAX_CAPABILITIES = 10_000;
+export const LINK_LOG_READ_BUCKET_CAPACITY = 2_000;
+export const LINK_LOG_READ_REFILL_PER_SECOND = 8;
 
 type TimingSafeComparator = (left: Uint8Array, right: Uint8Array) => boolean;
 

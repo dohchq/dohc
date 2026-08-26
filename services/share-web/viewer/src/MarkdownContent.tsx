@@ -1,13 +1,33 @@
-import { useMemo } from "react";
+import { useMemo, type MouseEvent } from "react";
 import { renderSafeMarkdown } from "./markdown";
 
 export function MarkdownContent(props: {
   markdown: string;
   resolveImage?: (href: string) => string | null;
+  resolveLink?: (href: string) => string | null;
+  onNavigate?: (path: string) => void;
 }) {
   const html = useMemo(
-    () => renderSafeMarkdown(props.markdown, props.resolveImage),
-    [props.markdown, props.resolveImage],
+    () => renderSafeMarkdown(props.markdown, props.resolveImage, props.resolveLink),
+    [props.markdown, props.resolveImage, props.resolveLink],
   );
-  return <article className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
+  const navigate = (event: MouseEvent<HTMLElement>) => {
+    if (!props.resolveLink || !props.onNavigate || !(event.target instanceof Element)) {
+      return;
+    }
+    const anchor = event.target.closest("a");
+    const href = anchor?.getAttribute("href");
+    if (!href) return;
+    const path = props.resolveLink(href);
+    if (!path) return;
+    event.preventDefault();
+    props.onNavigate(path);
+  };
+  return (
+    <article
+      className="markdown"
+      onClick={navigate}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }

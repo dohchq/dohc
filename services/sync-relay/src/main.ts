@@ -21,6 +21,7 @@ const nodeEnv = process.env.NODE_ENV;
 const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
 const linkKey = process.env.DOHC_RELAY_LINK_KEY;
+const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 
 function fatal(message: string): never {
   writeSync(2, `${message}\n`);
@@ -60,6 +61,10 @@ if (!isDevOrTest && !testAuthSeam && process.env.POSTGRES_URL === undefined) {
 
 if (!isDevOrTest && !linkKey) {
   fatal("FATAL: DOHC_RELAY_LINK_KEY must be set outside development/test.");
+}
+
+if (!isDevOrTest && !relayExchangeKey) {
+  fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set outside development/test.");
 }
 
 if (process.env.SYNC_RELAY_TEST_AUTH === "1" && !isDevOrTest) {
@@ -156,6 +161,7 @@ const relayHandler = createSyncRelayHandler({
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   presence,
   linkKey,
+  relayExchangeKey,
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);

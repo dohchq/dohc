@@ -52,4 +52,27 @@ describe("renderSafeMarkdown", () => {
     await act(() => root.unmount());
     container.remove();
   });
+
+  it("keeps ordinary text and drops the bodies of forbidden elements", () => {
+    const html = renderSafeMarkdown(`
+Plain paragraph text.
+
+- a list item
+
+<script>leakedScriptBody</script>
+
+<style>leakedStyleBody</style>
+`);
+
+    // A custom ALLOWED_TAGS list must name "#text": without it, KEEP_CONTENT:false
+    // strips every text node and the viewer renders empty elements.
+    expect(html).toContain("Plain paragraph text.");
+    expect(html).toContain("a list item");
+    // Raw HTML is stripped from the source before Marked runs, so a script or
+    // style body never reaches the render output by either route.
+    expect(html).not.toContain("leakedScriptBody");
+    expect(html).not.toContain("leakedStyleBody");
+    expect(MARKDOWN_SANITIZE_CONFIG.ALLOWED_TAGS).toContain("#text");
+    expect(MARKDOWN_SANITIZE_CONFIG.KEEP_CONTENT).toBe(false);
+  });
 });

@@ -42,6 +42,38 @@ afterEach(() => {
 });
 
 describe("share-web sessions", () => {
+  it("identifies exchange requests to the relay with the configured key", async () => {
+    const relayExchangeKey = "share-web-to-relay-test-key";
+    let receivedRelayExchangeKey: string | null = null;
+    const relay = async (relayRequest: Request): Promise<Response> => {
+      expect(new URL(relayRequest.url).pathname).toBe("/sync/link-exchange");
+      receivedRelayExchangeKey = relayRequest.headers.get(
+        "x-dohc-relay-exchange-key",
+      );
+      return Response.json({
+        ok: true,
+        grantId: "grant-alpha",
+        capabilityToken: CAP_ALPHA_1,
+        capabilityExpiresAtMs: 901_000,
+      });
+    };
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey,
+      publicHosts: new Set([HOST]),
+      fetchRelay: relay,
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 21).toString("base64url"),
+    });
+
+    const exchanged = await handler(
+      request("/api/exchange", exchange(SECRET_ALPHA)),
+    );
+
+    expect(exchanged.status).toBe(200);
+    expect(receivedRelayExchangeKey).toBe(relayExchangeKey);
+  });
+
   it("keeps two link sessions distinct when one link rotates", async () => {
     let alphaGeneration = 1;
     let tokenId = 0;
@@ -206,6 +238,56 @@ describe("share-web sessions", () => {
     const logged = [...info.mock.calls, ...errors.mock.calls].flat().map(String).join("\n");
     expect(logged).not.toContain(SECRET_ALPHA);
     expect(logged).not.toContain(CAP_ALPHA_1);
+  });
+
+  it("relays a generic 429 for a throttled read and preserves the session", async () => {
+    let readCalls = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 22).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-throttled",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        readCalls += 1;
+        if (readCalls === 1) {
+          return new Response("relay-specific throttle detail", { status: 429 });
+        }
+        return Response.json({
+          ok: true,
+          access: "view",
+          granterEmail: "owner@example.test",
+        });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+
+    const throttled = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+
+    expect(throttled.status).toBe(429);
+    expect(await throttled.text()).toBe(shareWebRefusalBody);
+    expectSecurityHeaders(throttled);
+
+    const retried = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toMatchObject({ granterEmail: "owner@example.test" });
+    expect(readCalls).toBe(2);
   });
 
   it("rejects hostile hosts and returns one refusal body for every public failure", async () => {

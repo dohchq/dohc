@@ -13,6 +13,8 @@ const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
 const EXCHANGE_MAX_IPS = 10_000;
 const DEFAULT_MAX_SESSIONS = 10_000;
+const MAX_BLOB_PROXIES_PER_SESSION = 8;
+const RASTER_SIGNATURE_BYTES = 12;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
@@ -32,6 +34,7 @@ interface ExchangeBucket {
 
 export interface CreateShareWebHandlerOptions {
   relayUrl: string;
+  relayExchangeKey?: string;
   publicHosts: ReadonlySet<string>;
   fetchRelay?: RelayFetch;
   nowMs?: () => number;
@@ -115,6 +118,27 @@ class ShareWebExchangeRateLimiter {
   }
 }
 
+class ShareWebBlobProxyLimiter {
+  private readonly inFlightBySession = new Map<string, number>();
+
+  acquire(discriminator: string): (() => void) | null {
+    const inFlight = this.inFlightBySession.get(discriminator) ?? 0;
+    if (inFlight >= MAX_BLOB_PROXIES_PER_SESSION) return null;
+    this.inFlightBySession.set(discriminator, inFlight + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.inFlightBySession.get(discriminator) ?? 1) - 1;
+      if (remaining === 0) {
+        this.inFlightBySession.delete(discriminator);
+      } else {
+        this.inFlightBySession.set(discriminator, remaining);
+      }
+    };
+  }
+}
+
 function sessionKey(discriminator: string, token: string): string {
   return `${discriminator}:${createHash("sha256").update(token).digest("base64url")}`;
 }
@@ -155,9 +179,9 @@ function jsonResponse(
   });
 }
 
-function refused(): Response {
+function refused(status: 404 | 429 = 404): Response {
   return response(REFUSAL_BODY, {
-    status: 404,
+    status,
     headers: { "content-type": "application/json" },
   });
 }
@@ -245,8 +269,94 @@ function bodyBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
+async function streamingBlobResponse(
+  relayResponse: Response,
+  release: () => void,
+): Promise<Response> {
+  if (!relayResponse.body) {
+    release();
+    return response(null, {
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-disposition": "attachment",
+      },
+    });
+  }
+
+  const reader = relayResponse.body.getReader();
+  const buffered: Uint8Array[] = [];
+  let bufferedBytes = 0;
+  let upstreamDone = false;
+  try {
+    while (bufferedBytes < RASTER_SIGNATURE_BYTES && !upstreamDone) {
+      const read = await reader.read();
+      upstreamDone = read.done;
+      if (read.value && read.value.byteLength > 0) {
+        buffered.push(read.value);
+        bufferedBytes += read.value.byteLength;
+      }
+    }
+  } catch (error) {
+    release();
+    throw error;
+  }
+
+  const signature = new Uint8Array(
+    Math.min(bufferedBytes, RASTER_SIGNATURE_BYTES),
+  );
+  let signatureOffset = 0;
+  for (const chunk of buffered) {
+    const remaining = signature.byteLength - signatureOffset;
+    if (remaining <= 0) break;
+    const included = chunk.subarray(0, remaining);
+    signature.set(included, signatureOffset);
+    signatureOffset += included.byteLength;
+  }
+  const raster = rasterContentType(signature);
+  let bufferedIndex = 0;
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (bufferedIndex < buffered.length) {
+        controller.enqueue(buffered[bufferedIndex++]!);
+        return;
+      }
+      if (upstreamDone) {
+        release();
+        controller.close();
+        return;
+      }
+      try {
+        const read = await reader.read();
+        upstreamDone = read.done;
+        if (read.done) {
+          release();
+          controller.close();
+        } else {
+          controller.enqueue(read.value);
+        }
+      } catch (error) {
+        release();
+        controller.error(error);
+      }
+    },
+    async cancel(reason: unknown) {
+      release();
+      await reader.cancel(reason);
+    },
+  });
+  return response(body, {
+    headers: raster
+      ? { "content-type": raster }
+      : {
+          "content-type": "application/octet-stream",
+          "content-disposition": "attachment",
+        },
+  });
+}
+
 export function createShareWebHandler({
   relayUrl,
+  relayExchangeKey,
   publicHosts,
   fetchRelay = (request) => fetch(request),
   nowMs = () => Date.now(),
@@ -256,6 +366,7 @@ export function createShareWebHandler({
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
+  const blobProxyLimiter = new ShareWebBlobProxyLimiter();
 
   async function readSession(request: Request): Promise<{
     discriminator: string;
@@ -306,7 +417,12 @@ export function createShareWebHandler({
         const relayResponse = await fetchRelay(
           relayRequest(relayUrl, "/sync/link-exchange", {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              ...(relayExchangeKey
+                ? { "x-dohc-relay-exchange-key": relayExchangeKey }
+                : {}),
+            },
             body: JSON.stringify({ secret }),
           }),
         );
@@ -369,36 +485,38 @@ export function createShareWebHandler({
       }
       if (!relayPath) return refused();
 
+      const isBlob = pathname.startsWith("/api/view/blob/");
+      const releaseBlobProxy = isBlob
+        ? blobProxyLimiter.acquire(authenticated.discriminator)
+        : null;
+      if (isBlob && !releaseBlobProxy) return refused(429);
+
       try {
         const relayResponse = await fetchRelay(
           relayRequest(relayUrl, relayPath, {
             headers: {
               authorization: `LinkCapability ${authenticated.session.capabilityToken}`,
             },
+            signal: request.signal,
           }),
         );
         if (relayResponse.status !== 200) {
+          releaseBlobProxy?.();
+          if (relayResponse.status === 429) return refused(429);
           if (relayResponse.status === 404) {
             sessions.delete(authenticated.discriminator, authenticated.token);
           }
           return refused();
         }
-        const bytes = new Uint8Array(await relayResponse.arrayBuffer());
-        if (pathname.startsWith("/api/view/blob/")) {
-          const raster = rasterContentType(bytes);
-          return response(bodyBuffer(bytes), {
-            headers: raster
-              ? { "content-type": raster }
-              : {
-                  "content-type": "application/octet-stream",
-                  "content-disposition": "attachment",
-                },
-          });
+        if (isBlob && releaseBlobProxy) {
+          return await streamingBlobResponse(relayResponse, releaseBlobProxy);
         }
+        const bytes = new Uint8Array(await relayResponse.arrayBuffer());
         return response(bodyBuffer(bytes), {
           headers: { "content-type": "application/json" },
         });
       } catch {
+        releaseBlobProxy?.();
         return refused();
       }
     }

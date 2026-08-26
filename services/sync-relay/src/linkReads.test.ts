@@ -7,6 +7,7 @@ import {
   LinkReadRateLimiter,
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
+import { filterOpForShare, type ShareSelector } from "./shareFilter";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
@@ -38,6 +39,7 @@ function handler(
     nowMs?: () => number;
     lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
     linkReadRateLimiter?: LinkReadRateLimiter;
+    linkLogReadRateLimiter?: LinkReadRateLimiter;
   } = {},
 ): SyncRelayHandler {
   let id = 0;
@@ -55,6 +57,7 @@ function handler(
     newId: () => `id-${id++}`,
     linkKey: LINK_KEY,
     linkReadRateLimiter: options.linkReadRateLimiter,
+    linkLogReadRateLimiter: options.linkLogReadRateLimiter,
   });
 }
 
@@ -378,6 +381,72 @@ describe("relay capability reads", () => {
     }
   });
 
+  it("matches the former full-scan freshness result on interleaved rows", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "origin-a",
+              ops: [
+                moment(3, "docs/newer.md", "# shared\n", 1_300),
+                moment(4, "private/newer.md", "hidden\n", 1_400),
+              ],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const newestPage = storage.fetchLogPageDescending({
+      workspaceId: WORKSPACE,
+      beforeRelaySeq: null,
+      limit: 2,
+    });
+    expect(newestPage.map((row) => row.recordedAtMs)).toEqual([1_400, 1_300]);
+    const nextPage = storage.fetchLogPageDescending({
+      workspaceId: WORKSPACE,
+      beforeRelaySeq: newestPage.at(-1)!.relaySeq,
+      limit: 2,
+    });
+    expect(nextPage.map((row) => row.recordedAtMs)).toEqual([1_200, 1_100]);
+
+    const selector: ShareSelector = {
+      paths: ["docs"],
+      versionId: null,
+      access: "view",
+    };
+    let cursor = 0;
+    let formerFullScanAnswer: number | null = null;
+    while (true) {
+      const page = storage.fetchLogPage({
+        workspaceId: WORKSPACE,
+        sinceRelaySeq: cursor,
+        limit: 2,
+      });
+      for (const row of page.rows) {
+        if (!filterOpForShare(selector, row.opKind, row.payloadJson).allowed) continue;
+        formerFullScanAnswer =
+          formerFullScanAnswer === null
+            ? row.recordedAtMs
+            : Math.max(formerFullScanAnswer, row.recordedAtMs);
+      }
+      if (!page.hasMore) break;
+      cursor = page.nextCursor;
+    }
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    expect(formerFullScanAnswer).toBe(1_300);
+    expect(metadata.lastSettledAtMs).toBe(formerFullScanAnswer);
+  });
+
   it("rate-limits only after capability authentication", async () => {
     const storage = await newStorage();
     const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
@@ -388,5 +457,34 @@ describe("relay capability reads", () => {
     const limited = await h(linkRequest(seeded.capability, "/sync/link/share"));
     expect(limited.status).toBe(429);
     expect(await json(limited)).toMatchObject({ code: "link_read_rate_limited" });
+  });
+
+  it("uses a separate read bucket for link log pages", async () => {
+    const storage = await newStorage();
+    const h = handler(storage, {
+      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkLogReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+    });
+    const seeded = await seed(h);
+
+    expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
+    const limitedBlob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(limitedBlob.status).toBe(429);
+    expect(await json(limitedBlob)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
+
+    expect((await h(linkRequest(seeded.capability, "/sync/link/log"))).status).toBe(200);
+    const limitedLog = await h(linkRequest(seeded.capability, "/sync/link/log"));
+    expect(limitedLog.status).toBe(429);
+    expect(await json(limitedLog)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
   });
 });
