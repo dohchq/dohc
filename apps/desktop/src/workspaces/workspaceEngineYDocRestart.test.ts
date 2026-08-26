@@ -891,6 +891,8 @@ it("opens first when record recovery loses the restarted daemon transport", asyn
   };
   const secondClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
+    helloAck: secondYdoc.helloAck,
+    onBlob: (handler) => secondYdoc.onBlob(handler),
     onEvent: (handler) => secondYdoc.onEvent(handler),
     async sendRequest(request) {
       const workspaceResponse = await routeWorkspace(request);
@@ -901,6 +903,8 @@ it("opens first when record recovery loses the restarted daemon transport", asyn
   };
   const firstClient: EngineDaemonClient & EngineTransport = {
     close: () => undefined,
+    helloAck: firstYdoc.helloAck,
+    onBlob: (handler) => firstYdoc.onBlob(handler),
     onEvent: (handler) => firstYdoc.onEvent(handler),
     async sendRequest(request) {
       const workspaceResponse = await routeWorkspace(request);

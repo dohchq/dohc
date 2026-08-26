@@ -108,7 +108,6 @@ function openResult(overrides: Record<string, unknown> = {}) {
     objectId: "object-1",
     path: "notes/solo.md",
     contentKind: "richdoc",
-    initialUpdateBase64: "AAA=",
     head: "present",
     lineage: "existing",
     lineageClaimId: null,

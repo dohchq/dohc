@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
+import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
 import type { Event } from "./generated/Event";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
 import type { Request } from "./generated/Request";
@@ -277,6 +278,7 @@ export class YdocLoopbackEngine implements EngineTransport {
   readonly responses: Response[] = [];
   readonly events: Event[] = [];
   readonly recordedUpdates: Uint8Array[] = [];
+  readonly helloAck = { capabilities: ["blobs"] } as const;
 
   private readonly files = new Map<string, LoopbackFile>();
   private readonly sessions = new Map<string, LoopbackSession>();
@@ -290,6 +292,9 @@ export class YdocLoopbackEngine implements EngineTransport {
   // (workspace, version, objectId) — see `lineageKey` — not by path.
   private readonly lineages = new Map<string, Lineage>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
+  private readonly blobHandlers = new Set<
+    (blob: CompletedDaemonBlob) => void
+  >();
   private nextSessionId = 1;
   private nextMomentId = 1;
   private nextRecaptureOrder = 2;
@@ -402,9 +407,24 @@ export class YdocLoopbackEngine implements EngineTransport {
     return () => this.eventHandlers.delete(handler);
   }
 
+  onBlob(handler: (blob: CompletedDaemonBlob) => void): () => void {
+    this.blobHandlers.add(handler);
+    return () => this.blobHandlers.delete(handler);
+  }
+
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
-    const result = this.handleRequest(request);
+    const delivery = this.handleRequest(request);
+    if (delivery.blob !== undefined) {
+      const completed: CompletedDaemonBlob = {
+        requestId: request.id,
+        streamId: request.id,
+        totalBytes: delivery.blob.byteLength,
+        bytes: delivery.blob,
+      };
+      for (const handler of this.blobHandlers) handler(completed);
+    }
+    const result = delivery.result;
     const response: Response = { id: request.id, result };
     this.responses.push(response);
     return response;
@@ -458,20 +478,23 @@ export class YdocLoopbackEngine implements EngineTransport {
     for (const handler of this.eventHandlers) handler(event);
   }
 
-  private handleRequest(request: Request): JsonValue {
+  private handleRequest(request: Request): {
+    result: JsonValue;
+    blob?: Uint8Array;
+  } {
     switch (request.method) {
       case YDOC_METHOD.open:
         return this.open(request);
       case YDOC_METHOD.recordUpdate:
-        return this.recordUpdate(request);
+        return { result: this.recordUpdate(request) };
       case YDOC_METHOD.settle:
-        return this.settle(request.params);
+        return { result: this.settle(request.params) };
       case YDOC_METHOD.applyExternalMarkdownEdit:
-        return this.applyExternalMarkdownEdit(request.params);
+        return { result: this.applyExternalMarkdownEdit(request.params) };
       case YDOC_METHOD.close:
-        return this.close(request.params);
+        return { result: this.close(request.params) };
       case YDOC_METHOD.evict:
-        return this.evict(request.params);
+        return { result: this.evict(request.params) };
       case YDOC_METHOD.resync:
         return this.resync(request.params);
       default:
@@ -479,7 +502,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     }
   }
 
-  private open(request: Request): JsonValue {
+  private open(request: Request): { result: JsonValue; blob: Uint8Array } {
     if (typeof request.workspace !== "string") {
       throw new Error("ydoc.open requires a workspace handle.");
     }
@@ -539,7 +562,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       : declaredDoc(contentKind);
     const lineageAbsentAtOpen = lineage === undefined;
     // A captured file with no durable lineage yet ships its content as
-    // `seedContent`, not embedded in `initialUpdateBase64` — the CLIENT
+    // `seedContent`, not embedded in the initial state blob — the CLIENT
     // applies it as a real local update and records it through
     // `ydoc.recordUpdate` (`YdocLiveAdapter.openSession`), exactly as
     // `ydoc_open_state_on_store` does (actor.rs): `initial_update` stays
@@ -567,15 +590,17 @@ export class YdocLoopbackEngine implements EngineTransport {
       openHeadSha: file?.head === "present" ? sha256(file.content) : null,
     });
     return {
-      sessionId,
-      objectId,
-      path,
-      contentKind,
-      initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(doc)),
-      lineage: lineage ? "existing" : "absent",
-      lineageClaimId: null,
-      head: file ? file.head : "absent",
-      ...(seedContent !== undefined ? { seedContent } : {}),
+      result: {
+        sessionId,
+        objectId,
+        path,
+        contentKind,
+        lineage: lineage ? "existing" : "absent",
+        lineageClaimId: null,
+        head: file ? file.head : "absent",
+        ...(seedContent !== undefined ? { seedContent } : {}),
+      },
+      blob: Y.encodeStateAsUpdate(doc),
     };
   }
 
@@ -832,7 +857,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     return entry;
   }
 
-  private resync(value: JsonValue): JsonValue {
+  private resync(value: JsonValue): { result: JsonValue; blob: Uint8Array } {
     const params = asObject(value, "ydoc.resync params");
     const session = this.requireSession(
       requiredString(params, "sessionId", "ydoc.resync params"),
@@ -842,10 +867,12 @@ export class YdocLoopbackEngine implements EngineTransport {
     // remote update emit seq 1 and re-mark the freshly-resynced session
     // stale.
     return {
-      initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(session.doc)),
-      lineageClaimId: null,
-      recoveredPaths: [],
-      artifactAssets: [],
+      result: {
+        lineageClaimId: null,
+        recoveredPaths: [],
+        artifactAssets: [],
+      },
+      blob: Y.encodeStateAsUpdate(session.doc),
     };
   }
 

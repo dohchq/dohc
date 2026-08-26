@@ -49,6 +49,48 @@ function seedPlaintextEngine(content = ""): YdocLoopbackEngine {
   return engine;
 }
 
+type BlobHandler = Parameters<NonNullable<EngineTransport["onBlob"]>>[0];
+const forwardedBlobHandlers = new WeakMap<
+  YdocLoopbackEngine,
+  Set<BlobHandler>
+>();
+
+function forwardYdocBlobEgress(
+  engine: YdocLoopbackEngine,
+): Pick<EngineTransport, "helloAck" | "onBlob"> {
+  return {
+    helloAck: engine.helloAck,
+    onBlob: (handler) => {
+      let handlers = forwardedBlobHandlers.get(engine);
+      if (handlers === undefined) {
+        handlers = new Set();
+        forwardedBlobHandlers.set(engine, handlers);
+      }
+      handlers.add(handler);
+      const unsubscribeEngine = engine.onBlob(handler);
+      return () => {
+        handlers.delete(handler);
+        unsubscribeEngine();
+      };
+    },
+  };
+}
+
+function emitYdocBlob(
+  engine: YdocLoopbackEngine,
+  requestId: number,
+  bytes: Uint8Array,
+): void {
+  for (const handler of forwardedBlobHandlers.get(engine) ?? []) {
+    handler({
+      requestId,
+      streamId: requestId,
+      totalBytes: bytes.byteLength,
+      bytes,
+    });
+  }
+}
+
 function plaintextUpdate(
   initialUpdate: Uint8Array,
   edit: (text: Y.Text) => void,
@@ -790,6 +832,7 @@ describe("YdocLiveAdapter", () => {
     let refuseNextRecord = true;
     const recordActors: Array<string | undefined> = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) {
@@ -850,6 +893,7 @@ describe("YdocLiveAdapter", () => {
     const winnerUpdate = Y.encodeStateAsUpdate(winner);
     let recordCount = 0;
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.open) {
@@ -867,12 +911,10 @@ describe("YdocLiveAdapter", () => {
           return engine.sendRequest(request);
         }
         if (request.method === YDOC_METHOD.resync) {
+          emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
             result: {
-              initialUpdateBase64: btoa(
-                String.fromCharCode(...winnerUpdate),
-              ),
               lineageClaimId: "winning-claim",
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
@@ -924,6 +966,7 @@ describe("YdocLiveAdapter", () => {
     const winnerUpdate = Y.encodeStateAsUpdate(winner);
     let records = 0;
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) {
@@ -939,10 +982,10 @@ describe("YdocLiveAdapter", () => {
           };
         }
         if (request.method === YDOC_METHOD.resync) {
+          emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
             result: {
-              initialUpdateBase64: btoa(String.fromCharCode(...winnerUpdate)),
               lineageClaimId: "winning-claim",
               recoveredPaths: ["notes/live (recovered).txt"],
               artifactAssets: [],
@@ -1000,6 +1043,7 @@ describe("YdocLiveAdapter", () => {
     let winnerInstalled = false;
     let recordCount = 0;
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.open) {
@@ -1037,10 +1081,10 @@ describe("YdocLiveAdapter", () => {
               },
             };
           }
+          emitYdocBlob(engine, request.id, winnerUpdate);
           return {
             id: request.id,
             result: {
-              initialUpdateBase64: btoa(String.fromCharCode(...winnerUpdate)),
               lineageClaimId: "winning-claim",
               recoveredPaths: [],
               artifactAssets: [],
@@ -1084,6 +1128,7 @@ describe("YdocLiveAdapter", () => {
     const resyncFailure = new Error("injected resync refusal");
     const methods: string[] = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         methods.push(request.method);
@@ -1133,6 +1178,7 @@ describe("YdocLiveAdapter", () => {
       releaseRecord = resolve;
     });
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         methods.push(request.method);
@@ -1179,6 +1225,7 @@ describe("YdocLiveAdapter", () => {
       code: "transport-error",
     });
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
@@ -1218,6 +1265,7 @@ describe("YdocLiveAdapter", () => {
     );
     const resyncFailure = new Error("resync refusal");
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
@@ -1255,6 +1303,7 @@ describe("YdocLiveAdapter", () => {
     const engine = seedPlaintextEngine();
     const settleFailure = new Error("injected settle refusal");
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.settle) throw settleFailure;
@@ -1334,6 +1383,7 @@ describe("YdocLiveAdapter", () => {
       new Error("daemon response"),
     );
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.settle && blocked.held) {
@@ -1498,6 +1548,7 @@ describe("YdocLiveAdapter", () => {
     let remaining = refusals;
     const methods: string[] = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         methods.push(request.method);
@@ -1729,6 +1780,7 @@ describe("YdocLiveAdapter", () => {
     // is refused terminally, so the close's resend cannot be waited out.
     let records = 0;
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) {
@@ -1817,6 +1869,7 @@ describe("YdocLiveAdapter", () => {
     let contended = true;
     const methods: string[] = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate && contended) throw busy;
@@ -1871,6 +1924,7 @@ describe("YdocLiveAdapter", () => {
     );
     let records = 0;
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) {
@@ -1907,6 +1961,7 @@ describe("YdocLiveAdapter", () => {
     // are closed exactly this way (`settle: false, settleOnRefusal: false`).
     const engine = seedPlaintextEngine();
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       sendRequest: (request) => engine.sendRequest(request),
     };
@@ -2233,6 +2288,7 @@ describe("YdocLiveAdapter", () => {
     });
     const order: string[] = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.settle) {
@@ -2319,6 +2375,7 @@ describe("YdocLiveAdapter", () => {
     });
     let settles = 0;
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.settle) {
@@ -2376,6 +2433,7 @@ describe("YdocLiveAdapter", () => {
     const engine = seedPlaintextEngine();
     const recordFailure = new Error("injected record failure");
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
@@ -2418,6 +2476,7 @@ describe("YdocLiveAdapter", () => {
     const recordFailure = new Error("injected record failure");
     const methods: string[] = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         methods.push(request.method);
@@ -2461,6 +2520,7 @@ describe("YdocLiveAdapter", () => {
     const unsettledClose = new Error("injected unsettled close");
     const closes: Array<boolean | undefined> = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.close) {
@@ -2503,6 +2563,7 @@ describe("YdocLiveAdapter", () => {
     const unsettledClose = new Error("injected unsettled close");
     const closes: Array<boolean | undefined> = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.close) {
@@ -2535,6 +2596,7 @@ describe("YdocLiveAdapter", () => {
     const engine = seedPlaintextEngine("settled base");
     const settleFailure = new Error("injected settle refusal");
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.settle) throw settleFailure;
@@ -2572,6 +2634,7 @@ describe("YdocLiveAdapter", () => {
     const transientClose = new Error("injected transient close failure");
     const closes: Array<boolean | undefined> = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.close) {
@@ -2609,6 +2672,7 @@ describe("YdocLiveAdapter", () => {
     const closes: Array<boolean | undefined> = [];
     let allowClose = false;
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.close) {
@@ -2662,6 +2726,7 @@ describe("YdocLiveAdapter", () => {
       },
     });
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.close) {
@@ -2719,6 +2784,7 @@ describe("YdocLiveAdapter", () => {
       },
     );
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         methods.push(request.method);
@@ -3136,6 +3202,7 @@ describe("YdocLiveAdapter", () => {
     const refusal = new Error("unsettled-close");
     const closes: Array<boolean | undefined> = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request) {
         if (request.method === YDOC_METHOD.open) {
@@ -3213,6 +3280,7 @@ describe("the ydoc.open deadline (#616)", () => {
     const requests: Request[] = [];
     const engine = seedPlaintextEngine("hello");
     const recording: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       async sendRequest(request) {
         requests.push(request);
         return await engine.sendRequest(request);
@@ -3350,6 +3418,7 @@ describe("the ydoc.open deadline (#616)", () => {
     // in crates/dohc-workspace-engine/tests/rpc_ydoc.rs.
     const engine = seedPlaintextEngine("on disk");
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       sendRequest: (request) => engine.sendRequest(request),
     };
@@ -3393,6 +3462,7 @@ describe("the ydoc.open deadline (#616)", () => {
   it("resurrects a remote update after eviction", async () => {
     const engine = seedPlaintextEngine("on disk");
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       sendRequest: (request) => engine.sendRequest(request),
     };
@@ -3427,6 +3497,7 @@ describe("the ydoc.open deadline (#616)", () => {
   it("resurrects an external markdown edit after eviction", async () => {
     const engine = seedPlaintextEngine("on disk");
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       sendRequest: (request) => engine.sendRequest(request),
     };
@@ -4229,7 +4300,7 @@ describe("the ydoc.open deadline (#616)", () => {
 
   // Codex round on #728 rebased head a5d7b7bb. The NoMarker guard's blind
   // spot: a head-present open with NO existing lineage used to embed its
-  // markdown directly into `initialUpdateBase64`, leaving
+  // markdown directly into the initial state blob, leaving
   // `firstUpdatePending` true forever — so a direct settle over a freshly
   // opened captured file, with no local edits at all, wrongly hit the
   // guard above. `ydoc_open_state_on_store` (actor.rs) never embeds a seed
@@ -4261,7 +4332,7 @@ describe("the ydoc.open deadline (#616)", () => {
       "captured content",
     );
 
-    // MUTATION: embed the seed directly in `initialUpdateBase64` instead of
+    // MUTATION: embed the seed directly in the initial state blob instead of
     // returning `seedContent` for the adapter to record -> this close
     // wrongly refuses (NoMarker), even though the artifact already holds
     // this exact content and nothing was ever "untouched" from the
@@ -4391,6 +4462,7 @@ describe("the ydoc.open deadline (#616)", () => {
     const engine = seedPlaintextEngine("on disk");
     const methods: string[] = [];
     const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
       async sendRequest(request: Request) {
         methods.push(request.method);

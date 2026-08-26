@@ -3,7 +3,7 @@
 //!
 //! These structs are the in-process transport's native currency (portability
 //! guardrail 3: an embedded engine never serializes to itself); the framed
-//! transport encodes them as JSON control frames in protocol v1.
+//! transport encodes them as JSON control frames in protocol v2.
 
 use crate::error::{EnvelopeDecodeError, LimitKind, LimitViolation, WireError};
 use crate::limits::{MAX_WIRE_INTEGER, WireLimits};
@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// Protocol compatibility version, negotiated in `hello`/`helloAck`.
 /// Distinct from the storage schema version (`schema_version = 2`).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Client-assigned request id, unique within a session generation.
 /// Bounded by [`MAX_WIRE_INTEGER`] so TypeScript can use plain `number`.

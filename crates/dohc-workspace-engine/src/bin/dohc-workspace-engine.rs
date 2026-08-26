@@ -510,14 +510,17 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
                                                 egress,
                                             }
                                         } else {
-                                            // The service response already is
-                                            // the metadata-only in-band shape.
-                                            // A client that did not negotiate
-                                            // blobs must never receive frames
-                                            // it cannot parse.
-                                            OutputItem::Envelope(Envelope::Response(
-                                                service_response.response,
-                                            ))
+                                            // An attached blob is part of this
+                                            // successful result. Never turn it
+                                            // into a metadata-only success for
+                                            // a client that cannot receive it.
+                                            OutputItem::Envelope(Envelope::Error(ErrorEnvelope {
+                                                id: Some(service_response.response.id),
+                                                error: WireError::new(
+                                                    ErrorCode::InvalidParams,
+                                                    "blob-capability-required",
+                                                ),
+                                            }))
                                         }
                                     }
                                     None => OutputItem::Envelope(Envelope::Response(
@@ -1090,6 +1093,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_blob_writer_emits_one_empty_fin_before_response() {
+        let response = WireResponse {
+            id: 73,
+            result: serde_json::json!({ "empty": true }),
+        };
+        let egress = BlobEgress {
+            stream_id: 73,
+            sha256: dohc_engine_storage::hex_sha256(&[]),
+            bytes: Vec::new(),
+            cancel: CancelSignal::new(),
+            deadline: None,
+            byte_permit: None,
+        };
+        let limits = WireLimits::default();
+        let (mut output, mut input) = tokio::io::duplex(4096);
+        write_blob_egress(&mut output, response.clone(), egress, &limits)
+            .await
+            .expect("write empty blob egress");
+        output.shutdown().await.expect("close transcript");
+        let mut transcript = Vec::new();
+        input
+            .read_to_end(&mut transcript)
+            .await
+            .expect("read transcript");
+
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&transcript);
+        let Frame::Control(start) = decoder.next_frame().expect("frame").expect("start") else {
+            panic!("first frame must be BlobStart");
+        };
+        assert!(matches!(
+            decode_control(&start, &limits).expect("decode start"),
+            Envelope::BlobStart(BlobStart {
+                request_id: 73,
+                stream_id: 73,
+                total_bytes: Some(0),
+                ..
+            })
+        ));
+        let Frame::BlobChunk {
+            stream_id,
+            fin,
+            bytes,
+        } = decoder
+            .next_frame()
+            .expect("frame")
+            .expect("empty final chunk")
+        else {
+            panic!("second frame must be the empty final BlobChunk");
+        };
+        assert_eq!(stream_id, 73);
+        assert!(fin);
+        assert!(bytes.is_empty());
+        let Frame::Control(response_frame) =
+            decoder.next_frame().expect("frame").expect("response")
+        else {
+            panic!("last frame must be Response");
+        };
+        assert_eq!(
+            decode_control(&response_frame, &limits).expect("decode response"),
+            Envelope::Response(response)
+        );
+        assert!(decoder.next_frame().expect("frame").is_none());
+    }
+
+    #[tokio::test]
     async fn cancelled_daemon_blob_writer_emits_no_blob_bytes() {
         // MUTATION: remove the pre-egress cancellation guard -> BlobStart and
         // plaintext blob bytes appear instead of the request-scoped error.
@@ -1227,19 +1296,19 @@ mod tests {
                 assert!(fin);
                 assert_eq!(bytes, vec![0x7a; 64 * 1024]);
             } else {
-                let Frame::Control(response_frame) =
-                    decoder.next_frame().expect("frame").expect("response")
+                let Frame::Control(error_frame) =
+                    decoder.next_frame().expect("frame").expect("error")
                 else {
-                    panic!("non-negotiating client must receive metadata response");
+                    panic!("non-negotiating client must receive an error");
                 };
-                let Envelope::Response(response) =
-                    decode_control(&response_frame, &limits).expect("decode response")
+                let Envelope::Error(error) =
+                    decode_control(&error_frame, &limits).expect("decode error")
                 else {
-                    panic!("non-negotiating client received a non-response envelope");
+                    panic!("non-negotiating client received a non-error envelope");
                 };
-                assert_eq!(response.id, id);
-                assert_eq!(response.result["bytesBase64"], serde_json::Value::Null);
-                assert_eq!(response.result["byteLength"], 64 * 1024);
+                assert_eq!(error.id, Some(id));
+                assert_eq!(error.error.code, ErrorCode::InvalidParams);
+                assert_eq!(error.error.message, "blob-capability-required");
                 assert!(decoder.next_frame().expect("frame").is_none());
                 continue;
             }
