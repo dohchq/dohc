@@ -741,12 +741,11 @@ export class EngineRelayClient {
             .catch(() => undefined);
           this.activeLocations.set(workspaceKey, connectionKey);
         }
-        let opened = false;
         try {
           return await this.sessions.run(
             targetWorkspace,
             async ({ client, workspace: handle }) => {
-              opened = true;
+              this.retainBoundWorkspace(workspaceKey, workspace);
               const requester = new WorkspaceDaemonRequester(client);
               return await requester.request(method, params, {
                 workspace: handle,
@@ -757,8 +756,6 @@ export class EngineRelayClient {
           );
         } catch (error) {
           translateRelayError(method, error);
-        } finally {
-          if (opened) this.retainBoundWorkspace(workspaceKey, workspace);
         }
       });
     const request = async (
