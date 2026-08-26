@@ -380,7 +380,118 @@ describe("share-web sessions", () => {
     expect(readCalls).toBe(2);
   });
 
-  it("deletes a near-expiry session when relay refresh refuses it", async () => {
+  it("keeps a near-expiry session after a network refresh failure and retries renewal on the next request", async () => {
+    let now = 1_000;
+    let refreshCalls = 0;
+    const readCapabilities: string[] = [];
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "share-web-to-relay-refresh-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 29).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-network-refresh-failure",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          refreshCalls += 1;
+          if (refreshCalls === 1) {
+            throw new Error("temporary relay outage");
+          }
+          return Response.json({
+            ok: true,
+            grantId: "grant-network-refresh-failure",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        readCapabilities.push(relayRequest.headers.get("authorization") ?? "");
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+    now = 601_001;
+
+    const duringFailure = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    const afterRetry = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+
+    expect({
+      statuses: [duringFailure.status, afterRetry.status],
+      refreshCalls,
+      readCapabilities,
+    }).toEqual({
+      statuses: [200, 200],
+      refreshCalls: 2,
+      readCapabilities: [
+        `LinkCapability ${CAP_ALPHA_1}`,
+        `LinkCapability ${CAP_ALPHA_2}`,
+      ],
+    });
+  });
+
+  it("keeps a near-expiry session when relay refresh answers 500", async () => {
+    let now = 1_000;
+    let refreshCalls = 0;
+    const readCapabilities: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "share-web-to-relay-refresh-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 31).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-server-refresh-failure",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          refreshCalls += 1;
+          return new Response("temporary relay failure", { status: 500 });
+        }
+        readCapabilities.push(relayRequest.headers.get("authorization") ?? "");
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+    now = 601_001;
+
+    const duringFailure = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+
+    expect(duringFailure.status).toBe(200);
+    expect(refreshCalls).toBe(1);
+    expect(readCapabilities).toEqual([`LinkCapability ${CAP_ALPHA_1}`]);
+  });
+
+  it("deletes a near-expiry session when relay refresh answers 401", async () => {
     let now = 1_000;
     let refreshCalls = 0;
     let readCalls = 0;

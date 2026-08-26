@@ -29,6 +29,11 @@ interface ShareWebSession {
   createdAtMs: number;
 }
 
+type RefreshAttempt =
+  | { status: "refreshed"; session: ShareWebSession }
+  | { status: "invalid" }
+  | { status: "unavailable" };
+
 interface ExchangeBucket {
   tokens: number;
   updatedAtMs: number;
@@ -429,7 +434,7 @@ export function createShareWebHandler({
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
   const blobProxyLimiter = new ShareWebBlobProxyLimiter();
-  const refreshes = new Map<string, Promise<ShareWebSession | null>>();
+  const refreshes = new Map<string, Promise<RefreshAttempt>>();
 
   async function readSession(request: Request): Promise<{
     discriminator: string;
@@ -483,7 +488,7 @@ export function createShareWebHandler({
     let refresh = refreshes.get(key);
     if (!refresh) {
       const expectedCapabilityToken = capabilityBeforeRefresh;
-      const pending = (async (): Promise<ShareWebSession | null> => {
+      const pending = (async (): Promise<RefreshAttempt> => {
         try {
           const relayResponse = await fetchRelay(
             relayRequest(relayUrl, "/sync/link-refresh", {
@@ -496,23 +501,27 @@ export function createShareWebHandler({
               },
             }),
           );
-          if (relayResponse.status !== 200) return null;
+          if (relayResponse.status === 401) return { status: "invalid" };
+          if (relayResponse.status !== 200) return { status: "unavailable" };
           const refreshed = parsedRelaySession(
             await relayResponse.json(),
             nowMs(),
           );
           if (!refreshed || refreshed.grantId !== authenticated.session.grantId) {
-            return null;
+            return { status: "unavailable" };
           }
-          return sessions.replaceCapability(
+          const session = sessions.replaceCapability(
             authenticated.discriminator,
             authenticated.token,
             expectedCapabilityToken,
             refreshed.capabilityToken,
             refreshed.expiresAtMs,
           );
+          return session
+            ? { status: "refreshed", session }
+            : { status: "unavailable" };
         } catch {
-          return null;
+          return { status: "unavailable" };
         }
       })();
       const tracked = pending.finally(() => {
@@ -522,8 +531,8 @@ export function createShareWebHandler({
       refresh = tracked;
     }
 
-    const refreshed = await refresh;
-    if (!refreshed) {
+    const attempt = await refresh;
+    if (attempt.status === "invalid") {
       sessions.deleteIfCapability(
         authenticated.discriminator,
         authenticated.token,
@@ -531,12 +540,15 @@ export function createShareWebHandler({
       );
       return { ok: false };
     }
+    if (attempt.status === "unavailable") {
+      return { ok: true, setCookie: null };
+    }
     return {
       ok: true,
       setCookie: sessionCookie(
         authenticated.discriminator,
         authenticated.token,
-        refreshed.expiresAtMs,
+        attempt.session.expiresAtMs,
         nowMs(),
       ),
     };

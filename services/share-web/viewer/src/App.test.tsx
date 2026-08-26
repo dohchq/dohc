@@ -15,6 +15,7 @@ const DEFAULT_META: ViewMeta = {
     access: "view",
   },
   lastSettledAtMs: null,
+  lastSettledKnown: true,
 };
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -104,6 +105,59 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
+  it("presents the established session capability on viewer requests", async () => {
+    const file: SharedFile = {
+      path: "readme.md",
+      blobSha256: "0".repeat(64),
+      contentKind: "text",
+    };
+    const requestInits = new Map<string, RequestInit | undefined>();
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      requestInits.set(path, init);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response("# Shared file");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    for (const path of [
+      "/api/view/meta",
+      "/api/view/log?since=0&limit=500",
+      `/api/view/blob/${file.blobSha256}`,
+    ]) {
+      expect(requestInits.get(path), path).toEqual({
+        credentials: "same-origin",
+        headers: { "x-dohc-link-session": SESSION },
+      });
+    }
+  });
+
+  it("renders unavailable freshness separately from no settled changes", async () => {
+    const meta = {
+      ...DEFAULT_META,
+      lastSettledKnown: false,
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(meta);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(container.querySelector(".freshness")?.textContent).toBe(
+      "Last settled time isn't available.",
+    );
+  });
+
   it("navigates resolved relative Markdown links inside the share", async () => {
     const readme: SharedFile = {
       path: "docs/readme.md",
@@ -159,6 +213,39 @@ describe("App", () => {
     expect(followedPageLink).toBe(false);
     expect(container.querySelector("h1")?.textContent).toBe("notes/next.txt");
     expect(location.pathname).toBe(`/s/${SESSION}`);
+  });
+
+  it("keeps the viewer chrome when the selected file blob is unavailable", async () => {
+    const file: SharedFile = {
+      path: "readme.md",
+      blobSha256: "9".repeat(64),
+      contentKind: "text",
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response(null, { status: 404 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const content = container.querySelector("main.content");
+    expect(content?.textContent).toBe("This link isn't available.");
+    expect(content?.querySelector(".state")?.textContent).toBe(
+      "This link isn't available.",
+    );
+    expect(container.querySelector("header")?.textContent).toContain(
+      "Shared by a dohc user",
+    );
+    expect(container.querySelector("h1")?.textContent).toBe(file.path);
+    expect(container.querySelector(".badge")?.textContent).toBe("View");
+    expect(container.querySelector('nav[aria-label="Shared files"]')?.textContent)
+      .toContain(file.path);
   });
 
   it.each([

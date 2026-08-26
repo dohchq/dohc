@@ -13,7 +13,11 @@ import {
   LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
   type SyncRelayHandler,
 } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import {
+  openSyncRelayStorage,
+  SHARED_BLOB_CANDIDATE_LIMIT,
+  type SyncRelayStorage,
+} from "./storage";
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
@@ -202,6 +206,46 @@ async function appendMoments(
   ).toBe(200);
 }
 
+async function createLink(
+  h: SyncRelayHandler,
+  input: {
+    paths: string[];
+    versionId?: string;
+    access: "view" | "comment" | "edit";
+  },
+): Promise<{ capability: string; grantId: string }> {
+  const share = await json(
+    await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({
+          recipientUserId: RECIPIENT,
+          paths: input.paths,
+          access: input.access,
+          ...(input.versionId === undefined ? {} : { versionId: input.versionId }),
+        }),
+      ),
+    ),
+  );
+  const link = await json(
+    await h(
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares/${String(share.shareId)}/links`,
+        jsonBody({ access: input.access }),
+      ),
+    ),
+  );
+  const exchange = await json(
+    await h(request(null, "/sync/link-exchange", jsonBody({ secret: link.secret }))),
+  );
+  return {
+    capability: String(exchange.capabilityToken),
+    grantId: String(link.grantId),
+  };
+}
+
 async function seed(
   h: SyncRelayHandler,
   access: "view" | "comment" | "edit" = "view",
@@ -243,36 +287,13 @@ async function seed(
       )
     ).status,
   ).toBe(200);
-  const share = await json(
-    await h(
-      request(
-        OWNER,
-        `/sync/${WORKSPACE}/shares`,
-        jsonBody({
-          recipientUserId: RECIPIENT,
-          paths: selector.paths ?? ["docs"],
-          access,
-          ...(selector.versionId === undefined ? {} : { versionId: selector.versionId }),
-        }),
-      ),
-    ),
-  );
-  const shareId = String(share.shareId);
-  const link = await json(
-    await h(
-      request(
-        OWNER,
-        `/sync/${WORKSPACE}/shares/${shareId}/links`,
-        jsonBody({ access }),
-      ),
-    ),
-  );
-  const exchange = await json(
-    await h(request(null, "/sync/link-exchange", jsonBody({ secret: link.secret }))),
-  );
+  const link = await createLink(h, {
+    paths: selector.paths ?? ["docs"],
+    ...(selector.versionId === undefined ? {} : { versionId: selector.versionId }),
+    access,
+  });
   return {
-    capability: String(exchange.capabilityToken),
-    grantId: String(link.grantId),
+    ...link,
     sharedSha,
     hiddenSha,
   };
@@ -373,6 +394,7 @@ describe("relay capability reads", () => {
       },
       access: "view",
       lastSettledAtMs: 1_100,
+      lastSettledKnown: true,
     });
     expect(linkMeta).not.toHaveProperty("granterEmail");
     expect(linkMeta).not.toHaveProperty("workspaceId");
@@ -544,6 +566,7 @@ describe("relay capability reads", () => {
       await h(linkRequest(seeded.capability, "/sync/link/share")),
     );
     expect(rotatedShare.lastSettledAtMs).toBeNull();
+    expect(rotatedShare.lastSettledKnown).toBe(true);
 
     await appendAfterRotation(h);
     const currentLog = await json(
@@ -558,6 +581,7 @@ describe("relay capability reads", () => {
       await h(linkRequest(seeded.capability, "/sync/link/share")),
     );
     expect(currentShare.lastSettledAtMs).toBe(1_300);
+    expect(currentShare.lastSettledKnown).toBe(true);
   });
 
   it("serves only blobs established above the workspace epoch floor", async () => {
@@ -754,6 +778,128 @@ describe("relay capability reads", () => {
     expect(await pinned.text()).toBe("# shared\n");
   });
 
+  it("serves a version.create-only snapshot blob only through a selector that covers it", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view", {
+      paths: ["docs"],
+      versionId: "snapshot-1",
+    });
+    const snapshotContent = "# snapshot only\n";
+    const snapshotSha = await putBlob(h, snapshotContent);
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "origin-a",
+              ops: [
+                {
+                  originSeq: 3,
+                  opKind: "version.create",
+                  payload: {
+                    versionId: "snapshot-1",
+                    forkSnapshots: [
+                      {
+                        objectId: "object-snapshot-only",
+                        path: "docs/snapshot-only.md",
+                        blobSha256: snapshotSha,
+                      },
+                    ],
+                  },
+                  recordedAtMs: 1_300,
+                },
+              ],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const excluded = await createLink(h, {
+      paths: ["private"],
+      versionId: "snapshot-1",
+      access: "view",
+    });
+
+    const covered = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${snapshotSha}`),
+    );
+    expect(covered.status).toBe(200);
+    expect(await covered.text()).toBe(snapshotContent);
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            excluded.capability,
+            `/sync/link/blobs/${snapshotSha}`,
+          ),
+        ),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+  });
+
+  it("deduplicates and caps blob candidates when one file returns to earlier content", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const alternateContent = "# alternate\n";
+    await putBlob(h, alternateContent);
+    const ops: ReturnType<typeof moment>[] = [];
+    for (let index = 0; index < SHARED_BLOB_CANDIDATE_LIMIT; index += 1) {
+      ops.push(
+        moment(3 + index, `private/candidate-${index}.md`, "# shared\n", 1_300 + index, {
+          objectId: `object-candidate-${index}`,
+        }),
+      );
+    }
+    const firstOscillationOriginSeq = 3 + SHARED_BLOB_CANDIDATE_LIMIT;
+    for (let index = 0; index <= SHARED_BLOB_CANDIDATE_LIMIT; index += 1) {
+      const alternateOriginSeq = firstOscillationOriginSeq + index * 2;
+      ops.push(
+        moment(alternateOriginSeq, "docs/shared.md", alternateContent, 2_000 + index * 2, {
+          objectId: "object-shared",
+          beforePath: "docs/shared.md",
+          beforeContent: "# shared\n",
+        }),
+      );
+      ops.push(
+        moment(alternateOriginSeq + 1, "docs/shared.md", "# shared\n", 2_001 + index * 2, {
+          objectId: "object-shared",
+          beforePath: "docs/shared.md",
+          beforeContent: alternateContent,
+        }),
+      );
+    }
+    await appendMoments(h, ops);
+
+    const blob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(blob.status).toBe(200);
+    expect(await blob.text()).toBe("# shared\n");
+
+    const candidates = storage.listObjectMomentLogRowsByBlob({
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      sha256: seeded.sharedSha,
+    });
+    expect(candidates.length).toBeLessThanOrEqual(SHARED_BLOB_CANDIDATE_LIMIT);
+    const candidateObjectIds = candidates.map((row) => {
+      const payload: unknown = JSON.parse(row.payloadJson);
+      if (payload === null || typeof payload !== "object") return null;
+      const objectId: unknown = Reflect.get(payload, "objectId");
+      return typeof objectId === "string" ? objectId : null;
+    });
+    expect(new Set(candidateObjectIds).size).toBe(candidateObjectIds.length);
+    expect(candidateObjectIds[0]).toBe("object-shared");
+    expect(candidates.map((row) => row.relaySeq)).toEqual(
+      [...candidates.map((row) => row.relaySeq)].sort((left, right) => right - left),
+    );
+  });
+
   it("makes revoked, rotated, expired, and unknown capability refusals byte-identical", async () => {
     let now = 2_000;
     const storage = await newStorage();
@@ -866,7 +1012,7 @@ describe("relay capability reads", () => {
     }
   });
 
-  it("returns null freshness when the first shared row is beyond the fallback page budget", async () => {
+  it("reports unknown freshness when the first shared row is beyond the fallback page budget", async () => {
     const pageSize = 2;
     const storage = await newStorage();
     const h = handler(storage, {
@@ -892,6 +1038,7 @@ describe("relay capability reads", () => {
     );
 
     expect(metadata.lastSettledAtMs).toBeNull();
+    expect(metadata.lastSettledKnown).toBe(false);
   });
 
   it("refuses a fallback blob when the forward walk exceeds the page budget", async () => {
@@ -938,6 +1085,7 @@ describe("relay capability reads", () => {
       await h(linkRequest(seeded.capability, "/sync/link/share")),
     );
     expect(metadata.lastSettledAtMs).toBe(1_100);
+    expect(metadata.lastSettledKnown).toBe(true);
 
     const blob = await h(
       linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),

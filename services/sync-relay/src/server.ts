@@ -46,6 +46,7 @@ import {
   type ThreadFileBinding,
 } from "./shareFilter";
 import {
+  SHARED_BLOB_CANDIDATE_LIMIT,
   SyncRelayBlobMissingError,
   SyncRelayConflictError,
   SyncRelayQuotaExceededError,
@@ -681,11 +682,14 @@ export function createSyncRelayHandler({
     return { ops, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
 
-  const newestFilteredOpTimestamp = (
+  const newestFilteredOpFreshness = (
     workspaceId: string,
     selector: AnyShareSelector,
     epochLogFloor: number,
-  ): number | null => {
+  ):
+    | { lastSettledAtMs: number; lastSettledKnown: true }
+    | { lastSettledAtMs: null; lastSettledKnown: true }
+    | { lastSettledAtMs: null; lastSettledKnown: false } => {
     let beforeRelaySeq: number | null = null;
     const chatResolver = chatResolverFor(workspaceId);
     for (
@@ -699,7 +703,9 @@ export function createSyncRelayHandler({
         limit: linkCapabilityReadFallbackPageSize,
       });
       for (const row of rows) {
-        if (row.relaySeq <= epochLogFloor) return null;
+        if (row.relaySeq <= epochLogFloor) {
+          return { lastSettledAtMs: null, lastSettledKnown: true };
+        }
         if (
           !isChatChannelSelector(selector) &&
           !FILE_FRESHNESS_OP_KINDS.has(row.opKind)
@@ -707,13 +713,15 @@ export function createSyncRelayHandler({
           continue;
         }
         if (filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver).allowed) {
-          return row.recordedAtMs;
+          return { lastSettledAtMs: row.recordedAtMs, lastSettledKnown: true };
         }
       }
-      if (rows.length < linkCapabilityReadFallbackPageSize) return null;
+      if (rows.length < linkCapabilityReadFallbackPageSize) {
+        return { lastSettledAtMs: null, lastSettledKnown: true };
+      }
       beforeRelaySeq = rows[rows.length - 1]!.relaySeq;
     }
-    return null;
+    return { lastSettledAtMs: null, lastSettledKnown: false };
   };
 
   const latestPathRelatedMoment = (
@@ -816,12 +824,19 @@ export function createSyncRelayHandler({
     sha256: string,
     epochLogFloor: number,
   ): Uint8Array | null => {
-    const candidates = storage.listObjectMomentLogRowsByBlob(workspaceId, sha256);
+    if (isChatChannelSelector(selector)) return null;
+    const versionId = targetVersionId(selector);
+    const candidates = [
+      ...storage.listObjectMomentLogRowsByBlob({ workspaceId, versionId, sha256 }),
+      ...storage.listVersionCreateLogRowsByBlob({ workspaceId, versionId, sha256 }),
+    ]
+      .sort((left, right) => right.relaySeq - left.relaySeq)
+      .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const chatResolver = chatResolverFor(workspaceId);
     const reachable = candidates.some((row) => {
       const establishingRow =
-        !isChatChannelSelector(selector) && selector.versionId === null
-          ? currentSettledBlobMoment(workspaceId, targetVersionId(selector), row)
+        selector.versionId === null
+          ? currentSettledBlobMoment(workspaceId, versionId, row)
           : row;
       if (!establishingRow || establishingRow.relaySeq <= epochLogFloor) return false;
       const decision = filterOpForShare(
@@ -1095,7 +1110,7 @@ export function createSyncRelayHandler({
         const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
 
         if (route.route === "link-share") {
-          const lastSettledAtMs = newestFilteredOpTimestamp(
+          const freshness = newestFilteredOpFreshness(
             share.workspaceId,
             capability.effectiveSelector,
             epochLogFloor,
@@ -1105,7 +1120,7 @@ export function createSyncRelayHandler({
             ok: true,
             effectiveSelector: capability.effectiveSelector,
             access: capability.access,
-            lastSettledAtMs,
+            ...freshness,
           });
         }
 

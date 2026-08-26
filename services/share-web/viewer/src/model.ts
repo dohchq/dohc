@@ -8,6 +8,7 @@ export interface ViewMeta {
     access: ShareAccess;
   };
   lastSettledAtMs: number | null;
+  lastSettledKnown: boolean;
 }
 
 export interface RelayOp {

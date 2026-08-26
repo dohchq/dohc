@@ -118,19 +118,24 @@ function relativeTime(timestamp: number, now: number): string {
   return formatter.format(Math.round(hours / 24), "day");
 }
 
-function Freshness(props: { lastSettledAtMs: number | null }) {
+function Freshness(props: {
+  lastSettledAtMs: number | null;
+  lastSettledKnown: boolean;
+}) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (props.lastSettledAtMs === null) return;
+    if (!props.lastSettledKnown || props.lastSettledAtMs === null) return;
     setNow(Date.now());
     const interval = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(interval);
-  }, [props.lastSettledAtMs]);
+  }, [props.lastSettledAtMs, props.lastSettledKnown]);
   return (
     <div className="freshness">
-      {props.lastSettledAtMs === null
-        ? "No settled changes"
-        : `Last settled ${relativeTime(props.lastSettledAtMs, now)}`}
+      {!props.lastSettledKnown
+        ? "Last settled time isn't available."
+        : props.lastSettledAtMs === null
+          ? "No settled changes"
+          : `Last settled ${relativeTime(props.lastSettledAtMs, now)}`}
     </div>
   );
 }
@@ -345,7 +350,10 @@ export function App() {
         </div>
         <span className="badge">View</span>
       </header>
-      <Freshness lastSettledAtMs={state.meta.lastSettledAtMs} />
+      <Freshness
+        lastSettledAtMs={state.meta.lastSettledAtMs}
+        lastSettledKnown={state.meta.lastSettledKnown}
+      />
       <div className="layout">
         <nav aria-label="Shared files">
           <p className="section-label">Files</p>
