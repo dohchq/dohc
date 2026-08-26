@@ -20,7 +20,7 @@ import type {
   WorkspaceSettingsResult,
 } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
-import { openLinkExternally } from "./editor/linkMenu";
+import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "./sdkFrame";
 
 type WorkspacePreviewMode =

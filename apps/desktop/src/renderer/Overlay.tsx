@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   type HTMLAttributes,
   type ReactNode,
@@ -33,6 +34,11 @@ export function Overlay(props: {
     const id = idRef.current;
     pushOverlay(id);
     return () => removeOverlay(id);
+  }, []);
+
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (panel && !panel.contains(document.activeElement)) panel.focus();
   }, []);
 
   useEffect(() => {

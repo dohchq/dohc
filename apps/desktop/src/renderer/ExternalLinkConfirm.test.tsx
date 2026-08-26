@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bridge } from "./bridge";
 import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
-import { openLinkExternally } from "./editor/linkMenu";
+import { openLinkExternally } from "./linkActivation";
 
 vi.mock("./bridge", () => ({ bridge: vi.fn() }));
 
@@ -190,6 +190,6 @@ describe("external-open routing", () => {
 
     walk(rendererRoot);
 
-    expect(callers.sort()).toEqual(["editor/linkMenu.tsx"]);
+    expect(callers.sort()).toEqual(["linkActivation.ts"]);
   });
 });

@@ -20,7 +20,7 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type * as Y from "yjs";
 import type { ExcalidrawDocument } from "./excalidrawDocument";
-import { openLinkExternally } from "./editor/linkMenu";
+import { openLinkExternally } from "./linkActivation";
 import {
   applyCanvasSceneChange,
   createSceneRemoteEchoes,

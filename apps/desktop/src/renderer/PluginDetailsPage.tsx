@@ -8,7 +8,7 @@ import {
   type PluginSettingDeclaration,
   type PluginSettingValue,
 } from "../plugins/pluginManifestSchema";
-import { activateReadOnlyLinkHref } from "./editor/linkMenu";
+import { activateReadOnlyLinkHref } from "./linkActivation";
 import { SettingRow, SwitchControl } from "./settings/SettingRow";
 import { bridge } from "./bridge";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
