@@ -16,6 +16,7 @@ import { shareWebRefusalBody } from "./server";
 
 const PUBLIC_HOST = "share.example.test";
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;
+const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const EXCHANGE_SECRET = Buffer.alloc(32, 11).toString("base64url");
 const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
 const BLOB_SHA = "a".repeat(64);
@@ -228,6 +229,7 @@ describe("share-web Node request adapter", () => {
     }
   });
 
+  // The GET covers the 16 KiB adapter cap; the POST covers the 8 KiB exchange-handler cap.
   it("accepts a request body exactly at the cap", async () => {
     const relay = await startControlledJsonRelay();
     const server = await startShareWeb({ relayUrl: relay.url });
@@ -274,6 +276,42 @@ describe("share-web Node request adapter", () => {
     } finally {
       relay.finishAllResponses();
     }
+  });
+
+  it("forwards an exchange body exactly at the handler cap", async () => {
+    const receivedExchangeBodies: Buffer[] = [];
+    const relayUrl = await startRelay((body) => receivedExchangeBodies.push(body));
+    const server = await startShareWeb({ relayUrl });
+    const requestPrefix = '{"padding":"';
+    const requestSuffix = `","secret":"${EXCHANGE_SECRET}"}`;
+    const requestBody =
+      requestPrefix +
+      "x".repeat(
+        MAX_EXCHANGE_BODY_BYTES -
+          Buffer.byteLength(requestPrefix) -
+          Buffer.byteLength(requestSuffix),
+      ) +
+      requestSuffix;
+    const expectedRelayBody = JSON.stringify({ secret: EXCHANGE_SECRET });
+    expect(Buffer.byteLength(requestBody)).toBe(MAX_EXCHANGE_BODY_BYTES);
+
+    const response = await sendHttpRequest(server.port, "/api/exchange", {
+      method: "POST",
+      headers: {
+        host: PUBLIC_HOST,
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(requestBody),
+      },
+      body: requestBody,
+    });
+
+    expect(response.statusCode).toBe(200);
+    await readResponse(response);
+    expect(receivedExchangeBodies).toHaveLength(1);
+    expect(receivedExchangeBodies[0]?.length).toBe(
+      Buffer.byteLength(expectedRelayBody),
+    );
+    expect(receivedExchangeBodies[0]?.toString("utf8")).toBe(expectedRelayBody);
   });
 
   it("keeps serving after a request with an invalid Host authority", async () => {
@@ -706,23 +744,28 @@ async function settleWithin<T>(
   }
 }
 
-async function startRelay(): Promise<string> {
+async function startRelay(onExchangeBody?: (body: Buffer) => void): Promise<string> {
   const server = createServer((request, response) => {
-    request.resume();
     if (request.method !== "POST" || request.url !== "/sync/link-exchange") {
+      request.resume();
       response.statusCode = 404;
       response.end();
       return;
     }
-    response.setHeader("content-type", "application/json");
-    response.end(
-      JSON.stringify({
-        ok: true,
-        grantId: "grant-integration",
-        capabilityToken: CAPABILITY_TOKEN,
-        capabilityExpiresAtMs: Date.now() + 15 * 60_000,
-      }),
-    );
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      onExchangeBody?.(Buffer.concat(chunks));
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          ok: true,
+          grantId: "grant-integration",
+          capabilityToken: CAPABILITY_TOKEN,
+          capabilityExpiresAtMs: Date.now() + 15 * 60_000,
+        }),
+      );
+    });
   });
   relayServers.add(server);
   await new Promise<void>((resolve, reject) => {

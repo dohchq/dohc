@@ -1068,6 +1068,9 @@ export function createSyncRelayHandler({
     const refreshLinkKey = linkKey;
     const refreshedAtMs = nowMs();
     const current = requireRefreshableLinkSession(request, refreshedAtMs);
+    if (!linkReadRateLimiter.allow(current.capabilityHash, refreshedAtMs)) {
+      throw linkReadRateLimited();
+    }
     const authorized = authorizeLinkShareAction({
       storage,
       grantId: current.session.grantId,

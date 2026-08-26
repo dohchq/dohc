@@ -494,7 +494,7 @@ describe("sync relay main process", () => {
 
     const secret = await seedExchangeLink(baseUrl, "workspace-keyed-exchange-buckets");
     const firstClientStatuses = await Promise.all(
-      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, async () =>
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
         (
           await exchangeLink(
             baseUrl,
@@ -506,14 +506,9 @@ describe("sync relay main process", () => {
       ),
     );
 
-    // Prove the first address's bucket is exhausted before asserting the
-    // second address succeeds — otherwise one larger shared bucket passes.
-    const exhaustedFirstClient = await exchangeLink(
-      baseUrl,
-      secret,
-      "198.51.100.10",
-      relayExchangeKey,
-    );
+    // Prove the first address's bucket is exhausted within one batch before
+    // asserting the second address succeeds — otherwise one larger shared
+    // bucket passes.
     const secondClient = await exchangeLink(
       baseUrl,
       secret,
@@ -521,12 +516,15 @@ describe("sync relay main process", () => {
       relayExchangeKey,
     );
     expect({
-      firstClientStatuses,
-      exhaustedFirstClientStatus: exhaustedFirstClient.status,
+      firstClientStatuses: [...firstClientStatuses].sort(
+        (left: number, right: number) => left - right,
+      ),
       secondClientStatus: secondClient.status,
     }).toEqual({
-      firstClientStatuses: Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
-      exhaustedFirstClientStatus: 404,
+      firstClientStatuses: [
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
+        404,
+      ],
       secondClientStatus: 200,
     });
   });
@@ -549,23 +547,24 @@ describe("sync relay main process", () => {
 
     const secret = await seedExchangeLink(baseUrl, "workspace-unkeyed-exchange-bucket");
     const firstClientStatuses = await Promise.all(
-      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, async () =>
+      Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY + 1 }, async () =>
         (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
       ),
     );
 
-    // Prove the shared bucket is empty at observation time before asserting
-    // the spoofed address shares it — the limiter refills 0.2 tokens/second,
-    // so real HTTP scheduling could otherwise admit one refilled token.
-    const exhaustedFirstClient = await exchangeLink(baseUrl, secret, "203.0.113.10");
+    // Prove the shared bucket is exhausted within one batch before asserting
+    // the spoofed address shares it.
     const spoofedSecondClient = await exchangeLink(baseUrl, secret, "203.0.113.11");
     expect({
-      firstClientStatuses,
-      exhaustedFirstClientStatus: exhaustedFirstClient.status,
+      firstClientStatuses: [...firstClientStatuses].sort(
+        (left: number, right: number) => left - right,
+      ),
       secondClientStatus: spoofedSecondClient.status,
     }).toEqual({
-      firstClientStatuses: Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
-      exhaustedFirstClientStatus: 404,
+      firstClientStatuses: [
+        ...Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
+        404,
+      ],
       secondClientStatus: 404,
     });
   });

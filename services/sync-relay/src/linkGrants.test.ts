@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   constantTimeHashEqual,
   LinkExchangeRateLimiter,
+  LinkReadRateLimiter,
   LINK_SESSION_TTL_MS,
   validateLinkCapability,
 } from "./linkSecurity";
@@ -91,6 +92,7 @@ function handler(
     linkKey?: string | Uint8Array;
     relayExchangeKey?: string;
     linkExchangeRateLimiter?: LinkExchangeRateLimiter;
+    linkReadRateLimiter?: LinkReadRateLimiter;
     nowMs?: () => number;
     newLinkBearer?: () => string;
   } = {},
@@ -111,6 +113,7 @@ function handler(
     linkKey: Object.hasOwn(overrides, "linkKey") ? overrides.linkKey : LINK_KEY,
     relayExchangeKey: overrides.relayExchangeKey,
     linkExchangeRateLimiter: overrides.linkExchangeRateLimiter,
+    linkReadRateLimiter: overrides.linkReadRateLimiter,
     newLinkBearer: overrides.newLinkBearer,
   };
   return createSyncRelayHandler(options);
@@ -1287,6 +1290,34 @@ describe("relay link grants", () => {
         nowMs: 2_001,
       }),
     ).toMatchObject({ grantId: created.grantId, access: "view" });
+  });
+
+  it("rate-limits refresh with the capability read bucket", async () => {
+    const storage = await newStorage();
+    const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const h = handler(storage, { linkReadRateLimiter: limiter });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchanged = await json(
+      await h(request(null, "/sync/link-exchange", jsonBody({ secret: created.secret }))),
+    );
+    const capability = String(exchanged.capabilityToken);
+    expect(limiter.allow(hmac(capability), 2_000)).toBe(true);
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: { authorization: `LinkCapability ${capability}` },
+      }),
+    );
+
+    expect(refused.status).toBe(429);
+    expect(await json(refused)).toEqual({
+      ok: false,
+      error: "too many link reads",
+      code: "link_read_rate_limited",
+    });
+    expect(storage.findLinkSessionByCapabilityHash(hmac(capability))).not.toBeNull();
   });
 
   it("refreshes a valid capability when the relay exchange key is not configured", async () => {

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownContent } from "./MarkdownContent";
 import {
-  LOG_RETRY_BUDGET_MS,
-  LOG_RETRY_INITIAL_MS,
-  LOG_RETRY_MAX_MS,
+  RETRY_BUDGET_MS,
+  RETRY_INITIAL_MS,
+  RETRY_MAX_MS,
 } from "./retry";
 import {
   filesFromAccumulator,
@@ -46,6 +46,12 @@ interface LoadedLog {
   epochLogFloor: number;
 }
 
+class ViewResponseError extends Error {
+  constructor(readonly status: number) {
+    super("refused");
+  }
+}
+
 type MarkdownPreview =
   | { status: "ready"; markdown: string }
   | { status: "too-large" };
@@ -86,18 +92,18 @@ async function apiWithThrottleRetry(
   path: string,
   signal?: AbortSignal,
 ): Promise<Response> {
-  let retryDelayMs = LOG_RETRY_INITIAL_MS;
+  let retryDelayMs = RETRY_INITIAL_MS;
   let retryWaitedMs = 0;
   while (true) {
     if (signal?.aborted) throw new Error("cancelled");
     const response = await api(session, path, signal);
     if (response.status !== 429) return response;
-    if (retryWaitedMs + retryDelayMs > LOG_RETRY_BUDGET_MS) {
+    if (retryWaitedMs + retryDelayMs > RETRY_BUDGET_MS) {
       throw new Error("refused");
     }
     await waitForRetry(retryDelayMs, signal);
     retryWaitedMs += retryDelayMs;
-    retryDelayMs = Math.min(retryDelayMs * 2, LOG_RETRY_MAX_MS);
+    retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
   }
 }
 
@@ -144,7 +150,7 @@ async function loadLog(
       session,
       `/api/view/log?since=${cursor}&limit=500`,
     );
-    if (!response.ok) throw new Error("refused");
+    if (!response.ok) throw new ViewResponseError(response.status);
     const page = (await response.json()) as {
       ops?: unknown;
       nextCursor?: unknown;
@@ -182,7 +188,7 @@ async function loadLog(
 
 async function loadMeta(session: string): Promise<ViewMeta> {
   const response = await api(session, "/api/view/meta");
-  if (!response.ok) throw new Error("refused");
+  if (!response.ok) throw new ViewResponseError(response.status);
   const meta = (await response.json()) as ViewMeta;
   if (meta.access !== "view" || meta.effectiveSelector.access !== "view") {
     throw new Error("refused");
@@ -478,7 +484,12 @@ export function App() {
       const fileAccumulator = new Map(previous.fileAccumulator);
       void Promise.all([
         loadMeta(readySession),
-        loadLog(readySession, previous.nextCursor, fileAccumulator),
+        loadLog(
+          readySession,
+          previous.nextCursor,
+          fileAccumulator,
+          MAX_LOG_PAGES,
+        ),
       ])
         .then(async ([meta, log]) => {
           if (!current) return;
@@ -506,8 +517,14 @@ export function App() {
               : value
           );
         })
-        .catch(() => {
-          if (current) setState({ status: "refused" });
+        .catch((error: unknown) => {
+          if (
+            current &&
+            error instanceof ViewResponseError &&
+            error.status === 404
+          ) {
+            setState({ status: "refused" });
+          }
         })
         .finally(() => {
           refreshInFlight = false;

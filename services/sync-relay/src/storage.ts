@@ -983,13 +983,13 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     } catch {}
     throw error;
   }
-  // AFTER the schema transaction commits, in its own. The seed scans every
-  // moment.append the log holds, and holding the schema-init write lock for
-  // the length of that scan stalls every other opener against
-  // SYNC_RELAY_BUSY_TIMEOUT_MS on the first open after a deploy. Its own
-  // transaction still makes it atomic — a crash part-way leaves the migration
-  // unrecorded and the next open redoes it.
+  // AFTER the schema transaction commits, each in its own transaction. The
+  // seeds scan existing log rows, and holding the schema-init write lock for
+  // those scans stalls every other opener against SYNC_RELAY_BUSY_TIMEOUT_MS
+  // on the first open after a deploy. Each transaction is still atomic: a
+  // crash part-way leaves its migration unrecorded and the next open redoes it.
   seedObjectPaths(db);
+  seedVersionSnapshotBlobs(db);
 }
 
 // Where a `moment.append` payload says its object is AFTER the op: the
@@ -1138,6 +1138,64 @@ function seedObjectPaths(db: SqliteDb): void {
         resolved.path,
         Number(row.relay_seq),
       );
+    }
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
+      migrationId,
+      Date.now(),
+    );
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
+function seedVersionSnapshotBlobs(db: SqliteDb): void {
+  const migrationId = "version-snapshot-blobs-seed-v1";
+  const seeded = db
+    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
+    .get(migrationId);
+  if (Number(seeded?.complete ?? 0) !== 0) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const claimed = db
+      .prepare(
+        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
+      )
+      .get(migrationId);
+    if (Number(claimed?.complete ?? 0) !== 0) {
+      db.exec("COMMIT");
+      return;
+    }
+    const insert = db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
+    const rows = db
+      .prepare(
+        `SELECT log.workspace_id, log.payload_json, log.recorded_at_ms, log.relay_seq
+         FROM sync_relay_log log
+         WHERE log.op_kind = 'version.create'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM sync_relay_version_snapshot_blobs candidate
+             WHERE candidate.workspace_id = log.workspace_id
+               AND candidate.relay_seq = log.relay_seq
+           )
+         ORDER BY log.relay_seq`,
+      )
+      .all();
+    for (const row of rows) {
+      const workspaceId = String(row.workspace_id);
+      const payloadJson = String(row.payload_json);
+      const versionId = versionIdFromVersionCreatePayload(payloadJson);
+      if (!versionId) continue;
+      const shas = referencedBlobShas("version.create", payloadJson, {
+        workspaceId,
+        recordedAtMs: Number(row.recorded_at_ms),
+      });
+      for (const sha256 of new Set(shas)) {
+        insert.run(workspaceId, Number(row.relay_seq), versionId, sha256);
+      }
     }
     db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
       migrationId,

@@ -7,9 +7,9 @@ import {
 } from "react";
 import { renderSafeMarkdown } from "./markdown";
 import {
-  LOG_RETRY_BUDGET_MS,
-  LOG_RETRY_INITIAL_MS,
-  LOG_RETRY_MAX_MS,
+  RETRY_BUDGET_MS,
+  RETRY_INITIAL_MS,
+  RETRY_MAX_MS,
 } from "./retry";
 
 interface ImageRetryState {
@@ -51,7 +51,7 @@ export function MarkdownContent(props: {
       if (!source) return;
       retry = {
         source,
-        retryDelayMs: LOG_RETRY_INITIAL_MS,
+        retryDelayMs: RETRY_INITIAL_MS,
         retryWaitedMs: 0,
         timeoutId: null,
         stopped: false,
@@ -59,7 +59,7 @@ export function MarkdownContent(props: {
       imageRetries.current.set(image, retry);
     }
     if (retry.stopped || retry.timeoutId !== null) return;
-    if (retry.retryWaitedMs + retry.retryDelayMs > LOG_RETRY_BUDGET_MS) {
+    if (retry.retryWaitedMs + retry.retryDelayMs > RETRY_BUDGET_MS) {
       retry.stopped = true;
       return;
     }
@@ -68,7 +68,7 @@ export function MarkdownContent(props: {
       retry.timeoutId = null;
       if (retry.stopped) return;
       retry.retryWaitedMs += retryDelayMs;
-      retry.retryDelayMs = Math.min(retryDelayMs * 2, LOG_RETRY_MAX_MS);
+      retry.retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
       image.src = retry.source;
     }, retryDelayMs);
   };

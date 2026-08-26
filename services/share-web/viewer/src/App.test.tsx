@@ -6,6 +6,7 @@ import { App, MARKDOWN_PREVIEW_BYTE_CAP } from "./App";
 import { filesFromLog, type RelayOp, type SharedFile, type ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
+const EXPECTED_MAX_LOG_PAGES = 10_000;
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
@@ -1163,6 +1164,60 @@ describe("App", () => {
     expect(container.querySelector("h1")?.textContent).toBe(firstFile.path);
   });
 
+  it("keeps loaded files through a network heartbeat failure and recovers on the next beat", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "note.txt",
+      blobSha256: "7".repeat(64),
+      contentKind: "text",
+    };
+    let metaRequests = 0;
+    let logRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        if (metaRequests === 2) throw new Error("network error");
+        return jsonResponse(metaRequests === 3
+          ? { ...DEFAULT_META, lastSettledAtMs: Date.now() }
+          : DEFAULT_META);
+      }
+      if (path === "/api/view/log?since=0&limit=500") {
+        logRequests += 1;
+        return logPage([file]);
+      }
+      if (path === "/api/view/log?since=1&limit=500") {
+        logRequests += 1;
+        return logOpsPage([], 1);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    expect(renderedFilePaths()).toEqual([file.path]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaRequests).toBe(2);
+    expect(container.textContent).not.toContain("This link isn't available.");
+    expect(renderedFilePaths()).toEqual([file.path]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaRequests).toBe(3);
+    expect(logRequests).toBe(3);
+    expect(renderedFilePaths()).toEqual([file.path]);
+    expect(container.querySelector(".freshness")?.textContent).toBe(
+      "Last settled now",
+    );
+  });
+
   it("shows the unavailable state when a meta heartbeat is refused", async () => {
     vi.useFakeTimers();
     let metaRequests = 0;
@@ -1190,6 +1245,81 @@ describe("App", () => {
     expect(metaRequests).toBe(2);
     expect(container.textContent).toContain("This link isn't available.");
   });
+
+  it("keeps loaded files when a meta heartbeat returns 500", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "note.txt",
+      blobSha256: "8".repeat(64),
+      contentKind: "text",
+    };
+    let metaRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return metaRequests === 1
+          ? jsonResponse(DEFAULT_META)
+          : new Response(null, { status: 500 });
+      }
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      if (path === "/api/view/log?since=1&limit=500") {
+        return logOpsPage([], 1);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(metaRequests).toBe(2);
+    expect(container.textContent).not.toContain("This link isn't available.");
+    expect(renderedFilePaths()).toEqual([file.path]);
+  });
+
+  it("caps heartbeat log pagination", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "note.txt",
+      blobSha256: "9".repeat(64),
+      contentKind: "text",
+    };
+    const heartbeatLogPaths: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      const cursorMatch = /^\/api\/view\/log\?since=(\d+)&limit=500$/u.exec(path);
+      if (cursorMatch) {
+        heartbeatLogPaths.push(path);
+        const cursor = Number(cursorMatch[1]);
+        return logOpsPage(
+          [],
+          cursor + 1,
+          heartbeatLogPaths.length <= EXPECTED_MAX_LOG_PAGES,
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(heartbeatLogPaths).toHaveLength(EXPECTED_MAX_LOG_PAGES);
+    expect(heartbeatLogPaths.at(-1)).toBe(
+      "/api/view/log?since=10000&limit=500",
+    );
+    expect(container.textContent).not.toContain("This link isn't available.");
+    expect(renderedFilePaths()).toEqual([file.path]);
+  }, 30_000);
 
   describe("log rate limits", () => {
     it("retries the same log page with exponential backoff", async () => {
