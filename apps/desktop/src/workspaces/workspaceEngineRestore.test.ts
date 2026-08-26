@@ -253,6 +253,31 @@ describe("engine restore", () => {
 });
 
 describe("stable object ids for the linked-chat rail", () => {
+  it("resolves object ids from metadata without reading file bodies", async () => {
+    const root = await tempRoot();
+    await write(root, "one.md", "one body\n");
+    await write(root, "two.md", "two body\n");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = capture(root, loopback, requests);
+    engine.start();
+    await engine.flush();
+
+    const objectId = await engine.fileObjectIdForPath("two.md");
+    if (objectId === null) throw new Error("Expected a captured object id.");
+    requests.length = 0;
+
+    expect(await engine.filePathForObjectId(objectId)).toBe("two.md");
+    expect(await engine.filePathForObjectId("missing-object-id")).toBeNull();
+    expect(requests.map((request) => request.method)).toContain(
+      VERSIONED_METHOD.textList,
+    );
+    expect(requests.map((request) => request.method)).not.toContain(
+      VERSIONED_METHOD.textRead,
+    );
+    await engine.stop();
+  });
+
   it("resolves a path to its engine object id and null for untracked paths", async () => {
     const root = await tempRoot();
     await write(root, "doc.md", "body\n");

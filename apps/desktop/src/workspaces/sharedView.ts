@@ -1414,11 +1414,6 @@ async function captureSharedViewLocalDivergence(input: {
   }
 
   const main = await store.ensureMainVersion({ workspaceId });
-  if (!store.listTextFileMetadata) {
-    throw new Error(
-      "Shared view reconciliation requires file metadata listing support.",
-    );
-  }
   const pathIsInScope = (path: string) =>
     paths === undefined ||
     paths.some((scope) => path === scope || path.startsWith(`${scope}/`));
@@ -2094,11 +2089,6 @@ async function refreshCapturedShareView(
   const main = await refreshInput.store.ensureMainVersion({
     workspaceId: refreshInput.workspaceId,
   });
-  if (!refreshInput.store.listTextFileMetadata) {
-    throw new Error(
-      "Shared view reconciliation requires file metadata listing support.",
-    );
-  }
   const preTrackedPaths = new Set(
     (
       await refreshInput.store.listTextFileMetadata({

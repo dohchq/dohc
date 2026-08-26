@@ -63,7 +63,7 @@ export interface VersionedLiveAdapterOptions {
   ) => string;
 }
 
-const LIST_TEXT_FILE_HYDRATION_CONCURRENCY = 8;
+const CONFLICT_HYDRATION_CONCURRENCY = 8;
 
 /**
  * The most reconstructed body text one hydrated `conflicts.list` page may
@@ -676,7 +676,7 @@ export class VersionedLiveAdapter {
     // instead of draining every page.
     const conflicts = await mapWithConcurrency(
       affordable,
-      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
+      CONFLICT_HYDRATION_CONCURRENCY,
       async (conflict) => {
         // Sides in sequence, so the concurrency bound counts blob reads —
         // three parallel sides per row would triple it.
@@ -742,27 +742,6 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.conflictsResolve, input, {
       idempotencyKey,
     });
-  }
-
-  async listTextFiles(input: {
-    workspaceId: string;
-    versionId: string;
-  }): Promise<VersionedTextReadValue[]> {
-    this.assertWorkspace(input.workspaceId);
-    const metadata = await this.listTextFileMetadata(input);
-    const snapshots = await mapWithConcurrency(
-      metadata,
-      LIST_TEXT_FILE_HYDRATION_CONCURRENCY,
-      async (row) =>
-        await this.readTextFile({
-          workspaceId: input.workspaceId,
-          versionId: input.versionId,
-          path: row.path,
-        }),
-    );
-    return snapshots.filter(
-      (snapshot): snapshot is VersionedTextReadValue => snapshot !== null,
-    );
   }
 
   async listTextFileMetadata(input: {

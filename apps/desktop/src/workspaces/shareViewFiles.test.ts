@@ -235,7 +235,6 @@ function mutableTextStore(input?: {
     }));
   return {
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
-    listTextFiles: vi.fn(async () => snapshots()),
     listTextFileMetadata: vi.fn(async () => {
       const rows = snapshots().map(
         ({ text: _text, metadata: _metadata, ...row }) => row,
@@ -1267,7 +1266,7 @@ describe("ShareViewFiles", () => {
     const store: ShareViewFilesStore = {
       ...baseStore,
       listTextFileMetadata: vi.fn(async (input) => {
-        const rows = await baseStore.listTextFileMetadata!(input);
+        const rows = await baseStore.listTextFileMetadata(input);
         metadataReads += 1;
         if (metadataReads === 1) {
           metadataRead.resolve();

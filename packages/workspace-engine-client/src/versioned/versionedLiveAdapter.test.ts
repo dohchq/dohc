@@ -1446,65 +1446,6 @@ describe("VersionedLiveAdapter", () => {
     } satisfies Partial<DaemonRefusalError>);
   });
 
-  it("bounds concurrent hydration when listing text files", async () => {
-    const files = Array.from({ length: 100 }, (_, index) => ({
-      path: `notes/${index}.md`,
-      objectId: `object-${index}`,
-      contentKind: "text" as const,
-      sha256: "a".repeat(64),
-      byteLength: index,
-      binarySha256: null,
-      updatedAtMs: index,
-      latestMomentId: `moment-${index}`,
-      metadataOrigin: "api",
-      hasYdocMarker: false,
-    }));
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const client: MinimalDaemonClient = {
-      close: () => undefined,
-      async sendRequest(request): Promise<Response> {
-        if (request.method === VERSIONED_METHOD.textList) {
-          return {
-            id: request.id,
-            result: { files, nextAfterPath: null },
-          };
-        }
-        const path = (request.params as { path: string }).path;
-        const row = files.find((candidate) => candidate.path === path)!;
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        inFlight -= 1;
-        return {
-          id: request.id,
-          result: {
-            workspaceId: WORKSPACE,
-            versionId: "main",
-            objectId: row.objectId,
-            path,
-            contentKind: "text",
-            text: path,
-            sha256: "a".repeat(64),
-            blobSha256: "a".repeat(64),
-            byteLength: Buffer.byteLength(path),
-            updatedAtMs: row.updatedAtMs,
-            latestMomentId: row.latestMomentId,
-            metadataOrigin: "api",
-          },
-        };
-      },
-    };
-    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
-      workspaceId: WORKSPACE,
-    });
-
-    await expect(
-      adapter.listTextFiles({ workspaceId: WORKSPACE, versionId: "main" }),
-    ).resolves.toHaveLength(files.length);
-    expect(maxInFlight).toBe(8);
-  });
-
   it("decodes loopback responses through the live adapter", async () => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter(

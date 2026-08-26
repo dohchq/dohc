@@ -36,7 +36,6 @@ import {
 } from "./workspaceEngineCapture";
 import {
   createShareViewFiles,
-  shareViewFilesStore,
   type ResolvedShareViewFilesTarget,
   type ShareViewFileChange,
   type ShareViewFileChangeValue,
@@ -416,7 +415,7 @@ async function applyOwnedShareViewChange(
   };
   const files = createShareViewFiles({
     resolveTarget: () => resolved,
-    openStore: () => shareViewFilesStore(scope.shareViewStore()),
+    openStore: () => scope.shareViewStore(),
     resolveRelay: async () => null,
     pull: async () => {
       throw new Error("Unexpected pull");
@@ -810,7 +809,7 @@ describe("shared view refresh", () => {
       );
       const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
       await expect(
-        store.listTextFileMetadata!({
+        store.listTextFileMetadata({
           workspaceId: WORKSPACE,
           versionId: main.id,
         }),
@@ -1156,7 +1155,7 @@ describe("shared view refresh", () => {
     const captureStore: typeof store = {
       ...store,
       async listTextFileMetadata(input) {
-        const snapshot = await store.listTextFileMetadata!(input);
+        const snapshot = await store.listTextFileMetadata(input);
         markSnapshotRead();
         await captureHeld;
         return snapshot;
@@ -1775,7 +1774,7 @@ describe("shared view refresh", () => {
       const captureStore: typeof store = {
         ...store,
         async listTextFileMetadata(input) {
-          const tracked = await store.listTextFileMetadata!(input);
+          const tracked = await store.listTextFileMetadata(input);
           expect(tracked.find((entry) => entry.path === path)).toMatchObject({
             latestMomentId: initial.latestMomentId,
           });
@@ -1943,7 +1942,7 @@ describe("shared view refresh", () => {
       async listTextFileMetadata(input) {
         metadataCalls += 1;
         if (metadataCalls === 2) throw new Error("metadata read failed");
-        return await store.listTextFileMetadata!(input);
+        return await store.listTextFileMetadata(input);
       },
     };
     try {

@@ -139,9 +139,9 @@ const WORKSPACE_EDITOR_TEXT = z.string().superRefine((text, ctx) => {
 // Matching the STORAGE contract does not promise that every stored body
 // arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
 // `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
-// renderer only by blob hydration. `versionedText.read` and the moment
-// timeline hydrate, compare rows inherit that through `listTextFiles`, and
-// conflict listing hydrates its withheld sides too (#537) — see VERSION_TEXT.
+// renderer only by blob hydration. `versionedText.read`, the moment timeline,
+// compare rows, and conflict listing all hydrate withheld bodies (#537) — see
+// VERSION_TEXT.
 //
 // One REQUEST field shares the schema — the combined conflict resolution at
 // VERSION_TEXT. There this bound is only a ceiling on what crosses IPC; the

@@ -8,7 +8,6 @@ import {
 import type { ShareMountRecord } from "../workspaces/registryStore";
 import {
   createShareViewFiles,
-  shareViewFilesStore,
   type PreparedShareViewFilesMount,
   type ResolvedShareViewFilesTarget,
 } from "../workspaces/shareViewFiles";
@@ -57,7 +56,7 @@ export async function refreshStandaloneShareThroughOwnerForTest(input: {
       candidate.workspaceId === requested.workspaceId
         ? target
         : null,
-    openStore: () => shareViewFilesStore(input.store),
+    openStore: () => input.store,
     resolveRelay: async () => input.relay,
     pull: async (current, relay, pullInput) =>
       input.pull({
@@ -140,13 +139,11 @@ export async function refreshShareMountThroughOwnerForTest(input: {
         ? target
         : null,
     openStore: (current) =>
-      shareViewFilesStore(
-        input.openStore({
-          workspaceId: current.storeWorkspaceId,
-          rootPath: current.rootPath,
-          shareMount: true,
-        }),
-      ),
+      input.openStore({
+        workspaceId: current.storeWorkspaceId,
+        rootPath: current.rootPath,
+        shareMount: true,
+      }),
     resolveRelay: async () => input.relay,
     pull: async (current, relay, pullInput) =>
       input.pull({
@@ -183,7 +180,6 @@ export async function refreshShareMountThroughOwnerForTest(input: {
 function emptyMountStore(): CaptureVersionedTextStore {
   return {
     ensureMainVersion: async () => ({ id: "main" }),
-    listTextFiles: async () => [],
     listTextFileMetadata: async () => [],
     readTextFile: async () => null,
     readBinaryFile: async () => null,
@@ -227,7 +223,7 @@ function mountMutationOwner(input: {
       candidate.shareId === requested.shareId
         ? input.target
         : null,
-    openStore: () => shareViewFilesStore(emptyMountStore()),
+    openStore: () => emptyMountStore(),
     resolveRelay: async () => null,
     pull: async () => {
       throw new Error("Unexpected pull");
