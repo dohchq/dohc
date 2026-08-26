@@ -254,9 +254,8 @@ async function denyFileContentRead(absolutePath: string): Promise<void> {
 // held by the #402 ratchet, which fails if sharedView.ts ever gains a runtime
 // import of the legacy package.
 //
-// materializeSharedViewPaths touches exactly two store methods
-// (sharedView.ts:68 ensureMainVersion, :91-104 readTextFile/readBinaryFile), so
-// the two tests that drive it directly need nothing more than this.
+// materializeSharedViewPaths touches only ensureMainVersion and the two read
+// methods, so the tests that drive it directly need nothing more than this.
 function stubStore(
   readTextFile: () => Promise<{ text: string }>,
 ): Parameters<typeof materializeSharedViewPaths>[3] {
@@ -3197,6 +3196,205 @@ describe("shared view refresh", () => {
     }
   });
 
+  it("keeps a tracked collision as durable debt when reading canonical content fails", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/unreadable-collision-head.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter file");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    const failingStore: typeof store = {
+      ...store,
+      async readTextFile(input) {
+        if (input.path === path) throw new Error("engine store unavailable");
+        return await store.readTextFile(input);
+      },
+    };
+    try {
+      await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+      await rm(join(rootDir, path));
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          failingStore,
+          true,
+          SHARE_ID,
+        ),
+      ).rejects.toMatchObject({
+        name: "CapturePartialFailureError",
+        capturedPaths: 0,
+        repairedPaths: 0,
+        path,
+        reason: "other",
+        message: "engine store unavailable",
+      });
+      await expect(
+        readCollisionRecordPaths(rootDir, SHARE_ID),
+      ).resolves.toEqual(new Set([path]));
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("keeps a tracked collision as durable debt when repair materialization fails", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/failed-collision-repair.md";
+    const absolutePath = join(rootDir, path);
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter file");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+
+    const store = harness.openStore(target);
+    try {
+      await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+      await rm(absolutePath);
+      failRemovePathOnce = {
+        path: absolutePath,
+        error: new Error("projection write unavailable"),
+      };
+
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          true,
+          SHARE_ID,
+        ),
+      ).rejects.toMatchObject({
+        name: "CapturePartialFailureError",
+        capturedPaths: 0,
+        repairedPaths: 0,
+        path,
+        reason: "other",
+        message: "projection write unavailable",
+      });
+      await expect(
+        readCollisionRecordPaths(rootDir, SHARE_ID),
+      ).resolves.toEqual(new Set([path]));
+    } finally {
+      failRemovePathOnce = null;
+      await store.close();
+    }
+  });
+
+  it("settles absent untracked pending and collision debt once", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/resolved-dual-debt.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, "granter file");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    relay.addDelete(path);
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writePendingMaterializationPaths(rootDir, [path]);
+    await writePendingMaterializationPaths(rootDir, [path]);
+    await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 1,
+        unjournalablePaths: [],
+      });
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toMatchObject({
+        pendingPaths: new Set(),
+        collisionPaths: new Set(),
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("gives collision debt precedence over a matching delete preimage", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const path = "docs/untracked-dual-debt.md";
+    const recipientContent = "recipient file";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(path, recipientContent);
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    relay.addDelete(path);
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, path), recipientContent, "utf8");
+    await writePendingMaterializationPaths(rootDir, [path]);
+    await recordCollisionPaths(rootDir, SHARE_ID, [path]);
+
+    const store = harness.openStore(target);
+    try {
+      await expect(
+        captureSharedViewLocalDivergence(
+          rootDir,
+          WORKSPACE,
+          store,
+          true,
+          SHARE_ID,
+        ),
+      ).resolves.toEqual({
+        capturedPaths: 0,
+        collisionRecordQuarantined: false,
+        repairedPaths: 0,
+        unjournalablePaths: [{ path, reason: "local-collision" }],
+      });
+      await expect(readFile(join(rootDir, path), "utf8")).resolves.toBe(
+        recipientContent,
+      );
+      await expect(
+        readSharedViewProjectionDebt(rootDir, SHARE_ID),
+      ).resolves.toMatchObject({
+        pendingPaths: new Set([path]),
+        collisionPaths: new Set([path]),
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
   it.each(["write", "delete"] as const)(
     "consults the collision record at the materialization boundary for a later %s",
     async (operation) => {
@@ -5540,6 +5738,66 @@ describe("shared view refresh", () => {
       });
     } finally {
       failRenameToPathOnce = null;
+      await store.close();
+    }
+  });
+
+  it("preserves an earlier captured edit when the next store write fails", async () => {
+    const rootDir = await tempRoot();
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    const firstPath = "docs/a-captured-first.md";
+    const failedPath = "docs/z-capture-fails.md";
+    const target = { workspaceId: WORKSPACE, rootPath: rootDir };
+    relay.addWrite(firstPath, "first original");
+    relay.addWrite(failedPath, "second original");
+    await refreshSharedViewOnce(harness, {
+      rootDir,
+      workspaceId: WORKSPACE,
+      shareId: SHARE_ID,
+    });
+    await writeFile(join(rootDir, firstPath), "first local edit", "utf8");
+    await writeFile(join(rootDir, failedPath), "second local edit", "utf8");
+
+    const store = harness.openStore(target);
+    const failingStore: typeof store = {
+      ...store,
+      async writeTextFile(input) {
+        if (input.path === failedPath)
+          throw new Error("engine store unavailable");
+        return await store.writeTextFile(input);
+      },
+    };
+    try {
+      await expect(
+        captureStandaloneShareViewRefresh({
+          rootDir,
+          workspaceId: WORKSPACE,
+          store: failingStore,
+          pinnedSelector: { ...PINNED_SELECTOR, access: "edit" },
+          shareId: SHARE_ID,
+          ended: false,
+        }),
+      ).resolves.toEqual({
+        ok: false,
+        changedPaths: 1,
+        errorMessage: "engine store unavailable",
+      });
+      await expect(
+        store.readTextFile({
+          workspaceId: WORKSPACE,
+          versionId: "main",
+          path: firstPath,
+        }),
+      ).resolves.toMatchObject({ text: "first local edit" });
+      await expect(
+        store.readTextFile({
+          workspaceId: WORKSPACE,
+          versionId: "main",
+          path: failedPath,
+        }),
+      ).resolves.toMatchObject({ text: "second original" });
+    } finally {
       await store.close();
     }
   });
