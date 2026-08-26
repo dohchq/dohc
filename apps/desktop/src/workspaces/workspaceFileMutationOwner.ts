@@ -119,7 +119,9 @@ export function createWorkspaceFileMutationOwner<
   Workspace extends WorkspaceFileMutationWorkspace,
 >(dependencies: {
   assertTrustedSender(event: IpcEvent): void;
-  withWorkspaceAuthority<Result>(workspaceId: string,
+  withRendererWorkspaceOperation<Result>(
+    event: IpcEvent,
+    workspaceId: string,
     work: (
       authority: WorkspaceFileMutationAuthority<Workspace>,
     ) => Promise<Result>,
@@ -183,7 +185,9 @@ export function createWorkspaceFileMutationOwner<
   ): Promise<Result> => {
     dependencies.assertTrustedSender(event);
     const input = parse(payload);
-    return dependencies.withWorkspaceAuthority(input.workspaceId,
+    return dependencies.withRendererWorkspaceOperation(
+      event,
+      input.workspaceId,
       async (authority) =>
         await work({
       input,

@@ -274,17 +274,19 @@ export function createWorkspaceAuthorityOwner<
   ): WorkspaceAuthorityOperation<Workspace, State> {
     lease.assertCurrent();
     const record = recordForBinding(lease.binding);
-    const workspace = options.findWorkspace(lease.binding.workspaceId);
-    if (!workspace || !bindingMatchesWorkspace(lease.binding, workspace)) {
-      throw new Error("This work belongs to a retired workspace authority.");
-    }
-    const physicalWorkspace = Object.freeze({
-      ...workspace,
-      rootPath: lease.binding.canonicalRootPath,
-      attachmentId: lease.binding.attachmentId,
-    }) as PhysicalWorkspace<Workspace>;
     return Object.freeze({
-      workspace: physicalWorkspace,
+      get workspace(): PhysicalWorkspace<Workspace> {
+        lease.assertCurrent();
+        const workspace = options.findWorkspace(lease.binding.workspaceId);
+        if (!workspace || !bindingMatchesWorkspace(lease.binding, workspace)) {
+          throw new Error("This work belongs to a retired workspace authority.");
+        }
+        return Object.freeze({
+          ...workspace,
+          rootPath: lease.binding.canonicalRootPath,
+          attachmentId: lease.binding.attachmentId,
+        }) as PhysicalWorkspace<Workspace>;
+      },
       state: lease.state,
       signal: record.retirement.signal,
       assertCurrent: () => lease.assertCurrent(),

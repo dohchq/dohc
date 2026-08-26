@@ -29,6 +29,7 @@ import {
 
 interface TestEvent {
   trusted: boolean;
+  authorityId?: string | symbol;
 }
 
 interface TestWorkspace {
@@ -178,15 +179,34 @@ async function harness(options: {
     options.trashItem ??
       (async (path: string) => rm(path, { recursive: true, force: true })),
   );
+  const rendererOperationCalls = vi.fn();
+  const withRendererWorkspaceOperation = async <Result>(
+    event: TestEvent,
+    workspaceId: string,
+    work: (authority: {
+      authorityId: string | symbol;
+      workspace: Readonly<TestWorkspace>;
+      capture: MutationCapture | null;
+      yDocSessions: WorkspaceFileMutationYDocPort;
+    }) => Promise<Result>,
+  ): Promise<Result> => {
+    rendererOperationCalls(event, workspaceId);
+    const authorityId = workspace.workspaceId;
+    if (event.authorityId !== undefined && event.authorityId !== authorityId) {
+      throw new Error(
+        "File change stopped because this window changed workspaces.",
+      );
+    }
+    return await work({
+      authorityId,
+      workspace: requireWorkspace(workspaceId),
+      capture,
+      yDocSessions,
+    });
+  };
   const owner = createWorkspaceFileMutationOwner({
     assertTrustedSender,
-    withWorkspaceAuthority: async (workspaceId, work) =>
-      await work({
-        authorityId: workspaceId,
-        workspace: requireWorkspace(workspaceId),
-        capture,
-    yDocSessions,
-      }),
+    withRendererWorkspaceOperation,
     shareViewFiles: { change },
     trashItem,
     notifyRenderer,
@@ -198,6 +218,7 @@ async function harness(options: {
     owner,
     change,
     assertTrustedSender,
+    rendererOperationCalls,
     requireWorkspace,
     notifyRenderer,
     logError,
@@ -251,6 +272,64 @@ describe("WorkspaceFileMutationOwner", () => {
       }),
     ).rejects.toThrow();
     expect(test.requireWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects every stale renderer mutation before replacement authority is exposed", async () => {
+    const test = await harness();
+    const staleEvent: TestEvent = {
+      trusted: true,
+      authorityId: Symbol("attachment-a"),
+    };
+    const workspaceId = test.workspace.workspaceId;
+    const mutations = [
+      () =>
+        test.owner.createFile(staleEvent, {
+          workspaceId,
+          relativePath: "created.md",
+          initialText: "created\n",
+        }),
+      () =>
+        test.owner.createFolder(staleEvent, {
+          workspaceId,
+          relativePath: "created-folder",
+        }),
+      () =>
+        test.owner.movePath(staleEvent, {
+          workspaceId,
+          fromPath: "before.md",
+          toPath: "after.md",
+        }),
+      () =>
+        test.owner.deletePath(staleEvent, {
+          workspaceId,
+          relativePath: "deleted.md",
+        }),
+      () =>
+        test.owner.writeText(staleEvent, {
+          workspaceId,
+          relativePath: "written.md",
+          text: "written\n",
+          expectedContentHash: CONTENT_HASH,
+        }),
+      () =>
+        test.owner.writeAsset(staleEvent, {
+          workspaceId,
+          relativePath: "assets/image.png",
+          bytes: new Uint8Array([1, 2, 3]),
+        }),
+    ];
+
+    for (const mutate of mutations) {
+      await expect(mutate()).rejects.toThrow(
+        "File change stopped because this window changed workspaces.",
+      );
+    }
+
+    expect(test.rendererOperationCalls).toHaveBeenCalledTimes(mutations.length);
+    expect(test.requireWorkspace).not.toHaveBeenCalled();
+    expect(test.ownsDocument).not.toHaveBeenCalled();
+    expect(test.change).not.toHaveBeenCalled();
+    expect(await readdir(test.rootPath)).toEqual([]);
   });
 
   it("creates files and folders, writes text, and writes assets locally", async () => {

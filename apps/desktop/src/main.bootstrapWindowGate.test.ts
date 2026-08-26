@@ -168,6 +168,20 @@ describe("bootstrap window gate", () => {
     ).toContain("withPhysicalWorkspaceOperation(");
   });
 
+  it("prepares search activity inside its held exact operation", () => {
+    const searchAt = mainSource.indexOf("registerWorkspaceSearchIpcHandlers<");
+    expect(searchAt).toBeGreaterThanOrEqual(0);
+    const wiring = mainSource.slice(searchAt, searchAt + 2200);
+    const acquireAt = wiring.indexOf("withRendererWorkspaceOperation(");
+    const activityAt = wiring.indexOf("await openWorkspaceActivityForOperation(");
+    const recheckAt = wiring.indexOf("operation.assertCurrent();", activityAt);
+    const forwardAt = wiring.indexOf("return work({", recheckAt);
+    expect(acquireAt).toBeGreaterThanOrEqual(0);
+    expect(activityAt).toBeGreaterThan(acquireAt);
+    expect(recheckAt).toBeGreaterThan(activityAt);
+    expect(forwardAt).toBeGreaterThan(recheckAt);
+  });
+
   // The shell's mount-time cloudStatus and the share view's on-open
   // auto-refresh both race the handshake; ungated, each surfaces the
   // broken-invariant sessions error as a user-visible failure.

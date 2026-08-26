@@ -203,7 +203,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function createHarness() {
+function createHarness(options: { afterWorkspaceWork?: () => void } = {}) {
   const log: string[] = [];
   const state = {
     trusted: true,
@@ -467,6 +467,7 @@ function createHarness() {
         authorityHolds += 1;
         try {
           const result = await work(active);
+          options.afterWorkspaceWork?.();
           if (!active.session.isCurrent()) throw new Error(inactiveMessage);
           return result;
         } finally {
@@ -563,6 +564,41 @@ describe("plugin IPC handlers", () => {
       error: { code: "pipeline-unavailable" },
     });
   });
+
+  it.each([CHANNELS.listPlugins, CHANNELS.installPlugin])(
+    "keeps %s runtime failures structured when the workspace retires with them",
+    async (channel) => {
+      const harness = createHarness();
+      const runtime = Promise.withResolvers<typeof harness.runtime>();
+      harness.ensurePipeline.mockReturnValueOnce(runtime.promise);
+
+      const request = harness.invoke(channel);
+      await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
+      harness.state.generation += 1;
+      runtime.reject(new Error("runtime unavailable"));
+
+      await expect(request).resolves.toMatchObject({
+        ok: false,
+        error: { code: "pipeline-unavailable" },
+      });
+    },
+  );
+
+  it.each([CHANNELS.listPlugins, CHANNELS.installPlugin])(
+    "rejects a successful stale %s result",
+    async (channel) => {
+      let harness!: ReturnType<typeof createHarness>;
+      harness = createHarness({
+        afterWorkspaceWork: () => {
+          harness.state.generation += 1;
+        },
+      });
+
+      await expect(harness.invoke(channel)).rejects.toThrow(
+        "does not target the active workspace",
+      );
+    },
+  );
 
   it("registers the complete plugin control plane once", () => {
     const harness = createHarness();

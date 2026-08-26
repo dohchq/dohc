@@ -119,13 +119,16 @@ describe("plugin panel main-process wiring", () => {
     const router = functionSource("function invokeWorkspacePluginSdk");
     const writerAt = router.indexOf("writeAuthoredText: createPluginAuthoredTextWriter({");
     expect(writerAt).toBeGreaterThan(-1);
-    expect(router.indexOf("signal: input.signal,", writerAt)).toBeGreaterThan(writerAt);
+    expect(router.indexOf("signal,", writerAt)).toBeGreaterThan(writerAt);
     expect(
-      router.indexOf("await requirePluginEngineCapture(input.workspaceId);", writerAt),
+      router.indexOf(
+        "await requirePluginEngineCaptureForOperation(operation);",
+        writerAt,
+      ),
     ).toBeGreaterThan(writerAt);
     expect(
       router.indexOf(
-        "pluginWorkspaceRuntimes.current(input.workspaceId)?.pipeline",
+        "operation.state.pluginRuntimes.current(input.workspaceId)?.pipeline",
         writerAt,
       ),
     ).toBeGreaterThan(writerAt);
@@ -315,29 +318,28 @@ describe("plugin panel main-process wiring", () => {
       "\n}\n",
     );
     expect(owner).toContain(
-      "rendererWorkspaceSessions.isWorkspaceOpen(workspaceId)",
+      "rendererWorkspaceSessions.isAttachmentOpen(binding.attachmentId)",
     );
   });
 
   it("does not warm a pipeline after a later workspace switch wins", () => {
     const open = handler("openWorkspace");
-    const awaitAt = open.indexOf("await openWorkspaceActivity(workspace)");
+    const awaitAt = open.indexOf("await openWorkspaceActivityForOperation(");
     const recheckAt = open.indexOf("rendererSession.isCurrent()", awaitAt);
     const warmAt = open.indexOf(
-      "void workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>",
+      "void withPhysicalWorkspaceOperation(workspace.workspaceId, (warmup) =>",
       recheckAt,
     );
     const ensureAt = open.indexOf(
-      "pluginWorkspaceRuntimes.ensure(canonicalWorkspaceFor(lease))",
+      "warmup.state.pluginRuntimes.ensure(warmup.workspace)",
       warmAt,
     );
     expect(awaitAt).toBeGreaterThan(-1);
     expect(recheckAt).toBeGreaterThan(awaitAt);
     expect(warmAt).toBeGreaterThan(recheckAt);
     expect(ensureAt).toBeGreaterThan(warmAt);
-    expect(open).toContain(
-      "rendererSession.isCurrent() && !sharedViewOf(workspace.workspaceId)",
-    );
+    expect(open.indexOf("if (!sharedViewOf(workspace.workspaceId))", recheckAt))
+      .toBeGreaterThan(recheckAt);
   });
 
 });

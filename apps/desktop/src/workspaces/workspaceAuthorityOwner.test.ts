@@ -171,6 +171,37 @@ describe("workspace authority owner", () => {
     await owner.invalidate("workspace");
   });
 
+  it("reads live metadata for the same binding while keeping physical authority fixed", async () => {
+    const test = testOwner({
+      workspaceId: "workspace",
+      rootPath: "alias",
+      label: "before",
+    });
+
+    await test.owner.withOperation("workspace", async (operation) => {
+      const initial = operation.workspace;
+      const state = operation.state;
+      const signal = operation.signal;
+
+      test.replace({
+        workspaceId: "workspace",
+        rootPath: "alias",
+        label: "after",
+      });
+
+      expect(operation.workspace).toMatchObject({
+        workspaceId: "workspace",
+        rootPath: "real:alias",
+        label: "after",
+        attachmentId: initial.attachmentId,
+      });
+      expect(operation.workspace).not.toBe(initial);
+      expect(operation.state).toBe(state);
+      expect(operation.signal).toBe(signal);
+      expect(test.canonicalizeRoot).toHaveBeenCalledOnce();
+    });
+  });
+
   it("aborts a held physical operation so retirement can kill and drain its exact work", async () => {
     const test = testOwner({
       workspaceId: "workspace",
@@ -186,7 +217,7 @@ describe("workspace authority owner", () => {
       operation.signal.addEventListener(
         "abort",
         () => {
-          killed.push(operation.workspace.attachmentId);
+          killed.push(attachmentId);
           childClosed.resolve();
         },
         { once: true },

@@ -919,13 +919,13 @@ describe("main-process chat authorization", () => {
     // projection of its engine store, so a write here would leave content no
     // moment states. The next pull would overwrite it.
     const rawDiskWriters = [
-      "pickImageFiles",
-      "applyDatabaseEdit",
-      "importToDatabase",
-    ];
-    for (const channel of rawDiskWriters) {
+      ["pickImageFiles", "workspace"],
+      ["applyDatabaseEdit", "operation.workspace"],
+      ["importToDatabase", "operation.workspace"],
+    ] as const;
+    for (const [channel, workspace] of rawDiskWriters) {
       expect(handlerSource(channel), channel).toContain(
-        "assertWritableWorkspace(workspace);",
+        `assertWritableWorkspace(${workspace});`,
       );
       expect(
         handlerSource(channel),
@@ -960,6 +960,27 @@ describe("main-process chat authorization", () => {
     );
   });
 
+  it("holds database and UI-state paths under exact renderer and physical authority", () => {
+    const helpers = [
+      ["applyDatabaseEdit", "await applyDatabaseEdit("],
+      ["getWorkspaceUiState", "await readUiStateFile(operation.workspace.rootPath)"],
+      ["setWorkspaceUiState", "writeUiStateFile(operation.workspace.rootPath"],
+    ] as const;
+
+    for (const [channel, helper] of helpers) {
+      const handler = handlerSource(channel);
+      const operationAt = handler.indexOf("withRendererWorkspaceOperation(");
+      const helperAt = handler.indexOf(helper);
+      expect(operationAt, channel).toBeGreaterThan(-1);
+      expect(helperAt, channel).toBeGreaterThan(operationAt);
+      expect(handler, channel).not.toContain("requireWorkspace(input.workspaceId)");
+    }
+
+    expect(handlerSource("applyDatabaseEdit")).toContain(
+      "operation.workspace.rootPath,",
+    );
+  });
+
   // #646 PR3a. Two lanes, and a workspace is only ever in one of them. The
   // rules live in shareProposals.ts and are driven behaviourally there; this
   // pin covers main's wiring — that both lanes go through them, and that
@@ -980,7 +1001,7 @@ describe("main-process chat authorization", () => {
         channel,
       ).toBe(true);
       expect(handler, `${channel}: a share view is never the granter`).not.toContain(
-        "requireShareProposalRecipient(",
+        "withShareProposalRecipientOperation(",
       );
     }
     const openAt = mainSource.indexOf("async function openShareProposals(");
@@ -992,14 +1013,17 @@ describe("main-process chat authorization", () => {
     const recipientLane = ["submitShareChanges", "listMyShareChanges", "withdrawShareChanges"];
     for (const channel of recipientLane) {
       const handler = handlerSource(channel);
-      expect(handler, channel).toContain("await requireShareProposalRecipient(");
+      expect(handler, channel).toContain("withShareProposalRecipientOperation(");
       expect(handler, `${channel}: shareId: input.` ).not.toContain("shareId: input.");
     }
 
     const granterAt = mainSource.indexOf("async function requireShareProposalGranter(");
     const granter = mainSource.slice(
       granterAt,
-      mainSource.indexOf("async function requireShareProposalRecipient(", granterAt),
+      mainSource.indexOf(
+        "function withShareProposalRecipientOperation<Result>(",
+        granterAt,
+      ),
     );
     expect(
       granter,
@@ -1028,7 +1052,7 @@ describe("main-process chat authorization", () => {
       "MUTATION: submitting without a final disk capture drops edits made after the last refresh",
     ).toContain("const reconciled = await withStaleSensitiveWorkspaceOperation(");
     expect(submit).toContain("shareViewFiles.reconcile(");
-    expect(submit).toContain('{ kind: "standalone", workspaceId: scope.workspace.workspaceId },');
+    expect(submit).toContain('{ kind: "standalone", workspaceId: scope.workspaceId },');
     expect(submit).toContain('"settle",');
     const schedulerAt = submit.indexOf(
       "const reconciled = await withStaleSensitiveWorkspaceOperation(",
@@ -1051,5 +1075,20 @@ describe("main-process chat authorization", () => {
     expect(submit).toContain(
       "reconciled.capturedPaths + reconciled.repairedPaths,",
     );
+
+    const recipientAt = mainSource.indexOf(
+      "function withShareProposalRecipientOperation<Result>(",
+    );
+    const recipientEnd = mainSource.indexOf("\n  }\n", recipientAt);
+    const recipient = mainSource.slice(recipientAt, recipientEnd);
+    const operationAt = recipient.indexOf("withRendererWorkspaceOperation(");
+    const credentialsAt = recipient.indexOf("await warmCredentialCache()");
+    const metadataAt = recipient.indexOf("const workspace = operation.workspace;");
+    expect(operationAt).toBeGreaterThan(-1);
+    expect(credentialsAt).toBeGreaterThan(operationAt);
+    expect(metadataAt).toBeGreaterThan(credentialsAt);
+    expect(recipient).toContain("rootPath: workspace.rootPath,");
+    expect(recipient).not.toContain("workspace: RegistryEntry;");
+    expect(recipient).not.toContain("requireWorkspace(workspaceId)");
   });
 });

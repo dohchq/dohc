@@ -212,6 +212,22 @@ function pluginIpcError(error: unknown) {
   };
 }
 
+class StructuredPluginFailure {
+  constructor(readonly result: unknown) {}
+}
+
+function preserveStructuredPluginFailure(result: unknown): unknown {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "ok" in result &&
+    result.ok === false
+  ) {
+    throw new StructuredPluginFailure(result);
+  }
+  return result;
+}
+
 export function registerPluginIpcHandlers<
   TSender extends PluginIpcSender,
   TEvent extends PluginIpcEvent<TSender>,
@@ -238,12 +254,20 @@ export function registerPluginIpcHandlers<
             ? payload.workspaceId
             : undefined;
         if (workspaceId === undefined) return handler(event, payload, undefined);
-        return workspaces.withActive(
-          event.sender,
-          workspaceId,
-          DEFAULT_INACTIVE_MESSAGE,
-          (active) => handler(event, payload, active),
-        );
+        return workspaces
+          .withActive(
+            event.sender,
+            workspaceId,
+            DEFAULT_INACTIVE_MESSAGE,
+            async (active) =>
+              preserveStructuredPluginFailure(
+                await handler(event, payload, active),
+              ),
+          )
+          .catch((error: unknown) => {
+            if (error instanceof StructuredPluginFailure) return error.result;
+            throw error;
+          });
       });
     },
   };
