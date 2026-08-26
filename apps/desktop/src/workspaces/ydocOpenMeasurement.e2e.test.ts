@@ -118,10 +118,13 @@ it.skipIf(engine.missing)(
     });
     await lifecycle.start();
     let sessions = createRealDaemonWorkspaceSessions(lifecycle);
-    let capture = createWorkspaceEngineCapture({
+    let workspace = {
       workspaceId: WORKSPACE_ID,
       rootPath: root,
       attachmentId: Symbol("test-workspace-attachment"),
+    };
+    let capture = createWorkspaceEngineCapture({
+      ...workspace,
       rustEngineSessions: sessions,
       daemonOwnsCapture: true,
     });
@@ -150,7 +153,7 @@ it.skipIf(engine.missing)(
         ) => Promise<void>,
       ): Promise<void> => {
         await sessions.run(
-          { workspaceId: WORKSPACE_ID, rootPath: root },
+          workspace,
           async (binding) => {
             const timing = new TimingTransport(binding.client as EngineTransport);
             const adapter = new YdocLiveAdapter(timing);
@@ -190,7 +193,7 @@ it.skipIf(engine.missing)(
       // case this bound has to clear.
       const appends = 800;
       await sessions.run(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
+        workspace,
         async (binding) => {
           const adapter = new YdocLiveAdapter(binding.client as EngineTransport);
           const session = await adapter.openSession({
@@ -215,10 +218,13 @@ it.skipIf(engine.missing)(
       });
       await lifecycle.start();
       sessions = createRealDaemonWorkspaceSessions(lifecycle);
-      capture = createWorkspaceEngineCapture({
+      workspace = {
         workspaceId: WORKSPACE_ID,
         rootPath: root,
         attachmentId: Symbol("test-workspace-attachment"),
+      };
+      capture = createWorkspaceEngineCapture({
+        ...workspace,
         rustEngineSessions: sessions,
         daemonOwnsCapture: true,
       });
