@@ -7,8 +7,9 @@
 // Positioning is CSS-only (position: sticky inside the shared grid cell
 // set up in styles.css — see the "outline rail" comment there), so this
 // component never measures or tracks its own placement; the only DOM
-// measurement it does is figuring out which heading is "active" as the
-// user scrolls, which is inherently scroll-driven and can't be CSS-only.
+// measurement it does is figuring out which heading is "active". Those
+// offsets are cached until editor/layout changes; scrolling only searches
+// the cache.
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
@@ -32,6 +33,7 @@ import {
 // after the user starts scrolling, instead of flipping the instant a new
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
+const GEOMETRY_SETTLE_MS = 180;
 
 type HeadingFlashState = {
   token: number | null;
@@ -114,9 +116,7 @@ function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   let node = el?.parentElement ?? null;
   while (node) {
     const overflowY = window.getComputedStyle(node).overflowY;
-    if (/(auto|scroll)/.test(overflowY) && node.scrollHeight > node.clientHeight) {
-      return node;
-    }
+    if (/(auto|scroll)/.test(overflowY)) return node;
     node = node.parentElement;
   }
   return null;
@@ -261,58 +261,32 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
   const [activeIndex, setActiveIndex] = useState(0);
   const wordCount = useDebouncedWordCount(editor);
 
-  // extractOutline always returns a fresh array (even when the flattened
-  // heading list is unchanged), so `headings` gets a new reference on every
-  // editor `update` — i.e. every keystroke. The scroll-tracking effect below
-  // needs the CURRENT headings to resolve the active section, but it must
-  // not treat every keystroke as a reason to tear down and reattach its
-  // scroll listener (that forces a coordsAtPos layout read per heading on
-  // every keystroke — see the ref below). Reading through a ref, kept in
-  // sync here, decouples "know the current headings" from "the listener's
-  // dependency array".
+  // The scroll-tracking effect attaches once per editor and reads current
+  // headings through this ref. Editor updates replace the array without
+  // tearing down the listener.
   const headingsRef = useRef<OutlineHeading[]>(headings);
-  // Set by the scroll-tracking effect below; re-invoked (never re-created)
-  // whenever headings change so a doc edit still refreshes which heading is
-  // "active" without re-running the effect that owns the listener.
-  const scheduleActiveUpdateRef = useRef<(() => void) | null>(null);
 
   // Recompute the heading list synchronously (cheap: a handful of nodes) on
   // every doc change. The word count is handled by useDebouncedWordCount above.
   useEffect(() => {
     if (!editor) {
+      headingsRef.current = [];
       setHeadings([]);
       return;
     }
     const recomputeHeadings = () => {
       const next = extractOutline(editor.state.doc);
-      // Keep the ref the scroll effect reads in lockstep with the rendered
-      // outline: the later `[headings]` effect also syncs it, but setting it
-      // here closes the window where a scroll during an editor change would
-      // resolve the active heading against the previous outline.
       headingsRef.current = next;
       setHeadings(next);
     };
 
     recomputeHeadings();
 
-    const onUpdate = () => {
-      recomputeHeadings();
-    };
-    editor.on("update", onUpdate);
+    editor.on("update", recomputeHeadings);
     return () => {
-      editor.off("update", onUpdate);
+      editor.off("update", recomputeHeadings);
     };
   }, [editor]);
-
-  // Keep the ref in sync with the latest headings, and ask the scroll effect
-  // (if it's attached) to refresh the active heading — via the SAME
-  // rAF-coalesced scheduler the scroll listener uses, so a burst of
-  // keystrokes collapses into at most one geometry read per frame instead of
-  // one per keystroke.
-  useEffect(() => {
-    headingsRef.current = headings;
-    scheduleActiveUpdateRef.current?.();
-  }, [headings]);
 
   // Apply an external heading jump once per target identity. If a collaborative
   // document has not received that heading yet, keep one lightweight editor
@@ -348,46 +322,131 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     };
   }, [editor, headingTarget?.anchor, headingTarget?.occurrence, headingTarget?.nonce]);
 
-  // Track scroll to resolve which section is active. Attaches once per
-  // editor/containerRef (NOT per headings change — see headingsRef above),
-  // so editing the document never tears down and reattaches this listener.
+  // Cache content-relative heading offsets. Scroll frames only binary-search
+  // this array; layout reads happen on real invalidations and once at
+  // scrollend as a backstop for an internal reflow that preserves the
+  // editor's outer size.
   useEffect(() => {
     if (!editor) return;
     const scrollEl = findScrollParent(containerRef.current);
     if (!scrollEl) return;
 
     let frame = 0;
-    const update = () => {
-      frame = 0;
+    let settleTimer = 0;
+    let headingTops: number[] | null = null;
+    const measureHeadingTops = () => {
       const currentHeadings = headingsRef.current;
-      if (currentHeadings.length === 0) return;
       const containerRect = scrollEl.getBoundingClientRect();
-      const tops = currentHeadings.map((h) => {
+      const measuredTops: number[] = [];
+      let previousTop = Number.NEGATIVE_INFINITY;
+      for (const heading of currentHeadings) {
         try {
-          return editor.view.coordsAtPos(h.pos).top - containerRect.top + scrollEl.scrollTop;
+          const measuredTop =
+            editor.view.coordsAtPos(heading.pos).top
+            - containerRect.top
+            + scrollEl.scrollTop;
+          // Hidden descendants can share an ancestor's coordinates. Keeping
+          // the cache nondecreasing preserves the old full scan's first-gap
+          // behavior and makes binary search safe.
+          previousTop = Number.isFinite(measuredTop)
+            ? Math.max(previousTop, measuredTop)
+            : Number.POSITIVE_INFINITY;
         } catch {
-          // resolveActiveHeadingIndex assumes ascending tops; a `0` here would
-          // read as "already scrolled past" and override a correct earlier
-          // heading. Infinity can never be mistaken for "reached".
-          return Number.POSITIVE_INFINITY;
+          // An unresolved position and everything after its first gap remain
+          // unreached until the next invalidation can measure them.
+          previousTop = Number.POSITIVE_INFINITY;
         }
-      });
+        measuredTops.push(previousTop);
+      }
+      return measuredTops;
+    };
+    const updateActiveHeading = () => {
+      frame = 0;
+      headingTops ??= measureHeadingTops();
+      if (headingTops.length === 0) return;
       setActiveIndex(
-        resolveActiveHeadingIndex(tops, scrollEl.scrollTop, ACTIVE_HEADING_READING_OFFSET),
+        resolveActiveHeadingIndex(
+          headingTops,
+          scrollEl.scrollTop,
+          ACTIVE_HEADING_READING_OFFSET,
+        ),
       );
     };
-    const onScroll = () => {
+    const scheduleUpdate = () => {
       if (frame) return;
-      frame = requestAnimationFrame(update);
+      frame = requestAnimationFrame(updateActiveHeading);
     };
-    scheduleActiveUpdateRef.current = onScroll;
+    const invalidateHeadingOffsets = () => {
+      headingTops = null;
+      scheduleUpdate();
+    };
+    const invalidateAfterLayoutSettles = () => {
+      window.clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(() => {
+        settleTimer = 0;
+        invalidateHeadingOffsets();
+      }, GEOMETRY_SETTLE_MS);
+    };
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(invalidateAfterLayoutSettles);
+    const observedElements = new Set<HTMLElement>([
+      scrollEl,
+      editor.view.dom,
+      ...(containerRef.current ? [containerRef.current] : []),
+      ...Array.from(scrollEl.children).filter(
+        (element): element is HTMLElement => element instanceof HTMLElement,
+      ),
+    ]);
+    for (const element of observedElements) resizeObserver?.observe(element);
 
-    update();
-    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    // Async math/Mermaid rendering and direct table-resize writes do not
+    // necessarily dispatch a document update. Observe only DOM changes that
+    // can affect layout; ResizeObserver supplies the settled height signal.
+    const mutationObserver =
+      typeof MutationObserver === "undefined"
+        ? null
+        : new MutationObserver(invalidateAfterLayoutSettles);
+    mutationObserver?.observe(editor.view.dom, {
+      attributes: true,
+      attributeFilter: ["class", "hidden", "style"],
+      childList: true,
+      subtree: true,
+    });
+    // The pane can be kept mounted under `hidden`, and top matter can be
+    // inserted before the editor without touching the ProseMirror document.
+    // Scrollend backstops later growth in a sibling inserted after mount.
+    mutationObserver?.observe(scrollEl, {
+      attributes: true,
+      attributeFilter: ["hidden"],
+      childList: true,
+    });
+
+    const fonts = document.fonts;
+    fonts?.addEventListener("loadingdone", invalidateHeadingOffsets);
+    fonts?.addEventListener("loadingerror", invalidateHeadingOffsets);
+    window.addEventListener("resize", invalidateAfterLayoutSettles);
+    scrollEl.addEventListener("load", invalidateHeadingOffsets, true);
+    scrollEl.addEventListener("error", invalidateHeadingOffsets, true);
+    editor.on("update", invalidateHeadingOffsets);
+    scrollEl.addEventListener("scroll", scheduleUpdate, { passive: true });
+    scrollEl.addEventListener("scrollend", invalidateHeadingOffsets, { passive: true });
+
+    invalidateHeadingOffsets();
     return () => {
-      scrollEl.removeEventListener("scroll", onScroll);
+      scrollEl.removeEventListener("scroll", scheduleUpdate);
+      scrollEl.removeEventListener("scrollend", invalidateHeadingOffsets);
+      editor.off("update", invalidateHeadingOffsets);
+      scrollEl.removeEventListener("load", invalidateHeadingOffsets, true);
+      scrollEl.removeEventListener("error", invalidateHeadingOffsets, true);
+      window.removeEventListener("resize", invalidateAfterLayoutSettles);
+      fonts?.removeEventListener("loadingdone", invalidateHeadingOffsets);
+      fonts?.removeEventListener("loadingerror", invalidateHeadingOffsets);
+      mutationObserver?.disconnect();
+      resizeObserver?.disconnect();
+      window.clearTimeout(settleTimer);
       if (frame) cancelAnimationFrame(frame);
-      scheduleActiveUpdateRef.current = null;
     };
   }, [editor, containerRef]);
 
