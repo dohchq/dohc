@@ -33,6 +33,26 @@ function requestPath(input: RequestInfo | URL): string {
   return `${url.pathname}${url.search}`;
 }
 
+function trackImageSourceRequests(image: HTMLImageElement): {
+  sources: string[];
+  times: number[];
+} {
+  let source = image.getAttribute("src") ?? "";
+  const sources = [source];
+  const times = [Date.now()];
+  Object.defineProperty(image, "src", {
+    configurable: true,
+    get: () => source,
+    set: (value: string) => {
+      source = value;
+      image.setAttribute("src", value);
+      sources.push(value);
+      times.push(Date.now());
+    },
+  });
+  return { sources, times };
+}
+
 function logOpsPage(
   ops: readonly RelayOp[],
   nextCursor: number,
@@ -568,6 +588,98 @@ describe("App", () => {
     expect(fetchMock.mock.calls.map(([input]) => requestPath(input))).not.toContain(
       `/api/view/blob/${file.blobSha256}`,
     );
+  });
+
+  async function renderRasterImage(): Promise<{
+    image: HTMLImageElement;
+    imageSource: string;
+  }> {
+    const file: SharedFile = {
+      path: "selected.png",
+      blobSha256: "e".repeat(64),
+      contentKind: "binary",
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") return logPage([file]);
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const image = container.querySelector("img.preview-image");
+    if (!(image instanceof HTMLImageElement)) {
+      throw new Error("raster preview did not render");
+    }
+    return {
+      image,
+      imageSource: `/api/view/blob/${file.blobSha256}?session=${SESSION}`,
+    };
+  }
+
+  it("retries a failed raster preview after the initial delay and stops after recovery", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { image, imageSource } = await renderRasterImage();
+    const requests = trackImageSourceRequests(image);
+
+    act(() => image.dispatchEvent(new Event("error")));
+    await act(async () => vi.advanceTimersByTimeAsync(999));
+    expect(requests.sources).toEqual([imageSource]);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(requests.sources).toEqual([imageSource, imageSource]);
+    expect(requests.times).toEqual([0, 1_000]);
+
+    act(() => image.dispatchEvent(new Event("error")));
+    act(() => image.dispatchEvent(new Event("load")));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(requests.sources).toEqual([imageSource, imageSource]);
+  });
+
+  it("gives up retrying a raster preview after the two-minute budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { image } = await renderRasterImage();
+    const requests = trackImageSourceRequests(image);
+    const retryDelays = [
+      1_000,
+      2_000,
+      4_000,
+      8_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+    ];
+
+    act(() => image.dispatchEvent(new Event("error")));
+    for (const delay of retryDelays) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+      act(() => image.dispatchEvent(new Event("error")));
+    }
+
+    expect(requests.times).toEqual([
+      0,
+      1_000,
+      3_000,
+      7_000,
+      15_000,
+      30_000,
+      45_000,
+      60_000,
+      75_000,
+      90_000,
+      105_000,
+      120_000,
+    ]);
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(requests.sources).toHaveLength(12);
   });
 
   it("pins the Markdown preview byte cap", () => {

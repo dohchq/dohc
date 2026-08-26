@@ -363,13 +363,15 @@ export interface SyncRelayStorage {
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
-  // Candidate moment rows for the shared-blob allowlist, found by the exact
-  // blob index. selectorPaths narrows path-share work before the cap; the
+  // Candidate moment rows for the shared-blob allowlist. Historical reads
+  // find any matching moment. Current-state reads find each object's latest
+  // moment first, then match its blob and path before applying the cap. The
   // share filter still makes the authorization decision.
   listObjectMomentLogRowsByBlob(input: {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    semantics: "historical-log" | "current-state";
     selectorPaths?: readonly string[];
   }): SyncRelayLogRow[];
   // version.create snapshot candidates use their own exact-hash index. The
@@ -797,6 +799,10 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob_lookup
         ON sync_relay_object_moments(
           workspace_id, version_id, blob_sha256, object_id, relay_seq DESC
+        );
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_latest
+        ON sync_relay_object_moments(
+          workspace_id, version_id, object_id, relay_seq DESC
         );
       -- WHICH object sits at a path IN ONE VERSION. sync_relay_object_paths
       -- answers the same question across every version at once, latest-wins,
@@ -2910,6 +2916,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     versionId: string;
     sha256: string;
+    semantics: "historical-log" | "current-state";
     selectorPaths?: readonly string[];
   }): SyncRelayLogRow[] {
     if (input.selectorPaths?.length === 0) return [];
@@ -2926,18 +2933,41 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
                 OR substr(m.path, 1, length(selected.path) + 1) = selected.path || '/'
            )`
       : "";
+    const candidateCtes =
+      input.semantics === "current-state"
+        ? `latest_by_object AS (
+             SELECT m.workspace_id, m.object_id, m.version_id,
+                    MAX(m.relay_seq) AS relay_seq
+             FROM sync_relay_object_moments m
+             WHERE m.workspace_id = ? AND m.version_id = ?
+             GROUP BY m.workspace_id, m.object_id, m.version_id
+           ),
+           candidates AS (
+             SELECT m.relay_seq
+             FROM latest_by_object latest
+             JOIN sync_relay_object_moments m
+               ON m.workspace_id = latest.workspace_id
+              AND m.object_id = latest.object_id
+              AND m.version_id = latest.version_id
+              AND m.relay_seq = latest.relay_seq
+             WHERE m.blob_sha256 = ?
+               ${selectorPathsCondition}
+             ORDER BY m.relay_seq DESC
+             LIMIT ?
+           )`
+        : `candidates AS (
+             SELECT MAX(m.relay_seq) AS relay_seq
+             FROM sync_relay_object_moments m
+             WHERE m.workspace_id = ? AND m.version_id = ? AND m.blob_sha256 = ?
+               ${selectorPathsCondition}
+             GROUP BY m.object_id
+             ORDER BY relay_seq DESC
+             LIMIT ?
+           )`;
     return this.db
       .prepare(
         `WITH ${selectorPathsCte}
-         candidates AS (
-           SELECT MAX(m.relay_seq) AS relay_seq
-           FROM sync_relay_object_moments m
-           WHERE m.workspace_id = ? AND m.version_id = ? AND m.blob_sha256 = ?
-             ${selectorPathsCondition}
-           GROUP BY m.object_id
-           ORDER BY relay_seq DESC
-           LIMIT ?
-         )
+         ${candidateCtes}
          SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
                 l.payload_json, l.recorded_at_ms, l.relay_seq
          FROM candidates c

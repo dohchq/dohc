@@ -924,6 +924,70 @@ describe("relay capability reads", () => {
     expect(JSON.stringify(sharedLog)).not.toContain("docs2/");
   });
 
+  it("caps current-state blob candidates after stale objects are removed", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const editedContent = "# edited\n";
+    await putBlob(h, editedContent);
+
+    const matchingCopies = Array.from(
+      { length: SHARED_BLOB_CANDIDATE_LIMIT },
+      (_, index) =>
+        moment(index + 3, `docs/candidate-${index}.md`, "# shared\n", 1_300 + index, {
+          objectId: `object-candidate-${index}`,
+        }),
+    );
+    const editedCopies = Array.from(
+      { length: SHARED_BLOB_CANDIDATE_LIMIT },
+      (_, index) =>
+        moment(
+          SHARED_BLOB_CANDIDATE_LIMIT + index + 3,
+          `docs/candidate-${index}.md`,
+          editedContent,
+          2_000 + index,
+          {
+            objectId: `object-candidate-${index}`,
+            beforePath: `docs/candidate-${index}.md`,
+            beforeContent: "# shared\n",
+          },
+        ),
+    );
+    await appendMoments(h, [...matchingCopies, ...editedCopies]);
+
+    const survivingCurrentBlob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(survivingCurrentBlob.status).toBe(200);
+    expect(await survivingCurrentBlob.text()).toBe("# shared\n");
+
+    await appendMoments(h, [
+      moment(
+        SHARED_BLOB_CANDIDATE_LIMIT * 2 + 3,
+        "docs/shared.md",
+        editedContent,
+        3_000,
+        {
+          objectId: "object-shared",
+          beforePath: "docs/shared.md",
+          beforeContent: "# shared\n",
+        },
+      ),
+    ]);
+
+    expect(
+      await denialBytes(
+        await h(linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`)),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+
+    const historicalBlob = await h(
+      request(RECIPIENT, `/sync/shares/share-0/blobs/${seeded.sharedSha}`),
+    );
+    expect(historicalBlob.status).toBe(200);
+    expect(await historicalBlob.text()).toBe("# shared\n");
+  });
+
   it("deduplicates and caps blob candidates when one file returns to earlier content", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -968,6 +1032,7 @@ describe("relay capability reads", () => {
       workspaceId: WORKSPACE,
       versionId: "main",
       sha256: seeded.sharedSha,
+      semantics: "current-state",
     });
     expect(candidates.length).toBeLessThanOrEqual(SHARED_BLOB_CANDIDATE_LIMIT);
     const candidateObjectIds = candidates.map((row) => {

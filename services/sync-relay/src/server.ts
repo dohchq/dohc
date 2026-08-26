@@ -833,6 +833,10 @@ export function createSyncRelayHandler({
         workspaceId,
         versionId,
         sha256,
+        semantics:
+          semantics.kind === "current-state" && selector.versionId === null
+            ? "current-state"
+            : "historical-log",
         ...(selector.versionId === null
           ? { selectorPaths: selector.paths }
           : {}),

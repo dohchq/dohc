@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useImageRetryHandlers } from "./imageRetry";
 import { MarkdownContent } from "./MarkdownContent";
 import {
   RETRY_BUDGET_MS,
@@ -393,15 +394,28 @@ function FileView(props: {
     );
   }
   if (isRasterImage(props.file.path)) {
+    const source = `/api/view/blob/${props.file.blobSha256}?session=${props.session}`;
     return (
-      <img
-        className="preview-image"
-        src={`/api/view/blob/${props.file.blobSha256}?session=${props.session}`}
+      <RasterImage
+        source={source}
         alt={props.file.path.split("/").at(-1) ?? "Shared image"}
       />
     );
   }
   return <DownloadCard file={props.file} session={props.session} />;
+}
+
+function RasterImage(props: { source: string; alt: string }) {
+  const { retryImage, stopImageRetry } = useImageRetryHandlers(props.source);
+  return (
+    <img
+      className="preview-image"
+      src={props.source}
+      alt={props.alt}
+      onError={retryImage}
+      onLoad={stopImageRetry}
+    />
+  );
 }
 
 function DownloadCard(props: { file: SharedFile; session: string }) {
