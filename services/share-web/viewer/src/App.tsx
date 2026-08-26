@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownContent } from "./MarkdownContent";
 import {
+  LOG_RETRY_BUDGET_MS,
+  LOG_RETRY_INITIAL_MS,
+  LOG_RETRY_MAX_MS,
+} from "./retry";
+import {
   filesFromAccumulator,
   foldLogOps,
   isMarkdown,
@@ -18,9 +23,6 @@ const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
 const VIEW_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
 const MAX_LOG_PAGES = 10_000;
-const LOG_RETRY_INITIAL_MS = 1_000;
-const LOG_RETRY_MAX_MS = 15_000;
-const LOG_RETRY_BUDGET_MS = 120_000;
 export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
 
 type ViewerState =
@@ -48,10 +50,15 @@ type MarkdownPreview =
   | { status: "ready"; markdown: string }
   | { status: "too-large" };
 
-async function api(session: string, path: string): Promise<Response> {
+async function api(
+  session: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<Response> {
   return fetch(path, {
     credentials: "same-origin",
     headers: { [SESSION_HEADER]: session },
+    ...(signal ? { signal } : {}),
   });
 }
 
@@ -83,7 +90,7 @@ async function apiWithThrottleRetry(
   let retryWaitedMs = 0;
   while (true) {
     if (signal?.aborted) throw new Error("cancelled");
-    const response = await api(session, path);
+    const response = await api(session, path, signal);
     if (response.status !== 429) return response;
     if (retryWaitedMs + retryDelayMs > LOG_RETRY_BUDGET_MS) {
       throw new Error("refused");
@@ -352,7 +359,7 @@ function FileView(props: {
         }
       })
       .catch(() => {
-        if (current) setFailed(true);
+        if (current && !abortController.signal.aborted) setFailed(true);
       });
     return () => {
       current = false;

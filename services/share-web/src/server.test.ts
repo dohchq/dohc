@@ -43,7 +43,7 @@ afterEach(() => {
 
 describe("share-web sessions", () => {
   it("identifies exchange requests to the relay with the configured key", async () => {
-    const relayExchangeKey = "share-web-to-relay-test-key";
+    const relayExchangeKey = "share-web-to-relay-test-exchange-key";
     const clientAddress = "198.51.100.23";
     let receivedRelayExchangeKey: string | null = null;
     let receivedClientAddress: string | null = null;
@@ -245,7 +245,7 @@ describe("share-web sessions", () => {
   });
 
   it("renews an active session before expiry and keeps it usable past the old expiry", async () => {
-    const relayExchangeKey = "share-web-to-relay-refresh-key";
+    const relayExchangeKey = "share-web-to-relay-refresh-exchange-key";
     let now = 1_000;
     let refreshCalls = 0;
     const readCapabilities: string[] = [];
@@ -331,7 +331,7 @@ describe("share-web sessions", () => {
     });
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
-      relayExchangeKey: "share-web-to-relay-refresh-key",
+      relayExchangeKey: "share-web-to-relay-refresh-exchange-key",
       publicHosts: new Set([HOST]),
       nowMs: () => now,
       newSessionToken: () => Buffer.alloc(32, 28).toString("base64url"),
@@ -387,7 +387,7 @@ describe("share-web sessions", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
-      relayExchangeKey: "share-web-to-relay-refresh-key",
+      relayExchangeKey: "share-web-to-relay-refresh-exchange-key",
       publicHosts: new Set([HOST]),
       nowMs: () => now,
       newSessionToken: () => Buffer.alloc(32, 29).toString("base64url"),
@@ -452,7 +452,7 @@ describe("share-web sessions", () => {
     const readCapabilities: string[] = [];
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
-      relayExchangeKey: "share-web-to-relay-refresh-key",
+      relayExchangeKey: "share-web-to-relay-refresh-exchange-key",
       publicHosts: new Set([HOST]),
       nowMs: () => now,
       newSessionToken: () => Buffer.alloc(32, 31).toString("base64url"),
@@ -497,7 +497,7 @@ describe("share-web sessions", () => {
     let readCalls = 0;
     const handler = createShareWebHandler({
       relayUrl: "http://relay.test",
-      relayExchangeKey: "share-web-to-relay-refresh-key",
+      relayExchangeKey: "share-web-to-relay-refresh-exchange-key",
       publicHosts: new Set([HOST]),
       nowMs: () => now,
       newSessionToken: () => Buffer.alloc(32, 27).toString("base64url"),

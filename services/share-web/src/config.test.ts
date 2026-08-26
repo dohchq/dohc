@@ -40,6 +40,21 @@ describe("share-web configuration", () => {
     );
   });
 
+  it("requires a configured relay exchange key to be at least 32 characters", () => {
+    const loadWithExchangeKey = (relayExchangeKey: string) =>
+      loadShareWebConfig({
+        NODE_ENV: "test",
+        DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
+        DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: relayExchangeKey,
+        DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+      });
+
+    expect(() => loadWithExchangeKey("x".repeat(31))).toThrow(
+      "DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be at least 32 characters.",
+    );
+    expect(loadWithExchangeKey("x".repeat(32)).relayExchangeKey).toBe("x".repeat(32));
+  });
+
   it("rejects inexact host lists and production development mode", () => {
     expect(() =>
       loadShareWebConfig({
@@ -61,7 +76,7 @@ describe("share-web configuration", () => {
         NODE_ENV: "production",
         DOHC_SHARE_WEB_DEV: "1",
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
-        DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "production-relay-exchange-key",
+        DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "production-relay-exchange-key-at-least-32",
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
       }),
     ).toThrow(/requires NODE_ENV=development or test/u);

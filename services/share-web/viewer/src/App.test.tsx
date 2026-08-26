@@ -142,13 +142,18 @@ describe("App", () => {
     for (const path of [
       "/api/view/meta",
       "/api/view/log?since=0&limit=500",
-      `/api/view/blob/${file.blobSha256}`,
     ]) {
       expect(requestInits.get(path), path).toEqual({
         credentials: "same-origin",
         headers: { "x-dohc-link-session": SESSION },
       });
     }
+    const blobRequestInit = requestInits.get(`/api/view/blob/${file.blobSha256}`);
+    expect(blobRequestInit).toMatchObject({
+      credentials: "same-origin",
+      headers: { "x-dohc-link-session": SESSION },
+    });
+    expect(blobRequestInit?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("renders unavailable freshness separately from no settled changes", async () => {
@@ -373,6 +378,107 @@ describe("App", () => {
     expect(firstFileRequests).toBe(1);
     expect(container.querySelector("article.markdown")?.textContent).toContain(
       "Second file content.",
+    );
+  });
+
+  it("cancels an in-flight Markdown stream when the selection changes", async () => {
+    vi.useFakeTimers();
+    const firstFile: SharedFile = {
+      path: "a.md",
+      blobSha256: "4".repeat(64),
+      contentKind: "text",
+    };
+    const secondFile: SharedFile = {
+      path: "b.md",
+      blobSha256: "3".repeat(64),
+      contentKind: "text",
+    };
+    const chunks = [
+      new TextEncoder().encode("# Obsolete file\n\n"),
+      new TextEncoder().encode("This body should not reach EOF."),
+    ];
+    const streamEvents: string[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
+      if (path === "/api/view/log?since=0&limit=500") {
+        return logPage([firstFile, secondFile]);
+      }
+      if (path === `/api/view/blob/${firstFile.blobSha256}`) {
+        let nextChunk = 0;
+        let pendingTimer: number | null = null;
+        let finishPull: (() => void) | null = null;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => {
+              streamEvents.push("cancel");
+              if (pendingTimer !== null) window.clearTimeout(pendingTimer);
+              pendingTimer = null;
+              controller.error(new DOMException("The request was aborted.", "AbortError"));
+              finishPull?.();
+              finishPull = null;
+            }, { once: true });
+          },
+          pull(controller) {
+            streamEvents.push(`read:${nextChunk + 1}`);
+            return new Promise<void>((resolve) => {
+              finishPull = resolve;
+              pendingTimer = window.setTimeout(() => {
+                pendingTimer = null;
+                finishPull = null;
+                const chunk = chunks[nextChunk];
+                nextChunk += 1;
+                if (chunk) {
+                  controller.enqueue(chunk);
+                } else {
+                  streamEvents.push("eof");
+                  controller.close();
+                }
+                resolve();
+              }, 100);
+            });
+          },
+        });
+        return new Response(body);
+      }
+      if (path === `/api/view/blob/${secondFile.blobSha256}`) {
+        return new Response("# Current file\n\nSecond file content.");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    expect(streamEvents).toEqual(["read:1"]);
+    const failedRenders: string[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          if (node.matches(".state")) failedRenders.push(node.textContent ?? "");
+          for (const state of node.querySelectorAll(".state")) {
+            failedRenders.push(state.textContent ?? "");
+          }
+        }
+      }
+    });
+    observer.observe(container, { childList: true, subtree: true });
+
+    const secondFileButton = [...container.querySelectorAll("button.file")]
+      .find((button) => button.textContent === secondFile.path);
+    await act(async () => {
+      secondFileButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    observer.disconnect();
+
+    expect(streamEvents).toEqual(["read:1", "cancel"]);
+    expect(failedRenders).toEqual([]);
+    expect(container.querySelector("article.markdown")?.textContent).toContain(
+      "Second file content.",
+    );
+    expect(container.querySelector("main.content")?.textContent).not.toContain(
+      "This link isn't available.",
     );
   });
 

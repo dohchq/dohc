@@ -62,6 +62,11 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   const nodeEnv = env.NODE_ENV;
   const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
   const relayExchangeKey = env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY || undefined;
+  if (relayExchangeKey !== undefined && relayExchangeKey.length < 32) {
+    throw new Error(
+      "DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be at least 32 characters.",
+    );
+  }
   if (!isDevOrTest && relayExchangeKey === undefined) {
     throw new Error(
       "DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be set outside development/test.",

@@ -407,7 +407,7 @@ describe("sync relay main process", () => {
     try {
       baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
         DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
-        DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key",
+        DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
       });
     } catch (error) {
       if (error instanceof ListenPermissionError) {
@@ -468,7 +468,7 @@ describe("sync relay main process", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-dohc-relay-exchange-key": "integration-relay-exchange-key",
+        "x-dohc-relay-exchange-key": "integration-relay-exchange-key-at-least-32",
       },
       body: JSON.stringify({ secret: link.secret }),
     });
@@ -477,7 +477,7 @@ describe("sync relay main process", () => {
 
   it("keeps keyed forwarded client addresses in separate exchange buckets", async (context) => {
     const relayRoot = await tempRoot("keyed-exchange-buckets");
-    const relayExchangeKey = "integration-relay-exchange-key";
+    const relayExchangeKey = "integration-relay-exchange-key-at-least-32";
     let baseUrl: string;
     try {
       baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
@@ -587,10 +587,22 @@ async function spawnRelayExpectExit(
   });
   children.push(child);
   return await new Promise((resolve, reject) => {
+    let stdout = "";
     let stderr = "";
     const timeout = setTimeout(() => {
-      reject(new Error(`sync relay did not exit\nstderr:\n${stderr}`));
+      reject(new Error(`sync relay did not exit\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (/SYNC_RELAY_LISTENING/u.test(stdout)) {
+        clearTimeout(timeout);
+        reject(
+          new Error(
+            `sync relay started listening instead of exiting\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          ),
+        );
+      }
+    });
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
@@ -652,7 +664,7 @@ describe("sync relay startup guards", () => {
       SYNC_RELAY_TEST_AUTH: undefined,
       POSTGRES_URL: "postgres://unused:unused@127.0.0.1:1/unused",
       DOHC_RELAY_LINK_KEY: undefined,
-      DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key",
+      DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
       SYNC_RELAY_PORT: "0",
       BETTER_AUTH_SECRET: "x".repeat(32),
       SYNC_RELAY_DB_PATH: dbPath,
@@ -677,5 +689,43 @@ describe("sync relay startup guards", () => {
     });
     expect(code).toBe(1);
     expect(stderr).toContain("DOHC_RELAY_EXCHANGE_KEY must be set");
+  });
+
+  it("refuses to start when DOHC_RELAY_EXCHANGE_KEY is shorter than 32 characters", async () => {
+    const dbPath = join(await tempRoot("short-relay-exchange-key"), "relay.sqlite");
+    const { code, stderr } = await spawnRelayExpectExit({
+      NODE_ENV: "test",
+      SYNC_RELAY_TEST_AUTH: "1",
+      DOHC_RELAY_EXCHANGE_KEY: "x".repeat(31),
+      SYNC_RELAY_PORT: "0",
+      SYNC_RELAY_DB_PATH: dbPath,
+      FORCE_COLOR: "0",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain(
+      "FATAL: DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters.",
+    );
+  });
+
+  it("starts in test with a 32-character or unset relay exchange key", async (context) => {
+    for (const [label, relayExchangeKey] of [
+      ["minimum-relay-exchange-key", "x".repeat(32)],
+      ["unset-relay-exchange-key", undefined],
+    ] as const) {
+      const relayRoot = await tempRoot(label);
+      try {
+        expect(
+          await spawnRelay(join(relayRoot, "relay.sqlite"), {
+            DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
+          }),
+        ).toMatch(/^http:\/\//u);
+      } catch (error) {
+        if (error instanceof ListenPermissionError) {
+          context.skip();
+          return;
+        }
+        throw error;
+      }
+    }
   });
 });

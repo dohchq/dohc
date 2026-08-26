@@ -1,9 +1,29 @@
 // @vitest-environment jsdom
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
-import { describe, expect, it } from "vitest";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkdownContent } from "./MarkdownContent";
 import { MARKDOWN_SANITIZE_CONFIG, renderSafeMarkdown } from "./markdown";
+
+function trackImageSourceRequests(image: HTMLImageElement): {
+  sources: string[];
+  times: number[];
+} {
+  let source = image.getAttribute("src") ?? "";
+  const sources = [source];
+  const times = [Date.now()];
+  Object.defineProperty(image, "src", {
+    configurable: true,
+    get: () => source,
+    set: (value: string) => {
+      source = value;
+      image.setAttribute("src", value);
+      sources.push(value);
+      times.push(Date.now());
+    },
+  });
+  return { sources, times };
+}
 
 describe("renderSafeMarkdown", () => {
   it("preserves tag-shaped text in fenced code blocks", () => {
@@ -96,5 +116,113 @@ Plain paragraph text.
     expect(template.content.querySelector("script, style")).toBeNull();
     expect(MARKDOWN_SANITIZE_CONFIG.ALLOWED_TAGS).toContain("#text");
     expect(MARKDOWN_SANITIZE_CONFIG.KEEP_CONTENT).toBe(false);
+  });
+});
+
+describe("MarkdownContent image retries", () => {
+  const imageSource = `/api/view/blob/${"a".repeat(64)}`;
+  let container: HTMLDivElement;
+  let root: Root | null;
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  });
+
+  afterEach(() => {
+    if (root) act(() => root?.unmount());
+    root = null;
+    container.remove();
+    vi.useRealTimers();
+  });
+
+  async function renderImage(): Promise<HTMLImageElement> {
+    await act(() => {
+      root?.render(createElement(MarkdownContent, {
+        markdown: `![Shared image](${imageSource})`,
+      }));
+    });
+    const image = container.querySelector("img");
+    if (!(image instanceof HTMLImageElement)) throw new Error("image did not render");
+    return image;
+  }
+
+  it("retries a failed image after the initial delay and stops after it loads", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const image = await renderImage();
+    const requests = trackImageSourceRequests(image);
+
+    act(() => image.dispatchEvent(new Event("error")));
+    await act(async () => vi.advanceTimersByTimeAsync(999));
+    expect(requests.sources).toEqual([imageSource]);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(requests.sources).toEqual([imageSource, imageSource]);
+    expect(requests.times).toEqual([0, 1_000]);
+
+    act(() => image.dispatchEvent(new Event("load")));
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(requests.sources).toEqual([imageSource, imageSource]);
+  });
+
+  it("gives up after the two-minute retry budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const image = await renderImage();
+    const requests = trackImageSourceRequests(image);
+    const retryDelays = [
+      1_000,
+      2_000,
+      4_000,
+      8_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+      15_000,
+    ];
+
+    act(() => image.dispatchEvent(new Event("error")));
+    for (const delay of retryDelays) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
+      act(() => image.dispatchEvent(new Event("error")));
+    }
+
+    expect(requests.times).toEqual([
+      0,
+      1_000,
+      3_000,
+      7_000,
+      15_000,
+      30_000,
+      45_000,
+      60_000,
+      75_000,
+      90_000,
+      105_000,
+      120_000,
+    ]);
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(requests.sources).toHaveLength(12);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels a pending image retry on unmount", async () => {
+    vi.useFakeTimers();
+    const image = await renderImage();
+    const requests = trackImageSourceRequests(image);
+
+    act(() => image.dispatchEvent(new Event("error")));
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+
+    expect(requests.sources).toEqual([imageSource]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

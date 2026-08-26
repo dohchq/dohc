@@ -70,6 +70,10 @@ if (!isDevOrTest && !relayExchangeKey) {
   fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set outside development/test.");
 }
 
+if (relayExchangeKey !== undefined && relayExchangeKey.length < 32) {
+  fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters.");
+}
+
 if (process.env.SYNC_RELAY_TEST_AUTH === "1" && !isDevOrTest) {
   fatal(
     `FATAL: SYNC_RELAY_TEST_AUTH=1 requires NODE_ENV=development or test, got NODE_ENV=${nodeEnv ?? "(unset)"}. ` +

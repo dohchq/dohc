@@ -1222,7 +1222,7 @@ describe("relay link grants", () => {
 
   it("refreshes a valid capability and retires the old session", async () => {
     const storage = await newStorage();
-    const relayExchangeKey = "share-web-relay-refresh-key";
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let tokenId = 30;
     const h = handler(storage, {
       relayExchangeKey,
@@ -1314,7 +1314,7 @@ describe("relay link grants", () => {
 
   it("refuses refresh without the configured relay exchange key", async () => {
     const storage = await newStorage();
-    const relayExchangeKey = "share-web-relay-refresh-key";
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     const h = handler(storage, { relayExchangeKey });
     await seedFileShare(h);
     const created = await createLink(h);
@@ -1345,7 +1345,7 @@ describe("relay link grants", () => {
 
   it("refuses refresh after the link grant is revoked", async () => {
     const storage = await newStorage();
-    const relayExchangeKey = "share-web-relay-refresh-key";
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     const h = handler(storage, { relayExchangeKey });
     await seedFileShare(h);
     const created = await createLink(h);
@@ -1389,7 +1389,7 @@ describe("relay link grants", () => {
 
   it("refuses refresh when revocation wins before session replacement", async () => {
     const target = await newStorage();
-    const relayExchangeKey = "share-web-relay-refresh-key";
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let grantId = "";
     let armed = false;
     const raced = new Proxy(target, {
@@ -1448,7 +1448,7 @@ describe("relay link grants", () => {
 
   it("does not refresh an expired capability", async () => {
     const storage = await newStorage();
-    const relayExchangeKey = "share-web-relay-refresh-key";
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let now = 2_000;
     const h = handler(storage, { relayExchangeKey, nowMs: () => now });
     await seedFileShare(h);
@@ -1496,7 +1496,7 @@ describe("relay link grants", () => {
         return typeof value === "function" ? value.bind(storage) : value;
       },
     });
-    const relayExchangeKey = "share-web-relay-exchange-key";
+    const relayExchangeKey = "share-web-relay-exchange-key-at-least-32";
     const h = handler(counted, {
       relayExchangeKey,
       linkExchangeRateLimiter: new LinkExchangeRateLimiter(1, 0.000_001, 10),
