@@ -2236,10 +2236,10 @@ function removePhysicalWorkspace(
 }
 
 async function cleanupFailedPhysicalWorkspace(
-  relayWorkspaceId: string,
+  workspaceId: string,
   rootPath: string,
 ): Promise<void> {
-  await closeRelayTransportWorkspace(relayWorkspaceId);
+  await closeRelayTransportWorkspace(workspaceId);
   await resetFailedJoinFolder(rootPath);
 }
 

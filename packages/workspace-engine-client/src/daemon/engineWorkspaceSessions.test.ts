@@ -696,6 +696,73 @@ describe("EngineWorkspaceSessions", () => {
     await sessions.closeAll();
   });
 
+  it("keeps capture policy through a retry that is already draining", async () => {
+    const workspace = {
+      ...(await tempWorkspace("workspace-capture-retire-drain")),
+      attachmentId: Symbol("capture-retire-drain"),
+    };
+    const author = {
+      kind: "agent" as const,
+      agentId: "agent",
+      onBehalfOf: "local",
+      agentRunId: "run",
+    };
+    const firstAttemptStarted = deferred<void>();
+    const failFirstAttempt = deferred<void>();
+    const requests: Request[] = [];
+    let openCount = 0;
+    const client: EngineDaemonClient = {
+      close() {},
+      async sendRequest(request) {
+        requests.push(request);
+        if (request.method === "workspace.open") {
+          openCount += 1;
+          return {
+            id: request.id,
+            result: { workspace: `handle-${openCount}` },
+          };
+        }
+        if (request.method === "workspace.close") {
+          return { id: request.id, result: { closed: true } };
+        }
+        throw new Error(`Unexpected request: ${request.method}`);
+      },
+    };
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    sessions.rememberCaptureAuthor(workspace, author);
+    let attempts = 0;
+    const activeRun = sessions.run(
+      workspace,
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          firstAttemptStarted.resolve();
+          await failFirstAttempt.promise;
+          throw transportFailure();
+        }
+        return "finished";
+      },
+      { retryTransportErrors: true },
+    );
+    await firstAttemptStarted.promise;
+
+    const retiring = sessions.closeWorkspace(workspace);
+    failFirstAttempt.resolve();
+
+    await expect(activeRun).resolves.toBe("finished");
+    await retiring;
+    const opens = requests.filter(
+      (request) => request.method === "workspace.open",
+    );
+    expect(opens).toHaveLength(2);
+    expect(opens.map((request) => request.params)).toEqual([
+      expect.objectContaining({ captureAuthor: author }),
+      expect.objectContaining({ captureAuthor: author }),
+    ]);
+  });
+
   it("preserves a remembered share mount across rebind but not physical close", async () => {
     const workspace = {
       ...(await tempWorkspace("workspace-share-rebind")),

@@ -945,7 +945,7 @@ describe("EngineRelayClient", () => {
     );
     const cleanup = source.slice(cleanupStart, cleanupEnd);
     const relayCloseAt = cleanup.indexOf(
-      "await closeRelayTransportWorkspace(relayWorkspaceId);",
+      "await closeRelayTransportWorkspace(workspaceId);",
     );
     const folderResetAt = cleanup.indexOf(
       "await resetFailedJoinFolder(rootPath);",
@@ -1678,6 +1678,50 @@ describe("EngineRelayClient", () => {
     await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
     await live.closeAll();
     expect(routes.modeFor("workspace-a")).toBeNull();
+  });
+
+  it("orders bootstrap retirement after requests already queued by initialization", async () => {
+    const daemon = new MockDaemon();
+    const sendRequest = daemon.sendRequest.bind(daemon);
+    const firstStarted = Promise.withResolvers<void>();
+    const secondStarted = Promise.withResolvers<void>();
+    const secondQueued = Promise.withResolvers<void>();
+    const releaseFirst = Promise.withResolvers<void>();
+    const releaseSecond = Promise.withResolvers<void>();
+    let pushesStarted = 0;
+    daemon.sendRequest = async (request) => {
+      if (request.method === "sync.push") {
+        pushesStarted += 1;
+        if (pushesStarted === 1) {
+          firstStarted.resolve();
+          await releaseFirst.promise;
+        } else if (pushesStarted === 2) {
+          secondStarted.resolve();
+          await releaseSecond.promise;
+        }
+      }
+      return await sendRequest(request);
+    };
+    const { sessions, live, client } = await harness(daemon);
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const pushes: Array<Promise<unknown>> = [];
+
+    const bootstrap = client.bootstrapJoinIdentity(null, async () => {
+      pushes.push(client.push());
+      await firstStarted.promise;
+      pushes.push(client.push());
+      secondQueued.resolve();
+    });
+    await secondQueued.promise;
+    releaseFirst.resolve();
+    await secondStarted.promise;
+    const closeCallsWhileSecondWasPending = closeWorkspace.mock.calls.length;
+    releaseSecond.resolve();
+    await Promise.all([bootstrap, ...pushes]);
+
+    expect(closeCallsWhileSecondWasPending).toBe(0);
+    expect(closeWorkspace).toHaveBeenCalledOnce();
+    await live.closeAll();
   });
 
   it("retires the bare bootstrap owner before an exact successor closes", async () => {

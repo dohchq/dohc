@@ -738,10 +738,7 @@ export class EngineWorkspaceSessions {
   }
 
   async closeWorkspace(workspace: string | EngineWorkspace): Promise<void> {
-    const key = this.sessionKey(workspace);
-    this.captureAuthors.delete(key);
-    this.shareMounts.delete(key);
-    await this.closeWorkspaceEntry(key, true);
+    await this.closeWorkspaceEntry(this.sessionKey(workspace), true);
   }
 
   /** Closes the daemon binding but preserves its session claim and policy. */
@@ -755,7 +752,13 @@ export class EngineWorkspaceSessions {
   ): Promise<void> {
     for (;;) {
       const entry = this.entries.get(key);
-      if (!entry) return;
+      if (!entry) {
+        if (retire) {
+          this.captureAuthors.delete(key);
+          this.shareMounts.delete(key);
+        }
+        return;
+      }
       if (entry.closing) {
         await entry.closing;
         continue;
@@ -772,6 +775,8 @@ export class EngineWorkspaceSessions {
           if (this.workspaceEntries.get(entry.workspaceId) === entry) {
             this.workspaceEntries.delete(entry.workspaceId);
           }
+          this.captureAuthors.delete(key);
+          this.shareMounts.delete(key);
         }
       }
       return;

@@ -965,7 +965,9 @@ export class EngineRelayClient {
           // activity.open creates the ordinary captured session only after the
           // authoritative coordinate is durable. Keep the relay route: the
           // first ordinary pull reopens this same client through it.
-          await this.sessions.closeWorkspace(workspace);
+          await this.serialize(workspaceKey, async () => {
+            await this.sessions.closeWorkspace(workspace);
+          });
         }
       },
       probe: async () => {
