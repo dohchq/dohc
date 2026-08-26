@@ -51,6 +51,7 @@ const hooks: WorkspaceCaptureHooks = {
   activeAgentRun: () => null,
   onCaptureOutcome: () => undefined,
 };
+const ATTACHMENT_ID = Symbol("engine-capture-gate-test");
 
 function activityWith(
   capture: WorkspaceEngineCapture | null,
@@ -74,7 +75,12 @@ async function writeOptOut(root: string): Promise<void> {
 describe("captureForFlaggedWorkspace decision", () => {
   it("returns the unreadable-file reason with the null capture", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
+    const workspace = {
+      workspaceId: "ws-gate",
+      rootPath: root,
+      attachmentId: ATTACHMENT_ID,
+      shareView: false,
+    };
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(join(root, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
 
@@ -106,6 +112,7 @@ describe("captureForFlaggedWorkspace decision", () => {
       {
         workspaceId: "ws-gate-share",
         rootPath: join(tempBase, "does-not-exist-share-view"),
+        attachmentId: ATTACHMENT_ID,
         shareView: true,
       },
       hooks,
@@ -116,7 +123,12 @@ describe("captureForFlaggedWorkspace decision", () => {
 
   it("carries no reason for a deliberate opt-out or a readable file", async () => {
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
+    const workspace = {
+      workspaceId: "ws-gate",
+      rootPath: root,
+      attachmentId: ATTACHMENT_ID,
+      shareView: false,
+    };
     await writeOptOut(root);
     const optedOut = await captureForFlaggedWorkspace(
       workspace,
@@ -129,7 +141,12 @@ describe("captureForFlaggedWorkspace decision", () => {
 
     const on = await tempRoot();
     const recording = await captureForFlaggedWorkspace(
-      { workspaceId: "ws-gate-on", rootPath: on, shareView: false },
+      {
+        workspaceId: "ws-gate-on",
+        rootPath: on,
+        attachmentId: ATTACHMENT_ID,
+        shareView: false,
+      },
       hooks,
       unusedSessions,
     );
@@ -455,7 +472,12 @@ describe("dispatchScanEligible", () => {
     // workspace is still open must still dispatch, or it stays pending
     // forever; only the reopen — where captureFor reads the flag — opts out.
     const root = await tempRoot();
-    const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
+    const workspace = {
+      workspaceId: "ws-gate",
+      rootPath: root,
+      attachmentId: ATTACHMENT_ID,
+      shareView: false,
+    };
     const { capture: openCapture } = await captureForFlaggedWorkspace(
       workspace,
       hooks,

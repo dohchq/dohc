@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function sourceBlock(startMarker: string, endMarker: string): string {
   const start = mainSource.indexOf(startMarker);
@@ -34,11 +37,12 @@ describe("workspace-activity main-process wiring", () => {
       "ipcMain.handle(CHANNELS.listWorkspaceFiles",
       "\n  ipcMain.handle(CHANNELS.createWorkspaceFile",
     );
+    expect(handler).toContain("withRendererWorkspaceOperation(");
     expect(handler).toContain("workspaceFileListings.list({");
+    expect(handler).toContain("attachmentId: workspace.attachmentId,");
     expect(handler).toContain("allowCached: input.allowCached === true,");
-    expect(handler).toContain(
-      "ListWorkspaceFilesResult.parse(await listOwnedWorkspaceFiles(workspace))",
-    );
+    expect(handler).toContain("await listOwnedWorkspaceFilesFor(workspace)");
+    expect(handler).not.toContain("requireWorkspace(input.workspaceId)");
   });
 
   it("forwards the daemon's capture payload scope into the renderer notification", () => {
@@ -53,21 +57,22 @@ describe("workspace-activity main-process wiring", () => {
   it("broadcasts scope-free only for genuinely cross-workspace events", () => {
     // Every scope-free send is one of: logout (all engines detached), a
     // registry change no window has active yet (join/open-share success and
-    // rollback), or a daemon relaunch that may have lost any workspace's
-    // capture event. A new bare notifyRenderer() call must either name its
-    // workspace or justify itself here.
+    // rollback), a daemon relaunch that may have lost any workspace's capture
+    // event, or an all-workspace engine reconcile/stop. A new bare
+    // notifyRenderer() call must either name its workspace or justify itself
+    // here.
     const bareCalls = mainSource.split("notifyRenderer()").length - 1;
-    expect(bareCalls).toBe(6);
+    expect(bareCalls).toBe(8);
   });
 
   it("event-gates the bookmark projection worker and keeps it as a slow crash backstop", () => {
-    const worker = sourceBlock("const bookmarkProjectionRuns = new Set<string>();", "\n  bookmarkProjectionTimer.unref();");
+    const worker = sourceBlock("const bookmarkProjectionTimer = setInterval(() => {", "\n  bookmarkProjectionTimer.unref();");
     // Gated: an unflagged workspace costs nothing per tick.
     const gateAt = worker.indexOf(
-      "if (!pendingChatBookmarkProjectionWorkspaceIds.has(workspaceId)) continue;",
+      "if (!state.bookmarkProjectionPending || state.bookmarkProjectionRunning) {",
     );
     const clearAt = worker.indexOf(
-      "pendingChatBookmarkProjectionWorkspaceIds.delete(workspaceId);",
+      "state.bookmarkProjectionPending = false;",
       gateAt,
     );
     const runAt = worker.indexOf(
@@ -78,21 +83,26 @@ describe("workspace-activity main-process wiring", () => {
     expect(clearAt).toBeGreaterThan(gateAt);
     expect(runAt).toBeGreaterThan(clearAt);
     // A failed pass re-flags so the pending rows survive to the next tick.
-    expect(worker).toContain("queueChatBookmarkProjection(workspaceId);");
+    expect(worker).toContain("state.bookmarkProjectionPending = true;");
     // The backstop cadence: slow, never the 3s hot loop this replaced.
     expect(worker).toContain("}, 30_000);");
   });
 
   it("flags bookmark work from every reply path this process can observe", () => {
     // Agent dispatch replies.
-    const dispatch = sourceBlock("onMessagePosted: (workspaceId, threadId) => {", "\n  },");
-    expect(dispatch).toContain("queueChatBookmarkProjection(workspaceId);");
+    const dispatch = sourceBlock("onMessagePosted: (workspace, threadId) => {", "\n  },");
+    expect(dispatch).toContain("queueChatBookmarkProjection(workspace.workspaceId);");
     // CLI/MCP chat writes.
     const cli = sourceBlock("onWrite: (workspace, target) => {", "\n    },");
     expect(cli).toContain("queueChatBookmarkProjection(workspace.workspaceId);");
     // Rows a previous session left pending: once per workspace open.
-    const open = sourceBlock("async function openWorkspaceActivityWith(", "\n}\n");
-    expect(open).toContain("queueChatBookmarkProjection(workspace.workspaceId);");
+    const open = sourceBlock(
+      "async function openWorkspaceActivityForOperation(",
+      "\n}\n",
+    );
+    expect(open).toContain(
+      "queueChatBookmarkProjection(canonicalWorkspace.workspaceId);",
+    );
     // A failed post-pull projection retries through the worker.
     const pull = sourceBlock(
       "async function projectPendingChatBookmarksAfterPull(",

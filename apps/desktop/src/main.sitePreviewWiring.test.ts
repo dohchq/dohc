@@ -10,7 +10,10 @@ import {
 import { createTestScratch } from "./workspaces/testTemp";
 import { listFiles } from "./workspaces/workspaceFiles";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 let root: string;
 

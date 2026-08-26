@@ -20,9 +20,10 @@ import {
   type EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
 import {
-  createWorkspaceEngineCapture,
+  createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
 import {
@@ -31,6 +32,15 @@ import {
   noteSettleOutcome,
   noteSettleStart,
 } from "./engineYDocSaveSeq";
+
+function createWorkspaceEngineCapture(
+  options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
+) {
+  return createAttachedWorkspaceEngineCapture({
+    ...options,
+    attachmentId: Symbol(`test-workspace-attachment:${options.workspaceId}`),
+  });
+}
 
 async function reconnectFailureCapture(prefix: string) {
   const rootPath = await createTestScratch(prefix);

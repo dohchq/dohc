@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function handlerSource(channel: string): string {
   const marker = `CHANNELS.${channel},`;
@@ -41,6 +44,38 @@ describe("workspace file operation wiring", () => {
     expect(beginShutdownAt).toBeGreaterThan(-1);
     expect(beginShutdownAt).toBeLessThan(engineYDocStopAt);
     expect(beginShutdownAt).toBeLessThan(firstStopAllAt);
+
+    const authorityStopAt = willQuitBody.indexOf(
+      "const workspaceAuthorityStop",
+    );
+    const authorityStopEnd = willQuitBody.indexOf(
+      "const workspaceShutdown",
+      authorityStopAt,
+    );
+    expect(authorityStopAt).toBeGreaterThan(engineYDocStopAt);
+    expect(authorityStopEnd).toBeGreaterThan(authorityStopAt);
+    const authorityStop = willQuitBody.slice(
+      authorityStopAt,
+      authorityStopEnd,
+    );
+    const closeAuthorityAt = authorityStop.indexOf(
+      "workspaceAuthorities.close()",
+    );
+    expect(closeAuthorityAt).toBeGreaterThan(-1);
+    expect(authorityStop).toContain("Promise.allSettled(");
+    for (const producerStop of [
+      "engineYDocStop",
+      "agentSessionStop",
+      "chatDispatchStop",
+      "cliServerStop",
+      "searchStop",
+      "agentIntegrationStop",
+      "pluginStop",
+    ]) {
+      const producerStopAt = authorityStop.indexOf(producerStop);
+      expect(producerStopAt).toBeGreaterThan(-1);
+      expect(producerStopAt).toBeLessThan(closeAuthorityAt);
+    }
   });
 
   it("admits imports through stale-sensitive scheduling without holding the native dialog", () => {
@@ -61,5 +96,97 @@ describe("workspace file operation wiring", () => {
     const dialogAt = handler.indexOf("await dialog.showOpenDialog(");
     expect(dialogAt).toBeGreaterThan(importAt);
     expect(handler.lastIndexOf("await importInto(")).toBeGreaterThan(dialogAt);
+    expect(handler).toContain("exactRendererWorkspaceReferences.capture(");
+    expect(
+      handler.lastIndexOf("exactRendererWorkspaceReferences.withReference("),
+    ).toBeGreaterThan(dialogAt);
+    expect(handler.indexOf("withRendererWorkspaceOperation(")).toBeGreaterThan(-1);
+  });
+
+  it("holds modal picks and menu results to one exact renderer workspace", () => {
+    for (const channel of [
+      "pickImageFiles",
+      "showExplorerMenu",
+      "showWorkbenchMenu",
+    ]) {
+      const handler = handlerSource(channel);
+      const captureAt = handler.indexOf("exactRendererWorkspaceReferences.capture(");
+      const modalAt =
+        channel === "pickImageFiles"
+          ? handler.indexOf("await dialog.showOpenDialog(")
+          : channel === "showExplorerMenu"
+            ? handler.indexOf("await new Promise<ExplorerMenuCommand | null>")
+            : handler.indexOf("await new Promise<WorkbenchMenuCommand | null>");
+      const reacquireAt = handler.lastIndexOf(
+        "exactRendererWorkspaceReferences.withReference(",
+      );
+      expect(captureAt, channel).toBeGreaterThan(-1);
+      expect(modalAt, channel).toBeGreaterThan(captureAt);
+      expect(reacquireAt, channel).toBeGreaterThan(modalAt);
+    }
+  });
+
+  it("reacquires the exact renderer workspace after export dialogs", () => {
+    for (const channel of ["exportWorkspaceZip", "exportDocumentFile"]) {
+      const handler = handlerSource(channel);
+      const captureAt = handler.indexOf(
+        "exactRendererWorkspaceReferences.capture(",
+      );
+      const dialogAt = handler.indexOf("await dialog.showSaveDialog(");
+      const cancelAt = handler.indexOf("if (target === null)");
+      const reacquireAt = handler.lastIndexOf(
+        "exactRendererWorkspaceReferences.withReference(",
+      );
+      const assertionAt = handler.indexOf(
+        "operation.assertCurrent();",
+        reacquireAt,
+      );
+      const writeAt = handler.indexOf("await writeFile(");
+      const resultAt = handler.lastIndexOf(
+        channel === "exportWorkspaceZip"
+          ? "ExportWorkspaceZipResult.parse("
+          : "ExportDocumentFileResult.parse(",
+      );
+
+      expect(captureAt, channel).toBeGreaterThan(-1);
+      expect(dialogAt, channel).toBeGreaterThan(captureAt);
+      expect(reacquireAt, channel).toBeGreaterThan(dialogAt);
+      expect(cancelAt, channel).toBeGreaterThan(reacquireAt);
+      expect(assertionAt, channel).toBeGreaterThan(cancelAt);
+      expect(writeAt, channel).toBeGreaterThan(reacquireAt);
+      expect(writeAt, channel).toBeGreaterThan(assertionAt);
+      expect(writeAt, channel).toBeGreaterThan(cancelAt);
+      expect(resultAt, channel).toBeGreaterThan(writeAt);
+
+      if (channel === "exportDocumentFile") {
+        const renderAt = handler.indexOf("await renderHtmlToPdf(");
+        const postRenderAssertionAt = handler.indexOf(
+          "operation.assertCurrent();",
+          renderAt,
+        );
+        expect(renderAt).toBeGreaterThan(assertionAt);
+        expect(postRenderAssertionAt).toBeGreaterThan(renderAt);
+        expect(writeAt).toBeGreaterThan(postRenderAssertionAt);
+      }
+    }
+  });
+
+  it("holds graph, heading, backlink, and settings I/O under renderer authority", () => {
+    const helpers = new Map([
+      ["readWorkspaceGraph", "readWorkspaceGraph("],
+      ["getBacklinks", "readWorkspaceBacklinks("],
+      ["listWorkspaceHeadings", "readOwnedWorkspaceTextFor("],
+      ["getWorkspaceSettings", "readWorkspaceSettingsFile("],
+      ["setWorkspaceSettings", "saveWorkspaceSettingsFile("],
+      ["resetWorkspaceSettings", "resetWorkspaceSettingsFile("],
+    ]);
+    for (const [channel, helper] of helpers) {
+      const handler = handlerSource(channel);
+      const operationAt = handler.indexOf("withRendererWorkspaceOperation(");
+      expect(operationAt, channel).toBeGreaterThan(-1);
+      expect(handler.indexOf(helper), channel).toBeGreaterThan(operationAt);
+      expect(handler, channel).toContain("operation.workspace");
+      expect(handler, channel).not.toContain("requireWorkspace(input.workspaceId)");
+    }
   });
 });

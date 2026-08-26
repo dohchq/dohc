@@ -15,7 +15,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import { createTestScratch } from "./testTemp";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
@@ -96,6 +96,7 @@ function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
 }
 
 const WORKSPACE_ID = "engine-capture-test";
+const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 
 // chmod/ACL-based fixtures cannot make a path unreadable for root (root
 // ignores file modes), so every test that needs an unreadable path skips
@@ -121,6 +122,7 @@ function capture(root: string, options: CaptureOptions = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
+    attachmentId: WORKSPACE_ATTACHMENT_ID,
     rustEngineSessions:
       rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
     ...rest,
@@ -128,6 +130,26 @@ function capture(root: string, options: CaptureOptions = {}) {
 }
 
 describe("probeEngineStoreRefusal", () => {
+  it("probes through the exact attachment session key", async () => {
+    const root = await tempRoot();
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const run = vi.spyOn(sessions, "run");
+    const attachmentId = Symbol("attachment");
+
+    await expect(
+      probeEngineStoreRefusal(
+        { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId },
+        sessions,
+      ),
+    ).resolves.toBeNull();
+    expect(run).toHaveBeenCalled();
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId,
+    });
+  });
+
   it("rethrows an unrecognized engine error", async () => {
     const root = await tempRoot();
     const probeError = Object.assign(new Error("permission denied"), {
@@ -143,7 +165,14 @@ describe("probeEngineStoreRefusal", () => {
     );
 
     await expect(
-      probeEngineStoreRefusal(WORKSPACE_ID, root, sessions),
+      probeEngineStoreRefusal(
+        {
+          workspaceId: WORKSPACE_ID,
+          rootPath: root,
+          attachmentId: WORKSPACE_ATTACHMENT_ID,
+        },
+        sessions,
+      ),
     ).rejects.toBe(probeError);
   });
 });
@@ -930,7 +959,11 @@ describe("workspaceEngineCapture batch capture", () => {
       const outcomes: boolean[] = [];
       const sessions = mockLiveSessions(new VersionedLoopbackEngine());
       const liveStore = createCaptureLiveStores(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
+        {
+          workspaceId: WORKSPACE_ID,
+          rootPath: root,
+          attachmentId: WORKSPACE_ATTACHMENT_ID,
+        },
         sessions,
       ).store;
       const daemonStore = new Proxy(liveStore, {
@@ -985,7 +1018,11 @@ describe("workspaceEngineCapture batch capture", () => {
       const outcomes: WorkspaceEngineCaptureFailure[] = [];
       const sessions = mockLiveSessions(new VersionedLoopbackEngine());
       const liveStore = createCaptureLiveStores(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
+        {
+          workspaceId: WORKSPACE_ID,
+          rootPath: root,
+          attachmentId: WORKSPACE_ATTACHMENT_ID,
+        },
         sessions,
       ).store;
       const daemonStore = new Proxy(liveStore, {
@@ -2362,7 +2399,11 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     const order: string[] = [];
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
     const liveStore = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: root },
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        attachmentId: WORKSPACE_ATTACHMENT_ID,
+      },
       sessions,
     ).store;
     const trackedStore = new Proxy(liveStore, {
@@ -2797,6 +2838,7 @@ describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
           capture: createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
+            attachmentId: w.attachmentId,
             rustEngineSessions: mockLiveSessions(loopback),
             onError: () => {},
             onCaptureOutcome: hooks.onCaptureOutcome,
@@ -2905,6 +2947,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
           const engineCapture = createWorkspaceEngineCapture({
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
+            attachmentId: w.attachmentId,
             rustEngineSessions: sessions,
           });
           const stopCapture = engineCapture.stop.bind(engineCapture);
@@ -2967,6 +3010,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
         capture: createWorkspaceEngineCapture({
           workspaceId: w.workspaceId,
           rootPath: w.rootPath,
+          attachmentId: w.attachmentId,
           rustEngineSessions: mockLiveSessions(loopback),
         }),
       }),
@@ -3447,7 +3491,11 @@ describe("Rust engine session selection", () => {
     const loopback = new VersionedLoopbackEngine();
     const sessions = mockLiveSessions(loopback);
     const liveStore = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: root },
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        attachmentId: WORKSPACE_ATTACHMENT_ID,
+      },
       sessions,
     ).store;
     let storeReads = 0;

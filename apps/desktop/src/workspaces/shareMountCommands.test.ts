@@ -29,6 +29,28 @@ const SELECTOR = {
   access: "view" as const,
 };
 const LEASE = {} as WorkspaceOperationLease;
+const assertCurrent = () => undefined;
+
+function retiringCaller() {
+  let current = true;
+  const retired = new Error("retired workspace authority");
+  const assertCurrent = () => {
+    if (!current) throw retired;
+  };
+  return {
+    retired,
+    assertCurrent,
+    retire() {
+      current = false;
+    },
+    async invoke<T>(work: () => Promise<T>): Promise<T> {
+      assertCurrent();
+      const result = await work();
+      assertCurrent();
+      return result;
+    },
+  };
+}
 
 const LIVE_OWNER_COMPLETE = Symbol("live owner complete");
 
@@ -246,6 +268,7 @@ describe("share mount commands", () => {
     const result = await h.commands.mount({
       workspace: WORKSPACE,
       shareCode: SHARE_CODE,
+      assertCurrent,
     });
 
     expect(result).toEqual({
@@ -272,21 +295,33 @@ describe("share mount commands", () => {
     ]);
   });
 
-  it("rolls back a durable mount when post-commit presentation fails", async () => {
+  it("settles a committed mount before its retired caller is refused", async () => {
     const h = harness();
-    let notifyCalls = 0;
-    h.dependencies.notifyRenderer = () => {
-      notifyCalls += 1;
-      h.events.push(`notify:${notifyCalls}`);
-      if (notifyCalls === 1) throw new Error("notify failed");
-    };
-    const commands = createShareMountCommands(h.dependencies);
+    const caller = retiringCaller();
+    vi.mocked(h.files.mount).mockImplementationOnce(async (_lease, target) => {
+      h.events.push("files:mount");
+      await withLiveMountOwner(target, (owner) =>
+        h.commands.filesLifecycle.createMount(owner, target),
+      );
+      caller.retire();
+      return {
+        status: "updated",
+        changedPaths: 2,
+      } as Awaited<ReturnType<ShareViewFiles["mount"]>>;
+    });
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
-    ).rejects.toThrow("Nothing was added");
+      caller.invoke(() =>
+        h.commands.mount({
+          workspace: WORKSPACE,
+          shareCode: SHARE_CODE,
+          assertCurrent: caller.assertCurrent,
+        }),
+      ),
+    ).rejects.toBe(caller.retired);
 
-    expect(h.mounts).toEqual([]);
+    expect(h.files.unmount).not.toHaveBeenCalled();
+    expect(h.mounts).toHaveLength(1);
     expect(h.events).toEqual([
       "credentials",
       "preflight",
@@ -296,23 +331,130 @@ describe("share mount commands", () => {
       "projection:create",
       "registry:1",
       "native",
-      "notify:1",
-      "files:unmount",
-      "relay:close",
-      "projection:remove",
-      "registry:0",
+      "notify:workspace-one",
+      "summary",
+      "lease:end",
+    ]);
+  });
+
+  it("translates a mount failure after retirement and still presents cleanup", async () => {
+    const h = harness();
+    const caller = retiringCaller();
+    vi.mocked(h.files.mount).mockImplementationOnce(async () => {
+      h.events.push("files:mount");
+      caller.retire();
+      throw new ShareUnavailableError();
+    });
+    h.dependencies.logError = () => {
+      h.events.push("log");
+      throw new Error("logger failed");
+    };
+
+    await expect(
+      h.commands.mount({
+        workspace: WORKSPACE,
+        shareCode: SHARE_CODE,
+        assertCurrent: caller.assertCurrent,
+      }),
+    ).rejects.toThrow("ended before it could be added");
+
+    expect(h.events).toEqual([
+      "credentials",
+      "preflight",
+      "lease:start",
+      "disk:names",
+      "files:mount",
       "log",
       "native",
-      "notify:2",
+      "notify:workspace-one",
     ]);
+  });
+
+  it("keeps a durable mount when post-commit presentation fails", async () => {
+    const h = harness();
+    const nativeFailure = new Error("native refresh failed");
+    const notifyFailure = new Error("notify failed");
+    const loggedErrors: unknown[] = [];
+    h.dependencies.refreshNativeWorkspaceSurfaces = () => {
+      h.events.push("native");
+      throw nativeFailure;
+    };
+    h.dependencies.notifyRenderer = () => {
+      h.events.push("notify:workspace-one");
+      throw notifyFailure;
+    };
+    h.dependencies.logError = (_message, error) => {
+      h.events.push("log");
+      loggedErrors.push(error);
+    };
+    const commands = createShareMountCommands(h.dependencies);
+
+    await expect(
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
+    ).resolves.toEqual({
+      workspace: { id: WORKSPACE.workspaceId },
+      mount: {
+        shareId: SHARE_ID,
+        label: "alex",
+        status: "updated",
+        changedPaths: 2,
+      },
+    });
+
+    expect(h.files.unmount).not.toHaveBeenCalled();
+    expect(h.mounts).toHaveLength(1);
+    expect(loggedErrors).toEqual([nativeFailure, notifyFailure]);
+    expect(h.events).toEqual([
+      "credentials",
+      "preflight",
+      "lease:start",
+      "disk:names",
+      "files:mount",
+      "projection:create",
+      "registry:1",
+      "native",
+      "log",
+      "notify:workspace-one",
+      "log",
+      "summary",
+      "lease:end",
+    ]);
+  });
+
+  it("keeps a durable mount when presentation failure reporting also fails", async () => {
+    const h = harness();
+    h.dependencies.notifyRenderer = () => {
+      throw new Error("notify failed");
+    };
+    h.dependencies.logError = () => {
+      throw new Error("logger failed");
+    };
+
+    await expect(
+      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
+    ).resolves.toEqual({
+      workspace: { id: WORKSPACE.workspaceId },
+      mount: {
+        shareId: SHARE_ID,
+        label: "alex",
+        status: "updated",
+        changedPaths: 2,
+      },
+    });
+    expect(h.files.unmount).not.toHaveBeenCalled();
+    expect(h.mounts).toHaveLength(1);
   });
 
   it("preserves incomplete post-commit cleanup evidence", async () => {
     const h = harness();
+    const responseFailure = new Error("workspace summary failed");
     const cleanupFailure = new Error("folder is busy");
     const nativeFailure = new Error("native refresh failed");
     const notifyFailure = new Error("notify failed");
     const loggedErrors: unknown[] = [];
+    h.dependencies.workspaceSummary = () => {
+      throw responseFailure;
+    };
     h.dependencies.refreshNativeWorkspaceSurfaces = () => {
       throw nativeFailure;
     };
@@ -326,7 +468,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("cleanup did not finish");
 
     const rollbackError = loggedErrors.find(
@@ -336,6 +478,9 @@ describe("share mount commands", () => {
     expect(
       (rollbackError as ShareViewMountRollbackError).rollbackError,
     ).toBe(cleanupFailure);
+    expect(
+      (rollbackError as ShareViewMountRollbackError).mountError,
+    ).toBe(responseFailure);
     expect(loggedErrors).toContain(notifyFailure);
     expect(loggedErrors).toContain(nativeFailure);
     expect(h.mounts).toEqual([]);
@@ -345,6 +490,9 @@ describe("share mount commands", () => {
     const h = harness();
     const cleanupFailure = new Error("metadata cleanup failed");
     const loggedErrors: unknown[] = [];
+    h.dependencies.workspaceSummary = () => {
+      throw new Error("workspace summary failed");
+    };
     h.dependencies.refreshNativeWorkspaceSurfaces = () => {
       throw new Error("native refresh failed");
     };
@@ -355,7 +503,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("cleanup did not finish");
 
     const rollbackError = loggedErrors.find(
@@ -386,11 +534,13 @@ describe("share mount commands", () => {
     const first = commands.mount({
       workspace: WORKSPACE,
       shareCode: SHARE_CODE,
+      assertCurrent,
     });
     await vi.waitFor(() => expect(calls).toBe(1));
     const second = commands.mount({
       workspace: WORKSPACE,
       shareCode: SHARE_CODE,
+      assertCurrent,
     });
     await Promise.resolve();
     expect(calls).toBe(1);
@@ -403,7 +553,11 @@ describe("share mount commands", () => {
   it("fails closed before relay access for invalid or cross-relay share codes", async () => {
     const invalid = harness();
     await expect(
-      invalid.commands.mount({ workspace: WORKSPACE, shareCode: "not-a-code" }),
+      invalid.commands.mount({
+        workspace: WORKSPACE,
+        shareCode: "not-a-code",
+        assertCurrent,
+      }),
     ).rejects.toThrow("doesn't look like a share code");
     expect(invalid.events).toEqual([]);
 
@@ -415,7 +569,7 @@ describe("share mount commands", () => {
     });
     const commands = createShareMountCommands(mismatch.dependencies);
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("different server");
     expect(mismatch.events).toEqual([]);
   });
@@ -429,7 +583,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("shared chat channel");
     expect(h.events).toEqual(["credentials", "preflight"]);
   });
@@ -442,7 +596,7 @@ describe("share mount commands", () => {
     );
 
     await expect(
-      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("cleanup did not finish");
     expect(h.events.at(-1)).toBe("notify:workspace-one");
   });
@@ -455,7 +609,7 @@ describe("share mount commands", () => {
     });
 
     await expect(
-      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("Nothing was added");
 
     expect(h.files.unmount).not.toHaveBeenCalled();
@@ -494,6 +648,10 @@ describe("share mount commands", () => {
     h.dependencies.closeRelayWorkspace = async () => {
       h.events.push("relay:close");
       throw new Error("close failed");
+    };
+    h.dependencies.logError = () => {
+      h.events.push("log");
+      throw new Error("logger failed");
     };
     const commands = createShareMountCommands(h.dependencies);
 
@@ -589,7 +747,7 @@ describe("share mount commands", () => {
       { shareId: "damaged", label: "../../escape" },
     ];
 
-    const result = await h.commands.refresh({ workspace: WORKSPACE });
+    const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
 
     expect(result.results).toEqual([
       {
@@ -613,6 +771,84 @@ describe("share mount commands", () => {
     ]);
   });
 
+  it("settles one reconcile but starts no later mount after retirement", async () => {
+    const h = harness();
+    const caller = retiringCaller();
+    h.mounts = [
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+      {
+        shareId: "22222222-2222-4222-8222-222222222222",
+        label: "blair",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+    ];
+    vi.mocked(h.files.reconcile).mockImplementationOnce(async () => {
+      h.events.push("files:reconcile");
+      caller.retire();
+      return {
+        kind: "refresh",
+        outcome: { status: "updated", changedPaths: 1 },
+      } as Awaited<ReturnType<ShareViewFiles["reconcile"]>>;
+    });
+
+    await expect(
+      h.commands.refresh({
+        workspace: WORKSPACE,
+        assertCurrent: caller.assertCurrent,
+      }),
+    ).rejects.toBe(caller.retired);
+
+    expect(h.files.reconcile).toHaveBeenCalledOnce();
+    expect(h.events).toEqual([
+      "lease:start",
+      "files:reconcile",
+      "lease:end",
+      "notify:workspace-one",
+    ]);
+  });
+
+  it("does not mask a classified reconcile failure after retirement", async () => {
+    const h = harness();
+    const caller = retiringCaller();
+    h.mounts = [
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+    ];
+    vi.mocked(h.files.reconcile).mockImplementationOnce(async () => {
+      h.events.push("files:reconcile");
+      caller.retire();
+      throw new RelayUnauthorizedError();
+    });
+
+    await expect(
+      h.commands.refresh({
+        workspace: WORKSPACE,
+        assertCurrent: caller.assertCurrent,
+      }),
+    ).rejects.toThrow("session expired");
+    expect(h.events).toEqual([
+      "lease:start",
+      "files:reconcile",
+      "notify:workspace-one",
+    ]);
+  });
+
   it("aborts the refresh on expired credentials but still notifies", async () => {
     const h = harness();
     h.mounts = [
@@ -629,10 +865,42 @@ describe("share mount commands", () => {
       new RelayUnauthorizedError(),
     );
 
-    await expect(h.commands.refresh({ workspace: WORKSPACE })).rejects.toThrow(
+    await expect(
+      h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
+    ).rejects.toThrow(
       "session expired",
     );
     expect(h.events.at(-1)).toBe("notify:workspace-one");
+  });
+
+  it("does not mask a classified refresh failure when notification fails", async () => {
+    const h = harness();
+    const notifyFailure = new Error("notify failed");
+    const loggedErrors: unknown[] = [];
+    h.mounts = [
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+    ];
+    vi.mocked(h.files.reconcile).mockRejectedValueOnce(
+      new RelayUnauthorizedError(),
+    );
+    h.dependencies.notifyRenderer = () => {
+      throw notifyFailure;
+    };
+    h.dependencies.logError = (_message, error) => {
+      loggedErrors.push(error);
+    };
+
+    await expect(
+      h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
+    ).rejects.toThrow("session expired");
+    expect(loggedErrors).toEqual([notifyFailure]);
   });
 
   it("keeps the empty registry tombstone when damaged mounts are removed", async () => {
@@ -645,6 +913,7 @@ describe("share mount commands", () => {
     const result = await h.commands.unmount({
       workspace: WORKSPACE,
       shareId: SHARE_ID,
+      assertCurrent,
     });
 
     expect(result).toEqual({
@@ -680,6 +949,7 @@ describe("share mount commands", () => {
     const result = await h.commands.unmount({
       workspace: WORKSPACE,
       shareId: SHARE_ID,
+      assertCurrent,
     });
 
     expect(result.folderLeft).toBe(true);
@@ -701,6 +971,82 @@ describe("share mount commands", () => {
     ]);
     expect(h.mounts).toEqual([]);
   });
+
+  it.each(["registry-only", "usable"] as const)(
+    "settles a %s unmount before its retired caller is refused",
+    async (kind) => {
+      const h = harness();
+      const caller = retiringCaller();
+      h.mounts =
+        kind === "registry-only"
+          ? [
+              { shareId: SHARE_ID, label: "../../escape" },
+              { shareId: SHARE_ID, label: "duplicate" },
+            ]
+          : [
+              {
+                shareId: SHARE_ID,
+                label: "alex",
+                granterEmail: null,
+                relayUrl: "https://relay.example",
+                recipientEmail: null,
+                grantedSelector: SELECTOR,
+              },
+            ];
+      if (kind === "registry-only") {
+        h.dependencies.closeRelayWorkspace = async () => {
+          h.events.push("relay:close");
+          caller.retire();
+        };
+      } else {
+        h.dependencies.projectionFor = () => ({
+          create: async () => {
+            h.events.push("projection:create");
+          },
+          remove: async () => {
+            h.events.push("projection:remove");
+            caller.retire();
+            return { folderLeft: false };
+          },
+        });
+      }
+
+      await expect(
+        caller.invoke(() =>
+          h.commands.unmount({
+            workspace: WORKSPACE,
+            shareId: SHARE_ID,
+            assertCurrent: caller.assertCurrent,
+          }),
+        ),
+      ).rejects.toBe(caller.retired);
+
+      expect(h.mounts).toEqual([]);
+      expect(h.events).toEqual(
+        kind === "registry-only"
+          ? [
+              "lease:start",
+              "relay:close",
+              "registry:0",
+              "native",
+              "notify:workspace-one",
+              "summary",
+              "lease:end",
+            ]
+          : [
+              "lease:start",
+              "files:unmount",
+              "relay:close",
+              "projection:remove",
+              "registry:0",
+              "native",
+              "notify:workspace-one",
+              "summary",
+              "lease:end",
+            ],
+      );
+    },
+  );
 
   it.each([
     {
@@ -744,7 +1090,11 @@ describe("share mount commands", () => {
       };
 
       await expect(
-        h.commands.unmount({ workspace: WORKSPACE, shareId: SHARE_ID }),
+        h.commands.unmount({
+          workspace: WORKSPACE,
+          shareId: SHARE_ID,
+          assertCurrent,
+        }),
       ).resolves.toEqual({
         workspace: { id: WORKSPACE.workspaceId },
         ...(folderLeft ? { folderLeft: true } : {}),
@@ -762,7 +1112,7 @@ describe("share mount commands", () => {
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
-      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE }),
+      commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
     ).rejects.toThrow("No share matches that code");
     expect(h.events).toEqual(["credentials"]);
   });

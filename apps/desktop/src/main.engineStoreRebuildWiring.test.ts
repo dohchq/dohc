@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function sourceBetween(startMarker: string, endMarker: string): string {
   const start = mainSource.indexOf(startMarker);
@@ -13,6 +16,100 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 }
 
 describe("main-process engine store rebuild wiring", () => {
+  it("keeps physical relay teardown on one attachment coordinate", () => {
+    const target = sourceBetween(
+      "function workspaceSessionTargetForPhysicalWorkspace(",
+      "function relayCloseTargetsForPhysicalWorkspace(",
+    );
+    const targets = sourceBetween(
+      "function relayCloseTargetsForPhysicalWorkspace(",
+      "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
+    );
+    const owner = sourceBetween(
+      "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
+      "function requireWorkspaceAuthority(",
+    );
+    const transportClose = sourceBetween(
+      "async function closeRelayTransportWorkspace(",
+      "async function closeAllRelayTransportWorkspaces(",
+    );
+
+    expect(target).toContain(
+      "if (targetWorkspaceId !== workspace.workspaceId) return targetWorkspaceId;",
+    );
+    expect(target).toContain("workspaceId: workspace.workspaceId");
+    expect(target).toContain("rootPath: workspace.rootPath");
+    expect(target).toContain("attachmentId: workspace.attachmentId");
+    expect(targets).toMatch(
+      /workspaceSessionTargetForPhysicalWorkspace\(\s*workspace\.workspaceId,\s*workspace,\s*\)/,
+    );
+    expect(targets).toMatch(
+      /const mountStoreWorkspaceIds = new Set\(\s*storedShareMounts\(workspace\)\.map\(\(mount\)\s*=>\s*mountStoreWorkspaceIdFor\(workspace\.workspaceId,\s*mount\.shareId\),/,
+    );
+    expect(targets).toContain("...mountStoreWorkspaceIds");
+    expect(targets).not.toContain("workspace.remote");
+    expect(owner).toContain("attachmentId: binding.attachmentId");
+    expect(owner).toContain(
+      "relayCloseTargetsForPhysicalWorkspace(physicalWorkspace)",
+    );
+    expect(owner).toContain(
+      "...relayCloseTargets.map((target) => closeRelayTransportWorkspace(target))",
+    );
+    expect(transportClose).toContain("workspace: string | EngineWorkspace");
+    expect(transportClose).toContain(
+      "await rustEngineRelayClient.closeWorkspace(workspace)",
+    );
+    expect(transportClose).toContain(
+      "await rustEngineWorkspaceSessions?.closeWorkspace(workspace)",
+    );
+  });
+
+  it("binds registered relay work to the workspace attachment", () => {
+    const engine = sourceBetween(
+      "function engineForWorkspace(",
+      "const workspaceActivity = createWorkspaceActivity(",
+    );
+    const sharedChannel = sourceBetween(
+      "function reserveAndPullSharedChannelForWorkspace(",
+      "ipcMain.handle(CHANNELS.listChatChannelShares",
+    );
+
+    for (const source of [engine, sharedChannel]) {
+      expect(source).toMatch(
+        /relayClientForWorkspace\(\{[\s\S]*?workspaceId: workspace\.workspaceId,[\s\S]*?rootPath: workspace\.rootPath,[\s\S]*?attachmentId: workspace\.attachmentId,/,
+      );
+    }
+    expect(engine).toContain(
+      "Cloud sync requires a registered workspace attachment.",
+    );
+    expect(sharedChannel).toContain(
+      'throw new Error("Shared channel pull targeted a different workspace.");',
+    );
+  });
+
+  it("retires a standalone physical share by attachment and a mount child by id", () => {
+    const shareFiles = sourceBetween(
+      "function createShareViewFilesForOperation(",
+      "function withShareViewFilesOperation<Result>(",
+    );
+    expect(shareFiles).toMatch(
+      /workspaceSessionTargetForPhysicalWorkspace\(\s*target\.storeWorkspaceId,\s*operation\.workspace,\s*\)/,
+    );
+    expect(shareFiles).toContain(
+      "closeRelayTransportWorkspace(retireTarget)",
+    );
+  });
+
+  it("does not seed received-share session state under logical startup keys", () => {
+    const startup = sourceBetween(
+      "async function startRustEngineDaemon(",
+      "// Single-instance lock gates the entire bootstrap",
+    );
+    expect(startup).not.toContain(
+      "receivedShareEngine.workspaceForRegistered(workspace)",
+    );
+  });
+
   it("treats relay teardown as non-fatal after local activity closes", () => {
     const close = sourceBetween(
       "async function closeDispatchRunActivity(",
@@ -21,10 +118,13 @@ describe("main-process engine store rebuild wiring", () => {
 
     expect(close).toContain("closeWorkspaceActivityAndRelay({");
     expect(close).toMatch(
-      /closeActivity: \(\) =>\s*activity\.close\(workspaceId, \{\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
+      /closeActivity: async \(\) => \{\s*await activity\.close\(current\.workspaceId, \{\s*expectedRootPath: current\.rootPath,\s*preserveStatus: true,\s*notify: options\.notifyRenderer,/,
+    );
+    expect(close).toMatch(
+      /workspaceSessionTargetForPhysicalWorkspace\(\s*current\.workspaceId,\s*current,?\s*\)/,
     );
     expect(close).toContain(
-      "closeRelay: () => closeRelayTransportWorkspace(relayWorkspaceId)",
+      "closeRelay: () => closeRelayTransportWorkspace(relayCloseTarget)",
     );
     expect(close).toContain("onRelayCloseError: (error) =>");
     expect(close).toContain("console.error(");
@@ -53,10 +153,19 @@ describe("main-process engine store rebuild wiring", () => {
     );
 
     expect(recovery).toContain("completePendingEngineStoreMove(rootPath");
-    expect(recovery).toContain("sessions.beginRebuild(workspace.workspaceId)");
-    expect(recovery).toContain("sessions.endRebuild(workspace.workspaceId)");
-    expect(dispatch).toContain("withEngineStoreRecovered(");
-    expect(ordinaryOpen).toContain("withEngineStoreRecovered(");
+    expect(recovery).toContain("sessions.beginRebuild(workspace)");
+    expect(recovery).toContain("sessions.endRebuild(workspace)");
+    expect(dispatch).toContain("withEngineStoreRecoveredForAuthority(lease,");
+    expect(dispatch).toMatch(
+      /captureForFlaggedWorkspace\(\s*\{\s*\.\.\.workspace,[\s\S]*?shareView: false,/,
+    );
+    expect(dispatch).toMatch(
+      /const relayCloseTarget = workspace\.remote[\s\S]*?workspaceSessionTargetForPhysicalWorkspace\(\s*workspace\.workspaceId,\s*workspace,\s*\)/,
+    );
+    expect(dispatch).toContain(
+      "await closeRelayTransportWorkspace(relayCloseTarget).catch(",
+    );
+    expect(ordinaryOpen).toContain("withEngineStoreRecoveredForAuthority(lease,");
     expect(lockedOpen).toContain(
       "withEngineStoreRecoveredUnderEngineStoreLock(",
     );
@@ -69,12 +178,12 @@ describe("main-process engine store rebuild wiring", () => {
     expect(
       lockedOpen.indexOf("completePendingEngineStoreMoveForWorkspace("),
     ).toBeLessThan(lockedOpen.indexOf("options.afterReopenRecoverySettled?.()"));
-    expect(rebuild).toContain("runInKeyedLane(");
+    expect(rebuild).toContain("inWorkspaceEngineStoreLane(lease,");
     expect(rebuild).toContain("openWorkspaceActivityUnderEngineStoreLock(");
     expect(rebuild).toContain("begin: () => sessions.beginRebuild(");
     expect(rebuild).toContain("end: () => sessions.endRebuild(");
     expect(rebuild).toMatch(
-      /afterReopenRecoverySettled: \(\) =>\s*sessions\.endRebuild\(workspace\.workspaceId\),/,
+      /afterReopenRecoverySettled: \(\) =>\s*sessions\.endRebuild\(workspace\),/,
     );
     expect(rebuild).toContain("moveStoreAside: moveEngineStoreAside");
     expect(rebuild).not.toContain("requireEngineSessions().beginRebuild(");
@@ -87,15 +196,15 @@ describe("main-process engine store rebuild wiring", () => {
     );
     const helper = sourceBetween(
       "async function startAgentRunWithWorkspaceActivity(",
-      "const lastEngineStoreRebuildResult",
+      "function createPluginSurfaceHostLease(",
     );
     const tryInVersion = sourceBetween(
-      "const tryInVersionSessions = createTryInVersionSessions({",
-      "async function workspaceAgentDefaults(",
+      "function createTryInVersionSessionsFor(",
+      "const tryInVersionSessions = {",
     );
     const sessionManager = sourceBetween(
       "async function agentSessionManager(",
-      "// Linked Chats",
+      "function linkedChatStoreFor(",
     );
     const ipc = sourceBetween(
       "ipcMain.handle(CHANNELS.startAgentRun,",

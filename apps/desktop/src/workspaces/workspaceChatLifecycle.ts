@@ -60,5 +60,9 @@ export function createWorkspaceChatLifecycle(options: {
       void maintainOnce(workspace);
       return result;
     },
+
+    async settled(): Promise<void> {
+      await Promise.all(maintenanceInFlight.values());
+    },
   };
 }

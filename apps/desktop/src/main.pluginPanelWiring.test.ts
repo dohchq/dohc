@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function sourceBlock(startMarker: string, endMarker: string): string {
   const start = mainSource.indexOf(startMarker);
@@ -24,8 +27,9 @@ const squeeze = (source: string): string => source.replace(/\s+/g, "");
 describe("plugin panel main-process wiring", () => {
   it("forwards watcher batches to the matching workspace runtime", () => {
     const batch = sourceBlock("onWatcherBatch: (workspace, events) => {", "\n  },");
+    expect(batch).toContain("withWorkspaceAttachment(workspace, () =>");
     expect(batch).toMatch(
-      /pluginWorkspaceRuntimes\.current\(workspace\.workspaceId\)\s*\?\.handleWatcherEvents\(events\);/,
+      /pluginWorkspaceRuntimes\.current\(workspace\.workspaceId\)\s*\?\.handleWatcherEvents\(events\),/,
     );
   });
 
@@ -89,16 +93,25 @@ describe("plugin panel main-process wiring", () => {
     expect(parseAt).toBeGreaterThan(sendAt);
 
     const surfaces = sourceBlock(
-      "const pluginSurfaces = new PluginSurfaces<WebContentsView>({",
-      "\n});",
+      "function createPluginSurfaces(",
+      "\n}\n",
+    );
+    const panelCallbackAt = surfaces.indexOf("notifyPanelInvalidated:");
+    const attachmentAt = surfaces.indexOf(
+      "attachmentId: binding.attachmentId,",
+      panelCallbackAt,
+    );
+    const notifyAt = surfaces.indexOf(
+      "notifyPluginPanelInvalidated(sender, generation, event)",
+      attachmentAt,
     );
     expect(surfaces).toContain(
       "notifyPanelInvalidated: ({ senderId, generation, ...event }) => {",
     );
     expect(surfaces).toContain("webContents.fromId(senderId)");
-    expect(surfaces).toContain(
-      "notifyPluginPanelInvalidated(sender, generation, event)",
-    );
+    expect(panelCallbackAt).toBeGreaterThan(-1);
+    expect(attachmentAt).toBeGreaterThan(panelCallbackAt);
+    expect(notifyAt).toBeGreaterThan(attachmentAt);
   });
 
 
@@ -106,13 +119,16 @@ describe("plugin panel main-process wiring", () => {
     const router = functionSource("function invokeWorkspacePluginSdk");
     const writerAt = router.indexOf("writeAuthoredText: createPluginAuthoredTextWriter({");
     expect(writerAt).toBeGreaterThan(-1);
-    expect(router.indexOf("signal: input.signal,", writerAt)).toBeGreaterThan(writerAt);
+    expect(router.indexOf("signal,", writerAt)).toBeGreaterThan(writerAt);
     expect(
-      router.indexOf("await requirePluginEngineCapture(input.workspaceId);", writerAt),
+      router.indexOf(
+        "await requirePluginEngineCaptureForOperation(operation);",
+        writerAt,
+      ),
     ).toBeGreaterThan(writerAt);
     expect(
       router.indexOf(
-        "pluginWorkspaceRuntimes.current(input.workspaceId)?.pipeline",
+        "operation.state.pluginRuntimes.current(input.workspaceId)?.pipeline",
         writerAt,
       ),
     ).toBeGreaterThan(writerAt);
@@ -120,14 +136,28 @@ describe("plugin panel main-process wiring", () => {
 
   it("routes runtime status through the validated main-process notifier", () => {
     const owner = sourceBlock(
-      "new PluginWorkspaceRuntimes<CreatedWorkspace>({",
-      "\n});",
+      "function createDesktopWorkspaceAuthorityState(",
+      "\n}\n",
     );
-    expect(owner).toContain("onPipelineStatus: notifyPluginStatusChanged,");
+    const statusAt = owner.indexOf("onPipelineStatus: (workspaceId, event) => {");
+    const attachmentAt = owner.indexOf(
+      "attachmentId: binding.attachmentId",
+      statusAt,
+    );
+    const notifyAt = owner.indexOf(
+      "notifyPluginStatusChanged(workspaceId, event)",
+      attachmentAt,
+    );
+    expect(statusAt).toBeGreaterThan(-1);
+    expect(attachmentAt).toBeGreaterThan(statusAt);
+    expect(notifyAt).toBeGreaterThan(attachmentAt);
   });
 
   it("constructs one owner for the pipeline and its exact host", () => {
     const createPipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
+    expect(createPipeline).toContain(
+      "const surfaces = authorityLease.state.pluginSurfaces;",
+    );
     const ownerAt = createPipeline.indexOf(
       "const hostOwnership = new PluginHostOwnership(pluginHost",
     );
@@ -145,7 +175,7 @@ describe("plugin panel main-process wiring", () => {
       "onRuntimeStopped: (pluginId) =>",
       pipelineAt,
     );
-    const stopAt = createPipeline.indexOf("pluginSurfaces.stop({", hookAt);
+    const stopAt = createPipeline.indexOf("surfaces.stop({", hookAt);
     expect(hookAt).toBeGreaterThan(pipelineAt);
     expect(stopAt).toBeGreaterThan(hookAt);
     expect(squeeze(createPipeline.slice(stopAt, stopAt + 180))).toContain(
@@ -225,7 +255,7 @@ describe("plugin panel main-process wiring", () => {
     const pipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
     const statusAt = pipeline.indexOf("onStatusChange: (pluginId, status) => {");
     const lifecycleAt = pipeline.indexOf(
-      "surfaceHostLifecycle?.statusChanged(pluginId, status);",
+      "surfaceHostLifecycle?.statusChanged(pluginId, status)",
       statusAt,
     );
     expect(statusAt).toBeGreaterThan(-1);
@@ -238,7 +268,7 @@ describe("plugin panel main-process wiring", () => {
       "onRecoveryDisposition: (pluginId, disposition) => {",
     );
     const lifecycleAt = pipeline.indexOf(
-      "surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition);",
+      "surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition)",
       recoveryAt,
     );
     expect(recoveryAt).toBeGreaterThan(-1);
@@ -247,16 +277,20 @@ describe("plugin panel main-process wiring", () => {
 
   it("composes host status with the pipeline and plugin surfaces once", () => {
     const pipeline = functionSource("function createPluginWorkspaceRuntimeParts(");
+    const capturedSurfacesAt = pipeline.indexOf(
+      "const surfaces = authorityLease.state.pluginSurfaces;",
+    );
     const lifecycleAt = pipeline.indexOf(
       "surfaceHostLifecycle = new PluginSurfaceHostLifecycle({",
     );
     const hostAt = pipeline.indexOf("host: pluginHost,", lifecycleAt);
-    const surfacesAt = pipeline.indexOf("surfaces: pluginSurfaces,", hostAt);
+    const surfacesAt = pipeline.indexOf("surfaces,", hostAt);
     const statusAt = pipeline.indexOf(
       "pipeline?.noteRuntimeStatus(pluginId, status)",
       surfacesAt,
     );
-    expect(lifecycleAt).toBeGreaterThan(-1);
+    expect(capturedSurfacesAt).toBeGreaterThan(-1);
+    expect(lifecycleAt).toBeGreaterThan(capturedSurfacesAt);
     expect(hostAt).toBeGreaterThan(lifecycleAt);
     expect(surfacesAt).toBeGreaterThan(hostAt);
     expect(statusAt).toBeGreaterThan(surfacesAt);
@@ -280,31 +314,32 @@ describe("plugin panel main-process wiring", () => {
 
   it("refuses pipeline creation after the last workspace window closes", () => {
     const owner = sourceBlock(
-      "new PluginWorkspaceRuntimes<CreatedWorkspace>({",
-      "\n});",
+      "function createDesktopWorkspaceAuthorityState(",
+      "\n}\n",
     );
     expect(owner).toContain(
-      "rendererWorkspaceSessions.isWorkspaceOpen(workspaceId)",
+      "rendererWorkspaceSessions.isAttachmentOpen(binding.attachmentId)",
     );
   });
 
   it("does not warm a pipeline after a later workspace switch wins", () => {
     const open = handler("openWorkspace");
-    const awaitAt = open.indexOf("await openWorkspaceActivity(workspace)");
-    const recheckAt = open.indexOf(
-      "rendererSession.isCurrent()",
-      awaitAt,
-    );
+    const awaitAt = open.indexOf("await openWorkspaceActivityForOperation(");
+    const recheckAt = open.indexOf("rendererSession.isCurrent()", awaitAt);
     const warmAt = open.indexOf(
-      "void pluginWorkspaceRuntimes.ensure(workspace)",
+      "void withPhysicalWorkspaceOperation(workspace.workspaceId, (warmup) =>",
       recheckAt,
+    );
+    const ensureAt = open.indexOf(
+      "warmup.state.pluginRuntimes.ensure(warmup.workspace)",
+      warmAt,
     );
     expect(awaitAt).toBeGreaterThan(-1);
     expect(recheckAt).toBeGreaterThan(awaitAt);
     expect(warmAt).toBeGreaterThan(recheckAt);
-    expect(open).toContain(
-      "rendererSession.isCurrent() && !sharedViewOf(workspace.workspaceId)",
-    );
+    expect(ensureAt).toBeGreaterThan(warmAt);
+    expect(open.indexOf("if (!sharedViewOf(workspace.workspaceId))", recheckAt))
+      .toBeGreaterThan(recheckAt);
   });
 
 });

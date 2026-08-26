@@ -28,9 +28,19 @@ import {
   YDocOpenRacedError,
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
-  createWorkspaceEngineCapture,
+  createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
   isYDocSessionUnreleasedError,
+  type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
+
+function createWorkspaceEngineCapture(
+  options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
+) {
+  return createAttachedWorkspaceEngineCapture({
+    ...options,
+    attachmentId: Symbol(`test-workspace-attachment:${options.workspaceId}`),
+  });
+}
 
 // #564: one document open may not hold the capture chain for the whole
 // six-attempt transport ladder. The deadline lives in the sessions layer

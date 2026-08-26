@@ -24,8 +24,10 @@ function harness() {
     workspaceId: "workspace-1",
     rootPath: "C:/workspace-1",
   };
+  const attachmentId = Symbol("workspace-1");
+  const signal = new AbortController().signal;
   const owner = {
-    start: vi.fn(async () => undefined),
+    start: vi.fn(async () => ({ settled: Promise.resolve() })),
     cancel: vi.fn(),
   };
   const authorizeCancel = vi.fn((_event: TestEvent) => {
@@ -37,7 +39,7 @@ function harness() {
       trace.push("trust");
       if (!event.trusted) throw new Error("Untrusted renderer.");
     },
-    authorizeWorkspace: (_event, workspaceId) => {
+    withWorkspaceOperation: async (_event, workspaceId, work) => {
       trace.push(`workspace:${workspaceId}`);
       if (workspaceId !== workspace.workspaceId) {
         throw new Error("Renderer has no authority for this workspace.");
@@ -45,15 +47,18 @@ function harness() {
       if (!rendererSessionCurrent || activeWorkspaceId !== workspaceId) {
         throw new Error("Search does not target the open workspace.");
       }
-      return {
+      return work({
         workspace,
+        attachmentId,
+        signal,
         isCurrent: () =>
           rendererSessionCurrent &&
           activeWorkspaceId === workspace.workspaceId,
-      };
+      });
     },
     authorizeCancel,
     owner,
+    onActivityError: vi.fn(),
   });
   const event: TestEvent = {
     trusted: true,
@@ -108,6 +113,8 @@ describe("workspace search IPC registration", () => {
           workspaceId: "workspace-1",
           rootPath: "C:/workspace-1",
         },
+        attachmentId: expect.any(Symbol),
+        signal: expect.any(AbortSignal),
         isCurrent: expect.any(Function),
       },
       payload,

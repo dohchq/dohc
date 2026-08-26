@@ -29,6 +29,7 @@ import {
 
 interface TestEvent {
   trusted: boolean;
+  authorityId?: symbol;
 }
 
 interface TestWorkspace {
@@ -82,7 +83,7 @@ async function harness(options: {
   shareMounts?: unknown;
   trashItem?: (path: string) => Promise<void>;
   beforeDocumentMutation?: (
-    workspaceId: string,
+    authorityId: symbol,
     path: string,
   ) => Promise<void>;
 } = {}) {
@@ -98,26 +99,27 @@ async function harness(options: {
       ? {}
       : { shareMounts: options.shareMounts }),
   };
+  let authorityId = Symbol(`attachment:${workspace.workspaceId}`);
   let capture: MutationCapture | null = null;
   const openYDocs: Array<{
-    workspaceId: string;
+    authorityId: symbol;
     path: string;
     markDeleted: () => void;
   }> = [];
-  const ownsDocument = vi.fn((workspaceId: string, path: string) =>
+  const ownsDocument = vi.fn((candidateAuthorityId: symbol, path: string) =>
     openYDocs.some(
       (session) =>
-        session.workspaceId === workspaceId && session.path === path,
+        session.authorityId === candidateAuthorityId && session.path === path,
     ),
   );
   const withDocumentUnowned: WorkspaceFileMutationYDocPort["withDocumentUnowned"] =
     async <T>(
-      workspaceId: string,
+      candidateAuthorityId: symbol,
       path: string,
       mutation: () => Promise<T>,
     ): Promise<T> => {
-      await options.beforeDocumentMutation?.(workspaceId, path);
-      if (ownsDocument(workspaceId, path)) {
+      await options.beforeDocumentMutation?.(candidateAuthorityId, path);
+      if (ownsDocument(candidateAuthorityId, path)) {
         throw new Error(
           "The engine owns this live document. Close its editor before writing the file directly.",
         );
@@ -126,10 +128,10 @@ async function harness(options: {
     };
   const markDeletedUnderPath = vi.fn<
     WorkspaceFileMutationYDocPort["markDeletedUnderPath"]
-  >((workspaceId, pathOrPrefix) => {
+  >((candidateAuthorityId, pathOrPrefix) => {
     for (const session of openYDocs) {
       if (
-        session.workspaceId === workspaceId &&
+        session.authorityId === candidateAuthorityId &&
         (session.path === pathOrPrefix ||
           session.path.startsWith(`${pathOrPrefix}/`))
       ) {
@@ -178,11 +180,33 @@ async function harness(options: {
     options.trashItem ??
       (async (path: string) => rm(path, { recursive: true, force: true })),
   );
+  const rendererOperationCalls = vi.fn();
+  const withRendererWorkspaceOperation = async <Result>(
+    event: TestEvent,
+    workspaceId: string,
+    work: (authority: {
+      authorityId: symbol;
+      workspace: Readonly<TestWorkspace>;
+      capture: MutationCapture | null;
+      yDocSessions: WorkspaceFileMutationYDocPort;
+    }) => Promise<Result>,
+  ): Promise<Result> => {
+    rendererOperationCalls(event, workspaceId);
+    if (event.authorityId !== undefined && event.authorityId !== authorityId) {
+      throw new Error(
+        "File change stopped because this window changed workspaces.",
+      );
+    }
+    return await work({
+      authorityId,
+      workspace: requireWorkspace(workspaceId),
+      capture,
+      yDocSessions,
+    });
+  };
   const owner = createWorkspaceFileMutationOwner({
     assertTrustedSender,
-    requireWorkspace,
-    engineCaptureFor: () => capture,
-    yDocSessions,
+    withRendererWorkspaceOperation,
     shareViewFiles: { change },
     trashItem,
     notifyRenderer,
@@ -194,6 +218,7 @@ async function harness(options: {
     owner,
     change,
     assertTrustedSender,
+    rendererOperationCalls,
     requireWorkspace,
     notifyRenderer,
     logError,
@@ -201,12 +226,22 @@ async function harness(options: {
     ownsDocument,
     withDocumentUnowned,
     markDeletedUnderPath,
-    registerYDoc(path: string, markDeleted: () => void) {
+    get authorityId(): symbol {
+      return authorityId;
+    },
+    registerYDoc(
+      path: string,
+      markDeleted: () => void,
+      sessionAuthorityId = authorityId,
+    ) {
       openYDocs.push({
-        workspaceId: workspace.workspaceId,
+        authorityId: sessionAuthorityId,
         path,
         markDeleted,
       });
+    },
+    setAuthorityId(next: symbol) {
+      authorityId = next;
     },
     setCapture(next: MutationCapture | null) {
       capture = next;
@@ -247,6 +282,64 @@ describe("WorkspaceFileMutationOwner", () => {
       }),
     ).rejects.toThrow();
     expect(test.requireWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("rejects every stale renderer mutation before replacement authority is exposed", async () => {
+    const test = await harness();
+    const staleEvent: TestEvent = {
+      trusted: true,
+      authorityId: Symbol("attachment-a"),
+    };
+    const workspaceId = test.workspace.workspaceId;
+    const mutations = [
+      () =>
+        test.owner.createFile(staleEvent, {
+          workspaceId,
+          relativePath: "created.md",
+          initialText: "created\n",
+        }),
+      () =>
+        test.owner.createFolder(staleEvent, {
+          workspaceId,
+          relativePath: "created-folder",
+        }),
+      () =>
+        test.owner.movePath(staleEvent, {
+          workspaceId,
+          fromPath: "before.md",
+          toPath: "after.md",
+        }),
+      () =>
+        test.owner.deletePath(staleEvent, {
+          workspaceId,
+          relativePath: "deleted.md",
+        }),
+      () =>
+        test.owner.writeText(staleEvent, {
+          workspaceId,
+          relativePath: "written.md",
+          text: "written\n",
+          expectedContentHash: CONTENT_HASH,
+        }),
+      () =>
+        test.owner.writeAsset(staleEvent, {
+          workspaceId,
+          relativePath: "assets/image.png",
+          bytes: new Uint8Array([1, 2, 3]),
+        }),
+    ];
+
+    for (const mutate of mutations) {
+      await expect(mutate()).rejects.toThrow(
+        "File change stopped because this window changed workspaces.",
+      );
+    }
+
+    expect(test.rendererOperationCalls).toHaveBeenCalledTimes(mutations.length);
+    expect(test.requireWorkspace).not.toHaveBeenCalled();
+    expect(test.ownsDocument).not.toHaveBeenCalled();
+    expect(test.change).not.toHaveBeenCalled();
+    expect(await readdir(test.rootPath)).toEqual([]);
   });
 
   it("creates files and folders, writes text, and writes assets locally", async () => {
@@ -884,13 +977,54 @@ describe("WorkspaceFileMutationOwner", () => {
       "The engine owns this live document. Close its editor before writing the file directly.",
     );
     expect(test.ownsDocument).toHaveBeenCalledWith(
-      test.workspace.workspaceId,
+      test.authorityId,
       "notes/a.md",
     );
     expect(test.change).not.toHaveBeenCalled();
     expect(await readFile(join(test.rootPath, "notes/a.md"), "utf8")).toBe(
       "before\n",
     );
+  });
+
+  it("isolates Y.Doc ownership between attachments that reuse one workspace id", async () => {
+    const test = await harness();
+    const attachmentA = test.authorityId;
+    const attachmentB = Symbol("attachment-b");
+    await mkdir(join(test.rootPath, "notes"));
+    await writeFile(join(test.rootPath, "notes/write.md"), "before\n");
+    await writeFile(join(test.rootPath, "notes/delete.md"), "delete me\n");
+    const markDeletedByA = vi.fn();
+    test.registerYDoc("notes/write.md", vi.fn(), attachmentA);
+    test.registerYDoc("notes/delete.md", markDeletedByA, attachmentA);
+
+    test.setAuthorityId(attachmentB);
+    await expect(
+      test.owner.writeText(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "notes/write.md",
+        text: "written by b\n",
+        expectedContentHash: hash("before\n"),
+      }),
+    ).resolves.toEqual({
+      status: "written",
+      contentHash: hash("written by b\n"),
+    });
+    await expect(
+      test.owner.deletePath(trustedEvent, {
+        workspaceId: test.workspace.workspaceId,
+        relativePath: "notes/delete.md",
+      }),
+    ).resolves.toEqual({ trashed: true });
+
+    expect(test.ownsDocument).toHaveBeenCalledWith(
+      attachmentB,
+      "notes/write.md",
+    );
+    expect(test.markDeletedUnderPath).toHaveBeenCalledWith(
+      attachmentB,
+      "notes/delete.md",
+    );
+    expect(markDeletedByA).not.toHaveBeenCalled();
   });
 
   it("refuses a direct write through an alias to an engine-owned document", async () => {
@@ -914,7 +1048,7 @@ describe("WorkspaceFileMutationOwner", () => {
     ).rejects.toThrow("The engine owns this live document");
 
     expect(test.ownsDocument).toHaveBeenCalledWith(
-      test.workspace.workspaceId,
+      test.authorityId,
       "notes/a.md",
     );
     await expect(
@@ -979,7 +1113,7 @@ describe("WorkspaceFileMutationOwner", () => {
     );
 
     expect(test.ownsDocument).toHaveBeenCalledWith(
-      test.workspace.workspaceId,
+      test.authorityId,
       "assets/target.png",
     );
     expect((await lstat(alias)).isSymbolicLink()).toBe(true);
@@ -1093,7 +1227,7 @@ describe("WorkspaceFileMutationOwner", () => {
 
     expect(trace).toEqual(["settle:notes/a.md", "marked", "finish:true"]);
     expect(test.markDeletedUnderPath).toHaveBeenCalledWith(
-      test.workspace.workspaceId,
+      test.authorityId,
       "notes/a.md",
     );
     await expect(access(join(test.rootPath, "notes/a.md"))).rejects.toThrow();

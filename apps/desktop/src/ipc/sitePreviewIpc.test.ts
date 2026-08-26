@@ -94,7 +94,7 @@ function harness(input: {
         if (!event.trusted) throw new Error("Untrusted renderer.");
         return event.sender;
       },
-      requireActiveWorkspace(_sender, workspaceId, subject, action) {
+      withActiveWorkspace(_sender, workspaceId, subject, action, work) {
         subjects.push({ subject, action });
         if (workspaceId !== workspace.workspaceId) {
           throw new Error(`Unknown workspace: ${workspaceId}`);
@@ -111,10 +111,10 @@ function harness(input: {
             `The ${subject} does not target the active workspace. Open the workspace and ${action}.`,
           );
         }
-        return {
+        return work({
           workspace,
           session: { isCurrent: () => sessionCurrent },
-        };
+        });
       },
     },
     catalog: { list: async () => [], get },

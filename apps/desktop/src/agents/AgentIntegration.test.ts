@@ -2,7 +2,12 @@ import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveAgentRun } from "../workspaces/workspaceWatcher";
-import { createAgentIntegration, type McpServerHandle } from "./AgentIntegration";
+import {
+  AgentIntegrationState,
+  createAgentIntegration as createPhysicalAgentIntegration,
+  type McpServerHandle,
+} from "./AgentIntegration";
+import { createInMemoryAgentIntegration as createAgentIntegration } from "./AgentIntegration.testSupport";
 import { createTestScratch } from "../workspaces/testTemp";
 
 async function withWorkspace<T>(
@@ -159,7 +164,14 @@ describe("AgentIntegration", () => {
       await integration.endAgentRun("ws", "no-such-run", "complete");
       expect(ended).toEqual([]);
       await integration.endAgentRun("ws", run.id, "failed");
-      expect(ended).toEqual([{ workspaceId: "ws", runId: run.id, status: "failed" }]);
+      expect(ended).toEqual([
+        {
+          attachmentId: Symbol.for("test-workspace-attachment:ws"),
+          workspaceId: "ws",
+          runId: run.id,
+          status: "failed",
+        },
+      ]);
     });
   });
 
@@ -187,6 +199,132 @@ describe("AgentIntegration", () => {
         lastRun: { status: "failed" },
       });
     });
+  });
+
+  it("does not install an old run after the attachment changes mid-start", async () => {
+    await withWorkspace(async ({ root }) => {
+      const oldState = new AgentIntegrationState();
+      const successorState = new AgentIntegrationState();
+      let currentState = oldState;
+      const setStarted = Promise.withResolvers<void>();
+      const allowSettle = Promise.withResolvers<void>();
+      const integration = createPhysicalAgentIntegration({
+        workspaceIds: () => ["ws"],
+        acquire: () => {
+          const heldState = currentState;
+          return {
+            attachmentId: Symbol.for("test-old-attachment"),
+            workspaceId: "ws",
+            rootPath: root,
+            state: heldState,
+            assertCurrent: () => {
+              if (currentState !== heldState) {
+                throw new Error("retired workspace authority");
+              }
+            },
+            setAgentRun: async () => {
+              setStarted.resolve();
+              await allowSettle.promise;
+            },
+            release: () => undefined,
+          };
+        },
+      });
+
+      const starting = integration.startAgentRun("ws");
+      await setStarted.promise;
+      currentState = successorState;
+      allowSettle.resolve();
+
+      await expect(starting).rejects.toThrow("retired workspace authority");
+      expect(oldState.activeRun).toBeNull();
+      expect(successorState.activeRun).toBeNull();
+    });
+  });
+
+  it("marks a persisted run failed when its attachment retires before attribution", async () => {
+    await withWorkspace(async ({ root }) => {
+      const state = new AgentIntegrationState();
+      const setAgentRun = vi.fn();
+      const release = vi.fn();
+      const integration = createPhysicalAgentIntegration({
+        workspaceIds: () => ["ws"],
+        acquire: () => ({
+          attachmentId: Symbol.for("test-retired-after-persist"),
+          workspaceId: "ws",
+          rootPath: root,
+          state,
+          assertCurrent: () => {
+            throw new Error("retired workspace authority");
+          },
+          setAgentRun,
+          release,
+        }),
+      });
+
+      await expect(integration.startAgentRun("ws")).rejects.toThrow(
+        "retired workspace authority",
+      );
+      expect(setAgentRun).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+      const runs = JSON.parse(
+        await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"),
+      ) as Array<{ status: string; endedAt?: number }>;
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ status: "failed" });
+      expect(runs[0]?.endedAt).toEqual(expect.any(Number));
+    });
+  });
+
+  it("cleans later workspaces when an earlier shutdown cleanup fails", async () => {
+    const firstFailure = new Error("first workspace slot refused cleanup");
+    const firstState = new AgentIntegrationState();
+    const secondState = new AgentIntegrationState();
+    const firstStop = vi.fn();
+    const secondStop = vi.fn();
+    firstState.mcp = { stop: firstStop };
+    secondState.mcp = { stop: secondStop };
+    firstState.activeRun = {
+      id: "run-first",
+      startedAt: 1,
+      agentId: "dohc-mcp",
+      onBehalfOf: "local",
+      status: "running",
+    };
+    secondState.activeRun = {
+      id: "run-second",
+      startedAt: 2,
+      agentId: "dohc-mcp",
+      onBehalfOf: "local",
+      status: "running",
+    };
+    const releases: string[] = [];
+    const clearedSlots: string[] = [];
+    const integration = createPhysicalAgentIntegration({
+      workspaceIds: () => ["workspace-first", "workspace-second"],
+      acquire: (workspaceId) => ({
+        attachmentId: Symbol.for(`test-workspace-attachment:${workspaceId}`),
+        workspaceId,
+        rootPath: "/unused",
+        state:
+          workspaceId === "workspace-first" ? firstState : secondState,
+        assertCurrent: () => undefined,
+        setAgentRun: async () => {
+          clearedSlots.push(workspaceId);
+          if (workspaceId === "workspace-first") throw firstFailure;
+        },
+        release: () => releases.push(workspaceId),
+      }),
+    });
+
+    await expect(integration.stopAll()).rejects.toBe(firstFailure);
+
+    expect(firstStop).toHaveBeenCalledOnce();
+    expect(secondStop).toHaveBeenCalledOnce();
+    expect(clearedSlots).toEqual(["workspace-first", "workspace-second"]);
+    expect(releases).toEqual(["workspace-first", "workspace-second"]);
+    expect(firstState.activeRun?.id).toBe("run-first");
+    expect(secondState.activeRun).toBeNull();
   });
 
   // Same boundary as workspaceUiState: a malicious attached workspace can ship

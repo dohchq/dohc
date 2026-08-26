@@ -35,6 +35,24 @@ export interface ShareViewProposalScope {
   grant: ShareViewSelector;
 }
 
+/** Whether two resolved scopes still address the same effective grant. */
+export function sameShareViewProposalScope(
+  left: ShareViewProposalScope,
+  right: ShareViewProposalScope,
+): boolean {
+  if (
+    left.shareId !== right.shareId ||
+    left.grant.access !== right.grant.access ||
+    left.grant.versionId !== right.grant.versionId ||
+    left.grant.paths.length !== right.grant.paths.length
+  ) {
+    return false;
+  }
+  const leftPaths = [...left.grant.paths].sort();
+  const rightPaths = [...right.grant.paths].sort();
+  return leftPaths.every((path, index) => path === rightPaths[index]);
+}
+
 /**
  * The share this workspace is a view of, at whatever level it grants.
  *

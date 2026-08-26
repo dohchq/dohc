@@ -71,6 +71,7 @@ function daemonCapture(
   return createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
+    attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: mockLiveSessions(loopback, requests),
     ...(secretStore === undefined ? {} : { secretStore }),
   });

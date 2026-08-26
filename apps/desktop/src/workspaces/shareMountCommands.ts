@@ -80,16 +80,19 @@ export interface ShareMountCommands<WorkspaceSummary> {
   mount(input: {
     workspace: ShareMountCommandWorkspace;
     shareCode: string;
+    assertCurrent(): void;
   }): Promise<{
     workspace: WorkspaceSummary;
     mount: ShareMountStatusRow;
   }>;
   refresh(input: {
     workspace: ShareMountCommandWorkspace;
+    assertCurrent(): void;
   }): Promise<{ results: ShareMountStatusRow[] }>;
   unmount(input: {
     workspace: ShareMountCommandWorkspace;
     shareId: string;
+    assertCurrent(): void;
   }): Promise<{ workspace: WorkspaceSummary; folderLeft?: true }>;
   filesLifecycle: ShareMountFilesLifecycle;
 }
@@ -195,7 +198,7 @@ export function createShareMountCommands<WorkspaceSummary>(
       );
       await dependencies.closeRelayWorkspace(target.storeWorkspaceId).catch(
         (error) => {
-          dependencies.logError(
+          reportFailure(
             `could not close share mount relay ${target.storeWorkspaceId}:`,
             error,
           );
@@ -203,7 +206,7 @@ export function createShareMountCommands<WorkspaceSummary>(
       );
       const removed = await dependencies.projectionFor(owner).remove();
       if (removed.error) {
-        dependencies.logError(
+        reportFailure(
           `could not remove share mount folder ${target.mountLabel}:`,
           removed.error,
         );
@@ -223,21 +226,35 @@ export function createShareMountCommands<WorkspaceSummary>(
     },
   };
 
-  function presentUnmount(workspaceId: string, shareId: string): void {
+  function reportFailure(message: string, error: unknown): void {
     try {
-      dependencies.refreshNativeWorkspaceSurfaces();
-    } catch (surfaceError) {
-      dependencies.logError(
-        `could not refresh native surfaces after unmount for ${shareId}:`,
-        surfaceError,
-      );
+      dependencies.logError(message, error);
+    } catch {
+      // Reporting a failure cannot change command settlement.
+    }
+  }
+
+  function presentWorkspace(
+    workspaceId: string,
+    context: string,
+    options: { refreshNativeSurfaces: boolean },
+  ): void {
+    if (options.refreshNativeSurfaces) {
+      try {
+        dependencies.refreshNativeWorkspaceSurfaces();
+      } catch (error) {
+        reportFailure(
+          `could not refresh native surfaces ${context}:`,
+          error,
+        );
+      }
     }
     try {
       dependencies.notifyRenderer({ workspaceId });
-    } catch (notifyError) {
-      dependencies.logError(
-        `could not notify renderer after unmount for ${shareId}:`,
-        notifyError,
+    } catch (error) {
+      reportFailure(
+        `could not notify renderer ${context}:`,
+        error,
       );
     }
   }
@@ -245,8 +262,9 @@ export function createShareMountCommands<WorkspaceSummary>(
   return {
     filesLifecycle,
 
-    mount({ workspace, shareCode }) {
+    mount({ workspace, shareCode, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, async () => {
+        assertCurrent();
         const parsed = parseShareCode(shareCode);
         if (!parsed) {
           throw new Error(
@@ -254,6 +272,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           );
         }
         const credentials = await dependencies.loadCredentials();
+        assertCurrent();
         if (!credentials) throw new Error("Sign in to dohc Cloud first.");
         const relayUrl = credentials.relayUrl;
         if (!relayUrl || !relayUrlsMatch(relayUrl, parsed.relayUrl)) {
@@ -270,7 +289,9 @@ export function createShareMountCommands<WorkspaceSummary>(
         const relay = { baseUrl: relayUrl, token: credentials.token };
         let info: Pick<ShareViewInfo, "granterEmail" | "selector">;
         try {
+          assertCurrent();
           info = await dependencies.fetchInfo(relay, parsed.shareId);
+          assertCurrent();
         } catch (error) {
           if (error instanceof ShareUnavailableError) {
             throw new Error(
@@ -295,6 +316,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             const onDisk = await dependencies.listDirectory(
               join(workspace.rootPath, SHARED_WITH_ME_FOLDER),
             );
+            assertCurrent();
             const mount = {
               shareId: parsed.shareId,
               label: allocateShareMountLabel({
@@ -329,8 +351,11 @@ export function createShareMountCommands<WorkspaceSummary>(
             try {
               const outcome = await files.mount(lease, prepared);
               mounted = true;
-              dependencies.refreshNativeWorkspaceSurfaces();
-              dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
+              presentWorkspace(
+                workspace.workspaceId,
+                `after mounting ${mount.label}`,
+                { refreshNativeSurfaces: true },
+              );
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 mount: {
@@ -365,26 +390,15 @@ export function createShareMountCommands<WorkspaceSummary>(
                   );
                 }
               }
-              dependencies.logError(
+              reportFailure(
                 `mount-share rollback for ${mount.label}:`,
                 mountError,
               );
-              try {
-                dependencies.refreshNativeWorkspaceSurfaces();
-              } catch (surfaceError) {
-                dependencies.logError(
-                  `could not refresh native surfaces after mount-share failure for ${mount.label}:`,
-                  surfaceError,
-                );
-              }
-              try {
-                dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
-              } catch (notifyError) {
-                dependencies.logError(
-                  `could not notify renderer after mount-share failure for ${mount.label}:`,
-                  notifyError,
-                );
-              }
+              presentWorkspace(
+                workspace.workspaceId,
+                `after mount failure for ${mount.label}`,
+                { refreshNativeSurfaces: true },
+              );
               if (mountError instanceof ShareUnavailableError) {
                 throw new Error(
                   "This share was ended before it could be added. Nothing was added to this workspace.",
@@ -406,8 +420,9 @@ export function createShareMountCommands<WorkspaceSummary>(
       });
     },
 
-    refresh({ workspace }) {
+    refresh({ workspace, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, async () => {
+        assertCurrent();
         const mounts = dependencies.readMounts(workspace.workspaceId);
         const results: ShareMountStatusRow[] = [];
         const pushResult = (
@@ -430,6 +445,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               pushResult(mount, "damaged", 0);
               continue;
             }
+            assertCurrent();
             try {
               // A slow relay holds only this mount's workspace transaction,
               // never one lease across the complete refresh pass.
@@ -464,7 +480,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               if (verdict.kind === "abort") {
                 throw new Error(verdict.message);
               }
-              dependencies.logError(
+              reportFailure(
                 `share-mount refresh failed for ${mount.label}:`,
                 error,
               );
@@ -473,16 +489,21 @@ export function createShareMountCommands<WorkspaceSummary>(
           }
           return { results };
         } finally {
-          dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
+          presentWorkspace(
+            workspace.workspaceId,
+            "after share-mount refresh",
+            { refreshNativeSurfaces: false },
+          );
         }
       });
     },
 
-    unmount({ workspace, shareId }) {
+    unmount({ workspace, shareId, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, () =>
         dependencies.withWorkspaceOperation(
           workspace.rootPath,
           async (lease) => {
+            assertCurrent();
             const registeredMounts = dependencies.readMounts(
               workspace.workspaceId,
             );
@@ -499,7 +520,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                   mountStoreWorkspaceIdFor(workspace.workspaceId, shareId),
                 )
                 .catch((error) => {
-                  dependencies.logError(
+                  reportFailure(
                     `could not close removed share relay ${shareId}:`,
                     error,
                   );
@@ -510,7 +531,11 @@ export function createShareMountCommands<WorkspaceSummary>(
                 workspace.workspaceId,
                 removal.remaining,
               );
-              presentUnmount(workspace.workspaceId, shareId);
+              presentWorkspace(
+                workspace.workspaceId,
+                `after unmount for ${shareId}`,
+                { refreshNativeSurfaces: true },
+              );
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 folderLeft: true as const,
@@ -521,7 +546,11 @@ export function createShareMountCommands<WorkspaceSummary>(
               workspaceId: workspace.workspaceId,
               shareId: removal.mount.shareId,
             });
-            presentUnmount(workspace.workspaceId, shareId);
+            presentWorkspace(
+              workspace.workspaceId,
+              `after unmount for ${shareId}`,
+              { refreshNativeSurfaces: true },
+            );
             return {
               workspace: dependencies.workspaceSummary(workspace.workspaceId),
               ...(removed.folderLeft ? { folderLeft: true as const } : {}),

@@ -40,12 +40,16 @@ export interface StartSitePreviewDependencies<
 > {
   authority: {
     requireTrustedSender(event: Event): Sender;
-    requireActiveWorkspace(
+    withActiveWorkspace<Result>(
       sender: Sender,
       workspaceId: string,
       subject: string,
       action: string,
-    ): { workspace: Workspace; session: SitePreviewRendererSession };
+      work: (input: {
+        workspace: Workspace;
+        session: SitePreviewRendererSession;
+      }) => Promise<Result>,
+    ): Promise<Result>;
   };
   catalog: OwnedSiteCatalog<Workspace>;
   lifecycle: Pick<ReturnType<typeof createSitePreviewLifecycle>, "start">;
@@ -82,44 +86,44 @@ export function createStartSitePreviewHandler<
   return async (event, rawPayload) => {
     const sender = dependencies.authority.requireTrustedSender(event);
     const payload = StartSitePreviewPayload.parse(rawPayload);
-    const { workspace, session } =
-      dependencies.authority.requireActiveWorkspace(
-        sender,
-        payload.workspaceId,
-        "Site preview request",
-        "start the preview again",
-      );
-    const isCurrent = () => session.isCurrent();
-
-    return StartSitePreviewResult.parse(
-      await dependencies.lifecycle.start<SitePreviewResultBody>({
-        senderId: sender.id,
-        workspaceId: payload.workspaceId,
-        siteRoot: payload.siteRoot,
-        isCurrent,
-        prepare: async () => {
-          const sharedView = dependencies.isSharedView(workspace.workspaceId);
-          assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
-          const site = requireExactSiteRoot(
-            await dependencies.catalog.get(
-              workspace,
-              payload.siteRoot,
-              payload.mode,
-            ),
-            payload.siteRoot,
-          );
-          return (signal) =>
-            dependencies.execute({
-              workspaceId: workspace.workspaceId,
-              workspaceRoot: workspace.rootPath,
-              site,
-              mode: payload.mode,
-              isCurrent,
-              signal,
-              sharedView,
-            });
-        },
-      }),
+    return dependencies.authority.withActiveWorkspace(
+      sender,
+      payload.workspaceId,
+      "Site preview request",
+      "start the preview again",
+      async ({ workspace, session }) => {
+        const isCurrent = () => session.isCurrent();
+        return StartSitePreviewResult.parse(
+          await dependencies.lifecycle.start<SitePreviewResultBody>({
+            senderId: sender.id,
+            workspaceId: payload.workspaceId,
+            siteRoot: payload.siteRoot,
+            isCurrent,
+            prepare: async () => {
+              const sharedView = dependencies.isSharedView(workspace.workspaceId);
+              assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
+              const site = requireExactSiteRoot(
+                await dependencies.catalog.get(
+                  workspace,
+                  payload.siteRoot,
+                  payload.mode,
+                ),
+                payload.siteRoot,
+              );
+              return (signal) =>
+                dependencies.execute({
+                  workspaceId: workspace.workspaceId,
+                  workspaceRoot: workspace.rootPath,
+                  site,
+                  mode: payload.mode,
+                  isCurrent,
+                  signal,
+                  sharedView,
+                });
+            },
+          }),
+        );
+      },
     );
   };
 }

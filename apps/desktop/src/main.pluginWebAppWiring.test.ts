@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function sourceBlock(startMarker: string, endMarker: string): string {
   const start = mainSource.indexOf(startMarker);
@@ -73,15 +76,25 @@ describe("plugin web app main-process wiring", () => {
 
   it("keeps all-workspace surface teardown before pipeline disposal", () => {
     const stopAll = functionSource("async function stopAllPluginWorkspaces(");
-    const closeAt = stopAll.indexOf("pluginWorkspaceRuntimes.close(");
-    const surfacesCloseAt = stopAll.indexOf("pluginSurfaces.close()", closeAt);
-    const drainAt = stopAll.indexOf(
-      "await Promise.allSettled([sitePreviewStop, pluginStop]);",
+    const fanoutAt = stopAll.indexOf(
+      "workspaceAuthorities.workspaceIds().map((workspaceId) =>",
+    );
+    const authorityAt = stopAll.indexOf(
+      "workspaceAuthorities.withAuthority(workspaceId, async (lease) => {",
+      fanoutAt,
+    );
+    const drainAt = stopAll.indexOf("await Promise.allSettled([", authorityAt);
+    const closeAt = stopAll.indexOf("lease.state.pluginRuntimes.close(");
+    const surfacesCloseAt = stopAll.indexOf(
+      "lease.state.pluginSurfaces.close()",
       closeAt,
     );
-    expect(closeAt).toBeGreaterThan(-1);
+    expect(fanoutAt).toBeGreaterThan(-1);
+    expect(authorityAt).toBeGreaterThan(fanoutAt);
+    expect(drainAt).toBeGreaterThan(authorityAt);
+    expect(closeAt).toBeGreaterThan(drainAt);
     expect(surfacesCloseAt).toBeGreaterThan(closeAt);
-    expect(drainAt).toBeGreaterThan(surfacesCloseAt);
+    expect(stopAll).toContain("await Promise.allSettled(");
   });
 
   it("generation-gates owner failure notification before sending", () => {
@@ -91,15 +104,21 @@ describe("plugin web app main-process wiring", () => {
     );
 
     const ownerAt = mainSource.indexOf(
-      "const pluginSurfaces = new PluginSurfaces<WebContentsView>({",
+      "function createPluginSurfaces(",
     );
     const resolveAt = mainSource.indexOf("webContents.fromId(senderId)", ownerAt);
+    const attachmentAt = mainSource.indexOf(
+      "attachmentId: binding.attachmentId,",
+      resolveAt,
+    );
     const sendAt = mainSource.indexOf(
       "notifyPluginWebAppFailed(sender, generation, event)",
       resolveAt,
     );
     expect(ownerAt).toBeGreaterThan(-1);
     expect(resolveAt).toBeGreaterThan(ownerAt);
+    expect(attachmentAt).toBeGreaterThan(resolveAt);
+    expect(attachmentAt).toBeLessThan(sendAt);
     expect(sendAt).toBeGreaterThan(resolveAt);
   });
 });

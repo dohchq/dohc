@@ -12,11 +12,15 @@ interface SenderRetirementPorts<Sender extends RendererWorkspaceSender> {
     stop(
       target:
         | { kind: "sender"; senderId: number }
-        | { kind: "workspace"; workspaceId: string },
+        | {
+            kind: "workspace";
+            workspaceId: string;
+            attachmentId: symbol;
+          },
     ): Promise<void>;
   };
   workspaceSearch: {
-    disposeSender(senderId: number): void;
+    disposeSender(senderId: number): Promise<void>;
   };
   presencePolls: {
     disposeSender(senderId: number): void;
@@ -28,7 +32,10 @@ interface SenderRetirementPorts<Sender extends RendererWorkspaceSender> {
 
 interface WorkspaceRetirementPorts {
   pluginRuntimes: {
-    stop(workspaceId: string, beforeDispose: () => Promise<void>): Promise<void>;
+    stop(
+      workspace: { workspaceId: string; attachmentId: symbol },
+      beforeDispose: () => Promise<void>,
+    ): Promise<void>;
   };
 }
 
@@ -38,7 +45,10 @@ export interface DesktopRendererWorkspaceRetirementDependencies<
     WorkspaceRetirementPorts {
   sitePreviews: {
     cancelSender(senderId: number): void;
-    stopWorkspace(workspaceId: string): Promise<void>;
+    stopWorkspace(workspace: {
+      workspaceId: string;
+      attachmentId: symbol;
+    }): Promise<void>;
   };
   onCleanupError(
     owner: string,
@@ -126,21 +136,29 @@ export function createDesktopRendererWorkspaceRetirement<
       );
     },
 
-    retireWorkspace(workspaceId: string): Promise<void> {
-      const scope = { kind: "workspace" as const, workspaceId };
+    retireWorkspace(workspace): Promise<void> {
+      const identity = {
+        workspaceId: workspace.workspaceId,
+        attachmentId: workspace.attachmentId,
+      };
+      const scope = {
+        kind: "workspace" as const,
+        workspaceId: identity.workspaceId,
+      };
       return drainCleanup(
         [
           {
             owner: "site previews",
-            run: () => dependencies.sitePreviews.stopWorkspace(workspaceId),
+            run: () => dependencies.sitePreviews.stopWorkspace(identity),
           },
           {
             owner: "plugin runtime",
             run: () =>
-              dependencies.pluginRuntimes.stop(workspaceId, () =>
+              dependencies.pluginRuntimes.stop(identity, () =>
                 dependencies.pluginSurfaces.stop({
                   kind: "workspace",
-                  workspaceId,
+                  workspaceId: identity.workspaceId,
+                  attachmentId: identity.attachmentId,
                 }),
               ),
           },

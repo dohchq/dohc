@@ -60,6 +60,10 @@ function harness(input: { capture: boolean; rootPath: string }) {
           request,
           allowPath: options.allowPath ?? (() => true),
         });
+        return {
+          settled: new Promise<void>(() => undefined),
+          cancel: async () => undefined,
+        };
       },
       cancel: vi.fn(),
       disposeOwner: vi.fn(),
@@ -76,12 +80,18 @@ function harness(input: { capture: boolean; rootPath: string }) {
   registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
-    authorizeWorkspace: (_event, workspaceId) => {
+    withWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Unknown workspace.");
-      return { workspace, isCurrent: () => true };
+      return work({
+        workspace,
+        attachmentId: Symbol.for("workspace-1"),
+        signal: new AbortController().signal,
+        isCurrent: () => true,
+      });
     },
     authorizeCancel: () => true,
     owner,
+    onActivityError: vi.fn(),
   });
   const sender: TestSender = {
     id: input.capture ? 1 : 2,
@@ -106,9 +116,17 @@ describe("ShareViewFiles workspace search wiring", () => {
         rgPath: "/unused",
         start: (options) => {
           emit.push(options.onBatch);
+          const settled = Promise.withResolvers<void>();
+          let wasKilled = false;
           return {
             searchId: options.searchId,
-            kill: () => killed.push(options.searchId),
+            kill: () => {
+              if (wasKilled) return;
+              wasKilled = true;
+              killed.push(options.searchId);
+              settled.resolve();
+            },
+            settled: settled.promise,
           };
         },
       }),
@@ -127,6 +145,8 @@ describe("ShareViewFiles workspace search wiring", () => {
       sender,
       {
         workspace: { workspaceId: "workspace-a", rootPath },
+        attachmentId: Symbol.for("workspace-a"),
+        signal: new AbortController().signal,
         isCurrent: () => true,
       },
       {
@@ -136,12 +156,14 @@ describe("ShareViewFiles workspace search wiring", () => {
       },
     );
 
-    owner.disposeSender(sender.id);
-    owner.disposeSender(sender.id);
+    await owner.disposeSender(sender.id);
+    await owner.disposeSender(sender.id);
     await owner.start(
       sender,
       {
         workspace: { workspaceId: "workspace-b", rootPath },
+        attachmentId: Symbol.for("workspace-b"),
+        signal: new AbortController().signal,
         isCurrent: () => true,
       },
       {

@@ -90,7 +90,7 @@ describe("desktop workspace secret enrollment state", () => {
     await sessions.closeAll();
   });
 
-  it("keeps a reopened received share capture-disabled before mount-time cloud status", async () => {
+  it("keeps an exact received share capture-disabled for cloud status", async () => {
     const root = await tempRoot();
     await createEngineDb(root);
     const daemon = new SecretStateDaemon();
@@ -107,19 +107,14 @@ describe("desktop workspace secret enrollment state", () => {
       }) as unknown as typeof createCaptureLiveStores,
     });
 
-    // Startup resolves the registry entry through the received-share owner.
-    // The status reader below deliberately reconstructs a plain descriptor,
-    // modeling any sibling path that forgets the share flag. The session pin
-    // must still make the first workspace.open capture-disabled.
-    access.workspaceForRegistered({
+    const attachmentId = Symbol("received-share");
+    const workspace = access.workspaceForRegistered({
       workspaceId: WORKSPACE_ID,
       rootPath: root,
+      attachmentId,
       shareView: null,
     });
-    await readWorkspaceSecretState(
-      { workspaceId: WORKSPACE_ID, rootPath: root },
-      sessions,
-    );
+    await readWorkspaceSecretState(workspace, sessions);
 
     const opens = daemon.requests.filter(
       (request) => request.method === "workspace.open",

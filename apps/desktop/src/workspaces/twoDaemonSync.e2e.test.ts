@@ -39,12 +39,14 @@ async function openLiveDaemonCapture(input: {
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
   const capture = createWorkspaceEngineCapture({
-    workspaceId: input.workspaceId,
-    rootPath: input.rootPath,
+    ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });
-  const relay = workspace.relay.bind(input);
+  const relay = workspace.relay.bind({
+    ...workspace.workspace,
+    relay: input.relay,
+  });
   return {
     capture,
     chats: workspace.chats,
@@ -66,7 +68,10 @@ async function openJoinedDaemonCapture(input: {
   passphrase?: string;
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
-  const relay = workspace.relay.bind(input);
+  const relay = workspace.relay.bind({
+    ...workspace.workspace,
+    relay: input.relay,
+  });
   const probe = await probeRelayWorkspace({
     workspaceId: input.workspaceId,
     relay: input.relay,
@@ -87,8 +92,7 @@ async function openJoinedDaemonCapture(input: {
     throw error;
   }
   const capture = createWorkspaceEngineCapture({
-    workspaceId: input.workspaceId,
-    rootPath: input.rootPath,
+    ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });
@@ -601,7 +605,6 @@ it.skipIf(engine.missing)(
 
       const sync = createRelaySyncEngine({
         rootDir: rootA,
-        remoteWorkspaceId: workspaceId,
         relay: relayConnection,
         operations: daemonA.relay,
         capture: daemonA.capture,

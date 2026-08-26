@@ -5,6 +5,7 @@ import {
   assertShareProposalGranter,
   requireShareViewMembership,
   requireShareViewProposalScope,
+  sameShareViewProposalScope,
   shareProposalOpPath,
 } from "./shareProposals";
 
@@ -70,6 +71,23 @@ describe("requireShareViewMembership (seeing and taking back)", () => {
 });
 
 describe("requireShareViewProposalScope (the recipient lane)", () => {
+  it("treats reordered selector paths as the same effective scope", () => {
+    const left = requireShareViewProposalScope(
+      marker({ paths: ["docs", "images"] }),
+    );
+    const right = requireShareViewProposalScope(
+      marker({ paths: ["images", "docs"] }),
+    );
+
+    expect(sameShareViewProposalScope(left, right)).toBe(true);
+    expect(
+      sameShareViewProposalScope(
+        left,
+        requireShareViewProposalScope(marker({ paths: ["docs", "other"] })),
+      ),
+    ).toBe(false);
+  });
+
   it("resolves the share and its pinned grant at edit level", () => {
     const scope = requireShareViewProposalScope(marker());
     expect(scope.shareId).toBe("share-1");

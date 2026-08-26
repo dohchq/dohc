@@ -203,7 +203,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function createHarness() {
+function createHarness(options: { afterWorkspaceWork?: () => void } = {}) {
   const log: string[] = [];
   const state = {
     trusted: true,
@@ -365,7 +365,7 @@ function createHarness() {
     stop: vi.fn(async (target) => {
       log.push(target.clearPartition ? "stop-partition" : "stop-surface");
     }),
-    withPluginSdkGrantSuspensions: vi.fn(async (run) => {
+    withPluginSdkGrantSuspensions: vi.fn(async (_workspaceId, run) => {
       const result = await run((identity: { pluginId: string }) => {
         log.push(`suspend:${identity.pluginId}`);
       });
@@ -428,18 +428,15 @@ function createHarness() {
     ),
     ensure: ensurePipeline,
   };
+  let authorityHolds = 0;
 
   registerPluginIpcHandlers({
     registrar: {
-      handle: (
-        channel: string,
-        handler: (
-          capturedEvent: typeof event,
-          payload: unknown,
-        ) => unknown | Promise<unknown>,
-      ) => {
+      handle: (channel, handler) => {
         if (handlers.has(channel)) throw new Error(`Duplicate handler: ${channel}`);
-        handlers.set(channel, handler);
+        handlers.set(channel, (capturedEvent, payload) =>
+          handler(capturedEvent, payload, undefined),
+        );
       },
     },
     assertTrustedSender: () => {
@@ -448,19 +445,7 @@ function createHarness() {
     },
     workspaces: {
       assertWritable,
-      currentSession: (requestSender) => {
-        const workspaceId = activeWorkspaceIdBySender.get(requestSender.id);
-        if (!workspaceId) return undefined;
-        const generation = state.generation;
-        return {
-          workspaceId,
-          generation,
-          isCurrent: () =>
-            activeWorkspaceIdBySender.get(requestSender.id) === workspaceId &&
-            state.generation === generation,
-        };
-      },
-      requireActive: (requestSender, workspaceId, inactiveMessage) => {
+      withActive: async (requestSender, workspaceId, inactiveMessage, work) => {
         const activeWorkspace = requireWorkspace(workspaceId);
         if (
           activeWorkspaceIdBySender.get(requestSender.id) !==
@@ -469,7 +454,7 @@ function createHarness() {
           throw new Error(inactiveMessage);
         }
         const generation = state.generation;
-        return {
+        const active = {
           workspace: activeWorkspace,
           session: {
             workspaceId: activeWorkspace.workspaceId,
@@ -479,6 +464,15 @@ function createHarness() {
                 activeWorkspace.workspaceId && state.generation === generation,
           },
         };
+        authorityHolds += 1;
+        try {
+          const result = await work(active);
+          options.afterWorkspaceWork?.();
+          if (!active.session.isCurrent()) throw new Error(inactiveMessage);
+          return result;
+        } finally {
+          authorityHolds -= 1;
+        }
       },
     },
     runtimes,
@@ -509,6 +503,9 @@ function createHarness() {
     sender,
     state,
     surfaces,
+    get authorityHolds() {
+      return authorityHolds;
+    },
     get panelAdmission() {
       return panelAdmission;
     },
@@ -538,6 +535,70 @@ beforeEach(() => {
 });
 
 describe("plugin IPC handlers", () => {
+  it("holds workspace authority across an awaited plugin operation", async () => {
+    const harness = createHarness();
+    const pending = deferred<typeof harness.runtime>();
+    harness.ensurePipeline.mockReturnValueOnce(pending.promise);
+
+    const result = harness.invoke(CHANNELS.listPlugins);
+    await Promise.resolve();
+
+    expect(harness.authorityHolds).toBe(1);
+    pending.resolve(harness.runtime);
+    await result;
+    expect(harness.authorityHolds).toBe(0);
+  });
+
+  it("keeps handler failures structured while the workspace operation is current", async () => {
+    const list = createHarness();
+    list.ensurePipeline.mockRejectedValueOnce(new Error("runtime unavailable"));
+    await expect(list.invoke(CHANNELS.listPlugins)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "pipeline-unavailable" },
+    });
+
+    const action = createHarness();
+    action.pipeline.install.mockRejectedValueOnce(new Error("install failed"));
+    await expect(action.invoke(CHANNELS.installPlugin)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "pipeline-unavailable" },
+    });
+  });
+
+  it.each([CHANNELS.listPlugins, CHANNELS.installPlugin])(
+    "rejects %s currentness failures even when a runtime catch makes them structured",
+    async (channel) => {
+      const harness = createHarness();
+      const runtime = Promise.withResolvers<typeof harness.runtime>();
+      harness.ensurePipeline.mockReturnValueOnce(runtime.promise);
+
+      const request = harness.invoke(channel);
+      await vi.waitFor(() => expect(harness.ensurePipeline).toHaveBeenCalledOnce());
+      harness.state.generation += 1;
+      runtime.reject(new Error("runtime unavailable"));
+
+      await expect(request).rejects.toThrow(
+        "does not target the active workspace",
+      );
+    },
+  );
+
+  it.each([CHANNELS.listPlugins, CHANNELS.installPlugin])(
+    "rejects a successful stale %s result",
+    async (channel) => {
+      let harness!: ReturnType<typeof createHarness>;
+      harness = createHarness({
+        afterWorkspaceWork: () => {
+          harness.state.generation += 1;
+        },
+      });
+
+      await expect(harness.invoke(channel)).rejects.toThrow(
+        "does not target the active workspace",
+      );
+    },
+  );
+
   it("registers the complete plugin control plane once", () => {
     const harness = createHarness();
 
@@ -667,11 +728,8 @@ describe("plugin IPC handlers", () => {
     expect(harness.surfaces.stop).not.toHaveBeenCalled();
   });
 
-  it("keeps bounds and panel SDK ownership distinct from workspace lookup", async () => {
+  it("holds physical workspace authority for bounds and panel SDK ownership", async () => {
     const harness = createHarness();
-    harness.requireWorkspace.mockImplementation(() => {
-      throw new Error("workspace lookup must not run");
-    });
 
     await harness.invoke(CHANNELS.setPluginWebAppBounds);
     expect(harness.surfaces.applyWebAppBounds).toHaveBeenCalledWith({
@@ -686,7 +744,7 @@ describe("plugin IPC handlers", () => {
     const result = await harness.invoke(CHANNELS.invokePluginPanelSdk);
     expect(result).toEqual({ result: { ok: true } });
     expect(harness.platform.routePanelSdk).toHaveBeenCalledOnce();
-    expect(harness.requireWorkspace).not.toHaveBeenCalled();
+    expect(harness.requireWorkspace).toHaveBeenCalledTimes(2);
     const authorizationRequest = harness.surfaces.authorizePanelSdk.mock.calls[0]?.[0];
     expect(authorizationRequest.currentGeneration()).toBe(3);
     expect(authorizationRequest.activeWorkspaceId()).toBe("workspace-1");

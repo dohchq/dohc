@@ -2657,7 +2657,10 @@ describe("ShareViewFiles", () => {
   });
 
   it("keeps main behind the received-share owner", async () => {
-    const main = await readFile(new URL("../main.ts", import.meta.url), "utf8");
+    const main = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
     expect(main).toContain("createShareViewFiles({");
     expect(main).not.toContain('from "./workspaces/sharedView"');
     expect(main).not.toContain('from "./workspaces/shareViewFileChanges"');
@@ -2667,4 +2670,5 @@ describe("ShareViewFiles", () => {
     expect(main).toContain("receivedShareEngine.relayFor({");
     expect(main).not.toContain("shareMount: true");
   });
+
 });

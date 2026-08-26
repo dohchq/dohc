@@ -3386,8 +3386,8 @@ const RelayShareDamagedState = z.object({
 
 const RelayShareGrantedRowBase = z.object({
   shareId: SHARE_ID,
-  // The relay-side workspace id (the remote identity, not necessarily a
-  // local registry id).
+  // The workspace coordinate. This device need not have that workspace in
+  // its local registry.
   workspaceId: z.string().min(1).max(256),
   // null for a PENDING email invite (an addressed email that has no dohc
   // account yet); the recipientEmail carries who it was shared with (PR 18).

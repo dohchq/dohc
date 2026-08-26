@@ -15,6 +15,8 @@ import {
 } from "./engineYDocSessionIpc";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 
+const AUTHORITY_ID = Symbol("attachment-a");
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -88,9 +90,21 @@ function providerSession(
   return Object.assign(base, input);
 }
 
+function workspaceAuthority(workspaceId: string) {
+  return {
+    workspace: {
+      workspaceId,
+      rootPath: "C:/workspace",
+      attachmentId: AUTHORITY_ID,
+    },
+    assertCurrent: vi.fn(),
+    release: vi.fn(),
+  };
+}
+
 interface TestHarnessOptions {
   resolveDocumentPath?: (
-    workspace: { workspaceId: string; rootPath: string },
+    workspace: { workspaceId: string; rootPath: string; attachmentId: symbol },
     path: string,
   ) => Promise<string | null>;
   rendererWorkspaceId?: string;
@@ -137,10 +151,7 @@ function harness(
             () => !retired,
             options.rendererWorkspaceId,
           ),
-    requireWorkspace: (workspaceId) => ({
-      workspaceId,
-      rootPath: "C:/workspace",
-    }),
+    acquireWorkspace: workspaceAuthority,
     captureFor: () => capture,
     ensureCaptureFor: vi.fn(async () => undefined),
     isSharedView: () => readOnly,
@@ -191,7 +202,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(
       h.ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", "notes/a.md", async () => true),
+        .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", async () => true),
     ).rejects.toThrow(
       "The engine owns this live document. Close its editor before writing the file directly.",
     );
@@ -257,7 +268,11 @@ describe("engine Y.Doc IPC adapter", () => {
     const sender = new FakeSender(7);
     const resolveDocumentPath = vi.fn(
       async (
-        _workspace: { workspaceId: string; rootPath: string },
+        _workspace: {
+          workspaceId: string;
+          rootPath: string;
+          attachmentId: symbol;
+        },
         _path: string,
       ) =>
         "notes/a.md",
@@ -269,7 +284,11 @@ describe("engine Y.Doc IPC adapter", () => {
     ).resolves.toMatchObject({ available: true });
 
     expect(resolveDocumentPath).toHaveBeenCalledWith(
-      { workspaceId: "workspace-1", rootPath: "C:/workspace" },
+      {
+        workspaceId: "workspace-1",
+        rootPath: "C:/workspace",
+        attachmentId: AUTHORITY_ID,
+      },
       "alias/a.md",
     );
     expect(resolveDocumentPath.mock.calls.map(([, path]) => path)).toEqual([
@@ -280,7 +299,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(
       h.ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", "notes/a.md", async () => true),
+        .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", async () => true),
     ).rejects.toThrow("The engine owns this live document");
   });
 
@@ -365,13 +384,13 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(
       h.ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", canonicalPath, mutation),
+        .withDocumentUnowned(AUTHORITY_ID, canonicalPath, mutation),
     ).rejects.toThrow("The engine owns this live document");
     expect(mutation).not.toHaveBeenCalled();
 
     h.ipc
       .fileMutationPort()
-      .markDeletedUnderPath("workspace-1", "Notes/Folder");
+      .markDeletedUnderPath(AUTHORITY_ID, "Notes/Folder");
     expect(sender.sent.at(-1)?.payload).toMatchObject({ state: "deleted" });
   });
 
@@ -386,10 +405,7 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
       isSharedView: () => false,
@@ -400,7 +416,11 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(ipc.open(sender, openPayload)).resolves.toMatchObject({
       available: true,
     });
-    expect(ensureCaptureFor).toHaveBeenCalledWith("workspace-1");
+    expect(ensureCaptureFor).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      rootPath: "C:/workspace",
+      attachmentId: AUTHORITY_ID,
+    });
     expect(capture.openYDocSession).toHaveBeenCalledOnce();
   });
 
@@ -457,10 +477,7 @@ describe("engine Y.Doc IPC adapter", () => {
     };
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,
@@ -474,7 +491,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(
       ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", "notes/a.md", mutation),
+        .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", mutation),
     ).rejects.toThrow(
       "The engine owns this live document. Close its editor before writing the file directly.",
     );
@@ -499,7 +516,7 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     const mutation = h.ipc
       .fileMutationPort()
-      .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+      .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", async () => {
         mutationEntered.resolve();
         await releaseMutation.promise;
         trace.push("mutation-finished");
@@ -519,7 +536,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(
       h.ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", "notes/a.md", laterMutation),
+        .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", laterMutation),
     ).rejects.toThrow("The engine owns this live document");
     expect(laterMutation).not.toHaveBeenCalled();
 
@@ -537,7 +554,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(
       h.ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+        .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", async () => {
           throw failure;
         }),
     ).rejects.toBe(failure);
@@ -556,7 +573,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const mutationError = new Error("write failed after admission");
     const mutation = h.ipc
       .fileMutationPort()
-      .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+      .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", async () => {
         mutationEntered.resolve();
         await releaseMutation.promise;
         throw mutationError;
@@ -588,7 +605,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const releaseMutation = deferred<void>();
     const mutation = h.ipc
       .fileMutationPort()
-      .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+      .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", async () => {
         mutationEntered.resolve();
         await releaseMutation.promise;
       });
@@ -613,7 +630,7 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(
       h.ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", "notes/a.md", laterMutation),
+        .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", laterMutation),
     ).resolves.toBeUndefined();
     expect(laterMutation).toHaveBeenCalledOnce();
   });
@@ -632,7 +649,7 @@ describe("engine Y.Doc IPC adapter", () => {
       const releaseMutation = deferred<void>();
       const mutation = h.ipc
         .fileMutationPort()
-        .withDocumentUnowned("workspace-1", "notes/a.md", async () => {
+        .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", async () => {
           mutationEntered.resolve();
           await releaseMutation.promise;
         });
@@ -654,7 +671,7 @@ describe("engine Y.Doc IPC adapter", () => {
       await expect(
         h.ipc
           .fileMutationPort()
-          .withDocumentUnowned("workspace-1", "notes/a.md", laterMutation),
+          .withDocumentUnowned(AUTHORITY_ID, "notes/a.md", laterMutation),
       ).resolves.toBeUndefined();
       expect(laterMutation).toHaveBeenCalledOnce();
     },
@@ -706,10 +723,7 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(() => generation),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => (captureAvailable ? capture : null),
       ensureCaptureFor,
       isSharedView: () => false,
@@ -763,7 +777,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.setReadOnly(false);
     h.ipc
       .fileMutationPort()
-      .markDeletedUnderPath("workspace-1", "notes");
+      .markDeletedUnderPath(AUTHORITY_ID, "notes");
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
       state: "deleted",
@@ -857,7 +871,7 @@ describe("engine Y.Doc IPC adapter", () => {
 
     h.ipc
       .fileMutationPort()
-      .markDeletedUnderPath("workspace-1", "notes/a.md");
+      .markDeletedUnderPath(AUTHORITY_ID, "notes/a.md");
     await expect(
       h.ipc.readArtifactAsset(sender, {
         sessionId: openPayload.sessionId,
@@ -916,10 +930,7 @@ describe("engine Y.Doc IPC adapter", () => {
     };
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,
@@ -1004,10 +1015,7 @@ describe("engine Y.Doc IPC adapter", () => {
       };
       const ipc = createEngineYDocSessionIpc({
         sessionFor: () => rendererSession(),
-        requireWorkspace: (workspaceId) => ({
-          workspaceId,
-          rootPath: "C:/workspace",
-        }),
+        acquireWorkspace: workspaceAuthority,
         captureFor: () => capture,
         ensureCaptureFor: vi.fn(async () => undefined),
         isSharedView: () => false,
@@ -1050,10 +1058,7 @@ describe("engine Y.Doc IPC adapter", () => {
     };
     const ipc = createEngineYDocSessionIpc({
       sessionFor: () => rendererSession(),
-      requireWorkspace: (workspaceId) => ({
-        workspaceId,
-        rootPath: "C:/workspace",
-      }),
+      acquireWorkspace: workspaceAuthority,
       captureFor: () => capture,
       ensureCaptureFor: vi.fn(async () => undefined),
       isSharedView: () => false,
@@ -1069,6 +1074,55 @@ describe("engine Y.Doc IPC adapter", () => {
     await expect(opening).resolves.toEqual({ available: false });
     await retirement;
     expect(close).toHaveBeenCalledWith(undefined);
+  });
+
+  it("does not create a session after physical authority retires during capture startup", async () => {
+    const sender = new FakeSender(7);
+    const attachmentId = Symbol("attachment-a");
+    const captureStarted = deferred<void>();
+    const captureGate = deferred<void>();
+    let captureAvailable = false;
+    let authorityCurrent = true;
+    const capture: EngineYDocSessionCapture = {
+      openYDocSession: vi.fn(async () => providerSession()),
+    };
+    const authority = {
+      workspace: {
+        workspaceId: openPayload.workspaceId,
+        rootPath: "C:/workspace",
+        attachmentId,
+      },
+      assertCurrent: vi.fn(() => {
+        if (!authorityCurrent) {
+          throw new Error("workspace attachment is no longer current");
+        }
+      }),
+      release: vi.fn(),
+    };
+    const ipc = createEngineYDocSessionIpc({
+      sessionFor: () => rendererSession(),
+      acquireWorkspace: () => authority,
+      captureFor: () => (captureAvailable ? capture : null),
+      ensureCaptureFor: vi.fn(async () => {
+        captureStarted.resolve();
+        await captureGate.promise;
+        captureAvailable = true;
+      }),
+      isSharedView: () => false,
+      resolveDocumentPath: async (_workspace, path) => path,
+      onError: vi.fn(),
+    });
+
+    const opening = ipc.open(sender, openPayload);
+    await captureStarted.promise;
+    authorityCurrent = false;
+    captureGate.resolve();
+
+    await expect(opening).rejects.toThrow(
+      "workspace attachment is no longer current",
+    );
+    expect(capture.openYDocSession).not.toHaveBeenCalled();
+    expect(authority.release).toHaveBeenCalledOnce();
   });
 
   it("drops stale-generation output and releases an unannounced lineage", async () => {

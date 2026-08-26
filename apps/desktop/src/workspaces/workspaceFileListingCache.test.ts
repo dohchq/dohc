@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import { WorkspaceFileListingCache } from "./workspaceFileListingCache";
 
+const ATTACHMENT_A = Symbol("attachment-a");
+const ATTACHMENT_B = Symbol("attachment-b");
+
 function listing(path: string): ListWorkspaceFilesResult {
   return { files: [{ path, kind: "file" }], folders: [] };
 }
@@ -23,21 +26,33 @@ describe("WorkspaceFileListingCache", () => {
     const forcedLoad = vi.fn(async () => listing("new.md"));
 
     await expect(
-      cache.list({ workspaceId: "ws-a", allowCached: false, load: firstLoad }),
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
+        allowCached: false,
+        load: firstLoad,
+      }),
     ).resolves.toEqual(listing("old.md"));
     await expect(
       cache.list({
         workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
         allowCached: true,
         load: vi.fn(async () => listing("unused.md")),
       }),
     ).resolves.toEqual(listing("old.md"));
     await expect(
-      cache.list({ workspaceId: "ws-a", allowCached: false, load: forcedLoad }),
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
+        allowCached: false,
+        load: forcedLoad,
+      }),
     ).resolves.toEqual(listing("new.md"));
     await expect(
       cache.list({
         workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
         allowCached: true,
         load: vi.fn(async () => listing("unused-again.md")),
       }),
@@ -45,6 +60,63 @@ describe("WorkspaceFileListingCache", () => {
 
     expect(firstLoad).toHaveBeenCalledOnce();
     expect(forcedLoad).toHaveBeenCalledOnce();
+  });
+
+  it("does not reuse a listing after the workspace id changes physical attachments", async () => {
+    const cache = new WorkspaceFileListingCache();
+
+    await expect(
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
+        allowCached: true,
+        load: async () => listing("old-root.md"),
+      }),
+    ).resolves.toEqual(listing("old-root.md"));
+    await expect(
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_B,
+        allowCached: true,
+        load: async () => listing("new-root.md"),
+      }),
+    ).resolves.toEqual(listing("new-root.md"));
+  });
+
+  it("keeps the replacement attachment cached when the old listing rejects late", async () => {
+    const cache = new WorkspaceFileListingCache();
+    const old = deferred<ListWorkspaceFilesResult>();
+    const replacementLoad = vi.fn(async () => listing("new-root.md"));
+
+    const oldRead = cache.list({
+      workspaceId: "ws-a",
+      attachmentId: ATTACHMENT_A,
+      allowCached: true,
+      load: () => old.promise,
+    });
+    await expect(
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_B,
+        allowCached: true,
+        load: replacementLoad,
+      }),
+    ).resolves.toEqual(listing("new-root.md"));
+
+    old.reject(new Error("old attachment disappeared"));
+    await expect(oldRead).rejects.toThrow("old attachment disappeared");
+
+    const unexpectedReload = vi.fn(async () => listing("unexpected.md"));
+    await expect(
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_B,
+        allowCached: true,
+        load: unexpectedReload,
+      }),
+    ).resolves.toEqual(listing("new-root.md"));
+    expect(replacementLoad).toHaveBeenCalledOnce();
+    expect(unexpectedReload).not.toHaveBeenCalled();
   });
 
   it("coalesces concurrent permitted reads without sharing across workspaces", async () => {
@@ -55,16 +127,19 @@ describe("WorkspaceFileListingCache", () => {
 
     const firstA = cache.list({
       workspaceId: "ws-a",
+      attachmentId: ATTACHMENT_A,
       allowCached: true,
       load: loadA,
     });
     const secondA = cache.list({
       workspaceId: "ws-a",
+      attachmentId: ATTACHMENT_A,
       allowCached: true,
       load: loadA,
     });
     const firstB = cache.list({
       workspaceId: "ws-b",
+      attachmentId: ATTACHMENT_B,
       allowCached: true,
       load: loadB,
     });
@@ -83,6 +158,8 @@ describe("WorkspaceFileListingCache", () => {
     const read = (workspaceId: string) =>
       cache.list({
         workspaceId,
+        attachmentId:
+          workspaceId === "ws-a" ? ATTACHMENT_A : ATTACHMENT_B,
         allowCached: true,
         load: async () => {
           const revision = (loads.get(workspaceId) ?? 0) + 1;
@@ -127,12 +204,14 @@ describe("WorkspaceFileListingCache", () => {
 
     const oldRead = cache.list({
       workspaceId: "ws-a",
+      attachmentId: ATTACHMENT_A,
       allowCached: true,
       load: () => old.promise,
     });
     cache.invalidate({ workspaceId: "ws-a", paths: ["visible.md"] });
     const freshRead = cache.list({
       workspaceId: "ws-a",
+      attachmentId: ATTACHMENT_A,
       allowCached: true,
       load: () => fresh.promise,
     });
@@ -144,6 +223,7 @@ describe("WorkspaceFileListingCache", () => {
     await expect(
       cache.list({
         workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
         allowCached: true,
         load: vi.fn(async () => listing("stale-fill.md")),
       }),
@@ -155,6 +235,7 @@ describe("WorkspaceFileListingCache", () => {
     await expect(
       cache.list({
         workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
         allowCached: true,
         load: async () => {
           throw new Error("walk failed");
@@ -164,6 +245,7 @@ describe("WorkspaceFileListingCache", () => {
     await expect(
       cache.list({
         workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
         allowCached: true,
         load: async () => listing("retry.md"),
       }),

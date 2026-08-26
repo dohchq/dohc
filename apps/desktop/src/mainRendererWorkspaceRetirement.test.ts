@@ -16,6 +16,7 @@ const session: RendererWorkspaceSession<typeof sender> = {
   sender,
   senderId: sender.id,
   workspaceId: "workspace-a",
+  attachmentId: Symbol("workspace-a"),
   rendererDocumentId: "document-1",
   generation: 23,
   isCurrent: () => false,
@@ -130,15 +131,20 @@ describe("desktop renderer workspace retirement", () => {
     });
     const retirement = createDesktopRendererWorkspaceRetirement(input);
 
-    const retiring = retirement.retireWorkspace("workspace-a");
-    expect(input.sitePreviews.stopWorkspace).toHaveBeenCalledWith("workspace-a");
+    const retiring = retirement.retireWorkspace(session);
+    const workspace = {
+      workspaceId: session.workspaceId,
+      attachmentId: session.attachmentId,
+    };
+    expect(input.sitePreviews.stopWorkspace).toHaveBeenCalledWith(workspace);
     expect(input.pluginRuntimes.stop).toHaveBeenCalledWith(
-      "workspace-a",
+      workspace,
       expect.any(Function),
     );
     expect(input.pluginSurfaces.stop).toHaveBeenCalledWith({
       kind: "workspace",
       workspaceId: "workspace-a",
+      attachmentId: session.attachmentId,
     });
 
     siteDrain.resolve();

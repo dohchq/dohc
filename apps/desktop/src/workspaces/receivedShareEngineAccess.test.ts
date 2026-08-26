@@ -31,7 +31,11 @@ describe("received share engine access", () => {
       rootPath: location.rootPath,
       shareMount: true,
     });
-    expect(rememberShareMount).toHaveBeenCalledWith(location.engineWorkspaceId);
+    expect(rememberShareMount).toHaveBeenCalledWith({
+      workspaceId: location.engineWorkspaceId,
+      rootPath: location.rootPath,
+      shareMount: true,
+    });
 
     expect(access.storeFor(location)).toBe(store);
     expect(createStores).toHaveBeenCalledWith(
@@ -66,13 +70,19 @@ describe("received share engine access", () => {
       relayClient: () => ({ bind }) as Pick<EngineRelayClient, "bind">,
       createStores: vi.fn() as unknown as typeof createCaptureLiveStores,
     });
+    const attachmentId = Symbol("registered-workspace");
 
     expect(
       access.workspaceForRegistered({
         workspaceId: "local-1",
         rootPath: "C:\\local",
+        attachmentId,
       }),
-    ).toEqual({ workspaceId: "local-1", rootPath: "C:\\local" });
+    ).toEqual({
+      workspaceId: "local-1",
+      rootPath: "C:\\local",
+      attachmentId,
+    });
     expect(rememberShareMount).not.toHaveBeenCalled();
 
     // A damaged marker still means received share. Treating null as absent
@@ -81,24 +91,33 @@ describe("received share engine access", () => {
       access.workspaceForRegistered({
         workspaceId: "received-1",
         rootPath: "C:\\received",
+        attachmentId,
         shareView: null,
       }),
     ).toEqual({
       workspaceId: "received-1",
       rootPath: "C:\\received",
+      attachmentId,
       shareMount: true,
     });
-    expect(rememberShareMount).toHaveBeenCalledWith("received-1");
+    expect(rememberShareMount).toHaveBeenCalledWith({
+      workspaceId: "received-1",
+      rootPath: "C:\\received",
+      attachmentId,
+      shareMount: true,
+    });
 
     access.relayForRegistered({
       workspaceId: "received-1",
       rootPath: "C:\\received",
+      attachmentId,
       shareView: null,
       relay: { baseUrl: "https://relay.example", token: "secret" },
     });
     expect(bind).toHaveBeenLastCalledWith({
       workspaceId: "received-1",
       rootPath: "C:\\received",
+      attachmentId,
       shareMount: true,
       relay: { baseUrl: "https://relay.example", token: "secret" },
     });

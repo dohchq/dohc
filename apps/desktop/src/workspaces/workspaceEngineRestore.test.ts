@@ -53,6 +53,7 @@ function capture(
   return createWorkspaceEngineCapture({
     workspaceId: "engine-restore-test",
     rootPath: root,
+    attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: mockLiveSessions(loopback, requests),
   });
 }

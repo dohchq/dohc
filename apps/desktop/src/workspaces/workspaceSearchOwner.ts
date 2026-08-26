@@ -11,6 +11,7 @@ import { storedShareMounts } from "./shareViewFilesTarget";
 import {
   mountScopedIncludeGlob,
   type SearchBatch,
+  type SearchExecution,
   type SearchRegistry,
 } from "./workspaceSearch";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -42,8 +43,18 @@ export interface WorkspaceSearchAuthority<
   Workspace extends WorkspaceSearchWorkspace,
 > {
   workspace: Workspace;
+  attachmentId: symbol;
+  signal: AbortSignal;
   isCurrent(): boolean;
 }
+
+export interface WorkspaceSearchActivity {
+  readonly settled: Promise<void>;
+}
+
+const completedSearchActivity: WorkspaceSearchActivity = Object.freeze({
+  settled: Promise.resolve(),
+});
 
 export interface WorkspaceSearchOwnerDependencies<
   Workspace extends WorkspaceSearchWorkspace,
@@ -71,6 +82,7 @@ export interface WorkspaceSearchOwnerDependencies<
 interface SearchIdentity {
   searchId: string;
   settled: boolean;
+  execution?: SearchExecution;
 }
 
 function stoppedSearchError(): Error {
@@ -95,7 +107,7 @@ export class WorkspaceSearchOwner<
     sender: WorkspaceSearchSender,
     authority: WorkspaceSearchAuthority<Workspace>,
     input: WorkspaceSearchPayload,
-  ): Promise<void> {
+  ): Promise<WorkspaceSearchActivity> {
     if (this.#disposed) throw stoppedSearchError();
 
     const { workspace } = authority;
@@ -106,9 +118,6 @@ export class WorkspaceSearchOwner<
     };
     const previous = this.#latest.get(sender.id);
     this.#latest.set(sender.id, identity);
-    if (previous) {
-      this.#dependencies.searchRegistry.cancel(sender.id, previous.searchId);
-    }
 
     const ownsSearch = () =>
       !this.#disposed && this.#latest.get(sender.id) === identity;
@@ -117,6 +126,18 @@ export class WorkspaceSearchOwner<
     const assertCurrent = () => {
       if (!isCurrent()) throw stoppedSearchError();
     };
+
+    if (previous) {
+      if (previous.execution) {
+        await previous.execution.cancel();
+      } else {
+        await this.#dependencies.searchRegistry.cancel(
+          sender.id,
+          previous.searchId,
+        );
+      }
+      assertCurrent();
+    }
 
     const ownedSearchView =
       await this.#dependencies.prepareOwnedSearch(workspace);
@@ -128,8 +149,9 @@ export class WorkspaceSearchOwner<
     );
     const capture = this.#dependencies.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      await this.#startRipgrep({
+      return await this.#startRipgrep({
         sender,
+        authority,
         workspace,
         input,
         includeGlob: input.includeGlob,
@@ -139,7 +161,6 @@ export class WorkspaceSearchOwner<
         isCurrent,
         assertCurrent,
       });
-      return;
     }
 
     await capture.flush();
@@ -171,7 +192,7 @@ export class WorkspaceSearchOwner<
         isCurrent,
         "policy result",
       );
-      return;
+      return completedSearchActivity;
     }
 
     const results = await this.#dependencies.queryEngine(workspace, {
@@ -207,7 +228,7 @@ export class WorkspaceSearchOwner<
       isCurrent,
       "engine result",
     );
-    if (!hasUsableMount || !isCurrent()) return;
+    if (!hasUsableMount || !isCurrent()) return completedSearchActivity;
 
     const mountGlob = mountScopedIncludeGlob(input.includeGlob);
     if (mountGlob === null) {
@@ -222,11 +243,12 @@ export class WorkspaceSearchOwner<
         isCurrent,
         "mount completion",
       );
-      return;
+      return completedSearchActivity;
     }
 
-    await this.#startRipgrep({
+    return await this.#startRipgrep({
       sender,
+      authority,
       workspace,
       input,
       includeGlob: mountGlob,
@@ -238,26 +260,38 @@ export class WorkspaceSearchOwner<
     });
   }
 
-  cancel(senderId: number, searchId: string): void {
+  async cancel(senderId: number, searchId: string): Promise<void> {
     const latest = this.#latest.get(senderId);
-    if (latest?.searchId === searchId) this.#latest.delete(senderId);
-    this.#dependencies.searchRegistry.cancel(senderId, searchId);
-  }
-
-  disposeSender(senderId: number): void {
+    if (latest?.searchId !== searchId) return;
     this.#latest.delete(senderId);
-    this.#dependencies.searchRegistry.disposeOwner(senderId);
+    if (latest.execution) {
+      await latest.execution.cancel();
+      return;
+    }
+    await this.#dependencies.searchRegistry.cancel(senderId, searchId);
   }
 
-  dispose(): void {
+  async disposeSender(senderId: number): Promise<void> {
+    const latest = this.#latest.get(senderId);
+    this.#latest.delete(senderId);
+    if (latest?.execution) await latest.execution.cancel();
+    await this.#dependencies.searchRegistry.disposeOwner(senderId);
+  }
+
+  async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
+    const executions = [...this.#latest.values()].flatMap((identity) =>
+      identity.execution ? [identity.execution] : [],
+    );
     this.#latest.clear();
-    this.#dependencies.searchRegistry.killAll();
+    await Promise.all(executions.map((execution) => execution.cancel()));
+    await this.#dependencies.searchRegistry.killAll();
   }
 
   async #startRipgrep(input: {
     sender: WorkspaceSearchSender;
+    authority: WorkspaceSearchAuthority<Workspace>;
     workspace: Workspace;
     input: WorkspaceSearchPayload;
     includeGlob: string | undefined;
@@ -266,9 +300,9 @@ export class WorkspaceSearchOwner<
     ownsSearch: () => boolean;
     isCurrent: () => boolean;
     assertCurrent: () => void;
-  }): Promise<void> {
+  }): Promise<SearchExecution> {
     input.assertCurrent();
-    await this.#dependencies.searchRegistry.startSearch(
+    const execution = await this.#dependencies.searchRegistry.startSearch(
       input.sender.id,
       input.workspace.rootPath,
       input.input.searchId,
@@ -289,11 +323,14 @@ export class WorkspaceSearchOwner<
           input.isCurrent,
         ),
       {
+        attachmentId: input.authority.attachmentId,
+        signal: input.authority.signal,
         isCurrent: input.isCurrent,
         allowPath: input.allowPath,
       },
     );
-    if (!input.isCurrent()) {
+    if (execution !== null) input.identity.execution = execution;
+    if (execution === null || !input.isCurrent()) {
       // This invocation is still pending, so its rejection settles the
       // renderer. Mark it first so cancellation cannot also emit a terminal
       // batch through a synchronous or late child callback.
@@ -301,14 +338,10 @@ export class WorkspaceSearchOwner<
       // Root validation can finish after this workspace loses authority. Kill
       // only this invocation's handle. A superseding search owns a different
       // identity and has already replaced or cancelled this handle.
-      if (input.ownsSearch()) {
-        this.#dependencies.searchRegistry.cancel(
-          input.sender.id,
-          input.input.searchId,
-        );
-      }
+      if (execution !== null) await execution.cancel();
       throw stoppedSearchError();
     }
+    return execution;
   }
 
   #sendRipgrepBatch(
@@ -373,7 +406,12 @@ export class WorkspaceSearchOwner<
     // live sender authorize an empty terminal event, never result data.
     if (identity.settled || !ownsSearch() || sender.isDestroyed()) return;
     identity.settled = true;
-    this.#dependencies.searchRegistry.cancel(sender.id, identity.searchId);
+    void identity.execution?.cancel().catch((error: unknown) => {
+      this.#dependencies.logError(
+        "Workspace search could not settle its stale child.",
+        error,
+      );
+    });
     this.#send(
       sender,
       {

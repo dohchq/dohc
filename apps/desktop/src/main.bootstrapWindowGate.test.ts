@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 // main.ts is the Electron entry point: it cannot be imported under vitest, so
 // this suite guards the bootstrap gate the way main.chatSecurity.test.ts guards
 // chat authorization — by reading the source it protects.
-const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
+const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8").replaceAll(
+  "\r\n",
+  "\n",
+);
 
 function ipcHandlerSource(channel: string): string {
   const marker = `ipcMain.handle(CHANNELS.${channel},`;
@@ -145,19 +148,38 @@ describe("bootstrap window gate", () => {
   // The window loads while the daemon handshakes, so a fast renderer can call
   // engine-backed IPC before sessions exist. The boot-reachable entry awaits
   // the handshake instead of throwing the broken-invariant sessions error.
-  it("gates workspace-activity opens on the daemon startup promise", () => {
+  it("holds physical workspace authority while daemon startup settles", () => {
     const openActivityAt = mainSource.indexOf(
-      "async function openWorkspaceActivityWith(",
+      "async function openWorkspaceActivityForOperation(",
     );
     expect(openActivityAt).toBeGreaterThanOrEqual(0);
     const retainAt = mainSource.indexOf(
-      "retainedWorkspaceActivities.add",
+      "operation.state.retainedActivity = true;",
       openActivityAt,
     );
     expect(retainAt).toBeGreaterThan(openActivityAt);
     expect(mainSource.slice(openActivityAt, retainAt)).toContain(
       "await engineDaemonStartup;",
     );
+    const wrapperAt = mainSource.indexOf("function openWorkspaceActivityWith(");
+    expect(wrapperAt).toBeGreaterThan(retainAt);
+    expect(
+      mainSource.slice(wrapperAt, mainSource.indexOf("\n}", wrapperAt)),
+    ).toContain("withPhysicalWorkspaceOperation(");
+  });
+
+  it("prepares search activity inside its held exact operation", () => {
+    const searchAt = mainSource.indexOf("registerWorkspaceSearchIpcHandlers<");
+    expect(searchAt).toBeGreaterThanOrEqual(0);
+    const wiring = mainSource.slice(searchAt, searchAt + 2200);
+    const acquireAt = wiring.indexOf("withRendererWorkspaceOperation(");
+    const activityAt = wiring.indexOf("await openWorkspaceActivityForOperation(");
+    const recheckAt = wiring.indexOf("operation.assertCurrent();", activityAt);
+    const forwardAt = wiring.indexOf("return work({", recheckAt);
+    expect(acquireAt).toBeGreaterThanOrEqual(0);
+    expect(activityAt).toBeGreaterThan(acquireAt);
+    expect(recheckAt).toBeGreaterThan(activityAt);
+    expect(forwardAt).toBeGreaterThan(recheckAt);
   });
 
   // The shell's mount-time cloudStatus and the share view's on-open
@@ -169,24 +191,28 @@ describe("bootstrap window gate", () => {
     expect(gateAt).toBeGreaterThanOrEqual(0);
     expect(gateAt).toBeLessThan(cloudStatus.indexOf("requireEngineSessions()"));
 
-    expect(ipcHandlerSource("refreshSharedView")).toContain(
-      "await engineDaemonStartup;",
-    );
+    const refresh = ipcHandlerSource("refreshSharedView");
+    const acquireAt = refresh.indexOf("withRendererWorkspaceOperation(");
+    const refreshGateAt = refresh.indexOf("await engineDaemonStartup;");
+    expect(acquireAt).toBeGreaterThanOrEqual(0);
+    expect(refreshGateAt).toBeGreaterThan(acquireAt);
   });
 
-  // Ungated, a mount refresh during the handshake throws inside the per-row
-  // reconcile, is classified "unchanged", and silently skips the on-open pull
-  // until the next poll. One gate at registration covers every mount lane.
-  it("gates the share mount handlers on the daemon startup promise", () => {
-    const registerAt = mainSource.indexOf("registerShareMountIpcHandlers({");
-    expect(registerAt).toBeGreaterThanOrEqual(0);
+  // A mount operation acquires physical authority before awaiting the daemon,
+  // so retirement cannot replace its canonical root during startup.
+  it("holds share mount authority across daemon startup", () => {
+    const commandsAt = mainSource.indexOf("const shareMountCommands:");
+    expect(commandsAt).toBeGreaterThanOrEqual(0);
     const wiring = mainSource.slice(
-      registerAt,
-      mainSource.indexOf("});", registerAt),
+      commandsAt,
+      mainSource.indexOf("shareViewFiles =", commandsAt),
     );
+    const acquireAt = wiring.indexOf("withPhysicalWorkspaceOperation(");
     const gateAt = wiring.indexOf("await engineDaemonStartup;");
-    const forwardAt = wiring.indexOf("handler(event, payload)");
+    const forwardAt = wiring.indexOf("operation.state.shareMountCommands.mount(");
+    expect(acquireAt).toBeGreaterThanOrEqual(0);
     expect(gateAt).toBeGreaterThanOrEqual(0);
+    expect(gateAt).toBeGreaterThan(acquireAt);
     expect(forwardAt).toBeGreaterThan(gateAt);
   });
 
@@ -194,7 +220,7 @@ describe("bootstrap window gate", () => {
   // listing must NOT, or every workspace's first file list would serialize
   // behind the daemon and undo the concurrent boot.
   it("gates only the share-backed file listing branches on the daemon startup", () => {
-    const listAt = mainSource.indexOf("async function listOwnedWorkspaceFiles(");
+    const listAt = mainSource.indexOf("async function listOwnedWorkspaceFilesFor(");
     expect(listAt).toBeGreaterThanOrEqual(0);
     const body = mainSource.slice(
       listAt,
@@ -227,10 +253,10 @@ describe("bootstrap window gate", () => {
     const forwardAt = wrapper.indexOf("shareViewFiles.read(");
     expect(wrapperGateAt).toBeGreaterThanOrEqual(0);
     expect(forwardAt).toBeGreaterThan(wrapperGateAt);
-    // Both owned readers route their share branch through the gate.
+    // Both operation-scoped owned readers route their share branch through the gate.
     for (const reader of [
-      "async function readOwnedWorkspaceText(",
-      "async function readOwnedWorkspaceAsset(",
+      "function readOwnedWorkspaceTextFor(",
+      "function readOwnedWorkspaceAssetFor(",
     ]) {
       const readerAt = mainSource.indexOf(reader);
       expect(readerAt).toBeGreaterThanOrEqual(0);
@@ -245,12 +271,13 @@ describe("bootstrap window gate", () => {
     const ownerAt = mainSource.indexOf("const engineYDocSessionIpc =");
     expect(ownerAt).toBeGreaterThanOrEqual(0);
     const owner = mainSource.slice(ownerAt, mainSource.indexOf("\n});", ownerAt));
+    expect(owner).toContain("const lease = requireWorkspaceAuthority(workspaceId);");
     expect(owner).toContain(
-      "captureFor: (workspaceId) => activity.engineCaptureFor(workspaceId)",
+      "captureFor: (workspace) => activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath)",
     );
-    expect(owner).toContain("ensureCaptureFor: async (workspaceId) => {");
+    expect(owner).toContain("ensureCaptureFor: async (workspace) => {");
     expect(owner).toContain(
-      "await openWorkspaceActivity(requireWorkspace(workspaceId));",
+      "await openWorkspaceActivity(requireWorkspace(workspace.workspaceId));",
     );
 
     const handler = ipcHandlerSource("engineYDocOpen");

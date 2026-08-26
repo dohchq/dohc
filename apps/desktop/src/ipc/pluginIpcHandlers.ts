@@ -90,13 +90,17 @@ interface PluginRendererWorkspaceSession {
   isCurrent(): boolean;
 }
 
-type PluginIpcHandler<TEvent> = (
+type PluginIpcHandler<TEvent, TWorkspace extends PluginIpcWorkspace> = (
   event: TEvent,
   payload: unknown,
+  active: ActiveWorkspacePolicy<TWorkspace> | undefined,
 ) => unknown | Promise<unknown>;
 
-interface PluginIpcRegistrar<TEvent> {
-  handle(channel: string, handler: PluginIpcHandler<TEvent>): void;
+interface PluginIpcRegistrar<
+  TEvent,
+  TWorkspace extends PluginIpcWorkspace = PluginIpcWorkspace,
+> {
+  handle(channel: string, handler: PluginIpcHandler<TEvent, TWorkspace>): void;
 }
 
 type PluginIpcSurfaces<TView extends PluginWebAppViewLike> = Pick<
@@ -106,8 +110,14 @@ type PluginIpcSurfaces<TView extends PluginWebAppViewLike> = Pick<
   | "startPanel"
   | "startWebApp"
   | "stop"
-  | "withPluginSdkGrantSuspensions"
->;
+> & {
+  withPluginSdkGrantSuspensions<Result extends { readonly ok: boolean }>(
+    workspaceId: string,
+    run: (
+      suspend: (identity: { workspaceId: string; pluginId: string }) => void,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+};
 
 interface PluginIpcPlatform<
   TSender extends PluginIpcSender,
@@ -144,19 +154,18 @@ interface RegisterPluginIpcHandlersOptions<
   TWorkspace extends PluginIpcWorkspace,
   TView extends PluginWebAppViewLike,
 > {
-  registrar: PluginIpcRegistrar<TEvent>;
+  registrar: PluginIpcRegistrar<TEvent, TWorkspace>;
   assertTrustedSender(event: TEvent): void;
   workspaces: {
     assertWritable(workspace: TWorkspace): void;
-    currentSession(sender: TSender): PluginRendererWorkspaceSession | undefined;
-    requireActive(
+    withActive<Result>(
       sender: TSender,
       workspaceId: string,
       inactiveMessage: string,
-    ): {
-      workspace: TWorkspace;
-      session: PluginRendererWorkspaceSession;
-    };
+      work: (
+        active: ActiveWorkspacePolicy<TWorkspace>,
+      ) => Result | Promise<Result>,
+    ): Promise<Result>;
   };
   runtimes: {
     current(workspaceId: string): PluginIpcRuntime | undefined;
@@ -203,6 +212,26 @@ function pluginIpcError(error: unknown) {
   };
 }
 
+class StructuredPluginFailure {
+  constructor(readonly result: unknown) {}
+}
+
+function preserveStructuredPluginFailure(
+  result: unknown,
+  isCurrent: () => boolean,
+): unknown {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "ok" in result &&
+    result.ok === false
+  ) {
+    if (!isCurrent()) throw new Error(DEFAULT_INACTIVE_MESSAGE);
+    throw new StructuredPluginFailure(result);
+  }
+  return result;
+}
+
 export function registerPluginIpcHandlers<
   TSender extends PluginIpcSender,
   TEvent extends PluginIpcEvent<TSender>,
@@ -217,32 +246,61 @@ export function registerPluginIpcHandlers<
     surfaces,
     platform,
   } = options;
-  const registrar: PluginIpcRegistrar<TEvent> = {
+  const registrar: PluginIpcRegistrar<TEvent, TWorkspace> = {
     handle(channel, handler) {
       rawRegistrar.handle(channel, (event, payload) => {
         assertTrustedSender(event);
-        return handler(event, payload);
+        const workspaceId =
+          typeof payload === "object" &&
+          payload !== null &&
+          "workspaceId" in payload &&
+          typeof payload.workspaceId === "string"
+            ? payload.workspaceId
+            : undefined;
+        if (workspaceId === undefined) return handler(event, payload, undefined);
+        return workspaces
+          .withActive(
+            event.sender,
+            workspaceId,
+            DEFAULT_INACTIVE_MESSAGE,
+            async (active) =>
+              preserveStructuredPluginFailure(
+                await handler(event, payload, active),
+                () => active.session.isCurrent(),
+              ),
+          )
+          .catch((error: unknown) => {
+            if (error instanceof StructuredPluginFailure) return error.result;
+            throw error;
+          });
       });
     },
   };
 
   const createReadableActiveWorkspacePolicy = (
-    event: TEvent,
+    active: ActiveWorkspacePolicy<TWorkspace> | undefined,
     workspaceId: string,
     inactiveMessage = DEFAULT_INACTIVE_MESSAGE,
   ): ActiveWorkspacePolicy<TWorkspace> => {
-    return workspaces.requireActive(event.sender, workspaceId, inactiveMessage);
+    if (
+      !active ||
+      active.workspace.workspaceId !== workspaceId ||
+      !active.session.isCurrent()
+    ) {
+      throw new Error(inactiveMessage);
+    }
+    return active;
   };
 
   const createWritableActiveWorkspacePolicy = (
-    event: TEvent,
+    active: ActiveWorkspacePolicy<TWorkspace> | undefined,
     workspaceId: string,
     settings: {
       inactiveMessage?: string;
     } = {},
   ): WritableActiveWorkspacePolicy<TWorkspace> => {
     const { workspace, session } = createReadableActiveWorkspacePolicy(
-      event,
+      active,
       workspaceId,
       settings.inactiveMessage,
     );
@@ -259,11 +317,12 @@ export function registerPluginIpcHandlers<
 
   const createExactSurfaceOwnershipPolicy = (
     event: TEvent,
+    active: ActiveWorkspacePolicy<TWorkspace> | undefined,
     workspaceId: string,
     inactiveMessage: string,
   ) => {
     const { workspace, session } = createReadableActiveWorkspacePolicy(
-      event,
+      active,
       workspaceId,
       inactiveMessage,
     );
@@ -277,11 +336,11 @@ export function registerPluginIpcHandlers<
   };
 
   const requireSurfaceSession = (
-    event: TEvent,
+    active: ActiveWorkspacePolicy<TWorkspace> | undefined,
     workspaceId: string,
     inactiveMessage: string,
   ): PluginRendererWorkspaceSession => {
-    const session = workspaces.currentSession(event.sender);
+    const session = active?.session;
     if (
       !session ||
       !session.isCurrent() ||
@@ -330,10 +389,10 @@ export function registerPluginIpcHandlers<
   };
 
   const activePipeline = async (
-    event: TEvent,
+    active: ActiveWorkspacePolicy<TWorkspace> | undefined,
     workspaceId: string,
   ) => {
-    const policy = createWritableActiveWorkspacePolicy(event, workspaceId);
+    const policy = createWritableActiveWorkspacePolicy(active, workspaceId);
     const runtime = await runtimes.ensure(policy.workspace);
     policy.revalidate();
     return {
@@ -358,9 +417,9 @@ export function registerPluginIpcHandlers<
     return { runtime, revalidate };
   };
 
-  registrar.handle(CHANNELS.openPluginPanel, async (event, payload) => {
+  registrar.handle(CHANNELS.openPluginPanel, async (event, payload, active) => {
     const input = OpenPluginPanelPayload.parse(payload);
-    const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
+    const policy = createWritableActiveWorkspacePolicy(active, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
     });
     const { runtime, revalidate } = await ensureExactRuntime(
@@ -386,9 +445,9 @@ export function registerPluginIpcHandlers<
     });
   });
 
-  registrar.handle(CHANNELS.startPluginPanel, async (event, payload) => {
+  registrar.handle(CHANNELS.startPluginPanel, async (event, payload, active) => {
     const input = StartPluginPanelPayload.parse(payload);
-    const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
+    const policy = createWritableActiveWorkspacePolicy(active, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
     });
     const currentPipeline = runtimes.current(policy.workspace.workspaceId)
@@ -432,9 +491,9 @@ export function registerPluginIpcHandlers<
     });
   });
 
-  registrar.handle(CHANNELS.invokePluginCommand, async (event, payload) => {
+  registrar.handle(CHANNELS.invokePluginCommand, async (event, payload, active) => {
     const input = InvokePluginCommandPayload.parse(payload);
-    const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
+    const policy = createWritableActiveWorkspacePolicy(active, input.workspaceId, {
       inactiveMessage:
         "The plugin command request does not target the active workspace. Open the workspace and try again.",
     });
@@ -471,10 +530,11 @@ export function registerPluginIpcHandlers<
     );
   });
 
-  registrar.handle(CHANNELS.stopPluginPanel, async (event, payload) => {
+  registrar.handle(CHANNELS.stopPluginPanel, async (event, payload, active) => {
     const input = StopPluginPanelPayload.parse(payload);
     const policy = createExactSurfaceOwnershipPolicy(
       event,
+      active,
       input.workspaceId,
       "The plugin panel stop request does not target the active workspace.",
     );
@@ -487,10 +547,10 @@ export function registerPluginIpcHandlers<
     });
   });
 
-  registrar.handle(CHANNELS.invokePluginPanelSdk, async (event, payload) => {
+  registrar.handle(CHANNELS.invokePluginPanelSdk, async (event, payload, active) => {
     const input = InvokePluginPanelSdkPayload.parse(payload);
     const session = requireSurfaceSession(
-      event,
+      active,
       input.workspaceId,
       CURRENT_RENDERER_MESSAGE,
     );
@@ -515,9 +575,9 @@ export function registerPluginIpcHandlers<
     return InvokePluginPanelSdkResult.parse({ result });
   });
 
-  registrar.handle(CHANNELS.openPluginWebApp, async (event, payload) => {
+  registrar.handle(CHANNELS.openPluginWebApp, async (event, payload, active) => {
     const input = OpenPluginWebAppPayload.parse(payload);
-    const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
+    const policy = createWritableActiveWorkspacePolicy(active, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
     });
     const { runtime, revalidate } = await ensureExactRuntime(
@@ -550,9 +610,9 @@ export function registerPluginIpcHandlers<
     });
   });
 
-  registrar.handle(CHANNELS.startPluginWebApp, async (event, payload) => {
+  registrar.handle(CHANNELS.startPluginWebApp, async (event, payload, active) => {
     const input = StartPluginWebAppPayload.parse(payload);
-    const policy = createWritableActiveWorkspacePolicy(event, input.workspaceId, {
+    const policy = createWritableActiveWorkspacePolicy(active, input.workspaceId, {
       inactiveMessage: CURRENT_RENDERER_MESSAGE,
     });
     const plugin = registeredPlugin(policy.workspace.workspaceId, input.pluginId);
@@ -604,10 +664,10 @@ export function registerPluginIpcHandlers<
     });
   });
 
-  registrar.handle(CHANNELS.setPluginWebAppBounds, (event, payload) => {
+  registrar.handle(CHANNELS.setPluginWebAppBounds, (event, payload, active) => {
     const input = SetPluginWebAppBoundsPayload.parse(payload);
     const session = requireSurfaceSession(
-      event,
+      active,
       input.workspaceId,
       CURRENT_RENDERER_MESSAGE,
     );
@@ -624,10 +684,11 @@ export function registerPluginIpcHandlers<
     });
   });
 
-  registrar.handle(CHANNELS.stopPluginWebApp, async (event, payload) => {
+  registrar.handle(CHANNELS.stopPluginWebApp, async (event, payload, active) => {
     const input = StopPluginWebAppPayload.parse(payload);
     const policy = createExactSurfaceOwnershipPolicy(
       event,
+      active,
       input.workspaceId,
       "The plugin web app stop request does not target the active workspace.",
     );
@@ -641,20 +702,20 @@ export function registerPluginIpcHandlers<
     });
   });
 
-  registrar.handle(CHANNELS.listPlugins, async (event, payload) => {
+  registrar.handle(CHANNELS.listPlugins, async (_event, payload, active) => {
     const input = ListPluginsPayload.parse(payload);
     try {
-      const { pipeline } = await activePipeline(event, input.workspaceId);
+      const { pipeline } = await activePipeline(active, input.workspaceId);
       return ListPluginsResult.parse({ ok: true, plugins: pipeline.list() });
     } catch (error) {
       return ListPluginsResult.parse({ ok: false, error: pluginIpcError(error) });
     }
   });
 
-  registrar.handle(CHANNELS.listOfferedPlugins, async (event, payload) => {
+  registrar.handle(CHANNELS.listOfferedPlugins, async (_event, payload, active) => {
     const input = ListOfferedPluginsPayload.parse(payload);
     try {
-      const { pipeline, workspace } = await activePipeline(event, input.workspaceId);
+      const { pipeline, workspace } = await activePipeline(active, input.workspaceId);
       const existingPluginIds = new Set(
         pipeline.list().map((plugin) => plugin.id),
       );
@@ -672,10 +733,10 @@ export function registerPluginIpcHandlers<
     }
   });
 
-  registrar.handle(CHANNELS.addOfferedPlugin, async (event, payload) => {
+  registrar.handle(CHANNELS.addOfferedPlugin, async (_event, payload, active) => {
     const input = AddOfferedPluginPayload.parse(payload);
     try {
-      const { pipeline, workspace } = await activePipeline(event, input.workspaceId);
+      const { pipeline, workspace } = await activePipeline(active, input.workspaceId);
       await pipeline.handleWatcherEvents([
         { operation: "update", path: "plugins" },
       ]);
@@ -728,10 +789,10 @@ export function registerPluginIpcHandlers<
       workspaceId: string,
     ) => Promise<unknown>,
   ): void => {
-    registrar.handle(channel, async (event, payload) => {
+    registrar.handle(channel, async (_event, payload, active) => {
       const input = PluginActionPayload.parse(payload);
       try {
-        const { pipeline } = await activePipeline(event, input.workspaceId);
+        const { pipeline } = await activePipeline(active, input.workspaceId);
         return PluginActionResult.parse(
           await run(pipeline, input.pluginId, input.workspaceId),
         );
@@ -748,10 +809,10 @@ export function registerPluginIpcHandlers<
   pluginAction(CHANNELS.installPlugin, (pipeline, pluginId) =>
     pipeline.install(pluginId));
   pluginAction(CHANNELS.disablePlugin, (pipeline, pluginId, workspaceId) =>
-    surfaces.withPluginSdkGrantSuspensions((suspend) =>
+    surfaces.withPluginSdkGrantSuspensions(workspaceId, (suspend) =>
       pipeline.disable(pluginId, {
         onWillStopRuntime: () => suspend({ workspaceId, pluginId }),
-      })
+      }),
     ));
   pluginAction(CHANNELS.enablePlugin, (pipeline, pluginId) =>
     pipeline.enable(pluginId));
@@ -760,10 +821,10 @@ export function registerPluginIpcHandlers<
   pluginAction(CHANNELS.rebuildPlugin, (pipeline, pluginId) =>
     pipeline.rebuild(pluginId));
 
-  registrar.handle(CHANNELS.pluginUninstallPreflight, async (event, payload) => {
+  registrar.handle(CHANNELS.pluginUninstallPreflight, async (_event, payload, active) => {
     const input = PluginUninstallPreflightPayload.parse(payload);
     try {
-      const { pipeline } = await activePipeline(event, input.workspaceId);
+      const { pipeline } = await activePipeline(active, input.workspaceId);
       const result = await pipeline.uninstallPreflight(
         input.pluginId,
         input.directoryName,
@@ -786,10 +847,10 @@ export function registerPluginIpcHandlers<
     }
   });
 
-  registrar.handle(CHANNELS.pluginSizes, async (event, payload) => {
+  registrar.handle(CHANNELS.pluginSizes, async (_event, payload, active) => {
     const input = PluginSizesPayload.parse(payload);
     try {
-      const { pipeline } = await activePipeline(event, input.workspaceId);
+      const { pipeline } = await activePipeline(active, input.workspaceId);
       return PluginSizesResult.parse({
         ok: true,
         sizes: await pipeline.sizes(input.directoryName, input.pluginId),
@@ -802,10 +863,10 @@ export function registerPluginIpcHandlers<
     }
   });
 
-  registrar.handle(CHANNELS.getPluginSettings, async (event, payload) => {
+  registrar.handle(CHANNELS.getPluginSettings, async (_event, payload, active) => {
     const input = GetPluginSettingsPayload.parse(payload);
     try {
-      const { pipeline } = await activePipeline(event, input.workspaceId);
+      const { pipeline } = await activePipeline(active, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
         values: await pipeline.getPluginSettings(input.directoryName),
@@ -818,10 +879,10 @@ export function registerPluginIpcHandlers<
     }
   });
 
-  registrar.handle(CHANNELS.setPluginSettings, async (event, payload) => {
+  registrar.handle(CHANNELS.setPluginSettings, async (_event, payload, active) => {
     const input = SetPluginSettingsPayload.parse(payload);
     try {
-      const { pipeline } = await activePipeline(event, input.workspaceId);
+      const { pipeline } = await activePipeline(active, input.workspaceId);
       return PluginSettingsResult.parse({
         ok: true,
         values: await pipeline.setPluginSettings(
@@ -838,24 +899,26 @@ export function registerPluginIpcHandlers<
     }
   });
 
-  registrar.handle(CHANNELS.uninstallPlugin, async (event, payload) => {
+  registrar.handle(CHANNELS.uninstallPlugin, async (_event, payload, active) => {
     const input = UninstallPluginPayload.parse(payload);
     try {
       const { pipeline, runtime, workspace } = await activePipeline(
-        event,
+        active,
         input.workspaceId,
       );
       const result: PluginPipelineUninstallResult =
-        await surfaces.withPluginSdkGrantSuspensions((suspend) =>
-          pipeline.uninstall(
-            input.pluginId,
-            input.directoryName,
-            input.confirmationToken,
-            {
-              onWillStopRuntime: (pluginId) =>
-                suspend({ workspaceId: input.workspaceId, pluginId }),
-            },
-          )
+        await surfaces.withPluginSdkGrantSuspensions(
+          input.workspaceId,
+          (suspend) =>
+            pipeline.uninstall(
+              input.pluginId,
+              input.directoryName,
+              input.confirmationToken,
+              {
+                onWillStopRuntime: (pluginId) =>
+                  suspend({ workspaceId: input.workspaceId, pluginId }),
+              },
+            ),
         );
       const rendererResult = PluginActionResult.parse(
         result.ok

@@ -10,6 +10,7 @@ export interface RendererWorkspaceSession<
   readonly sender: Sender;
   readonly senderId: number;
   readonly workspaceId: string;
+  readonly attachmentId: symbol;
   readonly rendererDocumentId: string;
   readonly generation: number;
   isCurrent(): boolean;
@@ -19,7 +20,12 @@ export interface RendererWorkspaceRetirement<
   Sender extends RendererWorkspaceSender,
 > {
   retireSender(session: RendererWorkspaceSession<Sender>): Promise<void>;
-  retireWorkspace(workspaceId: string): Promise<void>;
+  retireWorkspace(
+    workspace: Pick<
+      RendererWorkspaceSession<Sender>,
+      "workspaceId" | "attachmentId"
+    >,
+  ): Promise<void>;
 }
 
 export class RendererWorkspaceOpenSupersededError extends Error {
@@ -63,8 +69,11 @@ export class RendererWorkspaceSessionOwner<
   >;
   readonly #statesBySender = new WeakMap<Sender, SenderState<Sender>>();
   readonly #stateBySenderId = new Map<number, SenderState<Sender>>();
-  readonly #workspaceMembers = new Map<string, Set<SenderState<Sender>>>();
-  readonly #workspaceRetirements = new Map<string, Promise<void>>();
+  readonly #workspaceMembers = new Map<
+    symbol,
+    { readonly workspaceId: string; readonly members: Set<SenderState<Sender>> }
+  >();
+  readonly #workspaceRetirements = new Map<symbol, Promise<void>>();
   #nextGeneration = 0;
 
   constructor(options: RendererWorkspaceSessionOwnerOptions<Sender>) {
@@ -74,7 +83,7 @@ export class RendererWorkspaceSessionOwner<
 
   async open(
     sender: Sender,
-    workspaceId: string,
+    workspace: { readonly workspaceId: string; readonly attachmentId: symbol },
     rendererDocumentId: string,
   ): Promise<RendererWorkspaceSession<Sender>> {
     if (sender.isDestroyed()) {
@@ -95,7 +104,13 @@ export class RendererWorkspaceSessionOwner<
 
     const requestSequence = ++state.requestSequence;
     const active = state.active;
-    if (active?.workspaceId === workspaceId && active.isCurrent()) return active;
+    if (
+      active?.workspaceId === workspace.workspaceId &&
+      active.attachmentId === workspace.attachmentId &&
+      active.isCurrent()
+    ) {
+      return active;
+    }
 
     const senderRetirement = active
       ? this.#beginSenderRetirement(state, active)
@@ -103,15 +118,20 @@ export class RendererWorkspaceSessionOwner<
     if (senderRetirement) await senderRetirement;
     this.#assertOpenRequestCurrent(state, requestSequence);
 
-    const workspaceRetirement = this.#workspaceRetirements.get(workspaceId);
+    const workspaceRetirement = this.#workspaceRetirements.get(
+      workspace.attachmentId,
+    );
     if (workspaceRetirement) await workspaceRetirement;
     this.#assertOpenRequestCurrent(state, requestSequence);
 
-    const session = this.#createSession(state, workspaceId, rendererDocumentId);
+    const session = this.#createSession(state, workspace, rendererDocumentId);
     state.active = session;
-    const members = this.#workspaceMembers.get(workspaceId) ?? new Set();
-    members.add(state);
-    this.#workspaceMembers.set(workspaceId, members);
+    const membership = this.#workspaceMembers.get(workspace.attachmentId) ?? {
+      workspaceId: workspace.workspaceId,
+      members: new Set<SenderState<Sender>>(),
+    };
+    membership.members.add(state);
+    this.#workspaceMembers.set(workspace.attachmentId, membership);
     return session;
   }
 
@@ -132,7 +152,16 @@ export class RendererWorkspaceSessionOwner<
   }
 
   isWorkspaceOpen(workspaceId: string): boolean {
-    return (this.#workspaceMembers.get(workspaceId)?.size ?? 0) > 0;
+    for (const membership of this.#workspaceMembers.values()) {
+      if (membership.workspaceId === workspaceId && membership.members.size > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  isAttachmentOpen(attachmentId: symbol): boolean {
+    return (this.#workspaceMembers.get(attachmentId)?.members.size ?? 0) > 0;
   }
 
   retireForReload(
@@ -229,7 +258,7 @@ export class RendererWorkspaceSessionOwner<
 
   #createSession(
     state: SenderState<Sender>,
-    workspaceId: string,
+    workspace: { readonly workspaceId: string; readonly attachmentId: symbol },
     rendererDocumentId: string,
   ): RendererWorkspaceSession<Sender> {
     const generation = ++this.#nextGeneration;
@@ -237,7 +266,8 @@ export class RendererWorkspaceSessionOwner<
     session = Object.freeze({
       sender: state.sender,
       senderId: state.sender.id,
-      workspaceId,
+      workspaceId: workspace.workspaceId,
+      attachmentId: workspace.attachmentId,
       rendererDocumentId,
       generation,
       isCurrent: () =>
@@ -289,9 +319,9 @@ export class RendererWorkspaceSessionOwner<
             error,
           );
         });
-        this.#removeWorkspaceMember(session.workspaceId, state);
-        if (!this.isWorkspaceOpen(session.workspaceId)) {
-          await this.#retireWorkspace(session.workspaceId);
+        this.#removeWorkspaceMember(session, state);
+        if (!this.#workspaceMembers.has(session.attachmentId)) {
+          await this.#retireWorkspace(session);
         }
       } finally {
         if (state.retiring === promise) state.retiring = undefined;
@@ -302,34 +332,52 @@ export class RendererWorkspaceSessionOwner<
   }
 
   #removeWorkspaceMember(
-    workspaceId: string,
+    workspace: Pick<RendererWorkspaceSession<Sender>, "attachmentId">,
     state: SenderState<Sender>,
   ): void {
-    const members = this.#workspaceMembers.get(workspaceId);
-    members?.delete(state);
-    if (members?.size === 0) this.#workspaceMembers.delete(workspaceId);
+    const membership = this.#workspaceMembers.get(workspace.attachmentId);
+    membership?.members.delete(state);
+    if (membership?.members.size === 0) {
+      this.#workspaceMembers.delete(workspace.attachmentId);
+    }
   }
 
-  #retireWorkspace(workspaceId: string): Promise<void> {
-    const existing = this.#workspaceRetirements.get(workspaceId);
+  #retireWorkspace(
+    workspace: Pick<
+      RendererWorkspaceSession<Sender>,
+      "workspaceId" | "attachmentId"
+    >,
+  ): Promise<void> {
+    const existing = this.#workspaceRetirements.get(workspace.attachmentId);
     if (existing) return existing;
 
     const { promise, resolve } = Promise.withResolvers<void>();
-    this.#workspaceRetirements.set(workspaceId, promise);
+    this.#workspaceRetirements.set(workspace.attachmentId, promise);
     let workspaceDrain: Promise<void>;
     try {
-      workspaceDrain = this.#retirement.retireWorkspace(workspaceId);
+      workspaceDrain = this.#retirement.retireWorkspace({
+        workspaceId: workspace.workspaceId,
+        attachmentId: workspace.attachmentId,
+      });
     } catch (error) {
-      this.#onCleanupError({ kind: "workspace", workspaceId }, error);
+      this.#onCleanupError(
+        { kind: "workspace", workspaceId: workspace.workspaceId },
+        error,
+      );
       workspaceDrain = Promise.resolve();
     }
     void workspaceDrain
       .catch((error: unknown) => {
-        this.#onCleanupError({ kind: "workspace", workspaceId }, error);
+        this.#onCleanupError(
+          { kind: "workspace", workspaceId: workspace.workspaceId },
+          error,
+        );
       })
       .finally(() => {
-        if (this.#workspaceRetirements.get(workspaceId) === promise) {
-          this.#workspaceRetirements.delete(workspaceId);
+        if (
+          this.#workspaceRetirements.get(workspace.attachmentId) === promise
+        ) {
+          this.#workspaceRetirements.delete(workspace.attachmentId);
         }
         resolve();
       });

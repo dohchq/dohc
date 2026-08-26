@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { startWorkspaceWatch } from "./workspaceWatcher";
@@ -44,8 +44,13 @@ describe("workspaceActivity startup ordering", () => {
 
     const order: string[] = [];
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const attachmentId = Symbol("test-workspace-attachment");
     const liveStore = createCaptureLiveStores(
-      { workspaceId: WORKSPACE_ID, rootPath: root },
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        attachmentId,
+      },
       sessions,
     ).store;
     const trackedStore = new Proxy(liveStore, {
@@ -103,6 +108,7 @@ describe("workspaceActivity startup ordering", () => {
         capture: createWorkspaceEngineCapture({
           workspaceId: WORKSPACE_ID,
           rootPath: root,
+          attachmentId,
           store: trackedStore,
           rustEngineSessions: sessions,
         }),
