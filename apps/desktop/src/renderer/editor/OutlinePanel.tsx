@@ -7,9 +7,9 @@
 // Positioning is CSS-only (position: sticky inside the shared grid cell
 // set up in styles.css — see the "outline rail" comment there), so this
 // component never measures or tracks its own placement; the only DOM
-// measurement it does is figuring out which heading is "active". Those
-// offsets are cached until editor/layout changes; scrolling only searches
-// the cache.
+// measurement it does is figuring out which heading is "active". During
+// layout churn it measures directly; after layout settles it searches cached
+// offsets and spot-checks once when a new scroll gesture starts.
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
@@ -33,8 +33,8 @@ import {
 // after the user starts scrolling, instead of flipping the instant a new
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
-const GEOMETRY_SETTLE_MS = 180;
-const GEOMETRY_BACKSTOP_MS = 2_000;
+export const OUTLINE_GEOMETRY_HOT_MS = 250;
+const OUTLINE_GEOMETRY_SPOT_CHECK_TOLERANCE_PX = 1;
 
 type OutlineSnapshot = {
   generation: number;
@@ -44,6 +44,12 @@ type OutlineSnapshot = {
 type ActiveHeading = {
   generation: number;
   pos: number;
+};
+
+type HeadingGeometry = {
+  generation: number;
+  rawValues: number[];
+  values: number[];
 };
 
 type HeadingFlashState = {
@@ -279,10 +285,41 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
   // headings through this ref. Document transactions replace the snapshot
   // without tearing down the listener.
   const outlineRef = useRef<OutlineSnapshot>(outline);
+  const activeHeadingRef = useRef<ActiveHeading | null>(activeHeading);
+  const activeEditorRef = useRef<Editor | null>(null);
+  const setActiveHeadingIfChanged = (next: ActiveHeading | null) => {
+    const current = activeHeadingRef.current;
+    if (
+      current === next
+      || (current !== null
+        && next !== null
+        && current.generation === next.generation
+        && current.pos === next.pos)
+    ) {
+      return;
+    }
+    activeHeadingRef.current = next;
+    setActiveHeading((rendered) => {
+      if (
+        rendered === next
+        || (rendered !== null
+          && next !== null
+          && rendered.generation === next.generation
+          && rendered.pos === next.pos)
+      ) {
+        return rendered;
+      }
+      return next;
+    });
+  };
 
   // Recompute the heading list synchronously (cheap: a handful of nodes) on
   // every doc change. The word count is handled by useDebouncedWordCount above.
   useEffect(() => {
+    if (activeEditorRef.current !== editor) {
+      activeEditorRef.current = editor;
+      setActiveHeadingIfChanged(null);
+    }
     if (!editor) {
       const empty = {
         generation: outlineRef.current.generation + 1,
@@ -290,7 +327,6 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       };
       outlineRef.current = empty;
       setOutline(empty);
-      setActiveHeading(null);
       return;
     }
     const recomputeHeadings = () => {
@@ -300,9 +336,6 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       };
       outlineRef.current = next;
       setOutline(next);
-      // Geometry for the new document lands on the next frame. Do not apply a
-      // numeric index measured for the previous heading array in the meantime.
-      setActiveHeading(null);
     };
     const handleTransaction = ({ transaction }: { transaction: { docChanged: boolean } }) => {
       if (transaction.docChanged) recomputeHeadings();
@@ -352,9 +385,9 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     };
   }, [editor, headingTarget?.anchor, headingTarget?.occurrence, headingTarget?.nonce]);
 
-  // Cache content-relative heading offsets. Scroll frames only binary-search
-  // this array; layout reads happen on invalidations, after layout settles,
-  // and on a low-frequency backstop for otherwise unobservable idle reflows.
+  // Cache contract: active geometry is pixel-correct within one frame of any
+  // observable signal and within one scroll frame otherwise. Cold steady-state
+  // scroll frames perform zero layout reads except the gesture-start spot-check.
   useEffect(() => {
     if (!editor) return;
     const scrollEl = findScrollParent(containerRef.current);
@@ -362,76 +395,146 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
 
     let frame = 0;
     let settleTimer = 0;
-    let backstopTimer = 0;
-    let headingTops: { generation: number; values: number[] } | null = null;
-    const measureHeadingTops = (snapshot: OutlineSnapshot) => {
-      const containerRect = scrollEl.getBoundingClientRect();
+    let lastGeometrySignalAt = Number.NEGATIVE_INFINITY;
+    let lastScrollAt = Number.NEGATIVE_INFINITY;
+    let gestureSpotCheckPending = false;
+    let settledRecomputePending = false;
+    let headingTops: HeadingGeometry | null = null;
+    const measureHeadingTop = (
+      heading: OutlineHeading,
+      containerTop: number,
+    ) => {
+      try {
+        const measuredTop =
+          editor.view.coordsAtPos(heading.pos).top
+          - containerTop
+          + scrollEl.scrollTop;
+        return Number.isFinite(measuredTop)
+          ? measuredTop
+          : Number.POSITIVE_INFINITY;
+      } catch {
+        return Number.POSITIVE_INFINITY;
+      }
+    };
+    const measureHeadingTops = (
+      snapshot: OutlineSnapshot,
+      containerTop = scrollEl.getBoundingClientRect().top,
+    ): HeadingGeometry => {
+      const rawValues: number[] = [];
       const measuredTops: number[] = [];
       let previousTop = Number.NEGATIVE_INFINITY;
       for (const heading of snapshot.headings) {
-        try {
-          const measuredTop =
-            editor.view.coordsAtPos(heading.pos).top
-            - containerRect.top
-            + scrollEl.scrollTop;
-          // Hidden descendants can share an ancestor's coordinates. Keeping
-          // the cache nondecreasing preserves the old full scan's first-gap
-          // behavior and makes binary search safe.
-          previousTop = Number.isFinite(measuredTop)
-            ? Math.max(previousTop, measuredTop)
-            : Number.POSITIVE_INFINITY;
-        } catch {
-          // An unresolved position and everything after its first gap remain
-          // unreached until the next invalidation can measure them.
-          previousTop = Number.POSITIVE_INFINITY;
-        }
+        const measuredTop = measureHeadingTop(heading, containerTop);
+        rawValues.push(measuredTop);
+        // Hidden descendants can share an ancestor's coordinates. Keeping the
+        // search values nondecreasing preserves the old full scan's first-gap
+        // behavior and makes binary search safe.
+        previousTop = Number.isFinite(measuredTop)
+          ? Math.max(previousTop, measuredTop)
+          : Number.POSITIVE_INFINITY;
         measuredTops.push(previousTop);
       }
-      return { generation: snapshot.generation, values: measuredTops };
+      return {
+        generation: snapshot.generation,
+        rawValues,
+        values: measuredTops,
+      };
     };
-    const updateActiveHeading = () => {
-      frame = 0;
-      const snapshot = outlineRef.current;
-      if (headingTops?.generation !== snapshot.generation) {
-        headingTops = measureHeadingTops(snapshot);
-      }
-      if (headingTops.values.length === 0) {
-        setActiveHeading(null);
+    const resolveActiveHeading = (
+      snapshot: OutlineSnapshot,
+      geometry: HeadingGeometry,
+    ) => {
+      if (geometry.values.length === 0) {
+        setActiveHeadingIfChanged(null);
         return;
       }
       const activeIndex = resolveActiveHeadingIndex(
-        headingTops.values,
+        geometry.values,
         scrollEl.scrollTop,
         ACTIVE_HEADING_READING_OFFSET,
       );
       const heading = snapshot.headings[activeIndex];
-      setActiveHeading(
+      setActiveHeadingIfChanged(
         heading ? { generation: snapshot.generation, pos: heading.pos } : null,
       );
+    };
+    const geometryIsHot = (time: number) =>
+      time - lastGeometrySignalAt < OUTLINE_GEOMETRY_HOT_MS;
+    const topsMatch = (cached: number, measured: number) =>
+      Number.isFinite(cached)
+      && Number.isFinite(measured)
+      && Math.abs(cached - measured)
+        <= OUTLINE_GEOMETRY_SPOT_CHECK_TOLERANCE_PX;
+    const updateActiveHeading = (time: number) => {
+      frame = 0;
+      const snapshot = outlineRef.current;
+      const shouldSpotCheck = gestureSpotCheckPending;
+      gestureSpotCheckPending = false;
+      if (geometryIsHot(time)) {
+        resolveActiveHeading(snapshot, measureHeadingTops(snapshot));
+        return;
+      }
+
+      if (
+        settledRecomputePending
+        || headingTops?.generation !== snapshot.generation
+      ) {
+        settledRecomputePending = false;
+        if (settleTimer) {
+          window.clearTimeout(settleTimer);
+          settleTimer = 0;
+        }
+        headingTops = measureHeadingTops(snapshot);
+      } else if (shouldSpotCheck) {
+        const active = activeHeadingRef.current;
+        const activeIndex = active
+          ? snapshot.headings.findIndex((heading) => heading.pos === active.pos)
+          : -1;
+        if (activeIndex < 0) {
+          headingTops = measureHeadingTops(snapshot);
+        } else {
+          const containerTop = scrollEl.getBoundingClientRect().top;
+          const measuredTop = measureHeadingTop(
+            snapshot.headings[activeIndex]!,
+            containerTop,
+          );
+          if (!topsMatch(headingTops.rawValues[activeIndex]!, measuredTop)) {
+            headingTops = measureHeadingTops(snapshot, containerTop);
+          }
+        }
+      }
+
+      resolveActiveHeading(snapshot, headingTops);
     };
     const scheduleUpdate = () => {
       if (frame) return;
       frame = requestAnimationFrame(updateActiveHeading);
     };
-    const invalidateHeadingOffsets = () => {
-      headingTops = null;
-      scheduleUpdate();
-    };
-    const invalidateAfterLayoutSettles = () => {
-      // A transition can keep producing invalidations for longer than the
-      // debounce. Drop stale geometry now so every intervening scroll frame
-      // measures the current layout, then take one final settled measurement.
-      invalidateHeadingOffsets();
+    const scheduleSettledRecompute = () => {
       window.clearTimeout(settleTimer);
       settleTimer = window.setTimeout(() => {
         settleTimer = 0;
-        invalidateHeadingOffsets();
-      }, GEOMETRY_SETTLE_MS);
+        scheduleUpdate();
+      }, OUTLINE_GEOMETRY_HOT_MS);
+    };
+    const markGeometryHot = () => {
+      lastGeometrySignalAt = performance.now();
+      settledRecomputePending = true;
+      scheduleUpdate();
+      scheduleSettledRecompute();
+    };
+    const handleScroll = () => {
+      const time = performance.now();
+      if (time - lastScrollAt > OUTLINE_GEOMETRY_HOT_MS) {
+        gestureSpotCheckPending = true;
+      }
+      lastScrollAt = time;
+      scheduleUpdate();
     };
     const resizeObserver =
       typeof ResizeObserver === "undefined"
         ? null
-        : new ResizeObserver(invalidateAfterLayoutSettles);
+        : new ResizeObserver(markGeometryHot);
     const observedElements = new Set<HTMLElement>();
     const refreshResizeTargets = () => {
       const nextElements = new Set<HTMLElement>([
@@ -467,7 +570,7 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
             )) {
               refreshResizeTargets();
             }
-            invalidateAfterLayoutSettles();
+            markGeometryHot();
           });
     mutationObserver?.observe(editor.view.dom, {
       attributes: true,
@@ -486,25 +589,24 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     });
 
     const fonts = document.fonts;
-    fonts?.addEventListener("loadingdone", invalidateAfterLayoutSettles);
-    fonts?.addEventListener("loadingerror", invalidateAfterLayoutSettles);
-    window.addEventListener("resize", invalidateAfterLayoutSettles);
-    scrollEl.addEventListener("load", invalidateAfterLayoutSettles, true);
-    scrollEl.addEventListener("error", invalidateAfterLayoutSettles, true);
-    editor.on("update", invalidateAfterLayoutSettles);
+    fonts?.addEventListener("loadingdone", markGeometryHot);
+    fonts?.addEventListener("loadingerror", markGeometryHot);
+    window.addEventListener("resize", markGeometryHot);
+    scrollEl.addEventListener("load", markGeometryHot, true);
+    scrollEl.addEventListener("error", markGeometryHot, true);
+    editor.on("update", markGeometryHot);
     const handleDocumentTransaction = (
       { transaction }: { transaction: { docChanged: boolean } },
     ) => {
-      if (transaction.docChanged) invalidateAfterLayoutSettles();
+      if (transaction.docChanged) markGeometryHot();
     };
     editor.on("transaction", handleDocumentTransaction);
-    scrollEl.addEventListener("scroll", scheduleUpdate, { passive: true });
-    scrollEl.addEventListener("scrollend", invalidateHeadingOffsets, { passive: true });
+    scrollEl.addEventListener("scroll", handleScroll, { passive: true });
 
     let resolutionQuery: MediaQueryList | null = null;
     const handleResolutionChange = () => {
       resolutionQuery?.removeEventListener("change", handleResolutionChange);
-      invalidateAfterLayoutSettles();
+      markGeometryHot();
       resolutionQuery = window.matchMedia(
         `(resolution: ${window.devicePixelRatio}dppx)`,
       );
@@ -517,43 +619,26 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       resolutionQuery.addEventListener("change", handleResolutionChange);
     }
 
-    // CSS-only geometry shifts can change viewport coordinates without a DOM
-    // mutation or an observed box resize. This low-frequency idle measurement
-    // bounds that otherwise unobservable staleness to two seconds.
-    const refreshUnobservableGeometry = () => {
-      if (document.visibilityState === "hidden") return;
-      if (outlineRef.current.headings.length < 2) return;
-      invalidateHeadingOffsets();
-    };
-    backstopTimer = window.setInterval(
-      refreshUnobservableGeometry,
-      GEOMETRY_BACKSTOP_MS,
-    );
-
-    invalidateHeadingOffsets();
+    scheduleUpdate();
     return () => {
-      scrollEl.removeEventListener("scroll", scheduleUpdate);
-      scrollEl.removeEventListener("scrollend", invalidateHeadingOffsets);
+      scrollEl.removeEventListener("scroll", handleScroll);
       editor.off("transaction", handleDocumentTransaction);
-      editor.off("update", invalidateAfterLayoutSettles);
-      scrollEl.removeEventListener("load", invalidateAfterLayoutSettles, true);
-      scrollEl.removeEventListener("error", invalidateAfterLayoutSettles, true);
-      window.removeEventListener("resize", invalidateAfterLayoutSettles);
-      fonts?.removeEventListener("loadingdone", invalidateAfterLayoutSettles);
-      fonts?.removeEventListener("loadingerror", invalidateAfterLayoutSettles);
+      editor.off("update", markGeometryHot);
+      scrollEl.removeEventListener("load", markGeometryHot, true);
+      scrollEl.removeEventListener("error", markGeometryHot, true);
+      window.removeEventListener("resize", markGeometryHot);
+      fonts?.removeEventListener("loadingdone", markGeometryHot);
+      fonts?.removeEventListener("loadingerror", markGeometryHot);
       resolutionQuery?.removeEventListener("change", handleResolutionChange);
       mutationObserver?.disconnect();
       resizeObserver?.disconnect();
       window.clearTimeout(settleTimer);
-      window.clearInterval(backstopTimer);
       if (frame) cancelAnimationFrame(frame);
     };
   }, [editor, containerRef]);
 
   const headings = outline.headings;
-  const activePos = activeHeading?.generation === outline.generation
-    ? activeHeading.pos
-    : null;
+  const activePos = activeHeading?.pos ?? null;
   if (!editor || headings.length < 2) return null;
 
   return (
