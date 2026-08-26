@@ -1669,6 +1669,17 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  it("keeps the relay route available after bootstrap closes its temporary session", async () => {
+    const { routes, live, client } = await harness();
+
+    await client.bootstrapJoinIdentity(null);
+
+    expect(routes.modeFor("workspace-a")).toBe("daemon");
+    await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
+    await live.closeAll();
+    expect(routes.modeFor("workspace-a")).toBeNull();
+  });
+
   it("retires the bare bootstrap owner before an exact successor closes", async () => {
     const { rootPath, routes, sessions, live, relay, client } = await harness();
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");

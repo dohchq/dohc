@@ -742,7 +742,7 @@ export class EngineRelayClient {
           this.activeLocations.set(workspaceKey, connectionKey);
         }
         try {
-          return await this.sessions.run(
+          const result = await this.sessions.run(
             targetWorkspace,
             async ({ client, workspace: handle }) => {
               const requester = new WorkspaceDaemonRequester(client);
@@ -753,6 +753,8 @@ export class EngineRelayClient {
             },
             { retryTransportErrors: true },
           );
+          this.retainBoundWorkspace(workspaceKey, workspace);
+          return result;
         } catch (error) {
           translateRelayError(method, error);
         }
@@ -962,8 +964,9 @@ export class EngineRelayClient {
         } finally {
           // The bootstrap session is intentionally capture-free. Close it so
           // activity.open creates the ordinary captured session only after the
-          // authoritative coordinate is durable.
-          await this.closeWorkspace(workspace);
+          // authoritative coordinate is durable. Keep the relay route: the
+          // first ordinary pull reopens this same client through it.
+          await this.sessions.closeWorkspace(workspace);
         }
       },
       probe: async () => {
@@ -1344,6 +1347,30 @@ export class EngineRelayClient {
     return [...this.boundWorkspaces.values()].some(
       (workspace) => workspace.workspaceId === workspaceId,
     );
+  }
+
+  private retainBoundWorkspace(
+    workspaceKey: string | symbol,
+    workspace: EngineWorkspace,
+  ): void {
+    this.boundWorkspaces.set(workspaceKey, workspace);
+    for (const [candidateKey, candidate] of this.boundWorkspaces) {
+      if (
+        candidateKey === workspaceKey ||
+        candidate.workspaceId !== workspace.workspaceId
+      ) {
+        continue;
+      }
+      this.boundWorkspaces.delete(candidateKey);
+      this.activeLocations.delete(candidateKey);
+      if (!this.hasBoundLocation(candidate.workspaceId, candidate.rootPath)) {
+        this.routes.releaseLocation(
+          candidate.workspaceId,
+          candidate.rootPath,
+          "daemon",
+        );
+      }
+    }
   }
 
   private hasBoundLocation(workspaceId: string, rootPath: string): boolean {
