@@ -5708,7 +5708,7 @@ app.on("will-quit", (event) => {
   quitting = true;
   event.preventDefault();
   // FIRST, synchronously (#564): a document open mid transport-retry holds
-  // the capture chain, and captureStop below queues behind it. This resolves
+  // the capture chain, and workspaceAuthorityStop below queues behind it. This resolves
   // its armed backoff and makes the next failure final, so the chain frees in
   // at most one attempt instead of spending the whole 3 s budget. Nothing is
   // abandoned that a user could see: an opening document is read-only (#533),
@@ -5726,28 +5726,36 @@ app.on("will-quit", (event) => {
   // r19). Fire-and-forget — skip locks and do not await async stops so
   // termination stays quick; child.unref() and the OS finish the cleanup.
   const pluginStop = stopAllPluginWorkspaces();
-  const agentSessionStop = cachedAgentSessions?.stopAll() ?? Promise.resolve();
+  const agentSessionStop = (
+    cachedAgentSessions?.stopAll() ?? Promise.resolve()
+  ).catch(() => undefined);
   const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
   const cliServerStop = chatDispatchStop.then(() =>
     (cliServerStartup ?? Promise.resolve(cliServer))
     .then((server) => server?.close())
     .catch(() => undefined),
   );
-  const agentIntegrationStop = agentIntegration.stopAll().catch(() => undefined);
-  const workspaceAuthorityStop = chatDispatchStop.then(() => workspaceAuthorities.close()).catch(() => undefined);
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const captureStop = engineYDocStop
-      .then(() => chatDispatchStop)
-      .then(() => searchStop)
-      .then(() => agentIntegrationStop)
-      .then(() => pluginStop)
-      .then(() => workspaceAuthorityStop);
-  const rustEngineStop = Promise.all([
-    captureStop.catch(() => undefined),
-    workspaceAuthorityStop,
+  const agentIntegrationStop = agentSessionStop
+    .then(() => agentIntegration.stopAll())
+    .catch(() => undefined);
+  // The physical authority owns the capture and every per-workspace surface.
+  // Stop every producer first; chaining an already-started close promise here
+  // would not impose this order.
+  const workspaceAuthorityStop = Promise.allSettled([
+    engineYDocStop,
+    agentSessionStop,
+    chatDispatchStop,
+    cliServerStop,
+    searchStop,
+    agentIntegrationStop,
+    pluginStop,
   ])
+    .then(() => workspaceAuthorities.close())
+    .catch(() => undefined);
+  const rustEngineStop = workspaceAuthorityStop
     .then(async () => await closeAllRelayTransportWorkspaces())
     .catch(() => undefined)
     .then(async () => await rustEngineDaemon?.stop());
@@ -5759,7 +5767,7 @@ app.on("will-quit", (event) => {
       chatDispatchStop,
       searchStop,
       agentIntegrationStop,
-      captureStop,
+      workspaceAuthorityStop,
       rustEngineStop,
     ]).then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, WILL_QUIT_BUDGET_MS)),

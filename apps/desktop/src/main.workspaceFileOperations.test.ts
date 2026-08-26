@@ -44,6 +44,38 @@ describe("workspace file operation wiring", () => {
     expect(beginShutdownAt).toBeGreaterThan(-1);
     expect(beginShutdownAt).toBeLessThan(engineYDocStopAt);
     expect(beginShutdownAt).toBeLessThan(firstStopAllAt);
+
+    const authorityStopAt = willQuitBody.indexOf(
+      "const workspaceAuthorityStop",
+    );
+    const authorityStopEnd = willQuitBody.indexOf(
+      "const rustEngineStop",
+      authorityStopAt,
+    );
+    expect(authorityStopAt).toBeGreaterThan(engineYDocStopAt);
+    expect(authorityStopEnd).toBeGreaterThan(authorityStopAt);
+    const authorityStop = willQuitBody.slice(
+      authorityStopAt,
+      authorityStopEnd,
+    );
+    const closeAuthorityAt = authorityStop.indexOf(
+      "workspaceAuthorities.close()",
+    );
+    expect(closeAuthorityAt).toBeGreaterThan(-1);
+    expect(authorityStop).toContain("Promise.allSettled(");
+    for (const producerStop of [
+      "engineYDocStop",
+      "agentSessionStop",
+      "chatDispatchStop",
+      "cliServerStop",
+      "searchStop",
+      "agentIntegrationStop",
+      "pluginStop",
+    ]) {
+      const producerStopAt = authorityStop.indexOf(producerStop);
+      expect(producerStopAt).toBeGreaterThan(-1);
+      expect(producerStopAt).toBeLessThan(closeAuthorityAt);
+    }
   });
 
   it("admits imports through stale-sensitive scheduling without holding the native dialog", () => {
