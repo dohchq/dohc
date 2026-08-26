@@ -9337,6 +9337,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
     let draft = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "crashed draft");
     dohc_engine_collab::record_local_update_creating_marker(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &key,
         Some("notes/crashed.md"),
         dohc_engine_collab::ContentKind::Plaintext,
@@ -12621,8 +12622,15 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
     )
     .expect("local-only marker");
     let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
-    dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
-        .expect("local row");
+    dohc_engine_collab::record_local_update(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &local_update,
+        &NoFaults,
+        1_460,
+    )
+    .expect("local row");
     // A lineage the client seeded from a captured head (#815). The
     // replacement below must clear this witness — the winning base holds
     // content the file does not, and a surviving stamp would feed the
@@ -12742,8 +12750,15 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
     )
     .expect("local-only marker");
     let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
-    dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
-        .expect("local row");
+    dohc_engine_collab::record_local_update(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &local_update,
+        &NoFaults,
+        1_460,
+    )
+    .expect("local row");
     // Same witness pin as the pulled-base twin (#815): the deferred drain's
     // replacement must clear the seed source with the rows it described.
     engine

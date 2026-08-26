@@ -93,7 +93,7 @@ use crate::{CollabError, Ydoc};
 /// that changes the KIND or the PAYLOAD at an already-known clock is rejected.
 /// No honest peer ever redefines a clock it (or its dependency) has already
 /// used, so a mismatch can only be hostile/corrupt input.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ClockIdentity {
     /// A single UTF-16 code unit of a live `String` content block — the
     /// original surrogate/FFFD-adjacent risk class, kept as the string case of
@@ -107,7 +107,12 @@ enum ClockIdentity {
     Typed { kind: u8, payload: String },
 }
 
-#[derive(Default)]
+/// Derives `PartialEq`/`Debug` for the doc cache's differential check
+/// (`doc_cache.rs`): two byte-replay-equivalent documents must present the
+/// identical canonical structure — the exact thing the gate consumes — even
+/// though their raw re-encodes can differ (yrs `Any::Map` is HashMap-backed,
+/// so map-key ORDER in a re-encode is nondeterministic per doc instance).
+#[derive(Debug, Default, PartialEq)]
 struct WireStructure {
     unsafe_boundaries: BTreeSet<ID>,
     insertion_boundaries: Vec<ID>,
@@ -883,6 +888,11 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
         normalize_ranges(ranges);
     }
     Ok(structure)
+}
+
+/// Compare the canonical wire structure that the replay-parity gate consumes.
+pub(crate) fn structurally_equal_v1(left: &[u8], right: &[u8]) -> Result<bool, CollabError> {
+    Ok(scan_v1(left)? == scan_v1(right)?)
 }
 
 fn scan_item(

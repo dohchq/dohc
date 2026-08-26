@@ -37,8 +37,8 @@ use crate::search::{
 use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
-    LineageClaimStatus, Projection, Regime, SceneAsset, Ydoc, encode_scene_asset_record,
-    encode_scene_asset_records, import_portable_scene,
+    LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
+    encode_scene_asset_record, encode_scene_asset_records, import_portable_scene,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -6954,6 +6954,12 @@ fn worker_main(
     }
     drop(startup_tx);
 
+    // The writer thread's cache of live Y.Docs (PR1 of the doc-cache design):
+    // serves the replay-parity gate base on the LOCAL append path only. It
+    // lives and dies with this thread — exactly the single-writer scope its
+    // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
+    let mut doc_cache = WriterDocCache::new();
+
     // Blocking recv on the tokio channel keeps the SQLite work on THIS
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
@@ -6992,13 +6998,15 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_write_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_write_on_store(
+                        &mut store,
+                        &input,
+                        root_dir.as_deref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedBinaryWrite {
@@ -7009,14 +7017,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_binary_write_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_binary_write_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRename {
@@ -7027,14 +7037,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_rename_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_rename_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextDelete {
@@ -7045,14 +7057,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_delete_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_delete_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRollback {
@@ -7063,14 +7077,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_rollback_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_rollback_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextCompare { input, reply } => {
@@ -7087,14 +7103,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = versioned_text_merge_on_store(
-                    &mut store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    versioned_text_merge_on_store(
+                        &mut store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::CompareVersionFilesPage {
@@ -7124,14 +7142,16 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = capture_ingest_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_ingest_on_store(
+                        &mut store,
+                        &input,
+                        root_dir.as_deref(),
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::CaptureIngestBinary {
@@ -7141,13 +7161,15 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = capture_ingest_binary_on_store(
-                    &mut store,
-                    &input,
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_ingest_binary_on_store(
+                        &mut store,
+                        &input,
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::CaptureSecret {
@@ -7687,15 +7709,17 @@ fn worker_main(
                 token,
                 reply,
             } => {
-                let outcome = capture_retire_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    self_writes.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_retire_on_store(
+                        &mut store,
+                        &input,
+                        root_dir.as_deref(),
+                        self_writes.as_deref(),
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
                 let _ = reply.send(outcome);
             }
             Command::VersionedTextRead {
@@ -7739,6 +7763,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_open_state_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &workspace_id,
                     now_ms,
                     drain_deferred,
@@ -7827,6 +7852,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_record_update_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &key,
                     &path,
                     content_kind,
@@ -7897,6 +7923,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_close_session_on_store(
                     &mut store,
+                    &mut doc_cache,
                     &key,
                     materialization.as_ref(),
                     now_ms,
@@ -7921,6 +7948,9 @@ fn worker_main(
                     )
                     .map_err(RuntimeError::from)
                 };
+                // Recovery repair rewrites lineage state (probe-covered; reset
+                // hooks stay unconditional).
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::MaterializeReplayPending {
@@ -8055,6 +8085,10 @@ fn worker_main(
                     faults.as_ref(),
                     &token,
                 );
+                // Resolution can replace or archive a lineage; the tuple probe
+                // already misses on every such outcome (the claim id changes or
+                // the marker is deleted), but the reset hooks are unconditional.
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::ConflictApplyReplicated {
@@ -8081,6 +8115,9 @@ fn worker_main(
                         outcome => outcome.map_err(RuntimeError::from),
                     }
                 };
+                // A replicated conflict envelope can replace or archive a
+                // lineage (probe-covered; reset hooks stay unconditional).
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::ChatChannelCreate {
@@ -9174,6 +9211,9 @@ fn worker_main(
                 } else {
                     execute_relay_operation(&mut store, transport, operation, &leases)
                 };
+                // A pull can claim, replace, or advance lineages behind the
+                // local path (probe-covered; reset hooks stay unconditional).
+                doc_cache.clear();
                 let _ = reply.send(outcome);
             }
             Command::Close => {
@@ -9189,6 +9229,17 @@ fn worker_main(
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
     drop(store);
+}
+
+/// Local file mutations can rewrite or retire a Y.Doc lineage inside their
+/// transaction. Clear before entry so a committed crash cannot preserve an
+/// entry across a probe-invisible reset. A rollback only loses cache warmth.
+fn with_local_file_mutation_cache_reset<T>(
+    doc_cache: &mut WriterDocCache,
+    mutation: impl FnOnce() -> T,
+) -> T {
+    doc_cache.clear();
+    mutation()
 }
 
 fn reconcile_scene_asset_materialization_conflicts(
@@ -9533,8 +9584,10 @@ fn project_ydoc_on_store(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_scene_from_artifact_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     path: &str,
     artifact: &str,
@@ -9585,6 +9638,7 @@ fn seed_scene_from_artifact_on_store(
     let mut created_moment_ids: Vec<String> = Vec::new();
     let outcome = dohc_engine_collab::record_local_update_creating_marker_guarded(
         store,
+        doc_cache,
         key,
         Some(path),
         ContentKind::Scene,
@@ -9677,6 +9731,7 @@ fn seed_scene_from_artifact_on_store(
 #[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     workspace_id: &str,
     now_ms: i64,
     drain_deferred: bool,
@@ -9750,6 +9805,9 @@ fn ydoc_open_state_on_store(
             .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::LocalOnly)
         && dohc_engine_collab::read_last_settled_sha(store, &key)?.is_some()
     {
+        // Invalidate before the reset. A committed crash returns before the
+        // actor can run any post-transaction hook.
+        doc_cache.remove(&key);
         let cleared = store.write_with(&NoFaults, |tx| {
             tx.execute(
                 "DELETE FROM ydoc_updates                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
@@ -9794,6 +9852,8 @@ fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
+        // A full drain may replace the lineage, so eviction must precede it.
+        doc_cache.remove(&key);
         drain_deferred_ydoc_for_local_rpc(store, &key, &NoFaults)?;
     }
     // An open sync conflict on this object freezes the OPEN as well as the
@@ -9818,6 +9878,12 @@ fn ydoc_open_state_on_store(
             reason: "ydoc-conflict-open",
         }
         .into());
+    }
+    // A post-lease open starts a live session on this doc: prefer keeping its
+    // cache entry resident (eviction order only; a leaked pin never affects
+    // correctness).
+    if drain_deferred && expected_key_matches {
+        doc_cache.pin(&key);
     }
     let mut persisted = dohc_engine_collab::load_persisted(store, &key)?;
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
@@ -9844,6 +9910,7 @@ fn ydoc_open_state_on_store(
     {
         seed_materialization_jobs = seed_scene_from_artifact_on_store(
             store,
+            doc_cache,
             &key,
             path,
             &artifact.text,
@@ -9977,6 +10044,7 @@ fn ydoc_open_state_on_store(
 #[allow(clippy::too_many_arguments)]
 fn ydoc_record_update_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     path: &str,
     content_kind: ContentKind,
@@ -10014,6 +10082,7 @@ fn ydoc_record_update_on_store(
     let journal_kind = content_kind;
     match dohc_engine_collab::record_local_update_creating_marker_guarded_for_lineage(
         store,
+        doc_cache,
         key,
         Some(path),
         content_kind,
@@ -10734,6 +10803,7 @@ fn ydoc_resync_on_store(
 
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
     key: &DocKey,
     materialization: Option<&YdocCloseMaterialization>,
     now_ms: i64,
@@ -10743,6 +10813,12 @@ fn ydoc_close_session_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    // Close is a lineage reset (the local-only branch prunes to the bare
+    // marker — a head-rewind the cache's tuple probe cannot see if the same
+    // head coordinates are later re-appended). Remove BEFORE any branch so
+    // every outcome, including a mid-close crash, leaves no entry behind.
+    doc_cache.remove(key);
+    doc_cache.unpin(key);
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);
     };
@@ -13036,6 +13112,68 @@ fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
 }
 
 #[cfg(test)]
+mod doc_cache_reset_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+
+    #[test]
+    fn local_file_retire_removes_a_poisoned_warm_entry_immediately() {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
+            .expect("open engine store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("ensure main version");
+        let key = DocKey::new("workspace", "main", "document").expect("document key");
+        let update = Ydoc::wire().plaintext_insert(0, "cached");
+        let mut cache = WriterDocCache::new();
+        let appended = dohc_engine_collab::record_local_update_creating_marker_guarded(
+            &mut store,
+            &mut cache,
+            &key,
+            Some("document.md"),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &update,
+            None,
+            true,
+            false,
+            None,
+            &NoFaults,
+            2,
+            |_tx, _outcome| Ok(()),
+        )
+        .expect("append update");
+        assert!(matches!(appended, TxnOutcome::Committed(_)));
+        assert!(cache.contains_for_test(&key), "the entry must be warm");
+        cache.poison_doc_for_test(&key, Ydoc::wire());
+
+        let retired = with_local_file_mutation_cache_reset(&mut cache, || {
+            store.write_with(&NoFaults, |tx| -> Result<(), RuntimeError> {
+                dohc_engine_sync::retire_ydoc_lineage_in_tx(
+                    tx,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                )
+                .map_err(RuntimeError::from)
+            })
+        })
+        .expect("retire lineage");
+        assert!(matches!(retired, TxnOutcome::Committed(())));
+        assert!(
+            !cache.contains_for_test(&key),
+            "retire must remove the entry before any healing append"
+        );
+        assert!(
+            dohc_engine_collab::read_marker(&store, &key)
+                .expect("read retired marker")
+                .is_none(),
+            "the lineage must be retired"
+        );
+    }
+}
+
+#[cfg(test)]
 mod scene_seed_transaction_tests {
     use super::*;
     use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -13212,6 +13350,7 @@ mod scene_seed_transaction_tests {
 
         let result = seed_scene_from_artifact_on_store(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             "drawing.excalidraw",
             &artifact,
@@ -13285,6 +13424,7 @@ mod scene_seed_transaction_tests {
         .to_string();
         let jobs = seed_scene_from_artifact_on_store(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             "drawing.excalidraw",
             &artifact,
@@ -13331,6 +13471,7 @@ mod scene_seed_transaction_tests {
         .to_string();
         let jobs = seed_scene_from_artifact_on_store(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             "drawing.excalidraw",
             &artifact,

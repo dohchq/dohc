@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 pub mod canonical_json;
+mod doc_cache;
 pub mod durable;
 pub mod error;
 pub mod lease;
@@ -33,6 +34,7 @@ pub mod scene;
 mod scene_lifecycle;
 pub mod ydoc;
 
+pub use doc_cache::{CacheStats, WriterDocCache};
 pub use durable::{
     archive_active_lineage_in_tx, claim_base, claim_base_at_relay, claim_base_at_relay_in_tx,
     claim_base_in_tx, close_session, encode_origination_base_in_tx, ensure_marker,

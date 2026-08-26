@@ -7,6 +7,8 @@ mod common;
 
 use common::*;
 use dohc_engine_collab::ContentKind;
+#[cfg(feature = "fault-injection")]
+use dohc_engine_collab::WriterDocCache;
 use dohc_engine_collab::{
     apply_remote_update, claim_base, claim_base_at_relay, close_session, ensure_marker,
     fresh_successor_base, load_persisted, maybe_compact, read_marker, record_base_coordinate,
@@ -240,6 +242,7 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
     let first = committed(
         record_local_update_creating_marker_guarded(
             &mut ts.store,
+            &mut ts.cache,
             &key,
             Some(FIRST_PATH),
             ContentKind::Plaintext,
@@ -261,6 +264,7 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
     let replay = committed(
         record_local_update_creating_marker_guarded(
             &mut ts.store,
+            &mut ts.cache,
             &key,
             Some(FIRST_PATH),
             ContentKind::Plaintext,
@@ -285,6 +289,7 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
 
     let error = record_local_update_creating_marker_guarded(
         &mut ts.store,
+        &mut ts.cache,
         &key,
         Some(OTHER_PATH),
         ContentKind::Plaintext,
@@ -338,6 +343,7 @@ fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
 
     let error = record_local_update_creating_marker_guarded_for_lineage(
         &mut ts.store,
+        &mut ts.cache,
         &key,
         Some("notes/stale-session.md"),
         ContentKind::Plaintext,
@@ -404,7 +410,10 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     );
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "mine");
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_000).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_000)
+            .expect("rec"),
+    );
     let settle_outcome =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
     // The settle's OWN job must land before this test's cross-workspace
@@ -492,7 +501,17 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     );
     let doc2 = Ydoc::wire();
     let delta2 = doc2.plaintext_insert(0, "mine");
-    committed(record_local_update(&mut ts2.store, &key2, &delta2, &NoFaults, 1_000).expect("rec"));
+    committed(
+        record_local_update(
+            &mut ts2.store,
+            &mut ts2.cache,
+            &key2,
+            &delta2,
+            &NoFaults,
+            1_000,
+        )
+        .expect("rec"),
+    );
     let settle_outcome2 =
         committed(settle(&mut ts2.store, &key2, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
     // Land THIS settle's own job too — the seeded job below must be the
@@ -592,7 +611,10 @@ fn assert_pending_job_of_kind_blocks_close(job_id_prefix: &str) {
     );
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "mine");
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_000).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_000)
+            .expect("rec"),
+    );
     let settle_outcome =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
     land_settle_job(&mut ts.store, &settle_outcome);
@@ -688,7 +710,10 @@ fn local_only_close_prunes_the_cache() {
     let doc = Ydoc::wire();
     for i in 0..3 {
         let d = doc.plaintext_insert((i * 2) as u32, "ab");
-        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_000).expect("rec"));
+        committed(
+            record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_000)
+                .expect("rec"),
+        );
     }
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 3);
 
@@ -820,7 +845,10 @@ fn a_captured_head_lets_a_never_settled_local_close_prune() {
     );
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
+            .expect("rec"),
+    );
     seed_head(&mut ts.store, &key, "what the user typed", None);
 
     let out = committed(
@@ -855,7 +883,10 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
     );
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
+            .expect("rec"),
+    );
     seed_head(&mut ts.store, &key, "something else entirely", None);
 
     assert!(
@@ -911,7 +942,10 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
     );
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
+            .expect("rec"),
+    );
     seed_head(&mut ts.store, &key, "what the user typed", Some("conflict"));
 
     assert!(
@@ -947,7 +981,15 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
     let doc2 = Ydoc::wire();
     let delta2 = doc2.plaintext_insert(0, "what the user typed");
     committed(
-        record_local_update(&mut settled.store, &key2, &delta2, &NoFaults, 1_100).expect("rec"),
+        record_local_update(
+            &mut settled.store,
+            &mut settled.cache,
+            &key2,
+            &delta2,
+            &NoFaults,
+            1_100,
+        )
+        .expect("rec"),
     );
     seed_head(
         &mut settled.store,
@@ -997,7 +1039,10 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
     );
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
+            .expect("rec"),
+    );
 
     // The earlier engine settle: a completed job for this exact content and
     // path — the leftover row the old heuristic tripped on.
@@ -1048,7 +1093,10 @@ fn a_binary_head_refuses_the_close_by_name_instead_of_failing_internally() {
     );
     let doc = Ydoc::wire();
     let delta = doc.plaintext_insert(0, "what the user typed");
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
+            .expect("rec"),
+    );
     ts.store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1099,7 +1147,10 @@ fn replicated_close_never_prunes_the_lineage() {
         .expect("base"),
     );
     assert!(matches!(claim, ClaimOutcome::Claimed { .. }));
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
+            .expect("rec"),
+    );
 
     let before = load_persisted(&ts.store, &key)
         .expect("load")
@@ -1213,7 +1264,10 @@ fn append_self_bounds_the_log_at_threshold() {
     let doc = Ydoc::wire();
     for i in 0..(threshold + 1) {
         let d = doc.plaintext_insert(i as u32, "x");
-        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_000 + i).expect("rec"));
+        committed(
+            record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_000 + i)
+                .expect("rec"),
+        );
     }
     // The log folded itself: far fewer than threshold+1 update rows remain, and a
     // snapshot exists.
@@ -1266,7 +1320,17 @@ fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
     );
     let doc = Ydoc::wire();
     let update = doc.plaintext_insert(0, "x");
-    committed(record_local_update(&mut ts.store, &key, &update, &NoFaults, 1_001).expect("rec"));
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &update,
+            &NoFaults,
+            1_001,
+        )
+        .expect("rec"),
+    );
 
     // Force a compaction: pending -> 0, a snapshot now covers the lineage.
     let compacted = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002).expect("compact");
@@ -1345,6 +1409,7 @@ fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
         committed(
             record_local_update(
                 &mut ts.store,
+                &mut ts.cache,
                 &key,
                 &update,
                 &NoFaults,
@@ -2282,8 +2347,10 @@ fn local_edit_on_replicated_lineage_requests_broadcast() {
         )
         .expect("base"),
     );
-    let out =
-        committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    let out = committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &delta, &NoFaults, 1_100)
+            .expect("rec"),
+    );
     assert!(
         out.emit_outbound,
         "a new local edit on a replicated lineage broadcasts"
@@ -2311,8 +2378,9 @@ fn replicated_edit_before_base_is_not_broadcast() {
     );
     let doc = Ydoc::wire();
     let d = doc.plaintext_insert(0, "premature");
-    let out =
-        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_100).expect("rec"));
+    let out = committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_100).expect("rec"),
+    );
     assert!(
         !out.emit_outbound,
         "no broadcast before the base is claimed"
@@ -2341,7 +2409,10 @@ fn resettle_of_edited_doc_expects_prior_content_preimage() {
     );
     let doc = Ydoc::wire();
     let d1 = doc.plaintext_insert(0, "first");
-    committed(record_local_update(&mut ts.store, &key, &d1, &NoFaults, 1_000).expect("rec1"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &d1, &NoFaults, 1_000)
+            .expect("rec1"),
+    );
     let s1 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 5_000).expect("settle1"));
     let j1 = ts
         .store
@@ -2356,7 +2427,10 @@ fn resettle_of_edited_doc_expects_prior_content_preimage() {
 
     // Edit and re-settle: the new job must expect the FIRST content as preimage.
     let d2 = doc.plaintext_insert(5, " second");
-    committed(record_local_update(&mut ts.store, &key, &d2, &NoFaults, 6_000).expect("rec2"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &d2, &NoFaults, 6_000)
+            .expect("rec2"),
+    );
     let s2 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 7_000).expect("settle2"));
     assert!(!s2.deduped, "changed content is a new job");
     let j2 = ts
@@ -2396,7 +2470,14 @@ fn truncated_update_is_rejected_and_never_journaled() {
     let mut rejected = 0;
     for cut in 1..good.len() {
         let truncated = &good[..cut];
-        match record_local_update(&mut ts.store, &key, truncated, &NoFaults, 1_000) {
+        match record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            truncated,
+            &NoFaults,
+            1_000,
+        ) {
             Err(_) => rejected += 1,
             Ok(TxnOutcome::Committed(app)) => {
                 // If yrs happened to accept a prefix as a valid (different)
@@ -2411,12 +2492,15 @@ fn truncated_update_is_rejected_and_never_journaled() {
     assert!(rejected > 0, "truncated prefixes must be rejected");
     // The empty update is rejected too.
     assert!(matches!(
-        record_local_update(&mut ts.store, &key, &[], &NoFaults, 1_000),
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &[], &NoFaults, 1_000),
         Err(CollabError::EmptyUpdate)
     ));
     // The genuine update still lands cleanly afterward (rejection left no torn
     // state).
-    committed(record_local_update(&mut ts.store, &key, &good, &NoFaults, 1_000).expect("good"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &good, &NoFaults, 1_000)
+            .expect("good"),
+    );
     let persisted = load_persisted(&ts.store, &key).expect("load").expect("m");
     assert_eq!(
         persisted.doc.plaintext_string(),
@@ -2458,8 +2542,14 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         )
         .expect("marker"),
     );
-    let local_result =
-        record_local_update(&mut local.store, &local_key, &WITNESS, &NoFaults, 1_000);
+    let local_result = record_local_update(
+        &mut local.store,
+        &mut local.cache,
+        &local_key,
+        &WITNESS,
+        &NoFaults,
+        1_000,
+    );
     assert!(
         local_result.is_err(),
         "the witness must be rejected fail-closed on the local edit path, not journaled: {local_result:?}"
@@ -2608,8 +2698,15 @@ fn unknown_marker_content_kind_cannot_project_append_or_settle_as_richdoc() {
     let doc = Ydoc::wire();
     let first_update = doc.richdoc_append_paragraph("existing drawing-shaped state");
     committed(
-        record_local_update(&mut ts.store, &key, &first_update, &NoFaults, 1_100)
-            .expect("richdoc update"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &first_update,
+            &NoFaults,
+            1_100,
+        )
+        .expect("richdoc update"),
     );
     let rejected_update = doc.richdoc_append_paragraph("must not land");
 
@@ -2636,8 +2733,15 @@ fn unknown_marker_content_kind_cannot_project_append_or_settle_as_richdoc() {
         load_persisted(&ts.store, &key).expect_err("projection source must refuse"),
     );
     assert_unknown_content_kind(
-        record_local_update(&mut ts.store, &key, &rejected_update, &NoFaults, 1_200)
-            .expect_err("append must refuse"),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.cache,
+            &key,
+            &rejected_update,
+            &NoFaults,
+            1_200,
+        )
+        .expect_err("append must refuse"),
     );
     assert_unknown_content_kind(
         settle(
@@ -2694,7 +2798,9 @@ fn settle_projects_and_enqueues_an_idempotent_job() {
     );
     let doc = Ydoc::wire();
     let d = doc.plaintext_insert(0, "the settled markdown body");
-    committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_000).expect("rec"));
+    committed(
+        record_local_update(&mut ts.store, &mut ts.cache, &key, &d, &NoFaults, 1_000).expect("rec"),
+    );
 
     let first =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 5_000).expect("settle"));
@@ -2748,7 +2854,15 @@ mod crash {
             let update = doc.plaintext_insert(0, "committed-but-unacked");
             // Kill after the durable commit but before the ack.
             let faults = OneShotCrash::at(FaultPoint::StorageAfterCommitBeforeAck);
-            let out = record_local_update(&mut store, &key, &update, &faults, 1_000).expect("rec");
+            let out = record_local_update(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &key,
+                &update,
+                &faults,
+                1_000,
+            )
+            .expect("rec");
             assert_eq!(out, TxnOutcome::Crashed { committed: true });
             // Reopen (dropping `store` closes the connection; the file stays).
             drop(store);
@@ -2759,8 +2873,15 @@ mod crash {
                 "append durable after reopen"
             );
             // The retry is exactly-once (content-addressed dedup), never a dup.
-            let retry =
-                record_local_update(&mut store, &key, &update, &NoFaults, 1_000).expect("retry");
+            let retry = record_local_update(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &key,
+                &update,
+                &NoFaults,
+                1_000,
+            )
+            .expect("retry");
             assert!(
                 matches!(retry, TxnOutcome::Committed(a) if a.deduped),
                 "retry deduped"
@@ -2794,13 +2915,28 @@ mod crash {
             let doc = Ydoc::wire();
             let update = doc.plaintext_insert(0, "rolled-back");
             let faults = OneShotCrash::at(FaultPoint::StorageBeforePersist);
-            let out = record_local_update(&mut store, &key, &update, &faults, 1_000).expect("rec");
+            let out = record_local_update(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &key,
+                &update,
+                &faults,
+                1_000,
+            )
+            .expect("rec");
             assert_eq!(out, TxnOutcome::Crashed { committed: false });
             drop(store);
             let mut store = reopen(&dir);
             assert_eq!(count(&store, "ydoc_updates", &key), 0, "nothing journaled");
-            let retry =
-                record_local_update(&mut store, &key, &update, &NoFaults, 1_000).expect("retry");
+            let retry = record_local_update(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &key,
+                &update,
+                &NoFaults,
+                1_000,
+            )
+            .expect("retry");
             assert!(matches!(retry, TxnOutcome::Committed(a) if !a.deduped));
             assert_eq!(count(&store, "ydoc_updates", &key), 1);
         }
@@ -2826,7 +2962,17 @@ mod crash {
             );
             let doc = Ydoc::wire();
             let d = doc.plaintext_insert(0, "settle-once");
-            committed(record_local_update(&mut store, &key, &d, &NoFaults, 1_000).expect("rec"));
+            committed(
+                record_local_update(
+                    &mut store,
+                    &mut WriterDocCache::new(),
+                    &key,
+                    &d,
+                    &NoFaults,
+                    1_000,
+                )
+                .expect("rec"),
+            );
             let faults = OneShotCrash::at(FaultPoint::StorageAfterCommitBeforeAck);
             let out = settle(&mut store, &key, "n.md", &faults, 5_000).expect("settle");
             assert_eq!(out, TxnOutcome::Crashed { committed: true });
