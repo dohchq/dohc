@@ -63,6 +63,8 @@ const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 const COMPARE_PAGE_SIZE = 200;
 const MAX_MERGE_LINES = 2_000;
+const HISTORY_PROTECTED_MOMENT_LIMIT = 500;
+const HISTORY_PROTECTED_BYTE_BUDGET = 256 * 1024;
 // Mirrors MAX_METADATA_FIELD_BYTES in crates/dohc-workspace-engine/src/lib.rs.
 const MAX_METADATA_FIELD_BYTES = 16 * 1024;
 
@@ -2687,7 +2689,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       textMomentPage.nextBeforeMomentOrder === null
         ? Number.NEGATIVE_INFINITY
         : (textMoments.at(-1)?.recordedAtMs ?? Number.NEGATIVE_INFINITY);
-    const protectedMoments = [...state.secretMoments.values()]
+    const protectedMomentsInWindow = [...state.secretMoments.values()]
       .map((moment) => moment.wire)
       .filter(
         (moment) =>
@@ -2701,10 +2703,26 @@ export class VersionedLoopbackEngine implements EngineTransport {
           right.momentOrder - left.momentOrder ||
           left.id.localeCompare(right.id),
       );
+    const rowLimited = protectedMomentsInWindow.slice(
+      0,
+      HISTORY_PROTECTED_MOMENT_LIMIT,
+    );
+    let included = 0;
+    let remaining = HISTORY_PROTECTED_BYTE_BUDGET;
+    for (const moment of rowLimited) {
+      const bytes = utf8Length(JSON.stringify(moment));
+      if (included > 0 && bytes > remaining) break;
+      included += 1;
+      remaining -= bytes;
+    }
+    const protectedMoments = rowLimited.slice(0, included);
     return {
       activeVersion: this.versionJson(this.version(state, activeVersionId)),
       textMomentPage,
       protectedMoments,
+      protectedTruncated:
+        protectedMomentsInWindow.length > rowLimited.length ||
+        protectedMoments.length < rowLimited.length,
     };
   }
 

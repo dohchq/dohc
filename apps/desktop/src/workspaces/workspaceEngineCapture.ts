@@ -273,6 +273,7 @@ export interface WorkspaceEngineMomentPage {
   nextBeforeMomentOrder: number | null;
   latestMomentOrder: number;
   activeVersionId: string;
+  protectedTruncated: boolean;
 }
 
 // The diff page's payload: a text moment carries its full before/after
@@ -5533,6 +5534,7 @@ export function createWorkspaceEngineCapture(
         nextBeforeMomentOrder: page.nextBeforeMomentOrder,
         latestMomentOrder: page.latestMomentOrder,
         activeVersionId,
+        protectedTruncated: history.protectedTruncated,
       };
     },
 

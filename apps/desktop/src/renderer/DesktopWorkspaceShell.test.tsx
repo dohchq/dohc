@@ -692,6 +692,7 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
         nextBeforeMomentOrder: null,
         latestMomentOrder: 0,
         activeVersionId: "main",
+        protectedTruncated: false,
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
@@ -9783,8 +9784,26 @@ describe("history page", () => {
       nextBeforeMomentOrder: null,
       latestMomentOrder: 1,
       activeVersionId,
+      protectedTruncated: false,
     };
   }
+
+  it("shows the protected truncation marker from the history page", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn(async () => ({
+      ...historyPage([historyMoment("m-1", "Wrote the plan")]),
+      protectedTruncated: true,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await settleEngineOnRead(bridge);
+
+    await user.click(screen.getByTestId("activity-history"));
+
+    expect(
+      await screen.findAllByText("Some protected activity in this range is not shown."),
+    ).toHaveLength(1);
+  });
 
   it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();

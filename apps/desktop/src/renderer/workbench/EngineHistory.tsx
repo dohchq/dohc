@@ -326,6 +326,7 @@ export function EngineHistoryView(props: {
   moments: EngineMomentRecord[];
   hasMore: boolean;
   loadingMore: boolean;
+  protectedTruncated: boolean;
   onLoadMore: () => void;
   onOpenMoment: (momentId: string) => void;
 }) {
@@ -388,6 +389,11 @@ export function EngineHistoryView(props: {
         data-testid="engine-history-list"
         className="m-0 min-h-0 flex-1 list-none overflow-y-auto overflow-x-hidden p-0"
       >
+        {props.protectedTruncated ? (
+          <li className="border-b border-line px-3 py-2 text-[11px] text-muted">
+            Some protected activity in this range is not shown.
+          </li>
+        ) : null}
         {filteredGroups.map((group, index) => {
           const day = formatDay(group.recordedAtMs);
           const previousDayKey =

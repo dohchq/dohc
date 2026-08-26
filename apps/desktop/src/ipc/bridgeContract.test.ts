@@ -2108,8 +2108,10 @@ describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
       nextBeforeMomentOrder: null,
       latestMomentOrder: 7,
       activeVersionId: "main",
+      protectedTruncated: true,
     });
     expect(page.moments[0].summary).toBe("Reconciled offline edits");
+    expect(page.protectedTruncated).toBe(true);
     expect(
       EngineMomentDetailRecord.parse({
         id: "moment_2",

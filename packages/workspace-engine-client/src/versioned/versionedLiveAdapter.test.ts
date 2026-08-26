@@ -313,6 +313,7 @@ describe("VersionedLiveAdapter", () => {
               latestMomentOrder: -1,
             },
             protectedMoments: [],
+            protectedTruncated: true,
           },
         };
       },
@@ -331,6 +332,7 @@ describe("VersionedLiveAdapter", () => {
       activeVersion: { id: "main" },
       textMomentPage: { moments: [] },
       protectedMoments: [],
+      protectedTruncated: true,
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({

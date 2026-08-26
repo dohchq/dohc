@@ -145,6 +145,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     activeVersion: VersionRecord;
     textMomentPage: Awaited<ReturnType<VersionedTextStore["listMoments"]>>;
     protectedMoments: SecretFileMoment[];
+    protectedTruncated: boolean;
   }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
@@ -1030,6 +1031,7 @@ export function createCaptureLiveStores(
           ),
         },
         protectedMoments: page.protectedMoments.map(secretMomentFromWire),
+        protectedTruncated: page.protectedTruncated,
       };
     },
 

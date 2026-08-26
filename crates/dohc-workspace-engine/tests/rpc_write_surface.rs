@@ -989,6 +989,7 @@ async fn aggregate_history_page_matches_the_individual_reads_on_one_stable_snaps
     assert_eq!(aggregate["activeVersion"], active);
     assert_eq!(aggregate["textMomentPage"], text_page);
     assert_eq!(aggregate["protectedMoments"], json!(expected_protected));
+    assert_eq!(aggregate["protectedTruncated"], false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1043,6 +1044,115 @@ async fn aggregate_history_page_preserves_the_existing_text_page_byte_cut() {
         "the fixture must cross the 256 KiB page budget"
     );
     assert!(old_page["nextBeforeMomentOrder"].is_number());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_history_page_truncates_protected_rows_instead_of_refusing() {
+    let (_scratch, transport, handle) = fixture("aggregate-history-protected-row-cut").await;
+    let workspace_id = "ws-rpcd-aggregate-history-protected-row-cut";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    for index in 0..501u64 {
+        call(
+            &transport,
+            &handle,
+            3 + index,
+            "secrets.write",
+            json!({
+                "workspaceId": workspace_id,
+                "versionId": "main",
+                "path": ".env",
+                "text": format!("TOKEN={index}"),
+                "origin": "api",
+                "momentId": format!("protected-row-{index}"),
+            }),
+        )
+        .await;
+    }
+
+    let aggregate = call(
+        &transport,
+        &handle,
+        504,
+        "history.page",
+        json!({ "workspaceId": workspace_id, "limit": 200 }),
+    )
+    .await;
+    let protected = aggregate["protectedMoments"]
+        .as_array()
+        .expect("protected moments");
+
+    assert_eq!(protected.len(), 500);
+    assert_eq!(
+        protected.first().expect("newest")["id"],
+        "protected-row-500"
+    );
+    assert_eq!(
+        protected.last().expect("oldest included")["id"],
+        "protected-row-1"
+    );
+    assert_eq!(aggregate["protectedTruncated"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_history_page_marks_a_protected_byte_budget_cut() {
+    let (_scratch, transport, handle) = fixture("aggregate-history-protected-byte-cut").await;
+    let workspace_id = "ws-rpcd-aggregate-history-protected-byte-cut";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let summary = "x".repeat(dohc_engine_domain::MAX_METADATA_FIELD_BYTES);
+    for index in 0..20u64 {
+        call(
+            &transport,
+            &handle,
+            3 + index,
+            "secrets.write",
+            json!({
+                "workspaceId": workspace_id,
+                "versionId": "main",
+                "path": ".env",
+                "text": format!("TOKEN={index}"),
+                "origin": "api",
+                "momentId": format!("protected-byte-{index}"),
+                "summary": summary,
+            }),
+        )
+        .await;
+    }
+
+    let aggregate = call(
+        &transport,
+        &handle,
+        23,
+        "history.page",
+        json!({ "workspaceId": workspace_id, "limit": 200 }),
+    )
+    .await;
+    let protected = aggregate["protectedMoments"]
+        .as_array()
+        .expect("protected moments");
+
+    assert!(!protected.is_empty());
+    assert!(
+        protected.len() < 20,
+        "the fixture must cross the 256 KiB page budget"
+    );
+    for (offset, moment) in protected.iter().enumerate() {
+        assert_eq!(moment["id"], format!("protected-byte-{}", 19 - offset));
+    }
+    assert_eq!(aggregate["protectedTruncated"], true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

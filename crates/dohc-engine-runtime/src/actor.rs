@@ -154,9 +154,9 @@ pub struct RollbackExecutionResult {
 pub struct HistoryPageRead {
     pub active_version: VersionRecord,
     pub text_moment_page: MomentPage,
-    /// A limit+1 probe. The protocol layer applies the final wire-byte cut and
-    /// refuses the response if every returned row remains inside that cut's
-    /// time window.
+    /// A limit+1 probe. The protocol layer applies the row and wire-byte cuts
+    /// and reports whether either cut omitted protected activity in the time
+    /// window.
     pub protected_moments: Vec<SecretMomentRecord>,
     pub upper_recorded_at_ms: Option<i64>,
 }

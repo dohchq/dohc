@@ -1652,6 +1652,7 @@ describe("createCaptureLiveStores", () => {
               protected: true,
             },
           ],
+          protectedTruncated: true,
         },
       };
     });
@@ -1678,6 +1679,7 @@ describe("createCaptureLiveStores", () => {
           protected: true,
         },
       ],
+      protectedTruncated: true,
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.params).toEqual({

@@ -4434,28 +4434,19 @@ impl EngineService {
                         .is_none_or(|upper| moment.recorded_at_ms <= upper)
             })
             .collect();
-        if protected_moments.len() > HISTORY_PROTECTED_MOMENT_LIMIT {
-            return Err(wire(
-                ErrorCode::LimitExceeded,
-                "protected history window exceeds the row limit",
-            ));
-        }
+        let row_truncated = protected_moments.len() > HISTORY_PROTECTED_MOMENT_LIMIT;
         let protected_rows: Vec<Value> = protected_moments
             .into_iter()
+            .take(HISTORY_PROTECTED_MOMENT_LIMIT)
             .map(secret_moment_json)
             .collect();
-        if byte_budget_cut_serialized(&protected_rows, MOMENTS_PAGE_BYTE_BUDGET)
-            < protected_rows.len()
-        {
-            return Err(wire(
-                ErrorCode::LimitExceeded,
-                "protected history window exceeds the page byte budget",
-            ));
-        }
+        let included = byte_budget_cut_serialized(&protected_rows, MOMENTS_PAGE_BYTE_BUDGET);
+        let byte_truncated = included < protected_rows.len();
         Ok(json!({
             "activeVersion": version_record_json(&read.active_version),
             "textMomentPage": text_page.into_json(),
-            "protectedMoments": protected_rows,
+            "protectedMoments": &protected_rows[..included],
+            "protectedTruncated": row_truncated || byte_truncated,
         }))
     }
 

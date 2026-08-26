@@ -643,6 +643,7 @@ export type HistoryPageResult = JsonObject & {
   activeVersion: VersionRecord;
   textMomentPage: MomentsListResult;
   protectedMoments: SecretMomentRecord[];
+  protectedTruncated: boolean;
 };
 export type SearchEnsureIndexResult = JsonObject;
 
@@ -1106,6 +1107,7 @@ const HistoryPageResultSchema = mutableStruct({
   activeVersion: VersionRecordSchema,
   textMomentPage: MomentsListResultSchema,
   protectedMoments: Schema.mutable(Schema.Array(SecretMomentRecordSchema)),
+  protectedTruncated: Schema.Boolean,
 });
 const TextListResultSchema = mutableStruct({
   files: Schema.mutable(
