@@ -242,6 +242,40 @@ describe("AgentIntegration", () => {
     });
   });
 
+  it("marks a persisted run failed when its attachment retires before attribution", async () => {
+    await withWorkspace(async ({ root }) => {
+      const state = new AgentIntegrationState();
+      const setAgentRun = vi.fn();
+      const release = vi.fn();
+      const integration = createPhysicalAgentIntegration({
+        workspaceIds: () => ["ws"],
+        acquire: () => ({
+          attachmentId: Symbol.for("test-retired-after-persist"),
+          workspaceId: "ws",
+          rootPath: root,
+          state,
+          assertCurrent: () => {
+            throw new Error("retired workspace authority");
+          },
+          setAgentRun,
+          release,
+        }),
+      });
+
+      await expect(integration.startAgentRun("ws")).rejects.toThrow(
+        "retired workspace authority",
+      );
+      expect(setAgentRun).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+      const runs = JSON.parse(
+        await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"),
+      ) as Array<{ status: string; endedAt?: number }>;
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ status: "failed" });
+      expect(runs[0]?.endedAt).toEqual(expect.any(Number));
+    });
+  });
+
   it("cleans later workspaces when an earlier shutdown cleanup fails", async () => {
     const firstFailure = new Error("first workspace slot refused cleanup");
     const firstState = new AgentIntegrationState();

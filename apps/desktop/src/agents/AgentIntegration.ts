@@ -165,8 +165,8 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
         runs.push(record);
         await writeRuns(root, runs);
       });
-      authority.assertCurrent();
       try {
+        authority.assertCurrent();
         await authority.setAgentRun({
           agentId: record.agentId,
           onBehalfOf: record.onBehalfOf,
