@@ -188,6 +188,12 @@ export function createWorkspaceAuthorityOwner<
   }
 
   return {
+    workspaceIds(): string[] {
+      return [...slots.entries()]
+        .filter(([, slot]) => slot.current !== null && !slot.current.retired)
+        .map(([workspaceId]) => workspaceId);
+    },
+
     acquire(workspaceId: string): WorkspaceAuthorityLease<Workspace, State> {
       return leaseRecord(currentRecord(workspaceId));
     },

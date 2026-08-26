@@ -168,6 +168,21 @@ describe("workspace authority owner", () => {
     expect(removeBinding).toHaveBeenCalledOnce();
   });
 
+  it("lists only attachments that still admit work", async () => {
+    const test = testOwner({
+      workspaceId: "workspace",
+      rootPath: "root",
+      label: "A",
+    });
+    const lease = test.owner.acquire("workspace");
+    expect(test.owner.workspaceIds()).toEqual(["workspace"]);
+
+    const retiring = test.owner.retireBinding(lease.binding, () => undefined);
+    expect(test.owner.workspaceIds()).toEqual([]);
+    lease.release();
+    await retiring;
+  });
+
   it("keeps a blocking tombstone when cleanup fails", async () => {
     let workspace: Workspace | null = {
       workspaceId: "workspace",

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { createTestScratch } from "./testTemp";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { startWorkspaceWatch } from "./workspaceWatcher";

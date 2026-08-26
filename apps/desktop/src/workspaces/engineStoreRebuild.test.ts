@@ -32,8 +32,8 @@ import {
 import { runInKeyedLane } from "../keyedLane";
 import {
   closeWorkspaceActivityAndRelay,
-  createWorkspaceActivity,
 } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
 

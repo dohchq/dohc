@@ -3,9 +3,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeWorkspaceActivityAndRelay,
-  createWorkspaceActivity,
+  createWorkspaceActivity as createPhysicalWorkspaceActivity,
+  WorkspaceActivityState,
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { captureForFlaggedWorkspace } from "./engineCaptureGate";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -49,6 +51,45 @@ function workspace(): CreatedWorkspace {
 // the engine capture can stamp settled batches with agent authorship while a
 // dohc-tracked run is active.
 describe("workspaceActivity capture hooks", () => {
+  it("keeps an old attachment close from stopping its successor", async () => {
+    const successorRoot = await createTestScratch("dohc-activity-successor-");
+    const oldCaptureStop = vi.fn(async () => undefined);
+    const successorCaptureStop = vi.fn(async () => undefined);
+    const activity = createPhysicalWorkspaceActivity(() => {}, {
+      captureFor: (candidate) => ({
+        shareView: false,
+        capture: {
+          start: vi.fn(),
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop:
+            candidate.rootPath === root
+              ? oldCaptureStop
+              : successorCaptureStop,
+        } as never,
+      }),
+    });
+    const oldState = new WorkspaceActivityState();
+    const successorState = new WorkspaceActivityState();
+    const oldWorkspace = workspace();
+    const successorWorkspace = {
+      ...oldWorkspace,
+      rootPath: successorRoot,
+    };
+    try {
+      await activity.open(oldWorkspace, oldState);
+      await activity.open(successorWorkspace, successorState);
+
+      await activity.close(oldWorkspace, oldState);
+
+      expect(oldCaptureStop).toHaveBeenCalledOnce();
+      expect(successorCaptureStop).not.toHaveBeenCalled();
+      expect(activity.isOpen(successorState)).toBe(true);
+    } finally {
+      await activity.stop(successorState);
+      await rm(successorRoot, { recursive: true, force: true });
+    }
+  });
+
   it("fires and contains the dormant Rust shadow observer only when supplied", async () => {
     const captureBatch = vi.fn();
     const onRustEngineShadowActivity = vi.fn(async () => {

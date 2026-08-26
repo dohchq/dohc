@@ -2,7 +2,12 @@ import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveAgentRun } from "../workspaces/workspaceWatcher";
-import { createAgentIntegration, type McpServerHandle } from "./AgentIntegration";
+import {
+  AgentIntegrationState,
+  createAgentIntegration as createPhysicalAgentIntegration,
+  type McpServerHandle,
+} from "./AgentIntegration";
+import { createInMemoryAgentIntegration as createAgentIntegration } from "./AgentIntegration.testSupport";
 import { createTestScratch } from "../workspaces/testTemp";
 
 async function withWorkspace<T>(
@@ -186,6 +191,46 @@ describe("AgentIntegration", () => {
         activeRun: null,
         lastRun: { status: "failed" },
       });
+    });
+  });
+
+  it("does not install an old run after the attachment changes mid-start", async () => {
+    await withWorkspace(async ({ root }) => {
+      const oldState = new AgentIntegrationState();
+      const successorState = new AgentIntegrationState();
+      let currentState = oldState;
+      const setStarted = Promise.withResolvers<void>();
+      const allowSettle = Promise.withResolvers<void>();
+      const integration = createPhysicalAgentIntegration({
+        workspaceIds: () => ["ws"],
+        acquire: () => {
+          const heldState = currentState;
+          return {
+            workspaceId: "ws",
+            rootPath: root,
+            state: heldState,
+            assertCurrent: () => {
+              if (currentState !== heldState) {
+                throw new Error("retired workspace authority");
+              }
+            },
+            setAgentRun: async () => {
+              setStarted.resolve();
+              await allowSettle.promise;
+            },
+            release: () => undefined,
+          };
+        },
+      });
+
+      const starting = integration.startAgentRun("ws");
+      await setStarted.promise;
+      currentState = successorState;
+      allowSettle.resolve();
+
+      await expect(starting).rejects.toThrow("retired workspace authority");
+      expect(oldState.activeRun).toBeNull();
+      expect(successorState.activeRun).toBeNull();
     });
   });
 

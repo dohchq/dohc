@@ -517,11 +517,13 @@ import {
 import {
   closeWorkspaceActivityAndRelay,
   createWorkspaceActivity,
+  WorkspaceActivityState,
 } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
+import type { ActiveAgentRun } from "./workspaces/workspaceWatcher";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
@@ -566,6 +568,7 @@ import {
   releaseAndRefuseWithoutCapture,
 } from "./workspaces/engineCaptureGate";
 import {
+  AgentIntegrationState,
   createAgentIntegration,
   type AgentRunRecord,
 } from "./agents/AgentIntegration";
@@ -908,6 +911,15 @@ function createPluginWorkspaceRuntimeParts(
   workspace: CreatedWorkspace,
   hooks: { onPipelineStatus(event: PluginPipelineStatusEvent): void },
 ) {
+  const authorityLease = requireWorkspaceAuthority(workspace.workspaceId);
+  const authorityBinding = authorityLease.binding;
+  if (authorityBinding.canonicalRootPath !== workspace.rootPath) {
+    authorityLease.release();
+    throw new Error("Plugin runtime creation received a stale workspace root.");
+  }
+  authorityLease.release();
+  const runWithAuthority = <Result>(work: () => Result | Promise<Result>) =>
+    workspaceAuthorities.withBinding(authorityBinding, () => work());
   let pipeline: PluginPipeline | null = null;
   let surfaceHostLifecycle: PluginSurfaceHostLifecycle | null = null;
   const dohcDir = pluginDataDir(stateDir(), workspace.rootPath);
@@ -967,35 +979,37 @@ function createPluginWorkspaceRuntimeParts(
     // invokeChildProcess — a panel is renderer-driven UI, not the plugin's
     // own activated code, so it never brokers child processes.
     routeSdkRequest: (pluginId, method, params, spawnId, signal, emitEvent) =>
-      invokeWorkspacePluginSdk({
-        workspaceId: workspace.workspaceId,
-        pluginId,
-        spawnId,
-        requestPath: "plugin-process",
-        isWritable: () => !sharedViewOf(workspace.workspaceId),
-        signal,
-        invokeChildProcess: (childMethod, childParams) =>
-          childProcessBroker.invoke(
-            { pluginId, spawnId, signal, emitEvent },
-            childMethod,
-            childParams,
-          ),
-        subscribeFileWatch: (watchParams) =>
-          workspaceEvents.subscribe(
-            {
-              owner: { kind: "process", pluginId, spawnId },
-              emitEvent,
-            },
-            watchParams,
-          ),
-        unsubscribeFileWatch: (watchParams) =>
-          workspaceEvents.unsubscribe(
-            { owner: { kind: "process", pluginId, spawnId } },
-            watchParams,
-          ),
-        method,
-        params,
-      }),
+      runWithAuthority(() =>
+        invokeWorkspacePluginSdk({
+          workspaceId: workspace.workspaceId,
+          pluginId,
+          spawnId,
+          requestPath: "plugin-process",
+          isWritable: () => !sharedViewOf(workspace.workspaceId),
+          signal,
+          invokeChildProcess: (childMethod, childParams) =>
+            childProcessBroker.invoke(
+              { pluginId, spawnId, signal, emitEvent },
+              childMethod,
+              childParams,
+            ),
+          subscribeFileWatch: (watchParams) =>
+            workspaceEvents.subscribe(
+              {
+                owner: { kind: "process", pluginId, spawnId },
+                emitEvent,
+              },
+              watchParams,
+            ),
+          unsubscribeFileWatch: (watchParams) =>
+            workspaceEvents.unsubscribe(
+              { owner: { kind: "process", pluginId, spawnId } },
+              watchParams,
+            ),
+          method,
+          params,
+        }),
+      ),
     // The plugin gets its settings with its activation, so it never starts
     // without them and never has to ask. Named by directoryName — settings
     // are stored per directory, and a manifest's declared name can differ
@@ -1016,10 +1030,14 @@ function createPluginWorkspaceRuntimeParts(
     },
     onDispose: () => childProcessBroker.dispose(),
     onStatusChange: (pluginId, status) => {
-      surfaceHostLifecycle?.statusChanged(pluginId, status);
+      void runWithAuthority(() =>
+        surfaceHostLifecycle?.statusChanged(pluginId, status),
+      ).catch(() => undefined);
     },
     onRecoveryDisposition: (pluginId, disposition) => {
-      surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition);
+      void runWithAuthority(() =>
+        surfaceHostLifecycle?.recoveryDisposition(pluginId, disposition),
+      ).catch(() => undefined);
     },
   });
   pluginHostRef = pluginHost;
@@ -1049,13 +1067,22 @@ function createPluginWorkspaceRuntimeParts(
     pnpmRunnerEntry: join(import.meta.dirname, "pnpm-runner.js"),
     onStatusChange: hooks.onPipelineStatus,
     onRuntimeStopped: (pluginId) =>
-      pluginSurfaces.stop({
-        kind: "plugin",
-        workspaceId: workspace.workspaceId,
-        pluginId,
-      }),
+      runWithAuthority(() =>
+        pluginSurfaces.stop({
+          kind: "plugin",
+          workspaceId: workspace.workspaceId,
+          pluginId,
+        }),
+      ),
     isEngineCaptureAvailable: () =>
-      activity.engineCaptureFor(workspace.workspaceId) !== null,
+      withWorkspaceAttachment(
+        {
+          workspaceId: workspace.workspaceId,
+          attachmentId: authorityBinding.attachmentId,
+        },
+        (lease) =>
+          workspaceActivity.engineCaptureFor(lease.state.activity) !== null,
+      ) ?? false,
   });
   return { pipeline, agentDrivers: pluginDrivers, workspaceEvents };
 }
@@ -1708,11 +1735,12 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 const SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS = 15_000;
 
 interface DesktopWorkspaceAuthorityState {
+  activity: WorkspaceActivityState;
   sharedChannelWork: Promise<void>;
   sharedChannelSyncCursor: string | null;
   bookmarkProjectionPending: boolean;
   bookmarkProjectionRunning: boolean;
-  panelAgentRunId: string | null;
+  agentIntegration: AgentIntegrationState;
   linkedChatStore: DesktopLinkedChatStore | null;
   agentDispatchStoreHandle: LiveAgentDispatchStoreHandle | null;
   dispatchAgentRunId: string | null;
@@ -1733,11 +1761,12 @@ type DesktopWorkspaceAuthorityLease = WorkspaceAuthorityLease<
 
 function createDesktopWorkspaceAuthorityState(): DesktopWorkspaceAuthorityState {
   return {
+    activity: new WorkspaceActivityState(),
     sharedChannelWork: Promise.resolve(),
     sharedChannelSyncCursor: null,
     bookmarkProjectionPending: false,
     bookmarkProjectionRunning: false,
-    panelAgentRunId: null,
+    agentIntegration: new AgentIntegrationState(),
     linkedChatStore: null,
     agentDispatchStoreHandle: null,
     dispatchAgentRunId: null,
@@ -1760,8 +1789,23 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
     const results = await Promise.allSettled([
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
+      Promise.resolve().then(() =>
+        agentIntegration.disposeState(state.agentIntegration),
+      ),
+      pluginWorkspaceRuntimes.stop(binding.workspaceId, () =>
+        pluginSurfaces.stop({
+          kind: "workspace",
+          workspaceId: binding.workspaceId,
+        }),
+      ),
+      sitePreviews.stopWorkspace(binding.workspaceId),
+      binding.workspace.remote?.remoteWorkspaceId
+        ? closeRelayTransportWorkspace(
+            binding.workspace.remote.remoteWorkspaceId,
+          )
+        : Promise.resolve(),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
-      activity.close(binding.workspaceId, {
+      workspaceActivity.close(binding.workspace, state.activity, {
         expectedRootPath: binding.canonicalRootPath,
         preserveStatus: false,
       }),
@@ -1776,6 +1820,40 @@ function requireWorkspaceAuthority(
   workspaceId: string,
 ): DesktopWorkspaceAuthorityLease {
   return workspaceAuthorities.acquire(workspaceId);
+}
+
+function withWorkspaceAttachment<Result>(
+  workspace: { workspaceId: string; attachmentId?: symbol },
+  work: (lease: DesktopWorkspaceAuthorityLease) => Result,
+): Result | undefined {
+  if (!findWorkspace(workspace.workspaceId)) return undefined;
+  const lease = requireWorkspaceAuthority(workspace.workspaceId);
+  try {
+    if (
+      workspace.attachmentId !== undefined &&
+      lease.binding.attachmentId !== workspace.attachmentId
+    ) {
+      return undefined;
+    }
+    return work(lease);
+  } finally {
+    lease.release();
+  }
+}
+
+function withWorkspaceAttachmentAsync<Result>(
+  workspace: { workspaceId: string; attachmentId?: symbol },
+  work: (lease: DesktopWorkspaceAuthorityLease) => Result | Promise<Result>,
+): Promise<Result> {
+  return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) => {
+    if (
+      workspace.attachmentId !== undefined &&
+      lease.binding.attachmentId !== workspace.attachmentId
+    ) {
+      throw new Error("This callback belongs to a retired workspace authority.");
+    }
+    return work(lease);
+  });
 }
 
 type DesktopWorkspaceAuthorityBinding =
@@ -2207,7 +2285,7 @@ function relayClientForWorkspace(input: {
 }
 
 function engineForWorkspace(
-  workspace: { workspaceId: string; rootPath: string },
+  workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol },
   capture: WorkspaceEngineCapture | null,
   engineOptions: { joinBootstrap?: boolean } = {},
 ) {
@@ -2238,21 +2316,29 @@ function engineForWorkspace(
     },
     capture,
     onChange: () => {
-      notifyRenderer({ workspaceId: workspace.workspaceId });
-      void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-        console.error("[desktop] relay dispatch scan:", error);
+      withWorkspaceAttachment(workspace, () => {
+        notifyRenderer({ workspaceId: workspace.workspaceId });
+        void withWorkspaceAttachmentAsync(workspace, () =>
+          chatDispatchService.scanWorkspace(workspace.workspaceId),
+        ).catch((error) => {
+          console.error("[desktop] relay dispatch scan:", error);
+        });
       });
     },
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: async () => {
-      await syncWorkspaceSharedChannels(workspace.workspaceId);
+      await withWorkspaceAttachmentAsync(workspace, () =>
+        syncWorkspaceSharedChannels(workspace.workspaceId),
+      );
     },
     // A replicated chat message can mark a live bookmark pending without
     // touching the file watcher. Project immediately after the pull commits;
     // the periodic worker remains only a crash/retry backstop.
     afterSuccessfulPull: () =>
-      projectPendingChatBookmarksAfterPull(workspace.workspaceId),
+      withWorkspaceAttachmentAsync(workspace, () =>
+        projectPendingChatBookmarksAfterPull(workspace.workspaceId),
+      ),
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // A freshly joined workspace's engine is pull-first: no push before the
     // first successful pull (0P-C gate fix).
@@ -2261,7 +2347,7 @@ function engineForWorkspace(
   });
 }
 
-const activity = createWorkspaceActivity(notifyRenderer, {
+const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   cloudStateFor: (workspaceId) => {
     const remote = findWorkspace(workspaceId)?.remote;
     return {
@@ -2293,10 +2379,158 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   // One settled batch, two readers: the approval pipeline, and the plugins
   // that subscribed to a prefix of it. Neither changes the batch.
   onWatcherBatch: (workspace, events) => {
-    pluginWorkspaceRuntimes.current(workspace.workspaceId)
-      ?.handleWatcherEvents(events);
+    withWorkspaceAttachment(workspace, () =>
+      pluginWorkspaceRuntimes.current(workspace.workspaceId)
+        ?.handleWatcherEvents(events),
+    );
   },
 });
+
+function withWorkspaceActivityState<Result>(
+  workspaceId: string,
+  work: (
+    lease: DesktopWorkspaceAuthorityLease,
+    workspace: RegistryEntry & { attachmentId: symbol },
+  ) => Result,
+): Result {
+  const lease = requireWorkspaceAuthority(workspaceId);
+  try {
+    return work(lease, canonicalWorkspaceFor(lease));
+  } finally {
+    lease.release();
+  }
+}
+
+// Compatibility-shaped ingress for existing main-process callers. The
+// service itself owns no registry: every operation first resolves the current
+// physical attachment and then works only with that authority-owned state.
+const activity = {
+  open: (workspace: RegistryEntry) =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
+      workspaceActivity.open(canonicalWorkspaceFor(lease), lease.state.activity),
+    ),
+  close: (
+    workspaceId: string,
+    options?: { preserveStatus?: boolean; notify?: boolean; expectedRootPath?: string },
+  ) => {
+    if (!findWorkspace(workspaceId)) return Promise.resolve(false);
+    return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      workspaceActivity.close(
+        canonicalWorkspaceFor(lease),
+        lease.state.activity,
+        options,
+      ),
+    );
+  },
+  enableCloud: (
+    workspace: RegistryEntry,
+    options?: { joinBootstrap?: boolean },
+  ) =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
+      workspaceActivity.enableCloud(
+        canonicalWorkspaceFor(lease),
+        lease.state.activity,
+        options,
+      ),
+    ),
+  reconcileCloud: (engineFor: typeof engineForWorkspace): void => {
+    for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+      withWorkspaceActivityState(workspaceId, (lease) =>
+        workspaceActivity.reconcileCloud(lease.state.activity, engineFor, false),
+      );
+    }
+    notifyRenderer();
+  },
+  stopEngines: async (): Promise<void> => {
+    await Promise.all(
+      workspaceAuthorities.workspaceIds().map((workspaceId) =>
+        workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+          workspaceActivity.stopEngine(lease.state.activity, false),
+        ),
+      ),
+    );
+    notifyRenderer();
+  },
+  getStatus: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+      workspaceActivity.getStatus(workspace, lease.state.activity),
+    ),
+  listOpenWorkspaceIds: () =>
+    workspaceAuthorities.workspaceIds().filter((workspaceId) =>
+      withWorkspaceActivityState(workspaceId, (lease) =>
+        workspaceActivity.isOpen(lease.state.activity),
+      ),
+    ),
+  queueCloudSync: (workspaceId: string): void => {
+    if (!findWorkspace(workspaceId)) return;
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.queueCloudSync(lease.state.activity),
+    );
+  },
+  setAgentRun: (workspaceId: string, run: ActiveAgentRun | null) =>
+    workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      workspaceActivity.setAgentRun(
+        canonicalWorkspaceFor(lease),
+        lease.state.activity,
+        run,
+      ),
+    ),
+  claimAgentRun: (
+    workspaceId: string,
+    run: ActiveAgentRun,
+    expectedRootPath?: string,
+  ) =>
+    workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      workspaceActivity.claimAgentRun(
+        canonicalWorkspaceFor(lease),
+        lease.state.activity,
+        run,
+        expectedRootPath,
+      ),
+    ),
+  clearAgentRun: (
+    workspaceId: string,
+    agentRunId: string,
+    expectedRootPath?: string,
+  ) =>
+    workspaceAuthorities.withAuthority(workspaceId, (lease) =>
+      workspaceActivity.clearAgentRun(
+        lease.state.activity,
+        agentRunId,
+        expectedRootPath,
+      ),
+    ),
+  hasAgentRun: (workspaceId: string, expectedRootPath?: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.hasAgentRun(lease.state.activity, expectedRootPath),
+    ),
+  engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
+    if (!findWorkspace(workspaceId)) return null;
+    return withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.engineCaptureFor(
+        lease.state.activity,
+        expectedRootPath,
+      ),
+    );
+  },
+  workspaceRootPath: (workspaceId: string) => {
+    if (!findWorkspace(workspaceId)) return null;
+    return withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.workspaceRootPath(lease.state.activity),
+    );
+  },
+  registerExpectedEngineEvents: (
+    workspaceId: string,
+    events: Parameters<WorkspaceEngineCapture["registerExpectedEngineEvents"]>[0],
+  ) =>
+    withWorkspaceActivityState(workspaceId, (lease, workspace) =>
+      workspaceActivity.registerExpectedEngineEvents(
+        workspace,
+        lease.state.activity,
+        events,
+      ),
+    ),
+};
 // Local agent integration: owns the per-workspace MCP child + active-run slot
 // and persists agent-run records. The run slot is wired into the watcher
 // (workspaceActivity.setAgentRun) so a run's writes are attributed to the
@@ -2304,38 +2538,52 @@ const activity = createWorkspaceActivity(notifyRenderer, {
 // entry resolves; otherwise the toggle still flips and the user's AI tool
 // launches its own copy via the Settings config snippet.
 const agentIntegration = createAgentIntegration({
-  rootFor: (workspaceId) => findWorkspace(workspaceId)?.rootPath ?? null,
-  setAgentRun: async (workspaceId, run) => {
+  workspaceIds: () => workspaceAuthorities.workspaceIds(),
+  acquire: (workspaceId) => {
     const lease = requireWorkspaceAuthority(workspaceId);
-    try {
-      if (run) {
-      const previous = lease.state.panelAgentRunId;
-      if (previous) {
-          await activity.clearAgentRun(workspaceId, previous,
-            lease.binding.canonicalRootPath,
+    const workspace = canonicalWorkspaceFor(lease);
+    return {
+      workspaceId,
+      rootPath: workspace.rootPath,
+      state: lease.state.agentIntegration,
+      assertCurrent: () => lease.assertCurrent(),
+      setAgentRun: async (run: ActiveAgentRun | null) => {
+        if (run) {
+          const previous = lease.state.agentIntegration.activeRun?.id;
+          if (previous) {
+            await workspaceActivity.clearAgentRun(
+              lease.state.activity,
+              previous,
+              workspace.rootPath,
+            );
+          }
+          lease.assertCurrent();
+          if (
+            !(await workspaceActivity.claimAgentRun(
+              workspace,
+              lease.state.activity,
+              run,
+              workspace.rootPath,
+            ))
+          ) {
+            throw new Error(
+              "Another agent run is already active in this workspace.",
+            );
+          }
+          return;
+        }
+        const ownedRunId = lease.state.agentIntegration.activeRun?.id;
+        if (ownedRunId) {
+          await workspaceActivity.clearAgentRun(
+            lease.state.activity,
+            ownedRunId,
+            workspace.rootPath,
           );
         }
         lease.assertCurrent();
-      if (!(await activity.claimAgentRun(workspaceId, run,
-            lease.binding.canonicalRootPath,
-          ))) {
-        throw new Error("Another agent run is already active in this workspace.");
-      }
-        lease.assertCurrent();
-        lease.state.panelAgentRunId = run.agentRunId;
-      return;
-    }
-    const ownedRunId = lease.state.panelAgentRunId;
-    if (ownedRunId) {
-        await activity.clearAgentRun(workspaceId, ownedRunId,
-          lease.binding.canonicalRootPath,
-        );
-      }
-      lease.assertCurrent();
-      lease.state.panelAgentRunId = null;
-    } finally {
-      lease.release();
-    }
+      },
+      release: () => lease.release(),
+    };
   },
   home: stateDir(),
   // Every terminal run path funnels through endAgentRun (driver
@@ -3530,42 +3778,44 @@ async function routePluginPanelSdk(input: {
   params?: unknown;
 }): Promise<unknown> {
   const { authority, surfaceId, isPushLive } = input.authorization;
-  const workspaceEvents = pluginWorkspaceRuntimes.current(
-    authority.workspaceId,
-  )?.workspaceEvents;
-  const owner = {
-    kind: "panel" as const,
-    workspaceId: authority.workspaceId,
-    pluginId: authority.pluginId,
-    panelId: authority.panelId,
-    surfaceId,
-  };
-  const emitEvent = workspaceEvents
-    ? createPluginPanelFileWatchEmitter({
-        workspaceId: authority.workspaceId,
-        pluginId: authority.pluginId,
-        panelId: authority.panelId,
-        isPanelRunning: isPushLive,
-        send: notifyPluginPanelSdkEvent,
-      })
-    : undefined;
-  return invokeWorkspacePluginSdk({
-    workspaceId: authority.workspaceId,
-    pluginId: authority.pluginId,
-    spawnId: authority.spawnId,
-    requestPath: "panel",
-    isWritable: () => !sharedViewOf(authority.workspaceId),
-    signal: authority.signal,
-    subscribeFileWatch:
-      workspaceEvents && emitEvent
-        ? (watchParams) =>
-            workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
+  return workspaceAuthorities.withAuthority(authority.workspaceId, async () => {
+    const workspaceEvents = pluginWorkspaceRuntimes.current(
+      authority.workspaceId,
+    )?.workspaceEvents;
+    const owner = {
+      kind: "panel" as const,
+      workspaceId: authority.workspaceId,
+      pluginId: authority.pluginId,
+      panelId: authority.panelId,
+      surfaceId,
+    };
+    const emitEvent = workspaceEvents
+      ? createPluginPanelFileWatchEmitter({
+          workspaceId: authority.workspaceId,
+          pluginId: authority.pluginId,
+          panelId: authority.panelId,
+          isPanelRunning: isPushLive,
+          send: notifyPluginPanelSdkEvent,
+        })
+      : undefined;
+    return invokeWorkspacePluginSdk({
+      workspaceId: authority.workspaceId,
+      pluginId: authority.pluginId,
+      spawnId: authority.spawnId,
+      requestPath: "panel",
+      isWritable: () => !sharedViewOf(authority.workspaceId),
+      signal: authority.signal,
+      subscribeFileWatch:
+        workspaceEvents && emitEvent
+          ? (watchParams) =>
+              workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
+          : undefined,
+      unsubscribeFileWatch: workspaceEvents
+        ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
         : undefined,
-    unsubscribeFileWatch: workspaceEvents
-      ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
-      : undefined,
-    method: input.method,
-    params: input.params,
+      method: input.method,
+      params: input.params,
+    });
   });
 }
 
@@ -4605,7 +4855,7 @@ app.on("will-quit", (event) => {
       .then(() => chatDispatchStop)
       .then(() => agentIntegrationStop)
       .then(() => pluginStop)
-      .then(() => activity.stopAll());
+      .then(() => workspaceAuthorityStop);
   const rustEngineStop = Promise.all([
     captureStop.catch(() => undefined),
     workspaceAuthorityStop,
@@ -7101,7 +7351,9 @@ function registerIpcHandlers(
       // pluginIpcError; this is best-effort warmup, and the renderer's file
       // tree must not wait on it (fire-and-forget, like the dispatch scan in
       // openWorkspaceActivityWith).
-      void pluginWorkspaceRuntimes.ensure(workspace).catch((error: unknown) => {
+      void workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
+        pluginWorkspaceRuntimes.ensure(canonicalWorkspaceFor(lease)),
+      ).catch((error: unknown) => {
         console.error(
           `[desktop] plugin pipeline warmup failed for ${workspace.workspaceId}:`,
           error,

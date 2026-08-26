@@ -15,7 +15,7 @@ import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { localWorkspaceSdkReads } from "../testing/localWorkspaceSdkReads";
 import { createTestScratch } from "./testTemp";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
 import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,

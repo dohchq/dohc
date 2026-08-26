@@ -19,7 +19,7 @@ import {
   isYDocPathNotInVersionError,
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
-import { createWorkspaceActivity } from "./workspaceActivity";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import { createRealDaemonWorkspaceSessions } from "../testing/realDaemonWorkspaceSessions";
