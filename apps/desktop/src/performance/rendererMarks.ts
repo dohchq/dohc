@@ -1,8 +1,20 @@
-import { createMarkRecorder, type MarksSnapshot } from "./desktopMarks";
+import {
+  createMarkRecorder,
+  type MarksSnapshot,
+  type SwitchCompletionPhase,
+  type SwitchPhaseDetails,
+  type SwitchTimelineEntry,
+} from "./desktopMarks";
+
+export type { SwitchCompletionPhase, SwitchPhaseDetails };
 
 // The renderer-process recorder (separate instance from main's desktopMarks —
 // the renderer is a separate bundle and process).
 export const rendererMarks = createMarkRecorder();
+
+export function readSwitchTimeline(): SwitchTimelineEntry[] {
+  return rendererMarks.readSwitchTimeline();
+}
 
 export function fileOpenStartMark(groupId: string): string {
   return `file-open-start:${groupId}`;
@@ -12,7 +24,10 @@ declare global {
   interface Window {
     // Present only when the preload exposed the test bridge (DOHC_DESKTOP_TEST=1).
     dohcDesktopTest?: unknown;
-    dohcDesktopMarks?: { snapshot(): MarksSnapshot };
+    dohcDesktopMarks?: {
+      snapshot(): MarksSnapshot;
+      readSwitchTimeline(): SwitchTimelineEntry[];
+    };
   }
 }
 
@@ -22,5 +37,8 @@ declare global {
 // its presence is the renderer-side test signal. Production windows never
 // grow this surface.
 if (typeof window !== "undefined" && window.dohcDesktopTest !== undefined) {
-  window.dohcDesktopMarks = { snapshot: () => rendererMarks.snapshot() };
+  window.dohcDesktopMarks = {
+    snapshot: () => rendererMarks.snapshot(),
+    readSwitchTimeline,
+  };
 }

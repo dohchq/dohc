@@ -68,6 +68,8 @@ import type { SearchResultsEventEntry } from "../ipc/channels";
 import {
   fileOpenStartMark,
   rendererMarks,
+  type SwitchCompletionPhase,
+  type SwitchPhaseDetails,
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
@@ -1797,6 +1799,30 @@ export function DesktopWorkspaceShell(props: {
     };
   }
   const workspaceSelectionGeneration = workspaceSelection.current.generation;
+  const switchTimelineToken = useRef<
+    ReturnType<typeof rendererMarks.startSwitch> | null
+  >(null);
+  // Passive effects run after the new keyed shell commits. Starting here
+  // excludes abandoned renders while still preceding every async readiness
+  // effect declared below.
+  useEffect(() => {
+    switchTimelineToken.current = rendererMarks.startSwitch(
+      workspaceSelectionGeneration,
+    );
+  }, [workspaceSelectionGeneration]);
+  const markCurrentSwitchPhase = useCallback(
+    (phase: SwitchCompletionPhase, details?: SwitchPhaseDetails) => {
+      const token = switchTimelineToken.current;
+      if (
+        token === null ||
+        token.selectionGeneration !== workspaceSelectionGeneration
+      ) {
+        return false;
+      }
+      return rendererMarks.markSwitchPhase(token, phase, details);
+    },
+    [workspaceSelectionGeneration],
+  );
   const workspaceReadyGate = useRef<{
     workspaceId: string;
     selectionGeneration: number;
@@ -2126,6 +2152,15 @@ export function DesktopWorkspaceShell(props: {
   // the stored one.
   const uiStateLoaded = useRef(false);
   const userTouchedWb = useRef(false);
+  const restoredActiveFileSurface = useRef<{
+    selectionGeneration: number;
+    groupId: string;
+    path: string;
+  } | null>(null);
+  const [restoredSurfaceCommit, setRestoredSurfaceCommit] = useState<{
+    selectionGeneration: number;
+    waitsForFile: boolean;
+  } | null>(null);
   // The tab paths the stored state restored — the only ones a file listing is
   // allowed to close. Empty until the load applies, and empty forever when the
   // user acted first and the stored tabs were discarded. STATE, not a ref: the
@@ -2258,8 +2293,20 @@ export function DesktopWorkspaceShell(props: {
     },
     {
       onSuccess: (stored) => {
+        let restoredFileSurface: typeof restoredActiveFileSurface.current = null;
         if (stored && !userTouchedWb.current) {
           const parsed = parseUiState(stored);
+          const restoredGroup = activeGroup(parsed);
+          if (
+            restoredGroup.activeTab !== null &&
+            !isVirtualTabPath(restoredGroup.activeTab)
+          ) {
+            restoredFileSurface = {
+              selectionGeneration: workspaceSelectionGeneration,
+              groupId: restoredGroup.id,
+              path: restoredGroup.activeTab,
+            };
+          }
           // Order matters: wbRef first, THEN setWb, THEN enable flushes — a
           // beforeunload between "loaded" and the restored state's commit
           // must flush the restored state, never the stale default.
@@ -2267,6 +2314,11 @@ export function DesktopWorkspaceShell(props: {
           setWb(parsed);
           setRestoredTabPaths(new Set(allTabs(parsed).map((tab) => tab.path)));
         }
+        restoredActiveFileSurface.current = restoredFileSurface;
+        setRestoredSurfaceCommit({
+          selectionGeneration: workspaceSelectionGeneration,
+          waitsForFile: restoredFileSurface !== null,
+        });
         uiStateLoaded.current = true;
         if (userTouchedWb.current) {
           void bridge()
@@ -2275,10 +2327,45 @@ export function DesktopWorkspaceShell(props: {
         }
       },
       onError: () => {
+        restoredActiveFileSurface.current = null;
+        setRestoredSurfaceCommit({
+          selectionGeneration: workspaceSelectionGeneration,
+          waitsForFile: false,
+        });
         uiStateLoaded.current = true;
       },
     },
     [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
+  );
+  useEffect(() => {
+    if (
+      restoredSurfaceCommit?.selectionGeneration !==
+        workspaceSelectionGeneration ||
+      restoredSurfaceCommit.waitsForFile
+    ) {
+      return;
+    }
+    markCurrentSwitchPhase("restored-active-surface-ready");
+  }, [
+    markCurrentSwitchPhase,
+    restoredSurfaceCommit,
+    workspaceSelectionGeneration,
+  ]);
+  const onRestoredFileSurfaceReady = useCallback(
+    (path: string, groupId: string) => {
+      const target = restoredActiveFileSurface.current;
+      if (
+        target?.selectionGeneration !== workspaceSelectionGeneration ||
+        target.groupId !== groupId ||
+        target.path !== path
+      ) {
+        return;
+      }
+      if (markCurrentSwitchPhase("restored-active-surface-ready")) {
+        restoredActiveFileSurface.current = null;
+      }
+    },
+    [markCurrentSwitchPhase, workspaceSelectionGeneration],
   );
 
   // Debounced persist (500ms): tabs, view, panel visibility/width, rail.
@@ -2341,6 +2428,10 @@ export function DesktopWorkspaceShell(props: {
   // purpose that cannot be undone. See the close below.
   const failedFilesRequest = useRef(0);
   const [listingsSettled, setListingsSettled] = useState(0);
+  const [fileListingCommit, setFileListingCommit] = useState<{
+    request: number;
+    listingSource: "cached" | "fresh";
+  } | null>(null);
   const refreshFiles = useCallback(
     async (options: { allowCached?: true } = {}) => {
       const request = ++filesRequest.current;
@@ -2357,6 +2448,10 @@ export function DesktopWorkspaceShell(props: {
         setFiles(result.files);
         setFolders(result.folders ?? []);
         setFilesRevalidated(result.cached !== true);
+        setFileListingCommit({
+          request,
+          listingSource: result.cached === true ? "cached" : "fresh",
+        });
         return result.cached === true;
       } catch (error) {
         if (request > failedFilesRequest.current) {
@@ -3085,10 +3180,18 @@ export function DesktopWorkspaceShell(props: {
   // changed `refreshHistory` and re-ran the whole workspace-open effect.
   useEffect(() => {
     if (!workspaceIsReady || engineReadForWorkspace === null) return;
-    void refreshHistory().catch((error) =>
-      reportShellError("Could not refresh history.", error),
-    );
-  }, [engineReadForWorkspace, refreshHistory, reportShellError, workspaceIsReady]);
+    void refreshHistory()
+      .then(() => {
+        markCurrentSwitchPhase("history-ready");
+      })
+      .catch((error) => reportShellError("Could not refresh history.", error));
+  }, [
+    engineReadForWorkspace,
+    markCurrentSwitchPhase,
+    refreshHistory,
+    reportShellError,
+    workspaceIsReady,
+  ]);
   // Conflict review (0P-C): opened from the notice center's conflict notice.
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
@@ -4495,6 +4598,16 @@ export function DesktopWorkspaceShell(props: {
     if (files.length > 0) rendererMarks.markOnce("file-tree-loaded");
   }, [files]);
   useEffect(() => {
+    if (fileListingCommit === null) return;
+    markCurrentSwitchPhase("files-painted", {
+      listingSource: fileListingCommit.listingSource,
+    });
+  }, [fileListingCommit, markCurrentSwitchPhase]);
+  useEffect(() => {
+    if (!filesRevalidated) return;
+    markCurrentSwitchPhase("files-revalidated");
+  }, [filesRevalidated, markCurrentSwitchPhase]);
+  useEffect(() => {
     if (!hasMarkdownPath) return;
     return scheduleMarkdownEditorPreload();
   }, [files, hasMarkdownPath]);
@@ -4514,6 +4627,7 @@ export function DesktopWorkspaceShell(props: {
       try {
         const status = await bridge().openWorkspace({ workspaceId });
         if (cancelled) return;
+        markCurrentSwitchPhase("session-admitted");
         // Main awaits the capture build before it answers, so this is the
         // moment the decision exists — and the status committed beside it is
         // the first one that describes a decided workspace (#626). The two
@@ -4543,6 +4657,7 @@ export function DesktopWorkspaceShell(props: {
   }, [
     workspaceId,
     workspaceSelectionGeneration,
+    markCurrentSwitchPhase,
     refreshFiles,
     reportShellError,
     setCaptureDecidedFor,
@@ -6261,6 +6376,8 @@ export function DesktopWorkspaceShell(props: {
                 }
                 onScrollConsumed={consumeSearchScrollTarget}
                 onSaveStateChange={editorCallbacks.onSaveStateChange}
+                surfaceKey={editorGroup.id}
+                onSurfaceReady={onRestoredFileSurfaceReady}
                 registerDraftFlush={editorCallbacks.registerDraftFlush}
                 registerSourceToggle={editorCallbacks.registerSourceToggle}
                 autoFocus={wb.activeEditorGroup === editorGroup.id}
