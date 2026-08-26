@@ -14,12 +14,30 @@ function sourceBlock(startMarker: string, endMarker: string): string {
 describe("workspace-activity main-process wiring", () => {
   it("sends workspace activity through the scoped broadcast, keyed by each window's active workspace", () => {
     const notify = sourceBlock("function notifyRenderer(", "\n}\n");
+    // MUTATION: the complete-listing cache must be invalidated before any
+    // window can answer the activity event from its retained snapshot.
+    expect(notify.indexOf("workspaceFileListings.invalidate(")).toBeLessThan(
+      notify.indexOf("broadcastWorkspaceActivity({"),
+    );
+    expect(notify).toContain("workspaceActivityPayload(scope)");
     // The broadcaster itself owns the channel; this pin covers the wiring
     // that only main can get wrong: which windows and whose active workspace.
     expect(notify).toContain("broadcastWorkspaceActivity({");
     expect(notify).toContain("windows: BrowserWindow.getAllWindows(),");
     expect(notify).toContain(
       "rendererWorkspaceSessions.current(sender)?.workspaceId",
+    );
+  });
+
+  it("caches the complete owned listing only when the renderer opts in", () => {
+    const handler = sourceBlock(
+      "ipcMain.handle(CHANNELS.listWorkspaceFiles",
+      "\n  ipcMain.handle(CHANNELS.createWorkspaceFile",
+    );
+    expect(handler).toContain("workspaceFileListings.list({");
+    expect(handler).toContain("allowCached: input.allowCached === true,");
+    expect(handler).toContain(
+      "ListWorkspaceFilesResult.parse(await listOwnedWorkspaceFiles(workspace))",
     );
   });
 

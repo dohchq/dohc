@@ -20,7 +20,7 @@ interface ActivityWindow {
   };
 }
 
-function workspaceActivityPayload(
+export function workspaceActivityPayload(
   scope?: WorkspaceActivityScope,
 ): WorkspaceActivityEvent {
   if (!scope) return {};

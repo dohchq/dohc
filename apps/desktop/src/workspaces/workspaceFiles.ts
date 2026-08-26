@@ -7,6 +7,7 @@ import {
   nameUnitFor,
   sameFsEntry,
   entryCharBudget,
+  hasEngineIgnoredSegment,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
@@ -64,8 +65,6 @@ import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 // `shared-with-me` is intentionally visible: accepted shares materialize there
 // for read/preview by local sites. Publishing or re-sharing those files remains
 // gated by the explicit publish/share flow, not by local file preview.
-const IGNORED_DIRS = new Set([".dohc", "node_modules", ".git"]);
-
 // Head bytes read to find a markdown page's `icon` frontmatter. The icon is a
 // short scalar near the top (id, title, icon priority order), so a small
 // bounded read covers it without ever loading a whole document.
@@ -170,7 +169,9 @@ async function getCachedMarkdownIcon(absolutePath: string): Promise<string | und
 
 export async function listFiles(
   rootPath: string,
+  options: { platform?: NodeJS.Platform } = {},
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
+  const platform = options.platform ?? process.platform;
   const entries: WorkspaceFileEntry[] = [];
   // Directories ride along so EMPTY folders stay visible in the explorer
   // tree (the walk already visits every dir — this is purely additive).
@@ -182,12 +183,10 @@ export async function listFiles(
       const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
       // Never follow symlinks: a dir/file symlink could point outside the
       // workspace and leak names or recurse into foreign trees.
-      if (dirent.isSymbolicLink()) continue;
+      if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIRS.has(dirent.name)) {
-          folders.push(rel);
-          await walk(join(dir, dirent.name), rel);
-        }
+        folders.push(rel);
+        await walk(join(dir, dirent.name), rel);
       } else if (dirent.isFile()) {
         const kind = classifyPath(rel).kind;
         const entry: WorkspaceFileEntry = { path: rel, kind };
@@ -1147,8 +1146,10 @@ export async function collectZipEntries(
   relativePath?: string,
   options?: {
     includeArchivePath?(path: string): boolean;
+    platform?: NodeJS.Platform;
   },
 ): Promise<{ entries: ZipEntry[]; baseName: string }> {
+  const platform = options?.platform ?? process.platform;
   const realRoot = await realpath(rootPath);
   let startAbsolute = realRoot;
   let prefix = "";
@@ -1242,11 +1243,10 @@ export async function collectZipEntries(
       if (dirent.isSymbolicLink()) continue;
       const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
       const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
+      if (hasEngineIgnoredSegment(relPath, platform)) continue;
       if (options?.includeArchivePath?.(archivePath) === false) continue;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIRS.has(dirent.name)) {
-          await walk(join(dir, dirent.name), relPath, archivePath);
-        }
+        await walk(join(dir, dirent.name), relPath, archivePath);
       } else if (dirent.isFile()) {
         // Secret-classified files (.env family) stay out of archives —
         // including inside mounted shares (read-aware classification).
