@@ -28,6 +28,9 @@ function harness() {
     start: vi.fn(async () => undefined),
     cancel: vi.fn(),
   };
+  const authorizeCancel = vi.fn((_event: TestEvent) => {
+    return rendererSessionCurrent;
+  });
   registerWorkspaceSearchIpcHandlers<TestEvent, typeof workspace>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: (event) => {
@@ -49,9 +52,7 @@ function harness() {
           activeWorkspaceId === workspace.workspaceId,
       };
     },
-    authorizeCancel: () => {
-      return rendererSessionCurrent;
-    },
+    authorizeCancel,
     owner,
   });
   const event: TestEvent = {
@@ -66,6 +67,7 @@ function harness() {
   return {
     trace,
     owner,
+    authorizeCancel,
     event,
     setActiveWorkspaceId(workspaceId: string) {
       activeWorkspaceId = workspaceId;
@@ -196,6 +198,7 @@ describe("workspace search IPC registration", () => {
     await test.invoke(CHANNELS.cancelWorkspaceSearch, { searchId: "search-1" });
 
     expect(test.trace).toEqual(["trust"]);
+    expect(test.authorizeCancel).toHaveBeenCalledWith(test.event);
     expect(test.owner.cancel).toHaveBeenCalledWith(19, "search-1");
   });
 

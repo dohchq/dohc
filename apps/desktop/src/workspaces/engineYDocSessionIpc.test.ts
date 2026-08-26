@@ -93,15 +93,17 @@ interface TestHarnessOptions {
     workspace: { workspaceId: string; rootPath: string },
     path: string,
   ) => Promise<string | null>;
+  rendererWorkspaceId?: string;
 }
 
 function rendererSession(
   generationOf: () => number = () => 1,
   isAvailable: () => boolean = () => true,
+  workspaceId = "workspace-1",
 ) {
   const generation = generationOf();
   return {
-    workspaceId: "workspace-1",
+    workspaceId,
     generation,
     isCurrent: () => isAvailable() && generationOf() === generation,
   };
@@ -133,6 +135,7 @@ function harness(
         : rendererSession(
             () => generation,
             () => !retired,
+            options.rendererWorkspaceId,
           ),
     requireWorkspace: (workspaceId) => ({
       workspaceId,
@@ -207,6 +210,18 @@ describe("engine Y.Doc IPC adapter", () => {
       { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
       { sessionId: openPayload.sessionId, state: "saved", seq: 4 },
     ]);
+  });
+
+  it("refuses an open outside the renderer session's workspace", async () => {
+    const sender = new FakeSender(7);
+    const h = harness(providerSession(), {
+      rendererWorkspaceId: "workspace-2",
+    });
+
+    await expect(h.ipc.open(sender, openPayload)).resolves.toEqual({
+      available: false,
+    });
+    expect(h.capture.openYDocSession).not.toHaveBeenCalled();
   });
 
   it("reports current remote-update delivery failures but ignores stale senders", async () => {

@@ -151,18 +151,6 @@ describe("renderer reload admission", () => {
       "reused-search-id",
     );
 
-    const presenceCancel = vi.fn();
-    const cancelPresence = (requestSender: typeof renderer, pollId: string) => {
-      if (!sessions.current(requestSender)) return;
-      presenceCancel(requestSender.id, pollId);
-    };
-    cancelPresence(renderer, "reused-poll-id");
-    expect(presenceCancel).not.toHaveBeenCalled();
-    cancelPresence(replacement, "reused-poll-id");
-    expect(presenceCancel).toHaveBeenCalledWith(
-      replacement.id,
-      "reused-poll-id",
-    );
   });
 });
 
