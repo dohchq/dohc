@@ -5,14 +5,11 @@ import type {
 } from "./workspaceEngineCapture";
 
 // Shared by the two-daemon and single-daemon Rust e2e suites. `listMoments`
-// already flushes daemon-owned capture before it reads
-// (workspaceEngineCapture.ts's `flushCapture?.()` call), so this polls
-// `listMoments` directly rather than calling `capture.flush()` first — a
-// separate flush call would just repeat the same wait.
+// uses the daemon's aggregate history read, which settles capture before it
+// takes the page snapshot. A separate flush would repeat the same wait.
 //
-// A flush can throw "... did not settle." while the daemon's capture chain is
-// still draining a just-written batch; that is a retryable transient, not a
-// real failure, so it is swallowed here like every other not-yet-arrived poll.
+// A busy capture chain can still exhaust that bounded wait. Treat it like any
+// other not-yet-arrived poll.
 export async function waitForPathMoments(
   capture: WorkspaceEngineCapture,
   path: string,
@@ -23,7 +20,10 @@ export async function waitForPathMoments(
     try {
       page = await capture.listMoments({ limit: 100 });
     } catch (error) {
-      if (!(error instanceof Error) || !error.message.endsWith(" did not settle.")) {
+      if (
+        !(error instanceof Error) ||
+        error.message !== "History is still updating. Try again."
+      ) {
         throw error;
       }
       await delay(25);

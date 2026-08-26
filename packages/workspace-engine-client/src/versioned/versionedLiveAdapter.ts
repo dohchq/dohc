@@ -865,6 +865,21 @@ export class VersionedLiveAdapter {
     });
   }
 
+  async readHistoryPage(input: {
+    workspaceId: string;
+    limit?: number;
+    beforeMomentOrder?: number;
+  }): Promise<VersionedMethodResultMap["history.page"]> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyPage, {
+      workspaceId: input.workspaceId,
+      ...(input.limit !== undefined ? { limit: input.limit } : {}),
+      ...(input.beforeMomentOrder !== undefined
+        ? { beforeMomentOrder: input.beforeMomentOrder }
+        : {}),
+    });
+  }
+
   async getMoment(input: {
     workspaceId: string;
     momentId: string;
@@ -981,28 +996,6 @@ export class VersionedLiveAdapter {
   async secretStateExists(input: { workspaceId: string }): Promise<boolean> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.secretsStateExists, input);
-  }
-
-  async listSecretMoments(input: {
-    workspaceId: string;
-    versionId?: string;
-  }): Promise<SecretMomentRecord[]> {
-    this.assertWorkspace(input.workspaceId);
-    const rows: SecretMomentRecord[] = [];
-    let beforeMomentOrder: number | undefined;
-    do {
-      const page = await this.request(VERSIONED_METHOD.secretsMomentsList, {
-        workspaceId: input.workspaceId,
-        ...(input.versionId !== undefined
-          ? { versionId: input.versionId }
-          : {}),
-        limit: 500,
-        ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
-      });
-      rows.push(...page.moments);
-      beforeMomentOrder = page.nextBeforeMomentOrder ?? undefined;
-    } while (beforeMomentOrder !== undefined);
-    return rows;
   }
 
   async getSecretMoment(input: {

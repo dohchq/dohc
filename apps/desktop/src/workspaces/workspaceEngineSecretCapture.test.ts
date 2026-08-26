@@ -4,7 +4,7 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
-import type { SecretFileStore } from "@dohc/workspace-contracts/engine";
+import type { SecretFileMoment } from "@dohc/workspace-contracts/engine";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
 
@@ -66,14 +66,12 @@ function daemonCapture(
   root: string,
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
-  secretStore?: SecretFileStore,
 ): WorkspaceEngineCapture {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-secret-test",
     rootPath: root,
     attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: mockLiveSessions(loopback, requests),
-    ...(secretStore === undefined ? {} : { secretStore }),
   });
 }
 
@@ -89,25 +87,29 @@ class SecretMergeLoopbackEngine extends VersionedLoopbackEngine {
   }
 }
 
-function secretMoment(
+async function writeLoopbackSecret(
+  loopback: VersionedLoopbackEngine,
   id: string,
-  recordedAtMs: number,
-): Awaited<ReturnType<SecretFileStore["listSecretMoments"]>>[number] {
-  return {
-    id,
-    workspaceId: "engine-secret-test",
-    versionId: "main",
-    path: ".env",
-    recordedAtMs,
-    operation: "write",
-    metadata: {
+  text: string,
+): Promise<SecretFileMoment> {
+  const response = await loopback.sendRequest({
+    id: 10_000 + text.length,
+    method: VERSIONED_METHOD.secretsWrite,
+    workspace: "engine-secret-test",
+    params: {
+      workspaceId: "engine-secret-test",
+      versionId: "main",
+      path: ".env",
+      text,
       origin: "api",
+      momentId: id,
       summary: id,
       correlationId: id,
     },
-    momentOrder: recordedAtMs,
-    protected: true,
-  };
+  });
+  const moment = (response.result as { moment: SecretFileMoment | null }).moment;
+  if (moment === null) throw new Error("Expected a protected moment.");
+  return moment;
 }
 
 describe("secret capture through the desktop pipeline (daemon path)", () => {
@@ -374,31 +376,35 @@ describe("listMoments protected pagination", () => {
       workspace: "engine-secret-test",
       params: { workspaceId: "engine-secret-test" },
     });
-    for (const recordedAtMs of [10, 20, 30, 40, 50, 60]) {
+    const protectedMoments = [
+      await writeLoopbackSecret(loopback, "protected-lower", "one"),
+      await writeLoopbackSecret(loopback, "protected-middle", "two"),
+      await writeLoopbackSecret(loopback, "protected-upper", "three"),
+    ];
+    const textTimes = protectedMoments.flatMap((moment) => [
+      moment.recordedAtMs - 1,
+      moment.recordedAtMs,
+    ]);
+    for (const [index, recordedAtMs] of textTimes.entries()) {
       await loopback.sendRequest({
-        id: recordedAtMs,
+        id: 20_000 + index,
         method: VERSIONED_METHOD.textWrite,
         workspace: "engine-secret-test",
         params: {
           workspaceId: "engine-secret-test",
           versionId: "main",
-          path: `text-${recordedAtMs}.md`,
+          path: `text-${index}.md`,
           text: String(recordedAtMs),
           origin: "api",
-          momentId: `text-${recordedAtMs}`,
+          momentId: `text-${index}`,
           nowMs: recordedAtMs,
         },
       });
     }
-    const protectedMoments = [
-      secretMoment("protected-upper", 50),
-      secretMoment("protected-middle", 35),
-      secretMoment("protected-lower", 20),
-    ];
-    const secretStore = {
-      listSecretMoments: vi.fn(async () => protectedMoments),
-    } as unknown as SecretFileStore;
-    const engine = daemonCapture(root, loopback, undefined, secretStore);
+    const requests: Request[] = [];
+    const engine = daemonCapture(root, loopback, requests);
+    await engine.listVersions();
+    requests.length = 0;
 
     const newest = await engine.listMoments({ limit: 2 });
     const middle = await engine.listMoments({
@@ -410,24 +416,23 @@ describe("listMoments protected pagination", () => {
       beforeMomentOrder: middle.nextBeforeMomentOrder ?? undefined,
     });
 
-    // protected-upper ties text-50, which ends the first page, so it waits
-    // for the page that CONTAINS the end of the tie: a tie can outlast a
-    // page, and a tied protected moment placed at a page's end would jump in
-    // front of the tied text moments the next page appends.
+    // protected-upper ties text-5, which ends the first page, so it waits
+    // for the page that contains that timestamp. Each page must omit the two
+    // protected rows outside its own half-open time window.
     expect(newest.moments.map((moment) => moment.id)).toEqual([
-      "text-60",
-      "text-50",
+      "text-5",
+      "protected-upper",
+      "text-4",
     ]);
     expect(middle.moments.map((moment) => moment.id)).toEqual([
-      "protected-upper",
-      "text-40",
+      "text-3",
       "protected-middle",
-      "text-30",
+      "text-2",
     ]);
     expect(oldest.moments.map((moment) => moment.id)).toEqual([
-      "text-20",
+      "text-1",
       "protected-lower",
-      "text-10",
+      "text-0",
     ]);
     // What the user reads is the pages appended in order; the split above may
     // move, this may not.
@@ -436,15 +441,15 @@ describe("listMoments protected pagination", () => {
         (moment) => moment.id,
       ),
     ).toEqual([
-      "text-60",
-      "text-50",
+      "text-5",
       "protected-upper",
-      "text-40",
+      "text-4",
+      "text-3",
       "protected-middle",
-      "text-30",
-      "text-20",
+      "text-2",
+      "text-1",
       "protected-lower",
-      "text-10",
+      "text-0",
     ]);
 
     const protectedIds = [...newest.moments, ...middle.moments, ...oldest.moments]
@@ -456,7 +461,11 @@ describe("listMoments protected pagination", () => {
       "protected-lower",
     ]);
     expect(new Set(protectedIds).size).toBe(protectedMoments.length);
-    expect(secretStore.listSecretMoments).toHaveBeenCalledTimes(3);
+    expect(requests.map((request) => request.method)).toEqual([
+      VERSIONED_METHOD.historyPage,
+      VERSIONED_METHOD.historyPage,
+      VERSIONED_METHOD.historyPage,
+    ]);
     await engine.stop();
   });
 
@@ -466,7 +475,7 @@ describe("listMoments protected pagination", () => {
   // recordedAtMs first, then text before protected, then higher momentOrder,
   // then lower id. Ids here are chosen so that dropping any one rule reorders
   // the result.
-  it("orders same-millisecond moments by the stated rule, whatever order they arrive in", async () => {
+  it("orders same-millisecond text before protected rows by the stated rule", async () => {
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
     await loopback.sendRequest({
@@ -475,12 +484,17 @@ describe("listMoments protected pagination", () => {
       workspace: "engine-secret-test",
       params: { workspaceId: "engine-secret-test" },
     });
+    const tiedSecret = await writeLoopbackSecret(
+      loopback,
+      "aa-secret",
+      "tie",
+    );
     // "aaa-text" is written first, so it holds the LOWER momentOrder even
     // though its id sorts first.
     const textWrites: ReadonlyArray<[string, number]> = [
-      ["older-text", 400],
-      ["aaa-text", 500],
-      ["zz-text", 500],
+      ["older-text", tiedSecret.recordedAtMs - 1],
+      ["aaa-text", tiedSecret.recordedAtMs],
+      ["zz-text", tiedSecret.recordedAtMs],
     ];
     let requestId = 2;
     for (const [momentId, nowMs] of textWrites) {
@@ -499,32 +513,17 @@ describe("listMoments protected pagination", () => {
         },
       });
     }
-    // Both tie the text moments AND sort before them by id, so text-before-
-    // protected has to come from the rule, not from the ids.
-    const first = secretMoment("aa-secret", 500);
-    const second = secretMoment("ab-secret", 500);
-
-    async function mergedIds(
-      order: ReadonlyArray<ReturnType<typeof secretMoment>>,
-    ): Promise<string[]> {
-      const secretStore = {
-        listSecretMoments: vi.fn(async () => [...order]),
-      } as unknown as SecretFileStore;
-      const engine = daemonCapture(root, loopback, undefined, secretStore);
-      const page = await engine.listMoments();
-      await engine.stop();
-      return page.moments.map((moment) => moment.id);
-    }
-
-    const expected = [
+    // The protected id sorts before both text ids. Text-before-protected must
+    // therefore come from the merge rule, not from the ids or arrival order.
+    const engine = daemonCapture(root, loopback);
+    const page = await engine.listMoments();
+    expect(page.moments.map((moment) => moment.id)).toEqual([
       "zz-text",
       "aaa-text",
       "aa-secret",
-      "ab-secret",
       "older-text",
-    ];
-    expect(await mergedIds([first, second])).toEqual(expected);
-    expect(await mergedIds([second, first])).toEqual(expected);
+    ]);
+    await engine.stop();
   });
 
   // The rule has to hold across the whole timeline the user reads, not only
@@ -541,6 +540,11 @@ describe("listMoments protected pagination", () => {
       params: { workspaceId: "engine-secret-test" },
     });
     // One reconcile pass, one clock reading, one moment more than a page.
+    const tiedSecret = await writeLoopbackSecret(
+      loopback,
+      "tied-secret",
+      "tie",
+    );
     const tiedTextCount = 201;
     for (let index = 0; index < tiedTextCount; index += 1) {
       await loopback.sendRequest({
@@ -554,14 +558,11 @@ describe("listMoments protected pagination", () => {
           text: String(index),
           origin: "api",
           momentId: `tied-${index}`,
-          nowMs: 500,
+          nowMs: tiedSecret.recordedAtMs,
         },
       });
     }
-    const secretStore = {
-      listSecretMoments: vi.fn(async () => [secretMoment("tied-secret", 500)]),
-    } as unknown as SecretFileStore;
-    const engine = daemonCapture(root, loopback, undefined, secretStore);
+    const engine = daemonCapture(root, loopback);
 
     // The shell's own paging: 200 per request, later pages appended.
     const first = await engine.listMoments({ limit: 200 });

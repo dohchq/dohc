@@ -37,6 +37,7 @@ export const VERSIONED_METHOD = {
   secretsMomentsGet: "secrets.moments.get",
   momentsList: "moments.list",
   momentsGet: "moments.get",
+  historyPage: "history.page",
   searchEnsureIndex: "search.ensureIndex",
 } as const;
 
@@ -269,6 +270,12 @@ export type MomentsListParams = JsonObject & {
 };
 
 export type MomentsGetParams = JsonObject & { momentId: string };
+
+export type HistoryPageParams = JsonObject & {
+  workspaceId: string;
+  limit?: number;
+  beforeMomentOrder?: number;
+};
 
 export type SearchEnsureIndexParams = JsonObject & {
   workspaceId: string;
@@ -632,6 +639,11 @@ export type MomentsListResult = JsonObject & {
   latestMomentOrder: number;
 };
 export type MomentsGetResult = MomentRecord | null;
+export type HistoryPageResult = JsonObject & {
+  activeVersion: VersionRecord;
+  textMomentPage: MomentsListResult;
+  protectedMoments: SecretMomentRecord[];
+};
 export type SearchEnsureIndexResult = JsonObject;
 
 export type VersionedMethodParamsMap = {
@@ -667,6 +679,7 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetParams;
   [VERSIONED_METHOD.momentsList]: MomentsListParams;
   [VERSIONED_METHOD.momentsGet]: MomentsGetParams;
+  [VERSIONED_METHOD.historyPage]: HistoryPageParams;
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexParams;
 };
 
@@ -703,6 +716,7 @@ export type VersionedMethodResultMap = {
   [VERSIONED_METHOD.secretsMomentsGet]: SecretsMomentsGetResult;
   [VERSIONED_METHOD.momentsList]: MomentsListResult;
   [VERSIONED_METHOD.momentsGet]: MomentsGetResult;
+  [VERSIONED_METHOD.historyPage]: HistoryPageResult;
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexResult;
 };
 
@@ -1088,6 +1102,11 @@ const MomentsListResultSchema = mutableStruct({
   nextBeforeMomentOrder: NullableInt,
   latestMomentOrder: Schema.Int,
 });
+const HistoryPageResultSchema = mutableStruct({
+  activeVersion: VersionRecordSchema,
+  textMomentPage: MomentsListResultSchema,
+  protectedMoments: Schema.mutable(Schema.Array(SecretMomentRecordSchema)),
+});
 const TextListResultSchema = mutableStruct({
   files: Schema.mutable(
     Schema.Array(
@@ -1325,6 +1344,14 @@ export function decodeMomentsGetResult(value: JsonValue): MomentsGetResult {
   ) as MomentsGetResult;
 }
 
+export function decodeHistoryPageResult(value: JsonValue): HistoryPageResult {
+  return decodeVersionedSchema(
+    HistoryPageResultSchema,
+    value,
+    "history.page result",
+  ) as HistoryPageResult;
+}
+
 export function decodeVersionedTextListResult(
   value: JsonValue,
 ): VersionedTextListResult {
@@ -1444,6 +1471,9 @@ export function decodeVersionedResult<M extends VersionedMethod>(
       break;
     case VERSIONED_METHOD.momentsGet:
       result = decodeMomentsGetResult(value);
+      break;
+    case VERSIONED_METHOD.historyPage:
+      result = decodeHistoryPageResult(value);
       break;
     case VERSIONED_METHOD.searchEnsureIndex:
       result = decodeEmptyObject(value, "search.ensureIndex result");

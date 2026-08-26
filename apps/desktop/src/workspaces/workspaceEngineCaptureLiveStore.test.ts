@@ -1615,13 +1615,27 @@ describe("createCaptureLiveStores", () => {
     ]);
   });
 
-  it("omits nullable protected-moment metadata fields", async () => {
+  it("maps one aggregate history request and omits nullable protected metadata", async () => {
+    const requests: Request[] = [];
     const client = clientFor(async (request) => {
-      expect(request.method).toBe(VERSIONED_METHOD.secretsMomentsList);
+      requests.push(request);
+      expect(request.method).toBe(VERSIONED_METHOD.historyPage);
       return {
         id: request.id,
         result: {
-          moments: [
+          activeVersion: {
+            id: "main",
+            workspaceId: WORKSPACE_ID,
+            kind: "main",
+            name: "Main",
+            createdAtMs: 0,
+          },
+          textMomentPage: {
+            moments: [],
+            nextBeforeMomentOrder: null,
+            latestMomentOrder: -1,
+          },
+          protectedMoments: [
             {
               id: "secret-moment",
               workspaceId: WORKSPACE_ID,
@@ -1638,29 +1652,37 @@ describe("createCaptureLiveStores", () => {
               protected: true,
             },
           ],
-          nextBeforeMomentOrder: null,
         },
       };
     });
-    const { secretStore } = createCaptureLiveStores(
+    const { store } = createCaptureLiveStores(
       { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
       sessionsFor(client),
     );
 
     await expect(
-      secretStore.listSecretMoments({ workspaceId: WORKSPACE_ID }),
-    ).resolves.toEqual([
-      {
-        id: "secret-moment",
-        workspaceId: WORKSPACE_ID,
-        versionId: "main",
-        path: ".env",
-        recordedAtMs: 1,
-        operation: "write",
-        metadata: { origin: "local-file" },
-        momentOrder: 1,
-        protected: true,
-      },
-    ]);
+      store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 }),
+    ).resolves.toMatchObject({
+      activeVersion: { id: "main" },
+      textMomentPage: { moments: [], nextBeforeMomentOrder: null },
+      protectedMoments: [
+        {
+          id: "secret-moment",
+          workspaceId: WORKSPACE_ID,
+          versionId: "main",
+          path: ".env",
+          recordedAtMs: 1,
+          operation: "write",
+          metadata: { origin: "local-file" },
+          momentOrder: 1,
+          protected: true,
+        },
+      ],
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.params).toEqual({
+      workspaceId: WORKSPACE_ID,
+      limit: 200,
+    });
   });
 });

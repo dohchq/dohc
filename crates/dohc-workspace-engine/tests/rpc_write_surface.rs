@@ -851,6 +851,201 @@ async fn secret_moments_version_wide_pages_across_paths_newest_first() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_history_page_matches_the_individual_reads_on_one_stable_snapshot() {
+    let (_scratch, transport, handle) = fixture("aggregate-history-page").await;
+    let workspace_id = "ws-rpcd-aggregate-history-page";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let protected = call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=protected",
+            "origin": "api",
+            "momentId": "aggregate-secret",
+        }),
+    )
+    .await;
+    let protected_recorded_at_ms = protected["moment"]["recordedAtMs"]
+        .as_i64()
+        .expect("protected timestamp");
+    for (offset, (moment_id, now_ms)) in [
+        ("aggregate-text-old", protected_recorded_at_ms),
+        ("aggregate-text-new", protected_recorded_at_ms + 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        call(
+            &transport,
+            &handle,
+            4 + offset as u64,
+            "versionedText.write",
+            json!({
+                "versionId": "main",
+                "path": format!("aggregate-{offset}.md"),
+                "text": moment_id,
+                "origin": "api",
+                "momentId": moment_id,
+                "nowMs": now_ms,
+            }),
+        )
+        .await;
+    }
+
+    let first = call(
+        &transport,
+        &handle,
+        6,
+        "moments.list",
+        json!({ "versionId": "main", "limit": 1 }),
+    )
+    .await;
+    let cursor = first["nextBeforeMomentOrder"]
+        .as_i64()
+        .expect("second-page cursor");
+    let aggregate = call(
+        &transport,
+        &handle,
+        7,
+        "history.page",
+        json!({
+            "workspaceId": workspace_id,
+            "limit": 1,
+            "beforeMomentOrder": cursor,
+        }),
+    )
+    .await;
+    let active = call(
+        &transport,
+        &handle,
+        8,
+        "versions.active",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let text_page = call(
+        &transport,
+        &handle,
+        9,
+        "moments.list",
+        json!({
+            "versionId": "main",
+            "limit": 1,
+            "beforeMomentOrder": cursor,
+        }),
+    )
+    .await;
+    let secret_page = call(
+        &transport,
+        &handle,
+        10,
+        "secrets.moments.list",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "limit": 500,
+        }),
+    )
+    .await;
+    let upper_page = call(
+        &transport,
+        &handle,
+        11,
+        "moments.list",
+        json!({
+            "versionId": "main",
+            "limit": 1,
+            "beforeMomentOrder": cursor + 1,
+        }),
+    )
+    .await;
+    let upper_ms = upper_page["moments"][0]["recordedAtMs"]
+        .as_i64()
+        .expect("upper timestamp");
+    let expected_protected: Vec<Value> = secret_page["moments"]
+        .as_array()
+        .expect("protected moments")
+        .iter()
+        .filter(|moment| {
+            moment["recordedAtMs"]
+                .as_i64()
+                .is_some_and(|recorded_at_ms| recorded_at_ms <= upper_ms)
+        })
+        .cloned()
+        .collect();
+
+    assert_eq!(aggregate["activeVersion"], active);
+    assert_eq!(aggregate["textMomentPage"], text_page);
+    assert_eq!(aggregate["protectedMoments"], json!(expected_protected));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_history_page_preserves_the_existing_text_page_byte_cut() {
+    let (_scratch, transport, handle) = fixture("aggregate-history-byte-cut").await;
+    let workspace_id = "ws-rpcd-aggregate-history-byte-cut";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    for index in 0..32u64 {
+        call(
+            &transport,
+            &handle,
+            3 + index,
+            "versionedText.write",
+            json!({
+                "versionId": "main",
+                "path": format!("budget-{index}.md"),
+                "text": format!("row-{index}-{}", "x".repeat(9_000)),
+                "origin": "api",
+                "momentId": format!("budget-moment-{index}"),
+                "nowMs": index + 1,
+            }),
+        )
+        .await;
+    }
+    let old_page = call(
+        &transport,
+        &handle,
+        40,
+        "moments.list",
+        json!({ "versionId": "main", "limit": 100 }),
+    )
+    .await;
+    let aggregate = call(
+        &transport,
+        &handle,
+        41,
+        "history.page",
+        json!({ "workspaceId": workspace_id, "limit": 100 }),
+    )
+    .await;
+
+    assert_eq!(aggregate["textMomentPage"], old_page);
+    assert!(
+        old_page["moments"].as_array().expect("text page").len() < 32,
+        "the fixture must cross the 256 KiB page budget"
+    );
+    assert!(old_page["nextBeforeMomentOrder"].is_number());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_moments_without_version_list_workspace_history_newest_first() {
     // MUTATION: require versionId or always scope the actor query to one version -> fails.
     let (_scratch, transport, handle) = fixture("secret-workspace-history").await;

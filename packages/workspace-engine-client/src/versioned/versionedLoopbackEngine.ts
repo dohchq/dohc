@@ -330,6 +330,10 @@ const VERSIONED_PARAM_SHAPES = {
     optionalI64: ["limit", "beforeMomentOrder"],
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
+  [VERSIONED_METHOD.historyPage]: {
+    requiredStrings: ["workspaceId"],
+    optionalI64: ["limit", "beforeMomentOrder"],
+  },
   [VERSIONED_METHOD.searchEnsureIndex]: {
     requiredStrings: ["workspaceId", "versionId"],
   },
@@ -1300,6 +1304,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.momentsList(state, params);
       case VERSIONED_METHOD.momentsGet:
         return this.momentsGet(state, params);
+      case VERSIONED_METHOD.historyPage:
+        return this.historyPage(state, params);
       case VERSIONED_METHOD.searchEnsureIndex:
         this.version(state, requiredString(params, "versionId", request.method));
         return {};
@@ -2649,6 +2655,57 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private momentsGet(state: WorkspaceState, params: JsonObject): JsonValue {
     const moment = state.moments.get(requiredString(params, "momentId", "moment get"));
     return moment ? this.capMoment(moment.wire) : null;
+  }
+
+  private historyPage(state: WorkspaceState, params: JsonObject): JsonValue {
+    const activeVersionId = state.activeVersionId;
+    if (!state.versioned || activeVersionId === undefined) {
+      throw new Error("workspace-not-found");
+    }
+    const textMomentPage = this.momentsList(state, {
+      versionId: activeVersionId,
+      ...(params.limit !== undefined ? { limit: params.limit } : {}),
+      ...(params.beforeMomentOrder !== undefined
+        ? { beforeMomentOrder: params.beforeMomentOrder }
+        : {}),
+    }) as JsonObject;
+    const textMoments = textMomentPage.moments as unknown as MomentRecord[];
+    const beforeMomentOrder = optionalNumber(params, "beforeMomentOrder");
+    const upperRecordedAtMs =
+      beforeMomentOrder === undefined
+        ? Number.POSITIVE_INFINITY
+        : [...state.moments.values()]
+            .map((moment) => moment.wire)
+            .filter(
+              (moment) =>
+                moment.versionId === activeVersionId &&
+                moment.momentOrder <= beforeMomentOrder,
+            )
+            .sort((left, right) => right.momentOrder - left.momentOrder)[0]
+            ?.recordedAtMs ?? Number.POSITIVE_INFINITY;
+    const lowerRecordedAtMs =
+      textMomentPage.nextBeforeMomentOrder === null
+        ? Number.NEGATIVE_INFINITY
+        : (textMoments.at(-1)?.recordedAtMs ?? Number.NEGATIVE_INFINITY);
+    const protectedMoments = [...state.secretMoments.values()]
+      .map((moment) => moment.wire)
+      .filter(
+        (moment) =>
+          moment.versionId === activeVersionId &&
+          moment.recordedAtMs > lowerRecordedAtMs &&
+          moment.recordedAtMs <= upperRecordedAtMs,
+      )
+      .sort(
+        (left, right) =>
+          right.recordedAtMs - left.recordedAtMs ||
+          right.momentOrder - left.momentOrder ||
+          left.id.localeCompare(right.id),
+      );
+    return {
+      activeVersion: this.versionJson(this.version(state, activeVersionId)),
+      textMomentPage,
+      protectedMoments,
+    };
   }
 
   private workspace(id: string): WorkspaceState {

@@ -980,6 +980,65 @@ pub fn list_secret_moments_page_keyless(
     })
 }
 
+/// Keyless secret moments inside a half-open history-page time window.
+///
+/// Rows are newest first by the history surface's ordering key. `after_ms` is
+/// exclusive and `through_ms` is inclusive. The caller supplies a hard probe
+/// limit so an aggregate read never loads the workspace's full protected
+/// timeline merely to answer one visible text-history page.
+pub fn list_secret_moments_in_time_window_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    after_ms: Option<i64>,
+    through_ms: Option<i64>,
+    limit: usize,
+) -> Result<Vec<SecretMomentRecord>, DomainError> {
+    if limit == 0 {
+        return Err(DomainError::InvalidInput {
+            reason: "secret moment window limit must be positive",
+        });
+    }
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, version_id)?;
+        let mut sql = String::from(
+            "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
+             operation, metadata_origin, metadata_summary, metadata_correlation_id \
+             FROM secret_moments WHERE workspace_id = ?1 AND version_id = ?2",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(workspace_id.to_owned()),
+            Box::new(version_id.to_owned()),
+        ];
+        if let Some(after_ms) = after_ms {
+            sql.push_str(&format!(" AND recorded_at_ms > ?{}", binds.len() + 1));
+            binds.push(Box::new(after_ms));
+        }
+        if let Some(through_ms) = through_ms {
+            sql.push_str(&format!(" AND recorded_at_ms <= ?{}", binds.len() + 1));
+            binds.push(Box::new(through_ms));
+        }
+        sql.push_str(&format!(
+            " ORDER BY recorded_at_ms DESC, moment_order DESC LIMIT ?{}",
+            binds.len() + 1
+        ));
+        let limit = i64::try_from(limit).map_err(|_| DomainError::InvalidInput {
+            reason: "secret moment window limit is too large",
+        })?;
+        binds.push(Box::new(limit));
+        let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|bind| bind.as_ref()).collect();
+        let rows = stmt
+            .query_map(refs.as_slice(), map_moment_row)
+            .map_err(DomainError::sql_corrupt)?;
+        let mut moments = Vec::new();
+        for row in rows {
+            moments.push(row.map_err(DomainError::sql_corrupt)??);
+        }
+        Ok(moments)
+    })
+}
+
 /// Fetch a secret moment without requiring the data key.
 pub fn get_secret_moment_keyless(
     store: &EngineStore,

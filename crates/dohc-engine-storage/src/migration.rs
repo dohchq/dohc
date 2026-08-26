@@ -2870,6 +2870,17 @@ ALTER TABLE ydoc_docs ADD COLUMN seed_source_sha256 TEXT;
 
 pub(crate) const YDOC_SEED_SOURCE_MIGRATION_ID: &str = "v1-ydoc-seed-source";
 
+/// Ordinal 39. History pages bound protected moments by their recording-time
+/// window. This index makes that read proportional to the requested window
+/// instead of sorting every protected moment in the version.
+const V1_SECRET_MOMENT_HISTORY_TIME_INDEX_DDL: &str = "\
+CREATE INDEX idx_secret_moments_history_time
+    ON secret_moments(workspace_id, version_id, recorded_at_ms DESC, moment_order DESC);
+";
+
+pub(crate) const SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID: &str =
+    "v1-secret-moment-history-time-index";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3148,6 +3159,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: YDOC_SEED_SOURCE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_YDOC_SEED_SOURCE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 39,
+        id: SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SECRET_MOMENT_HISTORY_TIME_INDEX_DDL,
         sets_user_version: None,
     },
 ];

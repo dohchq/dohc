@@ -31,7 +31,7 @@ pub mod search;
 pub mod supervisor;
 
 pub use actor::{
-    ActiveVersionSwitch, ActorHandle, BinaryWriteExecutionResult, LifecycleState,
+    ActiveVersionSwitch, ActorHandle, BinaryWriteExecutionResult, HistoryPageRead, LifecycleState,
     MergeExecutionResult, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
     RelayOperationOutcome, RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord,
     SharingDeclined, StoreSnapshot, UnitsOutcome, WorkspaceActor, YdocAppend, YdocOpenState,

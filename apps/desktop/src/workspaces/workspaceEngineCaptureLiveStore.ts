@@ -9,6 +9,7 @@ import type {
   SecretFileMoment,
   SecretFileStore,
   TextFileSnapshot,
+  VersionRecord,
   VersionedTextFileState,
   VersionedTextMoment,
   VersionedTextMomentSummary,
@@ -136,6 +137,15 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
     workspaceId: string;
     versionId: string;
   }): Promise<CaptureTextFileMetadata[]>;
+  listHistoryPage(input: {
+    workspaceId: string;
+    limit?: number;
+    beforeMomentOrder?: number;
+  }): Promise<{
+    activeVersion: VersionRecord;
+    textMomentPage: Awaited<ReturnType<VersionedTextStore["listMoments"]>>;
+    protectedMoments: SecretFileMoment[];
+  }>;
   flushCapture?(): Promise<void>;
   reconcileCapture?(): Promise<void>;
   watcherStatus?(): Promise<{
@@ -1003,6 +1013,26 @@ export function createCaptureLiveStores(
       };
     },
 
+    async listHistoryPage(input: {
+      workspaceId: string;
+      limit?: number;
+      beforeMomentOrder?: number;
+    }) {
+      const page = await runRead(
+        async (adapter) => await adapter.readHistoryPage(input),
+      );
+      return {
+        activeVersion: page.activeVersion,
+        textMomentPage: {
+          ...page.textMomentPage,
+          moments: page.textMomentPage.moments.map((moment) =>
+            momentSummaryFromWire(input.workspaceId, moment),
+          ),
+        },
+        protectedMoments: page.protectedMoments.map(secretMomentFromWire),
+      };
+    },
+
     async getMoment(input: { workspaceId: string; momentId: string }) {
       const moment = await runRead(async (adapter) => await adapter.getMoment(input));
       return moment === null
@@ -1300,14 +1330,6 @@ export function createCaptureLiveStores(
     },
     listSecretFiles: (input: Parameters<SecretFileStore["listSecretFiles"]>[0]) =>
       runRawRead(async (adapter) => await adapter.listSecretFiles(input)),
-    async listSecretMoments(
-      input: Parameters<SecretFileStore["listSecretMoments"]>[0],
-    ) {
-      const moments = await runRawRead(
-        async (adapter) => await adapter.listSecretMoments(input),
-      );
-      return moments.map(secretMomentFromWire);
-    },
     async getSecretMoment(
       input: Parameters<SecretFileStore["getSecretMoment"]>[0],
     ) {
