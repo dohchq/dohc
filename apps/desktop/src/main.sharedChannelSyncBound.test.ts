@@ -73,11 +73,11 @@ describe("the shared-channel sync pass is bounded in production", () => {
   // rotation's place to the end of the registry and strands the rest.
   it("carries the cursor as a channel, and keeps a re-granted channel in place", () => {
     expect(syncCallSource).toMatch(
-      /resumeAfterChannelWireId:\s*lease\.state\.sharedChannelSyncCursor \?\? undefined,/,
+      /resumeAfterChannelWireId:\s*authority\.state\.sharedChannelSyncCursor \?\? undefined,/,
     );
-    expect(passSource).toContain("lease.state.sharedChannelSyncCursor = null;");
+    expect(passSource).toContain("authority.state.sharedChannelSyncCursor = null;");
     expect(passSource).toContain(
-      "lease.state.sharedChannelSyncCursor = result.resumeAfterChannelWireId;",
+      "authority.state.sharedChannelSyncCursor = result.resumeAfterChannelWireId;",
     );
     // The merge appends only a channel the workspace has never joined.
     const merge = sourceBetween(
@@ -97,7 +97,7 @@ describe("the shared-channel sync pass is bounded in production", () => {
   // front of a purely local read — opening a LOCAL channel awaited the rotation.
   it("never starts a pass for a chat target that holds no live grant", () => {
     const helper = sourceBetween(
-      "async function syncSharedChannelsForChatTarget(",
+      "async function syncRendererSharedChannelsForChatTarget(",
       "\n}\n",
     );
     expect(helper).toContain(
@@ -106,7 +106,13 @@ describe("the shared-channel sync pass is bounded in production", () => {
     // And the skip must come BEFORE the pass, or it skips nothing.
     expect(
       helper.indexOf("if (!joinedChannel || joinedChannel.ended === true) return 0;"),
-    ).toBeLessThan(helper.indexOf("return await syncWorkspaceSharedChannels(workspaceId,"));
+    ).toBeLessThan(
+      helper.indexOf(
+        "return syncRendererWorkspaceSharedChannels(\n" +
+          "    operation,\n" +
+          "    joinedChannel.channelWireId,",
+      ),
+    );
   });
 
   // A lookup that FAILS (the engine restarting) is not evidence the target is
@@ -114,15 +120,15 @@ describe("the shared-channel sync pass is bounded in production", () => {
   // unsynced for that trigger.
   it("falls back to a plain pass when the target lookup itself fails", () => {
     const helper = sourceBetween(
-      "async function syncSharedChannelsForChatTarget(",
+      "async function syncRendererSharedChannelsForChatTarget(",
       "\n}\n",
     );
     expect(helper).toContain("} catch {");
-    expect(helper).toContain("return await syncWorkspaceSharedChannels(workspaceId);");
+    expect(helper).toContain("return syncRendererWorkspaceSharedChannels(operation);");
     // The failure path must not be the local-target path.
     expect(helper).not.toContain(".catch(() => null)");
     expect(
-      helper.indexOf("return await syncWorkspaceSharedChannels(workspaceId);"),
+      helper.indexOf("return syncRendererWorkspaceSharedChannels(operation);"),
     ).toBeLessThan(
       helper.indexOf("if (!joinedChannel || joinedChannel.ended === true) return 0;"),
     );
@@ -165,11 +171,11 @@ describe("the shared-channel sync pass is bounded in production", () => {
   // cursor already had, one layer up.
   it("carries the priority through the queue as a channel, not a grant", () => {
     const helper = sourceBetween(
-      "async function syncSharedChannelsForChatTarget(",
+      "async function syncRendererSharedChannelsForChatTarget(",
       "\n}\n",
     );
     expect(helper).toMatch(
-      /return await syncWorkspaceSharedChannels\(workspaceId,\s*joinedChannel\.channelWireId,/,
+      /return syncRendererWorkspaceSharedChannels\(\s*operation,\s*joinedChannel\.channelWireId,/,
     );
     expect(helper).not.toContain("joinedChannel.shareId");
     expect(syncCallSource).toContain("priorityChannelWireId,");
@@ -194,11 +200,11 @@ describe("the shared-channel sync pass is bounded in production", () => {
 
   it("rotates the window: the cursor is both read and stored per workspace", () => {
     expect(syncCallSource).toMatch(
-      /resumeAfterChannelWireId:\s*lease\.state\.sharedChannelSyncCursor \?\? undefined,/,
+      /resumeAfterChannelWireId:\s*authority\.state\.sharedChannelSyncCursor \?\? undefined,/,
     );
-    expect(passSource).toContain("lease.state.sharedChannelSyncCursor = null;");
+    expect(passSource).toContain("authority.state.sharedChannelSyncCursor = null;");
     expect(passSource).toContain(
-      "lease.state.sharedChannelSyncCursor = result.resumeAfterChannelWireId;",
+      "authority.state.sharedChannelSyncCursor = result.resumeAfterChannelWireId;",
     );
   });
 
@@ -299,10 +305,12 @@ describe("the shared-channel sync pass is bounded in production", () => {
   // stay stale for many polls while the surface looks refreshed.
   it("names the open DM so its own poll refreshes it", () => {
     expect(handlerSource("syncDms")).toContain(
-      "await syncSharedChannelsForChatTarget(\n" +
-        "          workspace.workspaceId,\n" +
-        "          input.openChannelId ? { channelId: input.openChannelId } : undefined,\n" +
-        "        );",
+      "await syncRendererSharedChannelsForChatTarget(\n" +
+        "              operation,\n" +
+        "              input.openChannelId\n" +
+        "                ? { channelId: input.openChannelId }\n" +
+        "                : undefined,\n" +
+        "            );",
     );
     expect(handlerSource("syncDms")).not.toContain(
       "await syncWorkspaceSharedChannels(",
