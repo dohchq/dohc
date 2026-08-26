@@ -63,12 +63,6 @@ export const MARKDOWN_SANITIZE_CONFIG: Config = {
   KEEP_CONTENT: false,
 };
 
-export const RAW_HTML_STRIP_CONFIG: Config = {
-  ALLOWED_TAGS: [],
-  ALLOWED_ATTR: [],
-  KEEP_CONTENT: true,
-};
-
 DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
   if (node instanceof HTMLAnchorElement && data.attrName === "href") {
     data.keepAttr = SAFE_LINK.test(data.attrValue) && !/^\s*(?:data|javascript):/iu.test(data.attrValue);
@@ -93,7 +87,23 @@ export function renderSafeMarkdown(
   const parser = new Marked({
     async: false,
     gfm: true,
+    tokenizer: {
+      html(source) {
+        // Block HTML can absorb later nonblank Markdown.
+        // Escape one line so the rest still tokenizes.
+        const match = this.rules.block.html.exec(source);
+        if (!match) return false;
+        const newlineIndex = source.indexOf("\n");
+        const raw =
+          newlineIndex < 0 ? source : source.slice(0, newlineIndex + 1);
+        const pre = match[1] === "pre" || match[1] === "script" || match[1] === "style";
+        return { type: "html", raw, text: raw, block: true, pre };
+      },
+    },
     renderer: {
+      html({ text }) {
+        return escapeHtml(text);
+      },
       image({ href, text, title }) {
         const safeHref = resolveImage(href);
         if (!safeHref || !BLOB_IMAGE.test(safeHref)) return escapeHtml(text);
@@ -118,10 +128,7 @@ export function renderSafeMarkdown(
       },
     },
   });
-  const markdownWithoutRawHtml = String(
-    DOMPurify.sanitize(markdown, RAW_HTML_STRIP_CONFIG),
-  );
-  const rendered = parser.parse(markdownWithoutRawHtml);
+  const rendered = parser.parse(markdown);
   if (typeof rendered !== "string") throw new Error("Markdown rendering must be synchronous.");
   const sanitized = String(DOMPurify.sanitize(rendered, MARKDOWN_SANITIZE_CONFIG));
   const template = document.createElement("template");

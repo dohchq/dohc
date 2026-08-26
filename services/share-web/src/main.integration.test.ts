@@ -398,7 +398,7 @@ async function startRelay(): Promise<string> {
         ok: true,
         grantId: "grant-integration",
         capabilityToken: CAPABILITY_TOKEN,
-        capabilityExpiresAtMs: Date.now() + 60_000,
+        capabilityExpiresAtMs: Date.now() + 15 * 60_000,
       }),
     );
   });
@@ -458,7 +458,7 @@ async function startControlledBlobRelay(): Promise<ControlledBlobRelay> {
           ok: true,
           grantId: "grant-integration",
           capabilityToken: CAPABILITY_TOKEN,
-          capabilityExpiresAtMs: Date.now() + 60_000,
+          capabilityExpiresAtMs: Date.now() + 15 * 60_000,
         }),
       );
       return;

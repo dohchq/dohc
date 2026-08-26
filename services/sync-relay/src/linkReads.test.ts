@@ -16,6 +16,7 @@ const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-link-reads";
 const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
 const UNKNOWN_CAPABILITY = "z".repeat(43);
+const LINK_REFUSAL_BODY = '{"ok":false,"error":"not found","code":"not_found"}';
 
 const roots: string[] = [];
 const storages: SyncRelayStorage[] = [];
@@ -37,7 +38,6 @@ function handler(
   storage: SyncRelayStorage,
   options: {
     nowMs?: () => number;
-    lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
     linkReadRateLimiter?: LinkReadRateLimiter;
     linkLogReadRateLimiter?: LinkReadRateLimiter;
   } = {},
@@ -51,7 +51,6 @@ function handler(
       return { userId: match[1]!, workspaceId };
     },
     nowMs: options.nowMs ?? (() => 2_000),
-    lookupUserEmail: options.lookupUserEmail ?? ((userId) => `${userId}@example.test`),
     newShareId: () => `share-${id++}`,
     newGrantId: () => `grant-${id++}`,
     newId: () => `id-${id++}`,
@@ -105,31 +104,72 @@ async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
   return sha;
 }
 
-function moment(originSeq: number, path: string, content: string, recordedAtMs: number) {
+type MomentOptions = {
+  versionId?: string;
+  objectId?: string;
+  operation?: "write" | "rename" | "delete";
+  beforePath?: string | null;
+  beforeContent?: string | null;
+  afterPath?: string | null;
+  afterContent?: string | null;
+};
+
+function moment(
+  originSeq: number,
+  path: string,
+  content: string,
+  recordedAtMs: number,
+  options: MomentOptions = {},
+) {
+  const beforeContent = options.beforeContent ?? null;
+  const afterContent =
+    options.afterContent === undefined ? content : options.afterContent;
+  const beforePath = options.beforePath ?? null;
+  const afterPath = options.afterPath === undefined ? path : options.afterPath;
   return {
     originSeq,
     opKind: "moment.append",
     payload: {
       momentId: `moment-${originSeq}`,
-      versionId: "main",
-      objectId: `object-${originSeq}`,
+      versionId: options.versionId ?? "main",
+      objectId: options.objectId ?? `object-${originSeq}`,
       path,
       recordedAtMs,
-      operation: "write",
-      payloadBeforeBlobSha256: null,
-      payloadBeforePath: null,
-      payloadAfterBlobSha256: sha256(content),
-      payloadAfterPath: path,
+      operation: options.operation ?? "write",
+      payloadBeforeBlobSha256:
+        beforeContent === null ? null : sha256(beforeContent),
+      payloadBeforePath: beforePath,
+      payloadAfterBlobSha256:
+        afterContent === null ? null : sha256(afterContent),
+      payloadAfterPath: afterPath,
       metadata: { origin: "user" },
-      beforePresent: "null",
+      beforePresent: beforeContent === null ? "null" : "present",
     },
     recordedAtMs,
   };
 }
 
+async function appendMoments(
+  h: SyncRelayHandler,
+  ops: ReturnType<typeof moment>[],
+): Promise<void> {
+  expect(
+    (
+      await h(
+        request(
+          OWNER,
+          `/sync/${WORKSPACE}/log`,
+          jsonBody({ originId: "origin-a", ops }),
+        ),
+      )
+    ).status,
+  ).toBe(200);
+}
+
 async function seed(
   h: SyncRelayHandler,
   access: "view" | "comment" | "edit" = "view",
+  selector: { paths?: string[]; versionId?: string; sharedVersionId?: string } = {},
 ): Promise<{ capability: string; grantId: string; sharedSha: string; hiddenSha: string }> {
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -146,7 +186,10 @@ async function seed(
             originId: "origin-a",
             ops: [
               { originSeq: 0, opKind: "workspace.init", payload: { private: true }, recordedAtMs: 900 },
-              moment(1, "docs/shared.md", "# shared\n", 1_100),
+              moment(1, "docs/shared.md", "# shared\n", 1_100, {
+                versionId: selector.sharedVersionId,
+                objectId: "object-shared",
+              }),
               moment(2, "private/hidden.md", "hidden\n", 1_200),
             ],
           }),
@@ -159,7 +202,12 @@ async function seed(
       request(
         OWNER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access }),
+        jsonBody({
+          recipientUserId: RECIPIENT,
+          paths: selector.paths ?? ["docs"],
+          access,
+          ...(selector.versionId === undefined ? {} : { versionId: selector.versionId }),
+        }),
       ),
     ),
   );
@@ -189,58 +237,232 @@ async function denialBytes(response: Response): Promise<string> {
   return `${response.status}:${await response.text()}`;
 }
 
+async function capabilityRefusalBody(response: Response): Promise<string> {
+  expect(response.status).toBe(401);
+  const body = await response.text();
+  expect(body).toBe(LINK_REFUSAL_BODY);
+  return body;
+}
+
 describe("relay capability reads", () => {
-  it("matches the same-access recipient log and blob boundary at every access", async () => {
-    for (const access of ["view", "comment", "edit"] as const) {
-      const storage = await newStorage();
-      const h = handler(storage);
-      const { capability, sharedSha, hiddenSha } = await seed(h, access);
+  it.each([
+    ["metadata", "/sync/link/share"],
+    ["log", "/sync/link/log"],
+    ["blob", `/sync/link/blobs/${sha256("missing")}`],
+  ])("answers an invalid capability on the %s route with the generic 401 refusal", async (_name, path) => {
+    const storage = await newStorage();
+    const response = await handler(storage)(linkRequest(UNKNOWN_CAPABILITY, path));
 
-      const recipientMeta = await json(await h(request(RECIPIENT, "/sync/shares/share-0")));
-      const linkMetaResponse = await h(linkRequest(capability, "/sync/link/share"));
-      expect(linkMetaResponse.status).toBe(200);
-      const linkMeta = await json(linkMetaResponse);
-      expect(linkMeta).toEqual({
-        ok: true,
-        effectiveSelector: {
-          ...(recipientMeta.selector as Record<string, unknown>),
-          access,
-        },
-        access,
-        lastSettledAtMs: 1_100,
-        granterEmail: `${OWNER}@example.test`,
-      });
-      expect(linkMeta).not.toHaveProperty("workspaceId");
-      expect(linkMeta).not.toHaveProperty("grantId");
-      expect(linkMeta).not.toHaveProperty("participants");
+    expect({ status: response.status, body: await response.text() }).toEqual({
+      status: 401,
+      body: LINK_REFUSAL_BODY,
+    });
+  });
 
-      const recipientLog = await json(
-        await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100")),
-      );
-      const linkLog = await json(
-        await h(linkRequest(capability, "/sync/link/log?since=0&limit=100")),
-      );
-      expect(linkLog).toEqual(recipientLog);
-      expect(JSON.stringify(linkLog)).not.toContain("private/hidden.md");
+  it("keeps an unknown blob behind a valid capability at the generic 404", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const response = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${sha256("missing")}`),
+    );
 
-      const recipientBlob = await h(
-        request(RECIPIENT, `/sync/shares/share-0/blobs/${sharedSha}`),
-      );
-      const linkBlob = await h(linkRequest(capability, `/sync/link/blobs/${sharedSha}`));
-      expect(linkBlob.status).toBe(recipientBlob.status);
-      expect(await linkBlob.arrayBuffer()).toEqual(await recipientBlob.arrayBuffer());
+    expect({ status: response.status, body: await response.text() }).toEqual({
+      status: 404,
+      body: LINK_REFUSAL_BODY,
+    });
+  });
 
-      const missingSha = sha256("missing");
-      const recipientMissing = await denialBytes(
-        await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${missingSha}`)),
-      );
-      expect(
-        await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${hiddenSha}`))),
-      ).toBe(recipientMissing);
-      expect(
-        await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${missingSha}`))),
-      ).toBe(recipientMissing);
-    }
+  it("matches the view recipient log and blob boundary", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const { capability, sharedSha, hiddenSha } = await seed(h, "view");
+
+    const recipientMeta = await json(await h(request(RECIPIENT, "/sync/shares/share-0")));
+    const linkMetaResponse = await h(linkRequest(capability, "/sync/link/share"));
+    expect(linkMetaResponse.status).toBe(200);
+    const linkMeta = await json(linkMetaResponse);
+    expect(linkMeta).toEqual({
+      ok: true,
+      effectiveSelector: {
+        ...(recipientMeta.selector as Record<string, unknown>),
+        access: "view",
+      },
+      access: "view",
+      lastSettledAtMs: 1_100,
+    });
+    expect(linkMeta).not.toHaveProperty("granterEmail");
+    expect(linkMeta).not.toHaveProperty("workspaceId");
+    expect(linkMeta).not.toHaveProperty("grantId");
+    expect(linkMeta).not.toHaveProperty("participants");
+
+    const recipientLog = await json(
+      await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100")),
+    );
+    const linkLog = await json(
+      await h(linkRequest(capability, "/sync/link/log?since=0&limit=100")),
+    );
+    expect(linkLog).toEqual(recipientLog);
+    expect(JSON.stringify(linkLog)).not.toContain("private/hidden.md");
+
+    const recipientBlob = await h(
+      request(RECIPIENT, `/sync/shares/share-0/blobs/${sharedSha}`),
+    );
+    const linkBlob = await h(linkRequest(capability, `/sync/link/blobs/${sharedSha}`));
+    expect(linkBlob.status).toBe(recipientBlob.status);
+    expect(await linkBlob.arrayBuffer()).toEqual(await recipientBlob.arrayBuffer());
+
+    const missingSha = sha256("missing");
+    const recipientMissing = await denialBytes(
+      await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${missingSha}`)),
+    );
+    expect(
+      await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${hiddenSha}`))),
+    ).toBe(recipientMissing);
+    expect(
+      await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${missingSha}`))),
+    ).toBe(recipientMissing);
+  });
+
+  it("refuses a path-shared blob after a later delete supersedes its file", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+
+    const beforeDelete = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(beforeDelete.status).toBe(200);
+    expect(await beforeDelete.text()).toBe("# shared\n");
+
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", "# shared\n", 1_300, {
+        objectId: "object-shared",
+        operation: "delete",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+
+    const missing = await denialBytes(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/blobs/${sha256("missing")}`,
+        ),
+      ),
+    );
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${seeded.sharedSha}`,
+          ),
+        ),
+      ),
+    ).toBe(missing);
+  });
+
+  it("serves only the replacement blob and keeps untouched files servable", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# replacement\n";
+    const untouched = "# untouched\n";
+    const replacementSha = await putBlob(h, replacement);
+    const untouchedSha = await putBlob(h, untouched);
+    await appendMoments(h, [
+      moment(3, "docs/untouched.md", untouched, 1_300, {
+        objectId: "object-untouched",
+      }),
+      moment(4, "docs/shared.md", replacement, 1_400, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+
+    const missing = await denialBytes(
+      await h(
+        linkRequest(
+          seeded.capability,
+          `/sync/link/blobs/${sha256("missing")}`,
+        ),
+      ),
+    );
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${seeded.sharedSha}`,
+          ),
+        ),
+      ),
+    ).toBe(missing);
+
+    const current = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${replacementSha}`),
+    );
+    expect(current.status).toBe(200);
+    expect(await current.text()).toBe(replacement);
+
+    const untouchedResponse = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${untouchedSha}`),
+    );
+    expect(untouchedResponse.status).toBe(200);
+    expect(await untouchedResponse.text()).toBe(untouched);
+  });
+
+  it("refuses a blob after its file moves outside a path selector", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    await appendMoments(h, [
+      moment(3, "private/moved.md", "# shared\n", 1_300, {
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${seeded.sharedSha}`,
+          ),
+        ),
+      ),
+    ).toContain("404:");
+  });
+
+  it("keeps a version share's pinned blob servable after the live file moves on", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view", {
+      paths: [],
+      versionId: "snapshot-1",
+      sharedVersionId: "snapshot-1",
+    });
+    await appendMoments(h, [
+      moment(3, "private/moved.md", "# shared\n", 1_300, {
+        versionId: "main",
+        objectId: "object-shared",
+        operation: "rename",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+
+    const pinned = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(pinned.status).toBe(200);
+    expect(await pinned.text()).toBe("# shared\n");
   });
 
   it("makes revoked, rotated, expired, and unknown capability refusals byte-identical", async () => {
@@ -248,7 +470,7 @@ describe("relay capability reads", () => {
     const storage = await newStorage();
     const h = handler(storage, { nowMs: () => now });
     const first = await seed(h);
-    const unknown = await denialBytes(
+    const unknown = await capabilityRefusalBody(
       await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share")),
     );
 
@@ -264,7 +486,7 @@ describe("relay capability reads", () => {
       ).status,
     ).toBe(200);
     expect(
-      await denialBytes(await h(linkRequest(first.capability, "/sync/link/share"))),
+      await capabilityRefusalBody(await h(linkRequest(first.capability, "/sync/link/share"))),
     ).toBe(unknown);
 
     const secondLink = await json(
@@ -291,7 +513,7 @@ describe("relay capability reads", () => {
       ).status,
     ).toBe(200);
     expect(
-      await denialBytes(
+      await capabilityRefusalBody(
         await h(linkRequest(String(secondExchange.capabilityToken), "/sync/link/log")),
       ),
     ).toBe(unknown);
@@ -310,38 +532,12 @@ describe("relay capability reads", () => {
     );
     now += LINK_SESSION_TTL_MS;
     expect(
-      await denialBytes(
+      await capabilityRefusalBody(
         await h(
           linkRequest(String(thirdExchange.capabilityToken), `/sync/link/blobs/${first.sharedSha}`),
         ),
       ),
     ).toBe(unknown);
-  });
-
-  it("rechecks metadata after its asynchronous display lookup", async () => {
-    const storage = await newStorage();
-    let resolveLookup!: (email: string) => void;
-    const lookup = new Promise<string>((resolve) => {
-      resolveLookup = resolve;
-    });
-    let holdLookup = false;
-    const h = handler(storage, {
-      lookupUserEmail: (userId) =>
-        holdLookup ? lookup : `${userId}@example.test`,
-    });
-    const seeded = await seed(h);
-    holdLookup = true;
-    const pending = h(linkRequest(seeded.capability, "/sync/link/share"));
-    await Promise.resolve();
-    expect(
-      storage.revokeShareGrant({
-        shareId: "share-0",
-        grantId: seeded.grantId,
-        revokedAtMs: 2_001,
-      }),
-    ).toMatchObject({ ok: true });
-    resolveLookup(`${OWNER}@example.test`);
-    expect((await pending).status).toBe(404);
   });
 
   it("rechecks log and blob reads after storage work", async () => {
@@ -377,8 +573,127 @@ describe("relay capability reads", () => {
         racedMethod === "fetchLogPage"
           ? "/sync/link/log"
           : `/sync/link/blobs/${seeded.sharedSha}`;
-      expect((await h(linkRequest(seeded.capability, path))).status).toBe(404);
+      expect((await h(linkRequest(seeded.capability, path))).status).toBe(401);
     }
+  });
+
+  it("keeps file-link freshness on the latest artifact operation when chat is newer", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view");
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", "# shared\n", 1_300, {
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "origin-a",
+              ops: [
+                {
+                  originSeq: 4,
+                  opKind: "chat.thread.create",
+                  payload: {
+                    threadId: "thread-shared",
+                    title: "About the shared file",
+                    createdAtMs: 1_400,
+                    linkedAtMs: 1_400,
+                    linkedObjectId: "object-shared",
+                    linkedPathHint: "docs/shared.md",
+                  },
+                  recordedAtMs: 1_400,
+                },
+                {
+                  originSeq: 5,
+                  opKind: "chat.message.append",
+                  payload: {
+                    messageId: "message-shared",
+                    threadId: "thread-shared",
+                    authorKind: "human",
+                    authorDisplayName: "Owner",
+                    authorUserId: OWNER,
+                    body: "The file looks ready.",
+                    createdAtMs: 1_500,
+                  },
+                  recordedAtMs: 1_500,
+                },
+              ],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    expect(metadata.lastSettledAtMs).toBe(1_300);
+  });
+
+  it("moves file-link freshness when a file write follows chat", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h, "view");
+    await putBlob(h, "# updated\n");
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/log`,
+            jsonBody({
+              originId: "origin-a",
+              ops: [
+                {
+                  originSeq: 3,
+                  opKind: "chat.thread.create",
+                  payload: {
+                    threadId: "thread-shared",
+                    title: "About the shared file",
+                    createdAtMs: 1_300,
+                    linkedAtMs: 1_300,
+                    linkedObjectId: "object-shared",
+                    linkedPathHint: "docs/shared.md",
+                  },
+                  recordedAtMs: 1_300,
+                },
+                {
+                  originSeq: 4,
+                  opKind: "chat.message.append",
+                  payload: {
+                    messageId: "message-shared",
+                    threadId: "thread-shared",
+                    authorKind: "human",
+                    authorDisplayName: "Owner",
+                    authorUserId: OWNER,
+                    body: "Please update the file.",
+                    createdAtMs: 1_400,
+                  },
+                  recordedAtMs: 1_400,
+                },
+                moment(5, "docs/shared.md", "# updated\n", 1_500, {
+                  objectId: "object-shared",
+                  beforePath: "docs/shared.md",
+                  beforeContent: "# shared\n",
+                }),
+              ],
+            }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const metadata = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    expect(metadata.lastSettledAtMs).toBe(1_500);
   });
 
   it("matches the former full-scan freshness result on interleaved rows", async () => {
@@ -452,7 +767,7 @@ describe("relay capability reads", () => {
     const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
     const h = handler(storage, { linkReadRateLimiter: limiter });
     const seeded = await seed(h);
-    expect((await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"))).status).toBe(404);
+    expect((await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"))).status).toBe(401);
     expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
     const limited = await h(linkRequest(seeded.capability, "/sync/link/share"));
     expect(limited.status).toBe(429);

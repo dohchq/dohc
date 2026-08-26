@@ -7,7 +7,7 @@ import type { SharedFile, ViewMeta } from "./model";
 
 const SESSION = "abcdefghijkl";
 
-const DEFAULT_META: ViewMeta = {
+const DEFAULT_META: ViewMeta & { granterEmail: string } = {
   access: "view",
   effectiveSelector: {
     paths: [],
@@ -88,8 +88,9 @@ describe("App", () => {
     await renderApp();
 
     expect(container.querySelector("header")?.textContent).toContain(
-      "Shared by owner@example.com",
+      "Shared by a dohc user",
     );
+    expect(container.querySelector(".badge")?.textContent).toBe("View");
     expect(container.querySelector(".freshness")?.textContent).toBe(
       "No settled changes",
     );

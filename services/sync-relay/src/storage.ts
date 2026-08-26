@@ -335,6 +335,11 @@ export interface SyncRelayStorage {
     session: SyncRelayLinkSessionRow;
     guard?: () => void;
   }): boolean;
+  replaceLinkSession(input: {
+    currentSession: SyncRelayLinkSessionRow;
+    session: SyncRelayLinkSessionRow;
+    guard: () => void;
+  }): boolean;
   findLinkSessionByCapabilityHash(
     capabilityHash: string,
   ): SyncRelayLinkSessionRow | null;
@@ -361,6 +366,10 @@ export interface SyncRelayStorage {
   // the actual decision). sha256 is validated hex upstream, so it cannot
   // carry LIKE wildcards.
   listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[];
+  // The latest moment for this file identity across the FULL workspace log.
+  // Share filters must run only after this lookup: the decisive row may move
+  // the file outside a selector and therefore be invisible to that filter.
+  latestLogRowForObject(workspaceId: string, objectId: string): SyncRelayLogRow | null;
   // MU-C4 shared channels: the channelWireId bound by the EARLIEST
   // chat.thread.create op for this threadId in the workspace's log (relay
   // order). undefined means no create exists; null means the earliest create
@@ -2500,6 +2509,62 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     });
   }
 
+  replaceLinkSession(input: {
+    currentSession: SyncRelayLinkSessionRow;
+    session: SyncRelayLinkSessionRow;
+    guard: () => void;
+  }): boolean {
+    const { currentSession, session } = input;
+    if (
+      !currentSession.capabilityHash ||
+      !session.capabilityHash ||
+      currentSession.sessionId === session.sessionId ||
+      currentSession.capabilityHash === session.capabilityHash ||
+      currentSession.grantId !== session.grantId ||
+      currentSession.generation !== session.generation ||
+      currentSession.expiresAtMs <= session.mintedAtMs ||
+      session.expiresAtMs <= session.mintedAtMs ||
+      session.generation < 1
+    ) {
+      return false;
+    }
+    return this.tx(() => {
+      input.guard();
+      const retired = this.db
+        .prepare(
+          `DELETE FROM sync_relay_link_sessions
+           WHERE session_id = ?
+             AND capability_hash = ?
+             AND grant_id = ?
+             AND generation = ?
+             AND expires_at_ms > ?`,
+        )
+        .run(
+          currentSession.sessionId,
+          currentSession.capabilityHash,
+          currentSession.grantId,
+          currentSession.generation,
+          Math.trunc(session.mintedAtMs),
+        );
+      if (Number(retired.changes ?? 0) !== 1) return false;
+      this.db
+        .prepare(
+          `INSERT INTO sync_relay_link_sessions (
+             session_id, capability_hash, grant_id, generation, minted_at_ms, expires_at_ms
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          session.sessionId,
+          session.capabilityHash,
+          session.grantId,
+          session.generation,
+          Math.trunc(session.mintedAtMs),
+          Math.trunc(session.expiresAtMs),
+        );
+      return true;
+    });
+  }
+
   findLinkSessionByCapabilityHash(
     capabilityHash: string,
   ): SyncRelayLinkSessionRow | null {
@@ -2729,6 +2794,21 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       .map(rowToLogRow);
   }
 
+  latestLogRowForObject(workspaceId: string, objectId: string): SyncRelayLogRow | null {
+    if (!objectId) return null;
+    const row = this.db
+      .prepare(
+        `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
+                l.payload_json, l.recorded_at_ms, l.relay_seq
+         FROM sync_relay_object_paths p
+         JOIN sync_relay_log l
+           ON l.workspace_id = p.workspace_id AND l.relay_seq = p.relay_seq
+         WHERE p.workspace_id = ? AND p.object_id = ?`,
+      )
+      .get(workspaceId, objectId);
+    return row ? rowToLogRow(row) : null;
+  }
+
   findThreadCreateChannelWireId(
     workspaceId: string,
     threadId: string,
@@ -2844,7 +2924,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const row = this.db
       .prepare(
         "SELECT object_id FROM sync_relay_object_paths \
-         WHERE workspace_id = ? AND path = ? LIMIT 1",
+         WHERE workspace_id = ? AND path = ? ORDER BY relay_seq DESC LIMIT 1",
       )
       .get(workspaceId, path);
     return typeof row?.object_id === "string" ? row.object_id : undefined;

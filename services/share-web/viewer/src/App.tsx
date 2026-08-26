@@ -119,10 +119,6 @@ function Freshness(props: { lastSettledAtMs: number | null }) {
   );
 }
 
-function displayAccess(access: ViewMeta["access"]): string {
-  return access[0]!.toUpperCase() + access.slice(1);
-}
-
 interface FolderNode {
   name: string;
   path: string;
@@ -279,7 +275,9 @@ export function App() {
         ]);
         if (!metaResponse.ok) throw new Error("refused");
         const meta = (await metaResponse.json()) as ViewMeta;
-        if (!["view", "comment", "edit"].includes(meta.access)) throw new Error("refused");
+        if (meta.access !== "view" || meta.effectiveSelector.access !== "view") {
+          throw new Error("refused");
+        }
         const files = filesFromLog(ops);
         if (current) {
           setSelectedPath(files[0]?.path ?? "");
@@ -300,10 +298,10 @@ export function App() {
     <div className="viewer">
       <header>
         <div>
-          <p className="eyebrow">Shared by {state.meta.granterEmail ?? "a dohc user"}</p>
+          <p className="eyebrow">Shared by a dohc user</p>
           <h1>{selected?.path ?? "Shared files"}</h1>
         </div>
-        <span className="badge">{displayAccess(state.meta.access)}</span>
+        <span className="badge">View</span>
       </header>
       <Freshness lastSettledAtMs={state.meta.lastSettledAtMs} />
       <div className="layout">

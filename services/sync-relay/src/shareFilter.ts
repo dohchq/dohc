@@ -836,10 +836,9 @@ export function filterOpForShare(
       collectString(record.beforePath),
     ].filter((path): path is string => path !== null);
     if (paths.length === 0) return { allowed: false };
-    // ALL referenced paths must be visible — a rename that crosses the share
-    // boundary (either direction) is excluded rather than leaking the
-    // outside path. Known limitation: such a file goes stale in the shared
-    // view until its next in-boundary write.
+    // ALL referenced paths must be visible. A rename across the share boundary
+    // is excluded rather than leaking the outside path. Existing replicas keep
+    // their prior view, but current-state blob reads no longer hydrate it.
     if (!paths.every((path) => pathVisibleThroughShare(selector, path))) {
       return { allowed: false };
     }

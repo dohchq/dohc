@@ -1,5 +1,6 @@
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { writeSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -22,6 +23,8 @@ const isDevOrTest = nodeEnv === "development" || nodeEnv === "test";
 const testAuthSeam = process.env.SYNC_RELAY_TEST_AUTH === "1" && isDevOrTest;
 const linkKey = process.env.DOHC_RELAY_LINK_KEY;
 const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
+const relayExchangeKeyHash =
+  relayExchangeKey === undefined ? undefined : exchangeKeyHash(relayExchangeKey);
 
 function fatal(message: string): never {
   writeSync(2, `${message}\n`);
@@ -201,10 +204,36 @@ function isLinkExchangePath(pathname: string): boolean {
   }
 }
 
+function isLinkRefreshPath(pathname: string): boolean {
+  try {
+    const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    return parts.length === 2 && parts[0] === "sync" && parts[1] === "link-refresh";
+  } catch {
+    return false;
+  }
+}
+
+function exchangeKeyHash(value: string): Buffer {
+  return createHash("sha256").update(value).digest();
+}
+
+function presentsValidRelayExchangeKey(headers: Headers): boolean {
+  const presented = headers.get("x-dohc-relay-exchange-key");
+  return (
+    relayExchangeKeyHash !== undefined &&
+    presented !== null &&
+    timingSafeEqual(exchangeKeyHash(presented), relayExchangeKeyHash)
+  );
+}
+
 const server = createServer((request, response) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   const isLinkExchange = isLinkExchangePath(url.pathname);
-  const maxBodyBytes = isLinkExchange ? MAX_LINK_EXCHANGE_BODY_BYTES : MAX_BODY_BYTES;
+  const isLinkRefresh = isLinkRefreshPath(url.pathname);
+  const isLinkWorkloadRequest = isLinkExchange || isLinkRefresh;
+  const maxBodyBytes = isLinkWorkloadRequest
+    ? MAX_LINK_EXCHANGE_BODY_BYTES
+    : MAX_BODY_BYTES;
   const chunks: Buffer[] = [];
   let received = 0;
   let rejected = false;
@@ -228,7 +257,7 @@ const server = createServer((request, response) => {
     if (received > maxBodyBytes) {
       rejected = true;
       chunks.length = 0;
-      const refusal = isLinkExchange
+      const refusal = isLinkWorkloadRequest
         ? { error: "not found", definition: RELAY_ERRORS.not_found }
         : { error: "payload too large", definition: RELAY_ERRORS.payload_too_large };
       response.statusCode = refusal.definition.status;
@@ -253,9 +282,15 @@ const server = createServer((request, response) => {
   request.on("end", () => {
     if (rejected) return;
     const headers = new Headers(request.headers as Record<string, string>);
-    // Overwrite any caller-supplied value. The pre-auth token bucket keys on
-    // the socket peer, not on a spoofable forwarding header.
-    headers.set("x-dohc-relay-client-ip", request.socket.remoteAddress ?? "unknown");
+    const forwardedClientAddress = headers.get("x-dohc-relay-client-ip");
+    if (
+      !isLinkExchange ||
+      forwardedClientAddress === null ||
+      !presentsValidRelayExchangeKey(headers)
+    ) {
+      // Only the keyed share-web exchange hop can select a forwarded bucket.
+      headers.set("x-dohc-relay-client-ip", request.socket.remoteAddress ?? "unknown");
+    }
     const webRequest = new Request(url, {
       method: request.method,
       headers,

@@ -53,6 +53,7 @@ import {
   type ObjectMomentRow,
   type ShareProposalOpRow,
   type SyncRelayLogInput,
+  type SyncRelayLogRow,
   type SyncRelayShareWithGrantRow,
   type SyncRelayStorage,
 } from "./storage";
@@ -106,6 +107,7 @@ export interface CreateSyncRelayHandlerOptions {
 
 type SyncRelayRoute =
   | { route: "link-exchange" }
+  | { route: "link-refresh" }
   | { route: "link-share" }
   | { route: "link-log" }
   | { route: "link-blob"; sha256: string }
@@ -191,6 +193,11 @@ const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const MAX_WORKSPACE_ID_CHARS = 256;
 const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
+const FILE_FRESHNESS_OP_KINDS = new Set([
+  "workspace.init",
+  "moment.append",
+  "version.create",
+]);
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
 // #646 PR3a. A submit's idempotency key is the client's own string, not a
@@ -225,6 +232,46 @@ function storedSelectorKind(
   return {};
 }
 
+interface SettledMomentIdentity {
+  objectId: string | null;
+  referencedPaths: string[];
+  settledPath: string | null;
+  deleted: boolean;
+}
+
+function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | null {
+  if (row.opKind !== "moment.append") return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(row.payloadJson);
+  } catch {
+    return null;
+  }
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const objectId =
+    typeof record.objectId === "string" && record.objectId.length > 0
+      ? record.objectId
+      : null;
+  const referencedPaths = [
+    record.path,
+    record.payloadBeforePath,
+    record.payloadAfterPath,
+    record.beforePath,
+  ].filter((path): path is string => typeof path === "string" && path.length > 0);
+  const deleted = record.operation === "delete";
+  const settledPath = deleted
+    ? null
+    : typeof record.path === "string" && record.path.length > 0
+      ? record.path
+      : typeof record.payloadAfterPath === "string" && record.payloadAfterPath.length > 0
+        ? record.payloadAfterPath
+        : null;
+  return { objectId, referencedPaths, settledPath, deleted };
+}
+
 export function createSyncRelayHandler({
   storage,
   resolveActor,
@@ -247,6 +294,19 @@ export function createSyncRelayHandler({
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler {
   const relayExchangeKeyHash =
     relayExchangeKey === undefined ? undefined : sha256Base64Url(relayExchangeKey);
+
+  const hasValidRelayExchangeKey = (
+    request: Request,
+    requireConfigured: boolean,
+  ): boolean => {
+    if (relayExchangeKeyHash === undefined) return !requireConfigured;
+    const presented = request.headers.get("x-dohc-relay-exchange-key");
+    const presentedHash = sha256Base64Url(presented ?? "");
+    return (
+      presented !== null &&
+      constantTimeHashEqual(presentedHash, relayExchangeKeyHash)
+    );
+  };
 
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
   // presence scope. The actor's user id is the SERVER-DERIVED attribution;
@@ -621,6 +681,12 @@ export function createSyncRelayHandler({
         limit: MAX_LOG_PAGE_SIZE,
       });
       for (const row of rows) {
+        if (
+          !isChatChannelSelector(selector) &&
+          !FILE_FRESHNESS_OP_KINDS.has(row.opKind)
+        ) {
+          continue;
+        }
         if (filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver).allowed) {
           return row.recordedAtMs;
         }
@@ -628,6 +694,83 @@ export function createSyncRelayHandler({
       if (rows.length < MAX_LOG_PAGE_SIZE) return null;
       beforeRelaySeq = rows[rows.length - 1]!.relaySeq;
     }
+  };
+
+  const latestPathRelatedMoment = (
+    workspaceId: string,
+    candidate: SyncRelayLogRow,
+    candidateIdentity: SettledMomentIdentity,
+  ): SyncRelayLogRow => {
+    let latest = candidate;
+    let trackedObjectId = candidateIdentity.objectId;
+    let trackedPath =
+      candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
+    let cursor = candidate.relaySeq;
+    while (true) {
+      const page = storage.fetchLogPage({
+        workspaceId,
+        sinceRelaySeq: cursor,
+        limit: MAX_LOG_PAGE_SIZE,
+      });
+      for (const row of page.rows) {
+        const identity = settledMomentIdentity(row);
+        if (!identity) continue;
+        const sameObject =
+          trackedObjectId !== null && identity.objectId === trackedObjectId;
+        const samePath =
+          trackedPath !== null && identity.referencedPaths.includes(trackedPath);
+        if (!sameObject && !samePath) continue;
+        latest = row;
+        trackedObjectId = identity.objectId ?? trackedObjectId;
+        if (!identity.deleted) trackedPath = identity.settledPath ?? trackedPath;
+      }
+      if (!page.hasMore) return latest;
+      cursor = page.nextCursor;
+    }
+  };
+
+  const currentSettledBlobMoment = (
+    workspaceId: string,
+    candidate: SyncRelayLogRow,
+  ): SyncRelayLogRow | null => {
+    const candidateIdentity = settledMomentIdentity(candidate);
+    if (!candidateIdentity) return null;
+
+    let current = candidateIdentity.objectId
+      ? storage.latestLogRowForObject(workspaceId, candidateIdentity.objectId)
+      : null;
+    if (!current) {
+      const candidatePath =
+        candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
+      const currentObjectId = candidatePath
+        ? storage.objectIdAtPath(workspaceId, candidatePath)
+        : undefined;
+      current = currentObjectId
+        ? storage.latestLogRowForObject(workspaceId, currentObjectId)
+        : latestPathRelatedMoment(workspaceId, candidate, candidateIdentity);
+    }
+    if (!current) return null;
+
+    let currentIdentity = settledMomentIdentity(current);
+    if (!currentIdentity || currentIdentity.deleted) return null;
+
+    if (currentIdentity.objectId && currentIdentity.settledPath) {
+      const occupyingObjectId = storage.objectIdAtPath(
+        workspaceId,
+        currentIdentity.settledPath,
+      );
+      if (occupyingObjectId && occupyingObjectId !== currentIdentity.objectId) {
+        const occupyingMoment = storage.latestLogRowForObject(
+          workspaceId,
+          occupyingObjectId,
+        );
+        if (!occupyingMoment) return null;
+        current = occupyingMoment;
+        currentIdentity = settledMomentIdentity(current);
+        if (!currentIdentity || currentIdentity.deleted) return null;
+      }
+    }
+    return current;
   };
 
   const sharedBlob = (
@@ -638,7 +781,17 @@ export function createSyncRelayHandler({
     const candidates = storage.listLogRowsReferencing(workspaceId, sha256);
     const chatResolver = chatResolverFor(workspaceId);
     const reachable = candidates.some((row) => {
-      const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
+      const establishingRow =
+        !isChatChannelSelector(selector) && selector.versionId === null
+          ? currentSettledBlobMoment(workspaceId, row)
+          : row;
+      if (!establishingRow) return false;
+      const decision = filterOpForShare(
+        selector,
+        establishingRow.opKind,
+        establishingRow.payloadJson,
+        chatResolver,
+      );
       return decision.allowed && decision.blobSha256s.includes(sha256);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
@@ -648,11 +801,11 @@ export function createSyncRelayHandler({
     request: Request,
     rateLimiter: LinkReadRateLimiter,
   ) => {
-    if (!linkKey) throw notFound();
+    if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
       request.headers.get("authorization") ?? "",
     );
-    if (!match) throw notFound();
+    if (!match) throw invalidLinkCapability();
     const capabilityToken = match[1]!;
     const capability = validateLinkCapability({
       storage,
@@ -660,7 +813,7 @@ export function createSyncRelayHandler({
       linkKey,
       nowMs: nowMs(),
     });
-    if (!capability) throw notFound();
+    if (!capability) throw invalidLinkCapability();
     if (!rateLimiter.allow(capability.session.capabilityHash, nowMs())) {
       throw linkReadRateLimited();
     }
@@ -671,7 +824,7 @@ export function createSyncRelayHandler({
     capabilityToken: string,
     expected: { shareId: string; grantId: string; generation: number },
   ) => {
-    if (!linkKey) throw notFound();
+    if (!linkKey) throw invalidLinkCapability();
     const fresh = validateLinkCapability({
       storage,
       capabilityToken,
@@ -684,22 +837,48 @@ export function createSyncRelayHandler({
       fresh.grantId !== expected.grantId ||
       fresh.generation !== expected.generation
     ) {
-      throw notFound();
+      throw invalidLinkCapability();
     }
     return fresh;
   };
 
+  const requireRefreshableLinkSession = (request: Request, refreshedAtMs: number) => {
+    if (!linkKey) throw invalidLinkCapability();
+    const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(
+      request.headers.get("authorization") ?? "",
+    );
+    if (!match) throw invalidLinkCapability();
+    const capabilityToken = match[1]!;
+    const capabilityHash = hashLinkBearer(capabilityToken, linkKey);
+    const session = storage.findLinkSessionByCapabilityHash(capabilityHash);
+    if (
+      !session ||
+      !constantTimeHashEqual(capabilityHash, session.capabilityHash) ||
+      session.expiresAtMs <= refreshedAtMs
+    ) {
+      throw invalidLinkCapability();
+    }
+    return { capabilityHash, session };
+  };
+
+  const linkExchangeResult = (
+    authorized: AuthorizedShareAction<ShareSelector>,
+    capabilityToken: string,
+    capabilityExpiresAtMs: number,
+  ): LinkExchangeResult => ({
+    shareId: authorized.share.shareId,
+    grantId: authorized.grant.grantId,
+    generation: authorized.grant.generation,
+    access: authorized.effectiveSelector.access,
+    effectiveSelector: authorized.effectiveSelector,
+    capabilityToken,
+    capabilityExpiresAtMs,
+  });
+
   const respondToLinkExchange = async (request: Request): Promise<Response> => {
     const refused = (): Response => errorResponse(notFound());
     if (!linkKey) return refused();
-    const presentedRelayExchangeKey = request.headers.get(
-      "x-dohc-relay-exchange-key",
-    );
-    if (relayExchangeKeyHash !== undefined) {
-      const presentedHash = sha256Base64Url(presentedRelayExchangeKey ?? "");
-      const keyMatches = constantTimeHashEqual(presentedHash, relayExchangeKeyHash);
-      if (presentedRelayExchangeKey === null || !keyMatches) return refused();
-    }
+    if (!hasValidRelayExchangeKey(request, false)) return refused();
     const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
     if (!linkExchangeRateLimiter.allow(ip, nowMs())) return refused();
 
@@ -734,7 +913,8 @@ export function createSyncRelayHandler({
       });
       if (
         !authorized.ok ||
-        authorized.grant.generation !== found.credential.generation
+        authorized.grant.generation !== found.credential.generation ||
+        authorized.grant.access !== "view"
       ) {
         return refused();
       }
@@ -782,20 +962,74 @@ export function createSyncRelayHandler({
       });
       if (!minted) return refused();
 
-      const exchange: LinkExchangeResult = {
-        shareId: authorized.share.shareId,
-        grantId: authorized.grant.grantId,
-        generation: authorized.grant.generation,
-        access: authorized.effectiveSelector.access,
-        effectiveSelector: authorized.effectiveSelector,
+      const exchange = linkExchangeResult(
+        authorized,
         capabilityToken,
         capabilityExpiresAtMs,
-      };
+      );
       return jsonResponse({ ok: true, ...exchange });
     } catch (error) {
       if (error instanceof HttpError) return refused();
       throw error;
     }
+  };
+
+  const respondToLinkRefresh = (request: Request): Response => {
+    if (!hasValidRelayExchangeKey(request, true)) {
+      return errorResponse(notFound());
+    }
+    if (!linkKey) throw invalidLinkCapability();
+    const refreshLinkKey = linkKey;
+    const refreshedAtMs = nowMs();
+    const current = requireRefreshableLinkSession(request, refreshedAtMs);
+    const authorized = authorizeLinkShareAction({
+      storage,
+      grantId: current.session.grantId,
+      action: "read",
+    });
+    if (
+      !authorized.ok ||
+      authorized.grant.generation !== current.session.generation
+    ) {
+      throw invalidLinkCapability();
+    }
+
+    const capabilityToken = newLinkBearer();
+    const capabilityExpiresAtMs = refreshedAtMs + LINK_SESSION_TTL_MS;
+    const replaced = storage.replaceLinkSession({
+      currentSession: current.session,
+      session: {
+        sessionId: newId(),
+        capabilityHash: hashLinkBearer(capabilityToken, refreshLinkKey),
+        grantId: authorized.grant.grantId,
+        generation: authorized.grant.generation,
+        mintedAtMs: refreshedAtMs,
+        expiresAtMs: capabilityExpiresAtMs,
+      },
+      guard: () => {
+        const fresh = authorizeLinkShareAction({
+          storage,
+          grantId: current.session.grantId,
+          action: "read",
+        });
+        if (
+          !fresh.ok ||
+          fresh.share.shareId !== authorized.share.shareId ||
+          fresh.grant.grantId !== authorized.grant.grantId ||
+          fresh.grant.generation !== authorized.grant.generation
+        ) {
+          throw invalidLinkCapability();
+        }
+      },
+    });
+    if (!replaced) throw invalidLinkCapability();
+
+    const refresh = linkExchangeResult(
+      authorized,
+      capabilityToken,
+      capabilityExpiresAtMs,
+    );
+    return jsonResponse({ ok: true, ...refresh });
   };
 
   return async (request) => {
@@ -804,6 +1038,10 @@ export function createSyncRelayHandler({
       if (route.route === "link-exchange") {
         if (request.method !== "POST") throw methodNotAllowed();
         return await respondToLinkExchange(request);
+      }
+      if (route.route === "link-refresh") {
+        if (request.method !== "POST") throw methodNotAllowed();
+        return respondToLinkRefresh(request);
       }
       if (
         route.route === "link-share" ||
@@ -818,9 +1056,6 @@ export function createSyncRelayHandler({
         if (!share) throw notFound();
 
         if (route.route === "link-share") {
-          const granterEmail = lookupUserEmail
-            ? await lookupUserEmail(share.granterUserId)
-            : null;
           const lastSettledAtMs = newestFilteredOpTimestamp(
             share.workspaceId,
             capability.effectiveSelector,
@@ -831,7 +1066,6 @@ export function createSyncRelayHandler({
             effectiveSelector: capability.effectiveSelector,
             access: capability.access,
             lastSettledAtMs,
-            granterEmail,
           });
         }
 
@@ -2180,6 +2414,9 @@ function parseRoute(request: Request): SyncRelayRoute {
   if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-exchange") {
     return { route: "link-exchange" };
   }
+  if (parts.length === 2 && parts[0] === "sync" && parts[1] === "link-refresh") {
+    return { route: "link-refresh" };
+  }
   if (parts.length === 3 && parts[0] === "sync" && parts[1] === "link") {
     if (parts[2] === "share") return { route: "link-share" };
     if (parts[2] === "log") return { route: "link-log" };
@@ -2850,6 +3087,10 @@ function proposalNotOpen(): HttpError {
 
 function notFound(): HttpError {
   return relayHttpError(RELAY_ERRORS.not_found, "not found");
+}
+
+function invalidLinkCapability(): HttpError {
+  return new HttpError(401, RELAY_ERRORS.not_found.code, "not found");
 }
 
 function linkReadRateLimited(): HttpError {

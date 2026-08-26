@@ -1,4 +1,4 @@
-export type ShareAccess = "view" | "comment" | "edit";
+export type ShareAccess = "view";
 
 export interface ViewMeta {
   access: ShareAccess;
@@ -8,7 +8,6 @@ export interface ViewMeta {
     access: ShareAccess;
   };
   lastSettledAtMs: number | null;
-  granterEmail: string | null;
 }
 
 export interface RelayOp {

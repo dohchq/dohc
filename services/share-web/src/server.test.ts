@@ -44,12 +44,15 @@ afterEach(() => {
 describe("share-web sessions", () => {
   it("identifies exchange requests to the relay with the configured key", async () => {
     const relayExchangeKey = "share-web-to-relay-test-key";
+    const clientAddress = "198.51.100.23";
     let receivedRelayExchangeKey: string | null = null;
+    let receivedClientAddress: string | null = null;
     const relay = async (relayRequest: Request): Promise<Response> => {
       expect(new URL(relayRequest.url).pathname).toBe("/sync/link-exchange");
       receivedRelayExchangeKey = relayRequest.headers.get(
         "x-dohc-relay-exchange-key",
       );
+      receivedClientAddress = relayRequest.headers.get("x-dohc-relay-client-ip");
       return Response.json({
         ok: true,
         grantId: "grant-alpha",
@@ -66,12 +69,13 @@ describe("share-web sessions", () => {
       newSessionToken: () => Buffer.alloc(32, 21).toString("base64url"),
     });
 
-    const exchanged = await handler(
-      request("/api/exchange", exchange(SECRET_ALPHA)),
-    );
+    const exchangeRequest = request("/api/exchange", exchange(SECRET_ALPHA));
+    exchangeRequest.headers.set("x-dohc-share-web-client-ip", clientAddress);
+    const exchanged = await handler(exchangeRequest);
 
     expect(exchanged.status).toBe(200);
     expect(receivedRelayExchangeKey).toBe(relayExchangeKey);
+    expect(receivedClientAddress).toBe(clientAddress);
   });
 
   it("keeps two link sessions distinct when one link rotates", async () => {
@@ -240,6 +244,194 @@ describe("share-web sessions", () => {
     expect(logged).not.toContain(CAP_ALPHA_1);
   });
 
+  it("renews an active session before expiry and keeps it usable past the old expiry", async () => {
+    const relayExchangeKey = "share-web-to-relay-refresh-key";
+    let now = 1_000;
+    let refreshCalls = 0;
+    const readCapabilities: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey,
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 26).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-renewed",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          refreshCalls += 1;
+          expect(relayRequest.method).toBe("POST");
+          expect(relayRequest.headers.get("authorization")).toBe(
+            `LinkCapability ${CAP_ALPHA_1}`,
+          );
+          expect(relayRequest.headers.get("x-dohc-relay-exchange-key")).toBe(
+            relayExchangeKey,
+          );
+          expect(await relayRequest.text()).toBe("");
+          return Response.json({
+            ok: true,
+            grantId: "grant-renewed",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        const authorization = relayRequest.headers.get("authorization") ?? "";
+        readCapabilities.push(authorization);
+        if (
+          authorization === `LinkCapability ${CAP_ALPHA_1}` ||
+          authorization === `LinkCapability ${CAP_ALPHA_2}`
+        ) {
+          return Response.json({ ok: true, access: "view" });
+        }
+        return new Response("relay capability refusal", { status: 401 });
+      },
+    });
+
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+
+    now = 601_001;
+    const renewed = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect(renewed.status).toBe(200);
+
+    now = 901_001;
+    const afterOldExpiry = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect(afterOldExpiry.status).toBe(200);
+    expect(refreshCalls).toBe(1);
+    expect(readCapabilities).toEqual([
+      `LinkCapability ${CAP_ALPHA_2}`,
+      `LinkCapability ${CAP_ALPHA_2}`,
+    ]);
+    expect(cookiePair(renewed)).toBe(sessionHeaders.cookie);
+    expect(renewed.headers.get("set-cookie")).toContain("Max-Age=900");
+  });
+
+  it("shares one capability refresh across concurrent near-expiry views", async () => {
+    let now = 1_000;
+    let refreshCalls = 0;
+    let readCalls = 0;
+    let releaseRefresh: (() => void) | undefined;
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "share-web-to-relay-refresh-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 28).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-concurrent-refresh",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          refreshCalls += 1;
+          await refreshGate;
+          return Response.json({
+            ok: true,
+            grantId: "grant-concurrent-refresh",
+            capabilityToken: CAP_ALPHA_2,
+            capabilityExpiresAtMs: now + 900_000,
+          });
+        }
+        readCalls += 1;
+        expect(relayRequest.headers.get("authorization")).toBe(
+          `LinkCapability ${CAP_ALPHA_2}`,
+        );
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+    now = 601_001;
+
+    const first = handler(request("/api/view/meta", { headers: sessionHeaders }));
+    const second = handler(request("/api/view/meta", { headers: sessionHeaders }));
+    await vi.waitFor(() => expect(refreshCalls).toBe(1));
+    releaseRefresh?.();
+    const responses = await Promise.all([first, second]);
+
+    expect(responses.map((view) => view.status)).toEqual([200, 200]);
+    expect(readCalls).toBe(2);
+  });
+
+  it("deletes a near-expiry session when relay refresh refuses it", async () => {
+    let now = 1_000;
+    let refreshCalls = 0;
+    let readCalls = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      relayExchangeKey: "share-web-to-relay-refresh-key",
+      publicHosts: new Set([HOST]),
+      nowMs: () => now,
+      newSessionToken: () => Buffer.alloc(32, 27).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-refused-refresh",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        if (pathname === "/sync/link-refresh") {
+          refreshCalls += 1;
+          return new Response("relay refresh refusal", { status: 401 });
+        }
+        readCalls += 1;
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+    now = 601_001;
+
+    const refusedRefresh = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    const afterDeletion = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+
+    for (const refusal of [refusedRefresh, afterDeletion]) {
+      expect(refusal.status).toBe(404);
+      expect(await refusal.text()).toBe(shareWebRefusalBody);
+    }
+    expect(refreshCalls).toBe(1);
+    expect(readCalls).toBe(0);
+  });
+
   it("relays a generic 429 for a throttled read and preserves the session", async () => {
     let readCalls = 0;
     const handler = createShareWebHandler({
@@ -288,6 +480,107 @@ describe("share-web sessions", () => {
     expect(retried.status).toBe(200);
     expect(await retried.json()).toMatchObject({ granterEmail: "owner@example.test" });
     expect(readCalls).toBe(2);
+  });
+
+  it("preserves the session after a relay 404 resource miss", async () => {
+    const missingSha = "a".repeat(64);
+    const expectedMetaBody = JSON.stringify({ ok: true, access: "view" });
+    const relayReads: string[] = [];
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 24).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        const pathname = new URL(relayRequest.url).pathname;
+        if (pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-resource-miss",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        relayReads.push(pathname);
+        if (pathname === `/sync/link/blobs/${missingSha}`) {
+          return new Response("relay-specific missing resource", { status: 404 });
+        }
+        return new Response(expectedMetaBody, {
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+
+    const missing = await handler(
+      request(`/api/view/blob/${missingSha}`, { headers: sessionHeaders }),
+    );
+    expect({ status: missing.status, body: await missing.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+
+    const followUp = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect({ status: followUp.status, body: await followUp.text() }).toEqual({
+      status: 200,
+      body: expectedMetaBody,
+    });
+    expect(relayReads).toEqual([`/sync/link/blobs/${missingSha}`, "/sync/link/share"]);
+  });
+
+  it("deletes the session after a relay 401 capability refusal", async () => {
+    let relayReads = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 25).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-invalid-capability",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        relayReads += 1;
+        if (relayReads === 1) {
+          return new Response("relay-specific capability refusal", { status: 401 });
+        }
+        return Response.json({ ok: true, access: "view" });
+      },
+    });
+    const exchanged = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const body = (await exchanged.json()) as { session: string };
+    const sessionHeaders = {
+      cookie: cookiePair(exchanged),
+      "x-dohc-link-session": body.session,
+    };
+
+    const unauthorized = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect({ status: unauthorized.status, body: await unauthorized.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+
+    const followUp = await handler(
+      request("/api/view/meta", { headers: sessionHeaders }),
+    );
+    expect({ status: followUp.status, body: await followUp.text() }).toEqual({
+      status: 404,
+      body: shareWebRefusalBody,
+    });
+    expect(relayReads).toBe(1);
   });
 
   it("rejects hostile hosts and returns one refusal body for every public failure", async () => {

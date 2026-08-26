@@ -126,6 +126,44 @@ async function postJson(baseUrl: string, path: string, value: unknown): Promise<
   });
 }
 
+async function seedExchangeLink(baseUrl: string, workspaceId: string): Promise<string> {
+  expect((await postJson(baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
+  const shareResponse = await postJson(baseUrl, `/sync/${workspaceId}/shares`, {
+    recipientUserId: "link-recipient",
+    paths: ["docs"],
+    access: "view",
+  });
+  expect(shareResponse.status).toBe(200);
+  const share = (await shareResponse.json()) as { shareId: string };
+  const linkResponse = await postJson(
+    baseUrl,
+    `/sync/${workspaceId}/shares/${share.shareId}/links`,
+    { access: "view" },
+  );
+  expect(linkResponse.status).toBe(200);
+  const link = (await linkResponse.json()) as { secret: string };
+  return link.secret;
+}
+
+function exchangeLink(
+  baseUrl: string,
+  secret: string,
+  clientAddress: string,
+  relayExchangeKey?: string,
+): Promise<Response> {
+  return fetch(`${baseUrl}/sync/link-exchange`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-dohc-relay-client-ip": clientAddress,
+      ...(relayExchangeKey === undefined
+        ? {}
+        : { "x-dohc-relay-exchange-key": relayExchangeKey }),
+    },
+    body: JSON.stringify({ secret }),
+  });
+}
+
 // Push as an ARBITRARY authenticated user (WS-MU-C0 forgery tests). The
 // test-auth seam maps `Bearer test:<userId>` -> actor.userId, so this proves the
 // relay derives the pusher's identity server-side and cannot be told otherwise.
@@ -434,6 +472,79 @@ describe("sync relay main process", () => {
       body: JSON.stringify({ secret: link.secret }),
     });
     expect(small.status).toBe(200);
+  });
+
+  it("keeps keyed forwarded client addresses in separate exchange buckets", async (context) => {
+    const relayRoot = await tempRoot("keyed-exchange-buckets");
+    const relayExchangeKey = "integration-relay-exchange-key";
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+        DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const secret = await seedExchangeLink(baseUrl, "workspace-keyed-exchange-buckets");
+    const firstClientStatuses = await Promise.all(
+      Array.from({ length: 12 }, async () =>
+        (
+          await exchangeLink(
+            baseUrl,
+            secret,
+            "198.51.100.10",
+            relayExchangeKey,
+          )
+        ).status,
+      ),
+    );
+
+    const secondClient = await exchangeLink(
+      baseUrl,
+      secret,
+      "198.51.100.11",
+      relayExchangeKey,
+    );
+    expect({ firstClientStatuses, secondClientStatus: secondClient.status }).toEqual({
+      firstClientStatuses: Array.from({ length: 12 }, () => 200),
+      secondClientStatus: 200,
+    });
+  });
+
+  it("ignores a forwarded client address when no exchange key is configured", async (context) => {
+    const relayRoot = await tempRoot("unkeyed-exchange-bucket");
+    let baseUrl: string;
+    try {
+      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+        DOHC_RELAY_EXCHANGE_KEY: undefined,
+      });
+    } catch (error) {
+      if (error instanceof ListenPermissionError) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    const secret = await seedExchangeLink(baseUrl, "workspace-unkeyed-exchange-bucket");
+    const firstClientStatuses = await Promise.all(
+      Array.from({ length: 12 }, async () =>
+        (await exchangeLink(baseUrl, secret, "203.0.113.10")).status,
+      ),
+    );
+
+    const spoofedSecondClient = await exchangeLink(baseUrl, secret, "203.0.113.11");
+    expect({ firstClientStatuses, secondClientStatus: spoofedSecondClient.status }).toEqual({
+      firstClientStatuses: Array.from({ length: 12 }, () => 200),
+      secondClientStatus: 404,
+    });
   });
 });
 
