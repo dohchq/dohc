@@ -66,6 +66,7 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
   private readonly workspaceRoot: string;
   private readonly registrations = new Map<string, RegisteredPlugin>();
   private startPromise: Promise<void> | undefined;
+  private startSettled = false;
 
   constructor(
     workspace: PluginWorkspaceIdentity,
@@ -80,8 +81,14 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
   }
 
   start(): Promise<void> {
-    this.startPromise ??= this.pipeline.start();
+    this.startPromise ??= this.pipeline.start().finally(() => {
+      this.startSettled = true;
+    });
     return this.startPromise;
+  }
+
+  cancelStart(): void {
+    if (this.startPromise && !this.startSettled) this.pipeline.cancelStart();
   }
 
   assertSameRoot(workspaceRoot: string): void {
@@ -103,8 +110,6 @@ class OwnedPluginWorkspaceRuntime implements PluginWorkspaceRuntime {
       pipelineDisposal = Promise.resolve();
     }
 
-    const startPromise = this.startPromise;
-    if (startPromise) await startPromise.catch(() => undefined);
     await pipelineDisposal;
 
     try {
@@ -322,6 +327,7 @@ export class PluginWorkspaceRuntimes<
     const { promise: stop, resolve, reject } = Promise.withResolvers<void>();
     const slot: StoppingRuntimeSlot = { kind: "stopping", record, stop };
     this.slots.set(workspaceId, slot);
+    record?.cancelStart();
     void this.disposeRecord(workspaceId, slot, beforeDispose).then(resolve, reject);
     return stop;
   }

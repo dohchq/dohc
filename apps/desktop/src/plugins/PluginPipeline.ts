@@ -899,6 +899,10 @@ export class PluginPipeline {
     return this.startPromise;
   }
 
+  cancelStart(): void {
+    this.abortController.abort();
+  }
+
   list(): PluginPipelinePluginStatus[] {
     const listed: PluginPipelinePluginStatus[] = [];
     const included = new Set<string>();
@@ -1807,7 +1811,7 @@ export class PluginPipeline {
   dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
-    this.abortController.abort();
+    this.cancelStart();
     const closingOwnership = this.hostOwnership.close();
     this.disposePromise = this.finishDispose(closingOwnership);
     return this.disposePromise;
