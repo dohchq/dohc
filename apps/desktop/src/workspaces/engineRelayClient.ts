@@ -165,6 +165,19 @@ export class RelayTransportRouteGuard {
     this.routes.delete(workspaceId);
   }
 
+  releaseLocation(
+    workspaceId: string,
+    rootPath: string,
+    expectedMode?: RelayTransportMode,
+  ): void {
+    const route = this.routes.get(workspaceId);
+    if (!route || (expectedMode !== undefined && route.mode !== expectedMode)) {
+      return;
+    }
+    route.locations.delete(rootPath);
+    if (route.locations.size === 0) this.routes.delete(workspaceId);
+  }
+
   workspaceIds(): string[] {
     return [...this.routes.keys()];
   }
@@ -672,8 +685,12 @@ export class EngineRelayClient {
   private readonly routes: RelayTransportRouteGuard;
   private readonly allowInsecureLoopbackForTests: boolean;
   private readonly requestDeadlineMs: number;
-  private readonly activeLocations = new Map<string, string>();
-  private readonly workspaceTails = new Map<string, Promise<void>>();
+  private readonly activeLocations = new Map<string | symbol, string>();
+  private readonly boundWorkspaces = new Map<string | symbol, EngineWorkspace>();
+  private readonly workspaceTails = new Map<
+    string | symbol,
+    Promise<void>
+  >();
 
   constructor(options: EngineRelayClientOptions) {
     this.sessions = options.sessions;
@@ -687,12 +704,18 @@ export class EngineRelayClient {
   bind(input: {
     workspaceId: string;
     rootPath: string;
+    attachmentId?: symbol;
     shareMount?: true;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
   }): EngineRelayWorkspaceClient {
-    if (input.shareMount === true) {
-      this.sessions.rememberShareMount(input.workspaceId);
-    }
+    const workspace: EngineWorkspace = {
+      workspaceId: input.workspaceId,
+      rootPath: input.rootPath,
+      ...(input.attachmentId !== undefined
+        ? { attachmentId: input.attachmentId }
+        : {}),
+      ...(input.shareMount === true ? { shareMount: true } : {}),
+    };
     this.routes.bind({
       ...input,
       mode: "daemon",
@@ -700,23 +723,23 @@ export class EngineRelayClient {
         this.allowInsecureLoopbackForTests ||
         allowInsecureLoopbackRelayForTests(input.relay.baseUrl),
     });
-    const workspace = {
-      workspaceId: input.workspaceId,
-      rootPath: input.rootPath,
-      ...(input.shareMount === true ? { shareMount: true as const } : {}),
-    };
+    if (workspace.shareMount === true) {
+      this.sessions.rememberShareMount(workspace);
+    }
+    const workspaceKey = this.workspaceKey(workspace);
+    this.boundWorkspaces.set(workspaceKey, workspace);
     const connectionKey = `${input.rootPath}\u0000${input.relay.token}`;
     const requestFor = async (
       targetWorkspace: EngineWorkspace,
       method: string,
       params: Record<string, JsonValue | undefined>,
     ): Promise<JsonValue> =>
-      await this.serialize(workspace.workspaceId, async () => {
-        if (this.activeLocations.get(workspace.workspaceId) !== connectionKey) {
+      await this.serialize(workspaceKey, async () => {
+        if (this.activeLocations.get(workspaceKey) !== connectionKey) {
           await this.sessions
-            .closeWorkspace(workspace.workspaceId)
+            .closeWorkspace(workspace)
             .catch(() => undefined);
-          this.activeLocations.set(workspace.workspaceId, connectionKey);
+          this.activeLocations.set(workspaceKey, connectionKey);
         }
         try {
           return await this.sessions.run(
@@ -940,7 +963,7 @@ export class EngineRelayClient {
           // The bootstrap session is intentionally capture-free. Close it so
           // activity.open creates the ordinary captured session only after the
           // authoritative coordinate is durable.
-          await this.sessions.closeWorkspace(workspace.workspaceId);
+          await this.sessions.closeWorkspace(workspace);
         }
       },
       probe: async () => {
@@ -1245,18 +1268,39 @@ export class EngineRelayClient {
     };
   }
 
-  async closeWorkspace(workspaceId: string): Promise<void> {
-    await this.serialize(workspaceId, async () => {
-      await this.sessions.closeWorkspace(workspaceId);
-      this.activeLocations.delete(workspaceId);
-      this.routes.releaseWorkspace(workspaceId);
+  async closeWorkspace(workspace: string | EngineWorkspace): Promise<void> {
+    const workspaceId =
+      typeof workspace === "string" ? workspace : workspace.workspaceId;
+    const workspaceKey = this.workspaceKey(workspace);
+    await this.serialize(workspaceKey, async () => {
+      const registered = this.boundWorkspaces.get(workspaceKey);
+      const descriptor =
+        registered ?? (typeof workspace === "string" ? null : workspace);
+      await this.sessions.closeWorkspace(descriptor ?? workspace);
+      this.activeLocations.delete(workspaceKey);
+      if (this.boundWorkspaces.get(workspaceKey) === registered) {
+        this.boundWorkspaces.delete(workspaceKey);
+      }
+      if (
+        descriptor !== null &&
+        !this.hasBoundLocation(workspaceId, descriptor.rootPath)
+      ) {
+        this.routes.releaseLocation(
+          workspaceId,
+          descriptor.rootPath,
+          "daemon",
+        );
+      }
+      if (!this.hasBoundWorkspace(workspaceId)) {
+        this.routes.releaseWorkspace(workspaceId, "daemon");
+      }
     });
   }
 
   async closeAll(): Promise<void> {
     const results = await Promise.allSettled(
-      this.routes.workspaceIds().map(async (workspaceId) => {
-        await this.closeWorkspace(workspaceId);
+      [...this.boundWorkspaces.values()].map(async (workspace) => {
+        await this.closeWorkspace(workspace);
       }),
     );
     const failures = results.filter(
@@ -1272,21 +1316,41 @@ export class EngineRelayClient {
   }
 
   private serialize<T>(
-    workspaceId: string,
+    workspaceKey: string | symbol,
     run: () => Promise<T>,
   ): Promise<T> {
-    const previous = this.workspaceTails.get(workspaceId) ?? Promise.resolve();
+    const previous = this.workspaceTails.get(workspaceKey) ?? Promise.resolve();
     const result = previous.then(run, run);
     const settled = result.then(
       () => undefined,
       () => undefined,
     );
-    this.workspaceTails.set(workspaceId, settled);
+    this.workspaceTails.set(workspaceKey, settled);
     void settled.then(() => {
-      if (this.workspaceTails.get(workspaceId) === settled) {
-        this.workspaceTails.delete(workspaceId);
+      if (this.workspaceTails.get(workspaceKey) === settled) {
+        this.workspaceTails.delete(workspaceKey);
       }
     });
     return result;
+  }
+
+  private workspaceKey(workspace: string | EngineWorkspace): string | symbol {
+    return typeof workspace === "string"
+      ? workspace
+      : (workspace.attachmentId ?? workspace.workspaceId);
+  }
+
+  private hasBoundWorkspace(workspaceId: string): boolean {
+    return [...this.boundWorkspaces.values()].some(
+      (workspace) => workspace.workspaceId === workspaceId,
+    );
+  }
+
+  private hasBoundLocation(workspaceId: string, rootPath: string): boolean {
+    return [...this.boundWorkspaces.values()].some(
+      (workspace) =>
+        workspace.workspaceId === workspaceId &&
+        workspace.rootPath === rootPath,
+    );
   }
 }

@@ -16,6 +16,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  EngineClientError,
   EngineRequestError,
   EngineWorkspaceSessions,
   type EngineDaemonClient,
@@ -1637,6 +1638,219 @@ describe("EngineRelayClient", () => {
       daemon.requests,
       "bind must not require workspace preparation or workspace.open",
     ).toEqual([]);
+    await sessions.closeAll();
+  });
+
+  it("carries a physical attachment through bootstrap run and close", async () => {
+    const { rootPath, live, relay, sessions } = await harness();
+    const attachmentId = Symbol("relay-attachment");
+    const workspace = {
+      workspaceId: "workspace-attached",
+      rootPath,
+      attachmentId,
+    };
+    const run = vi.spyOn(sessions, "run");
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const client = live.bind({ ...workspace, relay });
+
+    await client.bootstrapJoinIdentity(null);
+
+    expect(run).toHaveBeenCalledWith(
+      { ...workspace, captureMode: "none" },
+      expect.any(Function),
+      { retryTransportErrors: true },
+    );
+    expect(closeWorkspace).toHaveBeenCalledWith(workspace);
+    await sessions.closeAll();
+  });
+
+  it("rebinds the attachment-keyed session before and after a transport restart", async () => {
+    const rootPath = await createTestScratch("dohc-relay-attachment-rebind-");
+    roots.push(rootPath);
+    const routes = new RelayTransportRouteGuard();
+    const second = new MockDaemon();
+    let current: EngineDaemonClient;
+    const first = new MockDaemon((request) => {
+      if (request.method === "sync.push") {
+        current = second;
+        throw new EngineClientError(
+          "transport-error",
+          "injected daemon restart",
+        );
+      }
+      return undefined;
+    });
+    current = first;
+    const sessions = new EngineWorkspaceSessions(
+      new RelayConfiguredDaemonClientSource(
+        { currentClient: () => current },
+        routes,
+      ),
+      {
+        transportRebindAttempts: 2,
+        sleep: async () => undefined,
+      },
+    );
+    const live = new EngineRelayClient({ sessions, routes });
+    const workspace = {
+      workspaceId: "workspace-rebind-attached",
+      rootPath,
+      attachmentId: Symbol("relay-rebind-attachment"),
+    };
+    const client = live.bind({
+      ...workspace,
+      relay: { baseUrl: "https://relay.test", token: "secret-token" },
+    });
+    await sessions.run(workspace, async () => undefined);
+
+    await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
+
+    expect(first.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "workspace.close",
+      "workspace.open",
+      "sync.push",
+    ]);
+    expect(second.requests.map((request) => request.method)).toEqual([
+      "workspace.open",
+      "sync.push",
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("isolates same-id physical successors through run and close", async () => {
+    let opens = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "workspace.open") {
+        opens += 1;
+        return { workspace: `ws-${opens}` };
+      }
+      return undefined;
+    });
+    const { rootPath, live, relay, routes, sessions } = await harness(daemon);
+    const firstWorkspace = {
+      workspaceId: "workspace-successor",
+      rootPath,
+      attachmentId: Symbol("relay-predecessor"),
+    };
+    const secondWorkspace = {
+      ...firstWorkspace,
+      attachmentId: Symbol("relay-successor"),
+    };
+    const first = live.bind({ ...firstWorkspace, relay });
+    const second = live.bind({ ...secondWorkspace, relay });
+
+    await first.push();
+    await second.push();
+    expect(opens).toBe(2);
+
+    await live.closeWorkspace(firstWorkspace);
+    expect(routes.modeFor(firstWorkspace.workspaceId)).toBe("daemon");
+    await second.push();
+    expect(opens).toBe(2);
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "workspace.close")
+        .map((request) => request.workspace),
+    ).toEqual(["ws-1"]);
+
+    await live.closeWorkspace(secondWorkspace);
+    expect(routes.modeFor(firstWorkspace.workspaceId)).toBeNull();
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "workspace.close")
+        .map((request) => request.workspace),
+    ).toEqual(["ws-1", "ws-2"]);
+    await sessions.closeAll();
+  });
+
+  it("closes the attachment-keyed session before a token refresh", async () => {
+    const { rootPath, live, relay, sessions } = await harness();
+    const workspace = {
+      workspaceId: "workspace-attached-refresh",
+      rootPath,
+      attachmentId: Symbol("relay-refresh-attachment"),
+    };
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const first = live.bind({ ...workspace, relay });
+    await first.push();
+    closeWorkspace.mockClear();
+
+    const refreshed = live.bind({
+      ...workspace,
+      relay: { ...relay, token: "refreshed-token" },
+    });
+    await refreshed.push();
+
+    expect(closeWorkspace).toHaveBeenCalledWith(workspace);
+    await live.closeWorkspace(workspace);
+  });
+
+  it("closes every attachment-keyed session during closeAll", async () => {
+    let opens = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "workspace.open") {
+        opens += 1;
+        return { workspace: `ws-close-all-${opens}` };
+      }
+      return undefined;
+    });
+    const { rootPath, live, relay, routes, sessions } = await harness(daemon);
+    const workspaceId = "workspace-attached-close-all";
+    const first = live.bind({
+      workspaceId,
+      rootPath,
+      attachmentId: Symbol("relay-close-all-first"),
+      relay,
+    });
+    const second = live.bind({
+      workspaceId,
+      rootPath,
+      attachmentId: Symbol("relay-close-all-second"),
+      relay,
+    });
+    await first.push();
+    await second.push();
+
+    await live.closeAll();
+
+    expect(
+      daemon.requests
+        .filter((request) => request.method === "workspace.close")
+        .map((request) => request.workspace)
+        .sort(),
+    ).toEqual(["ws-close-all-1", "ws-close-all-2"]);
+    expect(routes.modeFor(workspaceId)).toBeNull();
+    await sessions.closeAll();
+  });
+
+  it("releases only a closed attachment's stale route location", async () => {
+    const { rootPath, live, relay, routes, sessions } = await harness();
+    const successorRoot = await createTestScratch(
+      "dohc-relay-successor-location-",
+    );
+    roots.push(successorRoot);
+    const workspaceId = "workspace-moved-successor";
+    const predecessor = {
+      workspaceId,
+      rootPath,
+      attachmentId: Symbol("relay-location-predecessor"),
+    };
+    const successor = {
+      workspaceId,
+      rootPath: successorRoot,
+      attachmentId: Symbol("relay-location-successor"),
+    };
+    live.bind({ ...predecessor, relay });
+    live.bind({ ...successor, relay });
+
+    await live.closeWorkspace(predecessor);
+
+    expect(routes.relayForOpen(workspaceId, rootPath)).toBeNull();
+    expect(routes.relayForOpen(workspaceId, successorRoot)).toMatchObject({
+      bearerToken: relay.token,
+    });
+    await live.closeWorkspace(successor);
     await sessions.closeAll();
   });
 
