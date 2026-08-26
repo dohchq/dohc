@@ -121,7 +121,7 @@ export function createWorkspaceAuthorityOwner<
   let closing = false;
   let closeOperation: Promise<void> | null = null;
 
-  function assertRegistrationOpen(): void {
+  function assertOpen(): void {
     if (closing) {
       throw new Error("Workspace authority owner is closing.");
     }
@@ -224,6 +224,7 @@ export function createWorkspaceAuthorityOwner<
   }
 
   function currentRecord(workspaceId: string): AuthorityRecord<Workspace, State> {
+    assertOpen();
     const workspace = options.findWorkspace(workspaceId);
     if (!workspace) throw new Error(`Unknown workspace: ${workspaceId}`);
     const slot = slotFor(workspaceId);
@@ -423,7 +424,7 @@ export function createWorkspaceAuthorityOwner<
     reserveBinding(
       workspace: { workspaceId: string; rootPath: string },
     ): WorkspaceAuthorityReservation {
-      assertRegistrationOpen();
+      assertOpen();
       const prepared = prepareWorkspaceIdentity(workspace);
       const reservation = Object.freeze({
         reservationId: Symbol(`workspace-reservation:${workspace.workspaceId}`),
@@ -441,7 +442,7 @@ export function createWorkspaceAuthorityOwner<
       workspace: Workspace,
       registration: WorkspaceBindingRegistration,
     ): WorkspaceAuthorityBinding<Workspace> {
-      assertRegistrationOpen();
+      assertOpen();
       return runRegistration(
         prepareRegistration(workspace),
         registration,
@@ -454,7 +455,7 @@ export function createWorkspaceAuthorityOwner<
       workspace: Workspace,
       registration: WorkspaceBindingRegistration,
     ): WorkspaceAuthorityBinding<Workspace> {
-      assertRegistrationOpen();
+      assertOpen();
       const slot = slots.get(reservation.workspaceId);
       if (
         !slot ||

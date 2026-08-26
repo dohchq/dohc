@@ -660,6 +660,26 @@ describe("workspace authority owner", () => {
     expect(closed).toBe(true);
   });
 
+  it("does not create authority after closing begins", async () => {
+    const workspace = {
+      workspaceId: "workspace",
+      rootPath: "root",
+      label: "registered but unopened",
+    };
+    const createState = vi.fn(() => ({}));
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: (workspaceId) =>
+        workspaceId === workspace.workspaceId ? workspace : null,
+      canonicalizeRoot: (rootPath) => `real:${rootPath}`,
+      createState,
+    });
+
+    const closing = owner.close();
+    expect(() => owner.acquire(workspace.workspaceId)).toThrow("closing");
+    await closing;
+    expect(createState).not.toHaveBeenCalled();
+  });
+
   it("reports reserved cleanup failure to a concurrent close", async () => {
     const owner = createWorkspaceAuthorityOwner({
       findWorkspace: () => null,
