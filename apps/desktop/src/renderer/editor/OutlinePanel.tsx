@@ -34,6 +34,17 @@ import {
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
 const GEOMETRY_SETTLE_MS = 180;
+const GEOMETRY_BACKSTOP_MS = 2_000;
+
+type OutlineSnapshot = {
+  generation: number;
+  headings: OutlineHeading[];
+};
+
+type ActiveHeading = {
+  generation: number;
+  pos: number;
+};
 
 type HeadingFlashState = {
   token: number | null;
@@ -257,34 +268,53 @@ export type OutlinePanelProps = {
 };
 
 export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePanelProps) {
-  const [headings, setHeadings] = useState<OutlineHeading[]>([]);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [outline, setOutline] = useState<OutlineSnapshot>({
+    generation: 0,
+    headings: [],
+  });
+  const [activeHeading, setActiveHeading] = useState<ActiveHeading | null>(null);
   const wordCount = useDebouncedWordCount(editor);
 
   // The scroll-tracking effect attaches once per editor and reads current
-  // headings through this ref. Editor updates replace the array without
-  // tearing down the listener.
-  const headingsRef = useRef<OutlineHeading[]>(headings);
+  // headings through this ref. Document transactions replace the snapshot
+  // without tearing down the listener.
+  const outlineRef = useRef<OutlineSnapshot>(outline);
 
   // Recompute the heading list synchronously (cheap: a handful of nodes) on
   // every doc change. The word count is handled by useDebouncedWordCount above.
   useEffect(() => {
     if (!editor) {
-      headingsRef.current = [];
-      setHeadings([]);
+      const empty = {
+        generation: outlineRef.current.generation + 1,
+        headings: [],
+      };
+      outlineRef.current = empty;
+      setOutline(empty);
+      setActiveHeading(null);
       return;
     }
     const recomputeHeadings = () => {
-      const next = extractOutline(editor.state.doc);
-      headingsRef.current = next;
-      setHeadings(next);
+      const next = {
+        generation: outlineRef.current.generation + 1,
+        headings: extractOutline(editor.state.doc),
+      };
+      outlineRef.current = next;
+      setOutline(next);
+      // Geometry for the new document lands on the next frame. Do not apply a
+      // numeric index measured for the previous heading array in the meantime.
+      setActiveHeading(null);
+    };
+    const handleTransaction = ({ transaction }: { transaction: { docChanged: boolean } }) => {
+      if (transaction.docChanged) recomputeHeadings();
     };
 
     recomputeHeadings();
 
-    editor.on("update", recomputeHeadings);
+    // Tiptap suppresses `update` for setContent(..., { emitUpdate: false }) but
+    // still emits `transaction`; docChanged is the complete document boundary.
+    editor.on("transaction", handleTransaction);
     return () => {
-      editor.off("update", recomputeHeadings);
+      editor.off("transaction", handleTransaction);
     };
   }, [editor]);
 
@@ -323,9 +353,8 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
   }, [editor, headingTarget?.anchor, headingTarget?.occurrence, headingTarget?.nonce]);
 
   // Cache content-relative heading offsets. Scroll frames only binary-search
-  // this array; layout reads happen on real invalidations and once at
-  // scrollend as a backstop for an internal reflow that preserves the
-  // editor's outer size.
+  // this array; layout reads happen on invalidations, after layout settles,
+  // and on a low-frequency backstop for otherwise unobservable idle reflows.
   useEffect(() => {
     if (!editor) return;
     const scrollEl = findScrollParent(containerRef.current);
@@ -333,13 +362,13 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
 
     let frame = 0;
     let settleTimer = 0;
-    let headingTops: number[] | null = null;
-    const measureHeadingTops = () => {
-      const currentHeadings = headingsRef.current;
+    let backstopTimer = 0;
+    let headingTops: { generation: number; values: number[] } | null = null;
+    const measureHeadingTops = (snapshot: OutlineSnapshot) => {
       const containerRect = scrollEl.getBoundingClientRect();
       const measuredTops: number[] = [];
       let previousTop = Number.NEGATIVE_INFINITY;
-      for (const heading of currentHeadings) {
+      for (const heading of snapshot.headings) {
         try {
           const measuredTop =
             editor.view.coordsAtPos(heading.pos).top
@@ -358,18 +387,26 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
         }
         measuredTops.push(previousTop);
       }
-      return measuredTops;
+      return { generation: snapshot.generation, values: measuredTops };
     };
     const updateActiveHeading = () => {
       frame = 0;
-      headingTops ??= measureHeadingTops();
-      if (headingTops.length === 0) return;
-      setActiveIndex(
-        resolveActiveHeadingIndex(
-          headingTops,
-          scrollEl.scrollTop,
-          ACTIVE_HEADING_READING_OFFSET,
-        ),
+      const snapshot = outlineRef.current;
+      if (headingTops?.generation !== snapshot.generation) {
+        headingTops = measureHeadingTops(snapshot);
+      }
+      if (headingTops.values.length === 0) {
+        setActiveHeading(null);
+        return;
+      }
+      const activeIndex = resolveActiveHeadingIndex(
+        headingTops.values,
+        scrollEl.scrollTop,
+        ACTIVE_HEADING_READING_OFFSET,
+      );
+      const heading = snapshot.headings[activeIndex];
+      setActiveHeading(
+        heading ? { generation: snapshot.generation, pos: heading.pos } : null,
       );
     };
     const scheduleUpdate = () => {
@@ -381,6 +418,10 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       scheduleUpdate();
     };
     const invalidateAfterLayoutSettles = () => {
+      // A transition can keep producing invalidations for longer than the
+      // debounce. Drop stale geometry now so every intervening scroll frame
+      // measures the current layout, then take one final settled measurement.
+      invalidateHeadingOffsets();
       window.clearTimeout(settleTimer);
       settleTimer = window.setTimeout(() => {
         settleTimer = 0;
@@ -391,15 +432,28 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
       typeof ResizeObserver === "undefined"
         ? null
         : new ResizeObserver(invalidateAfterLayoutSettles);
-    const observedElements = new Set<HTMLElement>([
-      scrollEl,
-      editor.view.dom,
-      ...(containerRef.current ? [containerRef.current] : []),
-      ...Array.from(scrollEl.children).filter(
-        (element): element is HTMLElement => element instanceof HTMLElement,
-      ),
-    ]);
-    for (const element of observedElements) resizeObserver?.observe(element);
+    const observedElements = new Set<HTMLElement>();
+    const refreshResizeTargets = () => {
+      const nextElements = new Set<HTMLElement>([
+        scrollEl,
+        editor.view.dom,
+        ...(containerRef.current ? [containerRef.current] : []),
+        ...Array.from(scrollEl.children).filter(
+          (element): element is HTMLElement => element instanceof HTMLElement,
+        ),
+      ]);
+      for (const element of observedElements) {
+        if (nextElements.has(element)) continue;
+        resizeObserver?.unobserve(element);
+        observedElements.delete(element);
+      }
+      for (const element of nextElements) {
+        if (observedElements.has(element)) continue;
+        resizeObserver?.observe(element);
+        observedElements.add(element);
+      }
+    };
+    refreshResizeTargets();
 
     // Async math/Mermaid rendering and direct table-resize writes do not
     // necessarily dispatch a document update. Observe only DOM changes that
@@ -407,16 +461,24 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     const mutationObserver =
       typeof MutationObserver === "undefined"
         ? null
-        : new MutationObserver(invalidateAfterLayoutSettles);
+        : new MutationObserver((records) => {
+            if (records.some((record) =>
+              record.type === "childList" && record.target === scrollEl
+            )) {
+              refreshResizeTargets();
+            }
+            invalidateAfterLayoutSettles();
+          });
     mutationObserver?.observe(editor.view.dom, {
       attributes: true,
-      attributeFilter: ["class", "hidden", "style"],
+      attributeFilter: ["class", "hidden", "open", "style"],
       childList: true,
       subtree: true,
     });
     // The pane can be kept mounted under `hidden`, and top matter can be
     // inserted before the editor without touching the ProseMirror document.
-    // Scrollend backstops later growth in a sibling inserted after mount.
+    // Direct children are re-snapshotted below so later pane siblings also
+    // receive ResizeObserver coverage.
     mutationObserver?.observe(scrollEl, {
       attributes: true,
       attributeFilter: ["hidden"],
@@ -424,56 +486,98 @@ export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePan
     });
 
     const fonts = document.fonts;
-    fonts?.addEventListener("loadingdone", invalidateHeadingOffsets);
-    fonts?.addEventListener("loadingerror", invalidateHeadingOffsets);
+    fonts?.addEventListener("loadingdone", invalidateAfterLayoutSettles);
+    fonts?.addEventListener("loadingerror", invalidateAfterLayoutSettles);
     window.addEventListener("resize", invalidateAfterLayoutSettles);
-    scrollEl.addEventListener("load", invalidateHeadingOffsets, true);
-    scrollEl.addEventListener("error", invalidateHeadingOffsets, true);
-    editor.on("update", invalidateHeadingOffsets);
+    scrollEl.addEventListener("load", invalidateAfterLayoutSettles, true);
+    scrollEl.addEventListener("error", invalidateAfterLayoutSettles, true);
+    editor.on("update", invalidateAfterLayoutSettles);
+    const handleDocumentTransaction = (
+      { transaction }: { transaction: { docChanged: boolean } },
+    ) => {
+      if (transaction.docChanged) invalidateAfterLayoutSettles();
+    };
+    editor.on("transaction", handleDocumentTransaction);
     scrollEl.addEventListener("scroll", scheduleUpdate, { passive: true });
     scrollEl.addEventListener("scrollend", invalidateHeadingOffsets, { passive: true });
+
+    let resolutionQuery: MediaQueryList | null = null;
+    const handleResolutionChange = () => {
+      resolutionQuery?.removeEventListener("change", handleResolutionChange);
+      invalidateAfterLayoutSettles();
+      resolutionQuery = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio}dppx)`,
+      );
+      resolutionQuery.addEventListener("change", handleResolutionChange);
+    };
+    if (typeof window.matchMedia === "function") {
+      resolutionQuery = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio}dppx)`,
+      );
+      resolutionQuery.addEventListener("change", handleResolutionChange);
+    }
+
+    // CSS-only geometry shifts can change viewport coordinates without a DOM
+    // mutation or an observed box resize. This low-frequency idle measurement
+    // bounds that otherwise unobservable staleness to two seconds.
+    const refreshUnobservableGeometry = () => {
+      if (document.visibilityState === "hidden") return;
+      if (outlineRef.current.headings.length < 2) return;
+      invalidateHeadingOffsets();
+    };
+    backstopTimer = window.setInterval(
+      refreshUnobservableGeometry,
+      GEOMETRY_BACKSTOP_MS,
+    );
 
     invalidateHeadingOffsets();
     return () => {
       scrollEl.removeEventListener("scroll", scheduleUpdate);
       scrollEl.removeEventListener("scrollend", invalidateHeadingOffsets);
-      editor.off("update", invalidateHeadingOffsets);
-      scrollEl.removeEventListener("load", invalidateHeadingOffsets, true);
-      scrollEl.removeEventListener("error", invalidateHeadingOffsets, true);
+      editor.off("transaction", handleDocumentTransaction);
+      editor.off("update", invalidateAfterLayoutSettles);
+      scrollEl.removeEventListener("load", invalidateAfterLayoutSettles, true);
+      scrollEl.removeEventListener("error", invalidateAfterLayoutSettles, true);
       window.removeEventListener("resize", invalidateAfterLayoutSettles);
-      fonts?.removeEventListener("loadingdone", invalidateHeadingOffsets);
-      fonts?.removeEventListener("loadingerror", invalidateHeadingOffsets);
+      fonts?.removeEventListener("loadingdone", invalidateAfterLayoutSettles);
+      fonts?.removeEventListener("loadingerror", invalidateAfterLayoutSettles);
+      resolutionQuery?.removeEventListener("change", handleResolutionChange);
       mutationObserver?.disconnect();
       resizeObserver?.disconnect();
       window.clearTimeout(settleTimer);
+      window.clearInterval(backstopTimer);
       if (frame) cancelAnimationFrame(frame);
     };
   }, [editor, containerRef]);
 
+  const headings = outline.headings;
+  const activePos = activeHeading?.generation === outline.generation
+    ? activeHeading.pos
+    : null;
   if (!editor || headings.length < 2) return null;
 
   return (
     <nav className="dohc-outline" aria-label="Document outline">
       <div className="dohc-outline-rail" aria-hidden="true">
-        {headings.map((h, i) => (
+        {headings.map((h) => (
           <span
             key={h.pos}
             className={`dohc-outline-rail-mark dohc-outline-rail-mark--level-${h.level}${
-              i === activeIndex ? " is-active" : ""
+              h.pos === activePos ? " is-active" : ""
             }`}
           />
         ))}
       </div>
       <div className="dohc-outline-panel dohc-popover">
         <ul className="dohc-outline-list">
-          {headings.map((h, i) => (
+          {headings.map((h) => (
             <li key={h.pos}>
               <button
                 type="button"
                 className={`dohc-outline-item dohc-outline-item--level-${h.level}${
-                  i === activeIndex ? " is-active" : ""
+                  h.pos === activePos ? " is-active" : ""
                 }`}
-                aria-current={i === activeIndex ? "true" : undefined}
+                aria-current={h.pos === activePos ? "true" : undefined}
                 onClick={() => scrollToHeading(editor, h)}
               >
                 {h.text}

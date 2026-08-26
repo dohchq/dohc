@@ -1345,6 +1345,31 @@ describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
     expect(onDirty).not.toHaveBeenCalled();
   });
 
+  it("refreshes the outline after a local Markdown replacement suppresses update", async () => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const onDirty = vi.fn();
+    render(
+      createElement(MarkdownEditor, {
+        ref,
+        value: "# Before\n\n## Old section\n",
+        onDirty,
+        workspaceId: "workspace-1",
+        path: "notes/shared.md",
+        knownFiles: [],
+      }),
+    );
+    await screen.findByRole("button", { name: "Old section" });
+
+    act(() =>
+      ref.current?.replaceMarkdown("# After\n\n## New section\n\n### Details"),
+    );
+
+    await screen.findByRole("button", { name: "New section" });
+    expect(screen.getByRole("button", { name: "Details" })).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Old section" })).toBeNull();
+    expect(onDirty).not.toHaveBeenCalled();
+  });
+
   it("maps an end cursor across peer content prepended by replacement", async () => {
     const ref = createRef<MarkdownEditorHandle>();
     const onDirty = vi.fn();

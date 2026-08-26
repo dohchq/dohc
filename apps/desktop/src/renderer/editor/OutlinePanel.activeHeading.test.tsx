@@ -8,10 +8,16 @@ import type { OutlineHeading } from "./outline";
 type FrameCallback = (time: number) => void;
 type ResizeCallback = ResizeObserverCallback;
 type ObserverMutationCallback = MutationCallback;
+type TransactionCallback = (event: { transaction: { docChanged: boolean } }) => void;
 
 const frames = new Map<number, FrameCallback>();
-const resizeCallbacks = new Set<ResizeCallback>();
-const mutationCallbacks = new Set<ObserverMutationCallback>();
+const resizeObservers = new Map<ResizeCallback, Set<Element>>();
+const mutationObservers = new Map<
+  ObserverMutationCallback,
+  Array<{ target: Node; options: MutationObserverInit }>
+>();
+const resolutionCallbacks = new Set<() => void>();
+const resolutionQueries: string[] = [];
 const mountedScrollers = new Set<HTMLElement>();
 let nextFrame = 0;
 
@@ -26,8 +32,11 @@ function flushFrames(): void {
 beforeEach(() => {
   vi.useFakeTimers();
   frames.clear();
-  resizeCallbacks.clear();
-  mutationCallbacks.clear();
+  resizeObservers.clear();
+  mutationObservers.clear();
+  resolutionCallbacks.clear();
+  resolutionQueries.length = 0;
+  vi.stubGlobal("devicePixelRatio", 1);
   nextFrame = 0;
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     const id = ++nextFrame;
@@ -44,13 +53,17 @@ beforeEach(() => {
 
       constructor(callback: ResizeCallback) {
         this.callback = callback;
-        resizeCallbacks.add(callback);
+        resizeObservers.set(callback, new Set());
       }
 
-      observe() {}
-      unobserve() {}
+      observe(target: Element) {
+        resizeObservers.get(this.callback)?.add(target);
+      }
+      unobserve(target: Element) {
+        resizeObservers.get(this.callback)?.delete(target);
+      }
       disconnect() {
-        resizeCallbacks.delete(this.callback);
+        resizeObservers.delete(this.callback);
       }
     },
   );
@@ -61,18 +74,37 @@ beforeEach(() => {
 
       constructor(callback: ObserverMutationCallback) {
         this.callback = callback;
-        mutationCallbacks.add(callback);
+        mutationObservers.set(callback, []);
       }
 
-      observe() {}
+      observe(target: Node, options: MutationObserverInit) {
+        mutationObservers.get(this.callback)?.push({ target, options });
+      }
       takeRecords() {
         return [];
       }
       disconnect() {
-        mutationCallbacks.delete(this.callback);
+        mutationObservers.delete(this.callback);
       }
     },
   );
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener(event: string, callback: () => void) {
+      if (event === "change" && query.startsWith("(resolution:")) {
+        resolutionQueries.push(query);
+        resolutionCallbacks.add(callback);
+      }
+    },
+    removeEventListener(event: string, callback: () => void) {
+      if (event === "change") resolutionCallbacks.delete(callback);
+    },
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => true,
+  }));
 });
 
 afterEach(() => {
@@ -100,7 +132,7 @@ function resolveActiveHeadingByFullScan(
 }
 
 function renderActiveHeadingHarness(initialTops: readonly number[]) {
-  const headings: OutlineHeading[] = [
+  let headings: OutlineHeading[] = [
     { level: 1, text: "Intro", pos: 1 },
     { level: 2, text: "Plan", pos: 10 },
     { level: 2, text: "Review", pos: 20 },
@@ -108,6 +140,7 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
   ].slice(0, initialTops.length);
   let tops: HeadingTop[] = [...initialTops];
   const updateListeners = new Set<() => void>();
+  const transactionListeners = new Set<TransactionCallback>();
   const scroller = document.createElement("div");
   const editorContainer = document.createElement("div");
   const editorDom = document.createElement("div");
@@ -169,9 +202,15 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
     view: { coordsAtPos, dom: editorDom },
     on(event: string, callback: () => void) {
       if (event === "update") updateListeners.add(callback);
+      if (event === "transaction") {
+        transactionListeners.add(callback as TransactionCallback);
+      }
     },
     off(event: string, callback: () => void) {
       if (event === "update") updateListeners.delete(callback);
+      if (event === "transaction") {
+        transactionListeners.delete(callback as TransactionCallback);
+      }
     },
   } as unknown as Editor;
 
@@ -183,20 +222,104 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
 
   return {
     coordsAtPos,
-    emitUpdate() {
+    emitUpdate(flush = true) {
       act(() => {
         for (const callback of [...updateListeners]) callback();
       });
-      act(flushFrames);
+      if (flush) act(flushFrames);
     },
-    mutateEditorDom() {
+    emitDocumentTransaction(flush = true) {
       act(() => {
-        for (const callback of [...mutationCallbacks]) {
+        for (const callback of [...transactionListeners]) {
+          callback({ transaction: { docChanged: true } });
+        }
+      });
+      if (flush) act(flushFrames);
+    },
+    mutateEditorDom(settle = true) {
+      act(() => {
+        for (const callback of mutationObservers.keys()) {
           callback([], {} as MutationObserver);
         }
-        vi.advanceTimersByTime(200);
+        if (settle) vi.advanceTimersByTime(200);
       });
       act(flushFrames);
+    },
+    insertPaneSibling() {
+      const sibling = document.createElement("div");
+      act(() => {
+        scroller.appendChild(sibling);
+        const record = {
+          addedNodes: [sibling],
+          attributeName: null,
+          attributeNamespace: null,
+          nextSibling: null,
+          oldValue: null,
+          previousSibling: editorContainer,
+          removedNodes: [],
+          target: scroller,
+          type: "childList",
+        } as unknown as MutationRecord;
+        for (const [callback, observations] of mutationObservers) {
+          if (observations.some(({ target, options }) =>
+            target === scroller && options.childList
+          )) {
+            callback([record], {} as MutationObserver);
+          }
+        }
+      });
+      act(flushFrames);
+      return sibling;
+    },
+    toggleDetailsOpen() {
+      const details = document.createElement("details");
+      editorDom.appendChild(details);
+      act(() => {
+        details.open = true;
+        const record = {
+          addedNodes: [],
+          attributeName: "open",
+          attributeNamespace: null,
+          nextSibling: null,
+          oldValue: null,
+          previousSibling: null,
+          removedNodes: [],
+          target: details,
+          type: "attributes",
+        } as unknown as MutationRecord;
+        for (const [callback, observations] of mutationObservers) {
+          if (observations.some(({ target, options }) =>
+            target === editorDom
+            && options.attributes
+            && options.subtree
+            && options.attributeFilter?.includes("open")
+          )) {
+            callback([record], {} as MutationObserver);
+          }
+        }
+      });
+      act(flushFrames);
+    },
+    isResizeObserved(target: Element) {
+      return [...resizeObservers.values()].some((targets) => targets.has(target));
+    },
+    resizeElement(target: Element) {
+      act(() => {
+        for (const [callback, targets] of resizeObservers) {
+          if (targets.has(target)) callback([], {} as ResizeObserver);
+        }
+      });
+      act(flushFrames);
+    },
+    changeDevicePixelRatio(next: number) {
+      act(() => {
+        vi.stubGlobal("devicePixelRatio", next);
+        for (const callback of [...resolutionCallbacks]) callback();
+      });
+      act(flushFrames);
+    },
+    resolutionQueries() {
+      return [...resolutionQueries];
     },
     resourceLoad() {
       act(() => {
@@ -211,7 +334,9 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
     },
     resize() {
       act(() => {
-        for (const callback of [...resizeCallbacks]) callback([], {} as ResizeObserver);
+        for (const callback of resizeObservers.keys()) {
+          callback([], {} as ResizeObserver);
+        }
         vi.advanceTimersByTime(200);
       });
       act(flushFrames);
@@ -238,6 +363,17 @@ function renderActiveHeadingHarness(initialTops: readonly number[]) {
     },
     setTops(next: readonly HeadingTop[]) {
       tops = [...next];
+    },
+    replaceHeadings(next: readonly OutlineHeading[], nextTops: readonly HeadingTop[]) {
+      headings = [...next];
+      tops = [...nextTops];
+    },
+    flushFrames() {
+      act(flushFrames);
+    },
+    advanceTimers(milliseconds: number) {
+      act(() => vi.advanceTimersByTime(milliseconds));
+      act(flushFrames);
     },
   };
 }
@@ -268,6 +404,43 @@ describe("OutlinePanel active heading measurements", () => {
     // MUTATION: skip the update invalidation and the stale cache keeps Review active.
     expect(harness.activeText()).toBe(["Intro", "Plan", "Review"][expected]);
     expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses document-changing transactions even when update is suppressed", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
+
+    harness.replaceHeadings(
+      [
+        { level: 1, text: "Replacement", pos: 1 },
+        { level: 2, text: "Later", pos: 20 },
+      ],
+      [0, 900],
+    );
+    harness.emitDocumentTransaction();
+
+    expect(harness.activeText()).toBe("Replacement");
+  });
+
+  it("does not apply a stale numeric index to a new heading generation", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400, 700]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
+
+    harness.replaceHeadings(
+      [
+        { level: 2, text: "Plan", pos: 10 },
+        { level: 2, text: "Review", pos: 20 },
+        { level: 2, text: "Done", pos: 30 },
+      ],
+      [0, 400, 700],
+    );
+    harness.emitDocumentTransaction(false);
+
+    expect(harness.activeText()).not.toBe("Done");
+    harness.flushFrames();
+    expect(harness.activeText()).toBe("Review");
   });
 
   it("matches a full scan when measured positions have a gap or fail", () => {
@@ -317,6 +490,67 @@ describe("OutlinePanel active heading measurements", () => {
     harness.setTops([0, 800, 1_100]);
     harness.mutateEditorDom();
     expect(harness.activeText()).toBe("Intro");
+  });
+
+  it("drops stale geometry as soon as a transition mutation arrives", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
+    harness.coordsAtPos.mockClear();
+
+    harness.setTops([0, 800, 1_100]);
+    harness.mutateEditorDom(false);
+    harness.scrollTo(350);
+
+    expect(harness.activeText()).toBe("Intro");
+    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
+  });
+
+  it("observes details toggles and device-pixel-ratio changes", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
+
+    harness.setTops([0, 800, 1_100]);
+    harness.toggleDetailsOpen();
+    expect(harness.activeText()).toBe("Intro");
+
+    harness.setTops([0, 200, 400]);
+    harness.changeDevicePixelRatio(2);
+    expect(harness.activeText()).toBe("Review");
+    expect(harness.resolutionQueries().at(-1)).toBe("(resolution: 2dppx)");
+
+    harness.setTops([0, 800, 1_100]);
+    harness.changeDevicePixelRatio(3);
+
+    expect(harness.activeText()).toBe("Intro");
+    expect(harness.resolutionQueries().at(-1)).toBe("(resolution: 3dppx)");
+  });
+
+  it("observes a pane sibling inserted after the last scroll", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
+
+    const sibling = harness.insertPaneSibling();
+    expect(harness.isResizeObserved(sibling)).toBe(true);
+    harness.setTops([0, 800, 1_100]);
+    harness.resizeElement(sibling);
+
+    expect(harness.activeText()).toBe("Intro");
+  });
+
+  it("bounds an otherwise unobservable idle layout shift", () => {
+    const harness = renderActiveHeadingHarness([0, 200, 400]);
+    harness.scrollTo(350);
+    expect(harness.activeText()).toBe("Review");
+    harness.coordsAtPos.mockClear();
+
+    harness.setTops([0, 800, 1_100]);
+    harness.advanceTimers(5_000);
+
+    expect(harness.activeText()).toBe("Intro");
+    expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
   });
 
   it("recomputes at scroll idle after an otherwise unobserved layout shift", () => {
