@@ -120,6 +120,7 @@ import {
 import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
@@ -200,19 +201,28 @@ type CollaborationExtensions = {
 
 let collaborationExtensionsPromise: Promise<CollaborationExtensions> | null = null;
 
-async function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
-  if (!collaborationExtensionsPromise) {
-    collaborationExtensionsPromise = Promise.all([
-      import("@tiptap/extension-collaboration"),
-      import("@tiptap/extension-collaboration-caret"),
-      import("@tiptap/y-tiptap"),
-    ]).then(([collaboration, collaborationCaret, yTiptap]) => ({
-      Collaboration: collaboration.Collaboration,
-      CollaborationCaret: collaborationCaret.CollaborationCaret,
-      yTiptap,
-    }));
-  }
+function loadCollaborationExtensions(): Promise<CollaborationExtensions> {
+  collaborationExtensionsPromise ??= Promise.all([
+    import("@tiptap/extension-collaboration"),
+    import("@tiptap/extension-collaboration-caret"),
+    import("@tiptap/y-tiptap"),
+  ]).then(([collaboration, collaborationCaret, yTiptap]) => ({
+    Collaboration: collaboration.Collaboration,
+    CollaborationCaret: collaborationCaret.CollaborationCaret,
+    yTiptap,
+  }));
   return collaborationExtensionsPromise;
+}
+
+type CollaborationExtensionsLoad =
+  | { status: "loading" }
+  | { status: "ready"; extensions: CollaborationExtensions }
+  | { status: "failed"; error: Error };
+
+function collaborationLoadError(error: unknown): Error {
+  return error instanceof Error
+    ? error
+    : new Error("Collaboration extensions failed to load", { cause: error });
 }
 
 type MarkdownEditorInnerProps = MarkdownEditorProps & {
@@ -1157,20 +1167,23 @@ const MarkdownEditorCollabLoader = forwardRef<
   MarkdownEditorHandle,
   MarkdownEditorProps
 >(function MarkdownEditorCollabLoader(props, ref) {
-  const [collaborationExtensions, setCollaborationExtensions] =
-    useState<CollaborationExtensions | null>(null);
+  const [load, setLoad] = useState<CollaborationExtensionsLoad>({
+    status: "loading",
+  });
 
-  useEffect(() => {
-    let cancelled = false;
-    void loadCollaborationExtensions().then((extensions) => {
-      if (!cancelled) setCollaborationExtensions(extensions);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  useAsyncResponseEffect(
+    loadCollaborationExtensions,
+    {
+      onSuccess: (extensions) => setLoad({ status: "ready", extensions }),
+      onError: (error) =>
+        setLoad({ status: "failed", error: collaborationLoadError(error) }),
+    },
+    [],
+  );
 
-  if (!collaborationExtensions) {
+  if (load.status === "failed") throw load.error;
+
+  if (load.status === "loading") {
     return (
       <div
         className="dohc-tiptap-editor flex h-full items-center justify-center text-xs text-subtle"
@@ -1185,7 +1198,7 @@ const MarkdownEditorCollabLoader = forwardRef<
     <MarkdownEditorInner
       {...props}
       ref={ref}
-      collaborationExtensions={collaborationExtensions}
+      collaborationExtensions={load.extensions}
     />
   );
 });
