@@ -1587,7 +1587,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           reportError(error);
         }
         try {
-          await scanWorkspace(workspace.workspaceId);
+          await scanWorkspace(workspace.workspaceId, workspace.attachmentId);
         } catch (cause) {
           const error = new Error(
             `Agent dispatch scan failed for workspace ${workspace.workspaceId}.`,

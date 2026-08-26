@@ -721,19 +721,21 @@ export class EngineWorkspaceSessions {
   }
 
   rememberCaptureAuthor(
-    workspace: string | EngineWorkspace, author: AgentAuthor | null): void {
+    workspace: EngineWorkspace,
+    author: AgentAuthor | null,
+  ): void {
     this.captureAuthors.set(this.sessionKey(workspace), author);
   }
 
-  rememberShareMount(workspace: string | EngineWorkspace): void {
+  rememberShareMount(workspace: EngineWorkspace): void {
     this.shareMounts.add(this.sessionKey(workspace));
   }
 
-  beginRebuild(workspace: string | EngineWorkspace): void {
+  beginRebuild(workspace: EngineWorkspace): void {
     this.rebuildingWorkspaces.add(this.sessionKey(workspace));
   }
 
-  endRebuild(workspace: string | EngineWorkspace): void {
+  endRebuild(workspace: EngineWorkspace): void {
     this.rebuildingWorkspaces.delete(this.sessionKey(workspace));
   }
 

@@ -54,10 +54,10 @@ export function createReceivedShareEngineAccess(dependencies: {
   ): EngineWorkspace => {
     const sessions = dependencies.sessions();
     // This is stronger than carrying `shareMount` on one descriptor. Sessions
-    // are keyed by workspace id, so remembering the mode here keeps any later
-    // caller that reconstructs a plain descriptor from reopening this received
-    // share with generic capture. It also happens before a store or relay can
-    // issue workspace.open.
+    // are keyed by physical attachment when one is present, and otherwise by
+    // workspace id. Remembering the mode on that exact key keeps later callers
+    // for the same attachment from reopening this received share with generic
+    // capture. It also happens before a store or relay can issue workspace.open.
     const workspace = {
       workspaceId: location.engineWorkspaceId,
       rootPath: location.rootPath,

@@ -337,10 +337,8 @@ export function createShareMountCommands<WorkspaceSummary>(
             try {
               const outcome = await files.mount(lease, prepared);
               mounted = true;
-              assertCurrent();
               dependencies.refreshNativeWorkspaceSurfaces();
               dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
-              assertCurrent();
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 mount: {
@@ -375,7 +373,6 @@ export function createShareMountCommands<WorkspaceSummary>(
                   );
                 }
               }
-              assertCurrent();
               dependencies.logError(
                 `mount-share rollback for ${mount.label}:`,
                 mountError,
@@ -442,6 +439,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               pushResult(mount, "damaged", 0);
               continue;
             }
+            assertCurrent();
             try {
               // A slow relay holds only this mount's workspace transaction,
               // never one lease across the complete refresh pass.
@@ -458,7 +456,6 @@ export function createShareMountCommands<WorkspaceSummary>(
                     "refresh",
                   ),
               );
-              assertCurrent();
               if (
                 reconciled.kind !== "refresh" ||
                 "ok" in reconciled.outcome
@@ -473,7 +470,6 @@ export function createShareMountCommands<WorkspaceSummary>(
                 reconciled.outcome.changedPaths,
               );
             } catch (error) {
-              assertCurrent();
               const verdict = classifyShareMountRefreshError(error);
               if (verdict.kind === "abort") {
                 throw new Error(verdict.message);
@@ -487,7 +483,6 @@ export function createShareMountCommands<WorkspaceSummary>(
           }
           return { results };
         } finally {
-          assertCurrent();
           dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
         }
       });
@@ -520,7 +515,6 @@ export function createShareMountCommands<WorkspaceSummary>(
                     error,
                   );
                 });
-              assertCurrent();
               // The empty array is a durable ownership tombstone. Removing
               // the registry field could promote leftover projection bytes.
               dependencies.writeMounts(
@@ -538,7 +532,6 @@ export function createShareMountCommands<WorkspaceSummary>(
               workspaceId: workspace.workspaceId,
               shareId: removal.mount.shareId,
             });
-            assertCurrent();
             presentUnmount(workspace.workspaceId, shareId);
             return {
               workspace: dependencies.workspaceSummary(workspace.workspaceId),

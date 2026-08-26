@@ -47,10 +47,10 @@ describe("renderer reload admission", () => {
     });
     const renderer = sender(7);
     const workspace = {
-      workspaceId: "workspace-1",
+      ...physical("workspace-1"),
       rootPath: "C:/workspace-1",
     };
-    await sessions.open(renderer, physical(workspace.workspaceId), "document-1");
+    await sessions.open(renderer, workspace, "document-1");
 
     const siteLifecycle = createSitePreviewLifecycle({
       allowOrigin: () => () => undefined,

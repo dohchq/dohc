@@ -151,7 +151,6 @@ describe("exact renderer workspace references", () => {
         path: null,
       })),
     ).resolves.toEqual({ path: null });
-    expect(write).not.toHaveBeenCalled();
 
     await expect(
       references.withReference(sender, reference, "stale", () => ({

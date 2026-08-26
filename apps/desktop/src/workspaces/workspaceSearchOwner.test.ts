@@ -203,17 +203,22 @@ describe("WorkspaceSearchOwner", () => {
     const returnExecution = deferred<void>();
     const cancelStarted = deferred<void>();
     const cancelled = deferred<void>();
+    const events: string[] = [];
     let workspaceIsCurrent = true;
     const owner = new WorkspaceSearchOwner({
       searchRegistry: {
         async startSearch() {
           spawned.resolve();
           await returnExecution.promise;
+          const settled = cancelled.promise.then(() => {
+            events.push("child-settled");
+          });
           return {
-            settled: cancelled.promise,
+            settled,
             cancel: async () => {
+              events.push("cancel-started");
               cancelStarted.resolve();
-              await cancelled.promise;
+              await settled;
             },
           };
         },
@@ -235,25 +240,30 @@ describe("WorkspaceSearchOwner", () => {
       ),
       searchPayload("stale-after-spawn"),
     );
+    const observed = pending.catch((error: unknown) => {
+      events.push("parent-stopped");
+      throw error;
+    });
     await spawned.promise;
     workspaceIsCurrent = false;
     returnExecution.resolve();
     await cancelStarted.promise;
-    let stopped = false;
-    void pending.catch(() => {
-      stopped = true;
-    });
-    await Promise.resolve();
-    expect(stopped).toBe(false);
+    expect(events).toEqual(["cancel-started"]);
 
     cancelled.resolve();
-    await expectStopped(pending);
+    await expectStopped(observed);
+    expect(events).toEqual([
+      "cancel-started",
+      "child-settled",
+      "parent-stopped",
+    ]);
   });
 
   it("keeps authority activity unsettled until a retired child closes", async () => {
     const rootPath = await makeRoot();
     const childClosed = deferred<void>();
     const cancelStarted = deferred<void>();
+    const events: string[] = [];
     let emit!: (batch: SearchBatch) => void;
     let workspaceIsCurrent = true;
     const owner = new WorkspaceSearchOwner({
@@ -266,11 +276,15 @@ describe("WorkspaceSearchOwner", () => {
           onBatch,
         ) {
           emit = onBatch;
+          const settled = childClosed.promise.then(() => {
+            events.push("child-settled");
+          });
           return {
-            settled: childClosed.promise,
+            settled,
             cancel: async () => {
+              events.push("cancel-started");
               cancelStarted.resolve();
-              await childClosed.promise;
+              await settled;
             },
           };
         },
@@ -292,6 +306,9 @@ describe("WorkspaceSearchOwner", () => {
       ),
       searchPayload("retired-child"),
     );
+    void activity.settled.then(() => {
+      events.push("parent-settled");
+    });
 
     workspaceIsCurrent = false;
     emit({
@@ -301,16 +318,15 @@ describe("WorkspaceSearchOwner", () => {
       limitHit: false,
     });
     await cancelStarted.promise;
-    let settled = false;
-    void activity.settled.then(() => {
-      settled = true;
-    });
-    await Promise.resolve();
-    expect(settled).toBe(false);
+    expect(events).toEqual(["cancel-started"]);
 
     childClosed.resolve();
     await activity.settled;
-    expect(settled).toBe(true);
+    expect(events).toEqual([
+      "cancel-started",
+      "child-settled",
+      "parent-settled",
+    ]);
   });
 
   it("rejects a replaced engine search without emitting or starting its late mount pass", async () => {

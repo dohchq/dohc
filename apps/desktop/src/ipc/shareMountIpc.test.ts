@@ -207,7 +207,7 @@ describe("share mount IPC registration", () => {
     await expect(
       test.invoke(channel, payload, {
         trusted: true,
-        activeWorkspaceId: "workspace-2",
+        activeWorkspaceId: workspace.workspaceId,
         generation: 1,
       }),
     ).rejects.toThrow("changed workspaces");

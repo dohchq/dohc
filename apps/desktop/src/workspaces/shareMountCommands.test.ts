@@ -31,6 +31,27 @@ const SELECTOR = {
 const LEASE = {} as WorkspaceOperationLease;
 const assertCurrent = () => undefined;
 
+function retiringCaller() {
+  let current = true;
+  const retired = new Error("retired workspace authority");
+  const assertCurrent = () => {
+    if (!current) throw retired;
+  };
+  return {
+    retired,
+    assertCurrent,
+    retire() {
+      current = false;
+    },
+    async invoke<T>(work: () => Promise<T>): Promise<T> {
+      assertCurrent();
+      const result = await work();
+      assertCurrent();
+      return result;
+    },
+  };
+}
+
 const LIVE_OWNER_COMPLETE = Symbol("live owner complete");
 
 async function withLiveMountOwner<T>(
@@ -271,6 +292,77 @@ describe("share mount commands", () => {
       "notify:workspace-one",
       "summary",
       "lease:end",
+    ]);
+  });
+
+  it("settles a committed mount before its retired caller is refused", async () => {
+    const h = harness();
+    const caller = retiringCaller();
+    vi.mocked(h.files.mount).mockImplementationOnce(async (_lease, target) => {
+      h.events.push("files:mount");
+      await withLiveMountOwner(target, (owner) =>
+        h.commands.filesLifecycle.createMount(owner, target),
+      );
+      caller.retire();
+      return {
+        status: "updated",
+        changedPaths: 2,
+      } as Awaited<ReturnType<ShareViewFiles["mount"]>>;
+    });
+
+    await expect(
+      caller.invoke(() =>
+        h.commands.mount({
+          workspace: WORKSPACE,
+          shareCode: SHARE_CODE,
+          assertCurrent: caller.assertCurrent,
+        }),
+      ),
+    ).rejects.toBe(caller.retired);
+
+    expect(h.files.unmount).not.toHaveBeenCalled();
+    expect(h.mounts).toHaveLength(1);
+    expect(h.events).toEqual([
+      "credentials",
+      "preflight",
+      "lease:start",
+      "disk:names",
+      "files:mount",
+      "projection:create",
+      "registry:1",
+      "native",
+      "notify:workspace-one",
+      "summary",
+      "lease:end",
+    ]);
+  });
+
+  it("translates a mount failure after retirement and still presents cleanup", async () => {
+    const h = harness();
+    const caller = retiringCaller();
+    vi.mocked(h.files.mount).mockImplementationOnce(async () => {
+      h.events.push("files:mount");
+      caller.retire();
+      throw new ShareUnavailableError();
+    });
+
+    await expect(
+      h.commands.mount({
+        workspace: WORKSPACE,
+        shareCode: SHARE_CODE,
+        assertCurrent: caller.assertCurrent,
+      }),
+    ).rejects.toThrow("ended before it could be added");
+
+    expect(h.events).toEqual([
+      "credentials",
+      "preflight",
+      "lease:start",
+      "disk:names",
+      "files:mount",
+      "log",
+      "native",
+      "notify:workspace-one",
     ]);
   });
 
@@ -621,6 +713,84 @@ describe("share mount commands", () => {
     ]);
   });
 
+  it("settles one reconcile but starts no later mount after retirement", async () => {
+    const h = harness();
+    const caller = retiringCaller();
+    h.mounts = [
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+      {
+        shareId: "22222222-2222-4222-8222-222222222222",
+        label: "blair",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+    ];
+    vi.mocked(h.files.reconcile).mockImplementationOnce(async () => {
+      h.events.push("files:reconcile");
+      caller.retire();
+      return {
+        kind: "refresh",
+        outcome: { status: "updated", changedPaths: 1 },
+      } as Awaited<ReturnType<ShareViewFiles["reconcile"]>>;
+    });
+
+    await expect(
+      h.commands.refresh({
+        workspace: WORKSPACE,
+        assertCurrent: caller.assertCurrent,
+      }),
+    ).rejects.toBe(caller.retired);
+
+    expect(h.files.reconcile).toHaveBeenCalledOnce();
+    expect(h.events).toEqual([
+      "lease:start",
+      "files:reconcile",
+      "lease:end",
+      "notify:workspace-one",
+    ]);
+  });
+
+  it("does not mask a classified reconcile failure after retirement", async () => {
+    const h = harness();
+    const caller = retiringCaller();
+    h.mounts = [
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+    ];
+    vi.mocked(h.files.reconcile).mockImplementationOnce(async () => {
+      h.events.push("files:reconcile");
+      caller.retire();
+      throw new RelayUnauthorizedError();
+    });
+
+    await expect(
+      h.commands.refresh({
+        workspace: WORKSPACE,
+        assertCurrent: caller.assertCurrent,
+      }),
+    ).rejects.toThrow("session expired");
+    expect(h.events).toEqual([
+      "lease:start",
+      "files:reconcile",
+      "notify:workspace-one",
+    ]);
+  });
+
   it("aborts the refresh on expired credentials but still notifies", async () => {
     const h = harness();
     h.mounts = [
@@ -713,6 +883,82 @@ describe("share mount commands", () => {
     ]);
     expect(h.mounts).toEqual([]);
   });
+
+  it.each(["registry-only", "usable"] as const)(
+    "settles a %s unmount before its retired caller is refused",
+    async (kind) => {
+      const h = harness();
+      const caller = retiringCaller();
+      h.mounts =
+        kind === "registry-only"
+          ? [
+              { shareId: SHARE_ID, label: "../../escape" },
+              { shareId: SHARE_ID, label: "duplicate" },
+            ]
+          : [
+              {
+                shareId: SHARE_ID,
+                label: "alex",
+                granterEmail: null,
+                relayUrl: "https://relay.example",
+                recipientEmail: null,
+                grantedSelector: SELECTOR,
+              },
+            ];
+      if (kind === "registry-only") {
+        h.dependencies.closeRelayWorkspace = async () => {
+          h.events.push("relay:close");
+          caller.retire();
+        };
+      } else {
+        h.dependencies.projectionFor = () => ({
+          create: async () => {
+            h.events.push("projection:create");
+          },
+          remove: async () => {
+            h.events.push("projection:remove");
+            caller.retire();
+            return { folderLeft: false };
+          },
+        });
+      }
+
+      await expect(
+        caller.invoke(() =>
+          h.commands.unmount({
+            workspace: WORKSPACE,
+            shareId: SHARE_ID,
+            assertCurrent: caller.assertCurrent,
+          }),
+        ),
+      ).rejects.toBe(caller.retired);
+
+      expect(h.mounts).toEqual([]);
+      expect(h.events).toEqual(
+        kind === "registry-only"
+          ? [
+              "lease:start",
+              "relay:close",
+              "registry:0",
+              "native",
+              "notify:workspace-one",
+              "summary",
+              "lease:end",
+            ]
+          : [
+              "lease:start",
+              "files:unmount",
+              "relay:close",
+              "projection:remove",
+              "registry:0",
+              "native",
+              "notify:workspace-one",
+              "summary",
+              "lease:end",
+            ],
+      );
+    },
+  );
 
   it.each([
     {

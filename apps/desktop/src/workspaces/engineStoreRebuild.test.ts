@@ -146,8 +146,8 @@ function createRealRebuildGate() {
   });
   return {
     rebuildGate: {
-      begin: () => sessions.beginRebuild(workspace.workspaceId),
-      end: () => sessions.endRebuild(workspace.workspaceId),
+      begin: () => sessions.beginRebuild(workspace),
+      end: () => sessions.endRebuild(workspace),
     },
     sessions,
     workspace,
@@ -463,8 +463,8 @@ describe("moveEngineStoreAside", () => {
         return lstat(path);
       },
       rebuildGate: {
-        begin: () => sessions.beginRebuild(workspace.workspaceId),
-        end: () => sessions.endRebuild(workspace.workspaceId),
+        begin: () => sessions.beginRebuild(workspace),
+        end: () => sessions.endRebuild(workspace),
       },
     });
     await recoveryInspected.promise;
@@ -1175,8 +1175,8 @@ describe("moveEngineStoreAside", () => {
           throw renameError;
         },
         rebuildGate: {
-          begin: () => sessions.beginRebuild(workspace.workspaceId),
-          end: () => sessions.endRebuild(workspace.workspaceId),
+          begin: () => sessions.beginRebuild(workspace),
+          end: () => sessions.endRebuild(workspace),
         },
       }),
     ).rejects.toMatchObject({ cause: renameError });
@@ -1596,13 +1596,13 @@ describe("rebuildEngineStore", () => {
     // starts the daemon-owned capture. A stub reopenActivity (like the
     // it.each pins above) can't see this: it never actually starts a
     // capture that races the gate.
-    sessions.beginRebuild(workspace.workspaceId);
+    sessions.beginRebuild(workspace);
     await withEngineStoreRecoveredUnderEngineStoreLock(
       workspace,
       () => activity.open(workspace),
       async (rootPath) => {
         await completePendingEngineStoreMove(rootPath);
-        sessions.endRebuild(workspace.workspaceId);
+        sessions.endRebuild(workspace);
       },
     );
 
@@ -1650,7 +1650,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    sessions.beginRebuild(workspace.workspaceId);
+    sessions.beginRebuild(workspace);
     await expect(
       withEngineStoreRecoveredUnderEngineStoreLock(
         workspace,
@@ -1661,7 +1661,7 @@ describe("rebuildEngineStore", () => {
               throw new Error("rename denied");
             },
           });
-          sessions.endRebuild(workspace.workspaceId);
+          sessions.endRebuild(workspace);
         },
       ),
     ).rejects.toThrow();
@@ -1758,8 +1758,8 @@ describe("rebuildEngineStore", () => {
       ).toHaveLength(1);
     };
     const rebuildGate = {
-      begin: () => sessions.beginRebuild(workspace.workspaceId),
-      end: () => sessions.endRebuild(workspace.workspaceId),
+      begin: () => sessions.beginRebuild(workspace),
+      end: () => sessions.endRebuild(workspace),
     };
     const rebuilding = rebuildEngineStoreRequest(root, {
       isStoreRefused: () => true,

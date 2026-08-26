@@ -73,7 +73,7 @@ export type EngineYDocSessionCapture = Pick<
 interface EngineYDocWorkspace {
   workspaceId: string;
   rootPath: string;
-  attachmentId?: symbol;
+  attachmentId: symbol;
 }
 
 export interface EngineYDocRendererSession {
@@ -170,12 +170,12 @@ function liveDocumentMutationRefusal(): Error {
 
 /** Atomic admission shared by canonical Y.Doc opens and direct mutations. */
 class DocumentMutationReservations {
-  readonly #states = new Map<string | symbol,
+  readonly #states = new Map<
+    symbol,
     Map<string, DocumentReservationState>
   >();
 
-  async reserveOpen(
-    authorityId: string | symbol, path: string): Promise<() => void> {
+  async reserveOpen(authorityId: symbol, path: string): Promise<() => void> {
     const key = workspaceRelativePathIdentity(path);
     const state = this.#state(authorityId, key);
     const admittedMutations = state.tail;
@@ -191,7 +191,7 @@ class DocumentMutationReservations {
   }
 
   runMutation<T>(
-    authorityId: string | symbol,
+    authorityId: symbol,
     path: string,
     ownsDocument: () => boolean,
     mutation: () => Promise<T>,
@@ -221,7 +221,7 @@ class DocumentMutationReservations {
       });
   }
 
-  #state(authorityId: string | symbol, key: string): DocumentReservationState {
+  #state(authorityId: symbol, key: string): DocumentReservationState {
     let byPath = this.#states.get(authorityId);
     if (!byPath) {
       byPath = new Map();
@@ -237,8 +237,10 @@ class DocumentMutationReservations {
   }
 
   #deleteIdle(
-    authorityId: string | symbol,
-    key: string, state: DocumentReservationState): void {
+    authorityId: symbol,
+    key: string,
+    state: DocumentReservationState,
+  ): void {
     if (state.openings !== 0 || state.mutations !== 0) return;
     const byPath = this.#states.get(authorityId);
     if (byPath?.get(key) === state) byPath.delete(key);
@@ -372,7 +374,7 @@ class EngineYDocSessionIpc {
     }
     if (canonicalKind === null) return unavailableOpen();
     const releaseOpening = await this.#documentReservations.reserveOpen(
-      workspace.attachmentId ?? workspace.workspaceId,
+      workspace.attachmentId,
       canonicalPath,
     );
     try {
@@ -384,6 +386,7 @@ class EngineYDocSessionIpc {
         canonicalPath,
         validatedPath.normalized,
         canonicalKind,
+        authority,
         rendererSession,
         generation,
       );
@@ -399,6 +402,7 @@ class EngineYDocSessionIpc {
     canonicalPath: string,
     requestedPath: string,
     documentKind: NonNullable<ReturnType<typeof liveDocumentKindForPath>>,
+    authority: ReturnType<EngineYDocSessionIpcOptions["acquireWorkspace"]>,
     rendererSession: EngineYDocRendererSession,
     generation: number,
   ): Promise<OpenResult> {
@@ -412,6 +416,7 @@ class EngineYDocSessionIpc {
           error,
         );
       }
+      authority.assertCurrent();
       // Window loading now overlaps the daemon handshake. The await above can
       // span a reload, and a retired renderer must never acquire its session.
       if (!rendererSession.isCurrent()) {
@@ -431,6 +436,7 @@ class EngineYDocSessionIpc {
       );
       return unavailableOpen({ documentUnavailable: true });
     }
+    authority.assertCurrent();
     if (
       currentPath === null ||
       !workspaceRelativePathsEqual(currentPath, canonicalPath)
@@ -448,9 +454,7 @@ class EngineYDocSessionIpc {
       generation,
       sessionId: input.sessionId,
       workspaceId: workspace.workspaceId,
-      ...(workspace.attachmentId
-        ? { authorityId: workspace.attachmentId }
-        : {}),
+      authorityId: workspace.attachmentId,
       path: canonicalPath,
       openSession: async (signals) => {
         const saveSeq = createEngineYDocSaveSeqState();
@@ -696,7 +700,7 @@ class EngineYDocSessionIpc {
   }
 
   retireAuthority(
-    authorityId: string | symbol,
+    authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
     return this.#owner.retireAuthority(authorityId);
   }

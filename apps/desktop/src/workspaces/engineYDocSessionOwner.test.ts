@@ -38,6 +38,9 @@ interface TestOwnerOptions {
   }) => void;
 }
 
+const AUTHORITY_A = Symbol("attachment-a");
+const AUTHORITY_B = Symbol("attachment-b");
+
 function createOwner(
   outbound: TestOutbound[] = [],
   options: TestOwnerOptions = {},
@@ -59,6 +62,7 @@ function openInput(input: {
   generation: number;
   sessionId?: string;
   workspaceId?: string;
+  authorityId?: symbol;
   path?: string;
   openSession: (
     signals: EngineYDocSessionSignals<string, string, string>,
@@ -69,6 +73,7 @@ function openInput(input: {
     generation: input.generation,
     sessionId: input.sessionId ?? "renderer-session-1",
     workspaceId: input.workspaceId ?? "workspace-1",
+    authorityId: input.authorityId ?? AUTHORITY_A,
     path: input.path ?? "notes/a.md",
     openSession: input.openSession,
   };
@@ -833,7 +838,7 @@ describe("EngineYDocSessionOwner", () => {
       }),
     );
 
-    expect(owner.ownsDocument("workspace-1", "notes/pending.md")).toBe(true);
+    expect(owner.ownsDocument(AUTHORITY_A, "notes/pending.md")).toBe(true);
 
     pendingOpen.resolve({
       session: { close: async () => undefined },
@@ -858,6 +863,7 @@ describe("EngineYDocSessionOwner", () => {
         generation: 1,
         sessionId: "other-workspace",
         workspaceId: "workspace-2",
+        authorityId: AUTHORITY_B,
         path: "notes/folder/foreign.md",
         openSession: async () => ({
           session: { close: async () => undefined },
@@ -867,15 +873,15 @@ describe("EngineYDocSessionOwner", () => {
     );
 
     let visited = 0;
-    owner.forEachSessionUnderPath("workspace-1", "notes/folder", () => {
+    owner.forEachSessionUnderPath(AUTHORITY_A, "notes/folder", () => {
       visited += 1;
     });
 
     expect(visited).toBe(1);
-    expect(owner.ownsDocument("workspace-2", "notes/folder/foreign.md")).toBe(
+    expect(owner.ownsDocument(AUTHORITY_B, "notes/folder/foreign.md")).toBe(
       true,
     );
-    expect(owner.ownsDocument("workspace-1", "notes/folder/foreign.md")).toBe(
+    expect(owner.ownsDocument(AUTHORITY_A, "notes/folder/foreign.md")).toBe(
       false,
     );
   });
@@ -898,12 +904,12 @@ describe("EngineYDocSessionOwner", () => {
         }),
       );
 
-      expect(owner.ownsDocument("workspace-1", "notes/folder/a.md")).toBe(false);
-      expect(owner.ownsDocument("workspace-1", "Notes/Folder/A.md")).toBe(true);
+      expect(owner.ownsDocument(AUTHORITY_A, "notes/folder/a.md")).toBe(false);
+      expect(owner.ownsDocument(AUTHORITY_A, "Notes/Folder/A.md")).toBe(true);
       const visit = vi.fn();
-      owner.forEachSessionUnderPath("workspace-1", "notes", visit);
+      owner.forEachSessionUnderPath(AUTHORITY_A, "notes", visit);
       expect(visit).not.toHaveBeenCalled();
-      owner.forEachSessionUnderPath("workspace-1", "Notes", visit);
+      owner.forEachSessionUnderPath(AUTHORITY_A, "Notes", visit);
       expect(visit).toHaveBeenCalledOnce();
     },
   );
@@ -1156,6 +1162,7 @@ describe("EngineYDocSessionOwner", () => {
           generation: 1,
           sessionId: "workspace-b-session",
           workspaceId: "workspace-b",
+          authorityId: AUTHORITY_B,
           path: "notes/shared-name.md",
           openSession: otherWorkspaceOpen,
         }),

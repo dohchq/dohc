@@ -1341,6 +1341,42 @@ describe("chatDispatchService", () => {
     expect(fixture.syncWorkspaces[0]?.attachmentId).toBe(attachmentId);
   });
 
+  it("does not scan a replacement attachment after deferred pump sync", async () => {
+    vi.useFakeTimers();
+    const originalAttachmentId = Symbol("original attachment");
+    const replacementAttachmentId = Symbol("replacement attachment");
+    const syncStarted = Promise.withResolvers<void>();
+    const allowSync = Promise.withResolvers<void>();
+    const scannedAttachments: Array<symbol | undefined> = [];
+    const fixture = await createFixture({
+      workspaceAttachmentId: replacementAttachmentId,
+      pumpWorkspaces: [
+        {
+          workspaceId: WORKSPACE_ID,
+          rootPath: "/unused/original-workspace",
+          attachmentId: originalAttachmentId,
+        },
+      ],
+      onQueueSync: async () => {
+        syncStarted.resolve();
+        await allowSync.promise;
+      },
+      scanEligible: (workspace) => {
+        scannedAttachments.push(workspace.attachmentId);
+        return false;
+      },
+    });
+
+    fixture.service.start();
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
+    await syncStarted.promise;
+    allowSync.resolve();
+    await flushMicrotasks();
+
+    expect(fixture.syncWorkspaces[0]?.attachmentId).toBe(originalAttachmentId);
+    expect(scannedAttachments).toEqual([]);
+  });
+
   it("starts workspace pump syncs concurrently", async () => {
     vi.useFakeTimers();
     const secondWorkspace = {

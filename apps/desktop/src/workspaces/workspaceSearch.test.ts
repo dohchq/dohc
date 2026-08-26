@@ -495,6 +495,113 @@ describe("createSearchRegistry", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("escalates a replaced search to SIGKILL when SIGTERM does not settle it", async () => {
+    const root = await createTestScratch("dohc-reg-");
+    const termSent = Promise.withResolvers<void>();
+    const signals: Array<{ searchId: string; signal: NodeJS.Signals | undefined }> = [];
+    const registry = createSearchRegistry({
+      rgPath: "/unused",
+      start: (options) => {
+        const settled = Promise.withResolvers<void>();
+        return {
+          searchId: options.searchId,
+          settled: settled.promise,
+          kill: (signal) => {
+            signals.push({ searchId: options.searchId, signal });
+            if (signals.length === 1) termSent.resolve();
+            if (signal === "SIGKILL") settled.resolve();
+          },
+        };
+      },
+    });
+    await registry.startSearch(
+      1,
+      root,
+      "old",
+      { query: "a" },
+      () => {},
+      current(),
+    );
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let replaced = false;
+      const replacement = registry
+        .startSearch(
+          1,
+          root,
+          "new",
+          { query: "b" },
+          () => {},
+          current(),
+        )
+        .then(() => {
+          replaced = true;
+        });
+      await termSent.promise;
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Promise.resolve();
+
+      expect(replaced).toBe(true);
+      await replacement;
+      expect(signals.slice(0, 2)).toEqual([
+        { searchId: "old", signal: "SIGTERM" },
+        { searchId: "old", signal: "SIGKILL" },
+      ]);
+
+      const shutdown = registry.killAll();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await shutdown;
+    } finally {
+      vi.useRealTimers();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds killAll when a child never settles after SIGKILL", async () => {
+    const root = await createTestScratch("dohc-reg-");
+    const termSent = Promise.withResolvers<void>();
+    const signals: Array<NodeJS.Signals | undefined> = [];
+    const registry = createSearchRegistry({
+      rgPath: "/unused",
+      start: (options) => ({
+        searchId: options.searchId,
+        settled: new Promise<void>(() => undefined),
+        kill: (signal) => {
+          signals.push(signal);
+          if (signals.length === 1) termSent.resolve();
+        },
+      }),
+    });
+    const execution = await registry.startSearch(
+      1,
+      root,
+      "stuck",
+      { query: "a" },
+      () => {},
+      current(),
+    );
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let stopped = false;
+      const shutdown = registry.killAll().then(() => {
+        stopped = true;
+      });
+      await termSent.promise;
+      await vi.advanceTimersByTimeAsync(5_000);
+      await Promise.resolve();
+
+      expect(stopped).toBe(true);
+      await shutdown;
+      await expect(execution?.settled).resolves.toBeUndefined();
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    } finally {
+      vi.useRealTimers();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("applies a path allowance through the registry and local runner", async () => {
     const registry = createSearchRegistry({ rgPath });
     const root = await createTestScratch("dohc-reg-");

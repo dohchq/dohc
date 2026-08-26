@@ -267,10 +267,13 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
 
   // Quit path: stop every managed child and clear slots.
   async function stopAll(): Promise<void> {
+    let failed = false;
+    let firstError: unknown;
     for (const workspaceId of options.workspaceIds()) {
-      const authority = options.acquire(workspaceId);
-      const state = authority.state;
+      let authority: AgentIntegrationAuthority | null = null;
       try {
+        authority = options.acquire(workspaceId);
+        const state = authority.state;
         if (state.mcp) {
           state.mcp.stop();
           state.mcp = null;
@@ -280,10 +283,23 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
           authority.assertCurrent();
           state.activeRun = null;
         }
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
       } finally {
-        authority.release();
+        try {
+          authority?.release();
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            firstError = error;
+          }
+        }
       }
     }
+    if (failed) throw firstError;
   }
 
   function disposeState(state: AgentIntegrationState): void {

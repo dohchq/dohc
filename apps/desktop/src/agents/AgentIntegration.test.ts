@@ -242,6 +242,57 @@ describe("AgentIntegration", () => {
     });
   });
 
+  it("cleans later workspaces when an earlier shutdown cleanup fails", async () => {
+    const firstFailure = new Error("first workspace slot refused cleanup");
+    const firstState = new AgentIntegrationState();
+    const secondState = new AgentIntegrationState();
+    const firstStop = vi.fn();
+    const secondStop = vi.fn();
+    firstState.mcp = { stop: firstStop };
+    secondState.mcp = { stop: secondStop };
+    firstState.activeRun = {
+      id: "run-first",
+      startedAt: 1,
+      agentId: "dohc-mcp",
+      onBehalfOf: "local",
+      status: "running",
+    };
+    secondState.activeRun = {
+      id: "run-second",
+      startedAt: 2,
+      agentId: "dohc-mcp",
+      onBehalfOf: "local",
+      status: "running",
+    };
+    const releases: string[] = [];
+    const clearedSlots: string[] = [];
+    const integration = createPhysicalAgentIntegration({
+      workspaceIds: () => ["workspace-first", "workspace-second"],
+      acquire: (workspaceId) => ({
+        attachmentId: Symbol.for(`test-workspace-attachment:${workspaceId}`),
+        workspaceId,
+        rootPath: "/unused",
+        state:
+          workspaceId === "workspace-first" ? firstState : secondState,
+        assertCurrent: () => undefined,
+        setAgentRun: async () => {
+          clearedSlots.push(workspaceId);
+          if (workspaceId === "workspace-first") throw firstFailure;
+        },
+        release: () => releases.push(workspaceId),
+      }),
+    });
+
+    await expect(integration.stopAll()).rejects.toBe(firstFailure);
+
+    expect(firstStop).toHaveBeenCalledOnce();
+    expect(secondStop).toHaveBeenCalledOnce();
+    expect(clearedSlots).toEqual(["workspace-first", "workspace-second"]);
+    expect(releases).toEqual(["workspace-first", "workspace-second"]);
+    expect(firstState.activeRun?.id).toBe("run-first");
+    expect(secondState.activeRun).toBeNull();
+  });
+
   // Same boundary as workspaceUiState: a malicious attached workspace can ship
   // `.dohc` as a SYMLINK to a directory outside the workspace. The run-log
   // writer must refuse instead of planting agent-runs.json at the target.

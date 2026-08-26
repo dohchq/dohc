@@ -132,6 +132,46 @@ afterEach(async () => {
 });
 
 describe("live agent dispatch store", () => {
+  it("runs workspace sessions inside dispatch authority and releases it on rejection", async () => {
+    const requestFailure = new Error("dispatch request failed");
+    let authorityActive = false;
+    let releases = 0;
+    const client = mockClient((request) => {
+      expect(authorityActive).toBe(true);
+      if (request.method === "workspace.open") {
+        return { workspace: "handle-authority" };
+      }
+      if (request.method === "chats.dispatch.getRunRecord") {
+        throw requestFailure;
+      }
+      throw new Error(`Unexpected request: ${request.method}`);
+    });
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    openSessions.push(sessions);
+    const sessionRun = vi.spyOn(sessions, "run");
+    const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions, {
+      runWithAuthority: async (work) => {
+        expect(authorityActive).toBe(false);
+        authorityActive = true;
+        try {
+          return await work();
+        } finally {
+          expect(sessionRun).toHaveBeenCalledOnce();
+          expect(authorityActive).toBe(true);
+          authorityActive = false;
+          releases += 1;
+        }
+      },
+    });
+
+    await expect(store.getRunRecord(run.runId)).rejects.toBe(requestFailure);
+
+    expect(authorityActive).toBe(false);
+    expect(releases).toBe(1);
+  });
+
   it("deadlines every scan-side dispatch read", async () => {
     // MUTATION: use the ChatsLiveAdapter convenience methods without request
     // options -> these calls have no deadline and a connected daemon can wedge

@@ -78,12 +78,12 @@ export interface WorkspaceFileMutationWorkspace {
 
 export interface WorkspaceFileMutationYDocPort {
   withDocumentUnowned<T>(
-    authorityId: string | symbol,
+    authorityId: symbol,
     path: string,
     mutation: () => Promise<T>,
   ): Promise<T>;
   markDeletedUnderPath(
-    authorityId: string | symbol,
+    authorityId: symbol,
     pathOrPrefix: string,
   ): void;
 }
@@ -91,7 +91,7 @@ export interface WorkspaceFileMutationYDocPort {
 export interface WorkspaceFileMutationAuthority<
   Workspace extends WorkspaceFileMutationWorkspace,
 > {
-  readonly authorityId: string | symbol;
+  readonly authorityId: symbol;
   readonly workspace: Readonly<Workspace>;
   readonly capture: MutationCapture | null;
   readonly yDocSessions: WorkspaceFileMutationYDocPort;
@@ -177,8 +177,11 @@ export function createWorkspaceFileMutationOwner<
     event: IpcEvent,
     payload: unknown,
     parse: (value: unknown) => Payload,
-    work: (input: { input: Payload; workspace: Readonly<Workspace>; receivedShare: boolean;
-      authorityId: string | symbol;
+    work: (input: {
+      input: Payload;
+      workspace: Readonly<Workspace>;
+      receivedShare: boolean;
+      authorityId: symbol;
       capture: MutationCapture | null;
       yDocSessions: WorkspaceFileMutationYDocPort;
     }) => Promise<Result>,
@@ -190,9 +193,9 @@ export function createWorkspaceFileMutationOwner<
       input.workspaceId,
       async (authority) =>
         await work({
-      input,
+          input,
           workspace: authority.workspace,
-      receivedShare: shareViewIsPresent(authority.workspace.shareView),
+          receivedShare: shareViewIsPresent(authority.workspace.shareView),
           authorityId: authority.authorityId,
           capture: authority.capture,
           yDocSessions: authority.yDocSessions,

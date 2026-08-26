@@ -928,21 +928,25 @@ describe("EngineRelayClient", () => {
       "async function cleanupFailedPhysicalWorkspace(",
       removeStart,
     );
+    expect(removeStart).toBeGreaterThanOrEqual(0);
+    expect(removeEnd).toBeGreaterThan(removeStart);
     const remove = source.slice(removeStart, removeEnd);
     const cleanupAt = remove.indexOf("finalize: beforeRegistryRemoval");
     const registryRemoveAt = remove.indexOf(
       "removeWorkspace(binding.workspaceId);",
     );
-    expect(removeStart).toBeGreaterThanOrEqual(0);
-    expect(removeEnd).toBeGreaterThan(removeStart);
     expect(cleanupAt).toBeGreaterThanOrEqual(0);
     expect(registryRemoveAt).toBeGreaterThan(cleanupAt);
 
     const cleanupStart = removeEnd;
-    const cleanupEnd = source.indexOf(
-      "function serializeWorkspaceAuthorityWork(",
-      cleanupStart,
-    );
+    const cleanupEndMatch = source
+      .slice(cleanupStart)
+      .match(/\nfunction\s+serializeWorkspaceAuthorityWork(?:<[^>]+>)?\s*\(/);
+    const cleanupEnd =
+      cleanupEndMatch?.index === undefined
+        ? -1
+        : cleanupStart + cleanupEndMatch.index;
+    expect(cleanupEnd).toBeGreaterThan(cleanupStart);
     const cleanup = source.slice(cleanupStart, cleanupEnd);
     const relayCloseAt = cleanup.indexOf(
       "await closeRelayTransportWorkspace(workspaceId);",
@@ -960,6 +964,8 @@ describe("EngineRelayClient", () => {
       'desktopMarks.measureSince("workspace-join"',
       joinRollbackStart,
     );
+    expect(joinRollbackStart).toBeGreaterThanOrEqual(0);
+    expect(joinRollbackEnd).toBeGreaterThan(joinRollbackStart);
     const joinRollback = source.slice(joinRollbackStart, joinRollbackEnd);
     expect(joinRollback).toContain(
       "await removePhysicalWorkspace(authorityBinding, () =>",
@@ -967,9 +973,8 @@ describe("EngineRelayClient", () => {
     expect(joinRollback).toContain(
       "cleanupFailedPhysicalWorkspace(parsed.workspaceId, rootPath)",
     );
-    expect(joinRollback).toContain(
-      "workspaceAuthorities.releaseReservation(\n" +
-        "            authorityReservation,",
+    expect(joinRollback).toMatch(
+      /workspaceAuthorities\.releaseReservation\(\s*authorityReservation,/,
     );
 
     const shareRollbackStart = source.indexOf(
@@ -979,11 +984,15 @@ describe("EngineRelayClient", () => {
       "// A share view is opened HERE",
       shareRollbackStart,
     );
+    expect(shareRollbackStart).toBeGreaterThanOrEqual(0);
+    expect(shareRollbackEnd).toBeGreaterThan(shareRollbackStart);
     const shareRollback = source.slice(shareRollbackStart, shareRollbackEnd);
     const shareOperationStart = source.lastIndexOf(
       "const authorityReservation = workspaceAuthorities.reserveBinding({",
       shareRollbackStart,
     );
+    expect(shareOperationStart).toBeGreaterThanOrEqual(0);
+    expect(shareOperationStart).toBeLessThan(shareRollbackStart);
     const shareOperation = source.slice(shareOperationStart, shareRollbackEnd);
     expect(shareRollback).toContain(
       "await removePhysicalWorkspace(authorityBinding, () =>",
@@ -996,9 +1005,8 @@ describe("EngineRelayClient", () => {
     expect(shareRollback).toContain(
       "cleanupFailedPhysicalWorkspace(created.workspaceId, rootPath)",
     );
-    expect(shareRollback).toContain(
-      "workspaceAuthorities.releaseReservation(\n" +
-        "            authorityReservation,",
+    expect(shareRollback).toMatch(
+      /workspaceAuthorities\.releaseReservation\(\s*authorityReservation,/,
     );
     const tryAt = shareOperation.indexOf("try {");
     const registrationAt = shareOperation.indexOf(
@@ -1022,9 +1030,9 @@ describe("EngineRelayClient", () => {
       "function removePhysicalWorkspace(",
       registerStart,
     );
-    const register = source.slice(registerStart, registerEnd);
     expect(registerStart).toBeGreaterThanOrEqual(0);
     expect(registerEnd).toBeGreaterThan(registerStart);
+    const register = source.slice(registerStart, registerEnd);
     expect(register).toContain("workspaceAuthorities.registerBinding(");
     expect(register).toContain("workspaceAuthorities.registerReservedBinding(");
     expect(register).toContain("persist: () => registerWorkspace(workspace)");
@@ -1045,9 +1053,9 @@ describe("EngineRelayClient", () => {
       "function requireWorkspaceAuthority(",
       ownerStart,
     );
-    const owner = source.slice(ownerStart, ownerEnd);
     expect(ownerStart).toBeGreaterThanOrEqual(0);
     expect(ownerEnd).toBeGreaterThan(ownerStart);
+    const owner = source.slice(ownerStart, ownerEnd);
     expect(owner).toContain(
       "disposeState: async (state, binding, workspaceAtDisposal)",
     );

@@ -59,7 +59,10 @@ function sessionsFor(
       captureAuthorsSeen.push(captureAuthor);
       return await operation(binding);
     },
-    rememberCaptureAuthor(_workspaceId: string, author: AgentAuthor | null) {
+    rememberCaptureAuthor(
+      _workspace: EngineWorkspace,
+      author: AgentAuthor | null,
+    ) {
       captureAuthor = author;
     },
     async closeWorkspace() {},

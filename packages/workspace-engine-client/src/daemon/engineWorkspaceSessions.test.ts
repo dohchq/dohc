@@ -518,15 +518,16 @@ describe("EngineWorkspaceSessions", () => {
       onBehalfOf: "local",
       agentRunId: "run",
     };
-    sessions.rememberCaptureAuthor("workspace", author);
+    const workspace = { workspaceId: "workspace", rootPath };
+    sessions.rememberCaptureAuthor(workspace, author);
 
     await sessions.run(
-      { workspaceId: "workspace", rootPath },
+      workspace,
       async (binding) => binding.workspace,
     );
     generation = 1;
     await sessions.run(
-      { workspaceId: "workspace", rootPath },
+      workspace,
       async (binding) => binding.workspace,
     );
 
@@ -632,6 +633,8 @@ describe("EngineWorkspaceSessions", () => {
     };
     const operationStarted = deferred<void>();
     const finishOperation = deferred<void>();
+    const closeStarted = deferred<void>();
+    const order: string[] = [];
     const requests: Request[] = [];
     let openCount = 0;
     const client: EngineDaemonClient = {
@@ -646,6 +649,8 @@ describe("EngineWorkspaceSessions", () => {
           };
         }
         if (request.method === "workspace.close") {
+          order.push("close-started");
+          closeStarted.resolve();
           return { id: request.id, result: { closed: true } };
         }
         throw new Error(`Unexpected request: ${request.method}`);
@@ -658,24 +663,24 @@ describe("EngineWorkspaceSessions", () => {
     const activeRun = sessions.run(workspace, async () => {
       operationStarted.resolve();
       await finishOperation.promise;
+      order.push("run-finished");
       return "finished";
     });
     await operationStarted.promise;
 
     const rebinding = sessions.closeWorkspaceBinding(workspace);
-    await Promise.resolve();
-    expect(
-      requests.filter((request) => request.method === "workspace.close"),
-    ).toHaveLength(0);
     await expect(
       sessions.run(
         { workspaceId: workspace.workspaceId, rootPath: workspace.rootPath },
         async () => "unexpected",
       ),
     ).rejects.toThrow("different session key");
+    expect(order).toEqual([]);
     finishOperation.resolve();
     await expect(activeRun).resolves.toBe("finished");
+    await closeStarted.promise;
     await rebinding;
+    expect(order).toEqual(["run-finished", "close-started"]);
 
     await sessions.run(workspace, async () => undefined);
     const firstTwoOpens = requests.filter(
@@ -1105,7 +1110,7 @@ describe("EngineWorkspaceSessions", () => {
     await sessions.run(workspace, async () => undefined);
     const operation = vi.fn(async () => "unexpected");
 
-    sessions.beginRebuild(workspace.workspaceId);
+    sessions.beginRebuild(workspace);
     try {
       await expect(sessions.run(workspace, operation)).rejects.toEqual(
         new EngineWorkspaceRebuildingError(workspace.workspaceId),
@@ -1117,7 +1122,7 @@ describe("EngineWorkspaceSessions", () => {
       ).resolves.toBe("other-opened");
       expect(requests).toHaveLength(2);
     } finally {
-      sessions.endRebuild(workspace.workspaceId);
+      sessions.endRebuild(workspace);
     }
 
     await expect(
@@ -1158,7 +1163,7 @@ describe("EngineWorkspaceSessions", () => {
     await closeStarted.promise;
     const operation = vi.fn(async () => "unexpected");
     const queuedRun = sessions.run(workspace, operation);
-    sessions.beginRebuild(workspace.workspaceId);
+    sessions.beginRebuild(workspace);
     finishClose.resolve();
     await closing;
 
@@ -1169,7 +1174,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(operation).not.toHaveBeenCalled();
       expect(openCount).toBe(1);
     } finally {
-      sessions.endRebuild(workspace.workspaceId);
+      sessions.endRebuild(workspace);
     }
 
     await expect(

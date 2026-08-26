@@ -54,7 +54,6 @@ export interface EngineYDocSessionOutbound<
   TReplacement,
 > extends EngineYDocSessionCaller<TSender> {
   workspaceId: string;
-  authorityId?: symbol;
   path: string;
   message: EngineYDocSessionOutboundMessage<TEvent, TUpdate, TReplacement>;
 }
@@ -106,7 +105,7 @@ export interface OpenEngineYDocOwnedSessionInput<
   TValue,
 > extends EngineYDocSessionCaller<TSender> {
   workspaceId: string;
-  authorityId?: symbol;
+  authorityId: symbol;
   path: string;
   openSession: (
     signals: EngineYDocSessionSignals<TEvent, TUpdate, TReplacement>,
@@ -161,7 +160,7 @@ interface SessionRecord<
   readonly generation: number;
   readonly sessionId: string;
   readonly workspaceId: string;
-  readonly authorityId?: symbol;
+  readonly authorityId: symbol;
   readonly path: string;
   readonly openingRetirement: Deferred<EngineYDocSessionReleaseOutcome>;
   state: SessionState;
@@ -285,8 +284,7 @@ export class EngineYDocSessionOwner<
     const documentInUse = [...this.#records].some(
       (record) =>
         record.state !== "releasing" &&
-        this.#authorityOf(record) ===
-          (input.authorityId ?? input.workspaceId) &&
+        record.authorityId === input.authorityId &&
         workspaceRelativePathsEqual(record.path, input.path),
     );
     if (documentInUse) {
@@ -300,7 +298,7 @@ export class EngineYDocSessionOwner<
       generation: input.generation,
       sessionId: input.sessionId,
       workspaceId: input.workspaceId,
-      ...(input.authorityId ? { authorityId: input.authorityId } : {}),
+      authorityId: input.authorityId,
       path: input.path,
       openingRetirement: deferred<EngineYDocSessionReleaseOutcome>(),
       state: "opening",
@@ -382,23 +380,23 @@ export class EngineYDocSessionOwner<
     return { kind: "available", value: access(record.session) };
   }
 
-  ownsDocument(authorityId: string | symbol, path: string): boolean {
+  ownsDocument(authorityId: symbol, path: string): boolean {
     return [...this.#records].some(
       (record) =>
-        this.#authorityOf(record) === authorityId &&
+        record.authorityId === authorityId &&
         workspaceRelativePathsEqual(record.path, path),
     );
   }
 
   forEachSessionUnderPath(
-    authorityId: string | symbol,
+    authorityId: symbol,
     pathOrPrefix: string,
     visit: (session: TSession) => void,
   ): void {
     for (const record of this.#records) {
       if (
         record.session === null ||
-        this.#authorityOf(record) !== authorityId ||
+        record.authorityId !== authorityId ||
         !workspaceRelativePathIsAtOrUnder(record.path, pathOrPrefix)
       ) {
         continue;
@@ -408,20 +406,14 @@ export class EngineYDocSessionOwner<
   }
 
   retireAuthority(
-    authorityId: string | symbol,
+    authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
     const records = [...this.#records].filter(
-      (record) => this.#authorityOf(record) === authorityId,
+      (record) => record.authorityId === authorityId,
     );
     return Promise.all(
       records.map((record) => this.#retire(record, "released", true)),
     );
-  }
-
-  #authorityOf(
-    record: SessionRecord<TSender, TSession, TUpdate, TReplacement>,
-  ): string | symbol {
-    return record.authorityId ?? record.workspaceId;
   }
 
   release(
@@ -523,7 +515,7 @@ export class EngineYDocSessionOwner<
       (record) =>
         record !== opening &&
         record.state === "releasing" &&
-        this.#authorityOf(record) === this.#authorityOf(opening) &&
+        record.authorityId === opening.authorityId &&
         workspaceRelativePathsEqual(record.path, opening.path),
     );
     for (const blocker of blockers) {
