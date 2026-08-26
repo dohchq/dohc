@@ -47,6 +47,17 @@ async function newStorage(): Promise<SyncRelayStorage> {
   return storage;
 }
 
+function forceBlobFallback(storage: SyncRelayStorage): SyncRelayStorage {
+  return new Proxy(storage, {
+    get(target, property, receiver) {
+      if (property === "latestLogRowForObjectInVersion") return () => null;
+      if (property === "objectIdAtPathInVersion") return () => undefined;
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 function handler(
   storage: SyncRelayStorage,
   options: {
@@ -689,6 +700,35 @@ describe("relay capability reads", () => {
     ).toContain("404:");
   });
 
+  it("keeps a live main-version blob servable after the shared object is edited on a fork", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const forkContent = "# fork edit\n";
+    const forkSha = await putBlob(h, forkContent);
+
+    await appendMoments(h, [
+      moment(3, "docs/shared.md", forkContent, 1_300, {
+        versionId: "fork-1",
+        objectId: "object-shared",
+        beforePath: "docs/shared.md",
+        beforeContent: "# shared\n",
+      }),
+    ]);
+
+    expect(
+      await denialBytes(
+        await h(linkRequest(seeded.capability, `/sync/link/blobs/${forkSha}`)),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+
+    const mainBlob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
+    );
+    expect(mainBlob.status).toBe(200);
+    expect(await mainBlob.text()).toBe("# shared\n");
+  });
+
   it("keeps a version share's pinned blob servable after the live file moves on", async () => {
     const storage = await newStorage();
     const h = handler(storage);
@@ -857,10 +897,10 @@ describe("relay capability reads", () => {
   it("refuses a fallback blob when the forward walk exceeds the page budget", async () => {
     const pageSize = 2;
     const storage = await newStorage();
-    const h = handler(storage, {
+    const h = handler(forceBlobFallback(storage), {
       linkCapabilityReadFallbackPageSize: pageSize,
     });
-    const seeded = await seed(h, "view", { sharedObjectId: null });
+    const seeded = await seed(h);
     const rowsPerBudget =
       LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET * pageSize;
     await appendMoments(
@@ -889,10 +929,10 @@ describe("relay capability reads", () => {
 
   it("keeps freshness and fallback blobs unchanged when the log fits the page budget", async () => {
     const storage = await newStorage();
-    const h = handler(storage, {
+    const h = handler(forceBlobFallback(storage), {
       linkCapabilityReadFallbackPageSize: 2,
     });
-    const seeded = await seed(h, "view", { sharedObjectId: null });
+    const seeded = await seed(h);
 
     const metadata = await json(
       await h(linkRequest(seeded.capability, "/sync/link/share")),

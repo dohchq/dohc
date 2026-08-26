@@ -237,6 +237,7 @@ function storedSelectorKind(
 
 interface SettledMomentIdentity {
   objectId: string | null;
+  versionId: string | null;
   referencedPaths: string[];
   settledPath: string | null;
   deleted: boolean;
@@ -258,6 +259,10 @@ function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | nu
     typeof record.objectId === "string" && record.objectId.length > 0
       ? record.objectId
       : null;
+  const versionId =
+    typeof record.versionId === "string" && record.versionId.length > 0
+      ? record.versionId
+      : null;
   const referencedPaths = [
     record.path,
     record.payloadBeforePath,
@@ -272,7 +277,7 @@ function settledMomentIdentity(row: SyncRelayLogRow): SettledMomentIdentity | nu
       : typeof record.payloadAfterPath === "string" && record.payloadAfterPath.length > 0
         ? record.payloadAfterPath
         : null;
-  return { objectId, referencedPaths, settledPath, deleted };
+  return { objectId, versionId, referencedPaths, settledPath, deleted };
 }
 
 export function createSyncRelayHandler({
@@ -713,10 +718,11 @@ export function createSyncRelayHandler({
 
   const latestPathRelatedMoment = (
     workspaceId: string,
+    versionId: string,
     candidate: SyncRelayLogRow,
     candidateIdentity: SettledMomentIdentity,
   ): SyncRelayLogRow | null => {
-    let latest = candidate;
+    let latest = candidateIdentity.versionId === versionId ? candidate : null;
     let trackedObjectId = candidateIdentity.objectId;
     let trackedPath =
       candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
@@ -733,7 +739,7 @@ export function createSyncRelayHandler({
       });
       for (const row of page.rows) {
         const identity = settledMomentIdentity(row);
-        if (!identity) continue;
+        if (!identity || identity.versionId !== versionId) continue;
         const sameObject =
           trackedObjectId !== null && identity.objectId === trackedObjectId;
         const samePath =
@@ -751,23 +757,32 @@ export function createSyncRelayHandler({
 
   const currentSettledBlobMoment = (
     workspaceId: string,
+    versionId: string,
     candidate: SyncRelayLogRow,
   ): SyncRelayLogRow | null => {
     const candidateIdentity = settledMomentIdentity(candidate);
     if (!candidateIdentity) return null;
 
     let current = candidateIdentity.objectId
-      ? storage.latestLogRowForObject(workspaceId, candidateIdentity.objectId)
+      ? storage.latestLogRowForObjectInVersion({
+          workspaceId,
+          objectId: candidateIdentity.objectId,
+          versionId,
+        })
       : null;
     if (!current) {
       const candidatePath =
         candidateIdentity.settledPath ?? candidateIdentity.referencedPaths[0] ?? null;
       const currentObjectId = candidatePath
-        ? storage.objectIdAtPath(workspaceId, candidatePath)
+        ? storage.objectIdAtPathInVersion({ workspaceId, versionId, path: candidatePath })
         : undefined;
       current = currentObjectId
-        ? storage.latestLogRowForObject(workspaceId, currentObjectId)
-        : latestPathRelatedMoment(workspaceId, candidate, candidateIdentity);
+        ? storage.latestLogRowForObjectInVersion({
+            workspaceId,
+            objectId: currentObjectId,
+            versionId,
+          })
+        : latestPathRelatedMoment(workspaceId, versionId, candidate, candidateIdentity);
     }
     if (!current) return null;
 
@@ -775,15 +790,17 @@ export function createSyncRelayHandler({
     if (!currentIdentity || currentIdentity.deleted) return null;
 
     if (currentIdentity.objectId && currentIdentity.settledPath) {
-      const occupyingObjectId = storage.objectIdAtPath(
+      const occupyingObjectId = storage.objectIdAtPathInVersion({
         workspaceId,
-        currentIdentity.settledPath,
-      );
+        versionId,
+        path: currentIdentity.settledPath,
+      });
       if (occupyingObjectId && occupyingObjectId !== currentIdentity.objectId) {
-        const occupyingMoment = storage.latestLogRowForObject(
+        const occupyingMoment = storage.latestLogRowForObjectInVersion({
           workspaceId,
-          occupyingObjectId,
-        );
+          objectId: occupyingObjectId,
+          versionId,
+        });
         if (!occupyingMoment) return null;
         current = occupyingMoment;
         currentIdentity = settledMomentIdentity(current);
@@ -799,12 +816,12 @@ export function createSyncRelayHandler({
     sha256: string,
     epochLogFloor: number,
   ): Uint8Array | null => {
-    const candidates = storage.listLogRowsReferencing(workspaceId, sha256);
+    const candidates = storage.listObjectMomentLogRowsByBlob(workspaceId, sha256);
     const chatResolver = chatResolverFor(workspaceId);
     const reachable = candidates.some((row) => {
       const establishingRow =
         !isChatChannelSelector(selector) && selector.versionId === null
-          ? currentSettledBlobMoment(workspaceId, row)
+          ? currentSettledBlobMoment(workspaceId, targetVersionId(selector), row)
           : row;
       if (!establishingRow || establishingRow.relaySeq <= epochLogFloor) return false;
       const decision = filterOpForShare(

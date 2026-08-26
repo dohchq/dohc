@@ -75,6 +75,11 @@ describe("App", () => {
     });
   }
 
+  function renderedFilePaths(): Array<string | null> {
+    return [...container.querySelectorAll("button.file")]
+      .map((button) => button.textContent);
+  }
+
   it("renders a successful empty share instead of refusing it", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -279,11 +284,22 @@ describe("App", () => {
     );
   });
 
-  it("requests fresh meta every four minutes and stops on unmount", async () => {
+  it("refreshes files and meta every four minutes and stops on unmount", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-26T06:00:00.000Z").getTime();
     vi.setSystemTime(startedAt);
+    const initialFile: SharedFile = {
+      path: "zeta.txt",
+      blobSha256: "e".repeat(64),
+      contentKind: "text",
+    };
+    const addedFile: SharedFile = {
+      path: "alpha.txt",
+      blobSha256: "f".repeat(64),
+      contentKind: "text",
+    };
     const metaPaths: string[] = [];
+    const logPaths: string[] = [];
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") {
@@ -292,7 +308,12 @@ describe("App", () => {
           ? DEFAULT_META
           : { ...DEFAULT_META, lastSettledAtMs: startedAt + 4 * 60_000 });
       }
-      if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      if (path === "/api/view/log?since=0&limit=500") {
+        logPaths.push(path);
+        return logPage(logPaths.length === 1
+          ? [initialFile]
+          : [initialFile, addedFile]);
+      }
       throw new Error(`Unexpected request: ${path}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -303,21 +324,30 @@ describe("App", () => {
     expect(container.querySelector(".freshness")?.textContent).toBe(
       "No settled changes",
     );
+    expect(renderedFilePaths()).toEqual(["zeta.txt"]);
+    expect(container.querySelector("h1")?.textContent).toBe("zeta.txt");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
+    expect({
+      files: renderedFilePaths(),
+      freshness: container.querySelector(".freshness")?.textContent,
+    }).toEqual({
+      files: ["alpha.txt", "zeta.txt"],
+      freshness: "Last settled now",
+    });
     expect(metaPaths).toHaveLength(2);
-    expect(container.querySelector(".freshness")?.textContent).toBe(
-      "Last settled now",
-    );
+    expect(logPaths).toHaveLength(2);
+    expect(container.querySelector("h1")?.textContent).toBe("zeta.txt");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(4 * 60_000);
     });
 
     expect(metaPaths).toHaveLength(3);
+    expect(logPaths).toHaveLength(3);
     act(() => root?.unmount());
     root = null;
     expect(vi.getTimerCount()).toBe(0);
@@ -327,6 +357,73 @@ describe("App", () => {
     });
 
     expect(metaPaths).toHaveLength(3);
+    expect(logPaths).toHaveLength(3);
+  });
+
+  it("falls back to the first file when a heartbeat renames the selected file", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-26T06:00:00.000Z").getTime();
+    vi.setSystemTime(startedAt);
+    const firstFile: SharedFile = {
+      path: "alpha.txt",
+      blobSha256: "1".repeat(64),
+      contentKind: "text",
+    };
+    const selectedFile: SharedFile = {
+      path: "beta.txt",
+      blobSha256: "2".repeat(64),
+      contentKind: "text",
+    };
+    const renamedFile: SharedFile = {
+      path: "gamma.txt",
+      blobSha256: selectedFile.blobSha256,
+      contentKind: "text",
+    };
+    let metaRequests = 0;
+    let logRequests = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/meta") {
+        metaRequests += 1;
+        return jsonResponse({
+          ...DEFAULT_META,
+          lastSettledAtMs: metaRequests === 1
+            ? null
+            : startedAt + (metaRequests - 1) * 4 * 60_000,
+        });
+      }
+      if (path === "/api/view/log?since=0&limit=500") {
+        logRequests += 1;
+        if (logRequests === 1) return logPage([firstFile, selectedFile]);
+        if (logRequests === 2) return logPage([firstFile, renamedFile]);
+        return logPage([firstFile, selectedFile, renamedFile]);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+
+    const selectedButton = [...container.querySelectorAll("button.file")]
+      .find((button) => button.textContent === selectedFile.path);
+    expect(selectedButton).toBeDefined();
+    act(() => {
+      selectedButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.querySelector("h1")?.textContent).toBe(selectedFile.path);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(renderedFilePaths()).toEqual([firstFile.path, renamedFile.path]);
+    expect(container.querySelector("h1")?.textContent).toBe(firstFile.path);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+
+    expect(container.querySelector("h1")?.textContent).toBe(firstFile.path);
   });
 
   it("shows the unavailable state when a meta heartbeat is refused", async () => {

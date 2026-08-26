@@ -14,7 +14,7 @@ import {
 
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
-const META_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
+const VIEW_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
 const MAX_LOG_PAGES = 10_000;
 const LOG_RETRY_INITIAL_MS = 1_000;
 const LOG_RETRY_MAX_MS = 15_000;
@@ -302,21 +302,30 @@ export function App() {
   }, []);
 
   const readySession = state.status === "ready" ? state.session : null;
+  const readyFiles = state.status === "ready" ? state.files : null;
+  useEffect(() => {
+    if (readyFiles === null) return;
+    setSelectedPath((path) => readyFiles.some((file) => file.path === path)
+      ? path
+      : readyFiles[0]?.path ?? "");
+  }, [readyFiles]);
+
   useEffect(() => {
     if (readySession === null) return;
     let current = true;
     const interval = window.setInterval(() => {
-      void loadMeta(readySession)
-        .then((meta) => {
+      void Promise.all([loadMeta(readySession), loadLog(readySession)])
+        .then(([meta, ops]) => {
           if (!current) return;
+          const files = filesFromLog(ops);
           setState((value) => value.status === "ready" && value.session === readySession
-            ? { ...value, meta }
+            ? { ...value, meta, files }
             : value);
         })
         .catch(() => {
           if (current) setState({ status: "refused" });
         });
-    }, META_HEARTBEAT_INTERVAL_MS);
+    }, VIEW_HEARTBEAT_INTERVAL_MS);
     return () => {
       current = false;
       window.clearInterval(interval);

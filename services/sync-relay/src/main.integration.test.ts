@@ -506,14 +506,27 @@ describe("sync relay main process", () => {
       ),
     );
 
+    // Prove the first address's bucket is exhausted before asserting the
+    // second address succeeds — otherwise one larger shared bucket passes.
+    const exhaustedFirstClient = await exchangeLink(
+      baseUrl,
+      secret,
+      "198.51.100.10",
+      relayExchangeKey,
+    );
     const secondClient = await exchangeLink(
       baseUrl,
       secret,
       "198.51.100.11",
       relayExchangeKey,
     );
-    expect({ firstClientStatuses, secondClientStatus: secondClient.status }).toEqual({
+    expect({
+      firstClientStatuses,
+      exhaustedFirstClientStatus: exhaustedFirstClient.status,
+      secondClientStatus: secondClient.status,
+    }).toEqual({
       firstClientStatuses: Array.from({ length: LINK_EXCHANGE_BUCKET_CAPACITY }, () => 200),
+      exhaustedFirstClientStatus: 404,
       secondClientStatus: 200,
     });
   });

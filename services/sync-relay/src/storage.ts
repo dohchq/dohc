@@ -361,15 +361,20 @@ export interface SyncRelayStorage {
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
   // Idempotent; returns false only when the share does not exist.
   revokeShare(shareId: string, revokedAtMs: number): boolean;
-  // Candidate rows for the shared-blob allowlist: every log row whose payload
-  // MIGHT reference the given sha256 (LIKE pre-filter; the share filter makes
-  // the actual decision). sha256 is validated hex upstream, so it cannot
-  // carry LIKE wildcards.
-  listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[];
-  // The latest moment for this file identity across the FULL workspace log.
-  // Share filters must run only after this lookup: the decisive row may move
-  // the file outside a selector and therefore be invisible to that filter.
-  latestLogRowForObject(workspaceId: string, objectId: string): SyncRelayLogRow | null;
+  // Candidate moment rows for the shared-blob allowlist, found by the exact
+  // blob index. The share filter still makes the authorization decision.
+  listObjectMomentLogRowsByBlob(
+    workspaceId: string,
+    sha256: string,
+  ): SyncRelayLogRow[];
+  // The latest moment for this file identity within the one version a share
+  // exposes. Share filters run only after this lookup: the decisive row may
+  // move the file outside a selector and therefore be invisible to it.
+  latestLogRowForObjectInVersion(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+  }): SyncRelayLogRow | null;
   // MU-C4 shared channels: the channelWireId bound by the EARLIEST
   // chat.thread.create op for this threadId in the workspace's log (relay
   // order). undefined means no create exists; null means the earliest create
@@ -774,6 +779,11 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       -- the most recent moment that produced it.
       CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob
         ON sync_relay_object_moments(workspace_id, object_id, blob_sha256, relay_seq);
+      -- Blob authorization starts from a hash without knowing the object, so
+      -- it needs the hash immediately after workspace_id. The object-first
+      -- index above serves proposal-base lookups and cannot seek this query.
+      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob_lookup
+        ON sync_relay_object_moments(workspace_id, blob_sha256, relay_seq);
       -- WHICH object sits at a path IN ONE VERSION. sync_relay_object_paths
       -- answers the same question across every version at once, latest-wins,
       -- so a path last touched in a side version resolves to the wrong object
@@ -2782,30 +2792,42 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     });
   }
 
-  listLogRowsReferencing(workspaceId: string, sha256: string): SyncRelayLogRow[] {
+  listObjectMomentLogRowsByBlob(
+    workspaceId: string,
+    sha256: string,
+  ): SyncRelayLogRow[] {
     return this.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
-         FROM sync_relay_log
-         WHERE workspace_id = ? AND payload_json LIKE ?
-         ORDER BY relay_seq`,
+        `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
+                l.payload_json, l.recorded_at_ms, l.relay_seq
+         FROM sync_relay_object_moments m
+         JOIN sync_relay_log l
+           ON l.workspace_id = m.workspace_id AND l.relay_seq = m.relay_seq
+         WHERE m.workspace_id = ? AND m.blob_sha256 = ?
+         ORDER BY m.relay_seq`,
       )
-      .all(workspaceId, `%${sha256}%`)
+      .all(workspaceId, sha256)
       .map(rowToLogRow);
   }
 
-  latestLogRowForObject(workspaceId: string, objectId: string): SyncRelayLogRow | null {
-    if (!objectId) return null;
+  latestLogRowForObjectInVersion(input: {
+    workspaceId: string;
+    objectId: string;
+    versionId: string;
+  }): SyncRelayLogRow | null {
+    if (!input.objectId || !input.versionId) return null;
     const row = this.db
       .prepare(
         `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
                 l.payload_json, l.recorded_at_ms, l.relay_seq
-         FROM sync_relay_object_paths p
+         FROM sync_relay_object_moments m
          JOIN sync_relay_log l
-           ON l.workspace_id = p.workspace_id AND l.relay_seq = p.relay_seq
-         WHERE p.workspace_id = ? AND p.object_id = ?`,
+           ON l.workspace_id = m.workspace_id AND l.relay_seq = m.relay_seq
+         WHERE m.workspace_id = ? AND m.object_id = ? AND m.version_id = ?
+         ORDER BY m.relay_seq DESC
+         LIMIT 1`,
       )
-      .get(workspaceId, objectId);
+      .get(input.workspaceId, input.objectId, input.versionId);
     return row ? rowToLogRow(row) : null;
   }
 
