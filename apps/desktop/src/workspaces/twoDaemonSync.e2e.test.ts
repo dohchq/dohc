@@ -39,15 +39,13 @@ async function openLiveDaemonCapture(input: {
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
   const capture = createWorkspaceEngineCapture({
-    workspaceId: input.workspaceId,
-    rootPath: input.rootPath,
-    attachmentId: workspace.workspace.attachmentId,
+    ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });
   const relay = workspace.relay.bind({
-    ...input,
-    attachmentId: workspace.workspace.attachmentId,
+    ...workspace.workspace,
+    relay: input.relay,
   });
   return {
     capture,
@@ -71,8 +69,8 @@ async function openJoinedDaemonCapture(input: {
 }): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
   const relay = workspace.relay.bind({
-    ...input,
-    attachmentId: workspace.workspace.attachmentId,
+    ...workspace.workspace,
+    relay: input.relay,
   });
   const probe = await probeRelayWorkspace({
     workspaceId: input.workspaceId,
@@ -94,9 +92,7 @@ async function openJoinedDaemonCapture(input: {
     throw error;
   }
   const capture = createWorkspaceEngineCapture({
-    workspaceId: input.workspaceId,
-    rootPath: input.rootPath,
-    attachmentId: workspace.workspace.attachmentId,
+    ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });

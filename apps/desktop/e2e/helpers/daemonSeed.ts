@@ -41,6 +41,18 @@ export interface LiveDaemonWorkspace {
   close(): Promise<void>;
 }
 
+function attachWorkspace(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): AttachedEngineWorkspace {
+  return {
+    ...workspace,
+    attachmentId: Symbol(
+      `test-workspace-attachment:${workspace.workspaceId}`,
+    ),
+  };
+}
+
 export async function openLiveDaemonWorkspace(
   workspace: { workspaceId: string; rootPath: string },
   options: { maxRestarts?: number } = {},
@@ -53,12 +65,7 @@ export async function openLiveDaemonWorkspace(
   const routes = new RelayTransportRouteGuard();
   const source = new RelayConfiguredDaemonClientSource(lifecycle, routes);
   const sessions = createRealDaemonWorkspaceSessions(source);
-  const attachedWorkspace = {
-    ...workspace,
-    attachmentId: Symbol(
-      `test-workspace-attachment:${workspace.workspaceId}`,
-    ),
-  };
+  const attachedWorkspace = attachWorkspace(workspace);
   const relay = new EngineRelayClient({
     sessions,
     routes,
@@ -92,12 +99,7 @@ export async function seedThroughDaemon<T>(
   try {
     await lifecycle.start();
     sessions = createRealDaemonWorkspaceSessions(lifecycle);
-    const attachedWorkspace = {
-      ...workspace,
-      attachmentId: Symbol(
-        `test-workspace-attachment:${workspace.workspaceId}`,
-      ),
-    };
+    const attachedWorkspace = attachWorkspace(workspace);
     return await seed({
       chats: createLiveLinkedChatStore(attachedWorkspace, sessions),
       files: createCaptureLiveStores(attachedWorkspace, sessions).store,

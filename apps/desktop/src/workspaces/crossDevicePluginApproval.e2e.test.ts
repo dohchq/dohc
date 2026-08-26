@@ -200,8 +200,8 @@ async function openDaemon(
 ): Promise<LiveDaemonCapture> {
   const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
   const relay = workspace.relay.bind({
-    ...input,
-    attachmentId: workspace.workspace.attachmentId,
+    ...workspace.workspace,
+    relay: input.relay,
   });
   if (join_) {
     const probe = await probeRelayWorkspace({
@@ -221,9 +221,7 @@ async function openDaemon(
     }
   }
   const capture = createWorkspaceEngineCapture({
-    workspaceId: input.workspaceId,
-    rootPath: input.rootPath,
-    attachmentId: workspace.workspace.attachmentId,
+    ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
     daemonOwnsCapture: true,
   });

@@ -572,16 +572,21 @@ function sha256Utf8(text: string): string {
 }
 
 function desktopOwnedLoopbackCapture(root: string, options: {
+  attachmentId?: symbol;
   onError?: (context: string, error: unknown) => void;
   diskWriter?: EngineDiskWriter;
   store?: CaptureVersionedTextStore;
   rustEngineSessions?: EngineWorkspaceSessions;
 } = {}): WorkspaceEngineCapture {
-  const { rustEngineSessions, ...rest } = options;
+  const {
+    attachmentId = Symbol("test-workspace-attachment"),
+    rustEngineSessions,
+    ...rest
+  } = options;
   return createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
-    attachmentId: Symbol("test-workspace-attachment"),
+    attachmentId,
     rustEngineSessions:
       rustEngineSessions ?? mockLiveSessions(new VersionedLoopbackEngine()),
     ...rest,
@@ -794,11 +799,12 @@ describe("switchVersion", () => {
     // choice, so this read is a real `versionedText.read` over the wire.
     const loopback = new VersionedLoopbackEngine();
     const sessions = mockLiveSessions(loopback);
+    const attachmentId = Symbol("test-workspace-attachment");
     const store = createCaptureLiveStores(
       {
         workspaceId: WORKSPACE_ID,
         rootPath: root,
-        attachmentId: Symbol("test-workspace-attachment"),
+        attachmentId,
       },
       sessions,
     ).store;
@@ -811,6 +817,7 @@ describe("switchVersion", () => {
       },
     };
     const engine = desktopOwnedLoopbackCapture(root, {
+      attachmentId,
       store: countingStore,
       rustEngineSessions: sessions,
     });

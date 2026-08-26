@@ -285,9 +285,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
       rootPath: memberDir,
     });
     const memberRelay = member.relay.bind({
-      workspaceId: memberWs,
-      rootPath: memberDir,
-      attachmentId: member.workspace.attachmentId,
+      ...member.workspace,
       relay: relayConn,
     });
     await memberRelay.pullSharedChannel({ shareId, channelWireId });
