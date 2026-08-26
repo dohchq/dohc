@@ -818,11 +818,13 @@ export function createSyncRelayHandler({
     return current;
   };
 
-  const sharedBlob = (
+  const filteredSharedBlob = (
     workspaceId: string,
     selector: AnyShareSelector,
     sha256: string,
-    epochLogFloor: number,
+    semantics:
+      | { kind: "historical-log" }
+      | { kind: "current-state"; epochLogFloor: number },
   ): Uint8Array | null => {
     if (isChatChannelSelector(selector)) return null;
     const versionId = targetVersionId(selector);
@@ -842,10 +844,16 @@ export function createSyncRelayHandler({
     const chatResolver = chatResolverFor(workspaceId);
     const reachable = candidates.some((row) => {
       const establishingRow =
-        selector.versionId === null
+        semantics.kind === "current-state" && selector.versionId === null
           ? currentSettledBlobMoment(workspaceId, versionId, row)
           : row;
-      if (!establishingRow || establishingRow.relaySeq <= epochLogFloor) return false;
+      if (
+        !establishingRow ||
+        (semantics.kind === "current-state" &&
+          establishingRow.relaySeq <= semantics.epochLogFloor)
+      ) {
+        return false;
+      }
       const decision = filterOpForShare(
         selector,
         establishingRow.opKind,
@@ -856,6 +864,24 @@ export function createSyncRelayHandler({
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };
+
+  const historicalSharedBlob = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    sha256: string,
+  ): Uint8Array | null =>
+    filteredSharedBlob(workspaceId, selector, sha256, { kind: "historical-log" });
+
+  const currentSharedBlob = (
+    workspaceId: string,
+    selector: AnyShareSelector,
+    sha256: string,
+    epochLogFloor: number,
+  ): Uint8Array | null =>
+    filteredSharedBlob(workspaceId, selector, sha256, {
+      kind: "current-state",
+      epochLogFloor,
+    });
 
   const requireLinkRead = (
     request: Request,
@@ -1035,7 +1061,7 @@ export function createSyncRelayHandler({
   };
 
   const respondToLinkRefresh = (request: Request): Response => {
-    if (!hasValidRelayExchangeKey(request, true)) {
+    if (!hasValidRelayExchangeKey(request, false)) {
       return errorResponse(notFound());
     }
     if (!linkKey) throw invalidLinkCapability();
@@ -1148,7 +1174,7 @@ export function createSyncRelayHandler({
         }
 
         assertSha256(route.sha256);
-        const blob = sharedBlob(
+        const blob = currentSharedBlob(
           share.workspaceId,
           capability.effectiveSelector,
           route.sha256,
@@ -1544,9 +1570,12 @@ export function createSyncRelayHandler({
         // passes the share filter legitimately references it. Everything
         // else — a blob of an unshared file, a secret ciphertext blob, a
         // random hash — is the same generic 404 as a nonexistent share.
-        // The capability route calls this same filter-backed blob boundary.
         // Chat shares expose no blob because their filter decisions name none.
-        const blob = sharedBlob(share.workspaceId, share.selector, route.sha256, 0);
+        const blob = historicalSharedBlob(
+          share.workspaceId,
+          share.selector,
+          route.sha256,
+        );
         if (!blob) throw notFound();
         // Re-check revocation immediately before returning the blob body: a
         // revoke that raced with this in-flight read must abort rather than

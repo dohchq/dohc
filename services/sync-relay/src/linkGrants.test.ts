@@ -1289,6 +1289,29 @@ describe("relay link grants", () => {
     ).toMatchObject({ grantId: created.grantId, access: "view" });
   });
 
+  it("refreshes a valid capability when the relay exchange key is not configured", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", jsonBody({ secret: created.secret })),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+
+    const refreshed = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+        },
+      }),
+    );
+
+    expect(refreshed.status).toBe(200);
+  });
+
   it("refuses refresh without the configured relay exchange key", async () => {
     const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-key";

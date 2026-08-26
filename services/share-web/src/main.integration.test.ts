@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
   createServer,
   type IncomingMessage,
@@ -7,6 +8,8 @@ import {
   type ServerResponse,
 } from "node:http";
 import { connect } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { shareWebRefusalBody } from "./server";
@@ -18,6 +21,9 @@ const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
 const BLOB_SHA = "a".repeat(64);
 const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
 const SHUTDOWN_MARGIN_MS = 2_000;
+const MISSING_VIEWER_ASSETS_MESSAGE =
+  "share-web viewer assets are missing. Run: pnpm --filter @dohc/share-web build";
+const VIEWER_HTML = "<!doctype html><title>share-web viewer fixture</title>";
 const PNG_CHUNK = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8,
 ]);
@@ -28,6 +34,7 @@ const JSON_FINAL_CHUNK = Buffer.concat([
 ]);
 const children = new Set<ChildProcessWithoutNullStreams>();
 const relayServers = new Set<Server>();
+const viewerAssetRoots = new Set<string>();
 
 interface RunningShareWeb {
   child: ChildProcessWithoutNullStreams;
@@ -76,9 +83,59 @@ type RawSocketResult =
 afterEach(async () => {
   await Promise.all([...children].map(stopShareWeb));
   await Promise.all([...relayServers].map(stopRelay));
+  await Promise.all(
+    [...viewerAssetRoots].map((root) => rm(root, { recursive: true, force: true })),
+  );
+  viewerAssetRoots.clear();
 });
 
 describe("share-web Node request adapter", () => {
+  it.each([
+    ["development", true],
+    ["production", false],
+  ] as const)(
+    "fails %s startup when viewer assets are missing",
+    async (mode, devMode) => {
+      const viewerAssetsDir = await createViewerAssets(false);
+      let server: RunningShareWeb;
+      try {
+        server = await startShareWeb({ devMode, viewerAssetsDir });
+      } catch (error) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe(
+          "share-web exited before listening (code=1, signal=null)\n" +
+            "stdout:\n\n" +
+            `stderr:\n${MISSING_VIEWER_ASSETS_MESSAGE}\n`,
+        );
+        return;
+      }
+
+      const response = await sendHttpRequest(server.port, "/s/missing-viewer", {
+        method: "GET",
+        headers: { host: PUBLIC_HOST },
+      });
+      const body = await readResponse(response);
+      throw new Error(
+        `share-web started in ${mode} mode with empty viewer assets; ` +
+          `GET /s/missing-viewer returned ${String(response.statusCode)} ${JSON.stringify(body)}\n` +
+          `expected stderr:\n${MISSING_VIEWER_ASSETS_MESSAGE}\n`,
+      );
+    },
+  );
+
+  it("starts in development mode and serves present viewer assets", async () => {
+    const viewerAssetsDir = await createViewerAssets(true);
+    const server = await startShareWeb({ devMode: true, viewerAssetsDir });
+
+    const response = await sendHttpRequest(server.port, "/s/present-viewer", {
+      method: "GET",
+      headers: { host: PUBLIC_HOST },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(await readResponse(response)).toBe(VIEWER_HTML);
+  });
+
   it("force-closes a stalled blob response after the shutdown grace period", async () => {
     const relay = await startControlledBlobRelay();
     const server = await startShareWeb({ relayUrl: relay.url });
@@ -432,13 +489,24 @@ describe("share-web Node request adapter", () => {
 });
 
 async function startShareWeb(
-  options: { relayUrl?: string; trustedProxies?: string } = {},
+  options: {
+    devMode?: boolean;
+    relayUrl?: string;
+    trustedProxies?: string;
+    viewerAssetsDir?: string;
+  } = {},
 ): Promise<RunningShareWeb> {
   const relayUrl = options.relayUrl ?? (await startRelay());
   const env = { ...process.env };
+  delete env.DOHC_SHARE_WEB_DEV;
+  delete env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
+  if (options.devMode !== false) env.DOHC_SHARE_WEB_DEV = "1";
   if (options.trustedProxies !== undefined) {
     env.DOHC_SHARE_WEB_TRUSTED_PROXIES = options.trustedProxies;
+  }
+  if (options.viewerAssetsDir !== undefined) {
+    env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR = options.viewerAssetsDir;
   }
   const mainUrl = new URL("./main.ts", import.meta.url);
   const childArguments =
@@ -458,7 +526,6 @@ async function startShareWeb(
       env: {
         ...env,
         NODE_ENV: "test",
-        DOHC_SHARE_WEB_DEV: "1",
         DOHC_SHARE_WEB_RELAY_URL: relayUrl,
         DOHC_SHARE_WEB_PUBLIC_HOSTS: PUBLIC_HOST,
         DOHC_SHARE_WEB_PORT: "0",
@@ -494,8 +561,9 @@ async function startShareWeb(
       resolve(Number(match[1]));
     };
     child.stdout.on("data", inspectStdout);
-    child.once("exit", (code, signal) => {
+    child.once("close", (code, signal) => {
       clearTimeout(timeout);
+      children.delete(child);
       reject(
         new Error(
           `share-web exited before listening (code=${String(code)}, signal=${String(signal)})\n` +
@@ -506,6 +574,13 @@ async function startShareWeb(
   });
 
   return { child, port, stderr: () => stderr };
+}
+
+async function createViewerAssets(withIndex: boolean): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "dohc-share-web-viewer-"));
+  viewerAssetRoots.add(root);
+  if (withIndex) await writeFile(join(root, "index.html"), VIEWER_HTML);
+  return root;
 }
 
 async function exchangeSession(port: number): Promise<LinkSession> {

@@ -1,5 +1,6 @@
 import { readFileSync, writeSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadShareWebConfig } from "./config";
 import {
@@ -11,14 +12,14 @@ import {
 const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
 
 const config = loadConfig();
-const viewerAssetsDir = fileURLToPath(new URL("../viewer/dist", import.meta.url));
+const viewerAssetsDir = viewerAssetsDirectory();
 
-if (!config.devMode) {
-  try {
-    readFileSync(new URL("../viewer/dist/index.html", import.meta.url));
-  } catch {
-    fatal("FATAL: share-web viewer build is missing. Run pnpm --filter @dohc/share-web build.");
-  }
+try {
+  readFileSync(join(viewerAssetsDir, "index.html"));
+} catch {
+  fatal(
+    "share-web viewer assets are missing. Run: pnpm --filter @dohc/share-web build",
+  );
 }
 
 const handler = createShareWebHandler({
@@ -135,6 +136,14 @@ function loadConfig() {
 function fatal(message: string): never {
   writeSync(2, `${message}\n`);
   process.exit(1);
+}
+
+function viewerAssetsDirectory(): string {
+  if (process.env.NODE_ENV === "test") {
+    const testDirectory = process.env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
+    if (testDirectory) return testDirectory;
+  }
+  return fileURLToPath(new URL("../viewer/dist", import.meta.url));
 }
 
 function refuse(outgoing: ServerResponse): void {

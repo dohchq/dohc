@@ -838,7 +838,8 @@ export function filterOpForShare(
     if (paths.length === 0) return { allowed: false };
     // ALL referenced paths must be visible. A rename across the share boundary
     // is excluded rather than leaking the outside path. Existing replicas keep
-    // their prior view, but current-state blob reads no longer hydrate it.
+    // their prior view, but accountless current-state blob reads do not
+    // hydrate it after the move.
     if (!paths.every((path) => pathVisibleThroughShare(selector, path))) {
       return { allowed: false };
     }
