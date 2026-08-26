@@ -671,6 +671,7 @@ export function createSyncRelayHandler({
   const newestFilteredOpTimestamp = (
     workspaceId: string,
     selector: AnyShareSelector,
+    epochLogFloor: number,
   ): number | null => {
     let beforeRelaySeq: number | null = null;
     const chatResolver = chatResolverFor(workspaceId);
@@ -681,6 +682,7 @@ export function createSyncRelayHandler({
         limit: MAX_LOG_PAGE_SIZE,
       });
       for (const row of rows) {
+        if (row.relaySeq <= epochLogFloor) return null;
         if (
           !isChatChannelSelector(selector) &&
           !FILE_FRESHNESS_OP_KINDS.has(row.opKind)
@@ -777,6 +779,7 @@ export function createSyncRelayHandler({
     workspaceId: string,
     selector: AnyShareSelector,
     sha256: string,
+    epochLogFloor: number,
   ): Uint8Array | null => {
     const candidates = storage.listLogRowsReferencing(workspaceId, sha256);
     const chatResolver = chatResolverFor(workspaceId);
@@ -785,7 +788,7 @@ export function createSyncRelayHandler({
         !isChatChannelSelector(selector) && selector.versionId === null
           ? currentSettledBlobMoment(workspaceId, row)
           : row;
-      if (!establishingRow) return false;
+      if (!establishingRow || establishingRow.relaySeq <= epochLogFloor) return false;
       const decision = filterOpForShare(
         selector,
         establishingRow.opKind,
@@ -1054,11 +1057,13 @@ export function createSyncRelayHandler({
         if (request.method !== "GET") throw methodNotAllowed();
         const share = storage.getShare(capability.shareId);
         if (!share) throw notFound();
+        const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
 
         if (route.route === "link-share") {
           const lastSettledAtMs = newestFilteredOpTimestamp(
             share.workspaceId,
             capability.effectiveSelector,
+            epochLogFloor,
           );
           requireFreshLinkRead(capabilityToken, capability);
           return jsonResponse({
@@ -1071,7 +1076,8 @@ export function createSyncRelayHandler({
 
         if (route.route === "link-log") {
           const url = new URL(request.url);
-          const since = parseCursor(url.searchParams.get("since"));
+          const requestedSince = parseCursor(url.searchParams.get("since"));
+          const since = Math.max(requestedSince, epochLogFloor);
           const limit = parseLimit(url.searchParams.get("limit"));
           const page = filteredLogPage(
             share.workspaceId,
@@ -1088,6 +1094,7 @@ export function createSyncRelayHandler({
           share.workspaceId,
           capability.effectiveSelector,
           route.sha256,
+          epochLogFloor,
         );
         if (!blob) throw notFound();
         requireFreshLinkRead(capabilityToken, capability);
@@ -1475,7 +1482,7 @@ export function createSyncRelayHandler({
         // random hash — is the same generic 404 as a nonexistent share.
         // The capability route calls this same filter-backed blob boundary.
         // Chat shares expose no blob because their filter decisions name none.
-        const blob = sharedBlob(share.workspaceId, share.selector, route.sha256);
+        const blob = sharedBlob(share.workspaceId, share.selector, route.sha256, 0);
         if (!blob) throw notFound();
         // Re-check revocation immediately before returning the blob body: a
         // revoke that raced with this in-flight read must abort rather than

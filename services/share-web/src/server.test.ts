@@ -674,6 +674,73 @@ describe("share-web sessions", () => {
     expect(relayCalls).toBe(13);
   });
 
+  it("limits in-flight blob streams independently for each viewer session", async () => {
+    const blobSha = "c".repeat(64);
+    let tokenId = 0;
+    let blobReads = 0;
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test",
+      publicHosts: new Set([HOST]),
+      nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, ++tokenId).toString("base64url"),
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({
+            ok: true,
+            grantId: "grant-shared-blob-budget",
+            capabilityToken: CAP_ALPHA_1,
+            capabilityExpiresAtMs: 901_000,
+          });
+        }
+        blobReads += 1;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(12));
+            },
+          }),
+        );
+      },
+    });
+    const exchangedA = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const exchangedB = await handler(request("/api/exchange", exchange(SECRET_ALPHA)));
+    const sessionA = (await exchangedA.json()) as { session: string };
+    const sessionB = (await exchangedB.json()) as { session: string };
+    const headersA = {
+      cookie: cookiePair(exchangedA),
+      "x-dohc-link-session": sessionA.session,
+    };
+    const headersB = {
+      cookie: cookiePair(exchangedB),
+      "x-dohc-link-session": sessionB.session,
+    };
+
+    const heldByA = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        handler(request(`/api/view/blob/${blobSha}`, { headers: headersA })),
+      ),
+    );
+    const requestedByB = await handler(
+      request(`/api/view/blob/${blobSha}`, { headers: headersB }),
+    );
+    const ninthFromA = await handler(
+      request(`/api/view/blob/${blobSha}`, { headers: headersA }),
+    );
+
+    try {
+      expect(heldByA.map(({ status }) => status)).toEqual(Array(8).fill(200));
+      expect(requestedByB.status).toBe(200);
+      expect(ninthFromA.status).toBe(429);
+      expect(blobReads).toBe(9);
+    } finally {
+      await Promise.all(
+        [...heldByA, requestedByB, ninthFromA].map((response) =>
+          response.body?.cancel(),
+        ),
+      );
+    }
+  });
+
   it("serves only raster signatures inline and forces SVG and other bytes to download", async () => {
     const pngSha = "a".repeat(64);
     const svgSha = "b".repeat(64);

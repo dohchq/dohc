@@ -144,19 +144,19 @@ class ShareWebExchangeRateLimiter {
 class ShareWebBlobProxyLimiter {
   private readonly inFlightBySession = new Map<string, number>();
 
-  acquire(discriminator: string): (() => void) | null {
-    const inFlight = this.inFlightBySession.get(discriminator) ?? 0;
+  acquire(sessionIdentity: string): (() => void) | null {
+    const inFlight = this.inFlightBySession.get(sessionIdentity) ?? 0;
     if (inFlight >= MAX_BLOB_PROXIES_PER_SESSION) return null;
-    this.inFlightBySession.set(discriminator, inFlight + 1);
+    this.inFlightBySession.set(sessionIdentity, inFlight + 1);
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const remaining = (this.inFlightBySession.get(discriminator) ?? 1) - 1;
+      const remaining = (this.inFlightBySession.get(sessionIdentity) ?? 1) - 1;
       if (remaining === 0) {
-        this.inFlightBySession.delete(discriminator);
+        this.inFlightBySession.delete(sessionIdentity);
       } else {
-        this.inFlightBySession.set(discriminator, remaining);
+        this.inFlightBySession.set(sessionIdentity, remaining);
       }
     };
   }
@@ -626,7 +626,9 @@ export function createShareWebHandler({
 
       const isBlob = pathname.startsWith("/api/view/blob/");
       const releaseBlobProxy = isBlob
-        ? blobProxyLimiter.acquire(authenticated.discriminator)
+        ? blobProxyLimiter.acquire(
+            sessionKey(authenticated.discriminator, authenticated.token),
+          )
         : null;
       if (isBlob && !releaseBlobProxy) return refused(429, refreshedCookieHeaders);
 
@@ -662,8 +664,7 @@ export function createShareWebHandler({
             refreshedCookieHeaders,
           );
         }
-        const bytes = new Uint8Array(await relayResponse.arrayBuffer());
-        return response(bodyBuffer(bytes), {
+        return response(relayResponse.body, {
           headers: {
             "content-type": "application/json",
             ...refreshedCookieHeaders,

@@ -18,6 +18,11 @@ const BLOB_SHA = "a".repeat(64);
 const PNG_CHUNK = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8,
 ]);
+const JSON_FIRST_CHUNK = Buffer.from('{"ok":true,"payload":"');
+const JSON_FINAL_CHUNK = Buffer.concat([
+  Buffer.alloc(1024 * 1024, "x"),
+  Buffer.from('"}'),
+]);
 const children = new Set<ChildProcessWithoutNullStreams>();
 const relayServers = new Set<Server>();
 
@@ -44,6 +49,14 @@ interface ControlledBlobRelay {
   startBlob: (index: number) => void;
   waitForBlobCancellations: (count: number) => Promise<void>;
   waitForBlobRequests: (count: number) => Promise<void>;
+}
+
+interface ControlledJsonRelay {
+  finishAllResponses: () => void;
+  finishResponse: (index: number) => void;
+  startResponse: (index: number) => void;
+  url: string;
+  waitForRequests: (count: number) => Promise<void>;
 }
 
 type RawSocketResult =
@@ -223,6 +236,47 @@ describe("share-web Node request adapter", () => {
       relay.finishAllBlobs();
     }
   });
+
+  it.each([
+    ["meta", "/api/view/meta"],
+    ["log", "/api/view/log?since=0&limit=500"],
+  ] as const)(
+    "streams %s bytes before the relay finishes its body",
+    async (_route, path) => {
+      const relay = await startControlledJsonRelay();
+      const server = await startShareWeb({ relayUrl: relay.url });
+      const session = await exchangeSession(server.port);
+      const viewRequest = requestView(server.port, session, path);
+
+      await relay.waitForRequests(1);
+      relay.startResponse(0);
+
+      try {
+        const firstChunk = viewRequest.response.then(async (response) => {
+          expect(response.statusCode).toBe(200);
+          expect(response.headers["content-type"]).toBe("application/json");
+          const completeBody = readResponse(response);
+          return {
+            completeBody,
+            firstChunk: await readFirstChunk(response),
+          };
+        });
+        const observed = await settleWithin(firstChunk, 1_000);
+
+        expect(observed.kind).toBe("settled");
+        if (observed.kind !== "settled") return;
+        expect(observed.value.firstChunk).toEqual(JSON_FIRST_CHUNK);
+
+        relay.finishResponse(0);
+        expect(await observed.value.completeBody).toBe(
+          Buffer.concat([JSON_FIRST_CHUNK, JSON_FINAL_CHUNK]).toString("utf8"),
+        );
+      } finally {
+        viewRequest.destroy();
+        relay.finishAllResponses();
+      }
+    },
+  );
 });
 
 async function startShareWeb(
@@ -326,6 +380,36 @@ function requestBlob(port: number, session: LinkSession): PendingBlobRequest {
       port,
       path: `/api/view/blob/${BLOB_SHA}?session=${session.discriminator}`,
       headers: { host: PUBLIC_HOST, cookie: session.cookie },
+    },
+    resolveResponse,
+  );
+  request.once("error", rejectResponse);
+  request.end();
+  return { destroy: () => request.destroy(), response };
+}
+
+function requestView(
+  port: number,
+  session: LinkSession,
+  path: string,
+): PendingBlobRequest {
+  let resolveResponse: (response: IncomingMessage) => void = () => undefined;
+  let rejectResponse: (error: Error) => void = () => undefined;
+  const response = new Promise<IncomingMessage>((resolve, reject) => {
+    resolveResponse = resolve;
+    rejectResponse = reject;
+  });
+  void response.catch(() => undefined);
+  const request = requestHttp(
+    {
+      host: "127.0.0.1",
+      port,
+      path,
+      headers: {
+        host: PUBLIC_HOST,
+        cookie: session.cookie,
+        "x-dohc-link-session": session.discriminator,
+      },
     },
     resolveResponse,
   );
@@ -494,6 +578,69 @@ async function startControlledBlobRelay(): Promise<ControlledBlobRelay> {
     },
     waitForBlobRequests: (count) => {
       if (blobResponses.length >= count) return Promise.resolve();
+      return new Promise<void>((resolve) => requestWaiters.push({ count, resolve }));
+    },
+  };
+}
+
+async function startControlledJsonRelay(): Promise<ControlledJsonRelay> {
+  const responses: ServerResponse[] = [];
+  const requestWaiters: Array<{ count: number; resolve: () => void }> = [];
+  const notifyRequestWaiters = (): void => {
+    for (const waiter of requestWaiters.splice(0)) {
+      if (responses.length >= waiter.count) {
+        waiter.resolve();
+      } else {
+        requestWaiters.push(waiter);
+      }
+    }
+  };
+  const startResponse = (index: number): void => {
+    const response = responses[index];
+    if (!response || response.writableEnded || response.headersSent) return;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.write(JSON_FIRST_CHUNK);
+  };
+  const finishResponse = (index: number): void => {
+    const response = responses[index];
+    if (!response || response.writableEnded) return;
+    startResponse(index);
+    response.end(JSON_FINAL_CHUNK);
+  };
+  const server = createServer((request, response) => {
+    request.resume();
+    if (request.method === "POST" && request.url === "/sync/link-exchange") {
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          ok: true,
+          grantId: "grant-integration",
+          capabilityToken: CAPABILITY_TOKEN,
+          capabilityExpiresAtMs: Date.now() + 15 * 60_000,
+        }),
+      );
+      return;
+    }
+    responses.push(response);
+    notifyRequestWaiters();
+  });
+  relayServers.add(server);
+  await listenOnEphemeralPort(server);
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("controlled test relay did not bind to a TCP port");
+  }
+  return {
+    finishAllResponses: () => {
+      for (let index = 0; index < responses.length; index += 1) {
+        finishResponse(index);
+      }
+    },
+    finishResponse,
+    startResponse,
+    url: `http://127.0.0.1:${address.port}`,
+    waitForRequests: (count) => {
+      if (responses.length >= count) return Promise.resolve();
       return new Promise<void>((resolve) => requestWaiters.push({ count, resolve }));
     },
   };

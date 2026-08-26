@@ -17,6 +17,15 @@ const WORKSPACE = "workspace-link-reads";
 const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
 const UNKNOWN_CAPABILITY = "z".repeat(43);
 const LINK_REFUSAL_BODY = '{"ok":false,"error":"not found","code":"not_found"}';
+const EPOCH_1 = "epoch-1";
+const STREAM_1 = "stream-1";
+const EPOCH_2 = "epoch-2";
+const STREAM_2 = "stream-2";
+
+type TestWorkspaceIdentity = {
+  replicationEpoch: string;
+  streamIdentity: string;
+};
 
 const roots: string[] = [];
 const storages: SyncRelayStorage[] = [];
@@ -152,6 +161,10 @@ function moment(
 async function appendMoments(
   h: SyncRelayHandler,
   ops: ReturnType<typeof moment>[],
+  options: {
+    originId?: string;
+    identity?: TestWorkspaceIdentity;
+  } = {},
 ): Promise<void> {
   expect(
     (
@@ -159,7 +172,11 @@ async function appendMoments(
         request(
           OWNER,
           `/sync/${WORKSPACE}/log`,
-          jsonBody({ originId: "origin-a", ops }),
+          jsonBody({
+            originId: options.originId ?? "origin-a",
+            ops,
+            ...(options.identity ?? {}),
+          }),
         ),
       )
     ).status,
@@ -170,6 +187,7 @@ async function seed(
   h: SyncRelayHandler,
   access: "view" | "comment" | "edit" = "view",
   selector: { paths?: string[]; versionId?: string; sharedVersionId?: string } = {},
+  identity?: TestWorkspaceIdentity,
 ): Promise<{ capability: string; grantId: string; sharedSha: string; hiddenSha: string }> {
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -192,6 +210,7 @@ async function seed(
               }),
               moment(2, "private/hidden.md", "hidden\n", 1_200),
             ],
+            ...(identity ?? {}),
           }),
         ),
       )
@@ -230,6 +249,43 @@ async function seed(
     sharedSha,
     hiddenSha,
   };
+}
+
+async function seedThenRotate(h: SyncRelayHandler) {
+  const seeded = await seed(h, "view", {}, {
+    replicationEpoch: EPOCH_1,
+    streamIdentity: STREAM_1,
+  });
+  expect(
+    (
+      await h(
+        request(
+          OWNER,
+          `/sync/${WORKSPACE}/epoch`,
+          jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+        ),
+      )
+    ).status,
+  ).toBe(200);
+  return seeded;
+}
+
+async function appendAfterRotation(h: SyncRelayHandler): Promise<string> {
+  const content = "# after rotation\n";
+  const sha = await putBlob(h, content);
+  await appendMoments(
+    h,
+    [
+      moment(0, "docs/after-rotation.md", content, 1_300, {
+        objectId: "object-after-rotation",
+      }),
+    ],
+    {
+      originId: "origin-b",
+      identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
+    },
+  );
+  return sha;
 }
 
 async function denialBytes(response: Response): Promise<string> {
@@ -322,6 +378,60 @@ describe("relay capability reads", () => {
     expect(
       await denialBytes(await h(linkRequest(capability, `/sync/link/blobs/${missingSha}`))),
     ).toBe(recipientMissing);
+  });
+
+  it("keeps link log pages and freshness above the workspace epoch floor", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seedThenRotate(h);
+
+    const rotatedLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    expect(rotatedLog).toMatchObject({ ok: true, ops: [], hasMore: false });
+
+    const rotatedShare = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    expect(rotatedShare.lastSettledAtMs).toBeNull();
+
+    await appendAfterRotation(h);
+    const currentLog = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")),
+    );
+    expect(
+      (currentLog.ops as Array<{ payload: { payloadAfterPath?: string } }>).map(
+        (op) => op.payload.payloadAfterPath,
+      ),
+    ).toEqual(["docs/after-rotation.md"]);
+    const currentShare = await json(
+      await h(linkRequest(seeded.capability, "/sync/link/share")),
+    );
+    expect(currentShare.lastSettledAtMs).toBe(1_300);
+  });
+
+  it("serves only blobs established above the workspace epoch floor", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seedThenRotate(h);
+
+    expect(
+      await denialBytes(
+        await h(
+          linkRequest(
+            seeded.capability,
+            `/sync/link/blobs/${seeded.sharedSha}`,
+          ),
+        ),
+      ),
+    ).toBe(`404:${LINK_REFUSAL_BODY}`);
+
+    const currentSha = await appendAfterRotation(h);
+    const currentBlob = await h(
+      linkRequest(seeded.capability, `/sync/link/blobs/${currentSha}`),
+    );
+    expect(currentBlob.status).toBe(200);
+    expect(await currentBlob.text()).toBe("# after rotation\n");
   });
 
   it("refuses a path-shared blob after a later delete supersedes its file", async () => {
