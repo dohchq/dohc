@@ -345,6 +345,10 @@ describe("share mount commands", () => {
       caller.retire();
       throw new ShareUnavailableError();
     });
+    h.dependencies.logError = () => {
+      h.events.push("log");
+      throw new Error("logger failed");
+    };
 
     await expect(
       h.commands.mount({
@@ -644,6 +648,10 @@ describe("share mount commands", () => {
     h.dependencies.closeRelayWorkspace = async () => {
       h.events.push("relay:close");
       throw new Error("close failed");
+    };
+    h.dependencies.logError = () => {
+      h.events.push("log");
+      throw new Error("logger failed");
     };
     const commands = createShareMountCommands(h.dependencies);
 

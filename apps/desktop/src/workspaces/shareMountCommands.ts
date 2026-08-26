@@ -198,7 +198,7 @@ export function createShareMountCommands<WorkspaceSummary>(
       );
       await dependencies.closeRelayWorkspace(target.storeWorkspaceId).catch(
         (error) => {
-          dependencies.logError(
+          reportFailure(
             `could not close share mount relay ${target.storeWorkspaceId}:`,
             error,
           );
@@ -206,7 +206,7 @@ export function createShareMountCommands<WorkspaceSummary>(
       );
       const removed = await dependencies.projectionFor(owner).remove();
       if (removed.error) {
-        dependencies.logError(
+        reportFailure(
           `could not remove share mount folder ${target.mountLabel}:`,
           removed.error,
         );
@@ -226,11 +226,11 @@ export function createShareMountCommands<WorkspaceSummary>(
     },
   };
 
-  function reportPresentationFailure(message: string, error: unknown): void {
+  function reportFailure(message: string, error: unknown): void {
     try {
       dependencies.logError(message, error);
     } catch {
-      // Reporting a presentation failure cannot change command settlement.
+      // Reporting a failure cannot change command settlement.
     }
   }
 
@@ -243,7 +243,7 @@ export function createShareMountCommands<WorkspaceSummary>(
       try {
         dependencies.refreshNativeWorkspaceSurfaces();
       } catch (error) {
-        reportPresentationFailure(
+        reportFailure(
           `could not refresh native surfaces ${context}:`,
           error,
         );
@@ -252,7 +252,7 @@ export function createShareMountCommands<WorkspaceSummary>(
     try {
       dependencies.notifyRenderer({ workspaceId });
     } catch (error) {
-      reportPresentationFailure(
+      reportFailure(
         `could not notify renderer ${context}:`,
         error,
       );
@@ -390,7 +390,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                   );
                 }
               }
-              dependencies.logError(
+              reportFailure(
                 `mount-share rollback for ${mount.label}:`,
                 mountError,
               );
@@ -480,7 +480,7 @@ export function createShareMountCommands<WorkspaceSummary>(
               if (verdict.kind === "abort") {
                 throw new Error(verdict.message);
               }
-              dependencies.logError(
+              reportFailure(
                 `share-mount refresh failed for ${mount.label}:`,
                 error,
               );
@@ -520,7 +520,7 @@ export function createShareMountCommands<WorkspaceSummary>(
                   mountStoreWorkspaceIdFor(workspace.workspaceId, shareId),
                 )
                 .catch((error) => {
-                  dependencies.logError(
+                  reportFailure(
                     `could not close removed share relay ${shareId}:`,
                     error,
                   );
