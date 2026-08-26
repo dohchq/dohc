@@ -94,11 +94,11 @@ import { NewFileDialog } from "./NewFileDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { useGuestBlockingUi } from "./guestBlockingUi";
-import { DesktopSettings } from "./settings/DesktopSettings";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSectionId,
 } from "./settings/settingsRegistry";
+import { LazyDesktopSettings } from "./settings/LazyDesktopSettings";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { toggleTheme } from "./theme";
 import {
@@ -6550,7 +6550,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
-          <DesktopSettings
+          <LazyDesktopSettings
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}

@@ -42,6 +42,12 @@ type ErrorBoundaryProps = {
   // When any of these change (e.g. the active tab or view), a shown error is
   // cleared and the children re-render fresh — navigating away recovers.
   resetKeys?: ReadonlyArray<unknown>;
+  // Lazy views use this to replace React.lazy's cached rejected loader before
+  // the boundary renders its children again.
+  onRetry?: () => void;
+  // Dialog islands need the same visible card dimensions as their load state.
+  fallbackClassName?: string;
+  recoveryMessage?: ReactNode;
   children: ReactNode;
 };
 
@@ -68,6 +74,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   private reset = () => {
+    this.props.onRetry?.();
     this.setState({ error: null, hasError: false });
   };
 
@@ -77,7 +84,9 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       <div
         data-testid={`error-boundary-${this.props.scope}`}
         role="alert"
-        className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-2 bg-bg px-6 py-8 text-center"
+        className={`flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-2 bg-bg px-6 py-8 text-center${
+          this.props.fallbackClassName ? ` ${this.props.fallbackClassName}` : ""
+        }`}
       >
         <span className="text-sm font-semibold text-ink">
           This view ran into a problem
@@ -86,8 +95,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           {errorMessage(this.state.error)}
         </span>
         <span className="max-w-md text-[11px] text-subtle">
-          The rest of dohc keeps working. Try again, or switch to another
-          file or view.
+          {this.props.recoveryMessage ?? (
+            <>
+              The rest of dohc keeps working. Try again, or switch to another
+              file or view.
+            </>
+          )}
         </span>
         <button
           type="button"

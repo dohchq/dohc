@@ -2,7 +2,7 @@ import { Check, Cloud, Copy, ExternalLink, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { buildSyncCode } from "../workspaces/syncCode";
 import { bridge } from "./bridge";
-import { openLinkExternally } from "./editor/linkMenu";
+import { openLinkExternally } from "./linkActivation";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
