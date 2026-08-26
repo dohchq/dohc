@@ -2678,6 +2678,7 @@ function testSyncTimingOverrides(): {
 function relayClientForWorkspace(input: {
   workspaceId: string;
   rootPath: string;
+  attachmentId?: symbol;
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }): EngineRelayWorkspaceClient {
   if (!rustEngineRelayClient) {
@@ -2705,6 +2706,9 @@ function engineForWorkspace(
   const daemonRelay = relayClientForWorkspace({
     workspaceId: remote.remoteWorkspaceId,
     rootPath: workspace.rootPath,
+    ...(remote.remoteWorkspaceId === workspace.workspaceId && workspace.attachmentId
+      ? { attachmentId: workspace.attachmentId }
+      : {}),
     relay,
   });
   return createRelaySyncEngine({
@@ -3249,8 +3253,7 @@ async function engineSearchIndexFor(
 } | null> {
   const sessions = rustEngineWorkspaceSessions;
   if (!sessions) return null;
-  const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);
-  return await sessions.run(
+  const read = async (engineWorkspace: EngineWorkspace) => await sessions.run(
     engineWorkspace,
     async (binding) => {
       const adapter = new VersionedLiveAdapter(binding.client, binding.workspace, {
@@ -3269,6 +3272,19 @@ async function engineSearchIndexFor(
         files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
       };
     },
+  );
+  const registered = findWorkspace(workspace.workspaceId);
+  if (!registered) return await read(workspace);
+  if (
+    workspace.attachmentId === undefined &&
+    registered.rootPath !== workspace.rootPath
+  ) {
+    throw new Error(
+      "The engine workspace belongs to a replaced physical attachment.",
+    );
+  }
+  return await withWorkspaceAttachmentAsync(workspace, async (lease) =>
+    await read(engineWorkspaceForAuthority(lease)),
   );
 }
 
@@ -4920,12 +4936,10 @@ const receivedShareEngine = createReceivedShareEngineAccess({
   },
 });
 
-function engineWorkspaceForRegistryIdentity(
-  workspace: EngineWorkspace,
+function engineWorkspaceForAuthority(
+  lease: DesktopWorkspaceAuthorityLease,
 ): EngineWorkspace {
-  const registered = findWorkspace(workspace.workspaceId);
-  if (!registered || registered.rootPath !== workspace.rootPath) return workspace;
-  return receivedShareEngine.workspaceForRegistered(registered);
+  return receivedShareEngine.workspaceForRegistered(canonicalWorkspaceFor(lease));
 }
 
 let shareViewFiles: ShareViewFiles;
@@ -5075,6 +5089,9 @@ function createShareViewFilesForOperation(
         receivedShareEngine.storeFor({
           engineWorkspaceId: target.storeWorkspaceId,
           rootPath: target.rootPath,
+          ...(target.storeWorkspaceId === operation.workspace.workspaceId
+            ? { attachmentId: operation.workspace.attachmentId }
+            : {}),
         }),
       ),
     resolveRelay: async (target) => {
@@ -5103,6 +5120,9 @@ function createShareViewFilesForOperation(
         .relayFor({
           engineWorkspaceId: target.storeWorkspaceId,
           rootPath: target.rootPath,
+          ...(target.storeWorkspaceId === operation.workspace.workspaceId
+            ? { attachmentId: operation.workspace.attachmentId }
+            : {}),
           relay,
         })
         .pullShareView({
@@ -6914,9 +6934,13 @@ function registerIpcHandlers(
       // that the window loads during it.
       await engineDaemonStartup;
       const sessions = requireEngineSessions();
-      workspaceSecretState = await readWorkspaceSecretState(
-        receivedShareEngine.workspaceForRegistered(workspace),
-        sessions,
+      workspaceSecretState = await withPhysicalWorkspaceOperation(
+        workspace.workspaceId,
+        async (operation) =>
+          await readWorkspaceSecretState(
+            receivedShareEngine.workspaceForRegistered(operation.workspace),
+            sessions,
+          ),
       );
     }
     return CloudStatusResult.parse({
@@ -6963,64 +6987,79 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.cloudEnableSync, async (event, payload) => {
     assertTrustedSender(event);
     const input = CloudEnableSyncPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // A received share replicates through its pinned share lane. Enrolling its
-    // projection as an owned workspace would claim someone else's filtered
-    // copy and creates another engine-open path that has no reason to exist.
-    assertWritableWorkspace(workspace);
-    const credentials = await loadAndCacheCurrentCredentials();
-    if (!credentials) throw new Error("Sign in to dohc Cloud first");
-    if (!credentials.relayUrl) throw new Error("Cloud sync requires a relay URL");
-    const remoteWorkspaceId = syncEnrollmentRemoteWorkspaceId(
-      workspace,
-      credentials,
-    );
-
-    {
-      const relay = {
-        baseUrl: credentials.relayUrl,
-        token: credentials.token,
-      };
-      const daemonRelay = relayClientForWorkspace({
-        workspaceId: remoteWorkspaceId,
-        rootPath: workspace.rootPath,
-        relay,
-      });
-      try {
-        await daemonRelay.claim();
-      } catch (error) {
-        if (error instanceof RelayWorkspaceUnavailableError) {
-          throw new Error("This workspace id is already claimed by another account");
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Cloud enrollment stopped because this window changed workspaces.",
+      async (operation) => {
+        const workspace = operation.workspace;
+        // A received share replicates through its pinned share lane. Enrolling its
+        // projection as an owned workspace would claim someone else's filtered
+        // copy and creates another engine-open path that has no reason to exist.
+        assertWritableWorkspace(workspace);
+        const credentials = await loadAndCacheCurrentCredentials();
+        operation.assertCurrent();
+        if (!credentials) throw new Error("Sign in to dohc Cloud first");
+        if (!credentials.relayUrl) {
+          throw new Error("Cloud sync requires a relay URL");
         }
-        throw error;
-      }
-      const sessions = rustEngineWorkspaceSessions;
-      if (!sessions) {
-        throw new Error("Rust engine workspace sessions are unavailable.");
-      }
-      const dataKey = await readWorkspaceDataKeyForEnrollment(
-        receivedShareEngine.workspaceForRegistered(workspace),
-        sessions,
-      );
-      await enrollWorkspaceKeyEnvelope({
-        workspaceId: remoteWorkspaceId,
-        dataKey,
-        ...(input.passphrase === undefined
-          ? {}
-          : { passphrase: input.passphrase }),
-        transport: daemonRelay,
-        installDataKey: async (unwrapped) =>
-          await installWorkspaceDataKey(workspace.rootPath, unwrapped),
-      });
-    }
-
-    setWorkspaceRemote(workspace.workspaceId, {
-      serverUrl: credentials.serverUrl,
-      remoteWorkspaceId,
-      ownerUserId: credentials.userId,
-    });
-    await activity.enableCloud(workspace);
-    return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
+        const remoteWorkspaceId = syncEnrollmentRemoteWorkspaceId(
+          workspace,
+          credentials,
+        );
+        const relay = {
+          baseUrl: credentials.relayUrl,
+          token: credentials.token,
+        };
+        const daemonRelay = relayClientForWorkspace({
+          workspaceId: remoteWorkspaceId,
+          rootPath: workspace.rootPath,
+          ...(remoteWorkspaceId === workspace.workspaceId
+            ? { attachmentId: workspace.attachmentId }
+            : {}),
+          relay,
+        });
+        try {
+          await daemonRelay.claim();
+        } catch (error) {
+          if (error instanceof RelayWorkspaceUnavailableError) {
+            throw new Error(
+              "This workspace id is already claimed by another account",
+            );
+          }
+          throw error;
+        }
+        operation.assertCurrent();
+        const sessions = rustEngineWorkspaceSessions;
+        if (!sessions) {
+          throw new Error("Rust engine workspace sessions are unavailable.");
+        }
+        const dataKey = await readWorkspaceDataKeyForEnrollment(
+          receivedShareEngine.workspaceForRegistered(workspace),
+          sessions,
+        );
+        operation.assertCurrent();
+        await enrollWorkspaceKeyEnvelope({
+          workspaceId: remoteWorkspaceId,
+          dataKey,
+          ...(input.passphrase === undefined
+            ? {}
+            : { passphrase: input.passphrase }),
+          transport: daemonRelay,
+          installDataKey: async (unwrapped) =>
+            await installWorkspaceDataKey(workspace.rootPath, unwrapped),
+        });
+        operation.assertCurrent();
+        setWorkspaceRemote(workspace.workspaceId, {
+          serverUrl: credentials.serverUrl,
+          remoteWorkspaceId,
+          ownerUserId: credentials.userId,
+        });
+        await activity.enableCloud(workspace);
+        operation.assertCurrent();
+        return SyncStatusResult.parse(activity.getStatus(workspace.workspaceId));
+      },
+    );
   });
 
   // Join a synced workspace on THIS machine (0P-C): sync code from the
@@ -7494,6 +7533,9 @@ function registerIpcHandlers(
         const result = await relayClientForWorkspace({
           workspaceId,
           rootPath,
+          ...(workspaceId === workspace.workspaceId
+            ? { attachmentId: workspace.attachmentId }
+            : {}),
           relay,
         }).pullSharedChannel({
           shareId,
@@ -8186,6 +8228,7 @@ function registerIpcHandlers(
             receivedShareEngine.relayFor({
               engineWorkspaceId: scope.workspaceId,
               rootPath: scope.rootPath,
+              attachmentId: scope.attachmentId,
               relay: scope.relay,
             }).submitShareProposal({
               shareId: scope.shareId,
@@ -8356,11 +8399,13 @@ function registerIpcHandlers(
       // SOFT, like the refresh site. Opening a share is a read, and a failure
       // here costs the recipient the ability to send changes, not the ability
       // to open what they were given. The next refresh records it.
-      await recordShareViewIdentity(requireWorkspace(created.workspaceId)).catch(
-        (error) => {
-          console.error("[desktop] share view identity:", error);
-        },
-      );
+      await recordShareViewIdentity({
+        ...requireWorkspace(created.workspaceId),
+        rootPath: authorityBinding.canonicalRootPath,
+        attachmentId: authorityBinding.attachmentId,
+      }).catch((error) => {
+        console.error("[desktop] share view identity:", error);
+      });
       const reconciled = await withStaleSensitiveWorkspaceOperation(
         created.rootPath,
         (lease) =>
@@ -8803,9 +8848,10 @@ function registerIpcHandlers(
       }
     | {
         kind: "share";
-        workspace: RegistryEntry;
+        workspace: RegistryEntry & { attachmentId: symbol };
         engineWorkspace: EngineWorkspace;
         store: DesktopLinkedChatStore;
+        withAuthority<Result>(work: () => Promise<Result>): Promise<Result>;
         // The pinned level, or null when the stored grant cannot be read.
         // The registry file is DATA, not a contract (see
         // workspaceSummaryProjection.ts), so the level is read through
@@ -8822,44 +8868,53 @@ function registerIpcHandlers(
       };
 
   async function requireChatScope(workspaceId: string): Promise<ChatScope> {
-    const workspace = requireWorkspace(workspaceId);
-    // PRESENCE, the same question `sharedViewOf` asks before a write. A
-    // marker that lost its value is still a share view, and resolving a
-    // CAPTURE for it would give someone else's workspace the local chat
-    // surface — the enforcement layer failing open.
-    if (!shareViewIsPresent(workspace.shareView)) {
-      const local = await requireEngineCapture(workspaceId, "Chats");
+    return await workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
+      const workspace = canonicalWorkspaceFor(lease);
+      // PRESENCE, the same question `sharedViewOf` asks before a write. A
+      // marker that lost its value is still a share view, and resolving a
+      // CAPTURE for it would give someone else's workspace the local chat
+      // surface — the enforcement layer failing open.
+      if (!shareViewIsPresent(workspace.shareView)) {
+        const local = await requireEngineCapture(workspaceId, "Chats");
+        lease.assertCurrent();
+        return {
+          kind: "workspace",
+          workspace: local.workspace,
+          capture: local.capture,
+          store: linkedChatStoreFor(lease),
+        };
+      }
+      // Idempotent, and the same guarantee requireEngineCapture makes: the
+      // workspace's daemon session is live before any store call reaches it.
+      await openWorkspaceActivity(workspace);
+      lease.assertCurrent();
+      await warmCredentialCache();
+      lease.assertCurrent();
+      const binding = lease.binding;
+      const engineWorkspace = receivedShareEngine.workspaceFor({
+        engineWorkspaceId: workspace.workspaceId,
+        rootPath: workspace.rootPath,
+        attachmentId: binding.attachmentId,
+      });
       return {
-        kind: "workspace",
-        workspace: local.workspace,
-        capture: local.capture,
-        store: linkedChatStoreFor(local.workspace),
+        kind: "share",
+        workspace,
+        engineWorkspace,
+        store: linkedChatStoreFor(lease),
+        withAuthority: (work) =>
+          workspaceAuthorities.withBinding(binding, () => work()),
+        // The level the PINNED grant names, or null when the grant cannot be
+        // read completely. Read through the same function the refresh path
+        // uses, so this gate and the pull cannot disagree about what a share
+        // grants.
+        access: readableShareLevel(workspace.shareView?.grantedSelector),
+        ended: workspace.shareView?.ended === true,
+        authorUserId: resolveShareViewRelayAuthorId(
+          workspace.shareView ?? {},
+          cachedCredentials,
+        ),
       };
-    }
-    // Idempotent, and the same guarantee requireEngineCapture makes: the
-    // workspace's daemon session is live before any store call reaches it.
-    await openWorkspaceActivity(workspace);
-    await warmCredentialCache();
-    const engineWorkspace = receivedShareEngine.workspaceFor({
-      engineWorkspaceId: workspace.workspaceId,
-      rootPath: workspace.rootPath,
     });
-    return {
-      kind: "share",
-      workspace,
-      engineWorkspace,
-      store: linkedChatStoreFor(engineWorkspace),
-      // The level the PINNED grant names, or null when the grant cannot be
-      // read completely. Read through the same function the refresh path
-      // uses, so this gate and the pull cannot disagree about what a share
-      // grants.
-      access: readableShareLevel(workspace.shareView?.grantedSelector),
-      ended: workspace.shareView?.ended === true,
-      authorUserId: resolveShareViewRelayAuthorId(
-        workspace.shareView ?? {},
-        cachedCredentials,
-      ),
-    };
   }
 
   // The chat write gate, run BEFORE any durable row. A view share reads the
@@ -8890,7 +8945,7 @@ function registerIpcHandlers(
   // is not this share's origin. A `view` share is skipped as well: it may push
   // nothing, so it needs no identity and must not be given one.
   async function recordShareViewIdentity(
-    workspace: RegistryEntry,
+    workspace: RegistryEntry & { attachmentId: symbol },
   ): Promise<void> {
     await warmCredentialCache();
     const credentials = cachedCredentials;
@@ -8903,11 +8958,14 @@ function registerIpcHandlers(
     await receivedShareEngine.relayFor({
       engineWorkspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
+      attachmentId: workspace.attachmentId,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
     }).recordShareViewIdentity({ grantedSelector });
   }
 
-  async function pushShareViewChat(workspace: RegistryEntry): Promise<void> {
+  async function pushShareViewChat(
+    workspace: RegistryEntry & { attachmentId: symbol },
+  ): Promise<void> {
     const shareView = workspace.shareView;
     if (!shareView || shareView.ended) return;
     // The pinned grant, read back through the rule the pull uses. A grant this
@@ -8932,6 +8990,7 @@ function registerIpcHandlers(
     await receivedShareEngine.relayFor({
       engineWorkspaceId: workspace.workspaceId,
       rootPath: workspace.rootPath,
+      attachmentId: workspace.attachmentId,
       relay: { baseUrl: credentials.relayUrl, token: credentials.token },
     }).pushShareView({ shareId: shareView.shareId, grantedSelector });
   }
@@ -8955,7 +9014,9 @@ function registerIpcHandlers(
   // the mentions path already reads, over files that arrived by replay.
   async function chatFileObjectId(scope: ChatScope, path: string): Promise<string | null> {
     if (scope.kind === "workspace") return await scope.capture.fileObjectIdForPath(path);
-    const index = await activeEngineFileIndex(scope.engineWorkspace);
+    const index = await scope.withAuthority(
+      async () => await activeEngineFileIndex(scope.engineWorkspace),
+    );
     return index.objectIdByPath.get(path) ?? null;
   }
 

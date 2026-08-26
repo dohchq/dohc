@@ -23,14 +23,16 @@ describe("main-process chat authorization", () => {
   it("routes every main chat acquisition through the Rust-only factory", () => {
     const factoryStart = mainSource.indexOf("function linkedChatStoreFor(");
     const factoryEnd = mainSource.indexOf(
-      "\nconst agentDispatchStoreHandles",
+      "\nfunction agentDispatchStoreHandleFor(",
       factoryStart,
     );
     const factory = mainSource.slice(factoryStart, factoryEnd);
 
-    expect(factory).toContain(
-      "const engineWorkspace = engineWorkspaceForRegistryIdentity(workspace);",
-    );
+    expect(factoryEnd).toBeGreaterThan(factoryStart);
+    expect(factory).toContain("const lease = ownsLease");
+    expect(factory).toContain("attachmentId: binding.attachmentId");
+    expect(factory).toContain("receivedShareEngine.workspaceForRegistered({");
+    expect(factory).toContain("workspaceAuthorities.withBinding(binding");
     expect(factory).toContain("createDesktopLinkedChatStore(engineWorkspace, {");
     expect(factory).toContain("sessions: rustEngineWorkspaceSessions");
     expect(factory).not.toContain("createLinkedChatStore(");
@@ -222,6 +224,7 @@ describe("main-process chat authorization", () => {
       "joinSharedChannel",
       "leaveSharedChannel",
       "dismissShareSkips",
+      "cloudEnableSync",
       "listChatChannels",
       "syncDms",
       "acceptDm",
@@ -870,6 +873,41 @@ describe("main-process chat authorization", () => {
     // identity must be refused, not written locally and called sent.
     expect(shareGate).toContain("if (!scope.authorUserId)");
     expect(scope).toContain("resolveShareViewRelayAuthorId(");
+  });
+
+  it("keeps share chat stores and file-index reads on one exact engine attachment", () => {
+    const scopeAt = mainSource.indexOf("async function requireChatScope(");
+    const scopeEnd = mainSource.indexOf(
+      "\n  async function recordShareViewIdentity(",
+      scopeAt,
+    );
+    const scope = mainSource.slice(scopeAt, scopeEnd);
+    expect(scopeEnd).toBeGreaterThan(scopeAt);
+    expect(scope).toContain("workspaceAuthorities.withAuthority(workspaceId");
+    expect(scope).toContain("const workspace = canonicalWorkspaceFor(lease);");
+    expect(scope).toContain("attachmentId: binding.attachmentId");
+    expect(scope).toContain("store: linkedChatStoreFor(lease)");
+    expect(scope).toContain("workspaceAuthorities.withBinding(binding");
+
+    const fileObjectAt = mainSource.indexOf("async function chatFileObjectId(");
+    const fileObjectEnd = mainSource.indexOf(
+      "\n  async function requireVersionOperations(",
+      fileObjectAt,
+    );
+    const fileObject = mainSource.slice(fileObjectAt, fileObjectEnd);
+    expect(fileObjectEnd).toBeGreaterThan(fileObjectAt);
+    expect(fileObject).toContain("await scope.withAuthority(");
+    expect(fileObject).toContain("activeEngineFileIndex(scope.engineWorkspace)");
+
+    const indexAt = mainSource.indexOf("async function engineSearchIndexFor(");
+    const indexEnd = mainSource.indexOf(
+      "\nasync function activeEngineFileIndex(",
+      indexAt,
+    );
+    const index = mainSource.slice(indexAt, indexEnd);
+    expect(indexEnd).toBeGreaterThan(indexAt);
+    expect(index).toContain("withWorkspaceAttachmentAsync(workspace");
+    expect(index).toContain("engineWorkspaceForAuthority(lease)");
   });
 
   // #874: the rebuild moves a workspace's engine database aside. Main must

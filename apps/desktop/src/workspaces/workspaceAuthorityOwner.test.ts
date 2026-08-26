@@ -685,6 +685,39 @@ describe("workspace authority owner", () => {
     ).toBe("workspace");
   });
 
+  it("rejects a registration callback that did not persist the requested binding", () => {
+    let workspace: Workspace | null = null;
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => workspace,
+      canonicalizeRoot: (rootPath) => rootPath,
+      createState: () => ({}),
+    });
+    const registered = {
+      workspaceId: "workspace",
+      rootPath: "root",
+      label: "registered",
+    };
+    const rollback = vi.fn();
+
+    expect(() =>
+      owner.registerBinding(registered, {
+        persist: () => undefined,
+        rollback,
+      }),
+    ).toThrow("did not persist the requested binding");
+    expect(rollback).toHaveBeenCalledOnce();
+
+    const binding = owner.registerBinding(registered, {
+      persist: () => {
+        workspace = registered;
+      },
+      rollback: () => {
+        workspace = null;
+      },
+    });
+    expect(binding.workspaceId).toBe("workspace");
+  });
+
   it("blocks lazy admission when registration rollback fails", () => {
     let workspace: Workspace | null = null;
     const owner = createWorkspaceAuthorityOwner({
@@ -851,13 +884,18 @@ describe("workspace authority owner", () => {
   });
 
   it("keeps a blocking tombstone when cleanup fails", async () => {
-    let workspace: Workspace | null = {
-      workspaceId: "workspace",
-      rootPath: "root",
-      label: "A",
-    };
+    const registry = new Map<string, Workspace>([
+      [
+        "workspace",
+        {
+          workspaceId: "workspace",
+          rootPath: "root",
+          label: "A",
+        },
+      ],
+    ]);
     const owner = createWorkspaceAuthorityOwner({
-      findWorkspace: () => workspace,
+      findWorkspace: (workspaceId) => registry.get(workspaceId) ?? null,
       canonicalizeRoot: (rootPath) => rootPath,
       createState: () => ({}),
       disposeState: async () => {
@@ -868,8 +906,17 @@ describe("workspace authority owner", () => {
     lease.release();
 
     await expect(owner.invalidate("workspace")).rejects.toThrow("cleanup failed");
-    workspace = { ...workspace };
+    registry.set("workspace", { ...registry.get("workspace")! });
     expect(() => owner.acquire("workspace")).toThrow("retiring or blocked");
+    registry.delete("workspace");
+    registry.set("other", {
+      workspaceId: "other",
+      rootPath: "root",
+      label: "same root, different id",
+    });
+    expect(() => owner.acquire("other")).toThrow(
+      "already attached as workspace workspace",
+    );
   });
 
   it("does not let a released lease touch its former authority", () => {
