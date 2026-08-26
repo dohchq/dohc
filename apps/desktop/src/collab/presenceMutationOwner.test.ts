@@ -39,26 +39,31 @@ const NEW_INCARNATION = "123e4567-e89b-42d3-a456-426614174002";
 function sessionOwner(presence: PresenceMutationOwner<TestSender>) {
   return new RendererWorkspaceSessionOwner<TestSender>({
     retirement: {
-      retireSender: (session) => presence.retireSender(session),
+      retireSender: (session) => ({
+        requiredForAdmission: Promise.resolve(),
+        detachedFromAdmission: presence.retireSender(session),
+      }),
       retireWorkspace: async () => undefined,
     },
   });
 }
 
 describe("PresenceMutationOwner", () => {
-  it("drains a held workspace publish and leave before admitting a switch", async () => {
+  it("finishes a held workspace leave after admitting the next workspace", async () => {
     const presence = new PresenceMutationOwner<TestSender>();
     const sessions = sessionOwner(presence);
     const webContents = sender(7);
     const first = await sessions.open(webContents, physical("workspace-a"), "document-1");
     const publishDrain = deferred();
     const leaveDrain = deferred();
+    const leaveSettled = vi.fn();
     const publish = vi.fn(async () => {
       await publishDrain.promise;
       return "old-snapshot";
     });
     const leave = vi.fn(async () => {
       await leaveDrain.promise;
+      leaveSettled();
     });
 
     const result = presence.publish(first, "workspace-a/topic/me", OLD_INCARNATION, {
@@ -75,17 +80,13 @@ describe("PresenceMutationOwner", () => {
     publishDrain.resolve();
     await expect(result).resolves.toBeUndefined();
     await vi.waitFor(() => expect(leave).toHaveBeenCalledOnce());
-    let admitted = false;
-    void replacementOpen.then(() => {
-      admitted = true;
-    });
-    await Promise.resolve();
-    expect(admitted).toBe(false);
-
-    leaveDrain.resolve();
     const replacement = await replacementOpen;
     expect(replacement.workspaceId).toBe("workspace-b");
     expect(replacement.isCurrent()).toBe(true);
+    expect(leaveSettled).not.toHaveBeenCalled();
+
+    leaveDrain.resolve();
+    await vi.waitFor(() => expect(leaveSettled).toHaveBeenCalledOnce());
   });
 
   it("binds a held share leave to the retired session before reload admission", async () => {

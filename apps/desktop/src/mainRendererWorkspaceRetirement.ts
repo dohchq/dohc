@@ -1,5 +1,6 @@
 import type {
   RendererWorkspaceRetirement,
+  RendererWorkspaceSenderRetirement,
   RendererWorkspaceSender,
   RendererWorkspaceSession,
 } from "./window/rendererWorkspaceSessionOwner";
@@ -93,9 +94,11 @@ export function createDesktopRendererWorkspaceRetirement<
   dependencies: DesktopRendererWorkspaceRetirementDependencies<Sender>,
 ): RendererWorkspaceRetirement<Sender> {
   return {
-    retireSender(session: RendererWorkspaceSession<Sender>): Promise<void> {
+    retireSender(
+      session: RendererWorkspaceSession<Sender>,
+    ): RendererWorkspaceSenderRetirement {
       const scope = { kind: "sender" as const, senderId: session.senderId };
-      return drainCleanup(
+      const detached = drainCleanup(
         [
           {
             owner: "engine Y.Doc sessions",
@@ -105,6 +108,16 @@ export function createDesktopRendererWorkspaceRetirement<
                 session.generation,
               ),
           },
+          {
+            owner: "presence mutations",
+            run: () => dependencies.presenceMutations.retireSender(session),
+          },
+        ],
+        scope,
+        dependencies.onCleanupError,
+      );
+      const requiredForAdmission = drainCleanup(
+        [
           {
             owner: "site preview starts",
             run: () => dependencies.sitePreviews.cancelSender(session.senderId),
@@ -126,14 +139,11 @@ export function createDesktopRendererWorkspaceRetirement<
             owner: "presence polls",
             run: () => dependencies.presencePolls.disposeSender(session.senderId),
           },
-          {
-            owner: "presence mutations",
-            run: () => dependencies.presenceMutations.retireSender(session),
-          },
         ],
         scope,
         dependencies.onCleanupError,
       );
+      return { requiredForAdmission, detachedFromAdmission: detached };
     },
 
     retireWorkspace(workspace): Promise<void> {

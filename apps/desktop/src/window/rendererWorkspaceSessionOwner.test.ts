@@ -48,6 +48,9 @@ function owner(input?: {
   retireSender?: (
     session: RendererWorkspaceSession<TestSender>,
   ) => Promise<void>;
+  retireDetachedSender?: (
+    session: RendererWorkspaceSession<TestSender>,
+  ) => Promise<void>;
   retireWorkspace?: (workspace: {
     workspaceId: string;
     attachmentId: symbol;
@@ -56,7 +59,12 @@ function owner(input?: {
 }) {
   return new RendererWorkspaceSessionOwner<TestSender>({
     retirement: {
-      retireSender: input?.retireSender ?? (async () => undefined),
+      retireSender: (session) => ({
+        requiredForAdmission:
+          input?.retireSender?.(session) ?? Promise.resolve(),
+        detachedFromAdmission:
+          input?.retireDetachedSender?.(session) ?? Promise.resolve(),
+      }),
       retireWorkspace: input?.retireWorkspace ?? (async () => undefined),
     },
     onCleanupError: input?.onCleanupError,
@@ -292,6 +300,64 @@ describe("RendererWorkspaceSessionOwner", () => {
     workspaceDrain.resolve();
     await reload;
     expect((await reopening).isCurrent()).toBe(true);
+  });
+
+  it("makes a rapid A-to-B-to-A return join A's detached retirement", async () => {
+    const attachmentA = physical("workspace-a");
+    const attachmentB = physical("workspace-b");
+    const detachedADrain = deferred();
+    const workspaceADrain = deferred();
+    const retireWorkspace = vi.fn(
+      (workspace: { workspaceId: string; attachmentId: symbol }) =>
+        workspace.attachmentId === attachmentA.attachmentId
+          ? workspaceADrain.promise
+          : Promise.resolve(),
+    );
+    const sessions = owner({
+      retireDetachedSender: (session) =>
+        session.attachmentId === attachmentA.attachmentId
+          ? detachedADrain.promise
+          : Promise.resolve(),
+      retireWorkspace,
+    });
+    const renderer = sender(7);
+    const firstA = await sessions.open(
+      renderer.value,
+      attachmentA,
+      "document-1",
+    );
+
+    const sessionB = await sessions.open(
+      renderer.value,
+      attachmentB,
+      "document-1",
+    );
+    expect(sessionB.isCurrent()).toBe(true);
+    expect(retireWorkspace).toHaveBeenCalledWith(attachmentA);
+
+    const reopeningA = sessions.open(
+      renderer.value,
+      attachmentA,
+      "document-1",
+    );
+    let reopened = false;
+    void reopeningA.then(() => {
+      reopened = true;
+    });
+    await Promise.resolve();
+
+    expect(sessionB.isCurrent()).toBe(false);
+    expect(sessions.current(renderer.value)).toBeUndefined();
+    expect(reopened).toBe(false);
+
+    workspaceADrain.resolve();
+    await Promise.resolve();
+    expect(reopened).toBe(false);
+
+    detachedADrain.resolve();
+    const secondA = await reopeningA;
+    expect(secondA.generation).toBeGreaterThan(firstA.generation);
+    expect(secondA.isCurrent()).toBe(true);
   });
 
   it("keeps a replacement safe when Electron reuses a numeric sender id", async () => {

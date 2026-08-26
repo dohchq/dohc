@@ -41,7 +41,10 @@ describe("renderer reload admission", () => {
     const workspaceDrain = deferred();
     const sessions = new RendererWorkspaceSessionOwner<ReturnType<typeof sender>>({
       retirement: {
-        retireSender: () => senderDrain.promise,
+        retireSender: () => ({
+          requiredForAdmission: senderDrain.promise,
+          detachedFromAdmission: Promise.resolve(),
+        }),
         retireWorkspace: () => workspaceDrain.promise,
       },
     });
@@ -180,7 +183,10 @@ describe("presence mutation admission", () => {
     const mutations = new PresenceMutationOwner<ReturnType<typeof sender>>();
     const sessions = new RendererWorkspaceSessionOwner<ReturnType<typeof sender>>({
       retirement: {
-        retireSender: (session) => mutations.retireSender(session),
+        retireSender: (session) => ({
+          requiredForAdmission: Promise.resolve(),
+          detachedFromAdmission: mutations.retireSender(session),
+        }),
         retireWorkspace: async () => undefined,
       },
     });
@@ -281,7 +287,10 @@ describe("presence mutation admission", () => {
     const mutations = new PresenceMutationOwner<ReturnType<typeof sender>>();
     const sessions = new RendererWorkspaceSessionOwner<ReturnType<typeof sender>>({
       retirement: {
-        retireSender: (session) => mutations.retireSender(session),
+        retireSender: (session) => ({
+          requiredForAdmission: Promise.resolve(),
+          detachedFromAdmission: mutations.retireSender(session),
+        }),
         retireWorkspace: async () => undefined,
       },
     });

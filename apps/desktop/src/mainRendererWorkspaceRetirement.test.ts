@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
-import type { RendererWorkspaceSession } from "./window/rendererWorkspaceSessionOwner";
+import {
+  RendererWorkspaceSessionOwner,
+  type RendererWorkspaceSession,
+} from "./window/rendererWorkspaceSessionOwner";
 
 function deferred() {
   return Promise.withResolvers<void>();
@@ -68,7 +71,10 @@ describe("desktop renderer workspace retirement", () => {
     expect(input.presenceMutations.retireSender).toHaveBeenCalledWith(session);
 
     for (const drain of drains) drain.resolve();
-    await retiring;
+    await Promise.all([
+      retiring.requiredForAdmission,
+      retiring.detachedFromAdmission,
+    ]);
   });
 
   it("reports sender-arm failures without skipping or abandoning other arms", async () => {
@@ -94,7 +100,10 @@ describe("desktop renderer workspace retirement", () => {
     expect(input.workspaceSearch.disposeSender).toHaveBeenCalledOnce();
 
     lastDrain.resolve();
-    await retiring;
+    await Promise.all([
+      retiring.requiredForAdmission,
+      retiring.detachedFromAdmission,
+    ]);
     expect(input.onCleanupError).toHaveBeenCalledWith(
       "engine Y.Doc sessions",
       { kind: "sender", senderId: 17 },
@@ -105,6 +114,101 @@ describe("desktop renderer workspace retirement", () => {
       { kind: "sender", senderId: 17 },
       syncFailure,
     );
+  });
+
+  it("admits B after A's visible surfaces stop while durable and attachment cleanup drain", async () => {
+    const yDocDrain = deferred();
+    const senderSurfaceDrain = deferred();
+    const previewDrain = deferred();
+    const runtimeDrain = deferred();
+    const yDocSettled = vi.fn();
+    const previewStopped = vi.fn();
+    const runtimeStopped = vi.fn();
+    const surfaceHidden = vi.fn();
+    const admissionOrder: string[] = [];
+    const input = dependencies({
+      engineYDoc: {
+        retireSender: vi.fn(() => yDocDrain.promise.then(yDocSettled)),
+      },
+      sitePreviews: {
+        cancelSender: vi.fn(),
+        stopWorkspace: vi.fn(() => previewDrain.promise.then(previewStopped)),
+      },
+      pluginSurfaces: {
+        stop: vi.fn((target: { kind: string }) => {
+          if (target.kind === "sender") {
+            return senderSurfaceDrain.promise.then(() => {
+              surfaceHidden();
+              admissionOrder.push("surface hidden");
+            });
+          }
+          return Promise.resolve();
+        }),
+      },
+      pluginRuntimes: {
+        stop: vi.fn(
+          async (
+            _workspace: unknown,
+            beforeDispose: () => Promise<void>,
+          ) => {
+            await beforeDispose();
+            await runtimeDrain.promise;
+            runtimeStopped();
+          },
+        ),
+      },
+    });
+    const sessions = new RendererWorkspaceSessionOwner({
+      retirement: createDesktopRendererWorkspaceRetirement(input),
+    });
+    const attachmentA = {
+      workspaceId: "workspace-a",
+      attachmentId: Symbol("workspace-a"),
+    };
+    const attachmentB = {
+      workspaceId: "workspace-b",
+      attachmentId: Symbol("workspace-b"),
+    };
+    await sessions.open(sender, attachmentA, "document-1");
+
+    const openingB = sessions.open(sender, attachmentB, "document-1");
+    let admitted = false;
+    void openingB.then(() => {
+      admitted = true;
+      admissionOrder.push("B admitted");
+    });
+    await vi.waitFor(() =>
+      expect(input.pluginSurfaces.stop).toHaveBeenCalledWith({
+        kind: "sender",
+        senderId: sender.id,
+      }),
+    );
+
+    expect(sessions.current(sender)).toBeUndefined();
+    expect(admitted).toBe(false);
+    senderSurfaceDrain.resolve();
+
+    const sessionB = await openingB;
+    expect(sessionB.isCurrent()).toBe(true);
+    expect(surfaceHidden).toHaveBeenCalledOnce();
+    expect(admissionOrder).toEqual(["surface hidden", "B admitted"]);
+    expect(input.sitePreviews.stopWorkspace).toHaveBeenCalledWith(attachmentA);
+    expect(input.pluginRuntimes.stop).toHaveBeenCalledWith(
+      attachmentA,
+      expect.any(Function),
+    );
+    expect(yDocSettled).not.toHaveBeenCalled();
+    expect(previewStopped).not.toHaveBeenCalled();
+    expect(runtimeStopped).not.toHaveBeenCalled();
+
+    yDocDrain.resolve();
+    previewDrain.resolve();
+    runtimeDrain.resolve();
+    await vi.waitFor(() => {
+      expect(yDocSettled).toHaveBeenCalledOnce();
+      expect(previewStopped).toHaveBeenCalledOnce();
+      expect(runtimeStopped).toHaveBeenCalledOnce();
+    });
   });
 
   it("co-starts both workspace arms and drains them after a failure", async () => {
