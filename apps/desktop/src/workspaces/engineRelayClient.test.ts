@@ -894,18 +894,164 @@ describe("EngineRelayClient", () => {
       new URL("../main.ts", import.meta.url),
       "utf8",
     )).replaceAll("\r\n", "\n");
+    const reservation = source.indexOf(
+      "const authorityReservation = workspaceAuthorities.reserveBinding({",
+    );
+    const folderCreation = source.indexOf(
+      "created = await createWorkspaceFolder({",
+      reservation,
+    );
     const bootstrap = source.indexOf("await bootstrapJoinedWorkspace({");
     const registration = source.indexOf(
-      "registerPhysicalWorkspace({ ...created, joinBootstrapPending: true });",
+      "authorityBinding = registerReservedPhysicalWorkspace(",
       bootstrap,
     );
     const activityOpen = source.indexOf(
       "await openWorkspaceActivity(created",
       bootstrap,
     );
-    expect(bootstrap).toBeGreaterThanOrEqual(0);
+    expect(reservation).toBeGreaterThanOrEqual(0);
+    expect(folderCreation).toBeGreaterThan(reservation);
+    expect(bootstrap).toBeGreaterThan(folderCreation);
     expect(registration).toBeGreaterThan(bootstrap);
     expect(activityOpen).toBeGreaterThan(registration);
+  });
+
+  it("keeps failed join cleanup inside the retirement tombstone and removes the registry last", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const removeStart = source.indexOf("function removePhysicalWorkspace(");
+    const removeEnd = source.indexOf(
+      "async function cleanupFailedPhysicalWorkspace(",
+      removeStart,
+    );
+    const remove = source.slice(removeStart, removeEnd);
+    const cleanupAt = remove.indexOf("finalize: beforeRegistryRemoval");
+    const registryRemoveAt = remove.indexOf(
+      "removeWorkspace(binding.workspaceId);",
+    );
+    expect(removeStart).toBeGreaterThanOrEqual(0);
+    expect(removeEnd).toBeGreaterThan(removeStart);
+    expect(cleanupAt).toBeGreaterThanOrEqual(0);
+    expect(registryRemoveAt).toBeGreaterThan(cleanupAt);
+
+    const cleanupStart = removeEnd;
+    const cleanupEnd = source.indexOf(
+      "function serializeWorkspaceAuthorityWork(",
+      cleanupStart,
+    );
+    const cleanup = source.slice(cleanupStart, cleanupEnd);
+    const relayCloseAt = cleanup.indexOf(
+      "await closeRelayTransportWorkspace(relayWorkspaceId);",
+    );
+    const folderResetAt = cleanup.indexOf(
+      "await resetFailedJoinFolder(rootPath);",
+    );
+    expect(relayCloseAt).toBeGreaterThanOrEqual(0);
+    expect(folderResetAt).toBeGreaterThan(relayCloseAt);
+
+    const joinRollbackStart = source.indexOf(
+      "console.error(`[desktop] join rollback for ${rootPath}:`, error);",
+    );
+    const joinRollbackEnd = source.indexOf(
+      'desktopMarks.measureSince("workspace-join"',
+      joinRollbackStart,
+    );
+    const joinRollback = source.slice(joinRollbackStart, joinRollbackEnd);
+    expect(joinRollback).toContain(
+      "await removePhysicalWorkspace(authorityBinding, () =>",
+    );
+    expect(joinRollback).toContain(
+      "cleanupFailedPhysicalWorkspace(parsed.workspaceId, rootPath)",
+    );
+    expect(joinRollback).toContain(
+      "workspaceAuthorities.releaseReservation(\n" +
+        "            authorityReservation,",
+    );
+
+    const shareRollbackStart = source.indexOf(
+      "console.error(`[desktop] open-share rollback for ${rootPath}:`, error);",
+    );
+    const shareRollbackEnd = source.indexOf(
+      "// A share view is opened HERE",
+      shareRollbackStart,
+    );
+    const shareRollback = source.slice(shareRollbackStart, shareRollbackEnd);
+    const shareOperationStart = source.lastIndexOf(
+      "const authorityReservation = workspaceAuthorities.reserveBinding({",
+      shareRollbackStart,
+    );
+    const shareOperation = source.slice(shareOperationStart, shareRollbackEnd);
+    expect(shareRollback).toContain(
+      "await removePhysicalWorkspace(authorityBinding, () =>",
+    );
+    expect(shareOperation).toContain(
+      "authorityBinding = registerReservedPhysicalWorkspace(",
+    );
+    expect(shareRollback).toContain("if (authorityBinding)");
+    expect(shareRollback).toContain("} else {");
+    expect(shareRollback).toContain(
+      "cleanupFailedPhysicalWorkspace(created.workspaceId, rootPath)",
+    );
+    expect(shareRollback).toContain(
+      "workspaceAuthorities.releaseReservation(\n" +
+        "            authorityReservation,",
+    );
+    const tryAt = shareOperation.indexOf("try {");
+    const registrationAt = shareOperation.indexOf(
+      "authorityBinding = registerReservedPhysicalWorkspace(",
+    );
+    const metadataAt = shareOperation.indexOf("setWorkspaceShareView(");
+    const catchAt = shareOperation.indexOf("} catch (error) {");
+    expect(tryAt).toBeGreaterThanOrEqual(0);
+    expect(registrationAt).toBeGreaterThan(tryAt);
+    expect(metadataAt).toBeGreaterThan(registrationAt);
+    expect(catchAt).toBeGreaterThan(metadataAt);
+  });
+
+  it("registers the registry row and its exact authority as one operation", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const registerStart = source.indexOf("function physicalWorkspaceRegistration(");
+    const registerEnd = source.indexOf(
+      "function removePhysicalWorkspace(",
+      registerStart,
+    );
+    const register = source.slice(registerStart, registerEnd);
+    expect(registerStart).toBeGreaterThanOrEqual(0);
+    expect(registerEnd).toBeGreaterThan(registerStart);
+    expect(register).toContain("workspaceAuthorities.registerBinding(");
+    expect(register).toContain("workspaceAuthorities.registerReservedBinding(");
+    expect(register).toContain("persist: () => registerWorkspace(workspace)");
+    expect(register).toContain("rollback: () => {");
+    expect(register).toContain("current.rootPath !== workspace.rootPath");
+    expect(register).toContain("removeWorkspace(workspace.workspaceId);");
+  });
+
+  it("reads current exact relay metadata when retiring an attachment", async () => {
+    const source = (await readFile(
+      new URL("../main.ts", import.meta.url),
+      "utf8",
+    )).replaceAll("\r\n", "\n");
+    const ownerStart = source.indexOf(
+      "const workspaceAuthorities = createWorkspaceAuthorityOwner({",
+    );
+    const ownerEnd = source.indexOf(
+      "function requireWorkspaceAuthority(",
+      ownerStart,
+    );
+    const owner = source.slice(ownerStart, ownerEnd);
+    expect(ownerStart).toBeGreaterThanOrEqual(0);
+    expect(ownerEnd).toBeGreaterThan(ownerStart);
+    expect(owner).toContain(
+      "disposeState: async (state, binding, workspaceAtDisposal)",
+    );
+    expect(owner).toContain("workspaceAtDisposal.remote?.remoteWorkspaceId");
+    expect(owner).not.toContain("binding.workspace.remote");
   });
 
   it("refreshes a share view and commits its opaque daemon cursor", async () => {

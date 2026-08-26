@@ -336,6 +336,7 @@ import {
   createWorkspaceAuthorityOwner,
   type WorkspaceAuthorityBinding,
   type WorkspaceAuthorityLease,
+  type WorkspaceAuthorityReservation,
 } from "./workspaces/workspaceAuthorityOwner";
 import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
 import {
@@ -1806,7 +1807,11 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
   findWorkspace,
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
   createState: createDesktopWorkspaceAuthorityState,
-  disposeState: async (state, binding) => {
+  disposeState: async (state, binding, workspaceAtDisposal) => {
+    const physicalWorkspace = {
+      ...workspaceAtDisposal,
+      rootPath: binding.canonicalRootPath,
+    };
     const results = await Promise.allSettled([
       state.linkedChatStore?.close() ?? Promise.resolve(),
       state.agentDispatchStoreHandle?.close() ?? Promise.resolve(),
@@ -1822,13 +1827,13 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
       state.sitePreviews.stopWorkspace(binding.workspaceId),
       state.tryInVersionSessions.settled(),
       state.workspaceChatLifecycle.settled(),
-      binding.workspace.remote?.remoteWorkspaceId
+      workspaceAtDisposal.remote?.remoteWorkspaceId
         ? closeRelayTransportWorkspace(
-            binding.workspace.remote.remoteWorkspaceId,
+            workspaceAtDisposal.remote.remoteWorkspaceId,
           )
         : Promise.resolve(),
       engineYDocSessionIpc.retireAuthority(binding.attachmentId),
-      workspaceActivity.close(binding.workspace, state.activity, {
+      workspaceActivity.close(physicalWorkspace, state.activity, {
         expectedRootPath: binding.canonicalRootPath,
         preserveStatus: false,
       }),
@@ -2035,28 +2040,66 @@ const sitePreviews: SitePreviewLifecycle = {
 type DesktopWorkspaceAuthorityBinding =
   WorkspaceAuthorityBinding<RegistryEntry>;
 
+function physicalWorkspaceRegistration(workspace: RegistryEntry) {
+  return {
+    persist: () => registerWorkspace(workspace),
+    rollback: () => {
+      const current = findWorkspace(workspace.workspaceId);
+      if (!current) return;
+      if (current.rootPath !== workspace.rootPath) {
+        throw new Error(
+          "The workspace registry binding changed before registration rollback.",
+        );
+      }
+      removeWorkspace(workspace.workspaceId);
+    },
+  };
+}
+
 function registerPhysicalWorkspace(
   workspace: RegistryEntry,
 ): DesktopWorkspaceAuthorityBinding {
-  registerWorkspace(workspace);
-  const lease = requireWorkspaceAuthority(workspace.workspaceId);
-  const binding = lease.binding;
-  lease.release();
-  return binding;
+  return workspaceAuthorities.registerBinding(
+    workspace,
+    physicalWorkspaceRegistration(workspace),
+  );
+}
+
+function registerReservedPhysicalWorkspace(
+  reservation: WorkspaceAuthorityReservation,
+  workspace: RegistryEntry,
+): DesktopWorkspaceAuthorityBinding {
+  return workspaceAuthorities.registerReservedBinding(
+    reservation,
+    workspace,
+    physicalWorkspaceRegistration(workspace),
+  );
 }
 
 function removePhysicalWorkspace(
   binding: DesktopWorkspaceAuthorityBinding,
+  beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
 ): Promise<void> {
-  return workspaceAuthorities.retireBinding(binding, () => {
-    const current = findWorkspace(binding.workspaceId);
-    if (!current || current.rootPath !== binding.registeredRootPath) {
-      throw new Error(
-        "The workspace registry binding changed before removal completed.",
-      );
-    }
-    removeWorkspace(binding.workspaceId);
+  return workspaceAuthorities.retireBinding(binding, {
+    finalize: beforeRegistryRemoval,
+    removeBinding: () => {
+      const current = findWorkspace(binding.workspaceId);
+      if (!current || current.rootPath !== binding.registeredRootPath) {
+        throw new Error(
+          "The workspace registry binding changed before removal completed.",
+        );
+      }
+      removeWorkspace(binding.workspaceId);
+    },
   });
+}
+
+async function cleanupFailedPhysicalWorkspace(
+  relayWorkspaceId: string,
+  rootPath: string,
+): Promise<void> {
+  await closeRelayTransportWorkspace(relayWorkspaceId);
+  await resetFailedJoinFolder(rootPath);
 }
 
 function serializeWorkspaceAuthorityWork<Result>(
@@ -3642,9 +3685,10 @@ const chatDispatchService = createChatDispatchService({
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
       try {
         const store = linkedChatStoreFor(lease);
+        const registered = canonicalWorkspaceFor(lease);
         await assertSharedChannelWritable({
-          workspaceId: workspace.workspaceId,
-          sharedChannels: lease.binding.workspace.sharedChannels,
+          workspaceId: registered.workspaceId,
+          sharedChannels: registered.sharedChannels,
           store,
           target: { threadId },
         });
@@ -6506,19 +6550,26 @@ function registerIpcHandlers(
       throw error;
     }
 
-    desktopMarks.mark("workspace-join-start");
-    // Join bootstrap (0P-C gate fix): identity/metadata only — no starter
-    // files. The synced workspace's real content arrives with the first
-    // pull; anything seeded here could be captured by reconciliation and
-    // pushed INTO the remote workspace before that pull.
-    const created = await createWorkspaceFolder({
-      rootPath,
-      kind: "personal",
+    await mkdir(rootPath, { recursive: true });
+    const authorityReservation = workspaceAuthorities.reserveBinding({
       workspaceId: parsed.workspaceId,
-      bootstrap: "join",
+      rootPath,
     });
-    const summary = WorkspaceSummary.parse(created);
+    let created!: CreatedWorkspace;
+    let summary!: ReturnType<typeof WorkspaceSummary.parse>;
+    desktopMarks.mark("workspace-join-start");
     try {
+      // Join bootstrap (0P-C gate fix): identity/metadata only — no starter
+      // files. The synced workspace's real content arrives with the first
+      // pull; anything seeded here could be captured by reconciliation and
+      // pushed INTO the remote workspace before that pull.
+      created = await createWorkspaceFolder({
+        rootPath,
+        kind: "personal",
+        workspaceId: parsed.workspaceId,
+        bootstrap: "join",
+      });
+      summary = WorkspaceSummary.parse(created);
       // Bootstrap the relay coordinate through a capture-free daemon session
       // BEFORE registration exposes the workspace or activity.open can build
       // capture and start its watcher. An unset relay is claimed; otherwise
@@ -6541,7 +6592,10 @@ function registerIpcHandlers(
           await installWorkspaceDataKey(created.rootPath, unwrapped),
       });
 
-      authorityBinding = registerPhysicalWorkspace({ ...created, joinBootstrapPending: true });
+      authorityBinding = registerReservedPhysicalWorkspace(
+        authorityReservation,
+        { ...created, joinBootstrapPending: true },
+      );
       refreshNativeWorkspaceSurfaces();
 
       // Now open capture, bind the remote, and enable the pull-first engine.
@@ -6568,20 +6622,23 @@ function registerIpcHandlers(
       // having pulled. Everything removed still lives on the relay; the
       // user retries with the same code and the same (empty again) folder.
       console.error(`[desktop] join rollback for ${rootPath}:`, error);
-      if (authorityBinding) {
-        try {
-          await removePhysicalWorkspace(authorityBinding);
-        } catch(cleanupError) {
-          console.error("[desktop] join rollback cleanup:", cleanupError);
-          throw new Error(
-            "Couldn't safely roll back the workspace. Its folder was left in place; restart dohc before retrying.",
+      try {
+        if (authorityBinding) {
+          await removePhysicalWorkspace(authorityBinding, () =>
+            cleanupFailedPhysicalWorkspace(parsed.workspaceId, rootPath),
+          );
+        } else {
+          await workspaceAuthorities.releaseReservation(
+            authorityReservation,
+            () => cleanupFailedPhysicalWorkspace(parsed.workspaceId, rootPath),
           );
         }
+      } catch (cleanupError) {
+        console.error("[desktop] join rollback cleanup:", cleanupError);
+        throw new Error(
+          "Couldn't safely roll back the workspace. Its folder was left in place; restart dohc before retrying.",
+        );
       }
-      await closeRelayTransportWorkspace(parsed.workspaceId).catch(
-        () => undefined,
-      );
-      await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
       // Scope-free: the rollback removed a registry entry no window has
       // active yet — every window's workspace list is what changed.
@@ -7410,24 +7467,36 @@ function registerIpcHandlers(
     // Identity/metadata only (the join bootstrap): the shared content
     // arrives with the first pull below, and a shared view must never seed
     // starter files of its own.
-    const created = await createWorkspaceFolder({
+    await mkdir(rootPath, { recursive: true });
+    const reservedWorkspaceId = randomUUID();
+    const authorityReservation = workspaceAuthorities.reserveBinding({
+      workspaceId: reservedWorkspaceId,
       rootPath,
-      kind: "personal",
-      bootstrap: "join",
     });
-    const authorityBinding = registerPhysicalWorkspace(created);
-    setWorkspaceShareView(created.workspaceId, {
-      shareId: parsed.shareId,
-      granterEmail: info.granterEmail,
-      // Pin the selector the relay just stated, so later pulls enforce it
-      // instead of trusting the relay's selection each time.
-      grantedSelector: info.selector,
-      // Persist the origin relay so a later refresh signed into a DIFFERENT
-      // relay is skipped instead of misreading a 404 as "share ended".
-      relayUrl: credentials.relayUrl,
-    });
-    refreshNativeWorkspaceSurfaces();
+    let created!: CreatedWorkspace;
+    let authorityBinding: DesktopWorkspaceAuthorityBinding | null = null;
     try {
+      created = await createWorkspaceFolder({
+        rootPath,
+        kind: "personal",
+        workspaceId: reservedWorkspaceId,
+        bootstrap: "join",
+      });
+      authorityBinding = registerReservedPhysicalWorkspace(
+        authorityReservation,
+        created,
+      );
+      setWorkspaceShareView(created.workspaceId, {
+        shareId: parsed.shareId,
+        granterEmail: info.granterEmail,
+        // Pin the selector the relay just stated, so later pulls enforce it
+        // instead of trusting the relay's selection each time.
+        grantedSelector: info.selector,
+        // Persist the origin relay so a later refresh signed into a DIFFERENT
+        // relay is skipped instead of misreading a 404 as "share ended".
+        relayUrl: credentials.relayUrl,
+      });
+      refreshNativeWorkspaceSurfaces();
       // Before the first pull: a share view that writes back needs its own
       // sync identity, and the pull is what gives it the share cursor that
       // makes local writes journal.
@@ -7462,17 +7531,23 @@ function registerIpcHandlers(
     } catch (error) {
       console.error(`[desktop] open-share rollback for ${rootPath}:`, error);
       try {
-        await removePhysicalWorkspace(authorityBinding);
+        if (authorityBinding) {
+          await removePhysicalWorkspace(authorityBinding, () =>
+            cleanupFailedPhysicalWorkspace(created.workspaceId, rootPath),
+          );
+        } else {
+          await workspaceAuthorities.releaseReservation(
+            authorityReservation,
+            () =>
+              cleanupFailedPhysicalWorkspace(reservedWorkspaceId, rootPath),
+          );
+        }
       } catch (cleanupError) {
         console.error("[desktop] open-share rollback cleanup:", cleanupError);
         throw new Error(
           "Couldn't safely roll back the shared view. Its folder was left in place; restart dohc before retrying.",
         );
       }
-      await closeRelayTransportWorkspace(created.workspaceId).catch(
-        () => undefined,
-      );
-      await resetFailedJoinFolder(rootPath).catch(() => undefined);
       refreshNativeWorkspaceSurfaces();
       // Scope-free: the rollback removed a registry entry no window has
       // active yet — every window's workspace list is what changed.
