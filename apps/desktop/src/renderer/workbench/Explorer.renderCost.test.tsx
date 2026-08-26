@@ -4,7 +4,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorTabs } from "./EditorTabs";
 import { Explorer, type ExplorerProps } from "./Explorer";
-import { leafOf } from "./path-tree";
+import { buildTree, leafOf } from "./path-tree";
 import { isSingletonEditorTabPath } from "./workbenchState";
 
 // Real implementations, spied: every TreeRow render names its row through
@@ -74,6 +74,15 @@ function leafOfCalls(): number {
 }
 
 describe("Explorer render cost", () => {
+  it("keeps the same tree for a same-listing rerender", () => {
+    const props = explorerProps();
+    const view = render(<Explorer {...props} />);
+
+    expect(vi.mocked(buildTree)).toHaveBeenCalledTimes(1);
+    view.rerender(<Explorer {...props} onRefresh={vi.fn()} />);
+    expect(vi.mocked(buildTree)).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps EditorTabs out of an unrelated host re-render", () => {
     const props = {
       groupId: "group-1",

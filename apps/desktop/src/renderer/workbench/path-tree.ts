@@ -20,6 +20,13 @@ export type TreeNode = {
   children: TreeNode[];
 };
 
+type BuilderTreeNode = {
+  segment: string;
+  fullPath: string;
+  file: FileRow | null;
+  childrenBySegment: Map<string, BuilderTreeNode>;
+};
+
 // The last path segment — the name a tree row displays. Lives beside the tree
 // model (rather than inline in the explorer) so row-render tests can spy it as
 // their render-count probe (the chatFileMentions precedent).
@@ -34,42 +41,37 @@ export function buildTree(
   files: ReadonlyArray<FileRow>,
   folders: ReadonlyArray<FolderInput> = [],
 ): TreeNode {
-  const root: TreeNode = { segment: "", fullPath: "", file: null, children: [] };
+  const root: BuilderTreeNode = {
+    segment: "",
+    fullPath: "",
+    file: null,
+    childrenBySegment: new Map(),
+  };
 
   // Ensure every explicit folder has a node (even if empty).
-  for (const folder of folders) ensureFolderNode(root, folder);
+  for (const folder of folders) ensurePathNode(root, folder);
 
   for (const file of files) {
-    const segments = file.path.split("/");
-    let cursor = root;
-    let acc = "";
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i]!;
-      const isLast = i === segments.length - 1;
-      acc = acc ? `${acc}/${seg}` : seg;
-      let child = cursor.children.find((c) => c.segment === seg);
-      if (!child) {
-        child = { segment: seg, fullPath: acc, file: null, children: [] };
-        cursor.children.push(child);
-      }
-      if (isLast) child.file = file;
-      else cursor = child;
-    }
+    ensurePathNode(root, file.path).file = file;
   }
-  sortTree(root);
-  return root;
+  return materializeTree(root);
 }
 
-function ensureFolderNode(root: TreeNode, folderPath: string): TreeNode {
-  const segments = folderPath.split("/");
+function ensurePathNode(root: BuilderTreeNode, path: string): BuilderTreeNode {
+  const segments = path.split("/");
   let cursor = root;
   let acc = "";
   for (const seg of segments) {
     acc = acc ? `${acc}/${seg}` : seg;
-    let child = cursor.children.find((c) => c.segment === seg);
+    let child = cursor.childrenBySegment.get(seg);
     if (!child) {
-      child = { segment: seg, fullPath: acc, file: null, children: [] };
-      cursor.children.push(child);
+      child = {
+        segment: seg,
+        fullPath: acc,
+        file: null,
+        childrenBySegment: new Map(),
+      };
+      cursor.childrenBySegment.set(seg, child);
     }
     cursor = child;
   }
@@ -79,12 +81,18 @@ function ensureFolderNode(root: TreeNode, folderPath: string): TreeNode {
 // Sort order: folders before leaves (Obsidian/VS Code convention), ties
 // broken alphabetically (locale-aware). A folder is `file === null` — an
 // EMPTY listed folder still sorts as a folder, never as a leaf.
-function sortTree(node: TreeNode): void {
-  node.children.sort((a, b) => {
+function materializeTree(node: BuilderTreeNode): TreeNode {
+  const children = [...node.childrenBySegment.values()].map(materializeTree);
+  children.sort((a, b) => {
     const aIsFolder = a.file === null;
     const bIsFolder = b.file === null;
     if (aIsFolder !== bIsFolder) return aIsFolder ? -1 : 1;
     return a.segment.localeCompare(b.segment);
   });
-  node.children.forEach(sortTree);
+  return {
+    segment: node.segment,
+    fullPath: node.fullPath,
+    file: node.file,
+    children,
+  };
 }

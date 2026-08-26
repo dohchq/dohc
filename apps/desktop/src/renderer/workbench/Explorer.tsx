@@ -441,11 +441,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
 
   // Prune pending changes the authoritative refresh has confirmed.
   useEffect(() => {
-    setPending((current) =>
-      current.filter(
+    setPending((current) => {
+      const next = current.filter(
         (change) => !pendingTreeMoveSettled(change, props.files, props.folders),
-      ),
-    );
+      );
+      return next.length === current.length ? current : next;
+    });
   }, [props.files, props.folders]);
 
   // The open-editors list caps its height and scrolls internally, so the
