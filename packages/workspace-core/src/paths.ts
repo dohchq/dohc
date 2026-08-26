@@ -111,18 +111,8 @@ export function hasEngineIgnoredSegment(
   });
 }
 
-export function hasIgnoredSegment(relativePath: string): boolean {
-  return relativePath
-    .replaceAll("\\", "/")
-    .toLowerCase()
-    .split("/")
-    .some((segment) => {
-      const normalized = stripWindowsAliasSuffix(segment);
-      return (
-        IGNORED_SEGMENTS.has(normalized) ||
-        IGNORED_FILE_PREFIXES.some((prefix) => normalized.startsWith(prefix))
-      );
-    });
+export function hasIgnoredSegment(path: string): boolean {
+  return hasEngineIgnoredSegment(path.replaceAll("\\", "/"), "win32");
 }
 
 export function isSiteSourcePath(relativePath: string): boolean {
