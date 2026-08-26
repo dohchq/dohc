@@ -226,21 +226,35 @@ export function createShareMountCommands<WorkspaceSummary>(
     },
   };
 
-  function presentUnmount(workspaceId: string, shareId: string): void {
+  function reportPresentationFailure(message: string, error: unknown): void {
     try {
-      dependencies.refreshNativeWorkspaceSurfaces();
-    } catch (surfaceError) {
-      dependencies.logError(
-        `could not refresh native surfaces after unmount for ${shareId}:`,
-        surfaceError,
-      );
+      dependencies.logError(message, error);
+    } catch {
+      // Reporting a presentation failure cannot change command settlement.
+    }
+  }
+
+  function presentWorkspace(
+    workspaceId: string,
+    context: string,
+    options: { refreshNativeSurfaces: boolean },
+  ): void {
+    if (options.refreshNativeSurfaces) {
+      try {
+        dependencies.refreshNativeWorkspaceSurfaces();
+      } catch (error) {
+        reportPresentationFailure(
+          `could not refresh native surfaces ${context}:`,
+          error,
+        );
+      }
     }
     try {
       dependencies.notifyRenderer({ workspaceId });
-    } catch (notifyError) {
-      dependencies.logError(
-        `could not notify renderer after unmount for ${shareId}:`,
-        notifyError,
+    } catch (error) {
+      reportPresentationFailure(
+        `could not notify renderer ${context}:`,
+        error,
       );
     }
   }
@@ -337,8 +351,11 @@ export function createShareMountCommands<WorkspaceSummary>(
             try {
               const outcome = await files.mount(lease, prepared);
               mounted = true;
-              dependencies.refreshNativeWorkspaceSurfaces();
-              dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
+              presentWorkspace(
+                workspace.workspaceId,
+                `after mounting ${mount.label}`,
+                { refreshNativeSurfaces: true },
+              );
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 mount: {
@@ -377,22 +394,11 @@ export function createShareMountCommands<WorkspaceSummary>(
                 `mount-share rollback for ${mount.label}:`,
                 mountError,
               );
-              try {
-                dependencies.refreshNativeWorkspaceSurfaces();
-              } catch (surfaceError) {
-                dependencies.logError(
-                  `could not refresh native surfaces after mount-share failure for ${mount.label}:`,
-                  surfaceError,
-                );
-              }
-              try {
-                dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
-              } catch (notifyError) {
-                dependencies.logError(
-                  `could not notify renderer after mount-share failure for ${mount.label}:`,
-                  notifyError,
-                );
-              }
+              presentWorkspace(
+                workspace.workspaceId,
+                `after mount failure for ${mount.label}`,
+                { refreshNativeSurfaces: true },
+              );
               if (mountError instanceof ShareUnavailableError) {
                 throw new Error(
                   "This share was ended before it could be added. Nothing was added to this workspace.",
@@ -483,7 +489,11 @@ export function createShareMountCommands<WorkspaceSummary>(
           }
           return { results };
         } finally {
-          dependencies.notifyRenderer({ workspaceId: workspace.workspaceId });
+          presentWorkspace(
+            workspace.workspaceId,
+            "after share-mount refresh",
+            { refreshNativeSurfaces: false },
+          );
         }
       });
     },
@@ -521,7 +531,11 @@ export function createShareMountCommands<WorkspaceSummary>(
                 workspace.workspaceId,
                 removal.remaining,
               );
-              presentUnmount(workspace.workspaceId, shareId);
+              presentWorkspace(
+                workspace.workspaceId,
+                `after unmount for ${shareId}`,
+                { refreshNativeSurfaces: true },
+              );
               return {
                 workspace: dependencies.workspaceSummary(workspace.workspaceId),
                 folderLeft: true as const,
@@ -532,7 +546,11 @@ export function createShareMountCommands<WorkspaceSummary>(
               workspaceId: workspace.workspaceId,
               shareId: removal.mount.shareId,
             });
-            presentUnmount(workspace.workspaceId, shareId);
+            presentWorkspace(
+              workspace.workspaceId,
+              `after unmount for ${shareId}`,
+              { refreshNativeSurfaces: true },
+            );
             return {
               workspace: dependencies.workspaceSummary(workspace.workspaceId),
               ...(removed.folderLeft ? { folderLeft: true as const } : {}),

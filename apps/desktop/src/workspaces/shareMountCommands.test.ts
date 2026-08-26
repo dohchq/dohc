@@ -366,21 +366,40 @@ describe("share mount commands", () => {
     ]);
   });
 
-  it("rolls back a durable mount when post-commit presentation fails", async () => {
+  it("keeps a durable mount when post-commit presentation fails", async () => {
     const h = harness();
-    let notifyCalls = 0;
+    const nativeFailure = new Error("native refresh failed");
+    const notifyFailure = new Error("notify failed");
+    const loggedErrors: unknown[] = [];
+    h.dependencies.refreshNativeWorkspaceSurfaces = () => {
+      h.events.push("native");
+      throw nativeFailure;
+    };
     h.dependencies.notifyRenderer = () => {
-      notifyCalls += 1;
-      h.events.push(`notify:${notifyCalls}`);
-      if (notifyCalls === 1) throw new Error("notify failed");
+      h.events.push("notify:workspace-one");
+      throw notifyFailure;
+    };
+    h.dependencies.logError = (_message, error) => {
+      h.events.push("log");
+      loggedErrors.push(error);
     };
     const commands = createShareMountCommands(h.dependencies);
 
     await expect(
       commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
-    ).rejects.toThrow("Nothing was added");
+    ).resolves.toEqual({
+      workspace: { id: WORKSPACE.workspaceId },
+      mount: {
+        shareId: SHARE_ID,
+        label: "alex",
+        status: "updated",
+        changedPaths: 2,
+      },
+    });
 
-    expect(h.mounts).toEqual([]);
+    expect(h.files.unmount).not.toHaveBeenCalled();
+    expect(h.mounts).toHaveLength(1);
+    expect(loggedErrors).toEqual([nativeFailure, notifyFailure]);
     expect(h.events).toEqual([
       "credentials",
       "preflight",
@@ -390,23 +409,24 @@ describe("share mount commands", () => {
       "projection:create",
       "registry:1",
       "native",
-      "notify:1",
-      "files:unmount",
-      "relay:close",
-      "projection:remove",
-      "registry:0",
       "log",
-      "native",
-      "notify:2",
+      "notify:workspace-one",
+      "log",
+      "summary",
+      "lease:end",
     ]);
   });
 
   it("preserves incomplete post-commit cleanup evidence", async () => {
     const h = harness();
+    const responseFailure = new Error("workspace summary failed");
     const cleanupFailure = new Error("folder is busy");
     const nativeFailure = new Error("native refresh failed");
     const notifyFailure = new Error("notify failed");
     const loggedErrors: unknown[] = [];
+    h.dependencies.workspaceSummary = () => {
+      throw responseFailure;
+    };
     h.dependencies.refreshNativeWorkspaceSurfaces = () => {
       throw nativeFailure;
     };
@@ -430,6 +450,9 @@ describe("share mount commands", () => {
     expect(
       (rollbackError as ShareViewMountRollbackError).rollbackError,
     ).toBe(cleanupFailure);
+    expect(
+      (rollbackError as ShareViewMountRollbackError).mountError,
+    ).toBe(responseFailure);
     expect(loggedErrors).toContain(notifyFailure);
     expect(loggedErrors).toContain(nativeFailure);
     expect(h.mounts).toEqual([]);
@@ -439,6 +462,9 @@ describe("share mount commands", () => {
     const h = harness();
     const cleanupFailure = new Error("metadata cleanup failed");
     const loggedErrors: unknown[] = [];
+    h.dependencies.workspaceSummary = () => {
+      throw new Error("workspace summary failed");
+    };
     h.dependencies.refreshNativeWorkspaceSurfaces = () => {
       throw new Error("native refresh failed");
     };
@@ -813,6 +839,36 @@ describe("share mount commands", () => {
       "session expired",
     );
     expect(h.events.at(-1)).toBe("notify:workspace-one");
+  });
+
+  it("does not mask a classified refresh failure when notification fails", async () => {
+    const h = harness();
+    const notifyFailure = new Error("notify failed");
+    const loggedErrors: unknown[] = [];
+    h.mounts = [
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        granterEmail: null,
+        relayUrl: "https://relay.example",
+        recipientEmail: null,
+        grantedSelector: SELECTOR,
+      },
+    ];
+    vi.mocked(h.files.reconcile).mockRejectedValueOnce(
+      new RelayUnauthorizedError(),
+    );
+    h.dependencies.notifyRenderer = () => {
+      throw notifyFailure;
+    };
+    h.dependencies.logError = (_message, error) => {
+      loggedErrors.push(error);
+    };
+
+    await expect(
+      h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
+    ).rejects.toThrow("session expired");
+    expect(loggedErrors).toEqual([notifyFailure]);
   });
 
   it("keeps the empty registry tombstone when damaged mounts are removed", async () => {
