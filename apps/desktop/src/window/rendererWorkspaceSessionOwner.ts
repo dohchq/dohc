@@ -121,6 +121,16 @@ export class RendererWorkspaceSessionOwner<
     return session?.isCurrent() ? session : undefined;
   }
 
+  currentForDocument(
+    sender: Sender,
+    rendererDocumentId: string,
+  ): RendererWorkspaceSession<Sender> | undefined {
+    const session = this.current(sender);
+    return session?.rendererDocumentId === rendererDocumentId
+      ? session
+      : undefined;
+  }
+
   isWorkspaceOpen(workspaceId: string): boolean {
     return (this.#workspaceMembers.get(workspaceId)?.size ?? 0) > 0;
   }

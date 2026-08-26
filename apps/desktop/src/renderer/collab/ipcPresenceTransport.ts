@@ -46,15 +46,27 @@ export function createIpcPresenceTransport(
   scope: PresenceScopeInput,
 ): PresenceTransport {
   return {
-    async publish({ topic, clientId, state }): Promise<PresenceSnapshot> {
-      const result = await bridge().presencePublish({ scope, topic, clientId, state });
+    async publish({ topic, clientId, incarnationId, state }): Promise<PresenceSnapshot> {
+      const result = await bridge().presencePublish({
+        scope,
+        topic,
+        clientId,
+        incarnationId,
+        state,
+      });
       if (!result.ok) throw new Error(`presence publish ${result.reason}`);
       return toSnapshot(result.snapshot);
     },
-    async leave({ topic, clientId }): Promise<void> {
+    async leave({ topic, clientId, incarnationId }): Promise<void> {
       // Best-effort: a failed leave is fine — the relay entry expires on TTL.
       await bridge()
-        .presencePublish({ scope, topic, clientId, leave: true })
+        .presencePublish({
+          scope,
+          topic,
+          clientId,
+          incarnationId,
+          leave: true,
+        })
         .catch(() => undefined);
     },
     async poll({ topic, since, signal }): Promise<PresenceSnapshot> {

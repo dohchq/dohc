@@ -24,6 +24,8 @@ function sender(id: number) {
 }
 
 type TestSender = ReturnType<typeof sender>;
+const OLD_INCARNATION = "123e4567-e89b-42d3-a456-426614174001";
+const NEW_INCARNATION = "123e4567-e89b-42d3-a456-426614174002";
 
 function sessionOwner(presence: PresenceMutationOwner<TestSender>) {
   return new RendererWorkspaceSessionOwner<TestSender>({
@@ -50,7 +52,7 @@ describe("PresenceMutationOwner", () => {
       await leaveDrain.promise;
     });
 
-    const result = presence.publish(first, "workspace-a/topic/me", {
+    const result = presence.publish(first, "workspace-a/topic/me", OLD_INCARNATION, {
       resolve: async () => ({ publish, leave }),
     });
     await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
@@ -93,7 +95,11 @@ describe("PresenceMutationOwner", () => {
       await publishDrain.promise;
       return "old-snapshot";
     });
-    const oldResult = presence.publish(first, "workspace-a/share-1/topic/me", {
+    const oldResult = presence.publish(
+      first,
+      "workspace-a/share-1/topic/me",
+      OLD_INCARNATION,
+      {
       resolve: async () => {
         const exactSource = source;
         return {
@@ -101,7 +107,8 @@ describe("PresenceMutationOwner", () => {
           leave: () => exactSource.leave(),
         };
       },
-    });
+      },
+    );
     await vi.waitFor(() => expect(exactPublish).toHaveBeenCalledOnce());
     source = { leave: changedSourceLeave };
 
@@ -125,7 +132,7 @@ describe("PresenceMutationOwner", () => {
     const replacement = await replacementOpen;
     const successorLeave = vi.fn(async () => undefined);
     await expect(
-      presence.publish(replacement, "workspace-a/share-1/topic/me", {
+      presence.publish(replacement, "workspace-a/share-1/topic/me", NEW_INCARNATION, {
         resolve: async () => ({
           publish: async () => "new-snapshot",
           leave: successorLeave,
@@ -137,6 +144,7 @@ describe("PresenceMutationOwner", () => {
       presence.leave(
         first,
         "workspace-a/share-1/topic/me",
+        OLD_INCARNATION,
         async () => successorLeave,
       ),
     ).resolves.toBe(false);
@@ -153,7 +161,7 @@ describe("PresenceMutationOwner", () => {
       order.push("leave");
     });
 
-    const publish = presence.publish(active, "key", {
+    const publish = presence.publish(active, "key", OLD_INCARNATION, {
       resolve: async () => ({
         publish: async () => {
           order.push("publish-start");
@@ -164,7 +172,12 @@ describe("PresenceMutationOwner", () => {
         leave,
       }),
     });
-    const leaving = presence.leave(active, "key", async () => leave);
+    const leaving = presence.leave(
+      active,
+      "key",
+      OLD_INCARNATION,
+      async () => leave,
+    );
     await vi.waitFor(() => expect(order).toEqual(["publish-start"]));
     expect(leave).not.toHaveBeenCalled();
 
@@ -172,6 +185,50 @@ describe("PresenceMutationOwner", () => {
     await expect(publish).resolves.toBe("snapshot");
     await expect(leaving).resolves.toBe(true);
     expect(order).toEqual(["publish-start", "publish-end", "leave"]);
+  });
+
+  it("drops an old leave queued before a replacement publish claims the key", async () => {
+    const presence = new PresenceMutationOwner<TestSender>();
+    const sessions = sessionOwner(presence);
+    const active = await sessions.open(sender(7), "workspace-a", "document-1");
+    const oldPublishDrain = deferred();
+    const oldLeave = vi.fn(async () => undefined);
+    const runOldPublish = vi.fn(async () => {
+      await oldPublishDrain.promise;
+      return "old";
+    });
+    const oldPublish = presence.publish(active, "same-key", OLD_INCARNATION, {
+      resolve: async () => ({
+        publish: runOldPublish,
+        leave: oldLeave,
+      }),
+    });
+    await vi.waitFor(() => expect(runOldPublish).toHaveBeenCalledOnce());
+    const staleLeave = presence.leave(
+      active,
+      "same-key",
+      OLD_INCARNATION,
+      async () => oldLeave,
+    );
+    const newLeave = vi.fn(async () => undefined);
+    const replacement = presence.publish(
+      active,
+      "same-key",
+      NEW_INCARNATION,
+      {
+        resolve: async () => ({
+          publish: async () => "new",
+          leave: newLeave,
+        }),
+      },
+    );
+
+    oldPublishDrain.resolve();
+    await expect(oldPublish).resolves.toBeUndefined();
+    await expect(staleLeave).resolves.toBe(false);
+    await expect(replacement).resolves.toBe("new");
+    expect(oldLeave).not.toHaveBeenCalled();
+    expect(newLeave).not.toHaveBeenCalled();
   });
 
   it("coalesces a failed retired leave before same-key successors publish", async () => {
@@ -196,7 +253,7 @@ describe("PresenceMutationOwner", () => {
       .fn<() => Promise<void>>()
       .mockRejectedValueOnce(new Error("relay unavailable"))
       .mockImplementationOnce(() => retryDrain.promise);
-    await presence.publish(oldSession, "same-key", {
+    await presence.publish(oldSession, "same-key", OLD_INCARNATION, {
       resolve: async () => ({
         publish: async () => "old-snapshot",
         leave: oldLeave,
@@ -217,13 +274,13 @@ describe("PresenceMutationOwner", () => {
     );
     const firstPublish = vi.fn(async () => "first");
     const secondPublish = vi.fn(async () => "second");
-    const first = presence.publish(firstSuccessor, "same-key", {
+    const first = presence.publish(firstSuccessor, "same-key", NEW_INCARNATION, {
       resolve: async () => ({
         publish: firstPublish,
         leave: async () => undefined,
       }),
     });
-    const second = presence.publish(secondSuccessor, "same-key", {
+    const second = presence.publish(secondSuccessor, "same-key", NEW_INCARNATION, {
       resolve: async () => ({
         publish: secondPublish,
         leave: async () => undefined,
@@ -244,7 +301,7 @@ describe("PresenceMutationOwner", () => {
       "document-4",
     );
     const thirdPublish = vi.fn(async () => "third");
-    const third = presence.publish(thirdSuccessor, "same-key", {
+    const third = presence.publish(thirdSuccessor, "same-key", NEW_INCARNATION, {
       resolve: async () => ({
         publish: thirdPublish,
         leave: async () => undefined,
@@ -282,7 +339,7 @@ describe("PresenceMutationOwner", () => {
     const oldLeave = vi.fn(async () => {
       throw new Error("relay unavailable");
     });
-    await presence.publish(oldSession, "old-client-key", {
+    await presence.publish(oldSession, "old-client-key", OLD_INCARNATION, {
       resolve: async () => ({
         publish: async () => "old-snapshot",
         leave: oldLeave,
@@ -298,7 +355,7 @@ describe("PresenceMutationOwner", () => {
       "document-2",
     );
     await expect(
-      presence.publish(successor, "old-client-key", {
+      presence.publish(successor, "old-client-key", NEW_INCARNATION, {
         resolve: async () => ({
           publish: async () => "new-snapshot",
           leave: async () => undefined,

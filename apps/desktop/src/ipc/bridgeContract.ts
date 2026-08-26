@@ -1786,6 +1786,7 @@ export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
 // MAX_CLIENT_ID_CHARS): reject early rather than round-trip an over-long value.
 const PRESENCE_TOPIC = z.string().min(1).max(1024);
 const PRESENCE_CLIENT_ID = z.string().min(1).max(128);
+const PRESENCE_INCARNATION_ID = z.uuid();
 const PRESENCE_POLL_ID = z.string().min(1).max(128);
 
 // Cap the opaque presence state at the IPC boundary, mirroring the relay's
@@ -1868,6 +1869,7 @@ export const PresencePublishPayload = z.object({
   scope: PresenceScopeInput,
   topic: PRESENCE_TOPIC,
   clientId: PRESENCE_CLIENT_ID,
+  incarnationId: PRESENCE_INCARNATION_ID,
   // Opaque display payload (e.g. { displayName, typing }) — forwarded verbatim
   // to the relay, which caps its serialized size. Absent on a leave; bounded
   // here so main never serializes an attacker-sized payload.
@@ -1880,6 +1882,9 @@ export const PresencePublishPayload = z.object({
   leave: z.boolean().optional(),
 });
 export type PresencePublishPayload = z.infer<typeof PresencePublishPayload>;
+export const PresencePublishRequestPayload = PresencePublishPayload.extend({
+  rendererDocumentId: z.uuid(),
+});
 
 export const PresencePollPayload = z.object({
   scope: PresenceScopeInput,

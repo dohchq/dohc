@@ -6,6 +6,7 @@ import type {
 interface PresenceMutationEntry {
   tail: Promise<void>;
   mayBePresent: boolean;
+  incarnationId: string | undefined;
   leave: (() => Promise<void>) | undefined;
 }
 
@@ -60,24 +61,51 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
   publish<Snapshot>(
     session: RendererWorkspaceSession<Sender>,
     key: string,
+    incarnationId: string,
     operations: PresencePublishOperations<Snapshot>,
   ): Promise<Snapshot | undefined> {
     const state = this.#admit(session);
     if (!state) return Promise.resolve(undefined);
     const entry = this.#entry(state, key);
+    // Invocation order is the ownership order. PresenceChannel cannot invoke
+    // another publish after stop starts, so the newest channel's immediate
+    // publish synchronously supersedes its predecessor before either awaits.
+    entry.incarnationId = incarnationId;
 
     const operation = entry.tail.then(async () => {
-      if (state.retired || !session.isCurrent()) return undefined;
+      if (
+        state.retired ||
+        !session.isCurrent() ||
+        entry.incarnationId !== incarnationId
+      ) {
+        return undefined;
+      }
       await this.#drainRetiredLeave(key);
-      if (state.retired || !session.isCurrent()) return undefined;
+      if (
+        state.retired ||
+        !session.isCurrent() ||
+        entry.incarnationId !== incarnationId
+      ) {
+        return undefined;
+      }
       const transport = await operations.resolve();
-      if (state.retired || !session.isCurrent()) return undefined;
+      if (
+        state.retired ||
+        !session.isCurrent() ||
+        entry.incarnationId !== incarnationId
+      ) {
+        return undefined;
+      }
       // The relay may apply a request even when its response later fails. Once
       // a publish starts, retirement owes this exact identity a leave.
       entry.leave = transport.leave;
       entry.mayBePresent = true;
       const snapshot = await transport.publish();
-      return state.retired || !session.isCurrent() ? undefined : snapshot;
+      return state.retired ||
+        !session.isCurrent() ||
+        entry.incarnationId !== incarnationId
+        ? undefined
+        : snapshot;
     });
     entry.tail = operation.then(
       () => undefined,
@@ -89,24 +117,50 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
   leave(
     session: RendererWorkspaceSession<Sender>,
     key: string,
+    incarnationId: string,
     resolveLeave: () => Promise<() => Promise<void>>,
   ): Promise<boolean> {
     const state = this.#admit(session);
     if (!state) return Promise.resolve(false);
-    const entry = this.#entry(state, key);
+    const entry = state.entries.get(key);
+    if (!entry || entry.incarnationId !== incarnationId) {
+      return Promise.resolve(false);
+    }
 
     const operation = entry.tail.then(async () => {
-      if (state.retired || !session.isCurrent()) return false;
+      if (
+        state.retired ||
+        !session.isCurrent() ||
+        entry.incarnationId !== incarnationId
+      ) {
+        return false;
+      }
       await this.#drainRetiredLeave(key);
-      if (state.retired || !session.isCurrent()) return false;
+      if (
+        state.retired ||
+        !session.isCurrent() ||
+        entry.incarnationId !== incarnationId
+      ) {
+        return false;
+      }
       entry.leave ??= await resolveLeave();
-      if (state.retired || !session.isCurrent()) return false;
+      if (
+        state.retired ||
+        !session.isCurrent() ||
+        entry.incarnationId !== incarnationId
+      ) {
+        return false;
+      }
       // A renderer may stop before its initial publish returns. Serialize the
       // leave behind that publish and keep it retryable until it succeeds.
       entry.mayBePresent = true;
       await entry.leave();
       entry.mayBePresent = false;
-      return !state.retired && session.isCurrent();
+      return (
+        !state.retired &&
+        session.isCurrent() &&
+        entry.incarnationId === incarnationId
+      );
     });
     const tail = operation.then(
       () => undefined,
@@ -187,6 +241,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     const entry: PresenceMutationEntry = {
       tail: Promise.resolve(),
       mayBePresent: false,
+      incarnationId: undefined,
       leave: undefined,
     };
     state.entries.set(key, entry);

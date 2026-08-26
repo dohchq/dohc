@@ -43,6 +43,7 @@ import {
   SDK_PARAMS_MAX_DEPTH,
   SDK_PARAMS_MAX_VALUES,
   PresencePublishPayload,
+  PresencePublishRequestPayload,
   presenceStateWithinCap,
   RestoreEngineMomentFileResult,
   RunnerSelfTestPayload,
@@ -2275,11 +2276,14 @@ describe("renderer document request identity", () => {
 });
 
 describe("presence state size cap (MU-C5 DoS boundary)", () => {
+  const incarnationId = "123e4567-e89b-42d3-a456-426614174001";
+
   function publishPayload(state: unknown) {
     return PresencePublishPayload.safeParse({
       scope: { kind: "workspace", workspaceId: "ws-1" },
       topic: "chat:thread_1",
       clientId: "client-1",
+      incarnationId,
       state,
     });
   }
@@ -2293,6 +2297,7 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
       scope: { kind: "workspace", workspaceId: "ws-1" },
       topic: "chat:thread_1",
       clientId: "client-1",
+      incarnationId,
       leave: true,
     });
     expect(result.success).toBe(true);
@@ -2302,6 +2307,7 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
     const base = {
       topic: "chat:thread_1",
       clientId: "client-1",
+      incarnationId,
       state: null,
     };
     expect(
@@ -2320,6 +2326,23 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
         scope: { kind: "share", shareId: "share-1" },
       }).success,
     ).toBe(false);
+  });
+
+  it("requires preload's document identity only at the main request boundary", () => {
+    const payload = PresencePublishPayload.parse({
+      scope: { kind: "workspace", workspaceId: "ws-1" },
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      incarnationId,
+      state: null,
+    });
+    expect(
+      PresencePublishRequestPayload.safeParse({
+        ...payload,
+        rendererDocumentId: "123e4567-e89b-42d3-a456-426614174002",
+      }).success,
+    ).toBe(true);
+    expect(PresencePublishRequestPayload.safeParse(payload).success).toBe(false);
   });
 
   it("rejects an oversized JSON state before main would serialize it", () => {

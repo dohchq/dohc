@@ -179,7 +179,7 @@ import {
   StartDmPayload,
   StartDmResult,
   LeaveDmPayload,
-  PresencePublishPayload,
+  PresencePublishRequestPayload,
   PresencePollPayload,
   PresenceCancelPayload,
   PresenceResult,
@@ -8996,8 +8996,11 @@ function registerIpcHandlers(
   //
   ipcMain.handle(CHANNELS.presencePublish, async (event, payload) => {
     assertTrustedSender(event);
-    const input = PresencePublishPayload.parse(payload);
-    const rendererSession = rendererWorkspaceSessions.current(event.sender);
+    const input = PresencePublishRequestPayload.parse(payload);
+    const rendererSession = rendererWorkspaceSessions.currentForDocument(
+      event.sender,
+      input.rendererDocumentId,
+    );
     if (
       !rendererSession ||
       input.scope.workspaceId !== rendererSession.workspaceId
@@ -9013,14 +9016,12 @@ function registerIpcHandlers(
     };
     try {
       if (input.leave === true) {
-        const completed = await presenceMutationOwner.leave(
+        await presenceMutationOwner.leave(
           rendererSession,
           key,
+          input.incarnationId,
           resolveLeave,
         );
-        if (!completed) {
-          return PresenceResult.parse({ ok: false, reason: "unavailable" });
-        }
         // A leave has no snapshot to echo; report an empty one so the renderer
         // clears without treating it as a failure.
         return PresenceResult.parse({ ok: true, snapshot: { version: 0, peers: [] } });
@@ -9031,6 +9032,7 @@ function registerIpcHandlers(
       const snapshot = await presenceMutationOwner.publish(
         rendererSession,
         key,
+        input.incarnationId,
         {
           resolve: async () => {
             const transport = await presenceRelayTransportForScope(input.scope);

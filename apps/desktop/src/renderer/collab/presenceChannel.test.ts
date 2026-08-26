@@ -10,8 +10,17 @@ import {
 // A controllable fake transport: publish/leave are recorded; poll returns a
 // promise the test resolves/rejects on demand to drive the loop deterministically.
 function fakeTransport() {
-  const publishes: Array<{ topic: string; clientId: string; state: unknown }> = [];
-  const leaves: Array<{ topic: string; clientId: string }> = [];
+  const publishes: Array<{
+    topic: string;
+    clientId: string;
+    incarnationId: string;
+    state: unknown;
+  }> = [];
+  const leaves: Array<{
+    topic: string;
+    clientId: string;
+    incarnationId: string;
+  }> = [];
   let pendingPoll: {
     resolve: (s: PresenceSnapshot) => void;
     reject: (e: unknown) => void;
@@ -63,9 +72,57 @@ describe("createPresenceChannel", () => {
       onPeers: peers,
     });
     await flush();
-    expect(f.publishes[0]).toMatchObject({ topic: "general", clientId: "c1" });
+    expect(f.publishes[0]).toMatchObject({
+      topic: "general",
+      clientId: "c1",
+      incarnationId: expect.any(String),
+    });
     expect(peers).toHaveBeenCalled();
     channel.stop();
+  });
+
+  it("uses one incarnation for a channel and a new one for its replacement", async () => {
+    const incarnations: string[] = [];
+    const leaves: string[] = [];
+    const transport: PresenceTransport = {
+      async publish(input) {
+        incarnations.push(input.incarnationId);
+        return { version: 1, peers: [] };
+      },
+      async leave(input) {
+        leaves.push(input.incarnationId);
+      },
+      poll: (input) =>
+        new Promise((resolve) => {
+          input.signal.addEventListener(
+            "abort",
+            () => resolve({ version: 0, peers: [] }),
+            { once: true },
+          );
+        }),
+    };
+    const first = createPresenceChannel({
+      transport,
+      topic: "general",
+      clientId: "c1",
+      initialState: {},
+      onPeers: vi.fn(),
+    });
+    await flush();
+    await first.stop();
+    const second = createPresenceChannel({
+      transport,
+      topic: "general",
+      clientId: "c1",
+      initialState: {},
+      onPeers: vi.fn(),
+    });
+    await flush();
+    await second.stop();
+
+    expect(incarnations).toHaveLength(2);
+    expect(incarnations[0]).not.toBe(incarnations[1]);
+    expect(leaves).toEqual(incarnations);
   });
 
   it("updates peers as the poll loop yields new snapshots", async () => {
@@ -113,7 +170,13 @@ describe("createPresenceChannel", () => {
     void channel.stop();
     expect(f.pollAborted()).toBe(true);
     await flush();
-    expect(f.leaves).toEqual([{ topic: "general", clientId: "c1" }]);
+    expect(f.leaves).toEqual([
+      {
+        topic: "general",
+        clientId: "c1",
+        incarnationId: f.publishes[0]?.incarnationId,
+      },
+    ]);
     // A poll that resolves AFTER stop must not repaint.
     await f.resolvePoll({ version: 99, peers: [{ userId: "x", clientId: "cx", state: {}, updatedAtMs: 0 }] });
     await flush();
@@ -230,7 +293,11 @@ describe("createPresenceChannel", () => {
     const publishGate = new Promise<PresenceSnapshot>((resolve) => {
       releasePublish = resolve;
     });
-    const leaves: Array<{ topic: string; clientId: string }> = [];
+    const leaves: Array<{
+      topic: string;
+      clientId: string;
+      incarnationId: string;
+    }> = [];
     let publishCalls = 0;
     const transport: PresenceTransport = {
       publish: () => {
@@ -270,7 +337,13 @@ describe("createPresenceChannel", () => {
 
     releasePublish({ version: 2, peers: [] });
     await stopped;
-    expect(leaves).toEqual([{ topic: "general", clientId: "c1" }]);
+    expect(leaves).toEqual([
+      {
+        topic: "general",
+        clientId: "c1",
+        incarnationId: expect.any(String),
+      },
+    ]);
   });
 
   it("serializes overlapping publishes and coalesces to the newest state", async () => {
@@ -329,7 +402,11 @@ describe("createRelayPresenceTransport", () => {
       scope: { kind: "workspace", workspaceId: "w" },
       fetch: fakeFetch,
     });
-    await transport.publish({ topic: "notes/a.md", clientId: "c", state: { x: 1 } });
+    await transport.publish({
+      topic: "notes/a.md",
+      clientId: "c",
+      state: { x: 1 },
+    });
     expect(calls[0]?.url).toContain("/sync/w/presence?topic=notes%2Fa.md");
     expect((calls[0]?.init.headers as Record<string, string>).authorization).toBe("Bearer tok");
   });
@@ -361,10 +438,17 @@ describe("createRelayPresenceTransport", () => {
     // The transport boundary: an HTTP error is a rejected promise, never a
     // silently-parsed snapshot.
     await expect(
-      transport.publish({ topic: "t", clientId: "c", state: {} }),
+      transport.publish({
+        topic: "t",
+        clientId: "c",
+        state: {},
+      }),
     ).rejects.toThrow("presence publish failed: 503");
     await expect(
-      transport.leave({ topic: "t", clientId: "c" }),
+      transport.leave({
+        topic: "t",
+        clientId: "c",
+      }),
     ).rejects.toThrow("presence leave failed: 503");
     await expect(
       transport.poll({ topic: "t", since: 0, signal: new AbortController().signal }),

@@ -420,7 +420,11 @@ const bridge: DohcDesktopBridge = {
   requestDmAgain: (payload) => ipcRenderer.invoke(CHANNELS.requestDmAgain, payload),
   startDm: (payload) => ipcRenderer.invoke(CHANNELS.startDm, payload),
   leaveDm: (payload) => ipcRenderer.invoke(CHANNELS.leaveDm, payload),
-  presencePublish: (payload) => ipcRenderer.invoke(CHANNELS.presencePublish, payload),
+  presencePublish: (payload) =>
+    ipcRenderer.invoke(CHANNELS.presencePublish, {
+      ...payload,
+      rendererDocumentId,
+    }),
   presencePoll: (payload) => ipcRenderer.invoke(CHANNELS.presencePoll, payload),
   presenceCancel: (payload) => ipcRenderer.invoke(CHANNELS.presenceCancel, payload),
   getSyncStatus: (payload) => ipcRenderer.invoke(CHANNELS.getSyncStatus, payload),

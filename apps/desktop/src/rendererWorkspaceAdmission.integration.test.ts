@@ -4,6 +4,7 @@ import { CHANNELS } from "./ipc/channels";
 import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
 import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import { PresenceMutationOwner } from "./collab/presenceMutationOwner";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 
 function deferred() {
@@ -162,5 +163,129 @@ describe("renderer reload admission", () => {
       replacement.id,
       "reused-poll-id",
     );
+  });
+});
+
+describe("presence mutation admission", () => {
+  it("rejects an old cleanup through the current A-to-B-to-A session", async () => {
+    const renderer = sender(7);
+    const mutations = new PresenceMutationOwner<ReturnType<typeof sender>>();
+    const sessions = new RendererWorkspaceSessionOwner<ReturnType<typeof sender>>({
+      retirement: {
+        retireSender: (session) => mutations.retireSender(session),
+        retireWorkspace: async () => undefined,
+      },
+    });
+    const topicKey = "workspace-a/chat:channel:1/client-1";
+    const oldIncarnation = "123e4567-e89b-42d3-a456-426614174001";
+    const newIncarnation = "123e4567-e89b-42d3-a456-426614174002";
+    const documentId = "document-1";
+    const invokePublish = async (input: {
+      rendererDocumentId: string;
+      incarnationId: string;
+      publish: () => Promise<string>;
+      leave: () => Promise<void>;
+    }) => {
+      const current = sessions.currentForDocument(
+        renderer,
+        input.rendererDocumentId,
+      );
+      if (!current) return "unavailable";
+      return await mutations.publish(
+        current,
+        topicKey,
+        input.incarnationId,
+        {
+          resolve: async () => ({
+            publish: input.publish,
+            leave: input.leave,
+          }),
+        },
+      );
+    };
+    const invokeLeave = async (input: {
+      rendererDocumentId: string;
+      incarnationId: string;
+      leave: () => Promise<void>;
+    }) => {
+      const current = sessions.currentForDocument(
+        renderer,
+        input.rendererDocumentId,
+      );
+      if (!current) return "unavailable";
+      return (await mutations.leave(
+        current,
+        topicKey,
+        input.incarnationId,
+        async () => input.leave,
+      ))
+        ? "left"
+        : "noop";
+    };
+
+    await sessions.open(renderer, "workspace-a", documentId);
+    const retiredLeave = vi.fn(async () => undefined);
+    await expect(
+      invokePublish({
+        rendererDocumentId: documentId,
+        incarnationId: oldIncarnation,
+        publish: async () => "old",
+        leave: retiredLeave,
+      }),
+    ).resolves.toBe("old");
+
+    await sessions.open(renderer, "workspace-b", documentId);
+    await sessions.open(renderer, "workspace-a", documentId);
+    expect(retiredLeave).toHaveBeenCalledOnce();
+    const currentLeave = vi.fn(async () => undefined);
+    await expect(
+      invokePublish({
+        rendererDocumentId: documentId,
+        incarnationId: newIncarnation,
+        publish: async () => "new",
+        leave: currentLeave,
+      }),
+    ).resolves.toBe("new");
+
+    const staleResolver = vi.fn(async () => undefined);
+    await expect(
+      invokeLeave({
+        rendererDocumentId: documentId,
+        incarnationId: oldIncarnation,
+        leave: staleResolver,
+      }),
+    ).resolves.toBe("noop");
+    expect(staleResolver).not.toHaveBeenCalled();
+    expect(currentLeave).not.toHaveBeenCalled();
+
+    await expect(
+      invokeLeave({
+        rendererDocumentId: documentId,
+        incarnationId: newIncarnation,
+        leave: currentLeave,
+      }),
+    ).resolves.toBe("left");
+    expect(currentLeave).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an old-document presence invoke before successor ownership", async () => {
+    const renderer = sender(7);
+    const mutations = new PresenceMutationOwner<ReturnType<typeof sender>>();
+    const sessions = new RendererWorkspaceSessionOwner<ReturnType<typeof sender>>({
+      retirement: {
+        retireSender: (session) => mutations.retireSender(session),
+        retireWorkspace: async () => undefined,
+      },
+    });
+    await sessions.open(renderer, "workspace-a", "document-1");
+    await sessions.retireForReload(renderer, "document-1");
+    const successor = await sessions.open(
+      renderer,
+      "workspace-a",
+      "document-2",
+    );
+
+    expect(sessions.currentForDocument(renderer, "document-1")).toBeUndefined();
+    expect(sessions.currentForDocument(renderer, "document-2")).toBe(successor);
   });
 });
