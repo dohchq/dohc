@@ -1777,7 +1777,7 @@ describe("PluginDetailsPage", () => {
     });
 
     it("never lets a slow read repaint over the folder the plugin now has", async () => {
-      // MUTATION (drop the request token in useReadme): the rename's own
+      // MUTATION (drop the async-response guard in useReadme): the rename's own
       // README paints first, then the read for the folder the plugin no
       // longer has lands on top of it and the page shows the wrong file.
       // A workspace switch cannot prove this — it unmounts the README —
@@ -2479,11 +2479,19 @@ describe("the details rail", () => {
     expect(railRow("plugin-rail-stored-data")).toBeNull();
   });
 
+  it("shows no size rows when the measurement request rejects", async () => {
+    bridgeMock.pluginSizes.mockRejectedValue(new Error("the workspace closed"));
+
+    await renderRail();
+
+    await waitFor(() => expect(railRow("plugin-rail-installed-size")).toBeNull());
+    expect(railRow("plugin-rail-stored-data")).toBeNull();
+  });
+
   // The async-guard invariant, proved where the guard is the only thing
   // holding it. Switching plugin on an already-loaded catalog keeps this rail
   // mounted, so a slow measurement for the plugin the reader left can still
-  // reach the live component and repaint it. The request token is what
-  // refuses it.
+  // reach the live component and repaint it. The guarded effect refuses it.
   it("cannot paint one plugin's sizes onto another", async () => {
     const slow = deferred<{
       ok: true;
@@ -2513,7 +2521,7 @@ describe("the details rail", () => {
       )
     );
     // The same rail element throughout: nothing unmounted, so nothing but the
-    // token can be refusing the stale answer.
+    // effect cleanup can be refusing the stale answer.
     expect(screen.getByTestId("plugin-details-rail")).toBe(rail);
 
     // The t3-code answer lands late. It must not overwrite other-plugin.
