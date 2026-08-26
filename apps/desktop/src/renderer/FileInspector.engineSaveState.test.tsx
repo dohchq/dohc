@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { EngineDocSaveState } from "./collab/useEngineDoc";
@@ -9,16 +9,40 @@ import { FileInspector } from "./FileInspector";
 // so its in-flight/settling save state must reach the SHELL TAB's dirty dot via
 // onSaveStateChange — not just the header. The local saveState never leaves
 // "saved" on the engine path, so before the fix the tab dot was dead while the
-// engine was settling. This mock lets us drive the engine's save state directly.
-const engineDocState: {
-  available: boolean;
-  doc: Y.Doc | null;
-  saveState: EngineDocSaveState;
-} = { available: false, doc: null, saveState: "saved" };
+// engine was settling.
+//
+// The real hook publishes save-state transitions through its OWN React state
+// (useEngineDoc's publish()), re-rendering FileInspector from inside — a memo
+// on the component cannot elide it. The mock must deliver the same way, so it
+// is a subscribable store read via useSyncExternalStore, not a mutable module
+// object read once per parent render.
+const engineDocStore = vi.hoisted(() => {
+  let state = {
+    available: false,
+    doc: null as Y.Doc | null,
+    saveState: "saved" as EngineDocSaveState,
+  };
+  const listeners = new Set<() => void>();
+  return {
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSnapshot: () => state,
+    set(partial: Partial<typeof state>) {
+      state = { ...state, ...partial };
+      for (const listener of listeners) listener();
+    },
+  };
+});
 
-vi.mock("./collab/useEngineDoc", () => ({
-  useEngineDoc: () => engineDocState,
-}));
+vi.mock("./collab/useEngineDoc", async () => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    useEngineDoc: () =>
+      useSyncExternalStore(engineDocStore.subscribe, engineDocStore.getSnapshot),
+  };
+});
 
 describe("engine save-state lifts to the shell tab dirty dot", () => {
   const bridgeMock = {
@@ -29,9 +53,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
   };
 
   beforeEach(() => {
-    engineDocState.available = true;
-    engineDocState.doc = new Y.Doc();
-    engineDocState.saveState = "saved";
+    engineDocStore.set({ available: true, doc: new Y.Doc(), saveState: "saved" });
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -47,16 +69,14 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     cleanup();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
-    engineDocState.available = false;
-    engineDocState.doc = null;
-    engineDocState.saveState = "saved";
+    engineDocStore.set({ available: false, doc: null, saveState: "saved" });
   });
 
   it("lifts the engine's in-flight settle state to onSaveStateChange, returning to saved after settle", async () => {
     // A pending settle: the engine reports "saving" while it projects the edit.
-    engineDocState.saveState = "saving";
+    engineDocStore.set({ saveState: "saving" });
     const onSaveStateChange = vi.fn();
-    const view = render(
+    render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
     );
 
@@ -72,11 +92,10 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // And the header agrees.
     expect(header.getAttribute("data-state")).toBe("saving");
 
-    // The settle completes: the engine returns to "saved" and that too is lifted.
-    engineDocState.saveState = "saved";
-    view.rerender(
-      <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
-    );
+    // The settle completes: the engine publishes "saved" from inside the
+    // component, exactly like the real hook — no parent re-render involved
+    // (FileInspector is memoized, so a shallow-equal parent render is elided).
+    act(() => engineDocStore.set({ saveState: "saved" }));
     expect(onSaveStateChange).toHaveBeenLastCalledWith("saved");
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved");
   });
@@ -85,7 +104,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // AUDIT-SILENTSAVE: the visible half of the fix. A failed settle means the
     // file on disk is behind the editor — the header must say so, and the tab
     // dot must stay dirty.
-    engineDocState.saveState = "error";
+    engineDocStore.set({ saveState: "error" });
     const onSaveStateChange = vi.fn();
     render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
@@ -108,7 +127,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // #554: a file-locked settle is transient by contract — the engine keeps
     // the write pending and retries by itself. The chip must name the blocker
     // and say the edits are safe, not advise another edit.
-    engineDocState.saveState = "file-locked";
+    engineDocStore.set({ saveState: "file-locked" });
     const onSaveStateChange = vi.fn();
     render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,
@@ -134,7 +153,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     // #338: the settle committed, but the FILE holds an edit made outside dohc
     // that dohc refuses to overwrite. "Couldn't save" would be wrong twice —
     // the document IS saved, and another edit cannot help.
-    engineDocState.saveState = "changed-on-disk";
+    engineDocStore.set({ saveState: "changed-on-disk" });
     const onSaveStateChange = vi.fn();
     render(
       <FileInspector workspaceId="ws-1" path="a.md" onSaveStateChange={onSaveStateChange} />,

@@ -94,6 +94,8 @@ import {
   shareRefreshSummary,
   shareUnmountProjection,
   versionCompareOffCopy,
+  WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
+  WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
@@ -116,6 +118,15 @@ import {
 import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
+import { documentVersionKey } from "./documentVersionKey";
+import { leafOf } from "./workbench/path-tree";
+
+// Real implementations, spied (the chatFileMentions precedent): FileInspector
+// derives its document key on every render, and every explorer surface names
+// its rows through leafOf — so these call counts show whether the inspector
+// and the tree actually re-rendered across a shell render.
+vi.mock("./documentVersionKey", { spy: true });
+vi.mock("./workbench/path-tree", { spy: true });
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
 // the rows down, so a test of the LIST needs the same one-line subscriber.
@@ -11972,9 +11983,17 @@ describe("history page", () => {
       bridge.emitWorkspaceActivity();
     });
     await waitFor(() => expect(nextRead).toBeNull());
+    const statusReads = bridge.getSyncStatus.mock.calls.length;
     act(() => {
       bridge.emitWorkspaceActivity();
     });
+    // Activity refreshes ride a trailing-edge debounce now, so the newer read
+    // this scenario needs — the one the older answer must lose to — is issued
+    // only after the window elapses. Wait for its issue, or the older answer
+    // IS the newest information and displaying it would be correct.
+    await waitFor(() =>
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 1),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
     );
@@ -15030,5 +15049,286 @@ describe("set-aside draft recovery", () => {
     expect(
       (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
     ).toContain("Draft!");
+  });
+});
+
+// D2#2/#5/#6/#8: the shell stops re-rendering the world. The probes are real
+// functions the memoized surfaces call once per render (see the vi.mock spies
+// at the top), so a zero delta IS the bailout — and breaking any stabilization
+// (an inline arrow back in the Explorer prop set, a dropped memo, a dropped
+// suspendPolling plumb) makes these fail.
+describe("workbench render cost", () => {
+  it("a shell re-render with unchanged props re-renders neither tree rows nor the inspector", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    vi.stubGlobal("dohcDesktop", bridge);
+    // A FRESH element per render with identical prop values: rerendering the
+    // same element reference lets React skip the subtree outright, which
+    // would pass without re-rendering the shell at all.
+    const workspaces = [WORKSPACE];
+    const onSwitchWorkspace = () => {};
+    const shellElement = () => (
+      <DesktopWorkspaceShell
+        workspace={WORKSPACE}
+        workspaces={workspaces}
+        onSwitchWorkspace={onSwitchWorkspace}
+      />
+    );
+    const view = render(shellElement());
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findByTestId("markdown-editor");
+    expect(screen.getAllByTestId("tree-row").length).toBeGreaterThan(0);
+
+    // The deltas are measured across ONE synchronous re-render, so a read
+    // still in flight cannot inflate them: nothing async can interleave
+    // between the capture, the rerender, and the assertions.
+    const keyCalls = vi.mocked(documentVersionKey).mock.calls.length;
+    const leafCalls = vi.mocked(leafOf).mock.calls.length;
+    view.rerender(shellElement());
+    expect(vi.mocked(documentVersionKey).mock.calls.length).toBe(keyCalls);
+    expect(vi.mocked(leafOf).mock.calls.length).toBe(leafCalls);
+  });
+
+  it("caps a sustained activity burst and keeps its trailing refresh", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      const statusReads = bridge.getSyncStatus.mock.calls.length;
+      const eventIntervalMs = 100;
+      const burstDurationMs = WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS * 2.5;
+      for (let elapsed = 0; elapsed < burstDurationMs; elapsed += eventIntervalMs) {
+        act(() => bridge.emitWorkspaceActivity());
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(eventIntervalMs);
+        });
+      }
+      // Events never go quiet for the 200ms trailing delay. The 1s cap still
+      // refreshes at t=1000 and t=2000, then leaves one trailing pass armed.
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 2);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 3);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 3);
+
+      // The window re-arms: a later lone event still refreshes.
+      act(() => bridge.emitWorkspaceActivity());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 4);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("suspends the navigator's polling while a Chats tab is live", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(
+      Promise.resolve(storedStateWithTabs([], null)),
+    );
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    await screen.findByTestId("chats-view");
+
+    // Alone, the panel navigator answers activity itself: one DM sync.
+    // (Both chats instances call syncDms synchronously from the activity
+    // listener, so the counts need no settling wait.)
+    const alone = bridge.syncDms.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    expect(bridge.syncDms.mock.calls.length).toBe(alone + 1);
+
+    // With the Chats tab live there are two mounted instances — and still
+    // exactly one poller: the page. Without the suspendPolling plumb this
+    // reads +2.
+    await user.click(await screen.findByTestId("chats-open-tab"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("chats-view")).toHaveLength(2),
+    );
+    const paired = bridge.syncDms.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    expect(bridge.syncDms.mock.calls.length).toBe(paired + 1);
+  });
+
+  it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {
+    const user = userEvent.setup();
+    const bridge = Object.assign(
+      makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+      {
+        listChatChannels: vi.fn(async () => ({
+          channels: [
+            {
+              id: "channel-team",
+              name: "team",
+              slug: "team",
+              kind: "channel" as const,
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              threadCount: 1,
+              unreadCount: 0,
+              wireId: "channel-team",
+            },
+          ],
+          fileThreads: [],
+        })),
+        listChatChannelShares: vi.fn(async () => ({
+          joined: [{ channelWireId: "channel-team", joined: null }],
+          sessionKey: "session-a",
+          relay: {
+            state: "answered" as const,
+            granted: [],
+            received: [],
+          },
+        })),
+        listChannelThreads: vi.fn(async () => ({
+          threads: [
+            {
+              id: "thread-team",
+              title: "Team update",
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              channelId: "channel-team",
+              messageCount: 1,
+              lastReadSequence: 1,
+              unreadCount: 0,
+              openingMessage: {
+                id: "message-team",
+                authorKind: "human" as const,
+                authorDisplayName: "Alice",
+                bodySnippet: "A settled update",
+                createdAtMs: 1,
+                reactions: [],
+              },
+            },
+          ],
+          viewerAuthorId: "you",
+        })),
+        listChatMessages: vi.fn(async () => ({
+          messages: [
+            {
+              id: "message-team",
+              threadId: "thread-team",
+              authorKind: "human" as const,
+              authorDisplayName: "Alice",
+              body: "A settled update",
+              createdAtMs: 1,
+            },
+          ],
+        })),
+        listChatReactions: vi.fn(async () => ({
+          reactions: [],
+          viewerAuthorId: "you",
+        })),
+        listChatThreadDecisions: vi.fn(async () => ({ decisions: [] })),
+        listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
+        chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
+        chatDispatchStateForThread: vi.fn(async () => ({
+          liveRun: false,
+          pendingCount: 0,
+          paused: false,
+        })),
+        markChatThreadRead: vi.fn(async () => ({
+          lastReadSequence: 1,
+          revision: 1,
+        })),
+      },
+    );
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    await user.click(await screen.findByTestId("chats-post-card"));
+    await screen.findByTestId("chats-thread-view");
+    await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
+    bridge.markChatThreadRead.mockClear();
+    bridge.syncDms.mockClear();
+
+    for (let pass = 1; pass <= 3; pass += 1) {
+      act(() => bridge.emitWorkspaceActivity());
+      await waitFor(() =>
+        expect(bridge.markChatThreadRead).toHaveBeenCalledTimes(pass),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(bridge.syncDms).not.toHaveBeenCalled();
+    }
+  });
+
+  it("clears the suspended navigator's DM unread pill when the page read lands", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      let unreadCount = 1;
+      const markRead = deferred<void>();
+      const bridge = Object.assign(
+        makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+        {
+          syncDms: vi.fn(async () =>
+            dmSyncResult([{ ...CANONICAL_DM, unreadCount }]),
+          ),
+          listChatMessages: vi.fn(async () => ({
+            messages: [
+              {
+                id: "dm-message",
+                threadId: CANONICAL_DM.threadId!,
+                authorKind: "human" as const,
+                authorDisplayName: "Alice",
+                body: "Read me",
+                createdAtMs: 1,
+              },
+            ],
+          })),
+          listChatReactions: vi.fn(async () => ({
+            reactions: [],
+            viewerAuthorId: "you",
+          })),
+          markChatThreadRead: vi.fn(async () => {
+            await markRead.promise;
+            unreadCount = 0;
+            return { lastReadSequence: 1, revision: 1 };
+          }),
+        },
+      );
+      renderShell(bridge);
+
+      expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe(
+        "1",
+      );
+      // The panel hands the conversation to a Chats page. That page becomes
+      // the only poller while the panel stays mounted and suspended.
+      await user.click(screen.getByTestId("chats-dm-item"));
+      await screen.findByTestId("chats-dm-view");
+      await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
+      expect(screen.getByTestId("chats-dm-unread").textContent).toBe("1");
+
+      await act(async () => {
+        markRead.resolve();
+        await markRead.promise;
+      });
+      await waitFor(() =>
+        expect(screen.queryByTestId("chats-dm-unread")).toBeNull(),
+      );
+      expect(screen.getByTestId("chats-view")).toBeTruthy();
+      expect(screen.getByTestId("chats-dm-view")).toBeTruthy();
+      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe(
+        "true",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

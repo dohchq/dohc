@@ -254,7 +254,7 @@ describe("EditorTabs pointer drag", () => {
     });
     fireEvent.pointerUp(first, { pointerId: 4, clientX: 260, clientY: 10 });
 
-    expect(onMove).toHaveBeenCalledWith("a.md", 2);
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
     expect(onMoveToGroup).not.toHaveBeenCalled();
   });
 
@@ -303,7 +303,7 @@ describe("EditorTabs pointer drag", () => {
 
     expect(onMove).not.toHaveBeenCalled();
     expect(onMoveToGroup).toHaveBeenCalledOnce();
-    expect(onMoveToGroup).toHaveBeenCalledWith("a.md", "right", 0);
+    expect(onMoveToGroup).toHaveBeenCalledWith("left", "right", "a.md", 0);
   });
 
   it("starts a new drag after cancelling an unfinished pointer", () => {
@@ -352,7 +352,7 @@ describe("EditorTabs pointer drag", () => {
     });
     fireEvent.pointerUp(first, { pointerId: 5, clientX: 160, clientY: 10 });
 
-    expect(onMove).toHaveBeenCalledWith("a.md", 2);
+    expect(onMove).toHaveBeenCalledWith("left", "a.md", 2);
   });
 });
 
@@ -481,8 +481,10 @@ describe("EditorTabs overlay scrollbar", () => {
       screen.getByRole("button", { name: "New editor group right" }),
     );
     expect(onCreateGroupRight).toHaveBeenCalledOnce();
+    expect(onCreateGroupRight).toHaveBeenCalledWith("left");
     fireEvent.click(screen.getByRole("button", { name: "Close editor group" }));
     expect(onCloseGroup).toHaveBeenCalledOnce();
+    expect(onCloseGroup).toHaveBeenCalledWith("left");
   });
 
   it.each([
