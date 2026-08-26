@@ -2795,17 +2795,20 @@ export function ChatsView(props: {
   }, [refreshDms, nav.level, props.suspendPolling]);
 
   // The panel navigator hands every conversation to the page instance, so it
-  // never reaches the mark-read above and its channel and file-thread badges
-  // would keep the counts fetched at mount until it remounted. The shell bumps
-  // readRevision after each landed read; the mount value belongs to the load
-  // effect above, so only later ones refetch.
+  // never reaches the mark-read above and its channel, file-thread, and DM
+  // badges would keep the counts fetched at mount until it remounted. The
+  // shell bumps readRevision after each landed read; the mount value belongs
+  // to the load effect above, so only later ones refetch. DMs ride the same
+  // signal: a landed DM read moves the cursor syncDms counts from, and while
+  // polling is suspended nothing else can clear a DM pill.
   const seenReadRevision = useRef(props.readRevision);
   useEffect(() => {
     const revision = props.readRevision;
     if (revision === seenReadRevision.current) return;
     seenReadRevision.current = revision;
     void refreshOverview({ background: true });
-  }, [props.readRevision, refreshOverview]);
+    void refreshDms();
+  }, [props.readRevision, refreshDms, refreshOverview]);
 
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
@@ -2929,18 +2932,29 @@ export function ChatsView(props: {
       setReactions(keepIfUnchanged(reactionResult.reactions));
       setViewerAuthorId(reactionResult.viewerAuthorId);
       if (dm.connected) {
+        const clearedUnread = dm.unreadCount > 0;
         void bridge()
           .markChatThreadRead({
             workspaceId,
             threadId: dm.threadId,
             upToSequence: result.messages.length,
           })
-          .catch(() => {
-            // Best-effort, like the thread view.
-          });
+          .then(
+            // Only once the cursor write LANDED (the thread-view precedent),
+            // and only when this load actually cleared something: the open-DM
+            // poll re-marks on every pass, and reporting those would make the
+            // shell's readRevision re-poll the suspended navigator at the
+            // very cadence the suspension exists to stop.
+            () => {
+              if (clearedUnread) onThreadRead?.();
+            },
+            () => {
+              // Best-effort, like the thread view.
+            },
+          );
       }
     },
-    [workspaceId],
+    [onThreadRead, workspaceId],
   );
 
   const refreshOpenDm = useCallback(
@@ -3257,10 +3271,6 @@ export function ChatsView(props: {
     refreshChannelBadges,
     refreshDms,
   ]);
-  useEffect(() => {
-    if (props.suspendPolling) return;
-    return bridge().onWorkspaceActivity(refreshForActivity);
-  }, [props.suspendPolling, refreshForActivity]);
   // Resuming after a suspension owes one catch-up pass: the activity events
   // that fired meanwhile reached only the page instance, and waiting for the
   // next event would leave this surface stale for as long as the workspace
@@ -3271,9 +3281,12 @@ export function ChatsView(props: {
       pollingWasSuspended.current = true;
       return;
     }
-    if (!pollingWasSuspended.current) return;
-    pollingWasSuspended.current = false;
-    refreshForActivity();
+    const unsubscribe = bridge().onWorkspaceActivity(refreshForActivity);
+    if (pollingWasSuspended.current) {
+      pollingWasSuspended.current = false;
+      refreshForActivity();
+    }
+    return unsubscribe;
   }, [props.suspendPolling, refreshForActivity]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.

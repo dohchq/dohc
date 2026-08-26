@@ -95,6 +95,7 @@ import {
   shareUnmountProjection,
   versionCompareOffCopy,
   WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
+  WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
@@ -15076,7 +15077,7 @@ describe("workbench render cost", () => {
     expect(vi.mocked(leafOf).mock.calls.length).toBe(leafCalls);
   });
 
-  it("coalesces an activity burst into one files+history refresh", async () => {
+  it("caps a sustained activity burst and keeps its trailing refresh", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
     await waitFor(() =>
@@ -15087,25 +15088,31 @@ describe("workbench render cost", () => {
     try {
       const listings = bridge.listWorkspaceFiles.mock.calls.length;
       const statusReads = bridge.getSyncStatus.mock.calls.length;
-      act(() => {
-        bridge.emitWorkspaceActivity();
-        bridge.emitWorkspaceActivity();
-        bridge.emitWorkspaceActivity();
-      });
-      // Trailing edge: nothing refreshes until the burst goes quiet.
-      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings);
+      const eventIntervalMs = 100;
+      const burstDurationMs = WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS * 2.5;
+      for (let elapsed = 0; elapsed < burstDurationMs; elapsed += eventIntervalMs) {
+        act(() => bridge.emitWorkspaceActivity());
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(eventIntervalMs);
+        });
+      }
+      // Events never go quiet for the 200ms trailing delay. The 1s cap still
+      // refreshes at t=1000 and t=2000, then leaves one trailing pass armed.
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 2);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 2);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
       });
-      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 1);
-      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 1);
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 3);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 3);
 
       // The window re-arms: a later lone event still refreshes.
       act(() => bridge.emitWorkspaceActivity());
       await act(async () => {
         await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
       });
-      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 2);
+      expect(bridge.listWorkspaceFiles.mock.calls.length).toBe(listings + 4);
+      expect(bridge.getSyncStatus.mock.calls.length).toBe(statusReads + 4);
     } finally {
       vi.useRealTimers();
     }
@@ -15139,5 +15146,69 @@ describe("workbench render cost", () => {
     const paired = bridge.syncDms.mock.calls.length;
     act(() => bridge.emitWorkspaceActivity());
     expect(bridge.syncDms.mock.calls.length).toBe(paired + 1);
+  });
+
+  it("clears the suspended navigator's DM unread pill when the page read lands", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      let unreadCount = 1;
+      const markRead = deferred<void>();
+      const bridge = Object.assign(
+        makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+        {
+          syncDms: vi.fn(async () =>
+            dmSyncResult([{ ...CANONICAL_DM, unreadCount }]),
+          ),
+          listChatMessages: vi.fn(async () => ({
+            messages: [
+              {
+                id: "dm-message",
+                threadId: CANONICAL_DM.threadId!,
+                authorKind: "human" as const,
+                authorDisplayName: "Alice",
+                body: "Read me",
+                createdAtMs: 1,
+              },
+            ],
+          })),
+          listChatReactions: vi.fn(async () => ({
+            reactions: [],
+            viewerAuthorId: "you",
+          })),
+          markChatThreadRead: vi.fn(async () => {
+            await markRead.promise;
+            unreadCount = 0;
+            return { lastReadSequence: 1, revision: 1 };
+          }),
+        },
+      );
+      renderShell(bridge);
+
+      expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe(
+        "1",
+      );
+      // The panel hands the conversation to a Chats page. That page becomes
+      // the only poller while the panel stays mounted and suspended.
+      await user.click(screen.getByTestId("chats-dm-item"));
+      await screen.findByTestId("chats-dm-view");
+      await waitFor(() => expect(bridge.markChatThreadRead).toHaveBeenCalled());
+      expect(screen.getByTestId("chats-dm-unread").textContent).toBe("1");
+
+      await act(async () => {
+        markRead.resolve();
+        await markRead.promise;
+      });
+      await waitFor(() =>
+        expect(screen.queryByTestId("chats-dm-unread")).toBeNull(),
+      );
+      expect(screen.getByTestId("chats-view")).toBeTruthy();
+      expect(screen.getByTestId("chats-dm-view")).toBeTruthy();
+      expect(screen.getByTestId(`tab-${CHATS_TAB_PATH}`).dataset.active).toBe(
+        "true",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

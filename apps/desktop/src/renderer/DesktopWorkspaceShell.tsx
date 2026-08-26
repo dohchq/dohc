@@ -680,6 +680,12 @@ const SHARE_RELAY_POLL_MS = 5 * 60 * 1000;
 // immediate; long enough to cover main's per-batch event cadence.
 export const WORKSPACE_ACTIVITY_REFRESH_DELAY_MS = 200;
 
+// Cap on how long the trailing edge may keep sliding: a sustained burst
+// whose events land inside the window (a long import, an agent writing
+// continuously) would otherwise starve every refresh until it ends. During
+// such a burst one refresh still fires per cap window.
+export const WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS = 1_000;
+
 function scheduleMarkdownEditorPreload(): () => void {
   let idleHandle: number | null = null;
   let fired = false;
@@ -4147,21 +4153,9 @@ export function DesktopWorkspaceShell(props: {
     (height: number) => mutateWb((state) => setOpenEditorsHeight(state, height)),
     [mutateWb],
   );
-  const onExplorerImportFiles = useCallback(
-    (droppedPaths?: string[], targetDir?: string) => {
-      void importFiles(droppedPaths, targetDir);
-    },
-    [importFiles],
-  );
   const onExplorerRefreshShareMounts = useCallback(() => {
     void refreshShareMounts(true);
   }, [refreshShareMounts]);
-  const onExplorerUnmountShare = useCallback(
-    (path: string) => {
-      void unmountShare(path);
-    },
-    [unmountShare],
-  );
   // One share entry point for both surfaces: the explorer row's "Share…" and
   // the inspector header's share control open the same dialog.
   const onSharePath = useCallback((path: string) => {
@@ -4172,9 +4166,6 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not refresh workspace files.", error),
     );
   }, [refreshFiles, reportShellError]);
-  const onNewUntitledTextFile = useCallback(() => {
-    void createUntitledTextFile();
-  }, [createUntitledTextFile]);
   const openNewFileDialog = useCallback(() => setNewFileOpen(true), []);
   const openHistoryView = useCallback(() => {
     mutateWb((state) => ({
@@ -4392,7 +4383,6 @@ export function DesktopWorkspaceShell(props: {
       }
     },
     [
-      activeDocumentPath,
       closeGroupAfterFlush,
       closeFileTab,
       closeOtherTabs,
@@ -4429,67 +4419,12 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError, runWorkbenchMenuCommand, workspaceId],
   );
 
-  // Per-group tab-strip callbacks, cached like callbacksForEditor: EditorTabs'
-  // Tab rows are memoized on referentially stable callbacks, and the inline
-  // per-group arrows here re-rendered every tab on every shell render (D2#5).
-  // The wrappers read the CURRENT handlers through a render-synced ref, so a
-  // handler whose own identity moves (deps churn) never stales the wrapper.
-  const tabStripActionsRef = useRef({
-    activateEditorTab,
-    closeFileTab,
-    showWorkbenchMenu,
-    moveFileTab,
-    moveFileTabToGroup,
-    openEditorGroupRight,
-    closeGroupAfterFlush,
-  });
-  tabStripActionsRef.current = {
-    activateEditorTab,
-    closeFileTab,
-    showWorkbenchMenu,
-    moveFileTab,
-    moveFileTabToGroup,
-    openEditorGroupRight,
-    closeGroupAfterFlush,
-  };
-  const tabStripCallbacksCache = useRef(
-    new Map<
-      string,
-      {
-        onActivate: (path: string) => void;
-        onClose: (path: string) => void;
-        onContextMenu: (path: string) => void;
-        onMove: (path: string, toIndex: number) => void;
-        onMoveToGroup: (
-          path: string,
-          targetGroupId: string,
-          toIndex: number,
-        ) => void;
-        onCreateGroupRight: () => void;
-        onCloseGroup: () => void;
-      }
-    >(),
+  const showTabContextMenu = useCallback(
+    (groupId: string, path: string) => {
+      void showWorkbenchMenu("tab", path, groupId);
+    },
+    [showWorkbenchMenu],
   );
-  const tabStripCallbacksFor = (groupId: string) => {
-    const cached = tabStripCallbacksCache.current.get(groupId);
-    if (cached) return cached;
-    const actions = tabStripActionsRef;
-    const callbacks = {
-      onActivate: (path: string) =>
-        actions.current.activateEditorTab(groupId, path),
-      onClose: (path: string) => actions.current.closeFileTab(groupId, path),
-      onContextMenu: (path: string) =>
-        void actions.current.showWorkbenchMenu("tab", path, groupId),
-      onMove: (path: string, toIndex: number) =>
-        actions.current.moveFileTab(groupId, path, toIndex),
-      onMoveToGroup: (path: string, targetGroupId: string, toIndex: number) =>
-        actions.current.moveFileTabToGroup(groupId, targetGroupId, path, toIndex),
-      onCreateGroupRight: () => actions.current.openEditorGroupRight(groupId),
-      onCloseGroup: () => void actions.current.closeGroupAfterFlush(groupId),
-    };
-    tabStripCallbacksCache.current.set(groupId, callbacks);
-    return callbacks;
-  };
 
   // Performance marks (post-commit, so the rendered surface is included):
   // file tree populated, and shell interactive once status/history landed.
@@ -4549,18 +4484,29 @@ export function DesktopWorkspaceShell(props: {
     // so the coalesced (newest) refresh can never lose to a dropped one.
     // A pending timer cleared by this effect's cleanup is not a lost refresh
     // either: every re-run's body above refreshes both surfaces itself.
+    // The max-wait deadline keeps a burst that never quiets honest: the
+    // trailing edge slides only until the deadline, then the refresh fires
+    // and the next event starts a fresh window.
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let refreshDeadline: number | null = null;
+    const runActivityRefresh = () => {
+      refreshTimer = null;
+      refreshDeadline = null;
+      void refreshFiles().catch((error) =>
+        reportShellError("Could not refresh workspace files.", error),
+      );
+      void refreshHistory().catch((error) =>
+        reportShellError("Could not refresh history.", error),
+      );
+    };
     const unsubscribe = bridge().onWorkspaceActivity(() => {
+      const now = Date.now();
+      refreshDeadline ??= now + WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS;
       if (refreshTimer !== null) clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(() => {
-        refreshTimer = null;
-        void refreshFiles().catch((error) =>
-          reportShellError("Could not refresh workspace files.", error),
-        );
-        void refreshHistory().catch((error) =>
-          reportShellError("Could not refresh history.", error),
-        );
-      }, WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      refreshTimer = setTimeout(
+        runActivityRefresh,
+        Math.min(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, refreshDeadline - now),
+      );
     });
     return () => {
       cancelled = true;
@@ -5287,17 +5233,17 @@ export function DesktopWorkspaceShell(props: {
         onActivateTab={activateEditorTab}
         onCloseTab={closeFileTab}
         onCloseAllTabs={closeAllTabs}
-        onNewUntitledTextFile={onNewUntitledTextFile}
+        onNewUntitledTextFile={createUntitledTextFile}
         onCollapseFolders={collapseExplorerFolders}
         onSetFolderExpanded={setExplorerFolderExpanded}
         onToggleFolder={toggleExplorerFolder}
         onTogglePin={toggleExplorerPin}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
-        onImportFiles={onExplorerImportFiles}
+        onImportFiles={importFiles}
         shareView={shareView}
         onRefreshShareMounts={onExplorerRefreshShareMounts}
-        onUnmountShare={onExplorerUnmountShare}
+        onUnmountShare={unmountShare}
         onShare={onSharePath}
         onRefresh={onExplorerRefresh}
         onNewFileDialog={openNewFileDialog}
@@ -5857,7 +5803,6 @@ export function DesktopWorkspaceShell(props: {
                 searchScrollTarget.path === tabPath
                   ? searchScrollTarget
                   : undefined;
-              const tabStrip = tabStripCallbacksFor(editorGroup.id);
               return {
                 id: editorGroup.id,
                 size: editorGroup.size,
@@ -5871,14 +5816,14 @@ export function DesktopWorkspaceShell(props: {
                       tabLabels={tabLabels}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
-                      onActivate={tabStrip.onActivate}
-                      onClose={tabStrip.onClose}
-                      onContextMenu={tabStrip.onContextMenu}
-                      onMove={tabStrip.onMove}
-                      onMoveToGroup={tabStrip.onMoveToGroup}
-                      onCreateGroupRight={tabStrip.onCreateGroupRight}
+                      onActivate={activateEditorTab}
+                      onClose={closeFileTab}
+                      onContextMenu={showTabContextMenu}
+                      onMove={moveFileTab}
+                      onMoveToGroup={moveFileTabToGroup}
+                      onCreateGroupRight={openEditorGroupRight}
                       {...(wb.editorGroups.length > 1
-                        ? { onCloseGroup: tabStrip.onCloseGroup }
+                        ? { onCloseGroup: closeGroupAfterFlush }
                         : {})}
                     />
                     <div

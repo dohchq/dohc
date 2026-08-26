@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EditorTabs } from "./EditorTabs";
 import { Explorer, type ExplorerProps } from "./Explorer";
 import { leafOf } from "./path-tree";
+import { isSingletonEditorTabPath } from "./workbenchState";
 
 // Real implementations, spied: every TreeRow render names its row through
 // leafOf, so its call count shows which rows actually re-rendered (the
@@ -11,6 +13,11 @@ import { leafOf } from "./path-tree";
 // quiet — no open editors, no pins, no inline edit, no delete dialog — so a
 // delta is TreeRow renders and nothing else.
 vi.mock("./path-tree", { spy: true });
+vi.mock("./workbenchState", { spy: true });
+
+beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn();
+});
 
 afterEach(() => {
   cleanup();
@@ -67,32 +74,34 @@ function leafOfCalls(): number {
 }
 
 describe("Explorer render cost", () => {
-  // The shell re-renders on every lane commit (status, history, agent state).
-  // With an identical prop set the memoized Explorer must bail instead of
-  // reconciling every row. The open editor matters: its row names itself
-  // through editorTitle -> leafOf on every EXPLORER render, so this fails if
-  // either the Explorer memo goes (leafOf fires from the open-editors list)
-  // or the TreeRow stabilization goes (leafOf fires from every row).
-  it("skips re-rendering when the host re-renders with unchanged props", () => {
-    const props = explorerProps({
-      editorGroups: [
-        { id: "group-1", tabs: [{ path: "a.md" }], activeTab: "a.md", size: 1 },
-      ],
-    });
+  it("keeps EditorTabs out of an unrelated host re-render", () => {
+    const props = {
+      groupId: "group-1",
+      groupNumber: 1,
+      tabs: [{ path: "a.md" }],
+      activeTab: "a.md",
+      activeTabDirty: false,
+      recoveryPaths: new Set<string>(),
+      onActivate: vi.fn(),
+      onClose: vi.fn(),
+      onContextMenu: vi.fn(),
+      onMove: vi.fn(),
+      onMoveToGroup: vi.fn(),
+      onCreateGroupRight: vi.fn(),
+    };
     function Host() {
       const [, setTick] = useState(0);
       return (
         <>
           <button data-testid="bump" onClick={() => setTick((tick) => tick + 1)} />
-          <Explorer {...props} />
+          <EditorTabs {...props} />
         </>
       );
     }
     render(<Host />);
-    const baseline = leafOfCalls();
-    expect(baseline).toBeGreaterThan(0);
+    expect(vi.mocked(isSingletonEditorTabPath)).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByTestId("bump"));
-    expect(leafOfCalls()).toBe(baseline);
+    expect(vi.mocked(isSingletonEditorTabPath)).toHaveBeenCalledTimes(1);
   });
 
   // Selection state lives in the Explorer, so a click re-renders the tree —
