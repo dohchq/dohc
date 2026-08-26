@@ -7771,3 +7771,61 @@ describe("keepIfUnchanged", () => {
     expect(keepIfUnchanged(withAttachment)(attached)).toBe(withAttachment);
   });
 });
+
+// D2#6: the shell suspends the panel navigator's polling while a Chats tab is
+// live, because the page instance runs the same polls against the same store.
+describe("suspended polling", () => {
+  it("stops the polls while suspended, then resumes and catches up on unsuspend", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const view = render(
+        <ChatsView
+          workspaceId="workspace-a"
+          onOpenFileChat={vi.fn()}
+          onError={vi.fn()}
+          suspendPolling
+        />,
+      );
+      await screen.findByTestId("chats-channel-name");
+
+      // Suspended: no activity subscription, so an event refreshes nothing,
+      // and no DM list interval exists for the clock to fire.
+      expect(workspaceActivityCallbacks.size).toBe(0);
+      const dmSyncs = bridgeMock.syncDms.mock.calls.length;
+      const listings = bridgeMock.listChatChannels.mock.calls.length;
+      act(() => emitWorkspaceActivity());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12_000);
+      });
+      expect(bridgeMock.syncDms.mock.calls.length).toBe(dmSyncs);
+      expect(bridgeMock.listChatChannels.mock.calls.length).toBe(listings);
+
+      // Unsuspended: one catch-up pass runs immediately — the activity that
+      // fired meanwhile reached only the page instance — and the polls and
+      // the subscription re-arm.
+      view.rerender(
+        <ChatsView
+          workspaceId="workspace-a"
+          onOpenFileChat={vi.fn()}
+          onError={vi.fn()}
+          suspendPolling={false}
+        />,
+      );
+      await waitFor(() => {
+        expect(bridgeMock.syncDms.mock.calls.length).toBe(dmSyncs + 1);
+        expect(
+          bridgeMock.listChatChannels.mock.calls.length,
+        ).toBeGreaterThanOrEqual(listings + 1);
+      });
+      expect(workspaceActivityCallbacks.size).toBe(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_100);
+      });
+      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThanOrEqual(
+        dmSyncs + 2,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

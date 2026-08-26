@@ -1879,12 +1879,22 @@ export function ChatsView(props: {
   onDraftsChange?: (drafts: ChatsDrafts) => void;
   // Unread badges are the one state the two instances disagree about: the
   // page performs every read, the panel navigator only projects counts it
-  // fetched at mount. The page reports each landed mark-read; the shell hands
-  // the panel a bumped revision so its badges catch up.
+  // fetched at mount. Keep local thread badges and relay-backed DM badges on
+  // separate revisions so a channel refresh cannot wake suspended DM sync.
   onThreadRead?: () => void;
   readRevision?: number;
+  onDmRead?: () => void;
+  dmReadRevision?: number;
+  // The persistent panel navigator sets this while a Chats editor tab is
+  // live: the page instance runs the same polls against the same store, so a
+  // second poller doubles every chat read for nothing. Suspends the DM list
+  // poll, the open-DM poll, and the activity subscription; mount loads and
+  // the read-revision badge catch-ups stay on. On unsuspend, one catch-up
+  // pass refreshes what the missed activity events would have.
+  suspendPolling?: boolean;
 }) {
-  const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
+  const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } =
+    props;
   const collaboration = props.collaboration ?? null;
   // A stable fallback: a fresh [] per render would defeat the message-list
   // memo boundaries below for every roster-less host.
@@ -2782,16 +2792,16 @@ export function ChatsView(props: {
   // so pause this outer poll then — otherwise viewing a DM doubles the
   // relay/sync cadence for no benefit.
   useEffect(() => {
-    if (nav.level === "dm") return;
+    if (props.suspendPolling || nav.level === "dm") return;
     const interval = setInterval(() => void refreshDms(), 5_000);
     return () => clearInterval(interval);
-  }, [refreshDms, nav.level]);
+  }, [refreshDms, nav.level, props.suspendPolling]);
 
   // The panel navigator hands every conversation to the page instance, so it
-  // never reaches the mark-read above and its channel and file-thread badges
-  // would keep the counts fetched at mount until it remounted. The shell bumps
-  // readRevision after each landed read; the mount value belongs to the load
-  // effect above, so only later ones refetch.
+  // never reaches the mark-read above and its channel, file-thread, and DM
+  // badges would keep the counts fetched at mount until it remounted. The
+  // shell bumps readRevision after each landed local-thread read; the mount
+  // value belongs to the load effect above, so only later ones refetch.
   const seenReadRevision = useRef(props.readRevision);
   useEffect(() => {
     const revision = props.readRevision;
@@ -2799,6 +2809,17 @@ export function ChatsView(props: {
     seenReadRevision.current = revision;
     void refreshOverview({ background: true });
   }, [props.readRevision, refreshOverview]);
+
+  // A landed DM read moves the cursor syncDms reads from. While the navigator
+  // is suspended, this DM-specific signal is the only path that clears its
+  // pill; channel and file-thread reads must never pay for a relay sync.
+  const seenDmReadRevision = useRef(props.dmReadRevision);
+  useEffect(() => {
+    const revision = props.dmReadRevision;
+    if (revision === seenDmReadRevision.current) return;
+    seenDmReadRevision.current = revision;
+    void refreshDms();
+  }, [props.dmReadRevision, refreshDms]);
 
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
@@ -2922,18 +2943,29 @@ export function ChatsView(props: {
       setReactions(keepIfUnchanged(reactionResult.reactions));
       setViewerAuthorId(reactionResult.viewerAuthorId);
       if (dm.connected) {
+        const clearedUnread = dm.unreadCount > 0;
         void bridge()
           .markChatThreadRead({
             workspaceId,
             threadId: dm.threadId,
             upToSequence: result.messages.length,
           })
-          .catch(() => {
-            // Best-effort, like the thread view.
-          });
+          .then(
+            // Only once the cursor write LANDED (the thread-view precedent),
+            // and only when this load actually cleared something: the open-DM
+            // poll re-marks on every pass, and reporting those would make the
+            // shell's DM revision re-poll the suspended navigator at the
+            // very cadence the suspension exists to stop.
+            () => {
+              if (clearedUnread) onDmRead?.();
+            },
+            () => {
+              // Best-effort, like the thread view.
+            },
+          );
       }
     },
-    [workspaceId],
+    [onDmRead, workspaceId],
   );
 
   const refreshOpenDm = useCallback(
@@ -3141,8 +3173,7 @@ export function ChatsView(props: {
   // for every mounted Chats surface. Every response carries the follow request
   // sequence, the navigation token, or both the token and a per-surface
   // request sequence, so a slow refresh cannot repaint a newer one.
-  useEffect(() => {
-    return bridge().onWorkspaceActivity(() => {
+  const refreshForActivity = useCallback(() => {
       void refreshFollows();
       if (nav.level === "channels") {
         // The roll-up unread badge lives on this list, so a write to a chat
@@ -3237,7 +3268,6 @@ export function ChatsView(props: {
             }
           });
       }
-    });
   }, [
     applyChannelSnapshot,
     applyThreadSnapshot,
@@ -3252,6 +3282,23 @@ export function ChatsView(props: {
     refreshChannelBadges,
     refreshDms,
   ]);
+  // Resuming after a suspension owes one catch-up pass: the activity events
+  // that fired meanwhile reached only the page instance, and waiting for the
+  // next event would leave this surface stale for as long as the workspace
+  // stays quiet. The mount value is deliberately not a resumption.
+  const pollingWasSuspended = useRef(props.suspendPolling === true);
+  useEffect(() => {
+    if (props.suspendPolling) {
+      pollingWasSuspended.current = true;
+      return;
+    }
+    const unsubscribe = bridge().onWorkspaceActivity(refreshForActivity);
+    if (pollingWasSuspended.current) {
+      pollingWasSuspended.current = false;
+      refreshForActivity();
+    }
+    return unsubscribe;
+  }, [props.suspendPolling, refreshForActivity]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
@@ -3768,7 +3815,7 @@ export function ChatsView(props: {
   // paused. Token and request guards prevent an older pass from repainting a
   // newer snapshot or a local send.
   useEffect(() => {
-    if (nav.level !== "dm") return;
+    if (props.suspendPolling || nav.level !== "dm") return;
     const dm = nav.dm;
     const token = liveToken.current;
     if (!dm.threadId) void refreshOpenDm(dm, token);
@@ -3777,7 +3824,7 @@ export function ChatsView(props: {
       4_000,
     );
     return () => clearInterval(interval);
-  }, [nav, refreshOpenDm]);
+  }, [nav, refreshOpenDm, props.suspendPolling]);
 
   // #742 P2-D belt: LeaveDmDialog owns Escape itself, but this clears
   // leavingDm on any navigation away from the DM it was opened for — leaving

@@ -1148,6 +1148,11 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("applyDatabaseEdit")).toContain(
       "operation.workspace.rootPath,",
     );
+    const uiStateHandler = handlerSource("getWorkspaceUiState");
+    expect(uiStateHandler).toContain("WorkspaceIdPayload.parse(payload)");
+    expect(uiStateHandler).not.toContain(
+      "ListWorkspaceFilesPayload.parse(payload)",
+    );
   });
 
   // #646 PR3a. Two lanes, and a workspace is only ever in one of them. The
