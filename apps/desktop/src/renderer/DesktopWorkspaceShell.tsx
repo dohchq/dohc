@@ -89,7 +89,6 @@ import {
   type HeadingTarget,
   type ScrollTarget,
 } from "./FileInspector";
-import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { NewFileDialog } from "./NewFileDialog";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
@@ -111,6 +110,7 @@ import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
+import { indexFileListing } from "./workbench/file-listing-index";
 import {
   noteWorkspaceLabel,
   remapOrphanedDraftPaths,
@@ -1914,43 +1914,18 @@ export function DesktopWorkspaceShell(props: {
   useEffect(() => {
     return scheduleMarkdownEditorPreload();
   }, [workspaceId]);
-  const markdownWikilinkFiles = useMemo<WikilinkFile[]>(
-    () =>
-      files
-        .filter((file) => file.kind === "file" && /\.(md|markdown)$/i.test(file.path))
-        .map((file) => {
-          const pathNoExt = file.path.replace(/\.(md|markdown)$/i, "");
-          return {
-            path: file.path,
-            title: pathNoExt.split("/").pop() ?? file.path,
-            fileId: null,
-          };
-        }),
-    [files],
-  );
-  const conflictSummaries = useMemo(
-    () =>
-      files
-        .filter((file) => file.kind === "file" && file.path.endsWith(".conflict"))
-        .slice(0, 5)
-        .map((file) =>
-          `${file.path.replace(/\.conflict$/, "")} has a sync conflict (${file.path})`,
-        ),
-    [files],
-  );
+  const {
+    markdownWikilinkFiles,
+    conflictSummaries,
+    presentPaths,
+    hasMarkdownPath,
+    graphRefreshKey,
+  } = useMemo(() => indexFileListing(files), [files]);
 
   // Content search (Phase E5.0). The model lives HERE, not in the Search
   // view, so results — and the activity-bar count badge — survive switching
   // views while the panel unmounts.
   const search = useWorkspaceSearch(workspaceId);
-  const graphRefreshKey = useMemo(
-    () =>
-      [
-        String(files.length),
-        files.map((file) => file.path).join("\0"),
-      ].join("\0"),
-    [files],
-  );
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
   // The plugins list marks the row whose details tab the user is looking at,
@@ -2383,8 +2358,7 @@ export function DesktopWorkspaceShell(props: {
     const closable = new Set(
       [...restoredTabPaths].filter((path) => !dirtyPaths.has(path)),
     );
-    const present = new Set(files.map((file) => file.path));
-    const fileExists = (path: string) => present.has(path);
+    const fileExists = (path: string) => presentPaths.has(path);
     const current = wbRef.current;
     const next = pruneMissingRestoredTabs(current, closable, fileExists);
     if (next === current) return;
@@ -2408,7 +2382,7 @@ export function DesktopWorkspaceShell(props: {
     }
     setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
   }, [
-    files,
+    presentPaths,
     filesLoaded,
     listingsSettled,
     restoredTabPaths,
@@ -4447,9 +4421,9 @@ export function DesktopWorkspaceShell(props: {
     if (files.length > 0) rendererMarks.markOnce("file-tree-loaded");
   }, [files]);
   useEffect(() => {
-    if (!files.some((file) => /\.(md|markdown)$/i.test(file.path))) return;
+    if (!hasMarkdownPath) return;
     return scheduleMarkdownEditorPreload();
-  }, [files]);
+  }, [files, hasMarkdownPath]);
   useEffect(() => {
     if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);

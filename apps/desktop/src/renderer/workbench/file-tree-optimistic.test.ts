@@ -19,6 +19,13 @@ const files: FileRow[] = [
 const folders: FolderInput[] = ['inbox', 'projects/alpha']
 
 describe('optimistic file tree moves', () => {
+  it('preserves listing references when there are no pending changes', () => {
+    const projected = applyPendingTreeMoves(files, folders, [])
+
+    expect(projected.files).toBe(files)
+    expect(projected.folders).toBe(folders)
+  })
+
   it('projects a pending file move into the rendered file rows', () => {
     const pending: PendingTreeMove[] = [
       {
