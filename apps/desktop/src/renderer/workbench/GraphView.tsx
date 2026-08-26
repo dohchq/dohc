@@ -2,9 +2,11 @@ import { FileText, GitFork, RefreshCw, Unlink } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -56,6 +58,14 @@ type GraphPositionSink = (
   byPath: ReadonlyMap<string, ForceNode>,
 ) => void;
 
+type GraphDrag = {
+  path: string;
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  moved: boolean;
+};
+
 const EMPTY_GRAPH: WorkspaceGraphResult = {
   nodes: [],
   edges: [],
@@ -82,6 +92,9 @@ const GRAPH_LAYOUT: Record<
 > = {
   // Nodes after the pairwise limit keep center and edge forces, but skip
   // repulsion: panel layouts degrade after 160 ranked nodes, page layouts after 280.
+  // One run handles at most 2,000 nodes and 10,000 edges. At 120 frames (about
+  // 2 seconds at 60 Hz), the 280-node pairwise cap bounds page work to 4.7M
+  // pair checks. A terminal commit discards residual motion.
   panel: {
     width: 260,
     height: 420,
@@ -105,7 +118,7 @@ const GRAPH_LAYOUT: Record<
 };
 
 function graphEdgeKey(edge: VisibleGraphEdge): string {
-  return `${edge.source}:${edge.target}:${edge.kind}`;
+  return JSON.stringify([edge.source, edge.target, edge.kind]);
 }
 
 function degree(node: Pick<WorkspaceGraphNode, "incoming" | "outgoing">): number {
@@ -147,6 +160,7 @@ function initialGraphNode(
   activePath: string | null,
   variant: GraphVariant,
   previous: ForceNode | undefined,
+  dragging: boolean,
 ): ForceNode {
   const layout = GRAPH_LAYOUT[variant];
   const radius = graphRadius(node, variant);
@@ -157,9 +171,9 @@ function initialGraphNode(
       radius,
       x: Math.min(layout.width - radius - 16, Math.max(radius + 16, previous.x)),
       y: Math.min(layout.height - radius - 16, Math.max(radius + 16, previous.y)),
-      vx: previous.vx,
-      vy: previous.vy,
-      dragging: false,
+      vx: dragging ? 0 : previous.vx,
+      vy: dragging ? 0 : previous.vy,
+      dragging,
     };
   }
 
@@ -174,7 +188,7 @@ function initialGraphNode(
       y: centerY,
       vx: 0,
       vy: 0,
-      dragging: false,
+      dragging,
     };
   }
   const ringCount = activePath ? Math.max(1, count - 1) : count;
@@ -193,7 +207,7 @@ function initialGraphNode(
     y: centerY + Math.sin(angle) * spreadY,
     vx: 0,
     vy: 0,
-    dragging: false,
+    dragging,
   };
 }
 
@@ -202,6 +216,15 @@ function snapshotNodes(nodes: ForceNode[]): GraphPoint[] {
     ({ index: _index, vx: _vx, vy: _vy, dragging: _dragging, ...node }) =>
       node,
   );
+}
+
+function stopGraphMotion(
+  nodes: readonly { vx: number; vy: number }[],
+): void {
+  for (const node of nodes) {
+    node.vx = 0;
+    node.vy = 0;
+  }
 }
 
 function visibleEdges(
@@ -220,6 +243,7 @@ function useForceGraph(
   activePath: string | null,
   variant: GraphVariant,
   renderPositions: GraphPositionSink,
+  dragRef: RefObject<GraphDrag | null>,
 ) {
   const layout = GRAPH_LAYOUT[variant];
   const ordered = useMemo(
@@ -380,6 +404,8 @@ function useForceGraph(
       frameRef.current = requestGraphFrame(step);
       return;
     }
+    stopGraphMotion(nodes);
+    alphaRef.current = 0;
     setPoints(snapshotNodes(nodes));
     frameRef.current = null;
   }, []);
@@ -400,6 +426,7 @@ function useForceGraph(
 
   useEffect(() => {
     const previous = new Map(nodesRef.current.map((node) => [node.path, node]));
+    const heldPath = dragRef.current?.path;
     const nodes = ordered.map((node, index) =>
       initialGraphNode(
         node,
@@ -408,6 +435,7 @@ function useForceGraph(
         activePath,
         variant,
         previous.get(node.path),
+        heldPath === node.path,
       ),
     );
     nodesRef.current = nodes;
@@ -415,7 +443,7 @@ function useForceGraph(
     edgesRef.current = visibleEdges(graph, nodes, variant);
     setPoints(snapshotNodes(nodes));
     restart(0.86);
-  }, [activePath, graph, ordered, restart, variant]);
+  }, [activePath, dragRef, graph, ordered, restart, variant]);
 
   useEffect(() => {
     return () => {
@@ -487,12 +515,7 @@ function GraphMap(props: {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const nodeElementsRef = useRef(new Map<string, SVGGElement>());
   const edgeElementsRef = useRef(new Map<string, SVGLineElement>());
-  const dragRef = useRef<{
-    path: string;
-    startClientX: number;
-    startClientY: number;
-    moved: boolean;
-  } | null>(null);
+  const dragRef = useRef<GraphDrag | null>(null);
   const renderPositions = useCallback<GraphPositionSink>((nodes, edges, byPath) => {
     for (const node of nodes) {
       nodeElementsRef.current
@@ -515,6 +538,7 @@ function GraphMap(props: {
     props.activePath,
     props.variant,
     renderPositions,
+    dragRef,
   );
   const byPath = useMemo(
     () => new Map(points.map((point) => [point.path, point])),
@@ -547,7 +571,7 @@ function GraphMap(props: {
 
   function moveDrag(event: React.PointerEvent<SVGSVGElement>) {
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag || event.pointerId !== drag.pointerId) return;
     const point = pointFromPointer(event);
     const moved =
       Math.abs(event.clientX - drag.startClientX) > 3 ||
@@ -556,19 +580,19 @@ function GraphMap(props: {
     setNodePosition(drag.path, point.x, point.y, true);
   }
 
-  function endDrag(event: React.PointerEvent<SVGSVGElement>) {
+  function endDrag(event: React.PointerEvent<SVGSVGElement>, cancelled = false) {
     const drag = dragRef.current;
-    if (!drag) return;
-    const shouldOpen = !drag.moved;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const shouldOpen = !cancelled && !drag.moved;
     releaseNode(drag.path);
     dragRef.current = null;
     const svg = svgRef.current;
     if (
       typeof svg?.hasPointerCapture === "function" &&
       typeof svg.releasePointerCapture === "function" &&
-      svg.hasPointerCapture(event.pointerId)
+      svg.hasPointerCapture(drag.pointerId)
     ) {
-      svg?.releasePointerCapture(event.pointerId);
+      svg.releasePointerCapture(drag.pointerId);
     }
     if (shouldOpen) openNode(drag.path);
   }
@@ -582,7 +606,7 @@ function GraphMap(props: {
       aria-label="Workspace graph"
       onPointerMove={moveDrag}
       onPointerUp={endDrag}
-      onPointerCancel={endDrag}
+      onPointerCancel={(event) => endDrag(event, true)}
       className={
         props.variant === "page"
           ? "min-h-0 w-full flex-1 touch-none bg-panel"
@@ -647,10 +671,11 @@ function GraphMap(props: {
               className="dohc-graph-node outline-none"
               style={{ animationDelay: `${Math.min(index, 24) * 18}ms` }}
               onPointerDown={(event) => {
-                if (event.button !== 0) return;
+                if (event.button !== 0 || dragRef.current !== null) return;
                 const point = pointFromPointer(event);
                 dragRef.current = {
                   path: node.path,
+                  pointerId: event.pointerId,
                   startClientX: event.clientX,
                   startClientY: event.clientY,
                   moved: false,
@@ -729,6 +754,19 @@ export function GraphView(props: {
   const [includeChatMentions, setIncludeChatMentions] = useState(false);
   const chatMentionsEnabled =
     props.chatMentionsAvailable === true && includeChatMentions;
+  const requestIdentity = useMemo(
+    () => ({
+      workspaceId: props.workspaceId,
+      chatMentionsEnabled,
+      refreshKey: props.refreshKey,
+      reloadNonce,
+    }),
+    [chatMentionsEnabled, props.refreshKey, props.workspaceId, reloadNonce],
+  );
+  const requestIdentityRef = useRef(requestIdentity);
+  useLayoutEffect(() => {
+    requestIdentityRef.current = requestIdentity;
+  }, [requestIdentity]);
   const [state, setState] = useState<GraphState>({
     workspaceId: props.workspaceId,
     chatMentionsEnabled,
@@ -761,6 +799,7 @@ export function GraphView(props: {
     },
     {
       onSuccess: (graph) => {
+        if (requestIdentityRef.current !== requestIdentity) return;
         setState({
           workspaceId: props.workspaceId,
           chatMentionsEnabled,
@@ -770,6 +809,7 @@ export function GraphView(props: {
         });
       },
       onError: (error: unknown) => {
+        if (requestIdentityRef.current !== requestIdentity) return;
         setState((current) => ({
           workspaceId: props.workspaceId,
           chatMentionsEnabled,
@@ -783,7 +823,7 @@ export function GraphView(props: {
         }));
       },
     },
-    [chatMentionsEnabled, props.workspaceId, props.refreshKey, reloadNonce],
+    [requestIdentity],
   );
 
   const scopedState: GraphState =
