@@ -13,7 +13,7 @@ voice. No one check is enough, because dohc's text is not one kind of text.
 The lesson that holds it together: **a banned-words list does not work, a
 system does.** A controlled-language experiment
 ([woosal1337/blog ep01](https://github.com/woosal1337/blog/tree/main/videos/ep01-the-cure-for-ai-slop))
-measured writing systems cutting slop by 43% to 74% while a banned-words list
+found that writing systems cut slop by 43% to 74% while a banned-words list
 managed 3% to 40%. Directional, not proof. If this skill ever decays into
 "never say seamless," it has failed. Judge sentences by whether a reader can
 act on them, not by whether they contain a flagged token.
@@ -26,7 +26,7 @@ execute this text, or think about it?**
 ### 1. Executable text → strict STE
 
 Procedures, runbooks, skills, agent instructions, product invariants,
-migration steps. UI copy is the `dohc-interface` skill, not this one.
+migration steps. UI copy belongs to the `dohc-interface` skill, not this one.
 
 A reader acts on this text and cannot ask a follow-up question. Ambiguity here
 becomes a real failure.
@@ -39,7 +39,7 @@ becomes a real failure.
 - State the condition before the action it controls.
 - Put the common case first, exceptions after.
 - Say what the reader must do, not only what went wrong.
-- Never "simply", "easy", or "quickly" in a procedure.
+- Never write "simply", "easy", or "quickly" in a procedure.
 
 ### 2. Explanatory text → STE-flavored
 
@@ -48,14 +48,14 @@ Docs, specs, plans, PR bodies, README, code comments, design notes.
 A reader thinks about this text and can re-read it. Keep STE's discipline but
 let sentences breathe:
 
-- Prefer short sentences and vary length where it helps. Descriptions up to
-  25 words, one topic per paragraph.
+- Prefer short sentences and vary length where it helps the reader.
+  Descriptions up to 25 words, one topic per paragraph.
 - Keep contractions where they match the surrounding voice.
-- A fresh, concrete image is allowed when it does real explanatory work.
+- Use a fresh, concrete image only when it does real explanatory work.
 - Technical terms are fine. Define an unfamiliar one at first use.
 - State the motivation once, then explain the product, mechanism, or tradeoff.
-- Headings carry the point, not just the topic. Link with words that say where
-  the link goes, never "click here".
+- Headings carry the point, not just the topic.
+- Link with words that say where the link goes, never "click here".
 
 ### 3. Editorial text → Orwell only
 
@@ -72,18 +72,18 @@ hedging, cut inherited phrasing.
 
 ### Mixed documents
 
-Most real dohc documents mix registers. This file does. Section them, then let
-**the strictest register present govern any sentence the reader will act on.**
-A request for "soul" does not change the register: treat a section as
-editorial only when its job is to persuade, and keep a README, design note, or
-PR body explanatory unless the author supplied an editorial passage or asked
-for one.
+Most real dohc documents mix registers. This file does. Split the document
+into sections, then let **the strictest register present govern any sentence
+the reader will act on.** A request for "soul" does not change the register.
+Treat a section as editorial only when its job is to persuade. Keep a README,
+design note, or PR body explanatory unless the author supplied an editorial
+passage or asked for one.
 
 ## One document, one job
 
 The register governs sentences. A whole document also has a mode, and two
-questions pick it: does it inform action or understanding, and does it serve
-learning or work? Action and learning is a tutorial. Action and work is a
+questions pick the mode: does the document inform action or understanding, and
+does it serve learning or work? Action and learning is a tutorial. Action and work is a
 how-to. Understanding and work is reference. Understanding and learning is
 explanation. (diataxis.fr)
 
@@ -110,7 +110,7 @@ it by register: editorial text welcomes fresh metaphor, explanatory text
 allows it where it does real work, executable text bans it. The source skills,
 [orwell-writing](https://github.com/tamdogood/builder-essential-skills/blob/main/skills/orwell-writing/SKILL.md)
 and [ste-plain-writing](https://github.com/Ryuketsukami/ste-plain-writing),
-leave that unresolved.
+leave the conflict unresolved.
 
 **Precedence, so this is decidable.** Being accurate outranks everything. In
 executable text the strict rules then outrank Rule 6: break one only when
@@ -126,7 +126,7 @@ misfire: it cannot tell that two words mean the same thing, or that one word
 means two.
 
 - Use the word the surrounding surface already uses: the UI, the contract, the
-  neighbouring docs.
+  neighboring docs.
 - Do not swap in a synonym to avoid repetition. Repetition is correct.
 - One term, one meaning, within a document.
 - Check the word against the code before asserting what it means. Several dohc
@@ -145,6 +145,8 @@ one when the terms settle, and keep it next to the code it describes.
   and "fails only on growth" say different things.
 - Break noun strings: "the share-link permission scope check" becomes "the
   check on a share link's permission scope".
+- Make every "it", "they", and "this" point at one obvious thing. Repeat the
+  noun when in doubt.
 - Give every clause its verb. "Phase 1 moves the converters and Phase 2 the
   runtime" leaves Phase 2 without one.
 - Keep the small words that force one parse: "that", and the repeated article
@@ -234,21 +236,21 @@ reviewer can check.
 
 ## Workflow
 
-Drafting: name the register and the document's mode, draft in concrete direct
-English, apply the register's rules, check every noun against the code, then
-remove AI tells.
+Drafting: name the register and the document's mode. Draft in concrete, direct
+English. Apply the register's rules. Check every noun against the code. Remove
+AI tells last.
 
-Revising: read the whole source first and list what must survive: facts,
-warnings, constraints, commands, links, established voice. Cut, then restore
-anything the rewrite lost. Flag necessary jargon and necessary passive voice
-instead of silently removing their precision.
+Revising: read the whole source first. List what must survive: facts,
+warnings, constraints, commands, links, established voice. Cut what does no
+work, then restore anything the rewrite lost. Flag necessary jargon and
+necessary passive voice instead of silently removing their precision.
 
 ## Do not
 
 - Do not remove a caveat, limitation, or warning to make text shorter.
 - Do not invent evidence, numbers, examples, or sources.
-- Do not flatten a known voice into corporate neutral, and do not add
-  personality where neutral prose is correct. Both failures are real.
+- Do not flatten a known voice into corporate neutral. Do not add personality
+  where neutral prose is correct. Both failures are real.
 - Do not claim strict ASD-STE100 conformance. We use its discipline, not its
   certified dictionary.
 - Do not rewrite code, identifiers, or commands.
