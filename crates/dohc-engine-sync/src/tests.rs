@@ -8999,6 +8999,162 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
 }
 
 #[test]
+fn cached_defer_and_drain_match_the_cold_path() {
+    let (_warm_scratch, _warm_path, mut warm_store) = store();
+    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
+    let mut cold_seed_cache = dohc_engine_collab::WriterDocCache::new();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-cache-pair").expect("key");
+
+    let author = dohc_engine_collab::Ydoc::wire();
+    let local = author.plaintext_insert(0, "local");
+    let remote_one = author.plaintext_insert(5, " remote");
+    let remote_two = author.plaintext_insert(12, " final");
+    let empty_base = dohc_engine_collab::Ydoc::wire().encode_full_state();
+
+    let setup =
+        |store: &mut EngineStore, cache: &mut dohc_engine_collab::WriterDocCache| -> String {
+            VersionedTextStore::new(store)
+                .ensure_main_version("ws", "main", 1_000, &NoFaults)
+                .expect("main version");
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                    "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES ('ws','object-cache-pair',1_001)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .expect("file object");
+            let claim = match dohc_engine_collab::claim_base(
+                store,
+                &key,
+                dohc_engine_collab::ContentKind::Plaintext,
+                &empty_base,
+                &NoFaults,
+                1_002,
+            )
+            .expect("claim base")
+            {
+                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
+                    base_snapshot_sha,
+                }) => base_snapshot_sha,
+                other => panic!("unexpected claim: {other:?}"),
+            };
+            dohc_engine_collab::record_local_update(store, cache, &key, &local, &NoFaults, 1_003)
+                .expect("warm local append");
+            claim
+        };
+    let warm_claim = setup(&mut warm_store, &mut warm_cache);
+    let cold_claim = setup(&mut cold_store, &mut cold_seed_cache);
+    assert_eq!(warm_claim, cold_claim);
+
+    let remote_one_sha = warm_store
+        .put_binary_blob(&remote_one)
+        .expect("warm first remote blob");
+    cold_store
+        .put_binary_blob(&remote_one)
+        .expect("cold first remote blob");
+    let remote_two_sha = warm_store
+        .put_binary_blob(&remote_two)
+        .expect("warm second remote blob");
+    cold_store
+        .put_binary_blob(&remote_two)
+        .expect("cold second remote blob");
+    let deferred = [
+        envelope(
+            "peer",
+            0,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-cache-pair",
+                "path": "notes/cache-pair.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": remote_one_sha,
+                "lineageClaimId": warm_claim,
+                "isBaseState": false
+            }),
+        ),
+        envelope(
+            "peer",
+            1,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "object-cache-pair",
+                "path": "notes/cache-pair.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": remote_two_sha,
+                "lineageClaimId": cold_claim,
+                "isBaseState": false
+            }),
+        ),
+    ];
+
+    for operation in &deferred {
+        let warm = apply_ydoc_envelope_cached(
+            &mut warm_store,
+            &mut warm_cache,
+            operation,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("warm defer");
+        let cold = apply_ydoc_envelope(&mut cold_store, operation, &NoFaults, &AlwaysLive)
+            .expect("cold defer");
+        assert_eq!(warm, cold);
+    }
+
+    let warm_drain =
+        drain_deferred_ydoc_for_key_cached(&mut warm_store, &mut warm_cache, &key, &NoFaults)
+            .expect("warm drain");
+    let cold_drain =
+        drain_deferred_ydoc_for_key(&mut cold_store, &key, &NoFaults).expect("cold drain");
+    assert_eq!(warm_drain, cold_drain);
+
+    let warm_doc = dohc_engine_collab::load_persisted(&warm_store, &key)
+        .expect("warm persisted")
+        .expect("warm doc");
+    let cold_doc = dohc_engine_collab::load_persisted(&cold_store, &key)
+        .expect("cold persisted")
+        .expect("cold doc");
+    // One author produced every delta, so no Any::Map or multi-client map
+    // iteration can perturb this plaintext full-state encoding: byte equality
+    // is the strongest valid assertion here.
+    assert_eq!(
+        warm_doc.doc.encode_full_state(),
+        cold_doc.doc.encode_full_state()
+    );
+    assert_eq!(
+        warm_cache
+            .doc_full_state_for_test(&key)
+            .expect("warm cache remains resident"),
+        cold_doc.doc.encode_full_state()
+    );
+    let warm_head = VersionedTextStore::new(&mut warm_store)
+        .read_text("ws", "main", "notes/cache-pair.md")
+        .expect("warm head")
+        .expect("warm snapshot");
+    let cold_head = VersionedTextStore::new(&mut cold_store)
+        .read_text("ws", "main", "notes/cache-pair.md")
+        .expect("cold head")
+        .expect("cold snapshot");
+    assert_eq!(warm_head.text, cold_head.text);
+    assert_eq!(warm_head.blob_sha256, cold_head.blob_sha256);
+    assert_eq!(warm_head.latest_moment_id, cold_head.latest_moment_id);
+    assert_eq!(warm_head.text, "local remote final");
+
+    let stats = warm_cache.stats();
+    assert_eq!(stats.hits, 3, "two defer gates plus final drain projection");
+    assert_eq!(stats.misses, 1, "only the first local append reconstructs");
+    assert_eq!(stats.installs, 1);
+    assert_eq!(stats.advances, 2, "both committed drain deltas advance");
+}
+
+#[test]
 fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
     // Oracle parity (`projectYDocUpdate` → `writeTextFileInDb` → CRDT rows):
     // an APPLIED (non-deferred) ydoc envelope must advance the VISIBLE head

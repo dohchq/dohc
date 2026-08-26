@@ -1828,6 +1828,30 @@
         ],
         "type": "xmlFragment"
       }
+    },
+    "scene-revisions-and-app-state": {
+      "excalidraw:app-state": {
+        "type": "map",
+        "value": {
+          "theme": {
+            "type": "any",
+            "value": "\"dark\""
+          }
+        }
+      },
+      "excalidraw:revisions": {
+        "type": "map",
+        "value": {
+          "[\"box\",1,1]": {
+            "type": "any",
+            "value": "{\"id\":\"box\",\"isDeleted\":false,\"type\":\"rectangle\",\"version\":1,\"versionNonce\":1}"
+          },
+          "[\"box\",2,2]": {
+            "type": "any",
+            "value": "{\"id\":\"box\",\"isDeleted\":false,\"type\":\"rectangle\",\"version\":2,\"versionNonce\":2,\"x\":40}"
+          }
+        }
+      }
     }
   }
 }

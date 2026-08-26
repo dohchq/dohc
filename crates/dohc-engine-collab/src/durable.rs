@@ -2435,10 +2435,46 @@ pub fn validate_remote_update_with_pending(
 ) -> Result<(), CollabError> {
     validate_update_bytes(bytes)?;
     let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
+    validate_remote_update_with_pending_base(&base, pending, bytes)
+}
+
+/// Cache-backed form of [`validate_remote_update_with_pending`]. The cached
+/// document itself remains immutable. When queued predecessors exist, a
+/// scratch document is seeded from its full state before replaying them; the
+/// first deferred update validates directly against the resident base.
+pub fn validate_remote_update_with_pending_cached(
+    store: &EngineStore,
+    cache: &WriterDocCache,
+    key: &DocKey,
+    pending: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<(), CollabError> {
+    validate_update_bytes(bytes)?;
+    let Some(cached) = store.read_with(|conn| cache.doc_for_consumer(conn, key))? else {
+        return validate_remote_update_with_pending(store, key, pending, bytes);
+    };
+    if pending.is_empty() {
+        return crate::validate_replay_parity(cached, bytes);
+    }
+
+    // Applying the queued prefix must not mutate the actor cache before those
+    // coordinates durably drain. A full-state fork preserves the scan_v2
+    // topology consumed by the gate; the cache hit above already ran the
+    // differential oracle against the cold replay path.
+    let base = Ydoc::wire();
+    base.apply(&cached.encode_full_state())?;
+    validate_remote_update_with_pending_base(&base, pending, bytes)
+}
+
+fn validate_remote_update_with_pending_base(
+    base: &Ydoc,
+    pending: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<(), CollabError> {
     for queued in pending {
         base.apply(queued)?;
     }
-    crate::validate_replay_parity(&base, bytes)
+    crate::validate_replay_parity(base, bytes)
 }
 
 /// The content sha the lineage last durably settled (public read for the

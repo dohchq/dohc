@@ -14,11 +14,13 @@
 //! seq. A hit requires the whole tuple to match inside the caller's WRITE
 //! transaction; any mismatch is a miss and the caller reconstructs as before.
 //!
-//! ## Containment (PR1)
+//! ## Containment
 //!
-//! The cache serves ONLY the parity-gate base on the local append path.
-//! Forced compaction, close, `claim_base`, origination, and successor encodes
-//! always fully reconstruct. Durable BYTES are never derived from the cache.
+//! The cache serves the local parity-gate base and read-only PR3 consumers:
+//! settle projection, resync, deferred-update validation, and final drain
+//! projection. Forced compaction, close, `claim_base`, origination, lineage
+//! successor, and ordinary remote apply always fully reconstruct. Durable
+//! lineage bytes are never derived from the cache.
 //! The cache is never mutated inside a transaction: `base_for_gate` takes
 //! `&self`; advancement happens only after `TxnOutcome::Committed`.
 //!
@@ -220,6 +222,30 @@ impl WriterDocCache {
         key: &DocKey,
         marker: &Marker,
     ) -> Result<Option<&Ydoc>, CollabError> {
+        self.validated_entry(conn, key, marker)
+    }
+
+    /// Serve a read-only PR3 consumer after validating the entry against the
+    /// current durable replay tuple. A miss leaves reconstruction to the
+    /// caller, preserving each consumer's existing absence/error semantics.
+    pub fn doc_for_consumer(
+        &self,
+        conn: &Connection,
+        key: &DocKey,
+    ) -> Result<Option<&Ydoc>, CollabError> {
+        let Some(marker) = query_marker(conn, key)? else {
+            self.misses.set(self.misses.get() + 1);
+            return Ok(None);
+        };
+        self.validated_entry(conn, key, &marker)
+    }
+
+    fn validated_entry(
+        &self,
+        conn: &Connection,
+        key: &DocKey,
+        marker: &Marker,
+    ) -> Result<Option<&Ydoc>, CollabError> {
         let Some(entry) = self.entries.get(key) else {
             self.misses.set(self.misses.get() + 1);
             return Ok(None);
@@ -254,6 +280,47 @@ impl WriterDocCache {
         self.hits.set(self.hits.get() + 1);
         self.touch(entry);
         Ok(Some(&entry.doc))
+    }
+
+    /// Advance a resident entry after a deferred remote delta committed.
+    ///
+    /// This does not serve the remote replay gate (that remains PR4 scope).
+    /// It only keeps the already-validated cached document aligned so the
+    /// drain's final read-only projection can reuse it. The post-commit marker
+    /// tuple must prove that exactly this one row advanced the lineage; a fold,
+    /// reset, crash-after-commit, or any surprising side effect evicts.
+    pub fn finish_deferred_remote_append(
+        &mut self,
+        store: &EngineStore,
+        key: &DocKey,
+        outcome: &TxnOutcome<crate::replication::ReplicationApplyOutcome>,
+        update: &[u8],
+    ) {
+        use crate::replication::ReplicationApplyOutcome;
+
+        match outcome {
+            TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
+            TxnOutcome::Committed(ReplicationApplyOutcome::Applied { seq, .. }) => {
+                let Some(observed) = self.entries.get(key).map(|entry| entry.tuple.clone()) else {
+                    return;
+                };
+                let current = store
+                    .read_with(|conn| CacheTuple::read_current(conn, key))
+                    .ok()
+                    .flatten();
+                let update_sha = crate::hex_sha256(update);
+                let mut expected = observed.clone();
+                expected.head_update_seq = *seq;
+                expected.head_row_sha = Some(update_sha);
+                if *seq == observed.head_update_seq + 1 && current.as_ref() == Some(&expected) {
+                    self.advance_committed(key, update, expected);
+                } else {
+                    self.remove(key);
+                }
+            }
+            TxnOutcome::Crashed { committed: true } => self.remove(key),
+            TxnOutcome::Crashed { committed: false } => {}
+        }
     }
 
     /// Advance or install the entry for one COMMITTED, genuinely-new local

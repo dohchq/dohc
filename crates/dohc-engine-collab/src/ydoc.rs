@@ -33,9 +33,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use yrs::encoding::write::Write as _;
 use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
-use yrs::updates::encoder::Encode;
+use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
     Any, Array, Doc, GetString, IdSet, Map, Options, Out, ReadTxn, StateVector, Text, Transact,
     Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
@@ -489,10 +490,17 @@ impl Ydoc {
         txn.encode_state_as_update_v1(&StateVector::default())
     }
 
-    /// The state vector, v1-encoded — the provenance/diff primitive.
+    /// The state vector, v1-encoded in ascending client-id order — the
+    /// provenance/diff primitive.
+    ///
+    /// `yrs::StateVector::encode_v1` iterates its HashMap directly. Two Y.Docs
+    /// with identical state can therefore emit different bytes, which made
+    /// projection and lineage provenance hashes depend on the reconstructed
+    /// instance. The wire format is order-insensitive, so sort the entries
+    /// before encoding them.
     pub fn encode_state_vector(&self) -> Vec<u8> {
         let txn = self.doc.transact();
-        txn.state_vector().encode_v1()
+        encode_state_vector_canonical(&txn.state_vector())
     }
 
     /// The v1 update carrying everything this doc has that `remote_sv` lacks
@@ -842,6 +850,22 @@ impl Ydoc {
         }
         self.doc.transact().encode_state_as_update_v1(&before)
     }
+}
+
+fn encode_state_vector_canonical(state_vector: &StateVector) -> Vec<u8> {
+    let mut entries: Vec<_> = state_vector
+        .iter()
+        .map(|(client, clock)| (client.get(), *clock))
+        .collect();
+    entries.sort_unstable_by_key(|(client, _)| *client);
+
+    let mut encoder = EncoderV1::new();
+    encoder.write_var(entries.len());
+    for (client, clock) in entries {
+        encoder.write_var(client);
+        encoder.write_var(clock);
+    }
+    encoder.to_vec()
 }
 
 /// One block of the conflict-resolution fold's markdown parse — the subset
@@ -3773,6 +3797,41 @@ mod projection_tests {
                 .project(ContentKind::Scene)
                 .expect("scene projection")
                 .content
+        );
+    }
+
+    #[test]
+    fn state_vector_provenance_is_canonical_across_hashmap_insertion_order() {
+        // ClientHasher hashes to the raw client id; 1 and 9 collide in the
+        // initial table, making opposite insertion order a stable regression
+        // case for the old HashMap-iteration encoding.
+        let client_one = Ydoc::with_client_id(1);
+        let update_one = client_one.plaintext_insert(0, "one");
+        let client_nine = Ydoc::with_client_id(9);
+        let update_nine = client_nine.plaintext_insert(0, "nine");
+
+        let forward = Ydoc::wire();
+        forward.apply(&update_one).expect("client one update");
+        forward.apply(&update_nine).expect("client nine update");
+        let reverse = Ydoc::wire();
+        reverse.apply(&update_nine).expect("client nine update");
+        reverse.apply(&update_one).expect("client one update");
+
+        assert_eq!(forward.state_vector(), reverse.state_vector());
+        assert_eq!(forward.encode_state_vector(), reverse.encode_state_vector());
+        assert_eq!(
+            StateVector::decode_v1(&forward.encode_state_vector()).expect("canonical state vector"),
+            forward.state_vector(),
+        );
+        assert_eq!(
+            forward
+                .project(ContentKind::Plaintext)
+                .expect("forward projection")
+                .source_state_vector_sha256,
+            reverse
+                .project(ContentKind::Plaintext)
+                .expect("reverse projection")
+                .source_state_vector_sha256,
         );
     }
 

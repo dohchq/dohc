@@ -1117,6 +1117,32 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
     ) -> Result<SyncPassOutcome, RelayError> {
+        self.pull_chat_workspace_inner(store, None, workspace_id, faults, leases, now_ms)
+    }
+
+    /// Actor pull path carrying the single-writer document cache to routed
+    /// PR3 consumers.
+    pub fn pull_chat_workspace_with_cache(
+        &self,
+        store: &mut EngineStore,
+        cache: &mut dohc_engine_collab::WriterDocCache,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+    ) -> Result<SyncPassOutcome, RelayError> {
+        self.pull_chat_workspace_inner(store, Some(cache), workspace_id, faults, leases, now_ms)
+    }
+
+    fn pull_chat_workspace_inner(
+        &self,
+        store: &mut EngineStore,
+        mut cache: Option<&mut dohc_engine_collab::WriterDocCache>,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+    ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -1177,7 +1203,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut retryable = Vec::new();
         let mut deferred_origins = BTreeSet::new();
         for op in &ordered {
-            match crate::apply_replication_envelope(store, op, faults, leases) {
+            let routed = if let Some(cache) = cache.as_deref_mut() {
+                crate::apply_replication_envelope_with_cache(store, cache, op, faults, leases)
+            } else {
+                crate::apply_replication_envelope(store, op, faults, leases)
+            };
+            match routed {
                 Err(SyncError::RetryableState { .. }) => {
                     deferred_origins.insert(op.origin_id.clone());
                     retryable.push(op);
@@ -1205,7 +1236,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut still_deferred_origins = BTreeSet::new();
             let mut made_progress = false;
             for op in retryable {
-                match crate::apply_replication_envelope(store, op, faults, leases) {
+                let routed = if let Some(cache) = cache.as_deref_mut() {
+                    crate::apply_replication_envelope_with_cache(store, cache, op, faults, leases)
+                } else {
+                    crate::apply_replication_envelope(store, op, faults, leases)
+                };
+                match routed {
                     Err(SyncError::RetryableState { .. }) => {
                         still_deferred_origins.insert(op.origin_id.clone());
                         still_retryable.push(op);
