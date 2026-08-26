@@ -1483,10 +1483,10 @@ export function DesktopWorkspaceShell(props: {
   onSwitchWorkspace: (workspace: Workspace) => void;
 }) {
   const [files, setFiles] = useState<WorkspaceFileEntry[]>([]);
-  // An empty workspace also lists zero files, so "loaded" needs its own flag —
-  // the restored-tab reconciliation below must never run against a listing
-  // that has not happened yet.
-  const [filesLoaded, setFilesLoaded] = useState(false);
+  // An empty workspace also lists zero files, so freshness needs its own flag.
+  // A completed main-process cache hit can paint the explorer immediately,
+  // but restored-tab reconciliation must wait for an independent disk walk.
+  const [filesRevalidated, setFilesRevalidated] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
   // Main's single answer to "does anything record here" (#542): when the
   // open-time decision produced no recorder — opt-out, unreadable settings,
@@ -2350,11 +2350,14 @@ export function DesktopWorkspaceShell(props: {
           workspaceId,
           ...options,
         });
-        if (request <= committedFilesRequest.current) return;
+        if (request <= committedFilesRequest.current) {
+          return result.cached === true;
+        }
         committedFilesRequest.current = request;
         setFiles(result.files);
         setFolders(result.folders ?? []);
-        setFilesLoaded(true);
+        setFilesRevalidated(result.cached !== true);
+        return result.cached === true;
       } catch (error) {
         if (request > failedFilesRequest.current) {
           failedFilesRequest.current = request;
@@ -2386,7 +2389,7 @@ export function DesktopWorkspaceShell(props: {
   // that beats the ui-state load finds nothing restored yet, and the restore
   // is what has to re-run the check.
   useEffect(() => {
-    if (!filesLoaded || restoredTabPaths.size === 0) return;
+    if (!filesRevalidated || restoredTabPaths.size === 0) return;
     // Closing a tab is destructive, so it waits until no listing is in
     // flight. The watermark above deliberately lets an older success fill the
     // display — right for the explorer, wrong for closing tabs, because a
@@ -2437,7 +2440,7 @@ export function DesktopWorkspaceShell(props: {
     setWb((state) => pruneMissingRestoredTabs(state, closable, fileExists));
   }, [
     presentPaths,
-    filesLoaded,
+    filesRevalidated,
     listingsSettled,
     restoredTabPaths,
     dirtyPaths,
@@ -4525,7 +4528,11 @@ export function DesktopWorkspaceShell(props: {
           workspaceId,
           selectionGeneration: workspaceSelectionGeneration,
         });
-        await refreshFiles();
+        const paintedCachedListing = await refreshFiles({ allowCached: true });
+        if (cancelled || !paintedCachedListing) return;
+        void refreshFiles().catch((error) =>
+          reportShellError("Could not refresh workspace files.", error),
+        );
       } catch (error) {
         if (!cancelled) reportShellError("Could not open this workspace.", error);
       }

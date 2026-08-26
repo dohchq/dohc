@@ -9,6 +9,10 @@ function listing(path: string): ListWorkspaceFilesResult {
   return { files: [{ path, kind: "file" }], folders: [] };
 }
 
+function cachedListing(path: string): ListWorkspaceFilesResult {
+  return { ...listing(path), cached: true };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -40,7 +44,7 @@ describe("WorkspaceFileListingCache", () => {
         allowCached: true,
         load: vi.fn(async () => listing("unused.md")),
       }),
-    ).resolves.toEqual(listing("old.md"));
+    ).resolves.toEqual(cachedListing("old.md"));
     await expect(
       cache.list({
         workspaceId: "ws-a",
@@ -56,7 +60,7 @@ describe("WorkspaceFileListingCache", () => {
         allowCached: true,
         load: vi.fn(async () => listing("unused-again.md")),
       }),
-    ).resolves.toEqual(listing("new.md"));
+    ).resolves.toEqual(cachedListing("new.md"));
 
     expect(firstLoad).toHaveBeenCalledOnce();
     expect(forcedLoad).toHaveBeenCalledOnce();
@@ -114,7 +118,7 @@ describe("WorkspaceFileListingCache", () => {
         allowCached: true,
         load: unexpectedReload,
       }),
-    ).resolves.toEqual(listing("new-root.md"));
+    ).resolves.toEqual(cachedListing("new-root.md"));
     expect(replacementLoad).toHaveBeenCalledOnce();
     expect(unexpectedReload).not.toHaveBeenCalled();
   });
@@ -148,6 +152,14 @@ describe("WorkspaceFileListingCache", () => {
     await expect(firstA).resolves.toEqual(listing("a.md"));
     await expect(secondA).resolves.toEqual(listing("a.md"));
     await expect(firstB).resolves.toEqual(listing("b.md"));
+    await expect(
+      cache.list({
+        workspaceId: "ws-a",
+        attachmentId: ATTACHMENT_A,
+        allowCached: true,
+        load: vi.fn(async () => listing("unused.md")),
+      }),
+    ).resolves.toEqual(cachedListing("a.md"));
     expect(loadA).toHaveBeenCalledOnce();
     expect(loadB).toHaveBeenCalledOnce();
   });
@@ -180,7 +192,7 @@ describe("WorkspaceFileListingCache", () => {
       workspaceId: "ws-a",
       paths: [".dohc/engine/index", "pkg/node_modules/x.js"],
     });
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-2.md"));
+    await expect(read("ws-a")).resolves.toEqual(cachedListing("ws-a-2.md"));
 
     // MUTATION: treating a mixed set as hidden leaves the file tree stale.
     cache.invalidate({
@@ -227,7 +239,7 @@ describe("WorkspaceFileListingCache", () => {
         allowCached: true,
         load: vi.fn(async () => listing("stale-fill.md")),
       }),
-    ).resolves.toEqual(listing("fresh.md"));
+    ).resolves.toEqual(cachedListing("fresh.md"));
   });
 
   it("retries after a rejected listing", async () => {

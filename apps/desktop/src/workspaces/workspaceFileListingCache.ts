@@ -8,6 +8,7 @@ type ListingPromise = Promise<ListWorkspaceFilesResult>;
 interface ListingEntry {
   attachmentId: symbol;
   listing: ListingPromise;
+  settled: boolean;
 }
 
 // Complete listings only. The cache never constructs a delta: callers either
@@ -28,18 +29,32 @@ export class WorkspaceFileListingCache {
     if (options.allowCached) {
       const cached = this.#listings.get(options.workspaceId);
       if (cached?.attachmentId === options.attachmentId) {
-        return cached.listing;
+        // Do not store the marker in the cached snapshot: it describes this
+        // read, not the listing. An in-flight reuse is still the current walk,
+        // so it stays unmarked and does not cause a redundant revalidation.
+        return cached.settled
+          ? cached.listing.then((listing) => ({ ...listing, cached: true }))
+          : cached.listing;
       }
     }
 
     const listing = Promise.resolve().then(options.load);
-    const entry = { attachmentId: options.attachmentId, listing };
+    const entry = {
+      attachmentId: options.attachmentId,
+      listing,
+      settled: false,
+    };
     this.#listings.set(options.workspaceId, entry);
-    void listing.catch(() => {
-      if (this.#listings.get(options.workspaceId) === entry) {
-        this.#listings.delete(options.workspaceId);
-      }
-    });
+    void listing.then(
+      () => {
+        entry.settled = true;
+      },
+      () => {
+        if (this.#listings.get(options.workspaceId) === entry) {
+          this.#listings.delete(options.workspaceId);
+        }
+      },
+    );
     return listing;
   }
 

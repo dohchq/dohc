@@ -336,6 +336,10 @@ export const ListWorkspaceFilesResult = z.object({
   // appear in the tree. Optional so older fixtures/consumers keep parsing;
   // the main-side walk always provides it.
   folders: z.array(PATH_STRING).optional(),
+  // Hit-only presentation provenance. Absence means this request performed
+  // the owned-workspace walk; a cached answer must be revalidated before the
+  // renderer uses it as evidence that a path is missing.
+  cached: z.literal(true).optional(),
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
