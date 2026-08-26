@@ -1700,6 +1700,28 @@ describe("EngineRelayClient", () => {
     expect(closeWorkspace).not.toHaveBeenCalled();
   });
 
+  it("retires the bootstrap alias after an exact successor opens but its request fails", async () => {
+    const daemon = new MockDaemon((request) => {
+      if (request.method === "sync.push") {
+        throw new Error("injected push failure");
+      }
+      return undefined;
+    });
+    const { rootPath, routes, live, relay, client } = await harness(daemon);
+
+    await client.bootstrapJoinIdentity(null);
+    const workspace = {
+      workspaceId: "workspace-a",
+      rootPath,
+      attachmentId: Symbol("failed-successor-attachment"),
+    };
+    const exact = live.bind({ ...workspace, relay });
+
+    await expect(exact.push()).rejects.toThrow("injected push failure");
+    await live.closeWorkspace(workspace);
+    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+  });
+
   it("rebinds the attachment-keyed session before and after a transport restart", async () => {
     const rootPath = await createTestScratch("dohc-relay-attachment-rebind-");
     roots.push(rootPath);
