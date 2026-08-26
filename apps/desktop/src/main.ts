@@ -5755,21 +5755,12 @@ app.on("will-quit", (event) => {
   ])
     .then(() => workspaceAuthorities.close())
     .catch(() => undefined);
-  const rustEngineStop = workspaceAuthorityStop
+  const workspaceShutdown = workspaceAuthorityStop
     .then(async () => await closeAllRelayTransportWorkspaces())
     .catch(() => undefined)
     .then(async () => await rustEngineDaemon?.stop());
   void Promise.race([
-    Promise.all([
-      agentSessionStop,
-      pluginStop,
-      cliServerStop,
-      chatDispatchStop,
-      searchStop,
-      agentIntegrationStop,
-      workspaceAuthorityStop,
-      rustEngineStop,
-    ]).then(() => undefined),
+    workspaceShutdown,
     new Promise<void>((resolve) => setTimeout(resolve, WILL_QUIT_BUDGET_MS)),
   ]).finally(() => app.exit(0));
 });

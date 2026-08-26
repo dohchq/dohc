@@ -49,7 +49,7 @@ describe("workspace file operation wiring", () => {
       "const workspaceAuthorityStop",
     );
     const authorityStopEnd = willQuitBody.indexOf(
-      "const rustEngineStop",
+      "const workspaceShutdown",
       authorityStopAt,
     );
     expect(authorityStopAt).toBeGreaterThan(engineYDocStopAt);
