@@ -122,4 +122,20 @@ describe("resolveActiveHeadingIndex", () => {
     expect(resolveActiveHeadingIndex([100], 100)).toBe(0);
     expect(resolveActiveHeadingIndex([100], 99)).toBe(0); // still index 0, nothing before it
   });
+
+  it("searches a long cached outline without scanning every heading", () => {
+    let reads = 0;
+    const cachedTops = new Proxy(
+      Array.from({ length: 1_024 }, (_, index) => index * 20),
+      {
+        get(target, property, receiver) {
+          if (typeof property === "string" && /^\d+$/.test(property)) reads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      },
+    );
+
+    expect(resolveActiveHeadingIndex(cachedTops, 15_000, 72)).toBe(753);
+    expect(reads).toBeLessThanOrEqual(11);
+  });
 });

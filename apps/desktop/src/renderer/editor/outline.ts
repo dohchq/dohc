@@ -59,10 +59,14 @@ export function resolveActiveHeadingIndex(
   readingOffset = 0,
 ): number {
   if (tops.length === 0) return -1;
-  let active = 0;
-  for (let i = 0; i < tops.length; i += 1) {
-    if (tops[i] <= scrollTop + readingOffset) active = i;
-    else break;
+  const threshold = scrollTop + readingOffset;
+  // Upper-bound search: `low` finishes one past the last reached heading.
+  let low = 0;
+  let high = tops.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (tops[middle]! <= threshold) low = middle + 1;
+    else high = middle;
   }
-  return active;
+  return Math.max(0, low - 1);
 }
