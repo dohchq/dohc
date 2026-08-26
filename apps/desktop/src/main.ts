@@ -3550,8 +3550,7 @@ async function syncWorkspaceForDispatch(
       const workspace = canonicalWorkspaceFor(lease);
       if (sharedViewOf(workspaceId)) return false;
       try {
-        return await withEngineStoreRecoveredForAuthority(lease,
-          async () => {
+        return await withEngineStoreRecoveredForAuthority(lease, async () => {
           lease.assertCurrent();
           if (activity.listOpenWorkspaceIds().includes(workspaceId)) {
             if (
@@ -3562,48 +3561,48 @@ async function syncWorkspaceForDispatch(
               );
             }
             activity.queueCloudSync(workspaceId);
-              return (
+            return (
               activity.engineCaptureFor(workspaceId, workspace.rootPath) !== null
             );
-            }
-            const { capture } = await captureForFlaggedWorkspace(
-              {
-                ...workspace,
-                // Guarded above: a shared view already returned false.
-                shareView: false,
-              },
-              {
-                activeAgentRun: () => null,
-                onCaptureOutcome: () => undefined,
-              },
-              requireEngineSessions(),
-            );
-            if (!capture) return false;
+          }
+          const { capture } = await captureForFlaggedWorkspace(
+            {
+              ...workspace,
+              // Guarded above: a shared view already returned false.
+              shareView: false,
+            },
+            {
+              activeAgentRun: () => null,
+              onCaptureOutcome: () => undefined,
+            },
+            requireEngineSessions(),
+          );
+          if (!capture) return false;
+          try {
+            const engine = engineForWorkspace(workspace, capture);
+            if (!engine) return false;
             try {
-              const engine = engineForWorkspace(workspace, capture);
-              if (!engine) return false;
-              try {
-                await engine.start();
+              await engine.start();
               lease.assertCurrent();
               return true;
-              } finally {
-                await engine.stop().catch(() => undefined);
-                const relayCloseTarget = workspace.remote
-                  ? workspaceSessionTargetForPhysicalWorkspace(
-                      workspace.workspaceId,
-                      workspace,
-                    )
-                  : null;
-                if (relayCloseTarget) {
-                  await closeRelayTransportWorkspace(relayCloseTarget).catch(
-                    () => undefined,
-                  );
-                }
-              }
             } finally {
-              await capture.stop().catch(() => undefined);
+              await engine.stop().catch(() => undefined);
+              const relayCloseTarget = workspace.remote
+                ? workspaceSessionTargetForPhysicalWorkspace(
+                    workspace.workspaceId,
+                    workspace,
+                  )
+                : null;
+              if (relayCloseTarget) {
+                await closeRelayTransportWorkspace(relayCloseTarget).catch(
+                  () => undefined,
+                );
+              }
             }
-          });
+          } finally {
+            await capture.stop().catch(() => undefined);
+          }
+        });
       } catch (error) {
         if (!(error instanceof EngineStoreRecoveryFailedError)) throw error;
         // The dispatch pump stops on false. A thrown sync error is logged, then
@@ -3620,8 +3619,7 @@ async function syncWorkspaceForDispatch(
         lease.state.dispatchSync = null;
       }
     }
-    },
-  );
+  });
 }
 
 interface WorkspaceActivityOpenOptions {
@@ -3676,8 +3674,8 @@ async function ensureWorkspaceActivityOpen(
   options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
   return workspaceAuthorities.withAuthority(workspace.workspaceId, (lease) =>
-    withEngineStoreRecoveredForAuthority(lease,
-    () => ensureWorkspaceActivityOpenBody(lease, options),
+    withEngineStoreRecoveredForAuthority(lease, () =>
+      ensureWorkspaceActivityOpenBody(lease, options),
     ),
   );
 }
@@ -3690,15 +3688,17 @@ async function ensureWorkspaceActivityOpenUnderEngineStoreLock(
     const canonicalWorkspace = canonicalWorkspaceFor(lease);
     return withEngineStoreRecoveredUnderEngineStoreLock(
       canonicalWorkspace,
-    () => ensureWorkspaceActivityOpenBody(lease, options),
-    async (rootPath) => {
-      await completePendingEngineStoreMoveForWorkspace(
-          canonicalWorkspace, rootPath);
+      () => ensureWorkspaceActivityOpenBody(lease, options),
+      async (rootPath) => {
+        await completePendingEngineStoreMoveForWorkspace(
+          canonicalWorkspace,
+          rootPath,
+        );
         lease.assertCurrent();
         options.afterReopenRecoverySettled?.();
-    },
-  );
-});
+      },
+    );
+  });
 }
 
 async function closeDispatchRunActivity(
@@ -3709,39 +3709,42 @@ async function closeDispatchRunActivity(
     workspace,
     async (lease) => {
       const existing = lease.state.activityClosing;
-  if (existing) return await existing;
+      if (existing) return await existing;
       const current = canonicalWorkspaceFor(lease);
-  const relayCloseTarget = current.remote
-    ? workspaceSessionTargetForPhysicalWorkspace(current.workspaceId, current)
-    : null;
-  const closing = closeWorkspaceActivityAndRelay({
-    closeActivity: async () => {
+      const relayCloseTarget = current.remote
+        ? workspaceSessionTargetForPhysicalWorkspace(
+            current.workspaceId,
+            current,
+          )
+        : null;
+      const closing = closeWorkspaceActivityAndRelay({
+        closeActivity: async () => {
           await activity.close(current.workspaceId, {
             expectedRootPath: current.rootPath,
             preserveStatus: true,
-        notify: options.notifyRenderer,
-      });
+            notify: options.notifyRenderer,
+          });
         },
-    ...(relayCloseTarget
-      ? {
-          closeRelay: () => closeRelayTransportWorkspace(relayCloseTarget),
-        }
-      : {}),
-    onRelayCloseError: (error) =>
-      console.error(
-        `[desktop] relay workspace close failed for ${current.workspaceId}:`,
-        error,
-      ),
-  });
+        ...(relayCloseTarget
+          ? {
+              closeRelay: () => closeRelayTransportWorkspace(relayCloseTarget),
+            }
+          : {}),
+        onRelayCloseError: (error) =>
+          console.error(
+            `[desktop] relay workspace close failed for ${current.workspaceId}:`,
+            error,
+          ),
+      });
       lease.state.activityClosing = closing;
-  try {
-    await closing;
+      try {
+        await closing;
         lease.assertCurrent();
       } finally {
-    if (lease.state.activityClosing === closing) {
+        if (lease.state.activityClosing === closing) {
           lease.state.activityClosing = null;
-    }
-  }
+        }
+      }
     },
   );
 }
