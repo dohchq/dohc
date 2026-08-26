@@ -75,9 +75,15 @@ const pluginWebAppOpenedListeners = new Set<
   (event: PluginWebAppOpenedEvent) => void
 >();
 
+// One unforgeable identity per preload/document lifetime. Main uses it to
+// reject IPC that the outgoing document queued while renderer reload cleanup
+// was draining on the same WebContents object.
+const rendererDocumentId = crypto.randomUUID();
+
 const bridge: DohcDesktopBridge = {
   platform: process.platform,
-  reloadRenderer: () => ipcRenderer.invoke(CHANNELS.reloadRenderer),
+  reloadRenderer: () =>
+    ipcRenderer.invoke(CHANNELS.reloadRenderer, { rendererDocumentId }),
   pickWorkspaceRoot: () => ipcRenderer.invoke(CHANNELS.pickWorkspaceRoot),
   getWorkspaceRegistry: () => ipcRenderer.invoke(CHANNELS.getWorkspaceRegistry),
   getDefaultWorkspaceRoot: () =>
@@ -340,7 +346,11 @@ const bridge: DohcDesktopBridge = {
   mountShare: (payload) => ipcRenderer.invoke(CHANNELS.mountShare, payload),
   refreshShareMounts: (payload) => ipcRenderer.invoke(CHANNELS.refreshShareMounts, payload),
   unmountShare: (payload) => ipcRenderer.invoke(CHANNELS.unmountShare, payload),
-  openWorkspace: (payload) => ipcRenderer.invoke(CHANNELS.openWorkspace, payload),
+  openWorkspace: (payload) =>
+    ipcRenderer.invoke(CHANNELS.openWorkspace, {
+      ...payload,
+      rendererDocumentId,
+    }),
   listWorkspaceVersions: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceVersions, payload),
   createWorkspaceVersion: (payload) =>

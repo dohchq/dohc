@@ -64,9 +64,9 @@ import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity-value
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import type {
-  PresenceScope,
   PresenceTransport,
 } from "../collab/presenceChannel";
+import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 import {
   CHAT_AGENT_PRESENCE_TOPIC,
   agentPresenceClientId,
@@ -85,7 +85,7 @@ import {
 // scope). See the scope/topic derivation in ChatsView below. Still null when
 // solo/offline — the transport factory is simply never called.
 export interface ChatPresenceCollaboration {
-  transportForScope: (scope: PresenceScope) => PresenceTransport;
+  transportForScope: (scope: PresenceScopeInput) => PresenceTransport;
   clientId: string;
   displayName: string;
 }
@@ -4055,7 +4055,11 @@ export function ChatsView(props: {
   const presenceTransport = useMemo(() => {
     if (!collaboration) return null;
     if (!scopeShareId) return workspacePresenceTransport;
-    const scope: PresenceScope = { kind: "share", shareId: scopeShareId };
+    const scope: PresenceScopeInput = {
+      kind: "share",
+      workspaceId,
+      shareId: scopeShareId,
+    };
     return collaboration.transportForScope(scope);
   }, [collaboration, scopeShareId, workspacePresenceTransport]);
   // Presence stays dormant until the scope is DEFINITIVELY resolved for the

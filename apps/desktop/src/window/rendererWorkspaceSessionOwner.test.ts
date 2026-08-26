@@ -57,14 +57,28 @@ describe("RendererWorkspaceSessionOwner", () => {
     const sessions = owner({ retireSender, retireWorkspace });
     const renderer = sender(7);
 
-    const first = await sessions.open(renderer.value, "workspace-a");
-    const second = await sessions.open(renderer.value, "workspace-a");
+    const first = await sessions.open(renderer.value, "workspace-a", "document-1");
+    const second = await sessions.open(renderer.value, "workspace-a", "document-1");
 
     expect(second).toBe(first);
     expect(second.isCurrent()).toBe(true);
     expect(retireSender).not.toHaveBeenCalled();
     expect(retireWorkspace).not.toHaveBeenCalled();
     expect(renderer.destroyedListenerCount()).toBe(1);
+  });
+
+  it("closes reload admission before the document has opened a workspace", async () => {
+    const sessions = owner();
+    const renderer = sender(7);
+
+    await sessions.retireForReload(renderer.value, "document-1");
+
+    await expect(
+      sessions.open(renderer.value, "workspace-a", "document-1"),
+    ).rejects.toBeInstanceOf(RendererWorkspaceOpenSupersededError);
+    await expect(
+      sessions.open(renderer.value, "workspace-a", "document-2"),
+    ).resolves.toMatchObject({ rendererDocumentId: "document-2" });
   });
 
   it("revokes admission synchronously before reload cleanup drains", async () => {
@@ -74,7 +88,7 @@ describe("RendererWorkspaceSessionOwner", () => {
     const retireWorkspace = vi.fn(() => workspaceDrain.promise);
     const sessions = owner({ retireSender, retireWorkspace });
     const renderer = sender(7);
-    const first = await sessions.open(renderer.value, "workspace-a");
+    const first = await sessions.open(renderer.value, "workspace-a", "document-1");
 
     const reload = sessions.retireForReload(renderer.value);
 
@@ -83,12 +97,20 @@ describe("RendererWorkspaceSessionOwner", () => {
     expect(retireSender).toHaveBeenCalledWith(first);
     expect(retireWorkspace).not.toHaveBeenCalled();
 
-    const replacement = sessions.open(renderer.value, "workspace-a");
+    const staleOpen = sessions
+      .open(renderer.value, "workspace-b", "document-1")
+      .catch((error: unknown) => error);
+    const replacement = sessions.open(
+      renderer.value,
+      "workspace-a",
+      "document-2",
+    );
     let replaced = false;
     void replacement.then(() => {
       replaced = true;
     });
     await Promise.resolve();
+    expect(await staleOpen).toBeInstanceOf(RendererWorkspaceOpenSupersededError);
     expect(replaced).toBe(false);
 
     senderDrain.resolve();
@@ -110,12 +132,12 @@ describe("RendererWorkspaceSessionOwner", () => {
       retireWorkspace: () => workspaceDrain.promise,
     });
     const renderer = sender(7);
-    const first = await sessions.open(renderer.value, "workspace-a");
+    const first = await sessions.open(renderer.value, "workspace-a", "document-1");
 
     const openB = sessions
-      .open(renderer.value, "workspace-b")
+      .open(renderer.value, "workspace-b", "document-1")
       .catch((error: unknown) => error);
-    const openA = sessions.open(renderer.value, "workspace-a");
+    const openA = sessions.open(renderer.value, "workspace-a", "document-1");
 
     expect(first.isCurrent()).toBe(false);
     expect(sessions.current(renderer.value)).toBeUndefined();
@@ -135,8 +157,8 @@ describe("RendererWorkspaceSessionOwner", () => {
     const sessions = owner({ retireWorkspace });
     const first = sender(1);
     const second = sender(2);
-    await sessions.open(first.value, "workspace-a");
-    await sessions.open(second.value, "workspace-a");
+    await sessions.open(first.value, "workspace-a", "document-1");
+    await sessions.open(second.value, "workspace-a", "document-2");
 
     await sessions.retireForReload(first.value);
     expect(retireWorkspace).not.toHaveBeenCalled();
@@ -153,11 +175,11 @@ describe("RendererWorkspaceSessionOwner", () => {
     const sessions = owner({ retireWorkspace });
     const first = sender(1);
     const second = sender(2);
-    await sessions.open(first.value, "workspace-a");
+    await sessions.open(first.value, "workspace-a", "document-1");
 
     const reload = sessions.retireForReload(first.value);
     await vi.waitFor(() => expect(retireWorkspace).toHaveBeenCalledOnce());
-    const reopening = sessions.open(second.value, "workspace-a");
+    const reopening = sessions.open(second.value, "workspace-a", "document-2");
     let opened = false;
     void reopening.then(() => {
       opened = true;
@@ -180,11 +202,16 @@ describe("RendererWorkspaceSessionOwner", () => {
     });
     const oldRenderer = sender(7);
     const replacementRenderer = sender(7);
-    const oldSession = await sessions.open(oldRenderer.value, "workspace-a");
+    const oldSession = await sessions.open(
+      oldRenderer.value,
+      "workspace-a",
+      "document-1",
+    );
 
     const replacementOpen = sessions.open(
       replacementRenderer.value,
       "workspace-b",
+      "document-2",
     );
     expect(oldSession.isCurrent()).toBe(false);
     expect(sessions.current(replacementRenderer.value)).toBeUndefined();
@@ -206,7 +233,7 @@ describe("RendererWorkspaceSessionOwner", () => {
     const retireSender = vi.fn(() => senderDrain.promise);
     const sessions = owner({ retireSender });
     const renderer = sender(7);
-    await sessions.open(renderer.value, "workspace-a");
+    await sessions.open(renderer.value, "workspace-a", "document-1");
 
     const reload = sessions.retireForReload(renderer.value);
     renderer.destroy();
@@ -224,13 +251,13 @@ describe("RendererWorkspaceSessionOwner", () => {
     destroyedRenderer.destroy();
 
     await expect(
-      sessions.open(destroyedRenderer.value, "workspace-a"),
+      sessions.open(destroyedRenderer.value, "workspace-a", "document-1"),
     ).rejects.toBeInstanceOf(RendererWorkspaceOpenSupersededError);
     expect(destroyedRenderer.destroyedListenerCount()).toBe(0);
 
     const replacement = sender(7);
     await expect(
-      sessions.open(replacement.value, "workspace-b"),
+      sessions.open(replacement.value, "workspace-b", "document-2"),
     ).resolves.toMatchObject({ workspaceId: "workspace-b" });
   });
 
@@ -246,7 +273,7 @@ describe("RendererWorkspaceSessionOwner", () => {
       onCleanupError,
     });
     const renderer = sender(7);
-    await sessions.open(renderer.value, "workspace-a");
+    await sessions.open(renderer.value, "workspace-a", "document-1");
 
     await sessions.retireForReload(renderer.value);
 

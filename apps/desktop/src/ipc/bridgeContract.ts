@@ -510,6 +510,16 @@ export const OpenWorkspacePayload = z.object({
 });
 export type OpenWorkspacePayload = z.infer<typeof OpenWorkspacePayload>;
 
+// Preload adds one identity for its renderer document. It is intentionally not
+// part of DohcDesktopBridge: renderer code cannot choose or reuse it across a
+// reload, while main can distinguish a late invoke from the outgoing document.
+export const OpenWorkspaceRequestPayload = OpenWorkspacePayload.extend({
+  rendererDocumentId: z.uuid(),
+});
+export const ReloadRendererRequestPayload = z.object({
+  rendererDocumentId: z.uuid(),
+});
+
 export const ReadWorkspaceTextPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
@@ -1764,7 +1774,11 @@ export type StartDmResult = z.infer<typeof StartDmResult>;
 // the bearer independently.
 export const PresenceScopeInput = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: WORKSPACE_ID }),
-  z.object({ kind: z.literal("share"), shareId: z.string().min(1).max(200) }),
+  z.object({
+    kind: z.literal("share"),
+    workspaceId: WORKSPACE_ID,
+    shareId: z.string().min(1).max(200),
+  }),
 ]);
 export type PresenceScopeInput = z.infer<typeof PresenceScopeInput>;
 

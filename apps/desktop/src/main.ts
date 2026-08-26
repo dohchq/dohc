@@ -187,7 +187,8 @@ import {
   ChatThreadRecord,
   ChatMessageRecord,
   OpenFileExternallyPayload,
-  OpenWorkspacePayload,
+  OpenWorkspaceRequestPayload,
+  ReloadRendererRequestPayload,
   AgentRunPayload,
   EndAgentRunPayload,
   StartAgentRunResult,
@@ -263,6 +264,7 @@ import {
   type PresenceScope as RelayPresenceScope,
 } from "./renderer/collab/presenceChannel";
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
+import { PresenceMutationOwner } from "./collab/presenceMutationOwner";
 import { createDesktopRendererWorkspaceRetirement } from "./mainRendererWorkspaceRetirement";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 import { desktopMarks } from "./performance/desktopMarks";
@@ -1714,14 +1716,23 @@ const PRESENCE_POLL_SAFETY_MS = 35_000;
 // be cancelled/superseded by its own window, and bounded so a renderer can't
 // open unbounded relay long-polls / controllers / timers.
 const presencePollRegistry = createPresencePollRegistry();
+const presenceMutationOwner = new PresenceMutationOwner<WebContents>();
 // A stable ownership key so one window holds at most ONE poll per (scope, topic):
 // a new poll for the same key supersedes (aborts) the prior long-poll.
 function presenceScopeTopicKey(scope: PresenceScopeInput, topic: string): string {
   return JSON.stringify(
     scope.kind === "workspace"
       ? ["w", scope.workspaceId, topic]
-      : ["s", scope.shareId, topic],
+      : ["s", scope.workspaceId, scope.shareId, topic],
   );
+}
+
+function presenceMutationKey(
+  scope: PresenceScopeInput,
+  topic: string,
+  clientId: string,
+): string {
+  return JSON.stringify([presenceScopeTopicKey(scope, topic), clientId]);
 }
 async function presenceRelayTransportForScope(
   scope: PresenceScopeInput,
@@ -1744,11 +1755,9 @@ async function presenceRelayTransportForScope(
       workspaceId: remote.remoteWorkspaceId,
     };
   } else {
-    const joined = listWorkspaces().some((entry) =>
-      (entry.sharedChannels ?? []).some(
-        (channel) =>
-          channel.shareId === scope.shareId && channel.ended !== true,
-      ),
+    const joined = (findWorkspace(scope.workspaceId)?.sharedChannels ?? []).some(
+      (channel) =>
+        channel.shareId === scope.shareId && channel.ended !== true,
     );
     if (!joined) return null;
     relayScope = { kind: "share", shareId: scope.shareId };
@@ -3557,7 +3566,10 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
   },
 });
 
-async function prepareForRendererReload(sender: WebContents): Promise<void> {
+async function prepareForRendererReload(
+  sender: WebContents,
+  rendererDocumentId?: string,
+): Promise<void> {
   // `openWorkspace` records the active workspace before awaiting watcher
   // startup. Re-prioritize that sender's workspace so its replacement renderer
   // boots back into the same place, while closing every main-owned resource
@@ -3568,7 +3580,7 @@ async function prepareForRendererReload(sender: WebContents): Promise<void> {
   if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
   // retireForReload invalidates the lease before returning its promise. The
   // outgoing document cannot admit fresh work while these owners drain.
-  await rendererWorkspaceSessions.retireForReload(sender);
+  await rendererWorkspaceSessions.retireForReload(sender, rendererDocumentId);
 }
 
 // Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
@@ -4045,6 +4057,7 @@ const rendererWorkspaceSessions: RendererWorkspaceSessionOwner<WebContents> =
       pluginRuntimes: pluginWorkspaceRuntimes,
       workspaceSearch: workspaceSearchOwner,
       presencePolls: presencePollRegistry,
+      presenceMutations: presenceMutationOwner,
       onCleanupError: (owner, scope, error) => {
         const identity =
           scope.kind === "sender"
@@ -4608,10 +4621,11 @@ function registerIpcHandlers(
   deps: { now?: () => number; createId?: () => string } = {},
 ): void {
   const now = deps.now ?? (() => Date.now());
-  ipcMain.handle(CHANNELS.reloadRenderer, async (event) => {
+  ipcMain.handle(CHANNELS.reloadRenderer, async (event, payload) => {
     assertTrustedSender(event);
+    const input = ReloadRendererRequestPayload.parse(payload);
     const sender = event.sender;
-    await prepareForRendererReload(sender);
+    await prepareForRendererReload(sender, input.rendererDocumentId);
     if (!sender.isDestroyed()) sender.reload();
   });
 
@@ -6749,11 +6763,12 @@ function registerIpcHandlers(
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
     assertTrustedSender(event);
-    const input = OpenWorkspacePayload.parse(payload);
+    const input = OpenWorkspaceRequestPayload.parse(payload);
     const workspace = requireWorkspace(input.workspaceId);
     const rendererSession = await rendererWorkspaceSessions.open(
       event.sender,
       workspace.workspaceId,
+      input.rendererDocumentId,
     );
     preferredWorkspaceId = workspace.workspaceId;
     refreshNativeWorkspaceSurfaces();
@@ -8970,35 +8985,58 @@ function registerIpcHandlers(
     const rendererSession = rendererWorkspaceSessions.current(event.sender);
     if (
       !rendererSession ||
-      (input.scope.kind === "workspace" &&
-        input.scope.workspaceId !== rendererSession.workspaceId)
+      input.scope.workspaceId !== rendererSession.workspaceId
     ) {
       return PresenceResult.parse({ ok: false, reason: "unavailable" });
     }
-    try {
-      // Scope resolution (warms the credential cache) runs INSIDE the try so a
-      // throw degrades to the dormant "unavailable" result, never a rejected
-      // IPC promise — presence is best-effort.
+    const key = presenceMutationKey(input.scope, input.topic, input.clientId);
+    const resolveLeave = async (): Promise<() => Promise<void>> => {
       const transport = await presenceRelayTransportForScope(input.scope);
-      if (!transport) return PresenceResult.parse({ ok: false, reason: "unavailable" });
-      if (!rendererSession.isCurrent()) {
-        return PresenceResult.parse({ ok: false, reason: "unavailable" });
-      }
+      if (!transport) throw new Error("Presence scope is unavailable");
+      return () =>
+        transport.leave({ topic: input.topic, clientId: input.clientId });
+    };
+    try {
       if (input.leave === true) {
-        await transport.leave({ topic: input.topic, clientId: input.clientId });
-        if (!rendererSession.isCurrent()) {
+        const completed = await presenceMutationOwner.leave(
+          rendererSession,
+          key,
+          resolveLeave,
+        );
+        if (!completed) {
           return PresenceResult.parse({ ok: false, reason: "unavailable" });
         }
         // A leave has no snapshot to echo; report an empty one so the renderer
         // clears without treating it as a failure.
         return PresenceResult.parse({ ok: true, snapshot: { version: 0, peers: [] } });
       }
-      const snapshot = await transport.publish({
-        topic: input.topic,
-        clientId: input.clientId,
-        state: input.state ?? null,
-      });
-      if (!rendererSession.isCurrent()) {
+      // The exact renderer lease owns this mutation BEFORE scope resolution
+      // warms credentials. Retirement serializes its leave behind any request
+      // that may already have landed at the relay.
+      const snapshot = await presenceMutationOwner.publish(
+        rendererSession,
+        key,
+        {
+          resolve: async () => {
+            const transport = await presenceRelayTransportForScope(input.scope);
+            if (!transport) throw new Error("Presence scope is unavailable");
+            return {
+              publish: () =>
+                transport.publish({
+                  topic: input.topic,
+                  clientId: input.clientId,
+                  state: input.state ?? null,
+                }),
+              leave: () =>
+                transport.leave({
+                  topic: input.topic,
+                  clientId: input.clientId,
+                }),
+            };
+          },
+        },
+      );
+      if (!snapshot) {
         return PresenceResult.parse({ ok: false, reason: "unavailable" });
       }
       return PresenceResult.parse({ ok: true, snapshot });
@@ -9015,8 +9053,7 @@ function registerIpcHandlers(
     const rendererSession = rendererWorkspaceSessions.current(event.sender);
     if (
       !rendererSession ||
-      (input.scope.kind === "workspace" &&
-        input.scope.workspaceId !== rendererSession.workspaceId)
+      input.scope.workspaceId !== rendererSession.workspaceId
     ) {
       return PresenceResult.parse({ ok: false, reason: "aborted" });
     }

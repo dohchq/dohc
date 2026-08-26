@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIpcPresenceTransport } from "./ipcPresenceTransport";
-import type { PresenceScope } from "./presenceChannel";
+import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 
 // MU-C5 — the IPC-PROXIED presence transport. It must forward the scope, carry
 // NO relay token, normalize the snapshot, and abort an in-flight poll over IPC
 // (presenceCancel) so a workspace switch can't leak a request or repaint stale.
 
-const SCOPE: PresenceScope = { kind: "workspace", workspaceId: "ws-a" };
+const SCOPE: PresenceScopeInput = { kind: "workspace", workspaceId: "ws-a" };
 
 const bridgeMock = {
   presencePublish: vi.fn(),

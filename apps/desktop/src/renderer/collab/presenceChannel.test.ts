@@ -350,7 +350,7 @@ describe("createRelayPresenceTransport", () => {
     expect(calls[0]).toContain("/sync/shares/share-1/presence?topic=notes%2Fa.md&since=3");
   });
 
-  it("surfaces non-2xx publish/poll responses as rejections — which the channel swallows", async () => {
+  it("surfaces non-2xx publish/leave/poll responses as rejections — which the channel swallows", async () => {
     const fakeFetch = (async () => new Response("relay says no", { status: 503 })) as unknown as typeof fetch;
     const transport = createRelayPresenceTransport({
       baseUrl: "http://relay.test",
@@ -363,6 +363,9 @@ describe("createRelayPresenceTransport", () => {
     await expect(
       transport.publish({ topic: "t", clientId: "c", state: {} }),
     ).rejects.toThrow("presence publish failed: 503");
+    await expect(
+      transport.leave({ topic: "t", clientId: "c" }),
+    ).rejects.toThrow("presence leave failed: 503");
     await expect(
       transport.poll({ topic: "t", since: 0, signal: new AbortController().signal }),
     ).rejects.toThrow("presence poll failed: 503");

@@ -10,6 +10,7 @@ export interface RendererWorkspaceSession<
   readonly sender: Sender;
   readonly senderId: number;
   readonly workspaceId: string;
+  readonly rendererDocumentId: string;
   readonly generation: number;
   isCurrent(): boolean;
 }
@@ -35,6 +36,8 @@ interface SenderState<Sender extends RendererWorkspaceSender> {
   requestSequence: number;
   active: RendererWorkspaceSession<Sender> | undefined;
   retiring: Promise<void> | undefined;
+  rendererDocumentId: string | undefined;
+  readonly retiredRendererDocumentIds: Set<string>;
   destroyed: boolean;
 }
 
@@ -72,6 +75,7 @@ export class RendererWorkspaceSessionOwner<
   async open(
     sender: Sender,
     workspaceId: string,
+    rendererDocumentId: string,
   ): Promise<RendererWorkspaceSession<Sender>> {
     if (sender.isDestroyed()) {
       throw new RendererWorkspaceOpenSupersededError();
@@ -80,6 +84,14 @@ export class RendererWorkspaceSessionOwner<
     if (state.destroyed) {
       throw new RendererWorkspaceOpenSupersededError();
     }
+    if (
+      state.retiredRendererDocumentIds.has(rendererDocumentId) ||
+      (state.rendererDocumentId !== undefined &&
+        state.rendererDocumentId !== rendererDocumentId)
+    ) {
+      throw new RendererWorkspaceOpenSupersededError();
+    }
+    state.rendererDocumentId = rendererDocumentId;
 
     const requestSequence = ++state.requestSequence;
     const active = state.active;
@@ -95,7 +107,7 @@ export class RendererWorkspaceSessionOwner<
     if (workspaceRetirement) await workspaceRetirement;
     this.#assertOpenRequestCurrent(state, requestSequence);
 
-    const session = this.#createSession(state, workspaceId);
+    const session = this.#createSession(state, workspaceId, rendererDocumentId);
     state.active = session;
     const members = this.#workspaceMembers.get(workspaceId) ?? new Set();
     members.add(state);
@@ -113,10 +125,20 @@ export class RendererWorkspaceSessionOwner<
     return (this.#workspaceMembers.get(workspaceId)?.size ?? 0) > 0;
   }
 
-  retireForReload(sender: Sender): Promise<void> {
-    const state = this.#statesBySender.get(sender);
+  retireForReload(sender: Sender, rendererDocumentId?: string): Promise<void> {
+    let state = this.#statesBySender.get(sender);
+    if (!state && rendererDocumentId && !sender.isDestroyed()) {
+      state = this.#stateFor(sender);
+    }
     if (!state || this.#stateBySenderId.get(sender.id) !== state) {
       return Promise.resolve();
+    }
+    if (rendererDocumentId) {
+      state.retiredRendererDocumentIds.add(rendererDocumentId);
+    }
+    if (state.rendererDocumentId) {
+      state.retiredRendererDocumentIds.add(state.rendererDocumentId);
+      state.rendererDocumentId = undefined;
     }
     ++state.requestSequence;
     return state.active
@@ -138,6 +160,8 @@ export class RendererWorkspaceSessionOwner<
       requestSequence: 0,
       active: undefined,
       retiring: undefined,
+      rendererDocumentId: undefined,
+      retiredRendererDocumentIds: new Set(),
       destroyed: false,
     };
     this.#statesBySender.set(sender, state);
@@ -176,6 +200,7 @@ export class RendererWorkspaceSessionOwner<
   #createSession(
     state: SenderState<Sender>,
     workspaceId: string,
+    rendererDocumentId: string,
   ): RendererWorkspaceSession<Sender> {
     const generation = ++this.#nextGeneration;
     let session!: RendererWorkspaceSession<Sender>;
@@ -183,6 +208,7 @@ export class RendererWorkspaceSessionOwner<
       sender: state.sender,
       senderId: state.sender.id,
       workspaceId,
+      rendererDocumentId,
       generation,
       isCurrent: () =>
         !state.destroyed &&

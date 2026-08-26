@@ -27,6 +27,8 @@ import {
   ApplyEngineYDocUpdateResult,
   AcknowledgeEngineYDocLineageReplacementResult,
   OpenEngineYDocSessionResult,
+  OpenWorkspaceRequestPayload,
+  ReloadRendererRequestPayload,
   ReadEngineYDocArtifactAssetResult,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
@@ -2252,6 +2254,26 @@ describe("chat reaction emoji trust boundary (WS-MU-C2)", () => {
   });
 });
 
+describe("renderer document request identity", () => {
+  const rendererDocumentId = "123e4567-e89b-42d3-a456-426614174000";
+
+  it("requires preload's document id on workspace open and reload requests", () => {
+    expect(
+      OpenWorkspaceRequestPayload.parse({
+        workspaceId: "ws-1",
+        rendererDocumentId,
+      }),
+    ).toEqual({ workspaceId: "ws-1", rendererDocumentId });
+    expect(
+      ReloadRendererRequestPayload.parse({ rendererDocumentId }),
+    ).toEqual({ rendererDocumentId });
+    expect(
+      OpenWorkspaceRequestPayload.safeParse({ workspaceId: "ws-1" }).success,
+    ).toBe(false);
+    expect(ReloadRendererRequestPayload.safeParse({}).success).toBe(false);
+  });
+});
+
 describe("presence state size cap (MU-C5 DoS boundary)", () => {
   function publishPayload(state: unknown) {
     return PresencePublishPayload.safeParse({
@@ -2274,6 +2296,30 @@ describe("presence state size cap (MU-C5 DoS boundary)", () => {
       leave: true,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("binds a share presence scope to its origin workspace", () => {
+    const base = {
+      topic: "chat:thread_1",
+      clientId: "client-1",
+      state: null,
+    };
+    expect(
+      PresencePublishPayload.safeParse({
+        ...base,
+        scope: {
+          kind: "share",
+          workspaceId: "ws-1",
+          shareId: "share-1",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      PresencePublishPayload.safeParse({
+        ...base,
+        scope: { kind: "share", shareId: "share-1" },
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects an oversized JSON state before main would serialize it", () => {

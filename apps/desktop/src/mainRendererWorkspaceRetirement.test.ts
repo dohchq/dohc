@@ -16,6 +16,7 @@ const session: RendererWorkspaceSession<typeof sender> = {
   sender,
   senderId: sender.id,
   workspaceId: "workspace-a",
+  rendererDocumentId: "document-1",
   generation: 23,
   isCurrent: () => false,
 };
@@ -31,6 +32,7 @@ function dependencies(overrides: Record<string, unknown> = {}) {
     pluginRuntimes: { stop: vi.fn(async () => undefined) },
     workspaceSearch: { disposeSender: vi.fn() },
     presencePolls: { disposeSender: vi.fn() },
+    presenceMutations: { retireSender: vi.fn(async () => undefined) },
     onCleanupError: vi.fn(),
     ...overrides,
   };
@@ -38,7 +40,7 @@ function dependencies(overrides: Record<string, unknown> = {}) {
 
 describe("desktop renderer workspace retirement", () => {
   it("begins every sender arm before waiting for any arm to drain", async () => {
-    const drains = Array.from({ length: 5 }, deferred);
+    const drains = Array.from({ length: 6 }, deferred);
     const input = dependencies({
       engineYDoc: { retireSender: vi.fn(() => drains[0]!.promise) },
       sitePreviews: {
@@ -48,6 +50,7 @@ describe("desktop renderer workspace retirement", () => {
       pluginSurfaces: { stop: vi.fn(() => drains[2]!.promise) },
       workspaceSearch: { disposeSender: vi.fn(() => drains[3]!.promise) },
       presencePolls: { disposeSender: vi.fn(() => drains[4]!.promise) },
+      presenceMutations: { retireSender: vi.fn(() => drains[5]!.promise) },
     });
     const retirement = createDesktopRendererWorkspaceRetirement(input);
 
@@ -61,6 +64,7 @@ describe("desktop renderer workspace retirement", () => {
     });
     expect(input.workspaceSearch.disposeSender).toHaveBeenCalledWith(17);
     expect(input.presencePolls.disposeSender).toHaveBeenCalledWith(17);
+    expect(input.presenceMutations.retireSender).toHaveBeenCalledWith(session);
 
     for (const drain of drains) drain.resolve();
     await retiring;

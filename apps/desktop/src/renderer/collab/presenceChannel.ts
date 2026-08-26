@@ -88,12 +88,12 @@ export function createRelayPresenceTransport(config: RelayPresenceConfig): Prese
       return parseSnapshot(await response.json());
     },
     async leave({ topic, clientId }) {
-      // Best-effort: a failed leave is fine — the entry expires on TTL anyway.
-      await doFetch(presenceUrl(config, topic, {}), {
+      const response = await doFetch(presenceUrl(config, topic, {}), {
         method: "POST",
         headers: { ...authHeaders, "content-type": "application/json" },
         body: JSON.stringify({ clientId, leave: true }),
-      }).catch(() => undefined);
+      });
+      if (!response.ok) throw new Error(`presence leave failed: ${response.status}`);
     },
     async poll({ topic, since, signal }) {
       const response = await doFetch(presenceUrl(config, topic, { since: String(since) }), {

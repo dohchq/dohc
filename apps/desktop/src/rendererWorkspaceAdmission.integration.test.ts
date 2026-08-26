@@ -39,7 +39,7 @@ describe("renderer reload admission", () => {
       workspaceId: "workspace-1",
       rootPath: "C:/workspace-1",
     };
-    await sessions.open(renderer, workspace.workspaceId);
+    await sessions.open(renderer, workspace.workspaceId, "document-1");
 
     const siteLifecycle = createSitePreviewLifecycle({
       allowOrigin: () => () => undefined,
@@ -134,7 +134,7 @@ describe("renderer reload admission", () => {
     await reload;
 
     const replacement = sender(renderer.id);
-    await sessions.open(replacement, workspace.workspaceId);
+    await sessions.open(replacement, workspace.workspaceId, "document-2");
     await searchHandlers.get(CHANNELS.cancelWorkspaceSearch)!(
       { sender: renderer },
       { searchId: "reused-search-id" },

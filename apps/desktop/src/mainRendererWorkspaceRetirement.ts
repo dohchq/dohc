@@ -21,6 +21,9 @@ interface SenderRetirementPorts<Sender extends RendererWorkspaceSender> {
   presencePolls: {
     disposeSender(senderId: number): void;
   };
+  presenceMutations: {
+    retireSender(session: RendererWorkspaceSession<Sender>): Promise<void>;
+  };
 }
 
 interface WorkspaceRetirementPorts {
@@ -112,6 +115,10 @@ export function createDesktopRendererWorkspaceRetirement<
           {
             owner: "presence polls",
             run: () => dependencies.presencePolls.disposeSender(session.senderId),
+          },
+          {
+            owner: "presence mutations",
+            run: () => dependencies.presenceMutations.retireSender(session),
           },
         ],
         scope,
