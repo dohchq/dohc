@@ -1,7 +1,7 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { SHARE_ACCESS_VALUES } from "@dohc/security-contract/share-selector";
 import {
-  hasIgnoredSegment,
+  hasEngineIgnoredSegment,
   WORKSPACE_KINDS,
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
@@ -3063,8 +3063,9 @@ export type WorkspaceActivityEvent = z.infer<typeof WorkspaceActivityEvent>;
 // broadening its idea of a visible path without the other.
 export function activityPathsAffectWorkspaceListing(
   paths: readonly string[],
+  platform: NodeJS.Platform,
 ): boolean {
-  return paths.some((path) => !hasIgnoredSegment(path));
+  return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
 }
 
 // Unlike plugin events, an activity ping must never be DROPPED on a schema

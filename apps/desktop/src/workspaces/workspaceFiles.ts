@@ -7,7 +7,7 @@ import {
   nameUnitFor,
   sameFsEntry,
   entryCharBudget,
-  hasIgnoredSegment,
+  hasEngineIgnoredSegment,
   trashEntryPlan,
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
@@ -169,7 +169,9 @@ async function getCachedMarkdownIcon(absolutePath: string): Promise<string | und
 
 export async function listFiles(
   rootPath: string,
+  options: { platform?: NodeJS.Platform } = {},
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
+  const platform = options.platform ?? process.platform;
   const entries: WorkspaceFileEntry[] = [];
   // Directories ride along so EMPTY folders stay visible in the explorer
   // tree (the walk already visits every dir — this is purely additive).
@@ -181,7 +183,7 @@ export async function listFiles(
       const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
       // Never follow symlinks: a dir/file symlink could point outside the
       // workspace and leak names or recurse into foreign trees.
-      if (hasIgnoredSegment(rel) || dirent.isSymbolicLink()) continue;
+      if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
         folders.push(rel);
         await walk(join(dir, dirent.name), rel);
@@ -1144,8 +1146,10 @@ export async function collectZipEntries(
   relativePath?: string,
   options?: {
     includeArchivePath?(path: string): boolean;
+    platform?: NodeJS.Platform;
   },
 ): Promise<{ entries: ZipEntry[]; baseName: string }> {
+  const platform = options?.platform ?? process.platform;
   const realRoot = await realpath(rootPath);
   let startAbsolute = realRoot;
   let prefix = "";
@@ -1239,7 +1243,7 @@ export async function collectZipEntries(
       if (dirent.isSymbolicLink()) continue;
       const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
       const archivePath = archiveDir ? `${archiveDir}/${dirent.name}` : dirent.name;
-      if (hasIgnoredSegment(relPath)) continue;
+      if (hasEngineIgnoredSegment(relPath, platform)) continue;
       if (options?.includeArchivePath?.(archivePath) === false) continue;
       if (dirent.isDirectory()) {
         await walk(join(dir, dirent.name), relPath, archivePath);

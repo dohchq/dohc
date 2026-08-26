@@ -90,6 +90,27 @@ export function isReservedPath(relativePath: string): boolean {
 // as dohc noise, never a workspace artifact.
 const IGNORED_SEGMENTS = new Set([".dohc", ".git", "node_modules"]);
 const IGNORED_FILE_PREFIXES = [".dohc-write-"];
+
+// Rust's capture floor compares every path segment after platform-specific
+// normalization: Win32 folds case and strips trailing dot/space aliases;
+// every other host compares the on-disk name exactly. Callers pass the host
+// explicitly because this predicate runs in main and the sandboxed renderer.
+export function hasEngineIgnoredSegment(
+  relativePath: string,
+  platform: NodeJS.Platform,
+): boolean {
+  return relativePath.split("/").some((rawSegment) => {
+    const segment =
+      platform === "win32"
+        ? stripWindowsAliasSuffix(rawSegment).toLowerCase()
+        : rawSegment;
+    return (
+      IGNORED_SEGMENTS.has(segment) ||
+      IGNORED_FILE_PREFIXES.some((prefix) => segment.startsWith(prefix))
+    );
+  });
+}
+
 export function hasIgnoredSegment(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")

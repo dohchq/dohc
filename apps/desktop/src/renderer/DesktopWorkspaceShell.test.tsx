@@ -312,7 +312,10 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
+function makeBridge(
+  uiStatePromise: Promise<WorkspaceUiState | null>,
+  platform: NodeJS.Platform = "linux",
+) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
@@ -323,6 +326,7 @@ function makeBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     | ((event: PluginWebAppOpenedEvent) => void)
     | null = null;
   return {
+    platform,
     emitWorkspaceActivity: (event: WorkspaceActivityEvent = {}) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
@@ -15210,6 +15214,36 @@ describe("workbench render cost", () => {
         allowCached: true,
       });
       expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statusReads + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes files for a POSIX-distinct .GIT activity path", async () => {
+    const bridge = makeBridge(Promise.resolve(null), "linux");
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+
+    vi.useFakeTimers();
+    try {
+      const listings = bridge.listWorkspaceFiles.mock.calls.length;
+      act(() =>
+        bridge.emitWorkspaceActivity({
+          workspaceId: WORKSPACE.workspaceId,
+          paths: [".GIT/file.md"],
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+      });
+
+      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(listings + 1);
+      expect(bridge.listWorkspaceFiles).toHaveBeenLastCalledWith({
+        workspaceId: WORKSPACE.workspaceId,
+        allowCached: true,
+      });
     } finally {
       vi.useRealTimers();
     }

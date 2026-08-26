@@ -113,11 +113,11 @@ describe("listFiles", () => {
   it("lists files and folders but skips internal directories", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await writeFile(join(root, ".dohc", "manifest.json"), "{}");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git", "index"), "internal");
     await mkdir(join(root, "notes"), { recursive: true });
-    await mkdir(join(root, "notes", ".GIT"), { recursive: true });
-    await writeFile(join(root, "notes", ".GIT", "index"), "internal");
-    await mkdir(join(root, "notes", "NODE_MODULES"), { recursive: true });
-    await writeFile(join(root, "notes", "NODE_MODULES", "cache.js"), "internal");
+    await mkdir(join(root, "notes", "node_modules"), { recursive: true });
+    await writeFile(join(root, "notes", "node_modules", "cache.js"), "internal");
     await writeFile(join(root, ".dohc-write-listing.tmp"), "internal");
     await writeFile(join(root, "notes", "a.md"), "");
     await writeFile(join(root, "wallet.sqlite"), "");
@@ -127,6 +127,16 @@ describe("listFiles", () => {
       { path: "wallet.sqlite", kind: "database" },
     ]);
     expect(result.folders).toEqual(["notes"]);
+  });
+
+  it("keeps POSIX-distinct .GIT content in the listing", async () => {
+    await mkdir(join(root, ".GIT"), { recursive: true });
+    await writeFile(join(root, ".GIT", "file.md"), "owned");
+
+    const result = await listFiles(root, { platform: "linux" });
+
+    expect(result.files).toEqual([{ path: ".GIT/file.md", kind: "file" }]);
+    expect(result.folders).toEqual([".GIT"]);
   });
 
   it("surfaces a markdown page's icon frontmatter for the tree glyph", async () => {
@@ -547,8 +557,13 @@ describe("collectZipEntries", () => {
   it("exports the workspace excluding ignored segments and symlinks", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
     await writeFile(join(root, ".dohc", "manifest.json"), "{}");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git", "index"), "internal");
     await mkdir(join(root, "notes"), { recursive: true });
+    await mkdir(join(root, "notes", "node_modules"), { recursive: true });
+    await writeFile(join(root, "notes", "node_modules", "cache.js"), "internal");
     await writeFile(join(root, "notes", "a.md"), "alpha");
+    await writeFile(join(root, ".dohc-write-export.tmp"), "internal");
     await writeFile(join(root, "b.md"), "beta");
     const outside = await createTestScratch("dohc-outside-");
     await writeFile(join(outside, "secret.md"), "leak");
@@ -563,6 +578,17 @@ describe("collectZipEntries", () => {
     );
     expect(byPath.get("b.md")).toBe("beta");
     expect(byPath.get("notes/a.md")).toBe("alpha");
+  });
+
+  it("keeps POSIX-distinct .GIT content in ZIP exports", async () => {
+    await mkdir(join(root, ".GIT"), { recursive: true });
+    await writeFile(join(root, ".GIT", "file.md"), "owned");
+
+    const { entries } = await collectZipEntries(root, undefined, {
+      platform: "linux",
+    });
+
+    expect(entries.map((entry) => entry.path)).toEqual([".GIT/file.md"]);
   });
 
   it("exports a single folder under its own top-level name", async () => {

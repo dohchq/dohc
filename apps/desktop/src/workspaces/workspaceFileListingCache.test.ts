@@ -78,7 +78,7 @@ describe("WorkspaceFileListingCache", () => {
   });
 
   it("retains ignored-only activity and evicts every broad or visible scope", async () => {
-    const cache = new WorkspaceFileListingCache();
+    const cache = new WorkspaceFileListingCache("linux");
     const loads = new Map<string, number>();
     const read = (workspaceId: string) =>
       cache.list({
@@ -95,22 +95,28 @@ describe("WorkspaceFileListingCache", () => {
     await read("ws-b");
     cache.invalidate({
       workspaceId: "ws-a",
-      paths: [".DOHC/engine/index", "pkg/NODE_MODULES/x.js"],
+      paths: [".GIT/file.md"],
     });
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-1.md"));
+    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-2.md"));
+
+    cache.invalidate({
+      workspaceId: "ws-a",
+      paths: [".dohc/engine/index", "pkg/node_modules/x.js"],
+    });
+    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-2.md"));
 
     // MUTATION: treating a mixed set as hidden leaves the file tree stale.
     cache.invalidate({
       workspaceId: "ws-a",
       paths: [".dohc/engine/index", "notes/new.md"],
     });
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-2.md"));
-    cache.invalidate({ workspaceId: "ws-a" });
     await expect(read("ws-a")).resolves.toEqual(listing("ws-a-3.md"));
+    cache.invalidate({ workspaceId: "ws-a" });
+    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-4.md"));
     expect(loads.get("ws-b")).toBe(1);
 
     cache.invalidate({});
-    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-4.md"));
+    await expect(read("ws-a")).resolves.toEqual(listing("ws-a-5.md"));
     await expect(read("ws-b")).resolves.toEqual(listing("ws-b-2.md"));
   });
 

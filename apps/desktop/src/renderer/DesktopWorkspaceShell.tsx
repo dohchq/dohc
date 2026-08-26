@@ -4536,7 +4536,7 @@ export function DesktopWorkspaceShell(props: {
           filesRefreshMode = "full";
         } else if (
           filesRefreshMode !== "full" &&
-          activityPathsAffectWorkspaceListing(paths)
+          activityPathsAffectWorkspaceListing(paths, bridge().platform)
         ) {
           filesRefreshMode = "cached";
         }

@@ -13,6 +13,8 @@ type ListingPromise = Promise<ListWorkspaceFilesResult>;
 export class WorkspaceFileListingCache {
   readonly #listings = new Map<string, ListingPromise>();
 
+  constructor(private readonly platform: NodeJS.Platform = process.platform) {}
+
   list(options: {
     workspaceId: string;
     allowCached: boolean;
@@ -43,7 +45,7 @@ export class WorkspaceFileListingCache {
     }
     if (
       !event.paths?.length ||
-      activityPathsAffectWorkspaceListing(event.paths)
+      activityPathsAffectWorkspaceListing(event.paths, this.platform)
     ) {
       this.#listings.delete(event.workspaceId);
     }
