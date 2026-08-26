@@ -15,6 +15,7 @@ interface TestWorkspace {
 
 interface TestPipeline {
   start: ReturnType<typeof vi.fn<() => Promise<void>>>;
+  cancelStart: ReturnType<typeof vi.fn<() => void>>;
   dispose: ReturnType<typeof vi.fn<() => Promise<void>>>;
   handleWatcherEvents: ReturnType<
     typeof vi.fn<(events: readonly WatcherEvent[]) => Promise<void>>
@@ -57,6 +58,7 @@ function makeParts(overrides: {
   return {
     pipeline: {
       start: vi.fn(overrides.start ?? (async () => undefined)),
+      cancelStart: vi.fn(() => undefined),
       dispose: vi.fn(overrides.dispose ?? (async () => undefined)),
       handleWatcherEvents: vi.fn(async () => undefined),
       pluginRegistration: vi.fn(() => null),
@@ -249,50 +251,111 @@ describe("plugin workspace runtimes", () => {
     expect(harness.created).toHaveLength(1);
   });
 
-  it("keeps a stopped pending start until it settles before reopening", async () => {
+  it("stops an in-flight warmup without waiting for startup to settle", async () => {
     const opening = deferred();
     const harness = createHarness({
-      create: () => harness.created.length === 0
-        ? makeParts({ start: () => opening.promise })
-        : makeParts(),
+      create: () => makeParts({ start: () => opening.promise }),
     });
 
-    const first = harness.owner.ensure(workspace());
-    const second = harness.owner.ensure(workspace());
-    first.catch(() => undefined);
-    second.catch(() => undefined);
-    const retired = harness.owner.current("workspace-1");
-    if (!retired) throw new Error("The first runtime was not published.");
-    const remembered = retired.rememberPlugin(registration());
-
+    const warming = harness.owner.ensure(workspace());
+    warming.catch(() => undefined);
     const stopping = harness.owner.stop("workspace-1");
-    const reopening = harness.owner.ensure(workspace());
-    let reopeningSettled = false;
-    void reopening.then(
-      () => {
-        reopeningSettled = true;
-      },
-      () => {
-        reopeningSettled = true;
-      },
-    );
+    let stopped = false;
+    void stopping.then(() => {
+      stopped = true;
+    });
+
     await new Promise((resolve) => setImmediate(resolve));
-    expect(harness.created).toHaveLength(1);
-    expect(reopeningSettled).toBe(false);
+    expect(harness.created[0]?.pipeline.cancelStart).toHaveBeenCalledOnce();
     expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
-    expect(harness.created[0]?.events.dispose).not.toHaveBeenCalled();
-    expect(retired.registeredPlugin("example-plugin")).toBe(remembered);
+    expect(stopped).toBe(true);
 
-    opening.reject(new Error("start aborted"));
+    opening.resolve();
+    await expect(warming).rejects.toThrow(
+      "Plugin pipeline closed while the workspace was opening.",
+    );
+  });
 
-    await expect(first).rejects.toThrow("start aborted");
-    await expect(second).rejects.toThrow("start aborted");
-    await expect(stopping).resolves.toBeUndefined();
-    await expect(reopening).resolves.not.toBe(retired);
-    expect(harness.created).toHaveLength(2);
+  it("disposes every resource owned by a cancelled warmup", async () => {
+    const opening = deferred();
+    const surfaceDispose = vi.fn(() => undefined);
+    const harness = createHarness({
+      create: () => makeParts({ start: () => opening.promise }),
+    });
+
+    const warming = harness.owner.ensure(workspace());
+    warming.catch(() => undefined);
+    const runtime = harness.owner.current("workspace-1");
+    if (!runtime) throw new Error("The warming runtime was not published.");
+    const remembered = runtime.rememberPlugin(registration());
+    expect(runtime.registeredPlugin("example-plugin")).toBe(remembered);
+
+    await harness.owner.stop("workspace-1", surfaceDispose);
+
+    expect(surfaceDispose).toHaveBeenCalledOnce();
+    expect(harness.created[0]?.pipeline.cancelStart).toHaveBeenCalledOnce();
+    expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
     expect(harness.created[0]?.events.dispose).toHaveBeenCalledOnce();
-    expect(retired.registeredPlugin("example-plugin")).toBeUndefined();
-    expect(harness.owner.current("workspace-1")).toBeDefined();
+    expect(runtime.registeredPlugin("example-plugin")).toBeUndefined();
+
+    opening.resolve();
+    await expect(warming).rejects.toThrow(
+      "Plugin pipeline closed while the workspace was opening.",
+    );
+  });
+
+  it("disposes a completed warmup exactly once", async () => {
+    const surfaceDispose = vi.fn(() => undefined);
+    const harness = createHarness();
+    const runtime = await harness.owner.ensure(workspace());
+    runtime.rememberPlugin(registration());
+
+    await harness.owner.stop("workspace-1", surfaceDispose);
+
+    expect(surfaceDispose).toHaveBeenCalledOnce();
+    expect(harness.created[0]?.pipeline.cancelStart).not.toHaveBeenCalled();
+    expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
+    expect(harness.created[0]?.events.dispose).toHaveBeenCalledOnce();
+    expect(runtime.registeredPlugin("example-plugin")).toBeUndefined();
+  });
+
+  it("starts a fresh A runtime after a cancelled A to B to A switch", async () => {
+    const firstOpening = deferred();
+    let workspaceOneStarts = 0;
+    const harness = createHarness({
+      create: (openedWorkspace) => {
+        if (openedWorkspace.workspaceId !== "workspace-1") return makeParts();
+        workspaceOneStarts += 1;
+        return workspaceOneStarts === 1
+          ? makeParts({ start: () => firstOpening.promise })
+          : makeParts();
+      },
+    });
+
+    const firstWarmup = harness.owner.ensure(workspace());
+    firstWarmup.catch(() => undefined);
+    const firstRuntime = harness.owner.current("workspace-1");
+    if (!firstRuntime) throw new Error("The first A runtime was not published.");
+
+    await harness.owner.stop("workspace-1");
+    await harness.owner.ensure({
+      workspaceId: "workspace-2",
+      rootPath: "C:\\workspaces\\two",
+    });
+    const secondRuntime = await harness.owner.ensure(workspace());
+
+    expect(secondRuntime).not.toBe(firstRuntime);
+    expect(workspaceOneStarts).toBe(2);
+    expect(harness.created).toHaveLength(3);
+    expect(harness.created[0]?.pipeline.cancelStart).toHaveBeenCalledOnce();
+    expect(harness.created[0]?.pipeline.dispose).toHaveBeenCalledOnce();
+    expect(harness.created[2]?.pipeline.dispose).not.toHaveBeenCalled();
+
+    firstOpening.resolve();
+    await expect(firstWarmup).rejects.toThrow(
+      "Plugin pipeline closed while the workspace was opening.",
+    );
+    expect(harness.owner.current("workspace-1")).toBe(secondRuntime);
   });
 
   it("publishes the stopping slot and starts disposal before stop returns", async () => {
