@@ -50,6 +50,12 @@ type ForceNode = GraphPoint & {
 
 type VisibleGraphEdge = WorkspaceGraphResult["edges"][number];
 
+type GraphPositionSink = (
+  nodes: readonly ForceNode[],
+  edges: readonly VisibleGraphEdge[],
+  byPath: ReadonlyMap<string, ForceNode>,
+) => void;
+
 const EMPTY_GRAPH: WorkspaceGraphResult = {
   nodes: [],
   edges: [],
@@ -70,8 +76,12 @@ const GRAPH_LAYOUT: Record<
     edgeLimit: number;
     pairwiseLimit: number;
     labelLimit: number;
+    alphaDecay: number;
+    settleFrameLimit: number;
   }
 > = {
+  // Nodes after the pairwise limit keep center and edge forces, but skip
+  // repulsion: panel layouts degrade after 160 ranked nodes, page layouts after 280.
   panel: {
     width: 260,
     height: 420,
@@ -79,6 +89,8 @@ const GRAPH_LAYOUT: Record<
     edgeLimit: 10000,
     pairwiseLimit: 160,
     labelLimit: 80,
+    alphaDecay: 0.96,
+    settleFrameLimit: 120,
   },
   page: {
     width: 1200,
@@ -87,8 +99,14 @@ const GRAPH_LAYOUT: Record<
     edgeLimit: 10000,
     pairwiseLimit: 280,
     labelLimit: 180,
+    alphaDecay: 0.96,
+    settleFrameLimit: 120,
   },
 };
+
+function graphEdgeKey(edge: VisibleGraphEdge): string {
+  return `${edge.source}:${edge.target}:${edge.kind}`;
+}
 
 function degree(node: Pick<WorkspaceGraphNode, "incoming" | "outgoing">): number {
   return node.incoming + node.outgoing;
@@ -201,6 +219,7 @@ function useForceGraph(
   graph: WorkspaceGraphResult,
   activePath: string | null,
   variant: GraphVariant,
+  renderPositions: GraphPositionSink,
 ) {
   const layout = GRAPH_LAYOUT[variant];
   const ordered = useMemo(
@@ -212,18 +231,22 @@ function useForceGraph(
   );
   const [points, setPoints] = useState<GraphPoint[]>([]);
   const nodesRef = useRef<ForceNode[]>([]);
+  const nodesByPathRef = useRef(new Map<string, ForceNode>());
   const edgesRef = useRef<VisibleGraphEdge[]>([]);
   const frameRef = useRef<number | null>(null);
   const alphaRef = useRef(0);
+  const settleFramesRef = useRef(0);
   const activePathRef = useRef(activePath);
   const variantRef = useRef(variant);
+  const renderPositionsRef = useRef(renderPositions);
+  renderPositionsRef.current = renderPositions;
 
   const step = useCallback(() => {
     const nodes = nodesRef.current;
     const edges = edgesRef.current;
     const currentLayout = GRAPH_LAYOUT[variantRef.current];
     const currentActivePath = activePathRef.current;
-    const byPath = new Map(nodes.map((node) => [node.path, node]));
+    const byPath = nodesByPathRef.current;
     const dragging = nodes.some((node) => node.dragging);
     const alpha = dragging ? Math.max(alphaRef.current, 0.22) : alphaRef.current;
     const centerX = currentLayout.width / 2;
@@ -344,18 +367,27 @@ function useForceGraph(
       maxVelocity = Math.max(maxVelocity, Math.abs(node.vx), Math.abs(node.vy));
     }
 
-    setPoints(snapshotNodes(nodes));
-    alphaRef.current = dragging ? 0.28 : alphaRef.current * 0.982;
-    if (dragging || alphaRef.current > 0.008 || maxVelocity > 0.018) {
+    renderPositionsRef.current(nodes, edges, byPath);
+    alphaRef.current = dragging
+      ? 0.28
+      : alphaRef.current * currentLayout.alphaDecay;
+    if (!dragging) settleFramesRef.current += 1;
+    const hasEnergy = alphaRef.current > 0.008 || maxVelocity > 0.018;
+    if (
+      dragging ||
+      (hasEnergy && settleFramesRef.current < currentLayout.settleFrameLimit)
+    ) {
       frameRef.current = requestGraphFrame(step);
       return;
     }
+    setPoints(snapshotNodes(nodes));
     frameRef.current = null;
   }, []);
 
   const restart = useCallback(
     (boost = 0.7) => {
       alphaRef.current = Math.max(alphaRef.current, boost);
+      settleFramesRef.current = 0;
       if (frameRef.current === null) frameRef.current = requestGraphFrame(step);
     },
     [step],
@@ -379,6 +411,7 @@ function useForceGraph(
       ),
     );
     nodesRef.current = nodes;
+    nodesByPathRef.current = new Map(nodes.map((node) => [node.path, node]));
     edgesRef.current = visibleEdges(graph, nodes, variant);
     setPoints(snapshotNodes(nodes));
     restart(0.86);
@@ -393,14 +426,18 @@ function useForceGraph(
 
   const setNodePosition = useCallback(
     (path: string, x: number, y: number, dragging: boolean) => {
-      const node = nodesRef.current.find((entry) => entry.path === path);
+      const node = nodesByPathRef.current.get(path);
       if (!node) return;
       node.dragging = dragging;
       node.x = Math.min(layout.width - node.radius - 18, Math.max(node.radius + 18, x));
       node.y = Math.min(layout.height - node.radius - 28, Math.max(node.radius + 18, y));
       node.vx = 0;
       node.vy = 0;
-      setPoints(snapshotNodes(nodesRef.current));
+      renderPositionsRef.current(
+        nodesRef.current,
+        edgesRef.current,
+        nodesByPathRef.current,
+      );
       restart(dragging ? 0.55 : 0.32);
     },
     [layout.height, layout.width, restart],
@@ -408,9 +445,10 @@ function useForceGraph(
 
   const releaseNode = useCallback(
     (path: string) => {
-      const node = nodesRef.current.find((entry) => entry.path === path);
+      const node = nodesByPathRef.current.get(path);
       if (!node) return;
       node.dragging = false;
+      setPoints(snapshotNodes(nodesRef.current));
       restart(0.34);
     },
     [restart],
@@ -421,7 +459,6 @@ function useForceGraph(
     edges: edgesRef.current,
     setNodePosition,
     releaseNode,
-    restart,
   };
 }
 
@@ -448,16 +485,36 @@ function GraphMap(props: {
 }) {
   const layout = GRAPH_LAYOUT[props.variant];
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const nodeElementsRef = useRef(new Map<string, SVGGElement>());
+  const edgeElementsRef = useRef(new Map<string, SVGLineElement>());
   const dragRef = useRef<{
     path: string;
     startClientX: number;
     startClientY: number;
     moved: boolean;
   } | null>(null);
+  const renderPositions = useCallback<GraphPositionSink>((nodes, edges, byPath) => {
+    for (const node of nodes) {
+      nodeElementsRef.current
+        .get(node.path)
+        ?.setAttribute("transform", `translate(${node.x} ${node.y})`);
+    }
+    for (const edge of edges) {
+      const element = edgeElementsRef.current.get(graphEdgeKey(edge));
+      const source = byPath.get(edge.source);
+      const target = byPath.get(edge.target);
+      if (!element || !source || !target) continue;
+      element.setAttribute("x1", String(source.x));
+      element.setAttribute("y1", String(source.y));
+      element.setAttribute("x2", String(target.x));
+      element.setAttribute("y2", String(target.y));
+    }
+  }, []);
   const { points, edges, setNodePosition, releaseNode } = useForceGraph(
     props.graph,
     props.activePath,
     props.variant,
+    renderPositions,
   );
   const byPath = useMemo(
     () => new Map(points.map((point) => [point.path, point])),
@@ -538,7 +595,12 @@ function GraphMap(props: {
         const target = byPath.get(edge.target)!;
         return (
           <line
-            key={`${edge.source}:${edge.target}:${edge.kind}`}
+            key={graphEdgeKey(edge)}
+            ref={(element) => {
+              const key = graphEdgeKey(edge);
+              if (element) edgeElementsRef.current.set(key, element);
+              else edgeElementsRef.current.delete(key);
+            }}
             data-testid="graph-edge"
             x1={source.x}
             y1={source.y}
@@ -568,76 +630,84 @@ function GraphMap(props: {
         return (
           <g
             key={node.path}
-            data-testid="graph-node"
-            data-path={node.path}
-            data-kind={node.kind ?? "file"}
-            role="button"
-            tabIndex={0}
-            aria-label={`Open or focus ${node.path}`}
-            data-active={active ? "true" : "false"}
-            className="dohc-graph-node outline-none"
-            style={{ animationDelay: `${Math.min(index, 24) * 18}ms` }}
-            onPointerDown={(event) => {
-              if (event.button !== 0) return;
-              const point = pointFromPointer(event);
-              dragRef.current = {
-                path: node.path,
-                startClientX: event.clientX,
-                startClientY: event.clientY,
-                moved: false,
-              };
-              setNodePosition(node.path, point.x, point.y, true);
-              const svg = svgRef.current;
-              if (typeof svg?.setPointerCapture === "function") {
-                svg?.setPointerCapture(event.pointerId);
-              }
+            ref={(element) => {
+              if (element) nodeElementsRef.current.set(node.path, element);
+              else nodeElementsRef.current.delete(node.path);
             }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                openNode(node.path);
-              }
-            }}
+            transform={`translate(${node.x} ${node.y})`}
           >
-            <title>{`Open or focus ${node.path}`}</title>
-            <circle
-              cx={node.x}
-              cy={node.y}
-              r={node.radius + (props.variant === "page" ? 8 : 9)}
-              className="dohc-graph-node-halo"
-            />
-            <circle
-              cx={node.x}
-              cy={node.y}
-              r={node.radius}
-              className="dohc-graph-node-dot"
+            <g
+              data-testid="graph-node"
+              data-path={node.path}
+              data-kind={node.kind ?? "file"}
+              role="button"
+              tabIndex={0}
+              aria-label={`Open or focus ${node.path}`}
               data-active={active ? "true" : "false"}
-              strokeWidth={active ? 2 : 1.25}
-            />
-            {showLabel ? (
-              <text
-                x={node.x}
-                y={node.y + node.radius + (props.variant === "page" ? 18 : 17)}
-                textAnchor="middle"
-                stroke="var(--dohc-panel)"
-                strokeWidth={props.variant === "page" ? 4 : 3}
-                paintOrder="stroke"
-                data-active={active ? "true" : "false"}
-                className={
-                  active
-                    ? props.variant === "page"
-                      ? "fill-ink text-[13px]"
-                      : "fill-ink text-[11px]"
-                    : props.variant === "page"
-                      ? "fill-muted text-[12px]"
-                      : "fill-muted text-[11px]"
+              className="dohc-graph-node outline-none"
+              style={{ animationDelay: `${Math.min(index, 24) * 18}ms` }}
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                const point = pointFromPointer(event);
+                dragRef.current = {
+                  path: node.path,
+                  startClientX: event.clientX,
+                  startClientY: event.clientY,
+                  moved: false,
+                };
+                setNodePosition(node.path, point.x, point.y, true);
+                const svg = svgRef.current;
+                if (typeof svg?.setPointerCapture === "function") {
+                  svg?.setPointerCapture(event.pointerId);
                 }
-              >
-                {node.title.length > (props.variant === "page" ? 28 : 22)
-                  ? `${node.title.slice(0, props.variant === "page" ? 27 : 21)}…`
-                  : node.title}
-              </text>
-            ) : null}
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  openNode(node.path);
+                }
+              }}
+            >
+              <title>{`Open or focus ${node.path}`}</title>
+              <circle
+                cx={0}
+                cy={0}
+                r={node.radius + (props.variant === "page" ? 8 : 9)}
+                className="dohc-graph-node-halo"
+              />
+              <circle
+                cx={0}
+                cy={0}
+                r={node.radius}
+                className="dohc-graph-node-dot"
+                data-active={active ? "true" : "false"}
+                strokeWidth={active ? 2 : 1.25}
+              />
+              {showLabel ? (
+                <text
+                  x={0}
+                  y={node.radius + (props.variant === "page" ? 18 : 17)}
+                  textAnchor="middle"
+                  stroke="var(--dohc-panel)"
+                  strokeWidth={props.variant === "page" ? 4 : 3}
+                  paintOrder="stroke"
+                  data-active={active ? "true" : "false"}
+                  className={
+                    active
+                      ? props.variant === "page"
+                        ? "fill-ink text-[13px]"
+                        : "fill-ink text-[11px]"
+                      : props.variant === "page"
+                        ? "fill-muted text-[12px]"
+                        : "fill-muted text-[11px]"
+                  }
+                >
+                  {node.title.length > (props.variant === "page" ? 28 : 22)
+                    ? `${node.title.slice(0, props.variant === "page" ? 27 : 21)}…`
+                    : node.title}
+                </text>
+              ) : null}
+            </g>
           </g>
         );
       })}

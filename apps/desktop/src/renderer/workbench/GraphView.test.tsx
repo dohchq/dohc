@@ -1,6 +1,14 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Profiler } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
 import { GraphView } from "./GraphView";
@@ -26,12 +34,183 @@ function graph(path: string): WorkspaceGraphResult {
   };
 }
 
+function connectedGraph(): WorkspaceGraphResult {
+  return {
+    nodes: [
+      { path: "alpha.md", title: "Alpha", incoming: 0, outgoing: 1 },
+      { path: "beta.md", title: "Beta", incoming: 1, outgoing: 0 },
+    ],
+    edges: [{ source: "alpha.md", target: "beta.md", kind: "wikilink" }],
+    unresolvedLinks: 0,
+    scannedFileCount: 2,
+    omittedFileCount: 0,
+    truncatedFileCount: 0,
+  };
+}
+
+function stubAnimationFrames() {
+  let nextHandle = 1;
+  let timestamp = 0;
+  const callbacks = new Map<number, FrameRequestCallback>();
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn((callback: FrameRequestCallback) => {
+      const handle = nextHandle;
+      nextHandle += 1;
+      callbacks.set(handle, callback);
+      return handle;
+    }),
+  );
+  vi.stubGlobal(
+    "cancelAnimationFrame",
+    vi.fn((handle: number) => callbacks.delete(handle)),
+  );
+
+  return {
+    get pending() {
+      return callbacks.size;
+    },
+    runNext() {
+      const entry = callbacks.entries().next().value as
+        | [number, FrameRequestCallback]
+        | undefined;
+      expect(entry).toBeDefined();
+      const [handle, callback] = entry!;
+      callbacks.delete(handle);
+      timestamp += 16;
+      callback(timestamp);
+    },
+  };
+}
+
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
 
 describe("GraphView", () => {
+  it("does not commit React renders during force-simulation frames", async () => {
+    const frames = stubAnimationFrames();
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceGraph: vi.fn(async () => connectedGraph()),
+    });
+    let renderCount = 0;
+
+    render(
+      <Profiler id="graph-view" onRender={() => (renderCount += 1)}>
+        <GraphView
+          workspaceId="ws-graph"
+          activePath={null}
+          refreshKey="0"
+          onOpenPath={vi.fn()}
+        />
+      </Profiler>,
+    );
+
+    expect(await screen.findAllByTestId("graph-node")).toHaveLength(2);
+    renderCount = 0;
+    for (let frame = 0; frame < 6; frame += 1) {
+      await act(async () => frames.runNext());
+    }
+
+    expect(renderCount).toBe(0);
+  });
+
+  it("commits the final dragged position only when the drag ends", async () => {
+    stubAnimationFrames();
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceGraph: vi.fn(async () => connectedGraph()),
+    });
+    let renderCount = 0;
+    const onOpenPath = vi.fn();
+    const view = () => (
+      <Profiler id="graph-view" onRender={() => (renderCount += 1)}>
+        <GraphView
+          workspaceId="ws-drag"
+          activePath={null}
+          refreshKey="0"
+          onOpenPath={onOpenPath}
+        />
+      </Profiler>
+    );
+    const { rerender } = render(view());
+    const node = (await screen.findAllByTestId("graph-node")).find(
+      (element) => element.dataset.path === "alpha.md",
+    )!;
+    const map = screen.getByTestId("graph-map");
+    const edge = screen.getByTestId("graph-edge");
+
+    renderCount = 0;
+    fireEvent.pointerDown(node, {
+      button: 0,
+      pointerId: 1,
+      clientX: 130,
+      clientY: 210,
+    });
+    fireEvent.pointerMove(map, {
+      pointerId: 1,
+      clientX: 200,
+      clientY: 300,
+    });
+    expect(node.getAttribute("transform")).toBeNull();
+    expect(node.parentElement?.classList.contains("dohc-graph-node")).toBe(false);
+    expect(node.parentElement?.getAttribute("transform")).toBe(
+      "translate(200 300)",
+    );
+    expect([edge.getAttribute("x1"), edge.getAttribute("y1")]).toEqual([
+      "200",
+      "300",
+    ]);
+    expect(renderCount).toBe(0);
+
+    renderCount = 0;
+    fireEvent.pointerUp(map, {
+      pointerId: 1,
+      clientX: 200,
+      clientY: 300,
+    });
+    expect(renderCount).toBe(1);
+    expect(onOpenPath).not.toHaveBeenCalled();
+
+    rerender(view());
+    const committedNode = screen
+      .getAllByTestId("graph-node")
+      .find((element) => element.dataset.path === "alpha.md")!;
+    expect(
+      committedNode.parentElement?.getAttribute("transform"),
+    ).toBe("translate(200 300)");
+  });
+
+  it("matches a full React render after the simulation settles", async () => {
+    const frames = stubAnimationFrames();
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceGraph: vi.fn(async () => connectedGraph()),
+    });
+    const onOpenPath = vi.fn();
+    const view = () => (
+      <GraphView
+        workspaceId="ws-rest"
+        activePath={null}
+        refreshKey="0"
+        onOpenPath={onOpenPath}
+      />
+    );
+    const { rerender } = render(view());
+    expect(await screen.findAllByTestId("graph-node")).toHaveLength(2);
+
+    let frameCount = 0;
+    while (frames.pending > 0 && frameCount < 1_000) {
+      await act(async () => frames.runNext());
+      frameCount += 1;
+    }
+    expect(frames.pending).toBe(0);
+    expect(frameCount).toBeLessThanOrEqual(120);
+    const settledDom = screen.getByTestId("graph-map").innerHTML;
+
+    rerender(view());
+    expect(screen.getByTestId("graph-map").innerHTML).toBe(settledDom);
+  });
+
   it("hides chat mentions when Chats is unavailable", async () => {
     const readWorkspaceGraph = vi.fn(async () => ({
       nodes: [],
